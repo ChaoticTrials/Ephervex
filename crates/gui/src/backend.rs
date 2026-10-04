@@ -2070,7 +2070,18 @@ fn run_worker(
     // it, it does not assign it.
     let mut import_resolve_cancel: Option<CancellationToken> = None;
 
+    // Sign-in and other detached operations write the configuration through an
+    // `App` of their own, so it is reread whenever the file has changed.
+    let config_file = app.paths().config_file();
+    let mut config_stamp = config_file_stamp(&config_file);
     for command in commands {
+        let stamp = config_file_stamp(&config_file);
+        if stamp != config_stamp {
+            config_stamp = stamp;
+            if let Err(error) = app.reload_config() {
+                tracing::warn!(%error, "kept the configuration read earlier");
+            }
+        }
         match command {
             Command::Refresh => send_snapshot(&app, &events),
             Command::LoadMinecraftReleases => match runtime.block_on(app.minecraft_releases()) {
@@ -7092,6 +7103,16 @@ fn send_pair_start_failure(
         ),
         error: true,
     });
+}
+
+/// What identifies one written version of the configuration file. Every save
+/// renames a new file into place, so the inode changes even when the
+/// timestamp's resolution does not.
+fn config_file_stamp(path: &Path) -> Option<(u64, u64, std::time::SystemTime)> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = std::fs::metadata(path).ok()?;
+    Some((metadata.ino(), metadata.len(), metadata.modified().ok()?))
 }
 
 fn spawn_login(paths: Paths, events: &Sender<Event>) {

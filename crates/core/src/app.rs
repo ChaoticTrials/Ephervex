@@ -1452,15 +1452,53 @@ impl App {
     /// refusal to write a credential-looking key (ADR 0004) is on the path of
     /// every write rather than of most of them.
     ///
-    /// The change is applied to a copy and only committed once the write
-    /// succeeds: an in-memory setting that failed to reach disk would come back
-    /// on the next run and look like the launcher had ignored the user.
+    /// The change is applied to the file as it is on disk, so another `App` or
+    /// process's change is never reverted, and kept in memory only once the
+    /// write succeeds: an in-memory setting that failed to reach disk would
+    /// come back on the next run and look like the launcher had ignored the user.
     pub(crate) fn mutate_config(&mut self, change: impl FnOnce(&mut Config)) -> CoreResult<()> {
-        let mut updated = self.storage.config.clone();
-        change(&mut updated);
-        updated.save(self.paths())?;
-        self.storage.config = updated;
+        let updated = Config::update(self.paths(), change)?;
+        self.adopt_config(updated);
         Ok(())
+    }
+
+    /// Rereads the configuration file, picking up what another `App` or
+    /// process wrote since this one last read or wrote it.
+    ///
+    /// For a long-lived `App`. On failure the configuration read earlier stays.
+    pub fn reload_config(&mut self) -> CoreResult<()> {
+        let loaded = Config::load_or_default(self.paths())?;
+        self.adopt_config(loaded);
+        Ok(())
+    }
+
+    /// Holds `config` as current, moving to its persistent instance root when
+    /// another writer changed it, as opening storage would.
+    ///
+    /// A cached session for the account that stops being the default is
+    /// dropped, as choosing another default here would.
+    fn adopt_config(&mut self, config: Config) {
+        let was_default = self.storage.config.active_account().map(str::to_owned);
+        if self.session.as_ref().is_some_and(|session| {
+            was_default.as_deref() == Some(session.account.id.to_string().as_str())
+                && config.active_account() != was_default.as_deref()
+        }) {
+            self.session = None;
+        }
+
+        // Compared with the root in use, so a switch that failed is tried again.
+        let paths = config.apply_to(self.paths().clone());
+        if paths.persistent_instances_dir() != self.paths().persistent_instances_dir() {
+            let opened = paths
+                .ensure_base_directories()
+                .map_err(ephervex_storage::StorageError::from)
+                .and_then(|()| Registry::open(paths).map_err(ephervex_storage::StorageError::from));
+            match opened {
+                Ok(registry) => self.storage.registry = registry,
+                Err(error) => warn!(%error, "kept the persistent instance root opened earlier"),
+            }
+        }
+        self.storage.config = config;
     }
 }
 

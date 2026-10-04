@@ -869,7 +869,8 @@ fn config_failing_path(error: &ephervex_storage::ConfigError) -> Option<PathBuf>
     match error {
         ConfigError::Unreadable { path, .. }
         | ConfigError::Invalid { path, .. }
-        | ConfigError::Unwritable { path, .. } => Some(path.clone()),
+        | ConfigError::Unwritable { path, .. }
+        | ConfigError::Busy { path } => Some(path.clone()),
         ConfigError::Path(inner) => path_failing_path(inner),
         ConfigError::Serialization(_)
         | ConfigError::UnsupportedSchema { .. }

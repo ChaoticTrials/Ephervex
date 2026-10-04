@@ -369,72 +369,50 @@ impl App {
         edits: &[PreferenceEdit],
     ) -> CoreResult<()> {
         let catalog = self.minecraft_preference_catalog()?;
-        // Each id's final state, resolved before anything is written. Edits
-        // are folded in order, so a batch that names one preference twice
-        // persists what the last edit asked for.
-        let mut planned: BTreeMap<String, Option<PreferenceSetting>> = BTreeMap::new();
-
+        // Validated before anything is written, then applied in order to the
+        // file as it is on disk, so an edit that keeps a stored value keeps the
+        // current one and a later edit in the batch sees an earlier one.
+        let mut changes: Vec<(String, PreferenceChange)> = Vec::with_capacity(edits.len());
         for edit in edits {
             let Some(descriptor) = catalog.descriptor(edit.id.as_str()) else {
                 return Err(CoreError::PreferenceUnrecognized {
                     id: edit.id.to_string(),
                 });
             };
-            let setting = match &edit.change {
-                PreferenceChange::Set { managed, value } => {
-                    // Validated whether or not it is applied: a value stored
-                    // now is a value some later instance creation reads.
-                    descriptor.validate_value(value)?;
-                    Some(PreferenceSetting {
-                        enabled: *managed,
-                        value: value.to_stored_text(),
-                    })
-                }
-                PreferenceChange::Unmanage => {
-                    // Keeping the stored value is the whole difference between
-                    // "stop applying this" and "forget this": turning
-                    // management back on should restore what the user chose.
-                    // With nothing stored there is nothing to keep, and a row
-                    // holding no value at all is not a preference.
-                    self.staged_or_stored(&planned, edit.id.as_str())
-                        .map(|stored| PreferenceSetting {
-                            enabled: false,
-                            value: stored.value,
-                        })
-                }
-                PreferenceChange::Reset => None,
-            };
-            planned.insert(edit.id.as_str().to_owned(), setting);
+            if let PreferenceChange::Set { value, .. } = &edit.change {
+                // Validated whether or not it is applied: a value stored
+                // now is a value some later instance creation reads.
+                descriptor.validate_value(value)?;
+            }
+            changes.push((edit.id.as_str().to_owned(), edit.change.clone()));
         }
 
         self.mutate_config(|config| {
-            for (id, setting) in planned {
-                match setting {
-                    Some(setting) => {
-                        config.minecraft_preferences.insert(id, setting);
+            for (id, change) in changes {
+                match change {
+                    PreferenceChange::Set { managed, value } => {
+                        config.minecraft_preferences.insert(
+                            id,
+                            PreferenceSetting {
+                                enabled: managed,
+                                value: value.to_stored_text(),
+                            },
+                        );
                     }
-                    None => {
+                    // Keeping the stored value is the whole difference between
+                    // "stop applying this" and "forget this". With nothing
+                    // stored there is nothing to keep.
+                    PreferenceChange::Unmanage => {
+                        if let Some(setting) = config.minecraft_preferences.get_mut(&id) {
+                            setting.enabled = false;
+                        }
+                    }
+                    PreferenceChange::Reset => {
                         config.minecraft_preferences.remove(&id);
                     }
                 }
             }
         })
-    }
-
-    /// What one preference holds partway through a batch: whatever an earlier
-    /// edit in the same batch staged, else what the configuration file has.
-    ///
-    /// `None` means the preference has no value at all at this point, which is
-    /// the case an edit must never paper over with a placeholder.
-    fn staged_or_stored(
-        &self,
-        planned: &BTreeMap<String, Option<PreferenceSetting>>,
-        id: &str,
-    ) -> Option<PreferenceSetting> {
-        match planned.get(id) {
-            Some(staged) => staged.clone(),
-            None => self.config().minecraft_preferences.get(id).cloned(),
-        }
     }
 }
 

@@ -77,6 +77,84 @@ impl std::fmt::Display for ConfigParseError {
 
 impl std::error::Error for ConfigParseError {}
 
+/// The file in the configuration directory whose `flock` serializes updates.
+const CONFIG_LOCK_FILE: &str = "config.lock";
+
+/// How long an update waits on another process's before giving up, so a
+/// stopped or wedged one cannot hang this one.
+const CONFIG_LOCK_PATIENCE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Held while one update reloads, changes, and writes the configuration.
+///
+/// A `flock`, which the kernel drops if the holder dies, plus a process-wide
+/// mutex, because NFS gives all threads of a process one shared lock.
+struct ConfigWriteLock {
+    _file: Option<std::fs::File>,
+    _process: std::sync::MutexGuard<'static, ()>,
+}
+
+static CONFIG_WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+impl ConfigWriteLock {
+    fn take(path: &Path) -> Result<Self, ConfigError> {
+        use rustix::fs::{FlockOperation, Mode, OFlags, flock};
+        use rustix::io::Errno;
+
+        let deadline = std::time::Instant::now() + CONFIG_LOCK_PATIENCE;
+        let busy = || ConfigError::Busy {
+            path: path.to_path_buf(),
+        };
+        let wait = || {
+            if std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                Ok(())
+            } else {
+                Err(busy())
+            }
+        };
+        let process = loop {
+            match CONFIG_WRITES.try_lock() {
+                Ok(held) => break held,
+                // The mutex guards no data, so a panic while it was held leaves nothing torn.
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => break poisoned.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => wait()?,
+            }
+        };
+        let unwritable = |errno: Errno| ConfigError::Unwritable {
+            path: path.to_path_buf(),
+            source: errno.into(),
+        };
+        let file = rustix::fs::open(
+            path,
+            OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::RUSR | Mode::WUSR,
+        )
+        .map(std::fs::File::from)
+        .map_err(unwritable)?;
+        loop {
+            match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+                Ok(()) => {
+                    return Ok(Self {
+                        _file: Some(file),
+                        _process: process,
+                    });
+                }
+                Err(Errno::INTR) => {}
+                Err(Errno::WOULDBLOCK) => wait()?,
+                // Without locking, updates within this process stay serialized.
+                Err(errno @ (Errno::NOLCK | Errno::OPNOTSUPP | Errno::NOSYS)) => {
+                    tracing::warn!(path = %path.display(), %errno, "configuration updates are not locked across processes here");
+                    return Ok(Self {
+                        _file: None,
+                        _process: process,
+                    });
+                }
+                Err(errno) => return Err(unwritable(errno)),
+            }
+        }
+    }
+}
+
 /// Failures reading or writing the configuration file.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -101,6 +179,10 @@ pub enum ConfigError {
         #[source]
         source: std::io::Error,
     },
+    /// Another process kept the configuration locked for longer than an
+    /// update waits.
+    #[error("another process is updating the configuration ({path})")]
+    Busy { path: PathBuf },
     /// The in-memory configuration could not be turned into TOML.
     #[error("could not serialize the configuration")]
     Serialization(#[from] Box<toml::ser::Error>),
@@ -123,6 +205,7 @@ impl ConfigError {
             Self::Unreadable { .. } => "error-config-unreadable",
             Self::Invalid { .. } | Self::Serialization(_) => "error-config-invalid",
             Self::Unwritable { .. } => "error-config-unwritable",
+            Self::Busy { .. } => "error-config-busy",
             Self::UnsupportedSchema { .. } => "error-config-unsupported-schema",
             Self::SecretRejected { .. } => "error-config-secret-rejected",
             Self::Path(error) => error.message_id(),
@@ -1007,6 +1090,20 @@ impl Config {
         toml::to_string_pretty(self).map_err(|source| ConfigError::Serialization(Box::new(source)))
     }
 
+    /// Applies `change` to the configuration on disk and writes the result.
+    ///
+    /// The file is reloaded under an exclusive lock first, so a change another
+    /// process or `App` wrote in the meantime is kept rather than reverted.
+    /// Returns what was written.
+    pub fn update(paths: &Paths, change: impl FnOnce(&mut Self)) -> Result<Self, ConfigError> {
+        crate::paths::create_dir_all(paths.config_dir())?;
+        let _writing = ConfigWriteLock::take(&paths.config_dir().join(CONFIG_LOCK_FILE))?;
+        let mut config = Self::load_or_default(paths)?;
+        change(&mut config);
+        config.save_to(&paths.config_file())?;
+        Ok(config)
+    }
+
     /// Writes the configuration to its XDG location, creating the directory.
     pub fn save(&self, paths: &Paths) -> Result<(), ConfigError> {
         crate::paths::create_dir_all(paths.config_dir())?;
@@ -1449,6 +1546,84 @@ mod tests {
     use ephervex_model::AccountKind;
 
     use super::*;
+
+    #[test]
+    fn concurrent_updates_keep_every_change() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let paths = Paths::rooted_at(base.path());
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            for writer in ["a", "b"] {
+                let (paths, barrier) = (&paths, &barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    for round in 0..20 {
+                        Config::update(paths, |config| {
+                            config
+                                .favorite_minecraft_versions
+                                .push(format!("{writer}{round}"));
+                        })
+                        .expect("update");
+                    }
+                });
+            }
+        });
+
+        let written = Config::load_or_default(&paths).expect("load");
+        assert_eq!(written.favorite_minecraft_versions.len(), 40);
+    }
+
+    #[test]
+    fn an_update_waits_for_another_process_writing_the_configuration() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let paths = Paths::rooted_at(base.path());
+        crate::paths::create_dir_all(paths.config_dir()).expect("config dir");
+        // A descriptor of its own, as another process would have.
+        let other_writer = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(paths.config_dir().join(CONFIG_LOCK_FILE))
+            .expect("lock file");
+        rustix::fs::flock(&other_writer, rustix::fs::FlockOperation::LockExclusive).expect("flock");
+
+        let waiting = std::thread::spawn({
+            let paths = paths.clone();
+            move || Config::update(&paths, |config| config.display.show_linked_servers = true)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            !waiting.is_finished(),
+            "nothing is written while another update runs"
+        );
+
+        drop(other_writer);
+        assert!(
+            waiting
+                .join()
+                .expect("no panic")
+                .expect("update")
+                .display
+                .show_linked_servers
+        );
+    }
+
+    #[test]
+    fn an_update_keeps_what_another_writer_saved_after_this_one_loaded() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let paths = Paths::rooted_at(base.path());
+        let stale = Config::load_or_default(&paths).expect("load");
+
+        let mut other = stale.clone();
+        other.remember_account("id", "Alice", AccountKind::Offline, "2026-01-01T00:00:00Z");
+        other.save(&paths).expect("save");
+
+        let updated = Config::update(&paths, |config| config.display.show_linked_servers = true)
+            .expect("update");
+        assert!(updated.accounts.contains_key("id"));
+        assert!(updated.display.show_linked_servers);
+        assert_eq!(Config::load_or_default(&paths).expect("load"), updated);
+    }
 
     /// The serialized configuration schema.
     const DEFAULT_CONFIG_EXAMPLE: &str = r#"

@@ -467,6 +467,7 @@ mod tests {
             "error-config-unreadable",
             "error-config-invalid",
             "error-config-unwritable",
+            "error-config-busy",
             "error-config-unsupported-schema",
             "error-config-secret-rejected",
             "error-paths-no-home-directory",

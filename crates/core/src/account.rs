@@ -571,6 +571,7 @@ impl App {
     #[instrument(skip(self))]
     pub fn add_offline_account(&mut self, name: &str) -> CoreResult<AccountSummary> {
         let account = ephervex_auth::OfflineAccount::new(name)?;
+        self.reload_config()?;
 
         // Refused rather than silently returning the existing one: the UUID is
         // a hash of the name, so a "second" account of the same name would be
@@ -593,15 +594,21 @@ impl App {
     /// Makes an account the default a launch uses.
     #[instrument(skip(self))]
     pub fn set_default_account(&mut self, reference: &str) -> CoreResult<AccountSummary> {
+        self.reload_config()?;
         let key = self.resolve_account_key(reference)?.to_owned();
         let id = Uuid::parse_str(&key).map_err(|_| {
             CoreError::Auth(AuthError::AccountUnknown {
                 reference: reference.to_owned(),
             })
         })?;
-        self.mutate_config(|config| {
-            config.set_active_account(&key);
-        })?;
+        let mut known = false;
+        self.mutate_config(|config| known = config.set_active_account(&key))?;
+        if !known {
+            return Err(AuthError::AccountUnknown {
+                reference: reference.to_owned(),
+            }
+            .into());
+        }
 
         // A session belonging to the account that *was* default is no longer
         // the one a launch should use, and keeping it would let a launch run as
@@ -629,6 +636,7 @@ impl App {
     /// account precisely so removing one cannot disturb another.
     #[instrument(skip(self))]
     pub fn remove_account(&mut self, reference: &str) -> CoreResult<Option<AccountSummary>> {
+        self.reload_config()?;
         let key = self.resolve_account_key(reference)?.to_owned();
         let id = Uuid::parse_str(&key).map_err(|_| {
             CoreError::Auth(AuthError::AccountUnknown {
@@ -675,6 +683,7 @@ impl App {
     /// whether there was anything to sign out of.
     #[instrument(skip(self))]
     pub fn logout(&mut self) -> CoreResult<bool> {
+        self.reload_config()?;
         let Some(id) = self.config().active_account().map(str::to_owned) else {
             self.session = None;
             return Ok(false);
@@ -785,6 +794,50 @@ mod tests {
 
     fn app_rooted_at(base: &std::path::Path) -> App {
         App::open_at(Paths::rooted_at(base)).expect("app opens")
+    }
+
+    #[test]
+    fn a_setting_changed_through_one_app_keeps_an_account_another_app_added() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut worker = app_rooted_at(base.path());
+        let mut detached = app_rooted_at(base.path());
+
+        detached.add_offline_account("Alice").expect("add");
+        worker
+            .set_show_linked_servers(true)
+            .expect("change a setting");
+
+        let fresh = app_rooted_at(base.path());
+        let names: Vec<String> = fresh
+            .accounts()
+            .expect("accounts")
+            .into_iter()
+            .map(|account| account.name)
+            .collect();
+        assert_eq!(
+            names,
+            ["Alice"],
+            "the account survives the other App's write"
+        );
+        assert!(fresh.config().display.show_linked_servers);
+        assert_eq!(
+            worker.accounts().expect("accounts").len(),
+            1,
+            "the writer now holds what it wrote"
+        );
+    }
+
+    #[test]
+    fn an_account_setter_acts_on_an_account_another_app_added() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut worker = app_rooted_at(base.path());
+        let mut detached = app_rooted_at(base.path());
+
+        detached.add_offline_account("Alice").expect("add");
+
+        worker
+            .set_default_account("Alice")
+            .expect("rereads what another App wrote");
     }
 
     #[test]

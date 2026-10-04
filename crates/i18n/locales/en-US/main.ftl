@@ -130,6 +130,9 @@ error-config-invalid = The configuration file is not valid TOML.
 error-config-unwritable = The configuration file could not be saved.
 .action = Check that { $path } is writable and that the filesystem is not full.
 
+error-config-busy = Another Ephervex window or command is saving settings right now.
+.action = Try again in a moment. If it keeps happening, check which process holds { $path }.
+
 error-config-unsupported-schema = This configuration was written by a newer version of { app-name }.
 .action = Update { app-name }, or move { $path } aside to start from defaults. Ephervex will not guess at a schema it does not know.
 
