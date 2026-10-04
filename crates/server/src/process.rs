@@ -16,9 +16,9 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::capture::{CaptureStream, CapturedLine, OutputCapture, ServerOutputEvent};
 use crate::runtime::{
-    RuntimeClassification, RuntimeEvidence, active_control_socket_path, capture_java_child,
-    classify_runtime, clear_stale_runtime, create_runtime_lock, prepare_control_socket_path,
-    runtime_lock_path, runtime_path, write_runtime_evidence,
+    ProcessEvidence, RuntimeClassification, RuntimeEvidence, active_control_socket_path,
+    capture_java_child, classify_runtime, clear_stale_runtime, create_runtime_lock,
+    prepare_control_socket_path, runtime_lock_path, runtime_path, write_runtime_evidence,
 };
 use crate::{ServerError, ServerResult};
 
@@ -28,6 +28,8 @@ const CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
 /// the answer only comes once the replacement has been spawned.
 const RESTART_TIMEOUT: Duration = Duration::from_secs(300);
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// How long a child that has lost its executable link may take to finish exiting.
+const EXITING_CHILD_GRACE: Duration = Duration::from_secs(5);
 
 /// A redaction-safe command for a server JVM.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -250,7 +252,7 @@ async fn supervise_commands(
             }
             Err(error) => return Err(error),
         };
-        evidence.child = Some(capture_java_child(pid)?);
+        evidence.child = capture_spawned_child(&mut child, pid).await?;
         write_runtime_evidence(server_root, evidence)?;
         observer.emit(ServerEvent::Started { pid });
         for waiter in restart_waiters.drain(..) {
@@ -275,6 +277,35 @@ async fn supervise_commands(
 }
 
 type ReaderTask = tokio::task::JoinHandle<()>;
+
+/// The spawned child's identity, or `None` when it has already exited.
+///
+/// A child that exits at once loses its executable link before it becomes
+/// waitable, and its exit is reported like any other rather than as a
+/// runtime-state failure.
+async fn capture_spawned_child(
+    child: &mut Child,
+    pid: u32,
+) -> ServerResult<Option<ProcessEvidence>> {
+    let error = match capture_java_child(pid) {
+        Ok(evidence) => return Ok(Some(evidence)),
+        Err(error) => error,
+    };
+    let exiting = matches!(
+        &error,
+        ServerError::RuntimeState { path, source }
+            if source.kind() == std::io::ErrorKind::NotFound
+                && *path == Path::new(&format!("/proc/{pid}/exe"))
+    );
+    if !exiting {
+        return Err(error);
+    }
+    match tokio::time::timeout(EXITING_CHILD_GRACE, child.wait()).await {
+        Ok(Ok(_)) => Ok(None),
+        Ok(Err(wait_error)) => Err(ServerError::ProcessIo(wait_error)),
+        Err(_) => Err(error),
+    }
+}
 
 fn spawn_child(
     command: &ServerCommand,
@@ -706,6 +737,34 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+
+    #[tokio::test]
+    async fn a_child_that_exits_before_its_identity_is_read_is_reported_as_an_exit() {
+        let mut child = Command::new("sh")
+            .args(["-c", "exit 7"])
+            .spawn()
+            .expect("spawn");
+        let pid = child.id().expect("pid");
+        // Wait for the unreaped zombie, which has no executable to read.
+        let stat = format!("/proc/{pid}/stat");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !std::fs::read_to_string(&stat).is_ok_and(|text| {
+            text.rsplit_once(") ")
+                .is_some_and(|(_, rest)| rest.starts_with('Z'))
+        }) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child never exited"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        let evidence = capture_spawned_child(&mut child, pid)
+            .await
+            .expect("not a runtime-state failure");
+        assert!(evidence.is_none());
+        assert_eq!(child.wait().await.expect("status").code(), Some(7));
+    }
 
     #[tokio::test]
     async fn synthetic_child_receives_console_and_graceful_stop() {
