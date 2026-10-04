@@ -408,12 +408,21 @@ impl LaunchLock {
 
     /// Takes the lock for the current process, or reports who holds it.
     ///
-    /// A lock whose owner and game are both gone is replaced.
+    /// Refused while any launch, ordinary or additional, holds the instance. A
+    /// lock whose owner and game are both gone is replaced.
     pub fn acquire(instance_root: &Path) -> Result<Self, LockError> {
         let directory = metadata_dir(instance_root);
         create_dir_all(&directory)?;
         let ownership = OwnershipGuard::take(&directory)?;
-        Self::take_at(&ownership, directory.join(LAUNCH_LOCK_FILE))
+        let path = directory.join(LAUNCH_LOCK_FILE);
+        // The first launch is checked first, so a refusal names it.
+        if let Some(held) = read_state(&path)?.filter(LaunchState::holds_instance) {
+            return Err(already_running(&held));
+        }
+        if let Some(held) = live_additional_launch(&ownership, &directory)? {
+            return Err(already_running(&held));
+        }
+        Self::take_at(&ownership, path)
     }
 
     /// Records the game's process id, so a frontend can show it and a stuck
@@ -636,6 +645,47 @@ impl Drop for InProcessClaim {
         drop(held);
         RELEASED_IN_PROCESS.notify_all();
     }
+}
+
+/// The additional launch with the lowest id that still holds the instance.
+///
+/// Additional locks that provably hold nothing are removed on the way, since a
+/// launch id need never come back to replace its own.
+fn live_additional_launch(
+    _ownership: &OwnershipGuard,
+    directory: &Path,
+) -> Result<Option<LaunchState>, LockError> {
+    let unusable = |error| LockError::unusable(directory, error);
+    let mut live: Option<(String, LaunchState)> = None;
+    for entry in std::fs::read_dir(directory).map_err(unusable)? {
+        let entry = entry.map_err(unusable)?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(LockName::Additional(id)) = launch_id_of(&name) else {
+            continue;
+        };
+        // Only names a launch could have written, and only files: a FIFO
+        // would block the read.
+        if additional_lock_file(&id).as_deref() != Some(name.as_str())
+            || !entry.file_type().map_err(unusable)?.is_file()
+        {
+            continue;
+        }
+        // An unparseable lock is neither counted nor removed: it is another
+        // launch's file, and only a proven-dead one is cleared.
+        let Some(state) = read_state(&entry.path())? else {
+            continue;
+        };
+        if !state.holds_instance() {
+            if let Err(error) = std::fs::remove_file(entry.path()) {
+                debug!(path = %entry.path().display(), %error, "could not clear a dead launch lock");
+            }
+        } else if live.as_ref().is_none_or(|(lowest, _)| id < *lowest) {
+            live = Some((id, state));
+        }
+    }
+    Ok(live.map(|(_, held)| held))
 }
 
 fn already_running(held: &LaunchState) -> LockError {
@@ -947,6 +997,75 @@ mod tests {
         );
         drop(first);
         assert!(running_launches(root.path()).is_empty());
+    }
+
+    #[test]
+    fn an_ordinary_launch_is_refused_while_an_additional_launch_still_holds_the_instance() {
+        let root = instance();
+        let first = LaunchLock::acquire(root.path()).expect("the first launch");
+        let second = LaunchLock::acquire_additional(root.path(), "bob").expect("a second launch");
+        drop(first);
+
+        let error = LaunchLock::acquire(root.path()).expect_err("bob still holds the instance");
+        assert!(
+            matches!(error, LockError::AlreadyRunning { pid, .. } if pid == std::process::id())
+        );
+
+        drop(second);
+        LaunchLock::acquire(root.path()).expect("free once every launch has ended");
+    }
+
+    #[test]
+    fn an_orphaned_additional_game_keeps_an_ordinary_launch_out() {
+        let root = instance();
+        let (mut game, ticks) = live_game();
+        let own = process_start_ticks(std::process::id()).expect("own start time");
+        let orphaned = LaunchState {
+            owner_pid: std::process::id(),
+            owner_start_ticks: Some(own.wrapping_add(1)),
+            game_pid: Some(game.id()),
+            game_start_ticks: Some(ticks),
+            since: Utc::now(),
+        };
+        plant(
+            &metadata_dir(root.path()).join("launch.bob.lock"),
+            &orphaned,
+        );
+
+        let error = LaunchLock::acquire(root.path()).expect_err("the orphaned game holds it");
+        assert!(matches!(error, LockError::AlreadyRunning { pid, .. } if pid == game.id()));
+
+        game.kill().expect("end the game");
+        game.wait().expect("reap");
+        LaunchLock::acquire(root.path()).expect("free once the game is gone");
+    }
+
+    #[test]
+    fn an_ordinary_launch_clears_dead_additional_locks_and_ignores_what_no_launch_writes() {
+        let root = instance();
+        let directory = metadata_dir(root.path());
+        let dead = LaunchState {
+            owner_pid: 0,
+            owner_start_ticks: Some(1),
+            game_pid: None,
+            game_start_ticks: None,
+            since: Utc::now(),
+        };
+        plant(&directory.join("launch.gone.lock"), &dead);
+        std::fs::write(directory.join("launch.unreadable.lock"), b"not json").expect("write");
+        // Live state under a name no launch id produces, and a directory named like a lock.
+        plant(
+            &directory.join("launch.a.b.lock"),
+            &LaunchLock::current_state(),
+        );
+        create_dir_all(&directory.join("launch.dir.lock")).expect("directory");
+
+        LaunchLock::acquire(root.path()).expect("nothing a launch wrote holds the instance");
+        assert!(!directory.join("launch.gone.lock").exists());
+        assert!(
+            directory.join("launch.unreadable.lock").exists(),
+            "only a lock proven dead is removed"
+        );
     }
 
     /// A plain launch is still exclusive. Only a caller that has said it is
