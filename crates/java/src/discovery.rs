@@ -343,9 +343,10 @@ impl JavaDiscovery {
 
         if let Some(root) = &self.managed_root {
             // `<java>/<major>/<vendor-build>/bin/java`: the layout the managed
-            // installer writes.
-            for major in children(root) {
-                for build in children(&major) {
+            // installer writes. Its hidden entries are staging directories and
+            // locks, never a published runtime.
+            for major in children(root).into_iter().filter(|path| !is_hidden(path)) {
+                for build in children(&major).into_iter().filter(|path| !is_hidden(path)) {
                     push_home(&mut candidates, JavaSourceKind::Managed, &build);
                 }
             }
@@ -422,6 +423,12 @@ fn children(directory: &Path) -> Vec<PathBuf> {
         .collect();
     paths.sort();
     paths
+}
+
+/// Whether a directory entry's name starts with a dot.
+fn is_hidden(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name.as_encoded_bytes().starts_with(b"."))
 }
 
 /// Collapses runtimes that answer at both `<home>/bin/java` and
@@ -681,6 +688,38 @@ mod tests {
         assert_eq!(
             inventory.runtimes[0].primary_source(),
             JavaSourceKind::Managed
+        );
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_managed_install_is_not_offered_beside_the_finished_one() {
+        let temp = tempfile::tempdir().expect("temp");
+        let managed = temp.path().join("java");
+        let major = managed.join("21");
+        std::fs::create_dir_all(&major).expect("create major dir");
+        let installed = fake_jdk(
+            &major,
+            "eclipse-jdk-21.0.12+8",
+            "21.0.12",
+            "21.0.12+8",
+            "Eclipse Adoptium",
+        );
+        for staging in [
+            ".eclipse-jdk-21.0.12+8.incomplete",
+            ".eclipse-jdk-21.0.12+8.a1B2c3.incomplete",
+        ] {
+            fake_jdk(&major, staging, "21.0.12", "21.0.12+8", "Eclipse Adoptium");
+        }
+
+        let inventory = JavaDiscovery::isolated()
+            .with_managed_root(&managed)
+            .discover()
+            .await;
+
+        assert_eq!(inventory.runtimes.len(), 1, "{:?}", inventory.runtimes);
+        assert_eq!(
+            inventory.runtimes[0].executable,
+            std::fs::canonicalize(installed.join("bin").join("java")).expect("canonicalize")
         );
     }
 

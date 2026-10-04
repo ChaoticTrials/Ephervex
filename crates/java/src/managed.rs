@@ -30,8 +30,8 @@
 //!
 //! Files land in a hidden `.incomplete` sibling that belongs to one attempt, so
 //! concurrent installs never share one, and are renamed into position only once
-//! the probe succeeds. An interrupted install therefore leaves no half-unpacked
-//! JDK at a path that discovery would later find, probe, and offer.
+//! the probe succeeds. Discovery skips hidden entries, so an interrupted install
+//! leaves no half-unpacked JDK at a path that discovery would find and offer.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
