@@ -150,9 +150,13 @@ mod tests {
 
     #[tokio::test]
     async fn readiness_timeout_and_cancellation_are_typed() {
-        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("reserve port");
-        let address = listener.local_addr().expect("address");
-        drop(listener);
+        // Bound but never listening, so connections are refused and no other
+        // socket can take the port while the test runs.
+        let closed = tokio::net::TcpSocket::new_v4().expect("socket");
+        closed
+            .bind((Ipv4Addr::LOCALHOST, 0).into())
+            .expect("reserve port");
+        let address = closed.local_addr().expect("address");
         let target = ConnectionTarget {
             address: address.ip(),
             port: NonZeroU16::new(address.port()).expect("port"),
