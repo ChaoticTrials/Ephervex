@@ -244,6 +244,10 @@ pub struct App {
     /// local server instead of a production one.
     #[cfg(test)]
     pub(crate) loopback_http: bool,
+    /// The keyring a test build uses instead of Secret Service. Compiled only
+    /// into a test build.
+    #[cfg(test)]
+    pub(crate) test_keyring: Option<crate::account::TestKeyring>,
 }
 
 impl App {
@@ -281,6 +285,8 @@ impl App {
             session: None,
             #[cfg(test)]
             loopback_http: false,
+            #[cfg(test)]
+            test_keyring: None,
         })
     }
 
@@ -304,6 +310,8 @@ impl App {
             session: None,
             #[cfg(test)]
             loopback_http: false,
+            #[cfg(test)]
+            test_keyring: None,
         })
     }
 

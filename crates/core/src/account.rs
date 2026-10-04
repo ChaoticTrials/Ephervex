@@ -422,6 +422,9 @@ impl App {
         observer: &AuthObserver,
         cancel: &CancellationToken,
     ) -> CoreResult<&Session> {
+        // Before the login stores a new credential, which a pending cleanup
+        // for the same account must not then delete.
+        self.finish_keyring_cleanup();
         let provider = self.build_account_provider(options.allow_session_only)?;
         let session = provider.login(&options.request, observer, cancel).await?;
         self.adopt(session)
@@ -443,6 +446,7 @@ impl App {
             // expires. Say so rather than failing later inside the keyring.
             return self.establish_offline_session();
         }
+        self.finish_keyring_cleanup();
         let id = self.active_account_id()?;
         let provider = self.build_account_provider(true)?;
         let session = provider.resume(id, observer, cancel).await?;
@@ -630,7 +634,8 @@ impl App {
     /// left a secret in the keyring with nothing in `config.toml` recording
     /// that it exists — an orphan nobody could find to remove later. This way
     /// the worst case is an account that is still listed and can be removed
-    /// again (ADR 0004).
+    /// again (ADR 0004). When the keyring cannot be reached at all, the account
+    /// is forgotten and its credential recorded for deletion once it can.
     ///
     /// Only *this* account's entry is touched. `CredentialKey` is keyed per
     /// account precisely so removing one cannot disturb another.
@@ -649,20 +654,39 @@ impl App {
             .get(&key)
             .map_or(AccountKind::Microsoft, |account| account.kind);
 
+        let mut keyring = None;
+        let mut keyring_reachable = true;
         if kind.has_stored_credential() {
-            match credential_store() {
-                Ok(store) => ephervex_auth::CredentialStore::delete(
-                    store.as_ref(),
-                    &ephervex_auth::CredentialKey::MicrosoftRefreshToken(id),
-                )?,
-                // No Secret Service at all means there is nothing persistent to
-                // orphan. Refusing here would strand an account that a user on
-                // such a machine could never remove.
-                Err(error) => debug!(%error, "no keyring to remove a credential from"),
+            match self.keyring() {
+                Ok(store) => {
+                    store.delete(&ephervex_auth::CredentialKey::MicrosoftRefreshToken(id))?;
+                    keyring = Some(store);
+                }
+                // The keyring may only be locked or briefly gone, so the
+                // credential is recorded for deletion rather than forgotten.
+                // Refusing instead would strand the account on a machine whose
+                // keyring never comes back.
+                Err(error) => {
+                    debug!(%error, "keyring unavailable; its credential is removed later");
+                    keyring_reachable = false;
+                }
             }
         }
 
-        self.mutate_config(|config| config.forget_account(&key))?;
+        if keyring_reachable {
+            self.mutate_config(|config| config.forget_account(&key))?;
+            match keyring {
+                Some(store) => self.clean_up_keyring(store.as_ref()),
+                None => self.finish_keyring_cleanup(),
+            }
+        } else {
+            // Recorded in the spelling a later sign-in remembers it by.
+            let account = id.to_string();
+            self.mutate_config(|config| {
+                config.forget_account(&key);
+                config.record_keyring_cleanup(&account);
+            })?;
+        }
         if self.session.as_ref().is_some_and(|s| s.account.id == id) {
             self.session = None;
         }
@@ -736,6 +760,72 @@ impl App {
         )?)
     }
 
+    /// The persistent keyring, or why it cannot be reached.
+    #[cfg_attr(
+        not(test),
+        expect(
+            clippy::unused_self,
+            reason = "a test build reads its keyring from the App"
+        )
+    )]
+    fn keyring(&self) -> Result<Arc<dyn CredentialStore>, AuthError> {
+        #[cfg(test)]
+        match &self.test_keyring {
+            Some(TestKeyring::Store(store)) => return Ok(Arc::clone(store)),
+            Some(TestKeyring::Unreachable) => {
+                return Err(AuthError::SecretStorageUnavailable {
+                    detail: "no keyring in this test".to_owned(),
+                });
+            }
+            None => {}
+        }
+        credential_store()
+    }
+
+    /// Deletes the stored credentials of accounts removed while the keyring
+    /// could not be reached, once it can be.
+    fn finish_keyring_cleanup(&mut self) {
+        if self.reload_config().is_err() || self.config().keyring_cleanup.is_empty() {
+            return;
+        }
+        if let Ok(store) = self.keyring() {
+            self.clean_up_keyring(store.as_ref());
+        }
+    }
+
+    /// [`Self::finish_keyring_cleanup`] with a keyring already open.
+    ///
+    /// The deletions happen outside the configuration lock, because one can
+    /// wait on a keyring unlock prompt. A deletion that fails stays recorded
+    /// for the next attempt.
+    fn clean_up_keyring(&mut self, store: &dyn CredentialStore) {
+        let mut done = Vec::new();
+        for pending in &self.config().keyring_cleanup {
+            let deleted = Uuid::parse_str(pending).map_or(Ok(()), |account| {
+                store.delete(&ephervex_auth::CredentialKey::MicrosoftRefreshToken(
+                    account,
+                ))
+            });
+            match deleted {
+                Ok(()) => done.push(pending.clone()),
+                Err(error) => {
+                    warn!(%error, account = %pending, "could not remove a removed account's credential yet");
+                }
+            }
+        }
+        if done.is_empty() {
+            return;
+        }
+        let result = self.mutate_config(|config| {
+            config
+                .keyring_cleanup
+                .retain(|pending| !done.contains(pending));
+        });
+        if let Err(error) = result {
+            warn!(%error, "could not record the finished keyring cleanup");
+        }
+    }
+
     /// The active account's id, or a typed "nobody is signed in".
     fn active_account_id(&self) -> CoreResult<Uuid> {
         let id = self
@@ -775,6 +865,14 @@ impl App {
     }
 }
 
+/// The keyring a test build uses instead of Secret Service.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) enum TestKeyring {
+    Unreachable,
+    Store(Arc<dyn CredentialStore>),
+}
+
 /// The credential store, when Secret Service answers.
 ///
 /// A free function rather than a method because it depends on the machine
@@ -794,6 +892,78 @@ mod tests {
 
     fn app_rooted_at(base: &std::path::Path) -> App {
         App::open_at(Paths::rooted_at(base)).expect("app opens")
+    }
+
+    fn remember_microsoft_account(app: &mut App, id: Uuid) {
+        app.mutate_config(|config| {
+            config.remember_account(
+                &id.to_string(),
+                "Steve",
+                AccountKind::Microsoft,
+                "2026-01-01T00:00:00Z",
+            );
+        })
+        .expect("remember");
+    }
+
+    #[test]
+    fn removing_an_account_while_the_keyring_is_unreachable_records_its_credential_for_cleanup() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let id = Uuid::new_v4();
+        remember_microsoft_account(&mut app, id);
+        app.test_keyring = Some(TestKeyring::Unreachable);
+
+        app.remove_account(&id.to_string()).expect("removed");
+
+        let config = app_rooted_at(base.path()).config().clone();
+        assert!(!config.accounts.contains_key(&id.to_string()));
+        assert_eq!(config.keyring_cleanup, [id.to_string()]);
+    }
+
+    #[test]
+    fn a_recorded_credential_is_deleted_once_the_keyring_is_reachable() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let id = Uuid::new_v4();
+        remember_microsoft_account(&mut app, id);
+        app.test_keyring = Some(TestKeyring::Unreachable);
+        app.remove_account(&id.to_string()).expect("removed");
+
+        let store = Arc::new(MemoryStore::new());
+        let key = ephervex_auth::CredentialKey::MicrosoftRefreshToken(id);
+        store
+            .store(&key, &SecretString::new("refresh".to_owned()))
+            .expect("store");
+        app.test_keyring = Some(TestKeyring::Store(store.clone()));
+        app.finish_keyring_cleanup();
+
+        assert!(store.load(&key).expect("load").is_none());
+        assert!(
+            app_rooted_at(base.path())
+                .config()
+                .keyring_cleanup
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn removing_an_account_with_a_reachable_keyring_deletes_its_credential() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let id = Uuid::new_v4();
+        remember_microsoft_account(&mut app, id);
+        let store = Arc::new(MemoryStore::new());
+        let key = ephervex_auth::CredentialKey::MicrosoftRefreshToken(id);
+        store
+            .store(&key, &SecretString::new("refresh".to_owned()))
+            .expect("store");
+        app.test_keyring = Some(TestKeyring::Store(store.clone()));
+
+        app.remove_account(&id.to_string()).expect("removed");
+
+        assert!(store.load(&key).expect("load").is_none());
+        assert!(app.config().keyring_cleanup.is_empty());
     }
 
     #[test]

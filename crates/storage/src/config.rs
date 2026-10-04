@@ -973,6 +973,11 @@ pub struct Config {
     /// one account ships, and the data model must not make a second one a
     /// schema change. Same arrangement as [`Self::minecraft_preferences`].
     pub accounts: BTreeMap<String, AccountConfig>,
+    /// Accounts removed while the keyring could not be reached, whose stored
+    /// credential is still to be deleted, so it is never left with nothing
+    /// naming it (ADR 0004). Account ids only.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub keyring_cleanup: Vec<String>,
     /// Each client's chosen pair, keyed by the client's id. An entry whose
     /// client is gone is ignored, and one whose server is gone or no longer
     /// linked falls back to the client's first linked server.
@@ -1005,6 +1010,7 @@ impl Default for Config {
             api: ApiConfig::default(),
             cache: CacheConfig::default(),
             accounts: BTreeMap::new(),
+            keyring_cleanup: Vec::new(),
             linked_pairs: BTreeMap::new(),
             unknown: toml::Table::new(),
         }
@@ -1197,6 +1203,8 @@ impl Config {
     /// first account, which becomes the default because otherwise a single
     /// account would sit there not being used by anything.
     pub fn remember_account(&mut self, id: &str, name: &str, kind: AccountKind, at: &str) {
+        // A remembered account's credential is current, not one to clean up.
+        self.keyring_cleanup.retain(|pending| pending != id);
         let entry = self.accounts.entry(id.to_owned()).or_default();
         if entry.added_at.is_empty() {
             at.clone_into(&mut entry.added_at);
@@ -1248,6 +1256,14 @@ impl Config {
             })
             .map(|(id, _)| id.clone())
             .unwrap_or_default();
+    }
+
+    /// Records an account whose stored credential could not be deleted yet,
+    /// for deletion once the keyring can be reached.
+    pub fn record_keyring_cleanup(&mut self, id: &str) {
+        if !self.keyring_cleanup.iter().any(|pending| pending == id) {
+            self.keyring_cleanup.push(id.to_owned());
+        }
     }
 
     /// Finds an account by UUID or by display name.
@@ -1546,6 +1562,46 @@ mod tests {
     use ephervex_model::AccountKind;
 
     use super::*;
+
+    #[test]
+    fn signing_an_account_in_again_cancels_its_pending_keyring_cleanup() {
+        let mut config = Config::default();
+        config.remember_account(
+            "id",
+            "Steve",
+            AccountKind::Microsoft,
+            "2026-01-01T00:00:00Z",
+        );
+        config.forget_account("id");
+        config.record_keyring_cleanup("id");
+        assert_eq!(config.keyring_cleanup, ["id"]);
+        assert!(!config.accounts.contains_key("id"));
+
+        config.remember_account(
+            "id",
+            "Steve",
+            AccountKind::Microsoft,
+            "2026-01-02T00:00:00Z",
+        );
+        assert!(config.keyring_cleanup.is_empty());
+    }
+
+    #[test]
+    fn pending_keyring_cleanup_round_trips_and_is_not_taken_for_a_secret() {
+        let mut config = Config::default();
+        config.keyring_cleanup.push("id".to_owned());
+        let text = config.to_toml_string().expect("serialize");
+        assert_eq!(
+            Config::from_toml_str(&text).expect("parse").keyring_cleanup,
+            ["id"]
+        );
+        assert!(
+            !Config::default()
+                .to_toml_string()
+                .expect("serialize")
+                .contains("keyring_cleanup")
+        );
+    }
 
     #[test]
     fn concurrent_updates_keep_every_change() {
