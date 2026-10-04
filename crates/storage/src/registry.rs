@@ -427,7 +427,7 @@ impl Registry {
     ///
     /// What is deliberately not carried over:
     ///
-    /// * **the launch lock**, which describes a running process;
+    /// * **launch locks**, which describe running processes;
     /// * **`last_launched_at`**, for the same reason;
     /// * **linked servers** - a server is its own entity with its own world
     ///   and its own process, and silently forking one because a client
@@ -458,14 +458,15 @@ impl Registry {
         // would otherwise leave a second root claiming the original's identity.
         metadata::mark_incomplete(&root)?;
 
-        let report = crate::copy::copy_tree(
-            &original.root,
-            &root,
-            &[LAUNCH_LOCK_FILE, metadata::SNAPSHOTS_DIR],
-        )
-        .map_err(|source| RegistryError::Io {
-            path: root.clone(),
-            source,
+        let skip = |relative: &Path| {
+            relative.file_name() == Some(std::ffi::OsStr::new(metadata::SNAPSHOTS_DIR))
+                || crate::lock::is_launch_state(relative)
+        };
+        let report = crate::copy::copy_tree(&original.root, &root, &skip).map_err(|source| {
+            RegistryError::Io {
+                path: root.clone(),
+                source,
+            }
         })?;
 
         let now = Utc::now();
@@ -1517,6 +1518,36 @@ mod tests {
             crate::lock::running_state(&copy.root).is_none(),
             "a copy of a running instance is not running"
         );
+    }
+
+    #[test]
+    fn a_duplicate_inherits_no_additional_launch_and_cannot_stop_the_originals() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let original = client_with_files(&registry, "Original");
+        let _first = crate::lock::LaunchLock::acquire(&original.root).expect("lock");
+        let _second =
+            crate::lock::LaunchLock::acquire_additional(&original.root, "second").expect("lock");
+
+        let copy = registry
+            .duplicate_client(original.id, &DuplicateClient::default())
+            .expect("duplicate")
+            .record;
+
+        assert!(crate::lock::running_launches(&copy.root).is_empty());
+        let launch_files: Vec<_> = std::fs::read_dir(metadata::metadata_dir(&copy.root))
+            .expect("metadata dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("launch."))
+            .collect();
+        assert!(launch_files.is_empty(), "copied {launch_files:?}");
+        assert_eq!(
+            crate::lock::force_release(&copy.root, Some("second")).expect("force"),
+            crate::lock::ForcedStop::default(),
+            "the copy has nothing of the original's to stop"
+        );
+        assert_eq!(crate::lock::running_launches(&original.root).len(), 2);
     }
 
     #[test]

@@ -18,8 +18,8 @@
 //! almost-complete copy. Symlinked *files* are copied by content, which is what
 //! a duplicate of a single linked jar should be.
 //!
-//! **The launch lock.** It describes a process, and the copy is not that
-//! process.
+//! Anything else is the caller's to skip: a duplicate leaves out launch state
+//! (`lock::is_launch_state`), which describes processes the copy is not.
 
 use std::path::{Path, PathBuf};
 
@@ -33,8 +33,9 @@ pub(crate) struct CopyReport {
     pub skipped_links: Vec<PathBuf>,
 }
 
-/// Copies `source` into `destination`, skipping paths whose name matches
-/// `excluded` at any depth.
+/// Copies `source` into `destination`, skipping every entry `skip` accepts.
+///
+/// `skip` sees each entry's path relative to `source`.
 ///
 /// `destination` is created if it does not exist. Existing files are
 /// overwritten, which only matters to callers that copy into a non-empty
@@ -42,10 +43,10 @@ pub(crate) struct CopyReport {
 pub(crate) fn copy_tree(
     source: &Path,
     destination: &Path,
-    excluded: &[&str],
+    skip: &dyn Fn(&Path) -> bool,
 ) -> std::io::Result<CopyReport> {
     let mut report = CopyReport::default();
-    copy_into(source, destination, source, excluded, &mut report)?;
+    copy_into(source, destination, source, skip, &mut report)?;
     Ok(report)
 }
 
@@ -53,7 +54,7 @@ fn copy_into(
     source: &Path,
     destination: &Path,
     root: &Path,
-    excluded: &[&str],
+    skip: &dyn Fn(&Path) -> bool,
     report: &mut CopyReport,
 ) -> std::io::Result<()> {
     std::fs::create_dir_all(destination)?;
@@ -62,14 +63,11 @@ fn copy_into(
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
         let name = entry.file_name();
-        if excluded
-            .iter()
-            .any(|excluded| std::ffi::OsStr::new(excluded) == name)
-        {
+        let from = entry.path();
+        if skip(from.strip_prefix(root).unwrap_or(&from)) {
             continue;
         }
 
-        let from = entry.path();
         let to = destination.join(&name);
         // `symlink_metadata` describes the entry itself; `file_type` from the
         // directory entry can be `Unknown` on some filesystems.
@@ -94,7 +92,7 @@ fn copy_into(
         }
 
         if kind.is_dir() {
-            copy_into(&from, &to, root, excluded, report)?;
+            copy_into(&from, &to, root, skip, report)?;
         } else if kind.is_file() {
             std::fs::copy(&from, &to)?;
             report.files += 1;
@@ -128,7 +126,7 @@ mod tests {
         );
         std::fs::create_dir_all(source.join("minecraft/saves")).expect("mkdir");
 
-        let report = copy_tree(&source, &destination, &[]).expect("copy");
+        let report = copy_tree(&source, &destination, &|_| false).expect("copy");
         assert_eq!(report.files, 2);
         assert!(report.skipped_links.is_empty());
 
@@ -144,18 +142,21 @@ mod tests {
     }
 
     #[test]
-    fn an_excluded_name_is_skipped_at_every_depth() {
+    fn a_skipped_path_is_judged_relative_to_the_source() {
         let base = tempfile::tempdir().expect("temp dir");
         let source = base.path().join("source");
         let destination = base.path().join("destination");
 
         write(&source.join(".launcher/launch.lock"), "pid");
         write(&source.join(".launcher/instance.json"), "{}");
-        write(&source.join("minecraft/launch.lock"), "also excluded");
+        write(&source.join("minecraft/launch.lock"), "a game file");
 
-        copy_tree(&source, &destination, &["launch.lock"]).expect("copy");
+        copy_tree(&source, &destination, &|relative| {
+            relative == Path::new(".launcher/launch.lock")
+        })
+        .expect("copy");
         assert!(!destination.join(".launcher/launch.lock").exists());
-        assert!(!destination.join("minecraft/launch.lock").exists());
+        assert!(destination.join("minecraft/launch.lock").is_file());
         assert!(destination.join(".launcher/instance.json").is_file());
     }
 
@@ -180,7 +181,7 @@ mod tests {
             .expect("symlink");
 
         let destination = base.path().join("destination");
-        let report = copy_tree(&source, &destination, &[]).expect("copy");
+        let report = copy_tree(&source, &destination, &|_| false).expect("copy");
 
         assert_eq!(
             std::fs::read_to_string(destination.join("minecraft/link.jar")).expect("read"),
@@ -208,7 +209,7 @@ mod tests {
             .expect("symlink");
 
         let destination = base.path().join("destination");
-        let report = copy_tree(&source, &destination, &[]).expect("copy");
+        let report = copy_tree(&source, &destination, &|_| false).expect("copy");
         assert_eq!(report.skipped_links, vec![PathBuf::from("dangling")]);
         assert_eq!(report.files, 0);
     }

@@ -519,6 +519,17 @@ pub fn running_launches(instance_root: &Path) -> Vec<RunningLaunch> {
     launches
 }
 
+/// Whether `relative`, a path inside an instance root, is launch state: a
+/// launch lock, its staging file, or the ownership guard. It describes the
+/// instance's processes, so a copy of the instance never carries it.
+pub(crate) fn is_launch_state(relative: &Path) -> bool {
+    relative.parent() == Some(Path::new(crate::paths::LAUNCHER_METADATA_DIR))
+        && relative
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(LAUNCH_LOCK_PREFIX))
+}
+
 /// Which launch a lock file's name names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LockName {
@@ -1107,6 +1118,24 @@ mod tests {
         assert_eq!(launch_id_of("launch..lock"), None);
         assert_eq!(launch_id_of("server-runtime.json"), None);
         assert_eq!(launch_id_of(OWNERSHIP_GUARD_FILE), None);
+    }
+
+    #[test]
+    fn launch_state_is_every_launch_file_in_the_metadata_directory_and_nothing_else() {
+        for name in [
+            LAUNCH_LOCK_FILE,
+            "launch.bob.lock",
+            OWNERSHIP_GUARD_FILE,
+            "launch.lock.tmp.0",
+        ] {
+            assert!(
+                is_launch_state(&Path::new(".launcher").join(name)),
+                "{name}"
+            );
+        }
+        assert!(!is_launch_state(Path::new(".launcher/instance.json")));
+        assert!(!is_launch_state(Path::new("minecraft/launch.lock")));
+        assert!(!is_launch_state(Path::new("launch.lock")));
     }
 
     #[test]
