@@ -427,7 +427,7 @@ impl App {
         self.finish_keyring_cleanup();
         let provider = self.build_account_provider(options.allow_session_only)?;
         let session = provider.login(&options.request, observer, cancel).await?;
-        self.adopt(session)
+        self.adopt_login(session)
     }
 
     /// Re-establishes a session for the account already signed in.
@@ -837,6 +837,47 @@ impl App {
 
     /// Records a completed session: metadata to the file, token to memory.
     fn adopt(&mut self, session: Session) -> CoreResult<&Session> {
+        self.record_account(&session)?;
+        self.hold_session(session)
+    }
+
+    /// [`Self::adopt`] for a new login. When the account cannot be recorded,
+    /// the credential the login just stored is deleted again, so it is never
+    /// left with nothing naming it (ADR 0004).
+    fn adopt_login(&mut self, session: Session) -> CoreResult<&Session> {
+        if let Err(error) = self.record_account(&session) {
+            self.discard_unrecorded_credential(&session);
+            return Err(error);
+        }
+        self.hold_session(session)
+    }
+
+    /// Deletes a just-stored credential whose account is not recorded.
+    ///
+    /// One the configuration already names replaced an earlier credential for
+    /// the same account, which is still recorded, so it stays.
+    fn discard_unrecorded_credential(&self, session: &Session) {
+        let id = session.account.id;
+        // Read without adopting it, so a failed login changes nothing else.
+        match ephervex_storage::Config::load_or_default(self.paths()) {
+            Ok(config) if !config.accounts.contains_key(&id.to_string()) => {}
+            Ok(_) => return,
+            // It may well record the account, so the credential stays.
+            Err(error) => {
+                warn!(%error, account = %id, "kept the credential of a login whose record could not be checked");
+                return;
+            }
+        }
+        let deleted = self.keyring().and_then(|store| {
+            store.delete(&ephervex_auth::CredentialKey::MicrosoftRefreshToken(id))
+        });
+        if let Err(error) = deleted {
+            warn!(%error, account = %id, "could not remove the credential of a login that was not recorded");
+        }
+    }
+
+    /// Writes a completed session's account metadata to the configuration.
+    fn record_account(&mut self, session: &Session) -> CoreResult<()> {
         let id = session.account.id.to_string();
         let name = session.account.name.clone();
         let at = session
@@ -857,7 +898,11 @@ impl App {
         } else {
             debug!(account = %id, "session-only login; nothing written to the configuration");
         }
+        Ok(())
+    }
 
+    /// Keeps a recorded session in memory for launches.
+    fn hold_session(&mut self, session: Session) -> CoreResult<&Session> {
         self.session = Some(session);
         self.session
             .as_ref()
@@ -904,6 +949,98 @@ mod tests {
             );
         })
         .expect("remember");
+    }
+
+    fn microsoft_session(id: Uuid) -> Session {
+        Session {
+            account: ephervex_auth::Account {
+                id,
+                name: "Steve".to_owned(),
+                kind: AccountKind::Microsoft,
+                authenticated_at: Utc::now(),
+            },
+            credentials: ephervex_auth::Credentials::Microsoft {
+                token: SecretString::new("access".to_owned()),
+                expires_at: Utc::now() + TimeDelta::hours(1),
+                entitlements: ephervex_auth::Entitlements::default(),
+                storage: CredentialStorage::Keyring,
+            },
+        }
+    }
+
+    fn keyring_holding(id: Uuid) -> Arc<MemoryStore> {
+        let store = Arc::new(MemoryStore::new());
+        store
+            .store(
+                &ephervex_auth::CredentialKey::MicrosoftRefreshToken(id),
+                &SecretString::new("refresh".to_owned()),
+            )
+            .expect("store");
+        store
+    }
+
+    /// Makes every configuration write fail while the file stays readable.
+    fn block_configuration_writes(app: &App) {
+        let lock = app.paths().config_dir().join("config.lock");
+        let _ = std::fs::remove_file(&lock);
+        std::fs::create_dir_all(lock).expect("block");
+    }
+
+    #[test]
+    fn a_login_that_cannot_be_recorded_removes_the_credential_it_stored() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let id = Uuid::new_v4();
+        let store = keyring_holding(id);
+        app.test_keyring = Some(TestKeyring::Store(store.clone()));
+        block_configuration_writes(&app);
+
+        app.adopt_login(microsoft_session(id))
+            .expect_err("the account cannot be recorded");
+
+        let key = ephervex_auth::CredentialKey::MicrosoftRefreshToken(id);
+        assert!(store.load(&key).expect("load").is_none());
+        assert!(app.session().is_none());
+    }
+
+    #[test]
+    fn a_failed_record_keeps_the_credential_of_an_account_already_recorded() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let id = Uuid::new_v4();
+        remember_microsoft_account(&mut app, id);
+        let store = keyring_holding(id);
+        app.test_keyring = Some(TestKeyring::Store(store.clone()));
+        block_configuration_writes(&app);
+
+        app.adopt_login(microsoft_session(id))
+            .expect_err("the account cannot be recorded again");
+
+        let key = ephervex_auth::CredentialKey::MicrosoftRefreshToken(id);
+        assert!(
+            store.load(&key).expect("load").is_some(),
+            "the recorded account keeps it"
+        );
+    }
+
+    #[test]
+    fn a_failed_record_keeps_the_credential_when_the_configuration_cannot_be_read() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let id = Uuid::new_v4();
+        let store = keyring_holding(id);
+        app.test_keyring = Some(TestKeyring::Store(store.clone()));
+        // A directory where the file belongs can neither be read nor written.
+        std::fs::create_dir_all(app.paths().config_file()).expect("block the file");
+
+        app.adopt_login(microsoft_session(id))
+            .expect_err("the account cannot be recorded");
+
+        let key = ephervex_auth::CredentialKey::MicrosoftRefreshToken(id);
+        assert!(
+            store.load(&key).expect("load").is_some(),
+            "it may record the account"
+        );
     }
 
     #[test]
