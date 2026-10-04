@@ -675,10 +675,12 @@ specific custom bind remains exact. The configured nonzero port is preserved.
 Only a controlled server is reusable. A stopped or proven-stale server goes
 through the ordinary start service and its EULA, Java, persistence, capture,
 and process-ownership rules. Readiness is a successful TCP connection within a
-bounded deadline while core also observes supervisor exit or loss of a
-controlled runtime. Once ready, the ordinary client launch pipeline supplies
-account identity, Java, exact loader metadata, artifacts, locking, and process
-capture. Client failure or exit sends no server stop action (ADR 0015).
+bounded deadline, counted only while the server's recorded Java process itself
+holds every listening socket the connection can reach. Core also observes
+supervisor exit or loss of a controlled runtime while it waits. Once ready,
+the ordinary client launch pipeline supplies account identity, Java, exact
+loader metadata, artifacts, locking, and process capture. Client failure or
+exit sends no server stop action (ADR 0015).
 
 ## Minecraft settings compatibility
 

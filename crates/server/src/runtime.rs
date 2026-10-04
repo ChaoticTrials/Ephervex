@@ -1,6 +1,7 @@
 //! Conservative Linux process identity and orphan classification.
 
 use std::io::Write as _;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::DirBuilderExt as _;
 use std::os::unix::fs::MetadataExt as _;
@@ -471,21 +472,9 @@ pub fn capture_java_child(pid: u32) -> ServerResult<ProcessEvidence> {
 }
 
 fn verify_process(evidence: &ProcessEvidence) -> IdentityState {
-    let Ok(current_boot) = read_boot_id() else {
-        return IdentityState::Unverifiable;
-    };
-    if current_boot != evidence.boot_id {
-        return IdentityState::ProvenDead;
-    }
-    let ticks = match read_start_ticks(evidence.pid) {
-        Ok(value) => value,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return IdentityState::ProvenDead;
-        }
-        Err(_) => return IdentityState::Unverifiable,
-    };
-    if ticks != evidence.start_ticks {
-        return IdentityState::ProvenDead;
+    match verify_process_instance(evidence) {
+        IdentityState::VerifiedAlive => {}
+        other => return other,
     }
     let executable = match std::fs::read_link(format!("/proc/{}/exe", evidence.pid)) {
         Ok(path) => path,
@@ -512,6 +501,158 @@ fn verify_process(evidence: &ProcessEvidence) -> IdentityState {
         }
     }
     IdentityState::VerifiedAlive
+}
+
+/// Whether the pid still names the process that was recorded, by boot and
+/// start time, without looking at what it executes.
+fn verify_process_instance(evidence: &ProcessEvidence) -> IdentityState {
+    let Ok(current_boot) = read_boot_id() else {
+        return IdentityState::Unverifiable;
+    };
+    if current_boot != evidence.boot_id {
+        return IdentityState::ProvenDead;
+    }
+    match read_start_ticks(evidence.pid) {
+        Ok(ticks) if ticks == evidence.start_ticks => IdentityState::VerifiedAlive,
+        Ok(_) => IdentityState::ProvenDead,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => IdentityState::ProvenDead,
+        Err(_) => IdentityState::Unverifiable,
+    }
+}
+
+/// Whether the recorded Java child itself holds every listening TCP socket
+/// that a connection to `target` can reach, since an accepted connection does
+/// not say who accepted it.
+///
+/// `Ok(false)` means not yet: no child is recorded or provably alive, it has
+/// not bound, or another program also listens where the connection would go.
+/// Exit is left to the caller's runtime monitoring.
+pub(crate) fn runtime_child_listens_on(
+    server_root: &Path,
+    target: SocketAddr,
+) -> ServerResult<bool> {
+    let Some(RuntimeEvidence {
+        child: Some(child), ..
+    }) = read_runtime_evidence(server_root)?
+    else {
+        return Ok(false);
+    };
+    // The executable is not compared: a Java binary an upgrade replaced on
+    // disk still runs as the same server.
+    let is_child = || {
+        matches!(
+            verify_process_instance(&child),
+            IdentityState::VerifiedAlive
+        )
+    };
+    if !is_child() {
+        return Ok(false);
+    }
+    // The launcher's own tables: a socket the child holds in another network
+    // namespace is not the one a local connection reaches. Unreadable tables
+    // fail closed rather than falling back to an unattributed connection.
+    let mut reachable = std::collections::HashSet::new();
+    for table in ["/proc/self/net/tcp", "/proc/self/net/tcp6"] {
+        let rows = match std::fs::read_to_string(table) {
+            Ok(rows) => rows,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => {
+                return Err(ServerError::RuntimeState {
+                    path: PathBuf::from(table),
+                    source,
+                });
+            }
+        };
+        reachable.extend(
+            rows.lines()
+                .skip(1)
+                .filter_map(|row| listening_inode(row, target)),
+        );
+    }
+    if reachable.is_empty() {
+        return Ok(false);
+    }
+    let descriptors = PathBuf::from(format!("/proc/{}/fd", child.pid));
+    let entries = match std::fs::read_dir(&descriptors) {
+        Ok(entries) => entries,
+        // A child that went away is reported by exit monitoring, not here.
+        Err(_) if !is_child() => return Ok(false),
+        // A live child whose sockets cannot be attributed would only ever time out.
+        Err(source) => {
+            return Err(ServerError::RuntimeState {
+                path: descriptors,
+                source,
+            });
+        }
+    };
+    for entry in entries {
+        // A descriptor can close between listing and reading it.
+        let Ok(link) = entry.and_then(|entry| std::fs::read_link(entry.path())) else {
+            continue;
+        };
+        if let Some(inode) = socket_inode(&link) {
+            reachable.remove(&inode);
+        }
+    }
+    // A co-listener, such as a separate IPv4 socket beside an IPv6-only wildcard
+    // or a shared reuse port, could take the connection instead. Checked again
+    // so a pid recycled during the scan cannot lend its descriptors.
+    Ok(reachable.is_empty() && is_child())
+}
+
+/// The socket inode of a `/proc/net/tcp` or `tcp6` row that listens where a
+/// connection to `target` arrives.
+fn listening_inode(row: &str, target: SocketAddr) -> Option<u64> {
+    const LISTEN: &str = "0A";
+    let mut fields = row.split_whitespace();
+    let (address, port) = fields.nth(1)?.rsplit_once(':')?;
+    let state = fields.nth(1)?;
+    let inode = fields.nth(5)?;
+    if state != LISTEN || u16::from_str_radix(port, 16).ok()? != target.port() {
+        return None;
+    }
+    if !accepts_for(table_address(address)?, target.ip()) {
+        return None;
+    }
+    inode.parse().ok()
+}
+
+/// A `/proc/net` address: 32-bit words in host byte order, as the kernel prints them.
+fn table_address(hex: &str) -> Option<IpAddr> {
+    let mut octets = [0_u8; 16];
+    let words = hex.len() / 8;
+    if !matches!(words, 1 | 4) || hex.len() % 8 != 0 {
+        return None;
+    }
+    for word in 0..words {
+        let value = u32::from_str_radix(hex.get(word * 8..word * 8 + 8)?, 16).ok()?;
+        octets[word * 4..word * 4 + 4].copy_from_slice(&value.to_ne_bytes());
+    }
+    Some(if words == 1 {
+        IpAddr::V4(Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]))
+    } else {
+        IpAddr::V6(Ipv6Addr::from(octets))
+    })
+}
+
+/// Whether a listener bound to `bound` receives connections made to `target`.
+fn accepts_for(bound: IpAddr, target: IpAddr) -> bool {
+    // An IPv4-mapped address reaches the same listeners as the IPv4 address.
+    match (bound.to_canonical(), target.to_canonical()) {
+        // A dual-stack wildcard also takes IPv4 connections.
+        (IpAddr::V6(bound), _) if bound.is_unspecified() => true,
+        (IpAddr::V4(bound), IpAddr::V4(target)) => bound.is_unspecified() || bound == target,
+        (IpAddr::V6(bound), IpAddr::V6(target)) => bound == target,
+        _ => false,
+    }
+}
+
+fn socket_inode(link: &Path) -> Option<u64> {
+    link.to_str()?
+        .strip_prefix("socket:[")?
+        .strip_suffix(']')?
+        .parse()
+        .ok()
 }
 
 fn read_boot_id() -> std::io::Result<String> {
@@ -550,6 +691,83 @@ mod tests {
     use std::os::unix::net::UnixListener;
 
     use super::*;
+
+    #[test]
+    fn listening_rows_are_matched_by_address_port_and_state() {
+        let target: SocketAddr = "127.0.0.1:25565".parse().expect("target");
+        let row = |address: &str, state: &str| {
+            format!(
+                "   0: {address}:63DD 00000000:0000 {state} 00000000:00000000 00:00000000 00000000  1000        0 4242 1 0000000000000000 100 0 0 10 0"
+            )
+        };
+        let loopback = hex_v4(Ipv4Addr::LOCALHOST);
+        let header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode";
+        assert_eq!(listening_inode(&row(&loopback, "0A"), target), Some(4242));
+        assert_eq!(
+            listening_inode(&row(&hex_v4(Ipv4Addr::UNSPECIFIED), "0A"), target),
+            Some(4242)
+        );
+        assert_eq!(
+            listening_inode(&row(&hex_v6(Ipv6Addr::UNSPECIFIED), "0A"), target),
+            Some(4242)
+        );
+        assert_eq!(
+            listening_inode(
+                &row(&hex_v6(Ipv4Addr::LOCALHOST.to_ipv6_mapped()), "0A"),
+                target
+            ),
+            Some(4242)
+        );
+        assert_eq!(listening_inode(&row(&loopback, "01"), target), None);
+        assert_eq!(
+            listening_inode(&row(&hex_v4(Ipv4Addr::new(127, 0, 0, 2)), "0A"), target),
+            None
+        );
+        assert_eq!(
+            listening_inode(&row(&hex_v6(Ipv6Addr::LOCALHOST), "0A"), target),
+            None
+        );
+        assert_eq!(
+            listening_inode(
+                &row(&loopback, "0A"),
+                "127.0.0.1:25566".parse().expect("target")
+            ),
+            None
+        );
+        assert_eq!(listening_inode(header, target), None);
+        assert_eq!(
+            listening_inode(
+                &row(&hex_v6(Ipv4Addr::UNSPECIFIED.to_ipv6_mapped()), "0A"),
+                target
+            ),
+            Some(4242)
+        );
+        assert_eq!(
+            listening_inode(
+                &row(&loopback, "0A"),
+                SocketAddr::new(IpAddr::V6(Ipv4Addr::LOCALHOST.to_ipv6_mapped()), 25_565)
+            ),
+            Some(4242)
+        );
+        assert_eq!(socket_inode(Path::new("socket:[4242]")), Some(4242));
+        assert_eq!(socket_inode(Path::new("pipe:[4242]")), None);
+    }
+
+    fn hex_v4(address: Ipv4Addr) -> String {
+        format!("{:08X}", u32::from_ne_bytes(address.octets()))
+    }
+
+    fn hex_v6(address: Ipv6Addr) -> String {
+        use std::fmt::Write as _;
+        address
+            .octets()
+            .chunks(4)
+            .fold(String::new(), |mut hex, word| {
+                let word = u32::from_ne_bytes(word.try_into().expect("word"));
+                write!(hex, "{word:08X}").expect("write to string");
+                hex
+            })
+    }
 
     fn root() -> tempfile::TempDir {
         let root = tempfile::tempdir().expect("temp dir");

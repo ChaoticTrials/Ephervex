@@ -335,7 +335,7 @@ async fn wait_for_managed_server(
     cancel: &CancellationToken,
     started: Option<&mut JoinHandle<CoreResult<ServerExit>>>,
 ) -> CoreResult<()> {
-    let readiness = wait_for_server_readiness(target, timeout, cancel);
+    let readiness = wait_for_server_readiness(root, target, timeout, cancel);
     tokio::pin!(readiness);
     if let Some(started) = started {
         tokio::select! {
@@ -623,32 +623,25 @@ mod tests {
     async fn a_controlled_server_is_reused_and_client_authentication_stays_on_the_normal_path() {
         let directory = tempfile::tempdir().expect("directory");
         let mut app = app_rooted_at(directory.path());
-        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .await
-            .expect("listener");
-        let port = listener.local_addr().expect("address").port();
-        let (client, server) = installed_linked_server(
-            &app,
-            ServerNetworkSettings {
-                port,
-                ..ServerNetworkSettings::default()
-            },
-        );
+        let (client, mut server) = installed_linked_server(&app, ServerNetworkSettings::default());
         let properties = server.root.join("server/server.properties");
         std::fs::write(&properties, b"motd=unchanged\n").expect("properties");
-        let before = std::fs::read(&properties).expect("before");
+        std::fs::write(server.root.join("server").join(STAND_IN_MARKER), b"").expect("marker");
 
         let root = server.root.clone();
         let capture = directory.path().join("capture");
         let task = tokio::spawn(async move {
             ServerSupervisor::run(
                 &ServerCommand {
-                    java: PathBuf::from("/bin/sh"),
-                    arguments: vec![
-                        "-c".to_owned(),
-                        "while IFS= read -r line; do [ \"$line\" = stop ] && exit 0; done"
-                            .to_owned(),
-                    ],
+                    java: std::env::current_exe().expect("test executable"),
+                    arguments: [
+                        "--exact",
+                        "connection::tests::a_supervised_stand_in_listens_until_told_to_stop",
+                        "--ignored",
+                        "--test-threads=1",
+                    ]
+                    .map(str::to_owned)
+                    .to_vec(),
                     working_directory: root.join("server"),
                 },
                 &root,
@@ -658,6 +651,15 @@ mod tests {
             .await
         });
         wait_until_controlled(&server.root).await;
+        let Some(port) = stand_in_port(&server.root.join("server")).await else {
+            let _ = send_control(&server.root, &ControlAction::Stop).await;
+            panic!("the stand-in server never published its port");
+        };
+        server.network.port = port;
+        app.registry_for_services()
+            .update_server(&mut server)
+            .expect("server port");
+        let before = std::fs::read(&properties).expect("before");
         let (connect_observer, mut connect_events) = LaunchAndConnectObserver::channel();
         let (server_observer, mut server_events) = ServerObserver::channel();
 
@@ -714,6 +716,10 @@ mod tests {
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .expect("listener");
+        let mut evidence =
+            ephervex_server::RuntimeEvidence::for_current_supervisor().expect("evidence");
+        evidence.record_child(std::process::id()).expect("child");
+        ephervex_server::write_runtime_evidence(directory.path(), &evidence).expect("evidence");
         let address = listener.local_addr().expect("address");
         let target = local_target(address.port());
         let mut running = tokio::spawn(std::future::pending::<CoreResult<ServerExit>>());
@@ -818,6 +824,45 @@ mod tests {
         assert_eq!(connected.dry_run, options.dry_run);
         assert!(connected.features.is_enabled("is_demo_user"));
         assert!(connected.features.is_enabled("is_quick_play_multiplayer"));
+    }
+
+    /// Present in a stand-in server's working directory, so running ignored
+    /// tests by hand never starts one.
+    const STAND_IN_MARKER: &str = "listening-stand-in";
+    const STAND_IN_PORT_FILE: &str = "bound-port";
+
+    /// The supervised server process for the reuse test: it holds a loopback
+    /// listener, publishes its port, and exits on `stop`.
+    #[test]
+    #[ignore = "started as a server process by the reuse test"]
+    fn a_supervised_stand_in_listens_until_told_to_stop() {
+        if !Path::new(STAND_IN_MARKER).exists() {
+            return;
+        }
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("listener");
+        let port = listener.local_addr().expect("address").port();
+        let staged = format!("{STAND_IN_PORT_FILE}.tmp");
+        std::fs::write(&staged, port.to_string()).expect("port");
+        std::fs::rename(&staged, STAND_IN_PORT_FILE).expect("publish port");
+        for line in std::io::stdin().lines() {
+            if line.is_err() || line.is_ok_and(|line| line == "stop") {
+                break;
+            }
+        }
+        drop(listener);
+    }
+
+    async fn stand_in_port(directory: &Path) -> Option<u16> {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if let Ok(port) = std::fs::read_to_string(directory.join(STAND_IN_PORT_FILE)) {
+                    return port.parse().expect("port");
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .ok()
     }
 
     async fn wait_until_controlled(root: &Path) {

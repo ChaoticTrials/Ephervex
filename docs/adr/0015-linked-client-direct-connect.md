@@ -41,11 +41,15 @@ controlled server is reused. Core never attempts a duplicate start or adopts
 an unknown or orphaned process.
 
 Readiness is a successful TCP connection to the derived target within a
-bounded 120-second deadline. Cancellation is immediate. During a new start,
-the supervisor result is observed so process-start failure or exit wins over
-readiness. During reuse, runtime classification is monitored so a stopped or
-uncertain server cannot be reported ready. Connection refusal is retried on a
-bounded interval; there is no fixed startup sleep.
+bounded 120-second deadline, counted only while the server's recorded Java
+process itself holds every listening socket such a connection can reach. A
+connection alone cannot say who accepted it, so another program on the port
+never stands in for the server, whether it is being started or reused.
+Cancellation is immediate. During a new start, the supervisor result is
+observed so process-start failure or exit wins over readiness. During reuse,
+runtime classification is monitored so a stopped or uncertain server cannot be
+reported ready. Connection refusal is retried on a bounded interval; there is
+no fixed startup sleep.
 
 After readiness, core invokes the normal client launch service. It preserves
 the selected client, account and token behavior, client Java choice, JVM
