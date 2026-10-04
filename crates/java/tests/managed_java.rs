@@ -211,6 +211,23 @@ fn reporter() -> OperationReporter {
     OperationReporter::silent("managed-java-test")
 }
 
+/// The hidden staging entries left in a major's directory.
+fn staging_left_in(major: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(major) else {
+        return Vec::new();
+    };
+    entries
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| name.starts_with('.') && name.ends_with(".incomplete"))
+        .collect()
+}
+
 #[tokio::test]
 async fn a_missing_runtime_is_installed_under_the_data_directory_and_is_executable() {
     let server = MockServer::start().await;
@@ -334,6 +351,63 @@ async fn installing_twice_reuses_what_is_already_there() {
 }
 
 #[tokio::test]
+async fn concurrent_installs_of_one_release_publish_one_complete_runtime() {
+    let server = MockServer::start().await;
+    let archive = temurin_archive();
+    let checksum = sha256(&archive);
+    mount(&server, archive, &checksum).await;
+
+    let temp = tempfile::tempdir().expect("temp");
+    let cache = temp.path().join("cache");
+    let java_dir = temp.path().join("data/java");
+    // Warm the index and archive caches so the installs overlap on extraction
+    // and publication rather than on the download.
+    let provider = provider(&server, &cache, &java_dir);
+    let warm = provider
+        .install(21, &reporter(), &CancellationToken::new())
+        .await
+        .expect("install");
+    std::fs::remove_dir_all(&warm.directory).expect("remove");
+
+    let installs: Vec<_> = (0..4)
+        .map(|_| {
+            let provider = provider.clone();
+            tokio::spawn(async move {
+                provider
+                    .install(21, &reporter(), &CancellationToken::new())
+                    .await
+            })
+        })
+        .collect();
+    let mut published = 0;
+    for install in installs {
+        let installed = install
+            .await
+            .expect("join")
+            .expect("every install succeeds");
+        assert_eq!(installed.directory, warm.directory);
+        published += usize::from(installed.newly_installed);
+    }
+
+    assert_eq!(published, 1, "exactly one install publishes the runtime");
+    let home = &warm.directory;
+    assert!(home.join("bin/java").is_file());
+    assert!(home.join("release").is_file());
+    assert!(home.join("legal/java.base/LICENSE").is_file());
+    assert_eq!(staging_left_in(&java_dir.join("21")), Vec::<String>::new());
+
+    // Staging must not leave the install private to its owner.
+    let ordinary = temp.path().join("ordinary");
+    std::fs::create_dir(&ordinary).expect("create");
+    assert_eq!(
+        std::fs::metadata(home).expect("home").permissions(),
+        std::fs::metadata(&ordinary)
+            .expect("ordinary")
+            .permissions()
+    );
+}
+
+#[tokio::test]
 async fn an_archive_whose_checksum_does_not_match_is_never_extracted() {
     let server = MockServer::start().await;
     let archive = temurin_archive();
@@ -388,9 +462,9 @@ async fn an_archive_that_tries_to_escape_its_directory_is_refused() {
         !Path::new("/tmp/ephervex-pwned").exists(),
         "the escaping entry must not have been written"
     );
-    let staging = java_dir.join("21/.eclipse-jdk-21.0.12+8.incomplete");
-    assert!(
-        !staging.exists(),
+    assert_eq!(
+        staging_left_in(&java_dir.join("21")),
+        Vec::<String>::new(),
         "the staging directory must be cleaned up"
     );
 }

@@ -28,16 +28,19 @@
 //!
 //! # Extraction is not done in place
 //!
-//! Files land in a sibling `.incomplete` directory and are renamed into
-//! position only once the probe succeeds. An interrupted install therefore
-//! leaves no half-unpacked JDK at a path that discovery would later find,
-//! probe, and offer.
+//! Files land in a hidden `.incomplete` sibling that belongs to one attempt, so
+//! concurrent installs never share one, and are renamed into position only once
+//! the probe succeeds. An interrupted install therefore leaves no half-unpacked
+//! JDK at a path that discovery would later find, probe, and offer.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ephervex_download::{
-    CacheLayout, ContentStore, DownloadManager, DownloadRequest, FileExtension, OperationReporter,
+    CacheLayout, ContentStore, DownloadError, DownloadManager, DownloadRequest, FileExtension,
+    OperationReporter, redacted,
 };
+use tempfile::TempDir;
 use tokio::fs;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
@@ -46,7 +49,14 @@ use crate::adoptium::{AdoptiumArchitecture, AdoptiumClient, ManagedRelease};
 use crate::archive::{ExtractionLimits, extract_tar_gz};
 use crate::discovery::{JavaOrigin, JavaRuntime, JavaSourceKind};
 use crate::error::JavaError;
+use crate::install_lock::InstallLock;
 use crate::probe::probe;
+
+/// Ends the name of every staging directory.
+const STAGING_SUFFIX: &str = ".incomplete";
+
+/// The length of the random part that makes a staging directory one attempt's own.
+const STAGING_RANDOM_LEN: usize = 6;
 
 /// A runtime Ephervex downloaded and installed.
 #[derive(Debug, Clone)]
@@ -191,25 +201,33 @@ impl ManagedJavaProvider {
         cancel: &CancellationToken,
     ) -> Result<ManagedInstallation, JavaError> {
         let major = release.major;
-
-        let directory = self
-            .major_directory(major)
-            .join(release.install_directory_name());
+        let major_directory = self.major_directory(major);
+        let name = release.install_directory_name();
+        let directory = major_directory.join(&name);
         let executable = directory.join("bin").join("java");
+        let finish = |runtime, newly_installed| ManagedInstallation {
+            runtime,
+            release: release.clone(),
+            directory: directory.clone(),
+            newly_installed,
+        };
 
-        if fs::try_exists(&executable).await.unwrap_or(false) {
-            debug!(path = %executable.display(), "the managed runtime is already installed");
-            let runtime = self.identify(&executable, major).await?;
-            return Ok(ManagedInstallation {
-                runtime,
-                release,
-                directory,
-                newly_installed: false,
-            });
+        if let Some(runtime) = self.installed_runtime(&executable, major).await? {
+            return Ok(finish(runtime, false));
         }
 
+        let lock = Arc::new(lock_release(&major_directory, &name, &release, cancel).await?);
+        // Another install may have finished while this one waited.
+        if let Some(runtime) = self.installed_runtime(&executable, major).await? {
+            return Ok(finish(runtime, false));
+        }
+        remove_abandoned_staging(&major_directory, &name, &lock).await;
+
         let archive = self.download(&release, reporter, cancel).await?;
-        self.unpack(&archive, &directory).await?;
+        let staging = self
+            .unpack(&archive, &major_directory, &name, Arc::clone(&lock))
+            .await?;
+        publish(staging, &directory, Arc::clone(&lock)).await?;
 
         let runtime = self.identify(&executable, major).await?;
         info!(
@@ -218,12 +236,20 @@ impl ManagedJavaProvider {
             path = %executable.display(),
             "installed a managed java runtime"
         );
-        Ok(ManagedInstallation {
-            runtime,
-            release,
-            directory,
-            newly_installed: true,
-        })
+        Ok(finish(runtime, true))
+    }
+
+    /// The runtime already installed at `executable`, if there is one.
+    async fn installed_runtime(
+        &self,
+        executable: &Path,
+        major: u32,
+    ) -> Result<Option<JavaRuntime>, JavaError> {
+        if !fs::try_exists(executable).await.unwrap_or(false) {
+            return Ok(None);
+        }
+        debug!(path = %executable.display(), "the managed runtime is already installed");
+        self.identify(executable, major).await.map(Some)
     }
 
     /// Fetches the archive into the content-addressed download cache.
@@ -260,34 +286,32 @@ impl ManagedJavaProvider {
         Ok(destination)
     }
 
-    /// Extracts into a staging directory and renames it into place.
-    async fn unpack(&self, archive: &Path, directory: &Path) -> Result<(), JavaError> {
-        let staging = staging_path(directory);
-        // A previous interrupted attempt would otherwise be extracted over,
-        // mixing two builds into one directory.
-        if fs::try_exists(&staging).await.unwrap_or(false) {
-            warn!(path = %staging.display(), "removing an interrupted managed java install");
-            let _ = fs::remove_dir_all(&staging).await;
-        }
-        if let Some(parent) = directory.parent() {
-            fs::create_dir_all(parent)
-                .await
-                .map_err(|source| JavaError::Io {
-                    path: parent.to_path_buf(),
-                    source,
-                })?;
-        }
+    /// Extracts into a staging directory of this attempt's own.
+    ///
+    /// The extraction owns the staging directory and the release lock, so an
+    /// install future dropped mid-extraction still holds the lock until the
+    /// writing stops, and the staging directory is then removed off the runtime.
+    async fn unpack(
+        &self,
+        archive: &Path,
+        major_directory: &Path,
+        name: &str,
+        lock: Arc<InstallLock>,
+    ) -> Result<TempDir, JavaError> {
+        let staging = new_staging(major_directory, name)?;
 
         let archive = archive.to_path_buf();
-        let target = staging.clone();
         let limits = self.limits;
         // `flate2` and `tar` block; a 200 MB JDK would stall the runtime's
         // worker for the duration.
-        let extraction = tokio::task::spawn_blocking(move || {
+        // Returned in this order so that, for a dropped install, the staging
+        // directory is removed before the lock is released.
+        let (staging, extraction, _lock) = tokio::task::spawn_blocking(move || {
             // Temurin archives wrap everything in one `jdk-<version>/`
             // directory, which is stripped so `bin/java` lands at the root of
             // the install and the layout is the same for every vendor.
-            extract_tar_gz(&archive, &target, 1, &limits)
+            let extraction = extract_tar_gz(&archive, staging.path(), 1, &limits);
+            (staging, extraction, lock)
         })
         .await
         .map_err(|_| JavaError::ManagedExtractionPanicked)?;
@@ -299,21 +323,15 @@ impl ManagedJavaProvider {
                     bytes = report.bytes,
                     "unpacked a managed java runtime"
                 );
+                Ok(staging)
             }
             Err(source) => {
-                let _ = fs::remove_dir_all(&staging).await;
-                return Err(JavaError::ManagedArchiveRejected {
+                discard(staging).await;
+                Err(JavaError::ManagedArchiveRejected {
                     source: Box::new(source),
-                });
+                })
             }
         }
-
-        fs::rename(&staging, directory)
-            .await
-            .map_err(|source| JavaError::Io {
-                path: directory.to_path_buf(),
-                source,
-            })
     }
 
     /// Probes the installed executable and checks it is what was asked for.
@@ -351,19 +369,133 @@ impl ManagedJavaProvider {
     }
 }
 
-/// The staging directory an install is extracted into before it is renamed.
+/// Takes the lock that serializes installs of release `name`, waiting for any
+/// install of it already running.
+async fn lock_release(
+    major_directory: &Path,
+    name: &str,
+    release: &ManagedRelease,
+    cancel: &CancellationToken,
+) -> Result<InstallLock, JavaError> {
+    let io = |source| JavaError::Io {
+        path: major_directory.to_path_buf(),
+        source,
+    };
+    fs::create_dir_all(major_directory).await.map_err(io)?;
+    // Canonical, so two spellings of one directory take the same lock.
+    let path = fs::canonicalize(major_directory)
+        .await
+        .map_err(io)?
+        .join(format!(".{name}.lock"));
+    match InstallLock::acquire(&path, cancel).await {
+        Ok(Some(lock)) => Ok(lock),
+        Ok(None) => Err(JavaError::ManagedDownloadFailed {
+            major: release.major,
+            release: release.release_name.clone(),
+            source: Box::new(DownloadError::Canceled {
+                url: redacted(&release.url),
+            }),
+        }),
+        Err(source) => Err(JavaError::Io { path, source }),
+    }
+}
+
+/// A new staging directory for release `name`, unique to this attempt.
 ///
-/// A sibling rather than a child: renaming a child into its own parent is not a
-/// rename, and a dot-prefixed sibling is also skipped by discovery's scan
-/// because it holds no `bin/java` until the moment it does.
-fn staging_path(directory: &Path) -> PathBuf {
-    let name = directory.file_name().map_or_else(
-        || ".incomplete".to_owned(),
-        |name| format!(".{}.incomplete", name.to_string_lossy()),
-    );
-    directory
-        .parent()
-        .map_or_else(|| PathBuf::from(&name), |parent| parent.join(&name))
+/// A sibling of the install directory, because a child cannot be renamed onto
+/// its own parent.
+fn new_staging(major_directory: &Path, name: &str) -> Result<TempDir, JavaError> {
+    tempfile::Builder::new()
+        .prefix(&format!(".{name}."))
+        .rand_bytes(STAGING_RANDOM_LEN)
+        .suffix(STAGING_SUFFIX)
+        .tempdir_in(major_directory)
+        .map_err(|source| JavaError::Io {
+            path: major_directory.to_path_buf(),
+            source,
+        })
+}
+
+/// Whether `entry`, a name in a major's directory, is a staging directory of
+/// release `name`. The fixed `.<name>.incomplete` an older Ephervex staged
+/// into counts too.
+fn is_staging_of(entry: &str, name: &str) -> bool {
+    let Some(rest) = entry
+        .strip_prefix('.')
+        .and_then(|rest| rest.strip_prefix(name))
+        .and_then(|rest| rest.strip_suffix(STAGING_SUFFIX))
+    else {
+        return false;
+    };
+    rest.is_empty()
+        || rest.strip_prefix('.').is_some_and(|random| {
+            random.len() == STAGING_RANDOM_LEN && random.bytes().all(|b| b.is_ascii_alphanumeric())
+        })
+}
+
+/// Removes the staging directories interrupted installs of release `name`
+/// left behind.
+///
+/// Run under the release lock, so none of them belongs to a live install. Not
+/// run where the lock cannot exclude other processes.
+async fn remove_abandoned_staging(major_directory: &Path, name: &str, lock: &InstallLock) {
+    if !lock.excludes_other_processes() {
+        return;
+    }
+    let Ok(mut entries) = fs::read_dir(major_directory).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if !entry
+            .file_name()
+            .to_str()
+            .is_some_and(|entry| is_staging_of(entry, name))
+        {
+            continue;
+        }
+        let path = entry.path();
+        warn!(path = %path.display(), "removing an interrupted managed java install");
+        if let Err(error) = fs::remove_dir_all(&path).await {
+            warn!(path = %path.display(), %error, "could not remove an interrupted managed java install");
+        }
+    }
+}
+
+/// Renames a finished staging directory into place.
+///
+/// The rename owns the staging directory and the lock, so a dropped install
+/// cannot remove the tree while it is being renamed, or let another in first.
+async fn publish(
+    staging: TempDir,
+    directory: &Path,
+    lock: Arc<InstallLock>,
+) -> Result<(), JavaError> {
+    let destination = directory.to_path_buf();
+    let renamed = tokio::task::spawn_blocking(move || {
+        let renamed = std::fs::rename(staging.path(), &destination);
+        if renamed.is_ok() {
+            let _ = staging.keep();
+        } else if let Err(error) = staging.close() {
+            warn!(%error, "could not remove a managed java staging directory");
+        }
+        drop(lock);
+        renamed
+    })
+    .await
+    .map_err(|_| JavaError::ManagedExtractionPanicked)?;
+    renamed.map_err(|source| JavaError::Io {
+        path: directory.to_path_buf(),
+        source,
+    })
+}
+
+/// Removes a staging directory off the async runtime: a JDK is thousands of files.
+async fn discard(staging: TempDir) {
+    let path = staging.path().to_path_buf();
+    let removed = tokio::task::spawn_blocking(move || staging.close()).await;
+    if !matches!(removed, Ok(Ok(()))) {
+        warn!(path = %path.display(), "could not remove a managed java staging directory");
+    }
 }
 
 #[cfg(test)]
@@ -371,12 +503,67 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
 
+    const NAME: &str = "eclipse-jdk-21.0.12+8";
+
     #[test]
-    fn staging_is_a_hidden_sibling_of_the_final_directory() {
-        let staging = staging_path(Path::new("/data/ephervex/java/21/eclipse-jdk-21.0.12+8"));
-        assert_eq!(
-            staging,
-            PathBuf::from("/data/ephervex/java/21/.eclipse-jdk-21.0.12+8.incomplete")
-        );
+    fn each_attempt_stages_into_its_own_hidden_sibling() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let first = new_staging(temp.path(), NAME).unwrap();
+        let second = new_staging(temp.path(), NAME).unwrap();
+
+        assert_ne!(first.path(), second.path());
+        for staging in [&first, &second] {
+            assert_eq!(staging.path().parent(), Some(temp.path()));
+            let entry = staging.path().file_name().unwrap().to_str().unwrap();
+            assert!(is_staging_of(entry, NAME), "{entry}");
+        }
+    }
+
+    #[test]
+    fn only_a_releases_own_staging_names_are_taken_for_its_staging() {
+        assert!(is_staging_of(".eclipse-jdk-21.0.12+8.incomplete", NAME));
+        assert!(is_staging_of(
+            ".eclipse-jdk-21.0.12+8.a1B2c3.incomplete",
+            NAME
+        ));
+
+        for entry in [
+            NAME,
+            ".eclipse-jdk-21.0.12+8.lock",
+            ".eclipse-jdk-21.0.12+8.1.a1B2c3.incomplete",
+            ".eclipse-jdk-21.0.12+8.a1B2c.incomplete",
+            ".eclipse-jdk-21.0.12+8.a1-2c3.incomplete",
+            ".eclipse-jdk-21.0.13+8.a1B2c3.incomplete",
+        ] {
+            assert!(!is_staging_of(entry, NAME), "{entry}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_install_removes_only_what_interrupted_installs_of_its_release_left() {
+        let temp = tempfile::tempdir().unwrap();
+        let major = temp.path();
+        let abandoned = [
+            ".eclipse-jdk-21.0.12+8.incomplete",
+            ".eclipse-jdk-21.0.12+8.a1B2c3.incomplete",
+        ];
+        let kept = [NAME, ".eclipse-jdk-21.0.13+8.a1B2c3.incomplete"];
+        for entry in abandoned.iter().chain(&kept) {
+            std::fs::create_dir_all(major.join(entry).join("bin")).unwrap();
+        }
+
+        let lock = InstallLock::acquire(&major.join(".lock"), &CancellationToken::new())
+            .await
+            .unwrap()
+            .unwrap();
+        remove_abandoned_staging(major, NAME, &lock).await;
+
+        for entry in abandoned {
+            assert!(!major.join(entry).exists(), "{entry}");
+        }
+        for entry in kept {
+            assert!(major.join(entry).exists(), "{entry}");
+        }
     }
 }

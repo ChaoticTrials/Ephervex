@@ -61,6 +61,7 @@ pub mod adoptium;
 pub mod archive;
 pub mod discovery;
 pub mod error;
+mod install_lock;
 pub mod managed;
 pub mod probe;
 pub mod requirement;
