@@ -1,13 +1,15 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ephervex_download::{
     CacheLayout, ContentStore, DownloadManager, DownloadRequest, FileExtension, HashVerifier,
-    MavenCoordinate, MetadataCache, MetadataKey, OperationReporter,
+    MavenCoordinate, MetadataCache, MetadataKey, OperationReporter, UrlPolicyError, redacted,
 };
-use ephervex_minecraft::{Installation, RuleContext, VanillaInstaller, VersionMetadata};
+use ephervex_minecraft::{
+    Installation, Platform, RuleContext, VanillaInstaller, VersionMetadata, rules_allow,
+};
 use ephervex_model::{Hash, HashAlgorithm, LoaderKind, LoaderSelection};
 use reqwest::Url;
 use tokio::fs;
@@ -204,6 +206,8 @@ impl InstallerEngine {
             .fetch_bundle(kind, minecraft, exact, reporter, cancel)
             .await?;
         Self::validate_bundle(kind, minecraft, exact, &bundle)?;
+        self.install_metadata_libraries(&bundle, reporter, cancel)
+            .await?;
         self.install_profile_libraries(&bundle, reporter, cancel)
             .await?;
         self.install_installer_declared_libraries(&bundle).await?;
@@ -445,6 +449,96 @@ impl InstallerEngine {
                     })?;
             }
         }
+        Ok(())
+    }
+
+    /// Downloads every library the loader's own version metadata declares with
+    /// a download address into the shared store.
+    ///
+    /// Forge's server argument files and launcher jar manifests name libraries
+    /// only `version.json` declares, and the Forge installer's own server
+    /// install downloads them. A client install reaches them through the
+    /// vanilla installer instead, which selects them by the same rules.
+    async fn install_metadata_libraries(
+        &self,
+        bundle: &InstallerBundle,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> LoaderResult<()> {
+        let context = RuleContext::new(Platform::host());
+        // The profile's own first entry for a coordinate is the one its step installs.
+        let mut profile: HashMap<&MavenCoordinate, &Hash> = HashMap::new();
+        for declared in &bundle.profile.libraries {
+            profile
+                .entry(&declared.coordinate)
+                .or_insert(&declared.artifact.sha1);
+        }
+        // The first entry for a coordinate wins, as it does when a client plans the same list.
+        let mut planned = HashSet::new();
+        let mut requests = Vec::new();
+        let mut names = Vec::new();
+        for library in &bundle.child.libraries {
+            let Some(artifact) = library.downloads.artifact.as_ref() else {
+                continue;
+            };
+            if !rules_allow(&library.rules, &context) || !planned.insert(&library.coordinate) {
+                continue;
+            }
+            // The profile's processors expect its copy, so the shared store
+            // cannot also hold a different file under the same coordinate.
+            if profile
+                .get(&library.coordinate)
+                .is_some_and(|sha1| **sha1 != artifact.sha1)
+            {
+                return Err(invalid_installer(
+                    &bundle.installer,
+                    &format!(
+                        "install profile and version metadata declare different files for {}",
+                        library.name
+                    ),
+                ));
+            }
+            if artifact.url.is_empty() {
+                continue;
+            }
+            // The download manager applies the transport policy, as it does for
+            // the client's copy of these libraries.
+            let url = Url::parse(&artifact.url).map_err(|_| UrlPolicyError::Malformed {
+                url: artifact.url.clone(),
+            })?;
+            requests.push(
+                DownloadRequest::new(url, self.layout.library(&library.coordinate))
+                    .verifying(artifact.sha1.clone())
+                    .sized(artifact.size)
+                    .labeled(library.name.clone()),
+            );
+            names.push(library.name.as_str());
+        }
+        if requests.is_empty() {
+            return Ok(());
+        }
+        self.manager
+            .download_all(&requests, reporter, cancel)
+            .await
+            .map_err(|source| {
+                if source.is_cancellation() {
+                    return LoaderError::Canceled;
+                }
+                // The batch reports its first failure by redacted URL; the coordinate is what a user can act on.
+                let text = source.to_string();
+                let artifact = requests
+                    .iter()
+                    .zip(&names)
+                    .find(|(request, _)| text.contains(&redacted(request.url())))
+                    .map_or_else(
+                        || format!("{} libraries", bundle.child.id),
+                        |(_, name)| (*name).to_owned(),
+                    );
+                LoaderError::Download {
+                    artifact,
+                    source: Box::new(source),
+                }
+            })?;
         Ok(())
     }
 
@@ -1267,6 +1361,286 @@ mod tests {
             modern_server_argfile(LoaderKind::NeoForge, "26.1.2", "26.1.2.94"),
             PathBuf::from("libraries/net/neoforged/neoforge/26.1.2.94/unix_args.txt")
         );
+    }
+
+    const ABC_SHA1: &str = "a9993e364706816aba3e25717850c26c9cd0d89d";
+    const DEF_SHA1: &str = "589c22335a381f122d129225f5c0ba3056ed5811";
+    const XYZ_SHA1: &str = "66b27417d37e024c46526c2f6d358a754fc552f3";
+
+    fn loopback_engine(root: &Path) -> InstallerEngine {
+        let manager = DownloadManager::new(ephervex_download::DownloaderConfig {
+            http: ephervex_download::HttpConfig::for_loopback_tests(),
+            ..ephervex_download::DownloaderConfig::default()
+        })
+        .expect("manager");
+        InstallerEngine::new(manager, CacheLayout::new(root.join("cache")))
+    }
+
+    fn library_json(name: &str, url: &str, sha1: &str) -> String {
+        format!(
+            r#"{{"name":"{name}","downloads":{{"artifact":{{"url":"{url}","sha1":"{sha1}","size":3}}}}}}"#
+        )
+    }
+
+    /// A bundle whose profile declares `profile_libraries` (a JSON list body) and
+    /// whose version metadata declares `libraries`.
+    fn bundle_declaring(
+        root: &Path,
+        profile_libraries: &str,
+        libraries: &[String],
+    ) -> InstallerBundle {
+        InstallerBundle {
+            installer: root.join("installer.jar"),
+            profile: InstallProfile::parse(&format!(
+                r#"{{"spec":1,"profile":"forge","version":"1.20.1-forge-47.4.10",
+                "minecraft":"1.20.1","libraries":[{profile_libraries}]}}"#
+            ))
+            .expect("profile"),
+            child: VersionMetadata::parse(&format!(
+                r#"{{"id":"1.20.1-forge-47.4.10","inheritsFrom":"1.20.1","type":"release",
+                "releaseTime":"2024-01-01T00:00:00+00:00","time":"2024-01-01T00:00:00+00:00",
+                "mainClass":"cpw.mods.bootstraplauncher.BootstrapLauncher","libraries":[{}]}}"#,
+                libraries.join(",")
+            ))
+            .expect("version metadata"),
+        }
+    }
+
+    fn library_path(engine: &InstallerEngine, coordinate: &str) -> PathBuf {
+        engine
+            .layout
+            .library(&MavenCoordinate::parse(coordinate).expect("coordinate"))
+    }
+
+    fn store_library(engine: &InstallerEngine, coordinate: &str, bytes: &[u8]) -> PathBuf {
+        let path = library_path(engine, coordinate);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("store");
+        std::fs::write(&path, bytes).expect("library");
+        path
+    }
+
+    #[tokio::test]
+    async fn a_server_install_fetches_the_libraries_only_its_version_metadata_declares() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        for (route, body) in [("/bootstraplauncher.jar", b"abc"), ("/javafml.jar", b"xyz")] {
+            Mock::given(method("GET"))
+                .and(path(route))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(body.to_vec()))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let base = server.uri();
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+        let fmlcore = store_library(&engine, "net.minecraftforge:fmlcore:1.20.1-47.4.10", b"def");
+        let javafml = store_library(
+            &engine,
+            "net.minecraftforge:javafmllanguage:1.20.1-47.4.10",
+            b"def",
+        );
+        let bundle = bundle_declaring(
+            root.path(),
+            "",
+            &[
+                library_json(
+                    "cpw.mods:bootstraplauncher:1.1.2",
+                    &format!("{base}/bootstraplauncher.jar"),
+                    ABC_SHA1,
+                ),
+                // A later entry for the same coordinate is not fetched.
+                library_json(
+                    "cpw.mods:bootstraplauncher:1.1.2",
+                    &format!("{base}/other-bootstraplauncher.jar"),
+                    XYZ_SHA1,
+                ),
+                // An entry the installer carries claims its coordinate too.
+                library_json("net.minecraftforge:forge:1.20.1-47.4.10", "", DEF_SHA1),
+                library_json(
+                    "net.minecraftforge:forge:1.20.1-47.4.10",
+                    &format!("{base}/forge.jar"),
+                    XYZ_SHA1,
+                ),
+                library_json(
+                    "net.minecraftforge:fmlcore:1.20.1-47.4.10",
+                    &format!("{base}/fmlcore.jar"),
+                    DEF_SHA1,
+                ),
+                library_json(
+                    "net.minecraftforge:javafmllanguage:1.20.1-47.4.10",
+                    &format!("{base}/javafml.jar"),
+                    XYZ_SHA1,
+                ),
+            ],
+        );
+
+        engine
+            .install_metadata_libraries(
+                &bundle,
+                &OperationReporter::silent("loader-server-libraries-test"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("server libraries install");
+
+        let launcher = library_path(&engine, "cpw.mods:bootstraplauncher:1.1.2");
+        assert_eq!(std::fs::read(launcher).expect("missing library"), b"abc");
+        assert_eq!(std::fs::read(fmlcore).expect("verified library"), b"def");
+        assert_eq!(std::fs::read(javafml).expect("replaced library"), b"xyz");
+    }
+
+    #[tokio::test]
+    async fn a_failed_server_library_download_names_the_library() {
+        let server = wiremock::MockServer::start().await;
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+        let bundle = bundle_declaring(
+            root.path(),
+            "",
+            &[library_json(
+                "cpw.mods:securejarhandler:2.1.10",
+                &format!("{}/securejarhandler.jar", server.uri()),
+                ABC_SHA1,
+            )],
+        );
+
+        let error = engine
+            .install_metadata_libraries(
+                &bundle,
+                &OperationReporter::silent("loader-server-libraries-test"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("a missing library fails the install");
+
+        assert!(matches!(
+            error,
+            LoaderError::Download { ref artifact, .. } if artifact == "cpw.mods:securejarhandler:2.1.10"
+        ));
+    }
+
+    #[tokio::test]
+    async fn canceling_server_library_downloads_is_reported_as_cancellation() {
+        let server = wiremock::MockServer::start().await;
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+        let bundle = bundle_declaring(
+            root.path(),
+            "",
+            &[library_json(
+                "cpw.mods:securejarhandler:2.1.10",
+                &format!("{}/securejarhandler.jar", server.uri()),
+                ABC_SHA1,
+            )],
+        );
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let error = engine
+            .install_metadata_libraries(
+                &bundle,
+                &OperationReporter::silent("loader-server-libraries-test"),
+                &cancel,
+            )
+            .await
+            .expect_err("a canceled install stops");
+
+        assert!(error.is_cancellation());
+    }
+
+    #[tokio::test]
+    async fn a_library_the_profile_declares_with_another_digest_is_refused() {
+        let server = wiremock::MockServer::start().await;
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+        let fmlcore = store_library(&engine, "net.minecraftforge:fmlcore:1.20.1-47.4.10", b"def");
+        let bundle = bundle_declaring(
+            root.path(),
+            &library_json(
+                "net.minecraftforge:fmlcore:1.20.1-47.4.10",
+                "https://maven.invalid/fmlcore.jar",
+                DEF_SHA1,
+            ),
+            &[library_json(
+                "net.minecraftforge:fmlcore:1.20.1-47.4.10",
+                &format!("{}/fmlcore.jar", server.uri()),
+                XYZ_SHA1,
+            )],
+        );
+
+        let error = engine
+            .install_metadata_libraries(
+                &bundle,
+                &OperationReporter::silent("loader-server-libraries-test"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("conflicting digests fail the install");
+
+        assert!(matches!(error, LoaderError::InstallerInvalid { .. }));
+        assert_eq!(std::fs::read(fmlcore).expect("profile library"), b"def");
+    }
+
+    #[tokio::test]
+    async fn an_installer_carried_library_the_profile_declares_with_another_digest_is_refused() {
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+        let bundle = bundle_declaring(
+            root.path(),
+            &library_json(
+                "net.minecraftforge:forge:1.20.1-47.4.10",
+                "https://maven.invalid/forge.jar",
+                DEF_SHA1,
+            ),
+            &[library_json(
+                "net.minecraftforge:forge:1.20.1-47.4.10",
+                "",
+                XYZ_SHA1,
+            )],
+        );
+
+        let error = engine
+            .install_metadata_libraries(
+                &bundle,
+                &OperationReporter::silent("loader-server-libraries-test"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("conflicting digests fail the install");
+
+        assert!(matches!(error, LoaderError::InstallerInvalid { .. }));
+    }
+
+    #[tokio::test]
+    async fn a_library_its_rules_exclude_from_this_host_is_not_fetched() {
+        let server = wiremock::MockServer::start().await;
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+        let elsewhere = if cfg!(target_os = "macos") {
+            "windows"
+        } else {
+            "osx"
+        };
+        let excluded = format!(
+            r#"{{"name":"ca.weblite:java-objc-bridge:1.1","rules":[{{"action":"allow","os":{{"name":"{elsewhere}"}}}}],
+            "downloads":{{"artifact":{{"url":"{}/objc.jar","sha1":"{ABC_SHA1}","size":3}}}}}}"#,
+            server.uri()
+        );
+        let bundle = bundle_declaring(root.path(), "", &[excluded]);
+
+        engine
+            .install_metadata_libraries(
+                &bundle,
+                &OperationReporter::silent("loader-server-libraries-test"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("an excluded library is skipped");
+
+        assert!(!library_path(&engine, "ca.weblite:java-objc-bridge:1.1").exists());
     }
 
     #[cfg(unix)]
