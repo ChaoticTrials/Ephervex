@@ -13,9 +13,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ephervex_download::{
-    ArtifactSource, CacheLayout, ChannelSink, ContentStore, DownloadError, DownloadManager,
-    DownloadRequest, DownloaderConfig, FileExtension, HttpConfig, OperationReporter, ProgressSink,
-    RetryPolicy, UrlPolicyError,
+    ArtifactSource, BatchDownloadError, CacheLayout, ChannelSink, ContentStore, DownloadError,
+    DownloadManager, DownloadRequest, DownloaderConfig, FileExtension, HttpConfig,
+    OperationReporter, ProgressSink, RetryPolicy, UrlPolicyError,
 };
 use ephervex_model::{Hash, HashAlgorithm, OperationStatus};
 use sha1::{Digest, Sha1};
@@ -1158,8 +1158,9 @@ async fn a_failure_in_a_batch_cancels_the_rest() {
         .await
         .expect_err("the missing file fails the batch");
 
+    assert_eq!(error.index(), 0);
     assert!(matches!(
-        error,
+        error.error(),
         DownloadError::HttpStatus { status: 404, .. }
     ));
     assert!(
@@ -1167,6 +1168,91 @@ async fn a_failure_in_a_batch_cancels_the_rest() {
         "the sibling transfer should have been canceled, not waited out"
     );
     assert!(!dir.path().join("slow.jar").exists());
+}
+
+/// Mounts a 200 for every `ok` route and a 404 for every `missing` one.
+async fn serve(server: &MockServer, ok: &[&str], missing: &[&str]) {
+    for route in ok {
+        Mock::given(method("GET"))
+            .and(path(*route))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+            .mount(server)
+            .await;
+    }
+    for route in missing {
+        Mock::given(method("GET"))
+            .and(path(*route))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(server)
+            .await;
+    }
+}
+
+async fn failed_batch(requests: &[DownloadRequest]) -> BatchDownloadError {
+    manager(RetryPolicy::none())
+        .download_all(
+            requests,
+            &OperationReporter::silent("download-batch"),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("the batch fails")
+}
+
+#[tokio::test]
+async fn a_batch_failure_names_the_request_even_when_its_error_carries_no_url() {
+    let server = MockServer::start().await;
+    serve(&server, &["/a.jar", "/b.jar"], &[]).await;
+    let dir = TempDir::new().expect("temp dir");
+    let refused = reqwest::Url::parse("file:///refused.jar").expect("file url");
+    let requests = vec![
+        request(&server, "/a.jar", &dir.path().join("a.jar")),
+        DownloadRequest::new(refused, dir.path().join("refused.jar")),
+        request(&server, "/b.jar", &dir.path().join("b.jar")),
+    ];
+
+    let error = failed_batch(&requests).await;
+
+    assert!(matches!(error.error(), DownloadError::Policy(_)));
+    assert_eq!(error.index(), 1);
+}
+
+#[tokio::test]
+async fn a_batch_failure_is_not_blamed_on_a_request_whose_url_prefixes_the_failed_one() {
+    let server = MockServer::start().await;
+    serve(&server, &["/lib.jar"], &["/lib.jar2"]).await;
+    let dir = TempDir::new().expect("temp dir");
+    let requests = vec![
+        request(&server, "/lib.jar", &dir.path().join("lib.jar")),
+        request(&server, "/lib.jar2", &dir.path().join("lib.jar2")),
+    ];
+
+    let error = failed_batch(&requests).await;
+
+    // Both addresses appear in the message, so the text alone cannot say which request failed.
+    assert!(error.to_string().contains(requests[0].url().as_str()));
+    assert_eq!(error.index(), 1);
+}
+
+#[tokio::test]
+async fn a_batch_failure_names_the_request_whose_query_string_was_redacted() {
+    let server = MockServer::start().await;
+    serve(&server, &["/a.jar"], &["/signed.jar"]).await;
+    let dir = TempDir::new().expect("temp dir");
+    let requests = vec![
+        request(&server, "/a.jar", &dir.path().join("a.jar")),
+        request(
+            &server,
+            "/signed.jar?token=secret",
+            &dir.path().join("signed.jar"),
+        ),
+    ];
+
+    let error = failed_batch(&requests).await;
+
+    let message = error.to_string();
+    assert!(!message.contains("secret"), "{message}");
+    assert_eq!(error.index(), 1);
 }
 
 #[tokio::test]

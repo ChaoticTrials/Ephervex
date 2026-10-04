@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use ephervex_download::{
     CacheLayout, ContentStore, DownloadManager, DownloadRequest, FileExtension, HashVerifier,
-    MavenCoordinate, MetadataCache, MetadataKey, OperationReporter, UrlPolicyError, redacted,
+    MavenCoordinate, MetadataCache, MetadataKey, OperationReporter, UrlPolicyError,
 };
 use ephervex_minecraft::{
     Installation, Platform, RuleContext, VanillaInstaller, VersionMetadata, rules_allow,
@@ -502,23 +502,17 @@ impl InstallerEngine {
         self.manager
             .download_all(&requests, reporter, cancel)
             .await
-            .map_err(|source| {
-                if source.is_cancellation() {
+            .map_err(|failure| {
+                if failure.is_cancellation() {
                     return LoaderError::Canceled;
                 }
-                // The batch reports its first failure by redacted URL; the coordinate is what a user can act on.
-                let text = source.to_string();
-                let artifact = requests
-                    .iter()
-                    .zip(&names)
-                    .find(|(request, _)| text.contains(&redacted(request.url())))
-                    .map_or_else(
-                        || format!("{} libraries", bundle.child.id),
-                        |(_, name)| (*name).to_owned(),
-                    );
+                let artifact = names.get(failure.index()).map_or_else(
+                    || format!("{} libraries", bundle.child.id),
+                    |name| (*name).to_owned(),
+                );
                 LoaderError::Download {
                     artifact,
-                    source: Box::new(source),
+                    source: Box::new(failure.into_error()),
                 }
             })?;
         Ok(())
@@ -1587,6 +1581,83 @@ mod tests {
                 &format!("{}/securejarhandler.jar", server.uri()),
                 ABC_SHA1,
             )],
+        );
+
+        let error = engine
+            .install_metadata_libraries(
+                &bundle,
+                &OperationReporter::silent("loader-server-libraries-test"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("a missing library fails the install");
+
+        assert!(matches!(
+            error,
+            LoaderError::Download { ref artifact, .. } if artifact == "cpw.mods:securejarhandler:2.1.10"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_server_library_refused_by_the_transport_policy_is_named() {
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+        // A policy refusal names no address.
+        let bundle = bundle_declaring(
+            root.path(),
+            "",
+            &[library_json(
+                "cpw.mods:securejarhandler:2.1.10",
+                "file:///securejarhandler.jar",
+                ABC_SHA1,
+            )],
+        );
+
+        let error = engine
+            .install_metadata_libraries(
+                &bundle,
+                &OperationReporter::silent("loader-server-libraries-test"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("a refused library fails the install");
+
+        assert!(matches!(
+            error,
+            LoaderError::Download { ref artifact, .. } if artifact == "cpw.mods:securejarhandler:2.1.10"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_failed_server_library_download_is_not_blamed_on_a_library_whose_address_prefixes_it()
+    {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/lib.jar"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"abc".to_vec()))
+            .mount(&server)
+            .await;
+        let base = server.uri();
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+        let bundle = bundle_declaring(
+            root.path(),
+            "",
+            &[
+                library_json(
+                    "cpw.mods:bootstraplauncher:1.1.2",
+                    &format!("{base}/lib.jar"),
+                    ABC_SHA1,
+                ),
+                library_json(
+                    "cpw.mods:securejarhandler:2.1.10",
+                    &format!("{base}/lib.jar2"),
+                    ABC_SHA1,
+                ),
+            ],
         );
 
         let error = engine

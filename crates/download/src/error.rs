@@ -178,6 +178,57 @@ impl DownloadError {
     }
 }
 
+/// The failure that stopped a batch download, with the request it belongs to.
+///
+/// Displays as the underlying [`DownloadError`]. The index is what lets a caller
+/// name the artifact: the error's URL is redacted and normalized, and some
+/// failures carry no URL at all.
+#[derive(Debug)]
+pub struct BatchDownloadError {
+    index: usize,
+    error: DownloadError,
+}
+
+impl BatchDownloadError {
+    pub(crate) const fn new(index: usize, error: DownloadError) -> Self {
+        Self { index, error }
+    }
+
+    /// The failed request's position in the slice the batch was given.
+    #[must_use]
+    pub const fn index(&self) -> usize {
+        self.index
+    }
+
+    #[must_use]
+    pub const fn error(&self) -> &DownloadError {
+        &self.error
+    }
+
+    /// Whether the batch stopped because the caller canceled it.
+    #[must_use]
+    pub const fn is_cancellation(&self) -> bool {
+        self.error.is_cancellation()
+    }
+
+    #[must_use]
+    pub fn into_error(self) -> DownloadError {
+        self.error
+    }
+}
+
+impl fmt::Display for BatchDownloadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.error, formatter)
+    }
+}
+
+impl std::error::Error for BatchDownloadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        std::error::Error::source(&self.error)
+    }
+}
+
 /// Which filesystem step of an artifact transfer failed.
 ///
 /// A transfer touches the disk in five distinguishable places, and knowing

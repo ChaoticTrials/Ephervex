@@ -80,7 +80,7 @@ pub use cache::{
     MavenConflictKey, MavenCoordinate, PART_SUFFIX,
 };
 pub use client::{HttpConfig, build_allowlisted_client, build_client, build_single_origin_client};
-pub use error::{ArtifactStep, DownloadError};
+pub use error::{ArtifactStep, BatchDownloadError, DownloadError};
 pub use manager::{
     ArtifactSource, AuthenticatedSource, DownloadManager, DownloadOutcome, DownloadRequest,
     DownloaderConfig,

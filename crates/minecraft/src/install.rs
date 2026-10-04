@@ -476,7 +476,16 @@ impl VanillaInstaller {
         self.manager
             .download_all(&requests, reporter, cancel)
             .await
-            .map_err(|source| LaunchError::download(name_from(&required, &source), source))?;
+            .map_err(|failure| {
+                if failure.is_cancellation() {
+                    return LaunchError::Canceled;
+                }
+                let name = required.get(failure.index()).map_or_else(
+                    || "a required file".to_owned(),
+                    |planned| planned.label.clone(),
+                );
+                LaunchError::download(name, failure.into_error())
+            })?;
 
         // The index is only readable once it is on disk, and its contents
         // decide the second, much larger batch.
@@ -529,7 +538,15 @@ impl VanillaInstaller {
         self.manager
             .download_all(&requests, reporter, cancel)
             .await
-            .map_err(|source| LaunchError::download("assets", source))?;
+            .map_err(|failure| {
+                if failure.is_cancellation() {
+                    return LaunchError::Canceled;
+                }
+                let name = objects
+                    .get(failure.index())
+                    .map_or_else(|| "assets".to_owned(), |(name, _)| (*name).to_owned());
+                LaunchError::download(name, failure.into_error())
+            })?;
         Ok(objects.len())
     }
 
@@ -639,22 +656,6 @@ fn url(value: &str) -> Result<reqwest::Url, UrlPolicyError> {
     reqwest::Url::parse(value).map_err(|_| UrlPolicyError::Malformed {
         url: value.to_owned(),
     })
-}
-
-/// Names the artifact a batch failure was about, where the error identifies one.
-///
-/// `download_all` reports the first failure, and its URL is already redacted of
-/// query and credentials; matching it back to a label turns "https://…/x.jar
-/// failed" into "org.lwjgl:lwjgl:3.3.3 failed", which is what a user can act on.
-fn name_from(artifacts: &[&PlannedArtifact], error: &ephervex_download::DownloadError) -> String {
-    let text = error.to_string();
-    artifacts
-        .iter()
-        .find(|planned| text.contains(planned.artifact.url.as_str()))
-        .map_or_else(
-            || "a required file".to_owned(),
-            |planned| planned.label.clone(),
-        )
 }
 
 #[cfg(test)]

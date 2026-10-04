@@ -39,7 +39,7 @@ use tracing::{debug, trace, warn};
 use crate::allowlist::{DomainAllowlist, UrlPolicyError, check_transport, redacted};
 use crate::cache::PART_SUFFIX;
 use crate::client::{HttpConfig, build_allowlisted_client, build_client};
-use crate::error::{ArtifactStep, AttemptFailure, DownloadError};
+use crate::error::{ArtifactStep, AttemptFailure, BatchDownloadError, DownloadError};
 use crate::progress::{ByteTally, OperationReporter};
 use crate::retry::{RetryPolicy, retry_after};
 use crate::verify::{HashVerifier, file_matches_hashes};
@@ -544,13 +544,13 @@ impl DownloadManager {
     ///
     /// The first failure cancels the remaining transfers: a pack import that
     /// has already lost a required file gains nothing by continuing to hammer
-    /// the CDN for the rest.
+    /// the CDN for the rest. The error names that failure's request by index.
     pub async fn download_all(
         &self,
         requests: &[DownloadRequest],
         reporter: &OperationReporter,
         cancel: &CancellationToken,
-    ) -> Result<Vec<DownloadOutcome>, DownloadError> {
+    ) -> Result<Vec<DownloadOutcome>, BatchDownloadError> {
         reporter.begin(None);
         let outcomes = self.download_all_within(requests, reporter, cancel).await;
         match &outcomes {
@@ -573,7 +573,7 @@ impl DownloadManager {
         requests: &[DownloadRequest],
         reporter: &OperationReporter,
         cancel: &CancellationToken,
-    ) -> Result<Vec<DownloadOutcome>, DownloadError> {
+    ) -> Result<Vec<DownloadOutcome>, BatchDownloadError> {
         let sizes: Vec<Option<u64>> = requests
             .iter()
             .map(DownloadRequest::expected_size)
@@ -602,7 +602,7 @@ impl DownloadManager {
 
         let mut outcomes: Vec<Option<DownloadOutcome>> =
             (0..requests.len()).map(|_| None).collect();
-        let mut failure: Option<DownloadError> = None;
+        let mut failure: Option<BatchDownloadError> = None;
         let total = requests.len() as u64;
         let mut done = 0;
         reporter.set_items(Progress::new(0, total));
@@ -612,7 +612,7 @@ impl DownloadManager {
                 Err(error) => {
                     if failure.is_none() {
                         batch.cancel();
-                        failure = Some(error);
+                        failure = Some(BatchDownloadError::new(index, error));
                     }
                 }
             }

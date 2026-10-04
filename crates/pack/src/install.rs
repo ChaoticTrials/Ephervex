@@ -531,11 +531,16 @@ async fn fetch_missing(
         // alternative is installing fewer files than the recipe named without
         // saying so.
         Ok(outcomes) if outcomes.len() == requests.len() => Ok(outcomes),
-        Err(error) if error.is_cancellation() => Err(PackError::Canceled),
+        Err(failure) if failure.is_cancellation() => Err(PackError::Canceled),
         outcome => {
-            if let Err(error) = &outcome {
+            if let Err(failure) = &outcome {
+                let path = files
+                    .get(failure.index())
+                    .map(|file| file.display_name())
+                    .unwrap_or_default();
                 warn!(
-                    %error,
+                    error = %failure,
+                    %path,
                     "a download failed; retrying each file against its remaining addresses"
                 );
             }

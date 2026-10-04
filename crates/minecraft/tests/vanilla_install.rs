@@ -411,6 +411,82 @@ async fn an_artifact_that_fails_its_digest_stops_the_launch_and_names_what_it_wa
 }
 
 #[tokio::test]
+async fn a_library_that_fails_to_download_is_named_even_when_its_address_has_a_query() {
+    let server = MockServer::start().await;
+    let mut fake = Fake::new();
+    // Left unserved. The failure's address is redacted of the query string.
+    fake.library.route = "/lib.jar?signature=secret".to_owned();
+    let index = Served::new("/17.json", fake.asset_index());
+    index.mount(&server).await;
+    fake.client.mount(&server).await;
+    fake.natives.mount(&server).await;
+
+    let cache = tempfile::tempdir().expect("temp dir");
+    let installer = installer(cache.path(), &server);
+    let metadata = VersionMetadata::parse(&fake.modern_document(&server, &index)).expect("parses");
+    let plan = installer.plan(&metadata, &linux()).expect("plans");
+
+    let error = installer
+        .install(plan, &reporter(), &CancellationToken::new())
+        .await
+        .expect_err("a missing library fails the install");
+
+    assert!(
+        matches!(&error, LaunchError::DownloadFailed { artifact, .. } if artifact == "org.lwjgl:lwjgl:3.3.3"),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn canceling_an_install_is_reported_as_cancellation_rather_than_a_failed_file() {
+    let server = MockServer::start().await;
+    let fake = Fake::new();
+    let index = Served::new("/17.json", fake.asset_index());
+    index.mount(&server).await;
+    fake.mount(&server).await;
+
+    let cache = tempfile::tempdir().expect("temp dir");
+    let installer = installer(cache.path(), &server);
+    let metadata = VersionMetadata::parse(&fake.modern_document(&server, &index)).expect("parses");
+    let plan = installer.plan(&metadata, &linux()).expect("plans");
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    let error = installer
+        .install(plan, &reporter(), &cancel)
+        .await
+        .expect_err("a canceled install does not complete");
+
+    assert!(error.is_cancellation(), "{error:?}");
+}
+
+#[tokio::test]
+async fn an_asset_that_fails_to_download_is_named() {
+    let server = MockServer::start().await;
+    let fake = Fake::new();
+    let index = Served::new("/17.json", fake.asset_index());
+    index.mount(&server).await;
+    fake.client.mount(&server).await;
+    fake.library.mount(&server).await;
+    fake.natives.mount(&server).await;
+
+    let cache = tempfile::tempdir().expect("temp dir");
+    let installer = installer(cache.path(), &server);
+    let metadata = VersionMetadata::parse(&fake.modern_document(&server, &index)).expect("parses");
+    let plan = installer.plan(&metadata, &linux()).expect("plans");
+
+    let error = installer
+        .install(plan, &reporter(), &CancellationToken::new())
+        .await
+        .expect_err("a missing asset fails the install");
+
+    assert!(
+        matches!(&error, LaunchError::DownloadFailed { artifact, .. } if artifact == "minecraft/sounds/a.ogg"),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
 async fn an_asset_index_that_is_not_an_index_fails_rather_than_launching_without_assets() {
     let server = MockServer::start().await;
     let fake = Fake::new();
