@@ -343,12 +343,12 @@ impl InstallerEngine {
             .content(ContentStore::InstallerCache, &sha1, Some(&jar));
         let request = DownloadRequest::parse(&jar_url, &installer)?
             .verifying(sha1)
-            .labeled(format!("{coordinate:?}:installer"));
+            .labeled(format!("{coordinate}"));
         self.manager
             .download(&request, reporter, cancel)
             .await
             .map_err(|source| LoaderError::Download {
-                artifact: format!("{coordinate:?}:installer"),
+                artifact: format!("{coordinate}"),
                 source: Box::new(source),
             })?;
 

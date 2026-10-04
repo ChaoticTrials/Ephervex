@@ -13,6 +13,7 @@
 //! downstream consumers are entitled to treat presence at that path as proof of a
 //! verified artifact.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use ephervex_model::{Hash, HashAlgorithm};
@@ -355,7 +356,22 @@ impl MavenCoordinate {
     }
 }
 
-/// Resolves cache paths under a single root.
+impl fmt::Display for MavenCoordinate {
+    /// The coordinate in its canonical `group:artifact:version[:classifier]` form.
+    ///
+    /// Labels and errors that name a coordinate use this instead of the derived
+    /// `Debug` dump, so the text reads `net.minecraftforge:forge:1.20.1-47.4.10`
+    /// with the classifier attached (e.g. `:installer`) rather than a struct
+    /// literal. The classifier is the artifact suffix; a coordinate parsed with
+    /// it already carries it here.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}:{}", self.group, self.artifact, self.version)?;
+        if let Some(classifier) = &self.classifier {
+            write!(f, ":{classifier}")?;
+        }
+        Ok(())
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheLayout {
     root: PathBuf,
@@ -749,6 +765,17 @@ mod tests {
             PathBuf::from(
                 "/cache/ephervex/libraries/net/neoforged/neoforge/21.1.0/neoforge-21.1.0-installer.zip"
             )
+        );
+    }
+
+    #[test]
+    fn a_coordinate_displays_in_canonical_group_artifact_version_form() {
+        let coordinate =
+            MavenCoordinate::parse("net.minecraftforge:forge:1.20.1-47.4.10:installer@jar")
+                .expect("well-formed coordinate");
+        assert_eq!(
+            coordinate.to_string(),
+            "net.minecraftforge:forge:1.20.1-47.4.10:installer"
         );
     }
 
