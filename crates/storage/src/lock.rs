@@ -23,6 +23,11 @@
 //! forever. The pair is unique for as long as the machine is up, which is
 //! exactly as long as a lock file needs to mean anything.
 //!
+//! Acquiring, taking over, and force-stopping a lock happen under an exclusive
+//! `flock` on `.launcher/launch.guard`, so two launchers can never both clear
+//! the same dead lock and both believe they won. Releasing does too, unless the
+//! guard cannot be had in time.
+//!
 //! Where `/proc` is not available the lock is treated as held. That is the
 //! conservative direction - refusing a launch is recoverable, corrupting a
 //! world is not - and Ephervex targets Linux (ADR 0003).
@@ -43,6 +48,13 @@ use crate::paths::{PathError, create_dir_all};
 /// A launch that is content to run alongside another names its own file
 /// [`additional_lock_file`] instead, so the two cannot clear each other's.
 pub const LAUNCH_LOCK_FILE: &str = "launch.lock";
+
+/// The file whose `flock` serializes every decision about who holds an
+/// instance's launch locks. It records nothing and is not itself a launch lock.
+const OWNERSHIP_GUARD_FILE: &str = "launch.guard";
+
+/// How long taking the ownership guard waits on another process before giving up.
+const OWNERSHIP_GUARD_PATIENCE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The prefix every launch lock file's name starts with.
 const LAUNCH_LOCK_PREFIX: &str = "launch.";
@@ -69,14 +81,6 @@ pub struct RunningLaunch {
     pub state: LaunchState,
 }
 
-/// How many times acquisition retries after clearing a lock whose owner is
-/// gone.
-///
-/// One retry is enough: two launchers racing to clear the same dead lock both
-/// try to create the file afterwards, exactly one wins, and the loser then sees
-/// a *live* owner and reports it. A longer loop would only add ways to spin.
-const ACQUIRE_ATTEMPTS: u32 = 3;
-
 /// Why an instance could not be locked for launching.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -88,6 +92,10 @@ pub enum LockError {
         /// When that launch started, for a message the user can act on.
         since: DateTime<Utc>,
     },
+    /// Another launcher was deciding who holds the instance at the same time,
+    /// and kept at it for longer than this one waits.
+    #[error("another launcher is claiming the instance at {path}")]
+    Busy { path: PathBuf },
     /// The lock file could not be created, read, or removed.
     #[error("the launch lock at {path} could not be used")]
     Unusable {
@@ -105,6 +113,7 @@ impl LockError {
     pub const fn message_id(&self) -> &'static str {
         match self {
             Self::AlreadyRunning { .. } => "error-launch-already-running",
+            Self::Busy { .. } => "error-launch-lock-busy",
             Self::Unusable { .. } => "error-launch-lock-unusable",
             Self::Path(error) => error.message_id(),
         }
@@ -114,7 +123,7 @@ impl LockError {
     #[must_use]
     pub fn failing_path(&self) -> Option<PathBuf> {
         match self {
-            Self::Unusable { path, .. } => Some(path.clone()),
+            Self::Unusable { path, .. } | Self::Busy { path } => Some(path.clone()),
             Self::AlreadyRunning { .. } | Self::Path(_) => None,
         }
     }
@@ -260,7 +269,13 @@ pub fn force_release(instance_root: &Path, launch: Option<&str>) -> Result<Force
         })?,
         None => LAUNCH_LOCK_FILE.to_owned(),
     };
-    let path = metadata_dir(instance_root).join(name);
+    let directory = metadata_dir(instance_root);
+    let path = directory.join(name);
+    // No lock is nothing to stop, and needs no guard to say so.
+    if !path.exists() {
+        return Ok(ForcedStop::default());
+    }
+    let _ownership = OwnershipGuard::take(&directory)?;
     let Some(state) = read_state(&path)? else {
         return Ok(ForcedStop::default());
     };
@@ -314,11 +329,6 @@ pub struct LaunchLock {
 }
 
 impl LaunchLock {
-    /// Takes the lock for the current process, or reports who holds it.
-    ///
-    /// Creation is `O_EXCL`, so two launchers that arrive at the same instant
-    /// cannot both believe they succeeded. A lock whose owner is gone is
-    /// cleared and the creation retried.
     /// Takes a lock that does not exclude the launch already running.
     ///
     /// For a launch the user asked for knowing one is already in progress:
@@ -338,22 +348,51 @@ impl LaunchLock {
                 std::io::Error::new(std::io::ErrorKind::InvalidInput, "unusable launch id"),
             )
         })?;
-        let path = directory.join(name);
-        let state = Self::current_state();
+        let ownership = OwnershipGuard::take(&directory)?;
+        Self::take_at(&ownership, directory.join(name))
+    }
 
-        // A stale file under this name means a previous launch with the same
-        // id died without releasing it. It is replaced rather than refused:
-        // the id is the caller's, and it has already said it does not mind
-        // running alongside anything.
-        if let Some(held) = read_state(&path)?.filter(LaunchState::holds_instance) {
-            return Err(LockError::AlreadyRunning {
-                pid: held.holder_pid(),
-                since: held.since,
-            });
+    /// Takes the lock at `path` unless a live launch holds it.
+    ///
+    /// A lock that cannot be parsed is replaced like a dead one: it is not
+    /// evidence of a launch, and refusing on it would strand the instance.
+    fn take_at(ownership: &OwnershipGuard, path: PathBuf) -> Result<Self, LockError> {
+        // One read decides both liveness and whether a file is there to replace.
+        let existing = match std::fs::read(&path) {
+            Ok(body) => Some(serde_json::from_slice::<LaunchState>(&body).ok()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(LockError::unusable(&path, error)),
+        };
+        if let Some(Some(held)) = &existing
+            && held.holds_instance()
+        {
+            return Err(already_running(held));
         }
-        let _ = std::fs::remove_file(&path);
-        write_new(&path, &state).map_err(|error| LockError::unusable(&path, error))?;
-        debug!(path = %path.display(), pid = state.owner_pid, "took an additional launch lock");
+        let state = Self::current_state();
+        let body =
+            serde_json::to_vec(&state).map_err(|error| LockError::unusable(&path, error.into()))?;
+        if let Some(previous) = existing {
+            replace_file(&path, &body).map_err(|error| LockError::unusable(&path, error))?;
+            warn!(
+                path = %path.display(),
+                pid = previous.map(|previous| previous.owner_pid),
+                "replaced a launch lock no live launch holds"
+            );
+        } else {
+            // Exclusive even where the guard could not be taken across processes.
+            match create_new(&path, &body) {
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return Err(match read_state(&path)? {
+                        Some(held) if held.holds_instance() => already_running(&held),
+                        _ => LockError::Busy {
+                            path: ownership.path().to_path_buf(),
+                        },
+                    });
+                }
+                result => result.map_err(|error| LockError::unusable(&path, error))?,
+            }
+        }
+        debug!(path = %path.display(), pid = state.owner_pid, "took a launch lock");
         Ok(Self { path, state })
     }
 
@@ -367,66 +406,14 @@ impl LaunchLock {
         }
     }
 
+    /// Takes the lock for the current process, or reports who holds it.
+    ///
+    /// A lock whose owner and game are both gone is replaced.
     pub fn acquire(instance_root: &Path) -> Result<Self, LockError> {
         let directory = metadata_dir(instance_root);
         create_dir_all(&directory)?;
-        let path = directory.join(LAUNCH_LOCK_FILE);
-
-        let state = LaunchState {
-            owner_pid: std::process::id(),
-            owner_start_ticks: process_start_ticks(std::process::id()),
-            game_pid: None,
-            game_start_ticks: None,
-            since: Utc::now(),
-        };
-
-        for _ in 0..ACQUIRE_ATTEMPTS {
-            match write_new(&path, &state) {
-                Ok(()) => {
-                    debug!(path = %path.display(), pid = state.owner_pid, "took the launch lock");
-                    return Ok(Self { path, state });
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let held = read_state(&path)?;
-                    match held {
-                        // A lock file we cannot parse is not evidence of a live
-                        // launch, and refusing forever on one would strand the
-                        // instance. Treated exactly like a dead owner.
-                        Some(held) if held.holds_instance() => {
-                            return Err(LockError::AlreadyRunning {
-                                pid: held.holder_pid(),
-                                since: held.since,
-                            });
-                        }
-                        held => {
-                            warn!(
-                                path = %path.display(),
-                                pid = held.as_ref().map(|state| state.owner_pid),
-                                "clearing a launch lock whose owner is gone"
-                            );
-                            if let Err(error) = std::fs::remove_file(&path) {
-                                if error.kind() != std::io::ErrorKind::NotFound {
-                                    return Err(LockError::unusable(&path, error));
-                                }
-                            }
-                        }
-                    }
-                }
-                Err(error) => return Err(LockError::unusable(&path, error)),
-            }
-        }
-
-        // Every attempt lost the race, which means somebody else is holding it.
-        match read_state(&path)? {
-            Some(held) => Err(LockError::AlreadyRunning {
-                pid: held.owner_pid,
-                since: held.since,
-            }),
-            None => Err(LockError::unusable(
-                &path,
-                std::io::Error::other("the launch lock could not be taken"),
-            )),
-        }
+        let ownership = OwnershipGuard::take(&directory)?;
+        Self::take_at(&ownership, directory.join(LAUNCH_LOCK_FILE))
     }
 
     /// Records the game's process id, so a frontend can show it and a stuck
@@ -436,24 +423,7 @@ impl LaunchLock {
         self.state.game_start_ticks = process_start_ticks(pid);
         let body = serde_json::to_vec(&self.state)
             .map_err(|error| LockError::unusable(&self.path, error.into()))?;
-        let mut temporary_name = self.path.as_os_str().to_os_string();
-        temporary_name.push(format!(".tmp.{}", uuid::Uuid::new_v4()));
-        let temporary = PathBuf::from(temporary_name);
-        let result = (|| {
-            use std::io::Write as _;
-
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary)?;
-            file.write_all(&body)?;
-            file.sync_all()?;
-            std::fs::rename(&temporary, &self.path)
-        })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(&temporary);
-        }
-        result.map_err(|error| LockError::unusable(&self.path, error))
+        replace_file(&self.path, &body).map_err(|error| LockError::unusable(&self.path, error))
     }
 
     /// What this lock records.
@@ -470,6 +440,13 @@ impl LaunchLock {
 
 impl Drop for LaunchLock {
     fn drop(&mut self) {
+        let Some(directory) = self.path.parent().filter(|directory| directory.is_dir()) else {
+            return;
+        };
+        // Releasing unguarded beats leaving this live process's lock behind.
+        let _ownership = OwnershipGuard::take(directory)
+            .inspect_err(|error| warn!(%error, "releasing the launch lock without its guard"))
+            .ok();
         let owns_path = read_state(&self.path).ok().flatten().is_some_and(|state| {
             state.owner_pid == self.state.owner_pid
                 && state.owner_start_ticks == self.state.owner_start_ticks
@@ -565,19 +542,145 @@ fn launch_id_of(name: &str) -> Option<LockName> {
     (!id.is_empty()).then(|| LockName::Additional(id.to_owned()))
 }
 
-/// Creates the lock file, failing with `AlreadyExists` if it already exists.
+/// Holds the right to decide who holds an instance's launch locks.
+///
+/// A `flock` rather than a lock file recording a pid: the kernel drops it when
+/// the holder dies. Taken on a file opened for writing, because NFS refuses an
+/// exclusive lock on a read-only descriptor. NFS also gives a process one lock
+/// per file shared by all its threads, so threads are kept apart in-process too.
+struct OwnershipGuard {
+    // Declared first so the flock is released before the in-process claim.
+    _file: Option<std::fs::File>,
+    claim: InProcessClaim,
+}
+
+/// This process's claim on one guard file.
+struct InProcessClaim(PathBuf);
+
+/// The guard files a thread of this process currently holds.
+static HELD_IN_PROCESS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+static RELEASED_IN_PROCESS: std::sync::Condvar = std::sync::Condvar::new();
+
+impl OwnershipGuard {
+    /// The guard file.
+    fn path(&self) -> &Path {
+        &self.claim.0
+    }
+
+    /// Waits a bounded time, so a stopped or wedged launcher cannot hang this one.
+    fn take(directory: &Path) -> Result<Self, LockError> {
+        use rustix::fs::{FlockOperation, Mode, OFlags, flock};
+        use rustix::io::Errno;
+
+        // Canonical, so two spellings of one instance claim the same guard.
+        let path = std::fs::canonicalize(directory)
+            .map_err(|error| LockError::unusable(directory, error))?
+            .join(OWNERSHIP_GUARD_FILE);
+        let deadline = std::time::Instant::now() + OWNERSHIP_GUARD_PATIENCE;
+        let busy = || LockError::Busy { path: path.clone() };
+
+        let mut held = HELD_IN_PROCESS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while held.contains(&path) {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(busy());
+            }
+            held = RELEASED_IN_PROCESS
+                .wait_timeout(held, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+        held.push(path.clone());
+        drop(held);
+        let claim = InProcessClaim(path.clone());
+
+        let file = rustix::fs::open(
+            &path,
+            OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::RUSR | Mode::WUSR,
+        )
+        .map(std::fs::File::from)
+        .map_err(|errno| LockError::unusable(&path, errno.into()))?;
+        loop {
+            match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+                Ok(()) => break,
+                Err(Errno::INTR) => {}
+                Err(Errno::WOULDBLOCK) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(Errno::WOULDBLOCK) => return Err(busy()),
+                // A filesystem with no locking at all keeps the in-process
+                // exclusion, which is as much as the lock files alone gave.
+                Err(errno @ (Errno::NOLCK | Errno::OPNOTSUPP | Errno::NOSYS)) => {
+                    warn!(path = %path.display(), %errno, "launch locks are not guarded across processes here");
+                    return Ok(Self { _file: None, claim });
+                }
+                Err(errno) => return Err(LockError::unusable(&path, errno.into())),
+            }
+        }
+        Ok(Self {
+            _file: Some(file),
+            claim,
+        })
+    }
+}
+
+impl Drop for InProcessClaim {
+    fn drop(&mut self) {
+        let mut held = HELD_IN_PROCESS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held.retain(|path| *path != self.0);
+        drop(held);
+        RELEASED_IN_PROCESS.notify_all();
+    }
+}
+
+fn already_running(held: &LaunchState) -> LockError {
+    LockError::AlreadyRunning {
+        pid: held.holder_pid(),
+        since: held.since,
+    }
+}
+
+/// Replaces `path` with `body` in one step, so a reader sees the old lock or
+/// the new one and never neither.
+///
+/// The directory is not synced, unlike [`crate::atomic`]: a lock means nothing
+/// after a reboot, and a failure there would come after the lock is in place.
+fn replace_file(path: &Path, body: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    // Ends in a uuid, never `.lock`, so `launch_id_of` ignores it.
+    let mut staging_name = path.as_os_str().to_os_string();
+    staging_name.push(format!(".tmp.{}", uuid::Uuid::new_v4()));
+    let staging = PathBuf::from(staging_name);
+    let result = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staging)
+        .and_then(|mut file| file.write_all(body).and_then(|()| file.sync_all()))
+        .and_then(|()| std::fs::rename(&staging, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staging);
+    }
+    result
+}
+
+/// Creates `path` with `body`, failing with `AlreadyExists` if it exists.
 ///
 /// The body is staged and hard-linked into place, so a reader never sees an
 /// empty lock and mistakes a starting launch for none.
-fn write_new(path: &Path, state: &LaunchState) -> std::io::Result<()> {
-    let body = serde_json::to_vec(state).map_err(std::io::Error::other)?;
+fn create_new(path: &Path, body: &[u8]) -> std::io::Result<()> {
     // Ends in a uuid, never `.lock`, so `launch_id_of` ignores it.
     let mut staging_name = path.as_os_str().to_os_string();
     staging_name.push(format!(".tmp.{}", uuid::Uuid::new_v4()));
     let staging = PathBuf::from(staging_name);
 
     let published =
-        create_with_body(&staging, &body).and_then(|()| std::fs::hard_link(&staging, path));
+        create_with_body(&staging, body).and_then(|()| std::fs::hard_link(&staging, path));
     let _ = std::fs::remove_file(&staging);
     match published {
         Err(error)
@@ -586,7 +689,7 @@ fn write_new(path: &Path, state: &LaunchState) -> std::io::Result<()> {
                 std::io::ErrorKind::Unsupported | std::io::ErrorKind::PermissionDenied
             ) =>
         {
-            create_with_body(path, &body)
+            create_with_body(path, body)
         }
         result => result,
     }
@@ -643,6 +746,10 @@ mod tests {
         root
     }
 
+    fn plant(path: &Path, state: &LaunchState) {
+        replace_file(path, &serde_json::to_vec(state).expect("json")).expect("lock file");
+    }
+
     /// A lock left by a launcher run that is gone, naming `game` as the game
     /// it started, with the start time `game_ticks`.
     fn orphaned_lock(root: &Path, game: u32, game_ticks: Option<u64>) {
@@ -656,7 +763,7 @@ mod tests {
             game_start_ticks: game_ticks,
             since: Utc::now(),
         };
-        write_new(&metadata_dir(root).join(LAUNCH_LOCK_FILE), &state).expect("lock file");
+        plant(&metadata_dir(root).join(LAUNCH_LOCK_FILE), &state);
     }
 
     /// A process standing in for a game that outlived its launcher.
@@ -880,6 +987,7 @@ mod tests {
         assert_eq!(launch_id_of("mod-display.json"), None);
         assert_eq!(launch_id_of("launch..lock"), None);
         assert_eq!(launch_id_of("server-runtime.json"), None);
+        assert_eq!(launch_id_of(OWNERSHIP_GUARD_FILE), None);
     }
 
     #[test]
@@ -904,7 +1012,10 @@ mod tests {
             })
             .collect();
         names.sort();
-        assert_eq!(names, ["launch.bob.lock", LAUNCH_LOCK_FILE]);
+        assert_eq!(
+            names,
+            ["launch.bob.lock", OWNERSHIP_GUARD_FILE, LAUNCH_LOCK_FILE]
+        );
         assert_eq!(running_launches(root.path()).len(), 2);
         assert_eq!(launch_id_of("launch.lock.tmp.0"), None);
         assert_eq!(launch_id_of("launch.bob.lock.tmp.0"), None);
@@ -959,6 +1070,139 @@ mod tests {
         );
         let held = LaunchLock::acquire(root.path()).expect("a dead owner's lock is taken over");
         assert_eq!(held.state().owner_pid, std::process::id());
+    }
+
+    /// Runs `contenders` acquisitions at once and returns the locks that
+    /// succeeded, after checking every other one was refused for a live holder.
+    fn race(
+        contenders: usize,
+        acquire: impl Fn() -> Result<LaunchLock, LockError> + Sync,
+    ) -> Vec<LaunchLock> {
+        let barrier = std::sync::Barrier::new(contenders);
+        std::thread::scope(|scope| {
+            let attempts: Vec<_> = (0..contenders)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        acquire()
+                    })
+                })
+                .collect();
+            attempts
+                .into_iter()
+                .filter_map(|attempt| match attempt.join().expect("no panic") {
+                    Ok(held) => Some(held),
+                    Err(LockError::AlreadyRunning { .. }) => None,
+                    Err(error) => panic!("a loser must see the winner, not {error}"),
+                })
+                .collect()
+        })
+    }
+
+    #[test]
+    fn launchers_racing_to_take_over_a_dead_lock_leave_exactly_one_holder() {
+        for _ in 0..5 {
+            let root = instance();
+            let dead = LaunchState {
+                owner_pid: 0,
+                owner_start_ticks: Some(1),
+                game_pid: None,
+                game_start_ticks: None,
+                since: Utc::now(),
+            };
+            plant(&metadata_dir(root.path()).join(LAUNCH_LOCK_FILE), &dead);
+            plant(&metadata_dir(root.path()).join("launch.bob.lock"), &dead);
+
+            let held = race(16, || LaunchLock::acquire(root.path()));
+            assert_eq!(held.len(), 1, "one ordinary launch holds the instance");
+
+            let held = race(16, || LaunchLock::acquire_additional(root.path(), "bob"));
+            assert_eq!(held.len(), 1, "one launch holds each additional lock");
+        }
+    }
+
+    #[test]
+    fn a_launch_waits_for_the_ownership_decision_another_launcher_is_making() {
+        let root = instance();
+        let directory = metadata_dir(root.path());
+        // A descriptor of its own, as another process would have.
+        let deciding = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(directory.join(OWNERSHIP_GUARD_FILE))
+            .expect("guard file");
+        rustix::fs::flock(&deciding, rustix::fs::FlockOperation::LockExclusive).expect("flock");
+
+        let waiting = std::thread::spawn({
+            let root = root.path().to_path_buf();
+            move || LaunchLock::acquire(&root).map(|held| held.state().clone())
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            !waiting.is_finished(),
+            "nothing is decided while the guard is held"
+        );
+        assert!(!directory.join(LAUNCH_LOCK_FILE).exists());
+
+        drop(deciding);
+        waiting
+            .join()
+            .expect("no panic")
+            .expect("taken once the guard is free");
+    }
+
+    #[test]
+    fn a_thread_waits_for_the_ownership_decision_another_thread_is_making() {
+        let root = instance();
+        let deciding = OwnershipGuard::take(&metadata_dir(root.path())).expect("guard");
+
+        let waiting = std::thread::spawn({
+            let root = root.path().to_path_buf();
+            move || LaunchLock::acquire(&root).map(|held| held.state().clone())
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            !waiting.is_finished(),
+            "nothing is decided while the claim is held"
+        );
+
+        drop(deciding);
+        waiting
+            .join()
+            .expect("no panic")
+            .expect("taken once the claim is free");
+    }
+
+    #[test]
+    fn a_force_stop_waits_for_the_ownership_decision_another_launcher_is_making() {
+        let root = instance();
+        let directory = metadata_dir(root.path());
+        let (mut stranger, ticks) = live_game();
+        orphaned_lock(root.path(), stranger.id(), Some(ticks.wrapping_add(1)));
+        let deciding = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(directory.join(OWNERSHIP_GUARD_FILE))
+            .expect("guard file");
+        rustix::fs::flock(&deciding, rustix::fs::FlockOperation::LockExclusive).expect("flock");
+
+        let waiting = std::thread::spawn({
+            let root = root.path().to_path_buf();
+            move || force_release(&root, None).map(|outcome| outcome.released)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            !waiting.is_finished(),
+            "nothing is removed while the guard is held"
+        );
+        assert!(directory.join(LAUNCH_LOCK_FILE).exists());
+
+        drop(deciding);
+        assert!(waiting.join().expect("no panic").expect("released"));
+        stranger.kill().expect("end");
+        stranger.wait().expect("reap");
     }
 
     #[test]

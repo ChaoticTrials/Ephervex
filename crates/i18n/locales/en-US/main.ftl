@@ -687,6 +687,9 @@ operation-identifier = Operation { $operation }
 error-launch-already-running = That instance is already being launched.
 .action = Close the running copy first. Two Minecraft processes in one instance directory overwrite each other's saves and options.
 
+error-launch-lock-busy = That instance is already being started or stopped.
+.action = Try again in a moment. If it keeps happening, check which process holds { $path }.
+
 error-launch-lock-unusable = Ephervex could not claim the instance for launching.
 .action = Check permissions on { $path }.
 
