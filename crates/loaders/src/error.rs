@@ -36,6 +36,16 @@ pub enum LoaderError {
     UnsupportedProfile { spec: u32 },
     #[error("the loader installer at {path} is invalid")]
     InstallerInvalid { path: PathBuf, detail: String },
+    /// The install profile and the version metadata publish different files for one library.
+    #[error(
+        "the loader installer at {path} declares library `{library}` as {profile} in install_profile.json and as {version} in version.json"
+    )]
+    InstallerLibraryConflict {
+        path: PathBuf,
+        library: String,
+        profile: ephervex_model::Hash,
+        version: ephervex_model::Hash,
+    },
     #[error("could not obtain loader artifact `{artifact}`")]
     Download {
         artifact: String,
@@ -90,6 +100,7 @@ impl LoaderError {
             Self::UnsupportedProfile { .. } | Self::InstallerInvalid { .. } => {
                 "error-loader-installer-invalid"
             }
+            Self::InstallerLibraryConflict { .. } => "error-loader-installer-library-conflict",
             Self::Download { .. } => "error-loader-download-failed",
             Self::Version(_) | Self::Inheritance(_) => "error-loader-version-metadata-invalid",
             Self::Minecraft(error) => error.message_id(),
@@ -115,6 +126,7 @@ impl LoaderError {
                 ("minecraft", minecraft.clone()),
                 ("since", (*since).to_owned()),
             ],
+            Self::InstallerLibraryConflict { library, .. } => vec![("library", library.clone())],
             _ => Vec::new(),
         }
     }
@@ -128,6 +140,7 @@ impl LoaderError {
     pub fn failing_path(&self) -> Option<PathBuf> {
         match self {
             Self::InstallerInvalid { path, .. }
+            | Self::InstallerLibraryConflict { path, .. }
             | Self::Io { path, .. }
             | Self::ProcessorOutputMissing { path }
             | Self::ServerTargetOccupied { path } => Some(path.clone()),

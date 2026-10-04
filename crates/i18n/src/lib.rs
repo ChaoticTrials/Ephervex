@@ -723,6 +723,7 @@ mod tests {
             "error-loader-version-unavailable",
             "error-loader-identity-mismatch",
             "error-loader-installer-invalid",
+            "error-loader-installer-library-conflict",
             "error-loader-download-failed",
             "error-loader-version-metadata-invalid",
             "error-loader-io",

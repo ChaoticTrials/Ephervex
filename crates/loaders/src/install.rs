@@ -137,7 +137,7 @@ impl InstallerEngine {
         let bundle = self
             .fetch_bundle(kind, minecraft, exact, reporter, cancel)
             .await?;
-        Self::validate_bundle(kind, minecraft, exact, &bundle)?;
+        Self::validate_bundle(kind, minecraft, exact, &bundle, context)?;
 
         let vanilla = self
             .install_vanilla_client(parent, context, reporter, cancel)
@@ -205,7 +205,13 @@ impl InstallerEngine {
         let bundle = self
             .fetch_bundle(kind, minecraft, exact, reporter, cancel)
             .await?;
-        Self::validate_bundle(kind, minecraft, exact, &bundle)?;
+        Self::validate_bundle(
+            kind,
+            minecraft,
+            exact,
+            &bundle,
+            &RuleContext::new(Platform::host()),
+        )?;
         self.install_metadata_libraries(&bundle, reporter, cancel)
             .await?;
         self.install_profile_libraries(&bundle, reporter, cancel)
@@ -317,12 +323,7 @@ impl InstallerEngine {
                 provider: "installer",
                 detail: "installer sidecar URL is invalid".to_owned(),
             })?;
-        let key = MetadataKey::new(&format!(
-            "{}-{}-{}-installer-sha1",
-            kind.to_string().to_ascii_lowercase(),
-            minecraft,
-            exact
-        ))?;
+        let key = installer_sidecar_key(kind, minecraft, exact)?;
         let sidecar = MetadataCache::new(self.layout.clone())
             .fetch_text(&self.manager, &key, &sidecar_url, reporter, cancel)
             .await
@@ -372,11 +373,13 @@ impl InstallerEngine {
         })
     }
 
+    /// Checks the bundle's identity, and its library digests under `context`'s rules.
     fn validate_bundle(
         kind: LoaderKind,
         minecraft: &str,
         exact: &str,
         bundle: &InstallerBundle,
+        context: &RuleContext,
     ) -> LoaderResult<()> {
         if bundle.profile.minecraft != minecraft || bundle.child.inherits_from() != Some(minecraft)
         {
@@ -407,7 +410,7 @@ impl InstallerEngine {
                 ),
             });
         }
-        Ok(())
+        ensure_consistent_library_digests(bundle, context)
     }
 
     async fn install_profile_libraries(
@@ -466,13 +469,6 @@ impl InstallerEngine {
         cancel: &CancellationToken,
     ) -> LoaderResult<()> {
         let context = RuleContext::new(Platform::host());
-        // The profile's own first entry for a coordinate is the one its step installs.
-        let mut profile: HashMap<&MavenCoordinate, &Hash> = HashMap::new();
-        for declared in &bundle.profile.libraries {
-            profile
-                .entry(&declared.coordinate)
-                .or_insert(&declared.artifact.sha1);
-        }
         // The first entry for a coordinate wins, as it does when a client plans the same list.
         let mut planned = HashSet::new();
         let mut requests = Vec::new();
@@ -483,20 +479,6 @@ impl InstallerEngine {
             };
             if !rules_allow(&library.rules, &context) || !planned.insert(&library.coordinate) {
                 continue;
-            }
-            // The profile's processors expect its copy, so the shared store
-            // cannot also hold a different file under the same coordinate.
-            if profile
-                .get(&library.coordinate)
-                .is_some_and(|sha1| **sha1 != artifact.sha1)
-            {
-                return Err(invalid_installer(
-                    &bundle.installer,
-                    &format!(
-                        "install profile and version metadata declare different files for {}",
-                        library.name
-                    ),
-                ));
             }
             if artifact.url.is_empty() {
                 continue;
@@ -891,6 +873,53 @@ impl InstallerEngine {
         }
         Ok(())
     }
+}
+
+fn installer_sidecar_key(
+    kind: LoaderKind,
+    minecraft: &str,
+    exact: &str,
+) -> LoaderResult<MetadataKey> {
+    Ok(MetadataKey::new(&format!(
+        "{}-{}-{}-installer-sha1",
+        kind.to_string().to_ascii_lowercase(),
+        minecraft,
+        exact
+    ))?)
+}
+
+/// Refuses a bundle whose profile and version metadata would store different files at one coordinate.
+/// Each side contributes the entry an install stores; a coordinate only one side stores is no conflict.
+fn ensure_consistent_library_digests(
+    bundle: &InstallerBundle,
+    context: &RuleContext,
+) -> LoaderResult<()> {
+    let mut profile: HashMap<&MavenCoordinate, &Hash> = HashMap::new();
+    for declared in &bundle.profile.libraries {
+        profile
+            .entry(&declared.coordinate)
+            .or_insert(&declared.artifact.sha1);
+    }
+    let mut stored = HashSet::new();
+    for library in &bundle.child.libraries {
+        let Some(artifact) = library.downloads.artifact.as_ref() else {
+            continue;
+        };
+        if !rules_allow(&library.rules, context) || !stored.insert(&library.coordinate) {
+            continue;
+        }
+        if let Some(sha1) = profile.get(&library.coordinate).copied()
+            && *sha1 != artifact.sha1
+        {
+            return Err(LoaderError::InstallerLibraryConflict {
+                path: bundle.installer.clone(),
+                library: library.name.clone(),
+                profile: sha1.clone(),
+                version: artifact.sha1.clone(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn installer_location(
@@ -1391,19 +1420,72 @@ mod tests {
     ) -> InstallerBundle {
         InstallerBundle {
             installer: root.join("installer.jar"),
-            profile: InstallProfile::parse(&format!(
-                r#"{{"spec":1,"profile":"forge","version":"1.20.1-forge-47.4.10",
-                "minecraft":"1.20.1","libraries":[{profile_libraries}]}}"#
-            ))
-            .expect("profile"),
-            child: VersionMetadata::parse(&format!(
-                r#"{{"id":"1.20.1-forge-47.4.10","inheritsFrom":"1.20.1","type":"release",
-                "releaseTime":"2024-01-01T00:00:00+00:00","time":"2024-01-01T00:00:00+00:00",
-                "mainClass":"cpw.mods.bootstraplauncher.BootstrapLauncher","libraries":[{}]}}"#,
-                libraries.join(",")
-            ))
-            .expect("version metadata"),
+            profile: InstallProfile::parse(&profile_json(profile_libraries)).expect("profile"),
+            child: VersionMetadata::parse(&version_json(libraries)).expect("version metadata"),
         }
+    }
+
+    fn profile_json(libraries: &str) -> String {
+        format!(
+            r#"{{"spec":1,"profile":"forge","version":"1.20.1-forge-47.4.10",
+            "minecraft":"1.20.1","libraries":[{libraries}]}}"#
+        )
+    }
+
+    fn version_json(libraries: &[String]) -> String {
+        format!(
+            r#"{{"id":"1.20.1-forge-47.4.10","inheritsFrom":"1.20.1","type":"release",
+            "releaseTime":"2024-01-01T00:00:00+00:00","time":"2024-01-01T00:00:00+00:00",
+            "mainClass":"cpw.mods.bootstraplauncher.BootstrapLauncher","libraries":[{}]}}"#,
+            libraries.join(",")
+        )
+    }
+
+    fn vanilla_parent() -> VersionMetadata {
+        VersionMetadata::parse(
+            r#"{"id":"1.20.1","type":"release","releaseTime":"2023-06-12T00:00:00+00:00",
+            "time":"2023-06-12T00:00:00+00:00","mainClass":"net.minecraft.client.main.Main",
+            "libraries":[]}"#,
+        )
+        .expect("parent metadata")
+    }
+
+    /// Places a Forge 1.20.1-47.4.10 installer carrying these documents, and its
+    /// digest sidecar, in the caches an install reads before reaching the network.
+    async fn cache_installer(engine: &InstallerEngine, profile: &str, version: &str) {
+        use std::io::Write as _;
+
+        let staged = engine.layout.root().join("staged-installer.jar");
+        std::fs::create_dir_all(staged.parent().expect("parent")).expect("cache root");
+        let mut archive = zip::ZipWriter::new(std::fs::File::create(&staged).expect("installer"));
+        for (name, body) in [("install_profile.json", profile), ("version.json", version)] {
+            archive
+                .start_file(name, zip::write::SimpleFileOptions::default())
+                .expect("entry");
+            archive.write_all(body.as_bytes()).expect("entry body");
+        }
+        archive.finish().expect("installer finish");
+
+        let sha1 = ephervex_download::hash_file(&staged, HashAlgorithm::Sha1)
+            .await
+            .expect("installer digest");
+        let jar = FileExtension::new("jar").expect("extension");
+        let cached = engine
+            .layout
+            .content(ContentStore::InstallerCache, &sha1, Some(&jar));
+        std::fs::create_dir_all(cached.parent().expect("parent")).expect("installer cache");
+        std::fs::rename(&staged, &cached).expect("cached installer");
+
+        let (_, jar_url) =
+            installer_location(LoaderKind::Forge, "1.20.1", "47.4.10").expect("installer");
+        MetadataCache::new(engine.layout.clone())
+            .store(
+                &installer_sidecar_key(LoaderKind::Forge, "1.20.1", "47.4.10").expect("key"),
+                &Url::parse(&format!("{jar_url}.sha1")).expect("sidecar url"),
+                serde_json::value::to_raw_value(sha1.digest()).expect("sidecar"),
+            )
+            .await
+            .expect("sidecar cached");
     }
 
     fn library_path(engine: &InstallerEngine, coordinate: &str) -> PathBuf {
@@ -1551,67 +1633,179 @@ mod tests {
         assert!(error.is_cancellation());
     }
 
+    const FMLCORE: &str = "net.minecraftforge:fmlcore:1.20.1-47.4.10";
+
+    /// A profile and version metadata that publish different digests for `FMLCORE`.
+    fn conflicting_documents(base: &str) -> (String, String) {
+        (
+            profile_json(&library_json(
+                FMLCORE,
+                &format!("{base}/profile-fmlcore.jar"),
+                DEF_SHA1,
+            )),
+            version_json(&[library_json(
+                FMLCORE,
+                &format!("{base}/fmlcore.jar"),
+                XYZ_SHA1,
+            )]),
+        )
+    }
+
+    fn assert_fmlcore_conflict(error: &LoaderError) {
+        assert!(
+            matches!(
+                error,
+                LoaderError::InstallerLibraryConflict { library, profile, version, .. }
+                    if library == FMLCORE
+                        && profile.digest() == DEF_SHA1
+                        && version.digest() == XYZ_SHA1
+            ),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    fn validate_on_host(bundle: &InstallerBundle) -> LoaderResult<()> {
+        InstallerEngine::validate_bundle(
+            LoaderKind::Forge,
+            "1.20.1",
+            "47.4.10",
+            bundle,
+            &RuleContext::new(Platform::host()),
+        )
+    }
+
     #[tokio::test]
-    async fn a_library_the_profile_declares_with_another_digest_is_refused() {
+    async fn a_client_install_refuses_conflicting_library_digests_before_downloading() {
         let server = wiremock::MockServer::start().await;
         let root = tempfile::tempdir().expect("root");
         let engine = loopback_engine(root.path());
-        let fmlcore = store_library(&engine, "net.minecraftforge:fmlcore:1.20.1-47.4.10", b"def");
-        let bundle = bundle_declaring(
-            root.path(),
-            &library_json(
-                "net.minecraftforge:fmlcore:1.20.1-47.4.10",
-                "https://maven.invalid/fmlcore.jar",
-                DEF_SHA1,
-            ),
-            &[library_json(
-                "net.minecraftforge:fmlcore:1.20.1-47.4.10",
-                &format!("{}/fmlcore.jar", server.uri()),
-                XYZ_SHA1,
-            )],
-        );
+        let fmlcore = store_library(&engine, FMLCORE, b"def");
+        let (profile, version) = conflicting_documents(&server.uri());
+        cache_installer(&engine, &profile, &version).await;
 
         let error = engine
-            .install_metadata_libraries(
-                &bundle,
-                &OperationReporter::silent("loader-server-libraries-test"),
+            .install_loader_client(
+                LoaderKind::Forge,
+                "1.20.1",
+                "47.4.10",
+                &vanilla_parent(),
+                &root.path().join("java"),
+                &RuleContext::new(Platform::host()),
+                &OperationReporter::silent("loader-client-conflict-test"),
                 &CancellationToken::new(),
             )
             .await
             .expect_err("conflicting digests fail the install");
 
-        assert!(matches!(error, LoaderError::InstallerInvalid { .. }));
+        assert_fmlcore_conflict(&error);
+        assert_eq!(
+            error.message_id(),
+            "error-loader-installer-library-conflict"
+        );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .expect("recorded")
+                .is_empty()
+        );
         assert_eq!(std::fs::read(fmlcore).expect("profile library"), b"def");
     }
 
     #[tokio::test]
-    async fn an_installer_carried_library_the_profile_declares_with_another_digest_is_refused() {
+    async fn a_server_install_refuses_conflicting_library_digests_before_downloading() {
+        let server = wiremock::MockServer::start().await;
         let root = tempfile::tempdir().expect("root");
         let engine = loopback_engine(root.path());
-        let bundle = bundle_declaring(
-            root.path(),
-            &library_json(
-                "net.minecraftforge:forge:1.20.1-47.4.10",
-                "https://maven.invalid/forge.jar",
-                DEF_SHA1,
-            ),
-            &[library_json(
-                "net.minecraftforge:forge:1.20.1-47.4.10",
-                "",
-                XYZ_SHA1,
-            )],
-        );
+        let fmlcore = store_library(&engine, FMLCORE, b"def");
+        let (profile, version) = conflicting_documents(&server.uri());
+        cache_installer(&engine, &profile, &version).await;
+        let target = root.path().join("server");
 
         let error = engine
-            .install_metadata_libraries(
-                &bundle,
-                &OperationReporter::silent("loader-server-libraries-test"),
+            .install_loader_server(
+                LoaderKind::Forge,
+                "1.20.1",
+                "47.4.10",
+                &vanilla_parent(),
+                &root.path().join("java"),
+                &target,
+                &OperationReporter::silent("loader-server-conflict-test"),
                 &CancellationToken::new(),
             )
             .await
             .expect_err("conflicting digests fail the install");
 
-        assert!(matches!(error, LoaderError::InstallerInvalid { .. }));
+        assert_fmlcore_conflict(&error);
+        assert!(
+            server
+                .received_requests()
+                .await
+                .expect("recorded")
+                .is_empty()
+        );
+        assert_eq!(std::fs::read(fmlcore).expect("profile library"), b"def");
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn an_installer_carried_library_the_profile_declares_with_another_digest_is_refused() {
+        let root = tempfile::tempdir().expect("root");
+        let bundle = bundle_declaring(
+            root.path(),
+            &library_json(FMLCORE, "https://maven.invalid/fmlcore.jar", DEF_SHA1),
+            &[library_json(FMLCORE, "", XYZ_SHA1)],
+        );
+
+        assert_fmlcore_conflict(&validate_on_host(&bundle).expect_err("conflict"));
+    }
+
+    #[test]
+    fn a_library_both_documents_publish_with_one_digest_is_accepted() {
+        let root = tempfile::tempdir().expect("root");
+        let securejarhandler = "cpw.mods:securejarhandler:2.1.10";
+        let bundle = bundle_declaring(
+            root.path(),
+            &[
+                library_json(FMLCORE, "https://maven.invalid/profile.jar", DEF_SHA1),
+                library_json(securejarhandler, "https://maven.invalid/sjh.jar", ABC_SHA1),
+            ]
+            .join(","),
+            &[
+                library_json(FMLCORE, "https://maven.invalid/fmlcore.jar", DEF_SHA1),
+                // Digests compare by value, not by spelling.
+                library_json(securejarhandler, "", &ABC_SHA1.to_ascii_uppercase()),
+            ],
+        );
+
+        validate_on_host(&bundle).expect("matching digests are not a conflict");
+    }
+
+    #[test]
+    fn only_the_version_metadata_entry_an_install_stores_is_compared() {
+        let root = tempfile::tempdir().expect("root");
+        let elsewhere = if cfg!(target_os = "macos") {
+            "windows"
+        } else {
+            "osx"
+        };
+        let bundle = bundle_declaring(
+            root.path(),
+            &library_json(FMLCORE, "https://maven.invalid/profile.jar", DEF_SHA1),
+            &[
+                // No artifact, so no install stores it.
+                format!(r#"{{"name":"{FMLCORE}","url":"https://maven.invalid/"}}"#),
+                format!(
+                    r#"{{"name":"{FMLCORE}","rules":[{{"action":"allow","os":{{"name":"{elsewhere}"}}}}],
+                    "downloads":{{"artifact":{{"url":"https://maven.invalid/a.jar","sha1":"{XYZ_SHA1}","size":3}}}}}}"#
+                ),
+                library_json(FMLCORE, "https://maven.invalid/fmlcore.jar", DEF_SHA1),
+                // Shadowed by the entry above.
+                library_json(FMLCORE, "https://maven.invalid/later.jar", XYZ_SHA1),
+            ],
+        );
+
+        validate_on_host(&bundle).expect("entries no install stores are not a conflict");
     }
 
     #[tokio::test]
