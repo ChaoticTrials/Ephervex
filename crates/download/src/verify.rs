@@ -167,6 +167,28 @@ pub async fn file_matches_hashes(path: &Path, expected: &[Hash]) -> Result<bool,
     Ok(verifier.finish().is_ok())
 }
 
+/// Whether `path` holds the artifact described: a regular file, of
+/// `expected_size` when one is given, matching every digest in `expected`.
+/// A missing path does not match.
+///
+/// The one definition of a trustworthy stored copy, shared by the download
+/// manager's cache revalidation and installers that write into the same stores.
+pub async fn stored_file_matches(
+    path: &Path,
+    expected_size: Option<u64>,
+    expected: &[Hash],
+) -> Result<bool, DownloadError> {
+    let metadata = match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => return Err(DownloadError::io(ArtifactStep::ReadCached, path, source)),
+    };
+    if !metadata.is_file() || expected_size.is_some_and(|size| size != metadata.len()) {
+        return Ok(false);
+    }
+    file_matches_hashes(path, expected).await
+}
+
 /// Computes one digest of a file already on disk.
 ///
 /// The counterpart to [`file_matches_hashes`] for bytes whose digest nobody

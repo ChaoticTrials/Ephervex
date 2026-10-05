@@ -24,6 +24,7 @@ use crate::{LoaderError, LoaderResult};
 const FORGE_MAVEN: &str = "https://maven.minecraftforge.net";
 const NEOFORGE_MAVEN: &str = "https://maven.neoforged.net/releases";
 const MAX_PROFILE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_PROFILE_DATA_BYTES: u64 = 128 * 1024 * 1024;
 static WORKSPACE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
@@ -46,6 +47,9 @@ pub struct InstalledServer {
     pub root: PathBuf,
     pub launch: ServerLaunch,
 }
+
+/// Workspace files with a published digest, by workspace path.
+type KnownDigests = HashMap<PathBuf, Hash>;
 
 #[derive(Debug)]
 struct InstallerBundle {
@@ -144,7 +148,8 @@ impl InstallerEngine {
             .await?;
         self.install_profile_libraries(&bundle, reporter, cancel)
             .await?;
-        self.install_installer_declared_libraries(&bundle).await?;
+        self.install_installer_declared_libraries(&bundle, context)
+            .await?;
 
         if bundle.profile.is_processor_driven() {
             let workspace = self.workspace("client");
@@ -158,26 +163,22 @@ impl InstallerEngine {
                 cancel,
             )
             .await?;
-            let result = self
-                .run_processors(
-                    &bundle,
-                    InstallSide::Client,
-                    &workspace,
-                    &vanilla.installation.plan.client_jar.path,
-                    java,
-                    cancel,
-                )
-                .await;
-            if let Err(error) = result {
-                remove_tree(&workspace).await;
-                return Err(error);
-            }
-            self.publish_libraries(&workspace.join("libraries")).await?;
+            self.run_and_publish_processors(
+                &bundle,
+                InstallSide::Client,
+                &workspace,
+                &vanilla.installation.plan.client_jar.path,
+                java,
+                context,
+                cancel,
+            )
+            .await?;
             remove_tree(&workspace).await;
         }
 
         let mut metadata = VersionMetadata::inherit(parent, &bundle.child)?;
-        self.mark_preinstalled_artifacts(&mut metadata).await?;
+        self.mark_preinstalled_artifacts(&mut metadata, context)
+            .await?;
         let installer = VanillaInstaller::new(self.manager.clone(), self.layout.clone());
         let plan = installer.plan(&metadata, context)?;
         let installation = installer.install(plan, reporter, cancel).await?;
@@ -202,21 +203,18 @@ impl InstallerEngine {
         cancel: &CancellationToken,
     ) -> LoaderResult<InstalledServer> {
         ensure_empty_target(target).await?;
+        // A server runs on this host, so every step selects libraries by its rules.
+        let context = RuleContext::new(Platform::host());
         let bundle = self
             .fetch_bundle(kind, minecraft, exact, reporter, cancel)
             .await?;
-        Self::validate_bundle(
-            kind,
-            minecraft,
-            exact,
-            &bundle,
-            &RuleContext::new(Platform::host()),
-        )?;
-        self.install_metadata_libraries(&bundle, reporter, cancel)
+        Self::validate_bundle(kind, minecraft, exact, &bundle, &context)?;
+        self.install_metadata_libraries(&bundle, &context, reporter, cancel)
             .await?;
         self.install_profile_libraries(&bundle, reporter, cancel)
             .await?;
-        self.install_installer_declared_libraries(&bundle).await?;
+        self.install_installer_declared_libraries(&bundle, &context)
+            .await?;
 
         let staging = server_staging(target);
         remove_tree(&staging).await;
@@ -249,21 +247,16 @@ impl InstallerEngine {
                 cancel,
             )
             .await?;
-            let result = self
-                .run_processors(
-                    &bundle,
-                    InstallSide::Server,
-                    &staging,
-                    &server_path,
-                    java,
-                    cancel,
-                )
-                .await;
-            if let Err(error) = result {
-                remove_tree(&staging).await;
-                return Err(error);
-            }
-            self.publish_libraries(&staging.join("libraries")).await?;
+            self.run_and_publish_processors(
+                &bundle,
+                InstallSide::Server,
+                &staging,
+                &server_path,
+                java,
+                &context,
+                cancel,
+            )
+            .await?;
             // Which of the two processor-driven eras this is shows in what the
             // processors produced. The argument-file era (Forge 1.17 onward and
             // every NeoForge build) writes `unix_args.txt`; the ModLauncher era
@@ -432,18 +425,25 @@ impl InstallerEngine {
             }
             let destination = self.layout.library(&library.coordinate);
             if library.artifact.url.is_empty() {
-                if fs::try_exists(&destination).await.unwrap_or(false) {
+                if stored_copy_matches(
+                    &destination,
+                    &library.artifact.sha1,
+                    Some(library.artifact.size),
+                )
+                .await?
+                {
                     continue;
                 }
                 let installer = bundle.installer.clone();
                 let entry = format!("maven/{}", library.coordinate.relative_path().display());
                 let expected = library.artifact.sha1.clone();
                 let size = library.artifact.size;
-                tokio::task::spawn_blocking(move || {
-                    extract_verified_entry(&installer, &entry, &destination, &expected, size)
+                let bytes = tokio::task::spawn_blocking(move || {
+                    read_verified_entry(&installer, &entry, &expected, size)
                 })
                 .await
                 .map_err(|error| invalid_installer(&bundle.installer, &error.to_string()))??;
+                publish_bytes(&destination, &bytes).await?;
             } else {
                 // The download manager revalidates a stored copy and applies the transport policy.
                 let url = parse_library_url(&library.artifact.url)?;
@@ -501,10 +501,10 @@ impl InstallerEngine {
     async fn install_metadata_libraries(
         &self,
         bundle: &InstallerBundle,
+        context: &RuleContext,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> LoaderResult<()> {
-        let context = RuleContext::new(Platform::host());
         // The first entry for a coordinate wins, as it does when a client plans the same list.
         let mut planned = HashSet::new();
         let mut requests = Vec::new();
@@ -513,7 +513,7 @@ impl InstallerEngine {
             let Some(artifact) = library.downloads.artifact.as_ref() else {
                 continue;
             };
-            if !rules_allow(&library.rules, &context) || !planned.insert(&library.coordinate) {
+            if !rules_allow(&library.rules, context) || !planned.insert(&library.coordinate) {
                 continue;
             }
             if artifact.url.is_empty() {
@@ -551,28 +551,44 @@ impl InstallerEngine {
     async fn install_installer_declared_libraries(
         &self,
         bundle: &InstallerBundle,
+        context: &RuleContext,
     ) -> LoaderResult<()> {
+        // The first entry for a coordinate the host's rules allow is the one an install stores.
+        let mut planned = HashSet::new();
         for library in &bundle.child.libraries {
             let Some(artifact) = library.downloads.artifact.as_ref() else {
                 continue;
             };
-            if !artifact.url.is_empty() {
+            if !rules_allow(&library.rules, context) || !planned.insert(&library.coordinate) {
                 continue;
             }
-            let destination = self.layout.library(&library.coordinate);
-            if fs::try_exists(&destination).await.unwrap_or(false) {
+            if !artifact.url.is_empty() {
                 continue;
             }
             let installer = bundle.installer.clone();
             let entry = format!("maven/{}", library.coordinate.relative_path().display());
+            let carried = {
+                let (installer, entry) = (installer.clone(), entry.clone());
+                tokio::task::spawn_blocking(move || zip_entry_exists(&installer, &entry))
+                    .await
+                    .map_err(|error| invalid_installer(&bundle.installer, &error.to_string()))??
+            };
+            // Later eras declare processor outputs this way; those arrive when the processors run.
+            if !carried {
+                continue;
+            }
+            let destination = self.layout.library(&library.coordinate);
+            if stored_copy_matches(&destination, &artifact.sha1, Some(artifact.size)).await? {
+                continue;
+            }
             let expected = artifact.sha1.clone();
             let size = artifact.size;
-            let destination_copy = destination.clone();
-            tokio::task::spawn_blocking(move || {
-                extract_declared_entry(&installer, &entry, &destination_copy, &expected, size)
+            let bytes = tokio::task::spawn_blocking(move || {
+                read_verified_entry(&installer, &entry, &expected, size)
             })
             .await
             .map_err(|error| invalid_installer(&bundle.installer, &error.to_string()))??;
+            publish_bytes(&destination, &bytes).await?;
         }
         Ok(())
     }
@@ -647,6 +663,29 @@ impl InstallerEngine {
         Ok(())
     }
 
+    /// Runs the processors in `workspace` and publishes the libraries they
+    /// produced. The workspace is removed when a processor fails.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_and_publish_processors(
+        &self,
+        bundle: &InstallerBundle,
+        side: InstallSide,
+        workspace: &Path,
+        minecraft_jar: &Path,
+        java: &Path,
+        context: &RuleContext,
+        cancel: &CancellationToken,
+    ) -> LoaderResult<()> {
+        let result = self
+            .run_processors(bundle, side, workspace, minecraft_jar, java, cancel)
+            .await;
+        if result.is_err() {
+            remove_tree(workspace).await;
+        }
+        self.publish_libraries(bundle, context, &workspace.join("libraries"), result?)
+            .await
+    }
+
     async fn run_processors(
         &self,
         bundle: &InstallerBundle,
@@ -655,8 +694,9 @@ impl InstallerEngine {
         minecraft_jar: &Path,
         java: &Path,
         cancel: &CancellationToken,
-    ) -> LoaderResult<()> {
+    ) -> LoaderResult<KnownDigests> {
         self.extract_profile_data(bundle, workspace).await?;
+        let mut verified = KnownDigests::new();
         let mut values = BTreeMap::from([
             ("SIDE".to_owned(), side.as_str().to_owned()),
             ("ROOT".to_owned(), workspace.to_string_lossy().into_owned()),
@@ -699,7 +739,8 @@ impl InstallerEngine {
                 self.run_processor(processor, workspace, java, &values, cancel)
                     .await?;
             }
-            self.verify_processor_outputs(processor, &values).await?;
+            self.verify_processor_outputs(processor, &values, &mut verified)
+                .await?;
         }
 
         if let Some(patched) = values.get("PATCHED") {
@@ -708,10 +749,11 @@ impl InstallerEngine {
                 return Err(LoaderError::ProcessorOutputMissing { path });
             }
             if let Some(expected) = values.get("PATCHED_SHA") {
-                verify_file_hash(&path, expected).await?;
+                let hash = verify_file_hash(&path, expected).await?;
+                verified.insert(path, hash);
             }
         }
-        Ok(())
+        Ok(verified)
     }
 
     async fn prepare_mojang_mappings(
@@ -769,12 +811,12 @@ impl InstallerEngine {
                     }
                     let installer = bundle.installer.clone();
                     let entry = entry.to_owned();
-                    let destination_copy = destination.clone();
-                    tokio::task::spawn_blocking(move || {
-                        extract_entry(&installer, &entry, &destination_copy)
+                    let bytes = tokio::task::spawn_blocking(move || {
+                        read_zip_bytes(&installer, &entry, MAX_PROFILE_DATA_BYTES)
                     })
                     .await
                     .map_err(|error| invalid_installer(&bundle.installer, &error.to_string()))??;
+                    write_private(&destination, &bytes).await?;
                 }
             }
         }
@@ -843,6 +885,7 @@ impl InstallerEngine {
         &self,
         processor: &Processor,
         values: &BTreeMap<String, String>,
+        verified: &mut KnownDigests,
     ) -> LoaderResult<()> {
         for (output, expected) in &processor.outputs {
             let path = PathBuf::from(resolve_tokens(output, values)?);
@@ -850,29 +893,82 @@ impl InstallerEngine {
                 return Err(LoaderError::ProcessorOutputMissing { path });
             }
             let hash = resolve_tokens(expected, values)?;
-            verify_file_hash(&path, hash.trim_matches('\'')).await?;
+            let hash = verify_file_hash(&path, hash.trim_matches('\'')).await?;
+            verified.insert(path, hash);
         }
         Ok(())
     }
 
-    async fn publish_libraries(&self, source: &Path) -> LoaderResult<()> {
+    async fn publish_libraries(
+        &self,
+        bundle: &InstallerBundle,
+        context: &RuleContext,
+        source: &Path,
+        mut known: KnownDigests,
+    ) -> LoaderResult<()> {
+        // version.json publishes digests for the files with no address, and the
+        // entry an install stores is the first one the host's rules allow.
+        let mut planned = HashSet::new();
+        for library in &bundle.child.libraries {
+            let Some(artifact) = library.downloads.artifact.as_ref() else {
+                continue;
+            };
+            if !rules_allow(&library.rules, context) || !planned.insert(&library.coordinate) {
+                continue;
+            }
+            if !artifact.url.is_empty() {
+                continue;
+            }
+            // A processor digest from install_profile.json must agree with version.json.
+            match known.entry(source.join(library.coordinate.relative_path())) {
+                std::collections::hash_map::Entry::Occupied(processed)
+                    if *processed.get() != artifact.sha1 =>
+                {
+                    return Err(LoaderError::InstallerLibraryConflict {
+                        path: bundle.installer.clone(),
+                        library: library.name.clone(),
+                        profile: processed.get().clone(),
+                        version: artifact.sha1.clone(),
+                    });
+                }
+                std::collections::hash_map::Entry::Occupied(_) => {}
+                std::collections::hash_map::Entry::Vacant(missing) => {
+                    missing.insert(artifact.sha1.clone());
+                }
+            }
+        }
         let destination = self.layout.store_root(ContentStore::Libraries);
-        publish_tree(source, &destination).await
+        publish_tree(source, &destination, &known).await
     }
 
     async fn mark_preinstalled_artifacts(
         &self,
         metadata: &mut VersionMetadata,
+        context: &RuleContext,
     ) -> LoaderResult<()> {
-        for library in &mut metadata.libraries {
+        // Only the first entry for a coordinate the host's rules allow is stored.
+        let stored: Vec<bool> = {
+            let mut planned = HashSet::new();
+            metadata
+                .libraries
+                .iter()
+                .map(|library| {
+                    library.downloads.artifact.is_some()
+                        && rules_allow(&library.rules, context)
+                        && planned.insert(&library.coordinate)
+                })
+                .collect()
+        };
+        for (library, stored) in metadata.libraries.iter_mut().zip(stored) {
             let Some(artifact) = library.downloads.artifact.as_mut() else {
                 continue;
             };
             if !artifact.url.is_empty() {
                 continue;
             }
+            // Every producer of these files verifies and publishes atomically.
             let path = self.layout.library(&library.coordinate);
-            if !fs::try_exists(&path).await.unwrap_or(false) {
+            if stored && !fs::try_exists(&path).await.unwrap_or(false) {
                 return Err(LoaderError::ProcessorOutputMissing { path });
             }
             // VanillaInstaller constructs all requests before it checks the
@@ -982,13 +1078,12 @@ fn read_zip_entry(path: &Path, name: &str) -> LoaderResult<String> {
     Ok(text)
 }
 
-fn extract_verified_entry(
+fn read_verified_entry(
     installer: &Path,
     entry: &str,
-    destination: &Path,
     expected: &Hash,
     size: u64,
-) -> LoaderResult<()> {
+) -> LoaderResult<Vec<u8>> {
     let bytes = read_zip_bytes(installer, entry, size.max(1))?;
     if bytes.len() as u64 != size {
         return Err(invalid_installer(
@@ -1001,28 +1096,7 @@ fn extract_verified_entry(
     verifier.finish().map_err(|error| {
         invalid_installer(installer, &format!("{entry} hash mismatch: {error:?}"))
     })?;
-    write_atomic(destination, &bytes)
-}
-
-fn extract_entry(installer: &Path, entry: &str, destination: &Path) -> LoaderResult<()> {
-    let bytes = read_zip_bytes(installer, entry, 128 * 1024 * 1024)?;
-    write_atomic(destination, &bytes)
-}
-
-/// Extracts a library the version metadata declares but the installer may not
-/// carry. A file that is not in the archive is not an error; see
-/// [`InstallerEngine::install_installer_declared_libraries`].
-fn extract_declared_entry(
-    installer: &Path,
-    entry: &str,
-    destination: &Path,
-    expected: &Hash,
-    size: u64,
-) -> LoaderResult<()> {
-    if !zip_entry_exists(installer, entry)? {
-        return Ok(());
-    }
-    extract_verified_entry(installer, entry, destination, expected, size)
+    Ok(bytes)
 }
 
 fn zip_entry_exists(installer: &Path, entry: &str) -> LoaderResult<bool> {
@@ -1062,20 +1136,6 @@ fn parse_library_url(raw: &str) -> LoaderResult<Url> {
         }
         .into()
     })
-}
-
-fn write_atomic(destination: &Path, bytes: &[u8]) -> LoaderResult<()> {
-    if destination.exists() {
-        return Ok(());
-    }
-    let parent = destination
-        .parent()
-        .ok_or_else(|| invalid_installer(destination, "destination has no parent"))?;
-    std::fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
-    let temporary = destination.with_extension("ephervex-part");
-    std::fs::write(&temporary, bytes).map_err(|source| io_error(&temporary, source))?;
-    std::fs::rename(&temporary, destination).map_err(|source| io_error(destination, source))?;
-    Ok(())
 }
 
 fn processor_main_class(path: &Path) -> LoaderResult<String> {
@@ -1161,19 +1221,130 @@ fn safe_archive_destination(root: &Path, entry: &str) -> LoaderResult<PathBuf> {
     Ok(root.join(path))
 }
 
-async fn verify_file_hash(path: &Path, expected: &str) -> LoaderResult<()> {
+async fn verify_file_hash(path: &Path, expected: &str) -> LoaderResult<Hash> {
     let expected = Hash::new(HashAlgorithm::Sha1, expected)
         .ok_or_else(|| invalid_installer(path, "processor output declares a malformed SHA-1"))?;
-    let bytes = fs::read(path)
+    let matches = ephervex_download::file_matches_hashes(path, std::slice::from_ref(&expected))
         .await
-        .map_err(|source| io_error(path, source))?;
-    let mut verifier = HashVerifier::new(&[expected]);
-    verifier.update(&bytes);
-    verifier.finish().map_err(|error| {
-        invalid_installer(path, &format!("processor output hash mismatch: {error:?}"))
-    })
+        .map_err(|error| local_read_error(path, error))?;
+    if !matches {
+        return Err(digest_mismatch(path, path, &expected).await);
+    }
+    Ok(expected)
 }
 
+/// Whether a file is the artifact with this digest, and size when known.
+/// Presence alone is not proof where the digest is known.
+async fn stored_copy_matches(path: &Path, sha1: &Hash, size: Option<u64>) -> LoaderResult<bool> {
+    ephervex_download::stored_file_matches(path, size, std::slice::from_ref(sha1))
+        .await
+        .map_err(|error| local_read_error(path, error))
+}
+
+/// A failure reading a local file while checking its digest, which is file I/O
+/// rather than a download.
+fn local_read_error(path: &Path, error: ephervex_download::DownloadError) -> LoaderError {
+    match error {
+        ephervex_download::DownloadError::Io { path, source, .. } => io_error(&path, source),
+        other => io_error(path, std::io::Error::other(other)),
+    }
+}
+
+/// Publishes `bytes` at `destination` by an atomic rename, replacing whatever
+/// is there.
+async fn publish_bytes(destination: &Path, bytes: &[u8]) -> LoaderResult<()> {
+    stage_and_publish(destination, destination, None, |staged| async move {
+        fs::write(staged, bytes).await
+    })
+    .await
+}
+
+/// Copies `source` to `destination` by an atomic rename, replacing whatever is
+/// there.
+async fn copy_atomic(
+    source: &Path,
+    destination: &Path,
+    expected: Option<&Hash>,
+) -> LoaderResult<()> {
+    stage_and_publish(destination, source, expected, |staged| async move {
+        fs::copy(source, staged).await.map(drop)
+    })
+    .await
+}
+
+/// Writes a staging sibling, checks it against `expected` when given, and
+/// renames it over `destination`, so only checked, complete bytes ever appear
+/// in a shared store. A failed write or mismatch is reported against `origin`.
+async fn stage_and_publish<F, Fut>(
+    destination: &Path,
+    origin: &Path,
+    expected: Option<&Hash>,
+    write: F,
+) -> LoaderResult<()>
+where
+    F: FnOnce(PathBuf) -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<()>>,
+{
+    let parent = destination
+        .parent()
+        .ok_or_else(|| invalid_installer(destination, "destination has no parent"))?;
+    fs::create_dir_all(parent)
+        .await
+        .map_err(|source| io_error(parent, source))?;
+    let staged = ephervex_download::staging_path(destination);
+    let published = async {
+        write(staged.clone())
+            .await
+            .map_err(|source| io_error(origin, source))?;
+        if let Some(expected) = expected
+            && !stored_copy_matches(&staged, expected, None).await?
+        {
+            return Err(digest_mismatch(origin, &staged, expected).await);
+        }
+        ephervex_download::publish_staged(&staged, destination)
+            .await
+            .map_err(|source| io_error(destination, source))
+    }
+    .await;
+    if published.is_err() {
+        let _ = fs::remove_file(&staged).await;
+    }
+    published
+}
+
+/// A refusal naming the published digest and the one `actual` has.
+async fn digest_mismatch(path: &Path, actual: &Path, expected: &Hash) -> LoaderError {
+    let found = ephervex_download::hash_file(actual, HashAlgorithm::Sha1)
+        .await
+        .map_or_else(
+            |_| "an unreadable file".to_owned(),
+            |hash| hash.digest().to_owned(),
+        );
+    invalid_installer(
+        path,
+        &format!(
+            "processor output does not match its published digest: expected {}, found {found}",
+            expected.digest()
+        ),
+    )
+}
+
+/// Writes into a private workspace, which nothing else reads until the install
+/// is done with it.
+async fn write_private(destination: &Path, bytes: &[u8]) -> LoaderResult<()> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| invalid_installer(destination, "destination has no parent"))?;
+    fs::create_dir_all(parent)
+        .await
+        .map_err(|source| io_error(parent, source))?;
+    fs::write(destination, bytes)
+        .await
+        .map_err(|source| io_error(destination, source))
+}
+
+/// Copies into a private workspace or staging tree, which nothing else reads
+/// until the install is done with it.
 async fn copy_file(source: &Path, destination: &Path) -> LoaderResult<()> {
     if fs::try_exists(destination).await.unwrap_or(false) {
         return Ok(());
@@ -1190,7 +1361,23 @@ async fn copy_file(source: &Path, destination: &Path) -> LoaderResult<()> {
     Ok(())
 }
 
-async fn publish_tree(source: &Path, destination: &Path) -> LoaderResult<()> {
+/// Whether `target` is a regular file of `source`'s size.
+async fn same_size(source: &Path, target: &Path) -> LoaderResult<bool> {
+    let source_size = fs::metadata(source)
+        .await
+        .map_err(|error| io_error(source, error))?
+        .len();
+    Ok(fs::symlink_metadata(target)
+        .await
+        .is_ok_and(|target| target.is_file() && target.len() == source_size))
+}
+
+/// Publishes a processor workspace's libraries into the shared store.
+///
+/// A store file whose digest is known is checked and replaced when it does not
+/// match, and the replacement is checked before it is renamed into place. One
+/// with no known digest is kept while its size matches the fresh output.
+async fn publish_tree(source: &Path, destination: &Path, known: &KnownDigests) -> LoaderResult<()> {
     let mut pending = vec![(source.to_path_buf(), destination.to_path_buf())];
     while let Some((from, to)) = pending.pop() {
         fs::create_dir_all(&to)
@@ -1208,16 +1395,22 @@ async fn publish_tree(source: &Path, destination: &Path) -> LoaderResult<()> {
                 .file_type()
                 .await
                 .map_err(|source| io_error(&entry.path(), source))?;
+            let path = entry.path();
             let target = to.join(entry.file_name());
             if kind.is_dir() {
-                pending.push((entry.path(), target));
+                pending.push((path, target));
             } else if kind.is_file() {
-                copy_file(&entry.path(), &target).await?;
+                let expected = known.get(&path);
+                let current = match expected {
+                    Some(hash) => stored_copy_matches(&target, hash, None).await?,
+                    // A file an earlier, non-atomic publication truncated differs in size.
+                    None => same_size(&path, &target).await?,
+                };
+                if !current {
+                    copy_atomic(&path, &target, expected).await?;
+                }
             } else {
-                return Err(invalid_installer(
-                    &entry.path(),
-                    "processor produced a symlink",
-                ));
+                return Err(invalid_installer(&path, "processor produced a symlink"));
             }
         }
     }
@@ -1583,6 +1776,7 @@ mod tests {
         engine
             .install_metadata_libraries(
                 &bundle,
+                &RuleContext::new(Platform::host()),
                 &OperationReporter::silent("loader-server-libraries-test"),
                 &CancellationToken::new(),
             )
@@ -1840,6 +2034,7 @@ mod tests {
         let error = engine
             .install_metadata_libraries(
                 &bundle,
+                &RuleContext::new(Platform::host()),
                 &OperationReporter::silent("loader-server-libraries-test"),
                 &CancellationToken::new(),
             )
@@ -1870,6 +2065,7 @@ mod tests {
         let error = engine
             .install_metadata_libraries(
                 &bundle,
+                &RuleContext::new(Platform::host()),
                 &OperationReporter::silent("loader-server-libraries-test"),
                 &CancellationToken::new(),
             )
@@ -1917,6 +2113,7 @@ mod tests {
         let error = engine
             .install_metadata_libraries(
                 &bundle,
+                &RuleContext::new(Platform::host()),
                 &OperationReporter::silent("loader-server-libraries-test"),
                 &CancellationToken::new(),
             )
@@ -1949,6 +2146,7 @@ mod tests {
         let error = engine
             .install_metadata_libraries(
                 &bundle,
+                &RuleContext::new(Platform::host()),
                 &OperationReporter::silent("loader-server-libraries-test"),
                 &cancel,
             )
@@ -2153,6 +2351,7 @@ mod tests {
         engine
             .install_metadata_libraries(
                 &bundle,
+                &RuleContext::new(Platform::host()),
                 &OperationReporter::silent("loader-server-libraries-test"),
                 &CancellationToken::new(),
             )
@@ -2160,6 +2359,285 @@ mod tests {
             .expect("an excluded library is skipped");
 
         assert!(!library_path(&engine, "ca.weblite:java-objc-bridge:1.1").exists());
+    }
+
+    fn staging_leftovers(directory: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut pending = vec![directory.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            for entry in std::fs::read_dir(&directory).expect("directory") {
+                let path = entry.expect("entry").path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().contains(".part."))
+                {
+                    found.push(path);
+                }
+            }
+        }
+        found
+    }
+
+    #[tokio::test]
+    async fn processor_outputs_checked_against_a_digest_are_recorded() {
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+        let output = root.path().join("work/libraries/g/out/1/out-1.jar");
+        std::fs::create_dir_all(output.parent().expect("parent")).expect("output directory");
+        std::fs::write(&output, b"abc").expect("output");
+        let processor = Processor {
+            sides: Vec::new(),
+            jar: "g:p:1".to_owned(),
+            classpath: Vec::new(),
+            args: Vec::new(),
+            outputs: BTreeMap::from([(
+                "{ROOT}/libraries/g/out/1/out-1.jar".to_owned(),
+                format!("'{ABC_SHA1}'"),
+            )]),
+        };
+        let values = BTreeMap::from([(
+            "ROOT".to_owned(),
+            root.path().join("work").to_string_lossy().into_owned(),
+        )]);
+        let mut verified = KnownDigests::new();
+
+        engine
+            .verify_processor_outputs(&processor, &values, &mut verified)
+            .await
+            .expect("the output matches");
+
+        assert_eq!(
+            verified.get(&output),
+            Some(&Hash::new(HashAlgorithm::Sha1, ABC_SHA1).expect("hash"))
+        );
+    }
+
+    #[tokio::test]
+    async fn publishing_replaces_wrong_or_truncated_store_copies_and_keeps_complete_ones() {
+        let root = tempfile::tempdir().expect("root");
+        let source = root.path().join("work/libraries");
+        let store = root.path().join("store");
+        for (directory, name, bytes) in [
+            (&source, "patched.jar", &b"abc"[..]),
+            (&source, "undeclared.jar", &b"new"[..]),
+            (&source, "fresh.jar", &b"xyz"[..]),
+            (&store, "patched.jar", &b"bad"[..]),
+            (&store, "undeclared.jar", &b"old"[..]),
+            (&source, "argfile.txt", &b"new"[..]),
+            (&store, "argfile.txt", &b"ne"[..]),
+        ] {
+            std::fs::create_dir_all(directory.join("g")).expect("directory");
+            std::fs::write(directory.join("g").join(name), bytes).expect("file");
+        }
+        let verified = KnownDigests::from([(
+            source.join("g/patched.jar"),
+            Hash::new(HashAlgorithm::Sha1, ABC_SHA1).expect("hash"),
+        )]);
+
+        publish_tree(&source, &store, &verified)
+            .await
+            .expect("publication");
+
+        assert_eq!(
+            std::fs::read(store.join("g/patched.jar")).expect("patched"),
+            b"abc"
+        );
+        assert_eq!(
+            std::fs::read(store.join("g/undeclared.jar")).expect("undeclared"),
+            b"old",
+            "an atomic earlier publication with no known digest is kept"
+        );
+        assert_eq!(
+            std::fs::read(store.join("g/fresh.jar")).expect("fresh"),
+            b"xyz"
+        );
+        assert_eq!(
+            std::fs::read(store.join("g/argfile.txt")).expect("argfile"),
+            b"new",
+            "a truncated earlier copy is replaced"
+        );
+        assert!(staging_leftovers(&store).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_processor_output_rewritten_after_its_check_is_not_published() {
+        let root = tempfile::tempdir().expect("root");
+        let source = root.path().join("work/libraries");
+        let store = root.path().join("store");
+        std::fs::create_dir_all(source.join("g")).expect("workspace");
+        std::fs::write(source.join("g/patched.jar"), b"xyz").expect("rewritten output");
+        let known = KnownDigests::from([(
+            source.join("g/patched.jar"),
+            Hash::new(HashAlgorithm::Sha1, ABC_SHA1).expect("hash"),
+        )]);
+
+        let error = publish_tree(&source, &store, &known)
+            .await
+            .expect_err("bytes that no longer match their digest are refused");
+
+        assert!(matches!(error, LoaderError::InstallerInvalid { .. }));
+        assert!(!store.join("g/patched.jar").exists());
+        assert!(staging_leftovers(&store).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_wrong_stored_copy_of_an_output_version_metadata_declares_is_replaced() {
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+        let coordinate = "net.minecraftforge:forge:1.20.1-47.4.10:client";
+        let bundle = bundle_declaring(root.path(), "", &[library_json(coordinate, "", ABC_SHA1)]);
+        let source = root.path().join("work/libraries");
+        let output = source.join(
+            MavenCoordinate::parse(coordinate)
+                .expect("coordinate")
+                .relative_path(),
+        );
+        std::fs::create_dir_all(output.parent().expect("parent")).expect("workspace");
+        std::fs::write(&output, b"abc").expect("processor output");
+        let stored = store_library(&engine, coordinate, b"bad");
+
+        engine
+            .publish_libraries(
+                &bundle,
+                &RuleContext::new(Platform::host()),
+                &source,
+                KnownDigests::new(),
+            )
+            .await
+            .expect("publication");
+
+        assert_eq!(std::fs::read(stored).expect("library"), b"abc");
+    }
+
+    #[tokio::test]
+    async fn only_the_first_installer_carried_entry_for_a_coordinate_is_installed() {
+        use std::io::Write as _;
+
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+        let coordinate = "net.minecraftforge:forge:1.16.5-36.2.39";
+        let bundle = bundle_declaring(
+            root.path(),
+            "",
+            &[
+                library_json(coordinate, "", ABC_SHA1),
+                library_json(coordinate, "", DEF_SHA1),
+            ],
+        );
+        let relative = MavenCoordinate::parse(coordinate)
+            .expect("coordinate")
+            .relative_path();
+        let mut archive =
+            zip::ZipWriter::new(std::fs::File::create(&bundle.installer).expect("installer"));
+        archive
+            .start_file(
+                format!("maven/{}", relative.display()),
+                zip::write::SimpleFileOptions::default(),
+            )
+            .expect("entry");
+        archive.write_all(b"abc").expect("entry body");
+        archive.finish().expect("installer finish");
+
+        engine
+            .install_installer_declared_libraries(&bundle, &RuleContext::new(Platform::host()))
+            .await
+            .expect("the later entry for the coordinate is not stored");
+
+        assert_eq!(
+            std::fs::read(library_path(&engine, coordinate)).expect("library"),
+            b"abc"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_preinstalled_artifact_the_host_never_stores_is_not_required() {
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+        let excluded = r#"{"name":"net.minecraftforge:forge:1.20.1-47.4.10:mac","rules":[{"action":"allow","os":{"name":"osx"}}],"downloads":{"artifact":{"url":"","sha1":"a9993e364706816aba3e25717850c26c9cd0d89d","size":3}}}"#;
+        let mut metadata = VersionMetadata::parse(&version_json(&[excluded.to_owned()]))
+            .expect("version metadata");
+
+        engine
+            .mark_preinstalled_artifacts(
+                &mut metadata,
+                &RuleContext::new(Platform::new(
+                    ephervex_minecraft::OsName::Linux,
+                    "x86_64",
+                    "",
+                )),
+            )
+            .await
+            .expect("an entry this host never stores is not required");
+    }
+
+    #[tokio::test]
+    async fn a_processor_digest_that_disagrees_with_version_metadata_is_refused() {
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+        let coordinate = "net.minecraftforge:forge:1.20.1-47.4.10:client";
+        let bundle = bundle_declaring(root.path(), "", &[library_json(coordinate, "", DEF_SHA1)]);
+        let source = root.path().join("work/libraries");
+        let output = source.join(
+            MavenCoordinate::parse(coordinate)
+                .expect("coordinate")
+                .relative_path(),
+        );
+        std::fs::create_dir_all(output.parent().expect("parent")).expect("workspace");
+        std::fs::write(&output, b"abc").expect("processor output");
+        let processed = KnownDigests::from([(
+            output,
+            Hash::new(HashAlgorithm::Sha1, ABC_SHA1).expect("hash"),
+        )]);
+
+        let error = engine
+            .publish_libraries(
+                &bundle,
+                &RuleContext::new(Platform::host()),
+                &source,
+                processed,
+            )
+            .await
+            .expect_err("two digests for one output are refused");
+
+        assert!(matches!(
+            error,
+            LoaderError::InstallerLibraryConflict { .. }
+        ));
+        assert!(!library_path(&engine, coordinate).exists());
+    }
+
+    #[tokio::test]
+    async fn an_installer_carried_library_whose_stored_copy_is_wrong_is_extracted_again() {
+        use std::io::Write as _;
+
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+        let coordinate = "net.minecraftforge:forge:1.16.5-36.2.39";
+        let bundle = bundle_declaring(root.path(), "", &[library_json(coordinate, "", ABC_SHA1)]);
+        let relative = MavenCoordinate::parse(coordinate)
+            .expect("coordinate")
+            .relative_path();
+        let mut archive =
+            zip::ZipWriter::new(std::fs::File::create(&bundle.installer).expect("installer"));
+        archive
+            .start_file(
+                format!("maven/{}", relative.display()),
+                zip::write::SimpleFileOptions::default(),
+            )
+            .expect("entry");
+        archive.write_all(b"abc").expect("entry body");
+        archive.finish().expect("installer finish");
+        let stored = store_library(&engine, coordinate, b"bad");
+
+        engine
+            .install_installer_declared_libraries(&bundle, &RuleContext::new(Platform::host()))
+            .await
+            .expect("installer-carried libraries install");
+
+        assert_eq!(std::fs::read(&stored).expect("library"), b"abc");
+        assert!(staging_leftovers(stored.parent().expect("parent")).is_empty());
     }
 
     #[cfg(unix)]

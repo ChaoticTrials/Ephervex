@@ -42,7 +42,7 @@ use crate::client::{HttpConfig, build_allowlisted_client, build_client};
 use crate::error::{ArtifactStep, AttemptFailure, BatchDownloadError, DownloadError};
 use crate::progress::{ByteTally, OperationReporter};
 use crate::retry::{RetryPolicy, retry_after};
-use crate::verify::{HashVerifier, file_matches_hashes};
+use crate::verify::{HashVerifier, stored_file_matches};
 
 /// The longest filename Ephervex generates for its own scratch files.
 ///
@@ -1070,14 +1070,11 @@ async fn already_cached(
     Ok(cached)
 }
 
-/// Revalidates whatever is at a request's destination, discarding it unless it
-/// is the artifact the request describes.
-///
-/// The one definition of "this cache entry can be trusted": the file exists, it
-/// is a regular file, its length is the declared size, and every published
-/// digest matches. Anything else is removed, because a cache path whose contents
-/// do not match the request is worse than an empty one - the atomicity invariant
-/// entitles the rest of the launcher to treat presence as proof.
+/// Revalidates whatever is at a request's destination with
+/// [`stored_file_matches`], discarding it unless it is the artifact the request
+/// describes. A cache path whose contents do not match the request is worse than
+/// an empty one: the atomicity invariant entitles the rest of the launcher to
+/// treat presence as proof.
 async fn revalidate_cached(
     request: &DownloadRequest,
 ) -> Result<Option<DownloadOutcome>, DownloadError> {
@@ -1095,12 +1092,7 @@ async fn revalidate_cached(
         }
     };
     let bytes = metadata.len();
-    let size_matches = request
-        .expected_size
-        .is_none_or(|expected| expected == bytes);
-    let hashes_match = file_matches_hashes(destination, &request.expected_hashes).await?;
-
-    if !size_matches || !hashes_match {
+    if !stored_file_matches(destination, request.expected_size, &request.expected_hashes).await? {
         warn!(path = %destination.display(), "discarding a cache entry that does not match its request");
         fs::remove_file(destination)
             .await
@@ -1227,6 +1219,23 @@ fn parse_content_range(response: &Response) -> Option<(u64, Option<u64>)> {
     let start = start.trim().parse::<u64>().ok()?;
     let complete = complete.trim().parse::<u64>().ok();
     Some((start, complete))
+}
+
+/// A unique sibling of `destination` to write a file into before
+/// [`publish_staged`] renames it into place. Named like a download's own
+/// staging file, so cache maintenance treats it as a transfer in flight.
+#[must_use]
+pub fn staging_path(destination: &Path) -> PathBuf {
+    part_path(destination, uuid::Uuid::new_v4())
+}
+
+/// Makes a fully written staging file durable, then renames it over
+/// `destination`, so a crash can never leave a renamed-but-empty file there.
+pub async fn publish_staged(staged: &Path, destination: &Path) -> std::io::Result<()> {
+    File::open(staged).await?.sync_all().await?;
+    fs::rename(staged, destination).await?;
+    sync_parent_directory(destination).await;
+    Ok(())
 }
 
 /// Best-effort durability for the rename itself.

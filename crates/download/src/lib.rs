@@ -83,7 +83,7 @@ pub use client::{HttpConfig, build_allowlisted_client, build_client, build_singl
 pub use error::{ArtifactStep, BatchDownloadError, DownloadError};
 pub use manager::{
     ArtifactSource, AuthenticatedSource, DownloadManager, DownloadOutcome, DownloadRequest,
-    DownloaderConfig,
+    DownloaderConfig, publish_staged, staging_path,
 };
 pub use metadata::{
     CachedMetadata, DEFAULT_METADATA_TTL, Freshness, MAX_METADATA_BYTES, METADATA_ENVELOPE_VERSION,
@@ -99,4 +99,4 @@ pub use progress::{ByteTally, ChannelSink, OperationReporter, ProgressSink};
 /// crate that only parses text.
 pub use reqwest::Url;
 pub use retry::{RetryPolicy, retry_after, status_is_transient};
-pub use verify::{HashMismatch, HashVerifier, file_matches_hashes, hash_file};
+pub use verify::{HashMismatch, HashVerifier, file_matches_hashes, hash_file, stored_file_matches};
