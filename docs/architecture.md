@@ -766,9 +766,11 @@ Minecraft metadata shapes are preserved until the layer that understands them.
 Legacy argument strings and modern argument arrays remain distinct. Rule-gated
 libraries retain their rules. Forge and NeoForge child metadata must be merged
 with the exact `inheritsFrom` parent before it is installable or launchable.
-Installer profile and child metadata declarations for the same stored library
-must agree on both SHA-1 and size. Conflicts are refused before library downloads
-and identify the library and the differing declarations.
+Installer profile and child metadata declarations that resolve to the same
+library cache path must agree on both SHA-1 and size, even when their Maven
+coordinates differ. Client installs also check the vanilla parent
+libraries they store against the profile. Conflicts are refused before library
+downloads and identify the library and the differing declarations.
 
 `ephervex-storage` holds an instance launch lock for the full operation. The
 lock records the launcher process and kernel start time to distinguish a live

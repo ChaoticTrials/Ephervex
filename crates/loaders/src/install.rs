@@ -141,6 +141,7 @@ impl InstallerEngine {
             .fetch_bundle(kind, minecraft, exact, reporter, cancel)
             .await?;
         Self::validate_bundle(kind, minecraft, exact, &bundle, context)?;
+        ensure_consistent_library_artifacts(&bundle, parent, context, "vanilla parent metadata")?;
 
         let vanilla = self
             .install_vanilla_client(parent, context, reporter, cancel)
@@ -360,7 +361,7 @@ impl InstallerEngine {
         })
     }
 
-    /// Checks the bundle's identity, and its library digests under `context`'s rules.
+    /// Checks the bundle's identity and library artifacts under `context`'s rules.
     fn validate_bundle(
         kind: LoaderKind,
         minecraft: &str,
@@ -397,7 +398,7 @@ impl InstallerEngine {
                 ),
             });
         }
-        ensure_consistent_library_digests(bundle, context)
+        ensure_consistent_library_artifacts(bundle, &bundle.child, context, "version.json")
     }
 
     async fn install_profile_libraries(
@@ -499,7 +500,7 @@ impl InstallerEngine {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> LoaderResult<()> {
-        // The first entry for a coordinate wins, as it does when a client plans the same list.
+        // The first entry for a cache path wins, as it does when a client plans the same list.
         let mut planned = HashSet::new();
         let mut requests = Vec::new();
         let mut names = Vec::new();
@@ -507,7 +508,9 @@ impl InstallerEngine {
             let Some(artifact) = library.downloads.artifact.as_ref() else {
                 continue;
             };
-            if !rules_allow(&library.rules, context) || !planned.insert(&library.coordinate) {
+            if !rules_allow(&library.rules, context)
+                || !planned.insert(library.coordinate.relative_path())
+            {
                 continue;
             }
             if artifact.url.is_empty() {
@@ -938,6 +941,7 @@ impl InstallerEngine {
                             .map_err(|source| io_error(processed.key(), source))?
                             .len(),
                         version_size: artifact.size,
+                        version_document: "version.json",
                     });
                 }
                 std::collections::hash_map::Entry::Occupied(_) => {}
@@ -1003,27 +1007,33 @@ fn installer_sidecar_key(
     ))?)
 }
 
-/// Refuses a bundle whose profile and version metadata would store different files at one coordinate.
-/// Each side contributes the entry an install stores; a coordinate only one side stores is no conflict.
-fn ensure_consistent_library_digests(
+/// Refuses profile and version metadata that would store different files at one cache path.
+/// Each side contributes the entry an install stores; a path only one side stores is no conflict.
+fn ensure_consistent_library_artifacts(
     bundle: &InstallerBundle,
+    metadata: &VersionMetadata,
     context: &RuleContext,
+    version_document: &'static str,
 ) -> LoaderResult<()> {
-    let mut profile: HashMap<&MavenCoordinate, &ProfileArtifact> = HashMap::new();
+    // A dotted classifier and a compound extension can resolve to the same file.
+    // Compare storage paths so aliases cannot hide a conflicting declaration.
+    let mut profile: HashMap<PathBuf, &ProfileArtifact> = HashMap::new();
     for declared in &bundle.profile.libraries {
         profile
-            .entry(&declared.coordinate)
+            .entry(declared.coordinate.relative_path())
             .or_insert(&declared.artifact);
     }
     let mut stored = HashSet::new();
-    for library in &bundle.child.libraries {
+    for library in &metadata.libraries {
         let Some(artifact) = library.downloads.artifact.as_ref() else {
             continue;
         };
-        if !rules_allow(&library.rules, context) || !stored.insert(&library.coordinate) {
+        if !rules_allow(&library.rules, context)
+            || !stored.insert(library.coordinate.relative_path())
+        {
             continue;
         }
-        if let Some(declared) = profile.get(&library.coordinate).copied()
+        if let Some(declared) = profile.get(&library.coordinate.relative_path()).copied()
             && (declared.sha1 != artifact.sha1 || declared.size != artifact.size)
         {
             return Err(LoaderError::InstallerLibraryConflict {
@@ -1033,6 +1043,7 @@ fn ensure_consistent_library_digests(
                 version: Box::new(artifact.sha1.clone()),
                 profile_size: declared.size,
                 version_size: artifact.size,
+                version_document,
             });
         }
     }
@@ -1823,6 +1834,14 @@ mod tests {
         .expect("parent metadata")
     }
 
+    fn parent_declaring(libraries: &[String]) -> VersionMetadata {
+        let mut parent = vanilla_parent();
+        parent.libraries = VersionMetadata::parse(&version_json(libraries))
+            .expect("parent libraries")
+            .libraries;
+        parent
+    }
+
     /// Places a Forge 1.20.1-47.4.10 installer carrying these documents, and its
     /// digest sidecar, in the caches an install reads before reaching the network.
     async fn cache_installer(engine: &InstallerEngine, profile: &str, version: &str) {
@@ -2176,6 +2195,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn library_path_aliases_use_the_first_stored_metadata_entry() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let server = wiremock::MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/first.jar"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"def".to_vec()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+        let first = format!("{FMLCORE}:linux.debug@jar");
+        let alias = format!("{FMLCORE}:linux@debug.jar");
+        let bundle = bundle_declaring(
+            root.path(),
+            &library_json(&alias, "https://maven.invalid/profile.jar", DEF_SHA1),
+            &[
+                library_json(&first, &format!("{}/first.jar", server.uri()), DEF_SHA1),
+                library_json(&alias, &format!("{}/alias.jar", server.uri()), XYZ_SHA1),
+            ],
+        );
+        validate_on_host(&bundle).expect("only the first stored entry is compared");
+        engine
+            .install_metadata_libraries(
+                &bundle,
+                &RuleContext::new(Platform::host()),
+                &OperationReporter::silent("loader-library-path-alias-test"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("only the first stored entry is downloaded");
+        assert_eq!(
+            std::fs::read(library_path(&engine, &alias)).expect("library"),
+            b"def"
+        );
+        assert_eq!(server.received_requests().await.expect("requests").len(), 1);
+    }
+
+    #[tokio::test]
     async fn a_failed_server_library_download_names_the_library() {
         let server = wiremock::MockServer::start().await;
         let root = tempfile::tempdir().expect("root");
@@ -2392,6 +2452,162 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(std::fs::read(fmlcore).expect("profile library"), b"def");
+    }
+
+    #[tokio::test]
+    async fn a_client_install_refuses_parent_library_conflicts_before_downloading() {
+        for (digest, size) in [(XYZ_SHA1, 3), (DEF_SHA1, 4)] {
+            let server = wiremock::MockServer::start().await;
+            let root = tempfile::tempdir().expect("root");
+            let engine = loopback_engine(root.path());
+            let cached = store_library(&engine, FMLCORE, b"def");
+            let profile = profile_json(&library_json(
+                FMLCORE,
+                &format!("{}/profile.jar", server.uri()),
+                DEF_SHA1,
+            ));
+            cache_installer(&engine, &profile, &version_json(&[])).await;
+            let parent = parent_declaring(&[library_json(
+                FMLCORE,
+                &format!("{}/parent.jar", server.uri()),
+                digest,
+            )
+            .replace("\"size\":3", &format!("\"size\":{size}"))]);
+
+            let error = engine
+                .install_loader_client(
+                    LoaderKind::Forge,
+                    "1.20.1",
+                    "47.4.10",
+                    &parent,
+                    &root.path().join("java"),
+                    &RuleContext::new(Platform::host()),
+                    &OperationReporter::silent("loader-parent-conflict-test"),
+                    &CancellationToken::new(),
+                )
+                .await
+                .expect_err("a parent conflict fails before the vanilla install");
+
+            assert_eq!(
+                error.message_id(),
+                "error-loader-installer-library-conflict"
+            );
+            assert!(error.to_string().contains("vanilla parent metadata"));
+            assert!(matches!(
+                error,
+                LoaderError::InstallerLibraryConflict {
+                    library, profile, version, profile_size: 3, version_size,
+                    version_document: "vanilla parent metadata", ..
+                } if library == FMLCORE && profile.digest() == DEF_SHA1
+                    && version.digest() == digest && version_size == size
+            ));
+            assert!(
+                server
+                    .received_requests()
+                    .await
+                    .expect("requests")
+                    .is_empty()
+            );
+            assert_eq!(std::fs::read(cached).expect("cached library"), b"def");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_client_install_refuses_parent_conflicts_at_the_same_cache_path() {
+        let server = wiremock::MockServer::start().await;
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+        let profile_name = format!("{FMLCORE}:linux.debug@jar");
+        let parent_name = format!("{FMLCORE}:linux@debug.jar");
+        assert_eq!(
+            MavenCoordinate::parse(&profile_name)
+                .expect("profile coordinate")
+                .relative_path(),
+            MavenCoordinate::parse(&parent_name)
+                .expect("parent coordinate")
+                .relative_path(),
+        );
+        let cached = store_library(&engine, &profile_name, b"def");
+        let profile = profile_json(&library_json(
+            &profile_name,
+            &format!("{}/profile.jar", server.uri()),
+            DEF_SHA1,
+        ));
+        cache_installer(&engine, &profile, &version_json(&[])).await;
+        let parent = parent_declaring(&[library_json(
+            &parent_name,
+            &format!("{}/parent.jar", server.uri()),
+            XYZ_SHA1,
+        )]);
+
+        let error = engine
+            .install_loader_client(
+                LoaderKind::Forge,
+                "1.20.1",
+                "47.4.10",
+                &parent,
+                &root.path().join("java"),
+                &RuleContext::new(Platform::host()),
+                &OperationReporter::silent("loader-parent-path-conflict-test"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("conflicting files at one path fail before the vanilla install");
+        assert!(matches!(
+            error,
+            LoaderError::InstallerLibraryConflict {
+                library, version_document: "vanilla parent metadata", ..
+            } if library == parent_name
+        ));
+        assert!(
+            server
+                .received_requests()
+                .await
+                .expect("requests")
+                .is_empty()
+        );
+        assert_eq!(std::fs::read(cached).expect("cached library"), b"def");
+    }
+
+    #[test]
+    fn parent_library_validation_compares_only_the_entries_the_install_stores() {
+        let root = tempfile::tempdir().expect("root");
+        let bundle = bundle_declaring(
+            root.path(),
+            &library_json(FMLCORE, "https://maven.invalid/profile.jar", DEF_SHA1),
+            &[],
+        );
+        let context = RuleContext::new(Platform::host());
+        let elsewhere = if cfg!(target_os = "macos") {
+            "windows"
+        } else {
+            "osx"
+        };
+        let parent = parent_declaring(&[
+            format!(r#"{{"name":"{FMLCORE}","url":"https://maven.invalid/"}}"#),
+            format!(
+                r#"{{"name":"{FMLCORE}","rules":[{{"action":"allow","os":{{"name":"{elsewhere}"}}}}],
+                "downloads":{{"artifact":{{"url":"https://maven.invalid/a.jar","sha1":"{XYZ_SHA1}","size":4}}}}}}"#
+            ),
+            library_json(FMLCORE, "https://maven.invalid/parent.jar", DEF_SHA1),
+            library_json(FMLCORE, "https://maven.invalid/duplicate.jar", XYZ_SHA1),
+        ]);
+
+        ensure_consistent_library_artifacts(&bundle, &parent, &context, "vanilla parent metadata")
+            .expect("matching stored artifacts are accepted");
+
+        let distinct = parent_declaring(&[library_json(
+            "net.minecraftforge:fmlcore:1.20.1-47.4.11",
+            "https://maven.invalid/distinct.jar",
+            XYZ_SHA1,
+        )]);
+        ensure_consistent_library_artifacts(
+            &bundle,
+            &distinct,
+            &context,
+            "vanilla parent metadata",
+        )
+        .expect("different coordinates occupy different paths");
     }
 
     #[tokio::test]

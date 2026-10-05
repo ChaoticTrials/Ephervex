@@ -38,7 +38,7 @@ pub enum LoaderError {
     InstallerInvalid { path: PathBuf, detail: String },
     /// The install profile and the version metadata publish different files for one library.
     #[error(
-        "the loader installer at {path} declares library `{library}` as {profile} ({profile_size} bytes) in install_profile.json and as {version} ({version_size} bytes) in version.json"
+        "the loader installer at {path} declares library `{library}` as {profile} ({profile_size} bytes) in install_profile.json and as {version} ({version_size} bytes) in {version_document}"
     )]
     InstallerLibraryConflict {
         path: PathBuf,
@@ -47,6 +47,7 @@ pub enum LoaderError {
         version: Box<ephervex_model::Hash>,
         profile_size: u64,
         version_size: u64,
+        version_document: &'static str,
     },
     #[error("could not obtain loader artifact `{artifact}`")]
     Download {
