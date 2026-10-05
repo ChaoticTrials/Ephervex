@@ -419,39 +419,75 @@ impl InstallerEngine {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> LoaderResult<()> {
+        // Later entries for a coordinate share its store path, so the first one wins.
+        let mut planned = HashSet::new();
+        let mut requests = Vec::new();
+        let mut names = Vec::new();
         for library in &bundle.profile.libraries {
             if cancel.is_cancelled() {
                 return Err(LoaderError::Canceled);
             }
-            let destination = self.layout.library(&library.coordinate);
-            if fs::try_exists(&destination).await.unwrap_or(false) {
+            if !planned.insert(&library.coordinate) {
                 continue;
             }
+            let destination = self.layout.library(&library.coordinate);
             if library.artifact.url.is_empty() {
+                if fs::try_exists(&destination).await.unwrap_or(false) {
+                    continue;
+                }
                 let installer = bundle.installer.clone();
                 let entry = format!("maven/{}", library.coordinate.relative_path().display());
-                let destination_copy = destination.clone();
                 let expected = library.artifact.sha1.clone();
                 let size = library.artifact.size;
                 tokio::task::spawn_blocking(move || {
-                    extract_verified_entry(&installer, &entry, &destination_copy, &expected, size)
+                    extract_verified_entry(&installer, &entry, &destination, &expected, size)
                 })
                 .await
                 .map_err(|error| invalid_installer(&bundle.installer, &error.to_string()))??;
             } else {
-                let request = DownloadRequest::parse(&library.artifact.url, &destination)?
-                    .verifying(library.artifact.sha1.clone())
-                    .sized(library.artifact.size)
-                    .labeled(library.name.clone());
-                self.manager
-                    .download(&request, reporter, cancel)
-                    .await
-                    .map_err(|source| LoaderError::Download {
-                        artifact: library.name.clone(),
-                        source: Box::new(source),
-                    })?;
+                // The download manager revalidates a stored copy and applies the transport policy.
+                let url = parse_library_url(&library.artifact.url)?;
+                requests.push(
+                    DownloadRequest::new(url, destination)
+                        .verifying(library.artifact.sha1.clone())
+                        .sized(library.artifact.size)
+                        .labeled(library.name.clone()),
+                );
+                names.push(library.name.as_str());
             }
         }
+        self.download_libraries(&requests, &names, &bundle.child.id, reporter, cancel)
+            .await
+    }
+
+    /// Fetches libraries as one bounded-concurrency batch, naming the one that failed.
+    async fn download_libraries(
+        &self,
+        requests: &[DownloadRequest],
+        names: &[&str],
+        version: &str,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> LoaderResult<()> {
+        if requests.is_empty() {
+            return Ok(());
+        }
+        reporter.set_step(Some(format!("{version} \u{b7} libraries")));
+        self.manager
+            .download_all(requests, reporter, cancel)
+            .await
+            .map_err(|failure| {
+                if failure.is_cancellation() {
+                    return LoaderError::Canceled;
+                }
+                let artifact = names
+                    .get(failure.index())
+                    .map_or_else(|| format!("{version} libraries"), |name| (*name).to_owned());
+                LoaderError::Download {
+                    artifact,
+                    source: Box::new(failure.into_error()),
+                }
+            })?;
         Ok(())
     }
 
@@ -485,9 +521,7 @@ impl InstallerEngine {
             }
             // The download manager applies the transport policy, as it does for
             // the client's copy of these libraries.
-            let url = Url::parse(&artifact.url).map_err(|_| UrlPolicyError::Malformed {
-                url: artifact.url.clone(),
-            })?;
+            let url = parse_library_url(&artifact.url)?;
             requests.push(
                 DownloadRequest::new(url, self.layout.library(&library.coordinate))
                     .verifying(artifact.sha1.clone())
@@ -496,26 +530,8 @@ impl InstallerEngine {
             );
             names.push(library.name.as_str());
         }
-        if requests.is_empty() {
-            return Ok(());
-        }
-        self.manager
-            .download_all(&requests, reporter, cancel)
+        self.download_libraries(&requests, &names, &bundle.child.id, reporter, cancel)
             .await
-            .map_err(|failure| {
-                if failure.is_cancellation() {
-                    return LoaderError::Canceled;
-                }
-                let artifact = names.get(failure.index()).map_or_else(
-                    || format!("{} libraries", bundle.child.id),
-                    |name| (*name).to_owned(),
-                );
-                LoaderError::Download {
-                    artifact,
-                    source: Box::new(failure.into_error()),
-                }
-            })?;
-        Ok(())
     }
 
     /// Installs every library the loader's own version metadata declares with
@@ -1039,6 +1055,15 @@ fn read_zip_bytes(installer: &Path, entry: &str, limit: u64) -> LoaderResult<Vec
     Ok(bytes)
 }
 
+fn parse_library_url(raw: &str) -> LoaderResult<Url> {
+    Url::parse(raw).map_err(|_| {
+        UrlPolicyError::Malformed {
+            url: raw.to_owned(),
+        }
+        .into()
+    })
+}
+
 fn write_atomic(destination: &Path, bytes: &[u8]) -> LoaderResult<()> {
     if destination.exists() {
         return Ok(());
@@ -1309,6 +1334,8 @@ fn io_error(path: &Path, source: std::io::Error) -> LoaderError {
 mod tests {
     #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
+    use std::time::Duration;
+
     use super::*;
 
     #[cfg(unix)]
@@ -1566,6 +1593,233 @@ mod tests {
         assert_eq!(std::fs::read(launcher).expect("missing library"), b"abc");
         assert_eq!(std::fs::read(fmlcore).expect("verified library"), b"def");
         assert_eq!(std::fs::read(javafml).expect("replaced library"), b"xyz");
+    }
+
+    /// Answers every request with `abc`, holding the answers until `expected`
+    /// requests are waiting at once or a short wait passes. Returns the address
+    /// and the most requests that were ever waiting together.
+    async fn serve_held_until_concurrent(
+        expected: usize,
+    ) -> (String, tokio::task::JoinHandle<usize>) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("listener");
+        let address = format!("http://{}", listener.local_addr().expect("address"));
+        let server = tokio::spawn(async move {
+            let mut answered = 0;
+            let mut most_waiting = 0;
+            while answered < expected {
+                let mut waiting = Vec::new();
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                while waiting.len() < expected - answered {
+                    let Ok(accepted) = tokio::time::timeout_at(deadline, listener.accept()).await
+                    else {
+                        break;
+                    };
+                    let (mut stream, _) = accepted.expect("accept");
+                    let mut request = Vec::new();
+                    let mut chunk = [0_u8; 1024];
+                    while !request.windows(4).any(|end| end == b"\r\n\r\n") {
+                        let read = stream.read(&mut chunk).await.expect("request");
+                        assert!(read > 0, "the request ended early");
+                        request.extend_from_slice(&chunk[..read]);
+                    }
+                    waiting.push(stream);
+                }
+                // A wait with nothing new means the rest are never coming.
+                if waiting.is_empty() {
+                    break;
+                }
+                most_waiting = most_waiting.max(waiting.len());
+                for mut stream in waiting {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc",
+                        )
+                        .await
+                        .expect("response");
+                    answered += 1;
+                }
+            }
+            most_waiting
+        });
+        (address, server)
+    }
+
+    #[tokio::test]
+    async fn profile_libraries_are_fetched_as_one_concurrent_batch() {
+        const LIBRARIES: usize = 4;
+        let root = tempfile::tempdir().expect("root");
+        let manager = DownloadManager::new(ephervex_download::DownloaderConfig {
+            http: ephervex_download::HttpConfig::for_loopback_tests(),
+            concurrency: LIBRARIES,
+            ..ephervex_download::DownloaderConfig::default()
+        })
+        .expect("manager");
+        let engine = InstallerEngine::new(manager, CacheLayout::new(root.path().join("cache")));
+        let (address, server) = serve_held_until_concurrent(LIBRARIES).await;
+        let names: Vec<String> = (0..LIBRARIES)
+            .map(|index| format!("test.library:part-{index}:1"))
+            .collect();
+        let profile_libraries = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                library_json(name, &format!("{address}/part-{index}.jar"), ABC_SHA1)
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let bundle = bundle_declaring(root.path(), &profile_libraries, &[]);
+
+        engine
+            .install_profile_libraries(
+                &bundle,
+                &OperationReporter::silent("loader-profile-libraries-test"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("profile libraries install");
+
+        assert_eq!(
+            server.await.expect("server"),
+            LIBRARIES,
+            "every profile library was requested before any was answered"
+        );
+        for name in &names {
+            assert_eq!(
+                std::fs::read(library_path(&engine, name)).expect("stored library"),
+                b"abc"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_coordinate_the_profile_repeats_is_fetched_once_from_its_first_entry() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/first.jar"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"abc"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // A second fetch would replace the first entry's file with these bytes.
+        Mock::given(method("GET"))
+            .and(path("/second.jar"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"def"))
+            .mount(&server)
+            .await;
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+        let coordinate = "net.minecraftforge:fmlcore:1.20.1-47.4.10";
+        let bundle = bundle_declaring(
+            root.path(),
+            &[
+                library_json(coordinate, &format!("{}/first.jar", server.uri()), ABC_SHA1),
+                library_json(
+                    coordinate,
+                    &format!("{}/second.jar", server.uri()),
+                    DEF_SHA1,
+                ),
+            ]
+            .join(","),
+            &[],
+        );
+
+        engine
+            .install_profile_libraries(
+                &bundle,
+                &OperationReporter::silent("loader-profile-libraries-test"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("the first entry installs the coordinate");
+
+        assert_eq!(
+            std::fs::read(library_path(&engine, coordinate)).expect("library"),
+            b"abc"
+        );
+        let requested: Vec<_> = server
+            .received_requests()
+            .await
+            .expect("recorded requests")
+            .into_iter()
+            .map(|request| request.url.path().to_owned())
+            .collect();
+        assert_eq!(requested, ["/first.jar"]);
+    }
+
+    #[tokio::test]
+    async fn a_profile_library_whose_stored_copy_is_wrong_is_fetched_again() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/fmlcore.jar"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"abc"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+        let coordinate = "net.minecraftforge:fmlcore:1.20.1-47.4.10";
+        let stored = store_library(&engine, coordinate, b"xyz");
+        let bundle = bundle_declaring(
+            root.path(),
+            &library_json(
+                coordinate,
+                &format!("{}/fmlcore.jar", server.uri()),
+                ABC_SHA1,
+            ),
+            &[],
+        );
+
+        engine
+            .install_profile_libraries(
+                &bundle,
+                &OperationReporter::silent("loader-profile-libraries-test"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("profile libraries install");
+
+        assert_eq!(std::fs::read(stored).expect("library"), b"abc");
+    }
+
+    #[tokio::test]
+    async fn a_failed_profile_library_download_names_the_library() {
+        let server = wiremock::MockServer::start().await;
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+        let bundle = bundle_declaring(
+            root.path(),
+            &library_json(
+                "net.minecraftforge:fmlcore:1.20.1-47.4.10",
+                &format!("{}/fmlcore.jar", server.uri()),
+                ABC_SHA1,
+            ),
+            &[],
+        );
+
+        let error = engine
+            .install_profile_libraries(
+                &bundle,
+                &OperationReporter::silent("loader-profile-libraries-test"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("a missing library fails the install");
+
+        assert!(matches!(
+            error,
+            LoaderError::Download { ref artifact, .. }
+                if artifact == "net.minecraftforge:fmlcore:1.20.1-47.4.10"
+        ));
     }
 
     #[tokio::test]
