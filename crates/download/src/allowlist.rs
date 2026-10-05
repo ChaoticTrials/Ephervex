@@ -23,7 +23,6 @@ use reqwest::Url;
 /// implementers enforce the same restriction.
 ///
 /// - <https://support.modrinth.com/en/articles/8802351-modrinth-modpack-format-mrpack>
-/// - <https://docs.modrinth.com/modpacks/format/>
 ///
 /// Audit note: keep this list minimal and exact-match. Every addition widens
 /// the set of hosts an untrusted bug-report archive can make the launcher talk
