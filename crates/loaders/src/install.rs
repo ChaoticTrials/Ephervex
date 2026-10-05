@@ -94,27 +94,26 @@ impl InstallerEngine {
         cancel: &CancellationToken,
     ) -> LoaderResult<InstalledServer> {
         ensure_empty_target(target).await?;
-        let staging = server_staging(target);
-        remove_tree(&staging).await;
-        fs::create_dir_all(&staging)
-            .await
-            .map_err(|source| io_error(&staging, source))?;
-        let artifact = metadata.server_jar()?.clone();
-        let jar = staging.join(format!("minecraft_server.{}.jar", metadata.id));
-        let request = DownloadRequest::parse(&artifact.url, &jar)?
-            .verifying(artifact.sha1)
-            .sized(artifact.size)
-            .labeled(format!("minecraft {} server", metadata.id));
-        self.manager
-            .download(&request, reporter, cancel)
-            .await
-            .map_err(|source| LoaderError::Download {
-                artifact: format!("minecraft {} server", metadata.id),
-                source: Box::new(source),
-            })?;
-        fs::rename(&staging, target)
-            .await
-            .map_err(|source| io_error(target, source))?;
+        let staging = ScratchDirectory::create(server_staging(target)).await?;
+        let jar = staging
+            .path()
+            .join(format!("minecraft_server.{}.jar", metadata.id));
+        let downloaded = async {
+            let artifact = metadata.server_jar()?.clone();
+            let request = DownloadRequest::parse(&artifact.url, &jar)?
+                .verifying(artifact.sha1)
+                .sized(artifact.size)
+                .labeled(format!("minecraft {} server", metadata.id));
+            self.manager
+                .download(&request, reporter, cancel)
+                .await
+                .map_err(|source| LoaderError::Download {
+                    artifact: format!("minecraft {} server", metadata.id),
+                    source: Box::new(source),
+                })
+        }
+        .await;
+        staging.settle(downloaded, Some(target)).await?;
         Ok(InstalledServer {
             selection: LoaderSelection::vanilla(),
             minecraft: metadata.id.clone(),
@@ -152,28 +151,33 @@ impl InstallerEngine {
             .await?;
 
         if bundle.profile.is_processor_driven() {
-            let workspace = self.workspace("client");
-            self.prepare_workspace(&workspace, &bundle.profile).await?;
-            self.prepare_mojang_mappings(
-                &bundle.profile,
-                InstallSide::Client,
-                parent,
-                &workspace,
-                reporter,
-                cancel,
-            )
-            .await?;
-            self.run_and_publish_processors(
-                &bundle,
-                InstallSide::Client,
-                &workspace,
-                &vanilla.installation.plan.client_jar.path,
-                java,
-                context,
-                cancel,
-            )
-            .await?;
-            remove_tree(&workspace).await;
+            let scratch = ScratchDirectory::create(self.workspace("client")).await?;
+            let workspace = scratch.path();
+            let processed = async {
+                self.prepare_workspace_in(workspace, &bundle.profile)
+                    .await?;
+                self.prepare_mojang_mappings(
+                    &bundle.profile,
+                    InstallSide::Client,
+                    parent,
+                    workspace,
+                    reporter,
+                    cancel,
+                )
+                .await?;
+                self.run_and_publish_processors(
+                    &bundle,
+                    InstallSide::Client,
+                    workspace,
+                    &vanilla.installation.plan.client_jar.path,
+                    java,
+                    context,
+                    cancel,
+                )
+                .await
+            }
+            .await;
+            scratch.settle(processed, None).await?;
         }
 
         let mut metadata = VersionMetadata::inherit(parent, &bundle.child)?;
@@ -216,84 +220,74 @@ impl InstallerEngine {
         self.install_installer_declared_libraries(&bundle, &context)
             .await?;
 
-        let staging = server_staging(target);
-        remove_tree(&staging).await;
-        fs::create_dir_all(&staging)
-            .await
-            .map_err(|source| io_error(&staging, source))?;
-
-        let server = parent.server_jar()?.clone();
-        let server_path = staging.join(format!("minecraft_server.{minecraft}.jar"));
-        let request = DownloadRequest::parse(&server.url, &server_path)?
-            .verifying(server.sha1)
-            .sized(server.size)
-            .labeled(format!("minecraft {minecraft} server"));
-        self.manager
-            .download(&request, reporter, cancel)
-            .await
-            .map_err(|source| LoaderError::Download {
-                artifact: format!("minecraft {minecraft} server"),
-                source: Box::new(source),
-            })?;
-
-        let launch = if bundle.profile.is_processor_driven() {
-            self.prepare_workspace_in(&staging, &bundle.profile).await?;
-            self.prepare_mojang_mappings(
-                &bundle.profile,
-                InstallSide::Server,
-                parent,
-                &staging,
-                reporter,
-                cancel,
-            )
-            .await?;
-            self.run_and_publish_processors(
-                &bundle,
-                InstallSide::Server,
-                &staging,
-                &server_path,
-                java,
-                &context,
-                cancel,
-            )
-            .await?;
-            // Which of the two processor-driven eras this is shows in what the
-            // processors produced. The argument-file era (Forge 1.17 onward and
-            // every NeoForge build) writes `unix_args.txt`; the ModLauncher era
-            // before it patches the game under `libraries` and still starts
-            // from the launcher jar the installer ships.
-            let relative = modern_server_argfile(kind, minecraft, exact);
-            let launch = if fs::try_exists(&staging.join(&relative))
+        let scratch = ScratchDirectory::create(server_staging(target)).await?;
+        let staging = scratch.path();
+        let staged = async {
+            let server = parent.server_jar()?.clone();
+            let server_path = staging.join(format!("minecraft_server.{minecraft}.jar"));
+            let request = DownloadRequest::parse(&server.url, &server_path)?
+                .verifying(server.sha1)
+                .sized(server.size)
+                .labeled(format!("minecraft {minecraft} server"));
+            self.manager
+                .download(&request, reporter, cancel)
                 .await
-                .unwrap_or(false)
-            {
-                ServerLaunch::ArgFile {
-                    file: target.join(relative),
-                }
-            } else {
-                match self.stage_profile_jar(&bundle, &staging).await {
-                    Ok(jar) => ServerLaunch::Jar {
-                        jar: target.join(jar),
-                    },
-                    Err(error) => {
-                        remove_tree(&staging).await;
-                        return Err(error);
-                    }
-                }
-            };
-            replace_with_shared_libraries(&self.layout, &staging).await?;
-            launch
-        } else {
-            let jar = self.stage_profile_jar(&bundle, &staging).await?;
-            link_shared_libraries(&self.layout, &staging).await?;
-            ServerLaunch::Jar {
-                jar: target.join(jar),
-            }
-        };
+                .map_err(|source| LoaderError::Download {
+                    artifact: format!("minecraft {minecraft} server"),
+                    source: Box::new(source),
+                })?;
 
-        fs::rename(&staging, target)
-            .await
-            .map_err(|source| io_error(target, source))?;
+            Ok(if bundle.profile.is_processor_driven() {
+                self.prepare_workspace_in(staging, &bundle.profile).await?;
+                self.prepare_mojang_mappings(
+                    &bundle.profile,
+                    InstallSide::Server,
+                    parent,
+                    staging,
+                    reporter,
+                    cancel,
+                )
+                .await?;
+                self.run_and_publish_processors(
+                    &bundle,
+                    InstallSide::Server,
+                    staging,
+                    &server_path,
+                    java,
+                    &context,
+                    cancel,
+                )
+                .await?;
+                // Which of the two processor-driven eras this is shows in what the
+                // processors produced. The argument-file era (Forge 1.17 onward and
+                // every NeoForge build) writes `unix_args.txt`; the ModLauncher era
+                // before it patches the game under `libraries` and still starts
+                // from the launcher jar the installer ships.
+                let relative = modern_server_argfile(kind, minecraft, exact);
+                let launch = if fs::try_exists(&staging.join(&relative))
+                    .await
+                    .unwrap_or(false)
+                {
+                    ServerLaunch::ArgFile {
+                        file: target.join(relative),
+                    }
+                } else {
+                    ServerLaunch::Jar {
+                        jar: target.join(self.stage_profile_jar(&bundle, staging).await?),
+                    }
+                };
+                replace_with_shared_libraries(&self.layout, staging).await?;
+                launch
+            } else {
+                let jar = self.stage_profile_jar(&bundle, staging).await?;
+                link_shared_libraries(&self.layout, staging).await?;
+                ServerLaunch::Jar {
+                    jar: target.join(jar),
+                }
+            })
+        }
+        .await;
+        let launch = scratch.settle(staged, Some(target)).await?;
         Ok(InstalledServer {
             selection: LoaderSelection::exact(kind, exact),
             minecraft: minecraft.to_owned(),
@@ -634,18 +628,6 @@ impl InstallerEngine {
             .join(format!("{side}-{}-{sequence}", std::process::id()))
     }
 
-    async fn prepare_workspace(
-        &self,
-        workspace: &Path,
-        profile: &InstallProfile,
-    ) -> LoaderResult<()> {
-        remove_tree(workspace).await;
-        fs::create_dir_all(workspace)
-            .await
-            .map_err(|source| io_error(workspace, source))?;
-        self.prepare_workspace_in(workspace, profile).await
-    }
-
     async fn prepare_workspace_in(
         &self,
         workspace: &Path,
@@ -664,7 +646,7 @@ impl InstallerEngine {
     }
 
     /// Runs the processors in `workspace` and publishes the libraries they
-    /// produced. The workspace is removed when a processor fails.
+    /// produced.
     #[allow(clippy::too_many_arguments)]
     async fn run_and_publish_processors(
         &self,
@@ -676,13 +658,10 @@ impl InstallerEngine {
         context: &RuleContext,
         cancel: &CancellationToken,
     ) -> LoaderResult<()> {
-        let result = self
+        let verified = self
             .run_processors(bundle, side, workspace, minecraft_jar, java, cancel)
-            .await;
-        if result.is_err() {
-            remove_tree(workspace).await;
-        }
-        self.publish_libraries(bundle, context, &workspace.join("libraries"), result?)
+            .await?;
+        self.publish_libraries(bundle, context, &workspace.join("libraries"), verified)
             .await
     }
 
@@ -863,22 +842,46 @@ impl InstallerEngine {
             .arg(classpath)
             .arg(&main_class)
             .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
-        let output = tokio::select! {
-            () = cancel.cancelled() => return Err(LoaderError::Canceled),
-            output = command.output() => output.map_err(|source| io_error(java, source))?,
+        let mut child = command.spawn().map_err(|source| io_error(java, source))?;
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut stderr = AbortOnDrop(tokio::spawn(capture_stderr(
+            child.stderr.take(),
+            captured.clone(),
+        )));
+        let status = tokio::select! {
+            () = cancel.cancelled() => None,
+            status = child.wait() => Some(status.map_err(|source| io_error(java, source))?),
         };
-        if !output.status.success() {
-            return Err(LoaderError::ProcessorFailed {
-                processor: processor.jar.clone(),
-                code: output.status.code(),
-                stderr: String::from_utf8_lossy(&output.stderr)
-                    .chars()
-                    .take(4096)
-                    .collect(),
-            });
+        let Some(status) = status else {
+            // Reaped, so it has stopped writing before its workspace is removed.
+            let _ = child.kill().await;
+            return Err(LoaderError::Canceled);
+        };
+        if status.success() {
+            return Ok(());
         }
-        Ok(())
+        // A child the processor left behind may hold the pipe open past its exit.
+        tokio::select! {
+            () = cancel.cancelled() => return Err(LoaderError::Canceled),
+            _ = tokio::time::timeout(std::time::Duration::from_secs(5), &mut stderr.0) => {}
+        }
+        drop(stderr);
+        let stderr = captured
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        Err(LoaderError::ProcessorFailed {
+            processor: processor.jar.clone(),
+            code: status.code(),
+            stderr: String::from_utf8_lossy(&stderr)
+                .chars()
+                .take(4096)
+                .collect(),
+        })
     }
 
     async fn verify_processor_outputs(
@@ -1440,14 +1443,126 @@ async fn ensure_empty_target(target: &Path) -> LoaderResult<()> {
     Ok(())
 }
 
+/// An installer-owned scratch directory. The install settles it, publishing or
+/// removing it; if the install is dropped first, it is removed off the async
+/// runtime.
+#[derive(Debug)]
+struct ScratchDirectory {
+    /// `None` once the directory has been published or removed.
+    path: Option<PathBuf>,
+}
+
+impl ScratchDirectory {
+    /// Creates an empty directory at `path`, clearing anything an earlier
+    /// process with the same id left there.
+    async fn create(path: PathBuf) -> LoaderResult<Self> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .await
+                .map_err(|source| io_error(parent, source))?;
+        }
+        remove_tree(&path).await;
+        fs::create_dir(&path)
+            .await
+            .map_err(|source| io_error(&path, source))?;
+        Ok(Self { path: Some(path) })
+    }
+
+    fn path(&self) -> &Path {
+        self.path.as_deref().unwrap_or_else(|| Path::new(""))
+    }
+
+    /// Renames the directory to `target` when the work succeeded and one is
+    /// given, so `target` owns its contents, and removes it otherwise.
+    async fn settle<T>(
+        mut self,
+        result: LoaderResult<T>,
+        target: Option<&Path>,
+    ) -> LoaderResult<T> {
+        let publish_to = target.filter(|_| result.is_ok());
+        let (Some(target), Some(path)) = (publish_to, self.path.as_deref()) else {
+            self.remove().await;
+            return result;
+        };
+        // One synchronous call, so a dropped install cannot interrupt it halfway.
+        if let Err(source) = std::fs::rename(path, target) {
+            self.remove().await;
+            return Err(io_error(target, source));
+        }
+        self.path = None;
+        result
+    }
+
+    async fn remove(mut self) {
+        let Some(path) = self.path.take() else {
+            return;
+        };
+        let retried = path.clone();
+        // The blocking pool refuses work while the runtime shuts down.
+        if tokio::task::spawn_blocking(move || remove_scratch(&retried))
+            .await
+            .is_err()
+        {
+            remove_scratch(&path);
+        }
+    }
+}
+
+impl Drop for ScratchDirectory {
+    fn drop(&mut self) {
+        let Some(path) = self.path.take() else {
+            return;
+        };
+        if tokio::runtime::Handle::try_current().is_err() {
+            remove_scratch(&path);
+            return;
+        }
+        // Its own thread, not the runtime's blocking pool, which refuses work
+        // while the runtime shuts down.
+        let retried = path.clone();
+        if std::thread::Builder::new()
+            .spawn(move || remove_scratch(&retried))
+            .is_err()
+        {
+            remove_scratch(&path);
+        }
+    }
+}
+
+/// Removes a scratch directory. A dropped or failed install's detached writes
+/// and killed processor may still be finishing, so a removal that races them
+/// is tried again shortly.
+fn remove_scratch(path: &Path) {
+    let mut attempts = 0;
+    loop {
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => return,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(_) if attempts < 3 => {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "could not remove loader staging directory"
+                );
+                return;
+            }
+        }
+    }
+}
+
 fn server_staging(target: &Path) -> PathBuf {
     let name = target
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("server");
     target.with_file_name(format!(
-        ".{name}.ephervex-installing-{}",
-        std::process::id()
+        ".{name}.ephervex-installing-{}-{}",
+        std::process::id(),
+        WORKSPACE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ))
 }
 
@@ -1495,6 +1610,42 @@ async fn create_directory_link(source: &Path, destination: &Path) -> LoaderResul
         destination,
         "shared server libraries require a supported directory-link implementation",
     ))
+}
+
+/// Aborts a background task on every exit from the scope that owns it.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// How much of a processor's stderr is kept for its failure report.
+const MAX_PROCESSOR_STDERR_BYTES: usize = 16 * 1024;
+
+/// Reads a processor's stderr to its end, keeping the start in `captured`.
+async fn capture_stderr(
+    pipe: Option<tokio::process::ChildStderr>,
+    captured: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+) {
+    let Some(mut pipe) = pipe else {
+        return;
+    };
+    let mut chunk = [0_u8; 8192];
+    loop {
+        let read = match tokio::io::AsyncReadExt::read(&mut pipe, &mut chunk).await {
+            Ok(0) => return,
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return,
+        };
+        let mut kept = captured
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let room = MAX_PROCESSOR_STDERR_BYTES.saturating_sub(kept.len());
+        kept.extend_from_slice(&chunk[..read.min(room)]);
+    }
 }
 
 async fn remove_tree(path: &Path) {
@@ -2606,6 +2757,138 @@ mod tests {
             LoaderError::InstallerLibraryConflict { .. }
         ));
         assert!(!library_path(&engine, coordinate).exists());
+    }
+
+    fn installing_siblings(target: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(target.parent().expect("parent"))
+            .expect("parent directory")
+            .map(|entry| entry.expect("entry").path())
+            .filter(|path| path.to_string_lossy().contains(".ephervex-installing-"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_canceled_server_install_leaves_no_staging_directory() {
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+        let metadata = VersionMetadata::parse(&format!(
+            r#"{{"id":"1.20.1","type":"release","releaseTime":"2023-06-12T00:00:00+00:00",
+            "time":"2023-06-12T00:00:00+00:00","mainClass":"net.minecraft.client.main.Main",
+            "libraries":[],"downloads":{{"server":{{"url":"https://piston-data.mojang.com/server.jar",
+            "sha1":"{ABC_SHA1}","size":3}}}}}}"#
+        ))
+        .expect("metadata");
+        let target = root.path().join("servers/one/game");
+        std::fs::create_dir_all(target.parent().expect("parent")).expect("server root");
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let error = engine
+            .install_vanilla_server(
+                &metadata,
+                &target,
+                &OperationReporter::silent("server-install-test"),
+                &cancel,
+            )
+            .await
+            .expect_err("a canceled install does not finish");
+
+        assert!(matches!(
+            error,
+            LoaderError::Download { ref source, .. } if source.is_cancellation()
+        ));
+        assert!(installing_siblings(&target).is_empty());
+        assert!(!target.exists());
+    }
+
+    #[tokio::test]
+    async fn a_loader_server_install_that_fails_after_staging_leaves_no_staging_directory() {
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+        cache_installer(&engine, &profile_json(""), &version_json(&[])).await;
+        // A plain HTTP address the transport policy refuses once staging exists.
+        let parent = VersionMetadata::parse(&format!(
+            r#"{{"id":"1.20.1","type":"release","releaseTime":"2023-06-12T00:00:00+00:00",
+            "time":"2023-06-12T00:00:00+00:00","mainClass":"net.minecraft.client.main.Main",
+            "libraries":[],"downloads":{{"server":{{"url":"http://127.0.0.1:1/server.jar",
+            "sha1":"{ABC_SHA1}","size":3}}}}}}"#
+        ))
+        .expect("parent metadata");
+        let target = root.path().join("servers/one/game");
+        std::fs::create_dir_all(target.parent().expect("parent")).expect("server root");
+
+        let error = engine
+            .install_loader_server(
+                LoaderKind::Forge,
+                "1.20.1",
+                "47.4.10",
+                &parent,
+                &root.path().join("java"),
+                &target,
+                &OperationReporter::silent("loader-server-staging-test"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("the server jar address is refused");
+
+        assert!(matches!(error, LoaderError::Url(_)), "{error:?}");
+        assert!(installing_siblings(&target).is_empty());
+        assert!(!target.exists());
+    }
+
+    #[tokio::test]
+    async fn a_scratch_directory_is_removed_or_handed_over_whole() {
+        let root = tempfile::tempdir().expect("root");
+        let removed = ScratchDirectory::create(root.path().join("removed"))
+            .await
+            .expect("scratch");
+        std::fs::write(removed.path().join("server.jar"), b"abc").expect("content");
+        let path = removed.path().to_path_buf();
+        removed.remove().await;
+        assert!(!path.exists());
+
+        let staged = ScratchDirectory::create(root.path().join("staged"))
+            .await
+            .expect("scratch");
+        std::fs::write(staged.path().join("server.jar"), b"abc").expect("content");
+        let path = staged.path().to_path_buf();
+        let target = root.path().join("game");
+        staged.settle(Ok(()), Some(&target)).await.expect("publish");
+        assert!(!path.exists());
+        assert_eq!(
+            std::fs::read(target.join("server.jar")).expect("published"),
+            b"abc"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_scratch_directory_dropped_inside_the_runtime_is_removed() {
+        let root = tempfile::tempdir().expect("root");
+        let scratch = ScratchDirectory::create(root.path().join("dropped"))
+            .await
+            .expect("scratch");
+        std::fs::create_dir_all(scratch.path().join("libraries")).expect("content");
+        let path = scratch.path().to_path_buf();
+        drop(scratch);
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while path.exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the directory is removed off the runtime");
+    }
+
+    #[test]
+    fn a_dropped_scratch_directory_is_removed() {
+        let root = tempfile::tempdir().expect("root");
+        let path = root.path().join("dropped");
+        std::fs::create_dir_all(path.join("libraries")).expect("scratch");
+        drop(ScratchDirectory {
+            path: Some(path.clone()),
+        });
+        assert!(!path.exists());
     }
 
     #[tokio::test]
