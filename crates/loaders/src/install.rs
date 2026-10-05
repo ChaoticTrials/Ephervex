@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument};
 use zip::ZipArchive;
 
-use crate::profile::{InstallProfile, InstallSide, Processor};
+use crate::profile::{InstallProfile, InstallSide, Processor, ProfileArtifact};
 use crate::{LoaderError, LoaderResult};
 
 const FORGE_MAVEN: &str = "https://maven.minecraftforge.net";
@@ -930,8 +930,14 @@ impl InstallerEngine {
                     return Err(LoaderError::InstallerLibraryConflict {
                         path: bundle.installer.clone(),
                         library: library.name.clone(),
-                        profile: processed.get().clone(),
-                        version: artifact.sha1.clone(),
+                        profile: Box::new(processed.get().clone()),
+                        version: Box::new(artifact.sha1.clone()),
+                        // Processor outputs declare a digest but no size; use the verified file.
+                        profile_size: fs::metadata(processed.key())
+                            .await
+                            .map_err(|source| io_error(processed.key(), source))?
+                            .len(),
+                        version_size: artifact.size,
                     });
                 }
                 std::collections::hash_map::Entry::Occupied(_) => {}
@@ -1003,11 +1009,11 @@ fn ensure_consistent_library_digests(
     bundle: &InstallerBundle,
     context: &RuleContext,
 ) -> LoaderResult<()> {
-    let mut profile: HashMap<&MavenCoordinate, &Hash> = HashMap::new();
+    let mut profile: HashMap<&MavenCoordinate, &ProfileArtifact> = HashMap::new();
     for declared in &bundle.profile.libraries {
         profile
             .entry(&declared.coordinate)
-            .or_insert(&declared.artifact.sha1);
+            .or_insert(&declared.artifact);
     }
     let mut stored = HashSet::new();
     for library in &bundle.child.libraries {
@@ -1017,14 +1023,16 @@ fn ensure_consistent_library_digests(
         if !rules_allow(&library.rules, context) || !stored.insert(&library.coordinate) {
             continue;
         }
-        if let Some(sha1) = profile.get(&library.coordinate).copied()
-            && *sha1 != artifact.sha1
+        if let Some(declared) = profile.get(&library.coordinate).copied()
+            && (declared.sha1 != artifact.sha1 || declared.size != artifact.size)
         {
             return Err(LoaderError::InstallerLibraryConflict {
                 path: bundle.installer.clone(),
                 library: library.name.clone(),
-                profile: sha1.clone(),
-                version: artifact.sha1.clone(),
+                profile: Box::new(declared.sha1.clone()),
+                version: Box::new(artifact.sha1.clone()),
+                profile_size: declared.size,
+                version_size: artifact.size,
             });
         }
     }
@@ -2435,6 +2443,26 @@ mod tests {
     }
 
     #[test]
+    fn matching_library_digests_with_different_sizes_are_refused() {
+        let root = tempfile::tempdir().expect("root");
+        for url in ["https://maven.invalid/fmlcore.jar", ""] {
+            let bundle = bundle_declaring(
+                root.path(),
+                &library_json(FMLCORE, "https://maven.invalid/profile.jar", DEF_SHA1),
+                &[library_json(FMLCORE, url, DEF_SHA1).replace("\"size\":3", "\"size\":4")],
+            );
+
+            let error = validate_on_host(&bundle).expect_err("conflicting sizes");
+            assert!(matches!(
+                error,
+                LoaderError::InstallerLibraryConflict {
+                    library, profile, version, profile_size: 3, version_size: 4, ..
+                } if library == FMLCORE && profile == version
+            ));
+        }
+    }
+
+    #[test]
     fn a_library_both_documents_publish_with_one_digest_is_accepted() {
         let root = tempfile::tempdir().expect("root");
         let securejarhandler = "cpw.mods:securejarhandler:2.1.10";
@@ -2754,7 +2782,9 @@ mod tests {
 
         assert!(matches!(
             error,
-            LoaderError::InstallerLibraryConflict { .. }
+            LoaderError::InstallerLibraryConflict {
+                profile, version, profile_size: 3, version_size: 3, ..
+            } if profile.digest() == ABC_SHA1 && version.digest() == DEF_SHA1
         ));
         assert!(!library_path(&engine, coordinate).exists());
     }
