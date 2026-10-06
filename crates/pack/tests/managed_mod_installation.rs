@@ -55,7 +55,7 @@ fn manager() -> DownloadManager {
 
 /// One instance's directories, as `ephervex-storage` lays them out.
 struct Instance {
-    _base: TempDir,
+    base: TempDir,
     game_dir: PathBuf,
     store: SourceStore,
     cache: CacheLayout,
@@ -70,7 +70,7 @@ impl Instance {
         std::fs::create_dir_all(store.dir()).expect("source dir");
         Self {
             cache: CacheLayout::new(base.path().join("cache")),
-            _base: base,
+            base,
             game_dir,
             store,
         }
@@ -459,7 +459,7 @@ async fn a_second_instance_reuses_the_verified_shared_cache() {
     // A second instance sharing one cache - bisecting a bug looks exactly like
     // this - pays no network cost.
     let second = Instance {
-        _base: tempfile::tempdir().expect("temp dir"),
+        base: tempfile::tempdir().expect("temp dir"),
         game_dir: first
             .game_dir
             .parent()
@@ -552,4 +552,205 @@ fn writable(dir: &Path) {
     let mut permissions = std::fs::metadata(dir).expect("metadata").permissions();
     permissions.set_mode(0o755);
     std::fs::set_permissions(dir, permissions).expect("set permissions");
+}
+
+fn root_addition(server: &MockServer, name: &str) -> PackFileRecipe {
+    addition(server, "/root.jar", name, ROOT_JAR, "ROOTPROJ")
+}
+
+#[tokio::test]
+async fn a_request_at_another_path_for_the_recorded_version_leaves_one_copy() {
+    // The recorded artifact is the same one wherever the caller would have put
+    // it. A second copy beside it is two builds of one mod to the loader, with
+    // a recipe that only knows the first.
+    let server = MockServer::start().await;
+    serve(&server, "/root.jar", ROOT_JAR).await;
+    let instance = Instance::new();
+    let mut recipe = recipe();
+    install(
+        &instance,
+        &mut recipe,
+        &[root_addition(&server, "root-1.0.jar")],
+    )
+    .await
+    .expect("first install");
+    let recorded = std::fs::read_to_string(instance.store.recipe_path()).expect("read");
+
+    let report = install(
+        &instance,
+        &mut recipe,
+        &[root_addition(&server, "root-renamed.jar")],
+    )
+    .await
+    .expect("request at another path");
+
+    assert_eq!(report.already_present, [Path::new("mods/root-1.0.jar")]);
+    assert!(!report.changed_anything());
+    assert!(!instance.jar("root-renamed.jar").exists());
+    assert!(instance.jar("root-1.0.jar").is_file());
+    assert_eq!(
+        std::fs::read_to_string(instance.store.recipe_path()).expect("read"),
+        recorded
+    );
+}
+
+#[tokio::test]
+async fn a_missing_recorded_jar_is_restored_where_the_recipe_records_it() {
+    let server = MockServer::start().await;
+    serve(&server, "/root.jar", ROOT_JAR).await;
+    let instance = Instance::new();
+    let mut recipe = recipe();
+    install(
+        &instance,
+        &mut recipe,
+        &[root_addition(&server, "root-1.0.jar")],
+    )
+    .await
+    .expect("first install");
+    std::fs::remove_file(instance.jar("root-1.0.jar")).expect("delete the jar");
+
+    let report = install(
+        &instance,
+        &mut recipe,
+        &[root_addition(&server, "root-renamed.jar")],
+    )
+    .await
+    .expect("request at another path");
+
+    assert_eq!(report.repaired, [Path::new("mods/root-1.0.jar")]);
+    assert!(instance.jar("root-1.0.jar").is_file());
+    assert!(!instance.jar("root-renamed.jar").exists());
+    assert_eq!(
+        recipe.managed_mods()[0].file_name,
+        "root-1.0.jar",
+        "the record keeps describing the installed file"
+    );
+}
+
+#[tokio::test]
+async fn a_recorded_mod_that_is_turned_off_stays_off_when_it_is_installed_again() {
+    let server = MockServer::start().await;
+    serve(&server, "/root.jar", ROOT_JAR).await;
+    let instance = Instance::new();
+    let mut recipe = recipe();
+    let additions = [root_addition(&server, "root-1.0.jar")];
+    install(&instance, &mut recipe, &additions)
+        .await
+        .expect("first install");
+    std::fs::rename(
+        instance.jar("root-1.0.jar"),
+        instance.jar("root-1.0.jar.disabled"),
+    )
+    .expect("turn the mod off");
+
+    let report = install(&instance, &mut recipe, &additions)
+        .await
+        .expect("install again");
+
+    assert_eq!(report.already_present, [Path::new("mods/root-1.0.jar")]);
+    assert!(report.repaired.is_empty());
+    assert!(
+        !instance.jar("root-1.0.jar").exists(),
+        "turning a mod off is the user's decision, not damage"
+    );
+    assert_eq!(
+        std::fs::read(instance.jar("root-1.0.jar.disabled")).expect("read"),
+        ROOT_JAR
+    );
+}
+
+#[tokio::test]
+async fn a_recorded_jar_with_other_bytes_is_left_alone_and_reported() {
+    // Very often the local build the instance exists to test. A repeated
+    // install must neither claim it matches nor overwrite it.
+    let server = MockServer::start().await;
+    serve(&server, "/root.jar", ROOT_JAR).await;
+    let instance = Instance::new();
+    let mut recipe = recipe();
+    let additions = [root_addition(&server, "root-1.0.jar")];
+    install(&instance, &mut recipe, &additions)
+        .await
+        .expect("first install");
+    let recorded = std::fs::read_to_string(instance.store.recipe_path()).expect("read");
+    std::fs::write(instance.jar("root-1.0.jar"), b"the developer's own build").expect("modify");
+
+    let report = install(&instance, &mut recipe, &additions)
+        .await
+        .expect("install again");
+
+    assert_eq!(report.modified, [Path::new("mods/root-1.0.jar")]);
+    assert!(report.already_present.is_empty());
+    assert!(!report.changed_anything());
+    assert_eq!(
+        std::fs::read(instance.jar("root-1.0.jar")).expect("read"),
+        b"the developer's own build"
+    );
+    assert_eq!(
+        std::fs::read_to_string(instance.store.recipe_path()).expect("read"),
+        recorded
+    );
+}
+
+#[tokio::test]
+async fn a_repair_restores_the_recorded_bytes_even_when_the_request_names_another_file() {
+    // The same project and version can offer more than one file. The recipe's
+    // hashes describe the recorded one, so that is what a repair must write.
+    let server = MockServer::start().await;
+    serve(&server, "/root.jar", ROOT_JAR).await;
+    serve(&server, "/library.jar", LIBRARY_JAR).await;
+    let instance = Instance::new();
+    let mut recipe = recipe();
+    install(
+        &instance,
+        &mut recipe,
+        &[root_addition(&server, "root-1.0.jar")],
+    )
+    .await
+    .expect("first install");
+    std::fs::remove_file(instance.jar("root-1.0.jar")).expect("delete the jar");
+    let other_file = addition(
+        &server,
+        "/library.jar",
+        "root-other-file.jar",
+        LIBRARY_JAR,
+        "ROOTPROJ",
+    );
+
+    let report = install(&instance, &mut recipe, &[other_file])
+        .await
+        .expect("repair");
+
+    assert_eq!(report.repaired, [Path::new("mods/root-1.0.jar")]);
+    assert_eq!(
+        std::fs::read(instance.jar("root-1.0.jar")).expect("read"),
+        ROOT_JAR
+    );
+    assert!(!instance.jar("root-other-file.jar").exists());
+}
+
+#[tokio::test]
+async fn a_recorded_jar_with_no_address_is_restored_from_the_requests_address() {
+    // A hand-placed jar a catalog recognized is recorded with no download
+    // address. The provider being asked serves exactly its bytes.
+    let server = MockServer::start().await;
+    serve(&server, "/root.jar", ROOT_JAR).await;
+    let instance = Instance::new();
+    let mut recipe = recipe();
+    let additions = [root_addition(&server, "root-1.0.jar")];
+    install(&instance, &mut recipe, &additions)
+        .await
+        .expect("first install");
+    recipe.files[0].downloads.clear();
+    std::fs::remove_file(instance.jar("root-1.0.jar")).expect("delete the jar");
+    std::fs::remove_dir_all(instance.base.path().join("cache")).expect("empty the cache");
+
+    let report = install(&instance, &mut recipe, &additions)
+        .await
+        .expect("repair");
+
+    assert_eq!(report.repaired, [Path::new("mods/root-1.0.jar")]);
+    assert_eq!(
+        std::fs::read(instance.jar("root-1.0.jar")).expect("read"),
+        ROOT_JAR
+    );
 }

@@ -32,12 +32,13 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use ephervex_download::stored_file_matches;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
 
 use crate::error::{PackError, PackResult};
 use crate::install::{ArtifactFetch, copy_into_instance, fetch_all};
-use crate::recipe::{PackFileRecipe, PackRecipe};
+use crate::recipe::{PackFileRecipe, PackRecipe, ProviderFileIdentity};
 use crate::store::SourceStore;
 
 /// The directory managed mods are installed into, relative to the game
@@ -82,8 +83,15 @@ pub struct ManagedModInstallation {
     /// Files this operation created, as logical paths.
     pub installed: Vec<PathBuf>,
     /// Files already present and already recorded at the same version, so
-    /// nothing was written for them.
+    /// nothing was written for them. A mod turned off still counts as present,
+    /// and the path is the one the recipe records, which is not necessarily the
+    /// one the request named.
     pub already_present: Vec<PathBuf>,
+    /// Recorded files whose bytes are not the recorded ones. They were left
+    /// exactly as they are: a changed jar is very often the local build the
+    /// instance exists to test, and a reinstall is not entitled to overwrite
+    /// it.
+    pub modified: Vec<PathBuf>,
     /// Recorded mods whose jar had gone missing and was restored from the
     /// verified cache. Repair, not an update: the recipe entry is unchanged.
     pub repaired: Vec<PathBuf>,
@@ -123,8 +131,13 @@ enum Disposition {
     Install,
     /// The recipe already records this exact mod and the jar is present.
     AlreadyPresent,
-    /// The recipe already records this exact mod but the jar has gone missing.
+    /// The recipe already records this exact mod but the jar has gone missing,
+    /// under either spelling.
     Repair,
+    /// The recipe already records this exact mod and a jar is there, but it is
+    /// not the recorded artifact. It is neither rewritten nor reported as
+    /// installed.
+    Altered,
 }
 
 /// Installs mods and records them in the recipe.
@@ -143,22 +156,26 @@ pub async fn install_managed(request: ManagedModInstall<'_>) -> PackResult<Manag
         fetch,
     } = request;
     let cancel = fetch.cancel;
+    let settled = settle_recorded_paths(recipe, additions);
+    let additions = settled.as_slice();
 
     // Nothing below this line runs until every destination is known to be safe.
-    let dispositions = plan_destinations(recipe, additions, game_dir)?;
+    let dispositions = plan_destinations(recipe, additions, game_dir).await?;
 
     let mut report = ManagedModInstallation::default();
     let mut pending: Vec<(&PackFileRecipe, Disposition)> = Vec::new();
     for (file, disposition) in additions.iter().zip(&dispositions) {
         match disposition {
             Disposition::AlreadyPresent => report.already_present.push(file.logical_path.clone()),
+            Disposition::Altered => report.modified.push(file.logical_path.clone()),
             other => pending.push((file, *other)),
         }
     }
     if pending.is_empty() {
         info!(
             already_present = report.already_present.len(),
-            "every requested mod was already installed at the requested version"
+            modified = report.modified.len(),
+            "nothing needed installing at the requested versions"
         );
         return Ok(report);
     }
@@ -200,7 +217,7 @@ pub async fn install_managed(request: ManagedModInstall<'_>) -> PackResult<Manag
 ///
 /// Runs to completion before anything is fetched or written: a collision found
 /// halfway through a copy loop would already have overwritten something.
-fn plan_destinations(
+async fn plan_destinations(
     recipe: &PackRecipe,
     additions: &[PackFileRecipe],
     game_dir: &Path,
@@ -216,63 +233,135 @@ fn plan_destinations(
         }
     }
 
-    additions
-        .iter()
-        .map(|file| disposition_for(recipe, file, game_dir))
-        .collect()
+    let mut dispositions = Vec::with_capacity(additions.len());
+    for file in additions {
+        dispositions.push(disposition_for(recipe, file, game_dir).await?);
+    }
+    Ok(dispositions)
 }
 
 /// What to do with one planned file.
-fn disposition_for(
+async fn disposition_for(
     recipe: &PackRecipe,
     file: &PackFileRecipe,
     game_dir: &Path,
 ) -> PackResult<Disposition> {
-    let destination = game_dir.join(&file.logical_path);
-    let recorded = recorded_identically(recipe, file);
-
-    match (destination.exists(), recorded) {
-        // Nothing there, nothing recorded: an ordinary install.
-        (false, false) => Ok(Disposition::Install),
-        // Recorded, but the jar is gone. Restoring it from the verified cache
-        // is repair; the recipe entry does not change.
-        (false, true) => Ok(Disposition::Repair),
-        // Recorded and present: an exactly repeated install, which does
-        // nothing rather than rewriting a byte-identical file.
-        (true, true) => Ok(Disposition::AlreadyPresent),
-        // Present, and Ephervex did not put it there. This is the local build
-        // being debugged, or the jar from the bug report. It is not ours to
-        // overwrite, and it is not ours to claim.
-        (true, false) => Err(PackError::DestinationOccupied { path: destination }),
+    // A recorded mod is judged by what the recipe says about it, wherever that
+    // is and however it is spelled on disk.
+    if let Some(recorded) = recorded_entry(recipe, file) {
+        return Ok(match recorded_jar(game_dir, recorded).await {
+            // Gone, so restoring it from the verified cache is repair; the
+            // recipe entry does not change.
+            RecordedJar::Missing => Disposition::Repair,
+            // An exactly repeated install, which does nothing rather than
+            // rewriting a byte-identical file.
+            RecordedJar::Intact => Disposition::AlreadyPresent,
+            RecordedJar::Altered => Disposition::Altered,
+        });
     }
+
+    // Not recorded. Anything standing here is a file Ephervex did not put
+    // there: the local build being debugged, or the jar from the bug report. It
+    // is not ours to overwrite, and it is not ours to claim.
+    let destination = game_dir.join(&file.logical_path);
+    if destination.exists() {
+        return Err(PackError::DestinationOccupied { path: destination });
+    }
+    Ok(Disposition::Install)
 }
 
-/// Whether the recipe already records this exact mod - same project *and* same
-/// version - at this exact path.
+/// The recipe entry a request for `file` refers to: the same project at the
+/// same version.
 ///
-/// A different version at the same path is deliberately not "recorded": it is
-/// refused earlier, during planning, because changing it is an update.
-fn recorded_identically(recipe: &PackRecipe, file: &PackFileRecipe) -> bool {
-    let Some((provider, project_id)) = file
+/// A different version of the project is deliberately not a match: changing it
+/// is an update, which this module refuses and the mutation module performs.
+pub(crate) fn recorded_entry<'a>(
+    recipe: &'a PackRecipe,
+    file: &PackFileRecipe,
+) -> Option<&'a PackFileRecipe> {
+    let (provider, project_id) = file
         .identity
         .as_ref()
-        .and_then(crate::recipe::ProviderFileIdentity::project)
-    else {
-        return false;
+        .and_then(ProviderFileIdentity::project)?;
+    let existing = recipe.managed_project(provider, project_id)?;
+    let version = |entry: &PackFileRecipe| {
+        entry
+            .identity
+            .as_ref()
+            .and_then(|identity| identity.version_id.clone())
     };
-    recipe
-        .managed_project(provider, project_id)
-        .is_some_and(|existing| {
-            existing.logical_path == file.logical_path
-                && existing
-                    .identity
-                    .as_ref()
-                    .and_then(|it| it.version_id.as_deref())
-                    == file
-                        .identity
-                        .as_ref()
-                        .and_then(|it| it.version_id.as_deref())
+    (version(existing) == version(file)).then_some(existing)
+}
+
+/// The request, with every mod the recipe already records at the requested
+/// version replaced by that recorded entry.
+///
+/// A request for the same project and version names the recorded artifact,
+/// wherever its caller would have put it and whichever of the version's files
+/// the caller picked. Where the artifact lives and which bytes it is are
+/// decisions the recipe has already made. Following the request instead would
+/// write a second copy beside the recorded one, which the loader reads as two
+/// builds of one mod, or put bytes on disk that the recipe's hashes do not
+/// describe.
+///
+/// The request's download addresses are kept after the recorded ones. A
+/// recorded entry may have none (a hand-placed jar) or only a stale one, while
+/// the provider being asked serves the recorded bytes. Every address is still
+/// verified against the recorded hashes, so an address serving anything else
+/// fails rather than installs.
+pub(crate) fn settle_recorded_paths(
+    recipe: &PackRecipe,
+    requested: &[PackFileRecipe],
+) -> Vec<PackFileRecipe> {
+    requested
+        .iter()
+        .map(|file| {
+            let Some(recorded) = recorded_entry(recipe, file) else {
+                return file.clone();
+            };
+            let mut settled = recorded.clone();
+            for address in &file.downloads {
+                if !settled.downloads.contains(address) {
+                    settled.downloads.push(address.clone());
+                }
+            }
+            settled
         })
+        .collect()
+}
+
+/// What a recorded mod's jar is on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecordedJar {
+    /// Neither the enabled nor the disabled spelling exists.
+    Missing,
+    /// Present, under either spelling, with the recorded bytes.
+    Intact,
+    /// Present, but not provably the recorded artifact: other bytes, a link, or
+    /// a file that could not be read back.
+    Altered,
+}
+
+/// Looks for a recorded mod's jar and checks it against the recorded hashes.
+///
+/// One answer to "is this recorded artifact installed?" for both the installer
+/// and the mutation, so the two cannot disagree about a mod that is turned off
+/// or one that was replaced locally.
+pub(crate) async fn recorded_jar(game_dir: &Path, recorded: &PackFileRecipe) -> RecordedJar {
+    let enabled = game_dir.join(&recorded.logical_path);
+    let present = if enabled.is_file() {
+        enabled
+    } else {
+        let disabled = disabled_path(&enabled);
+        if !disabled.is_file() {
+            return RecordedJar::Missing;
+        }
+        disabled
+    };
+    match stored_file_matches(&present, recorded.size, &recorded.hashes).await {
+        Ok(true) => RecordedJar::Intact,
+        Ok(false) | Err(_) => RecordedJar::Altered,
+    }
 }
 
 /// Copies each fetched artifact into the instance, recording what was created.

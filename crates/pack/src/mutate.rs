@@ -54,7 +54,7 @@ use tracing::{info, instrument, warn};
 
 use crate::error::{PackError, PackResult};
 use crate::install::{ArtifactFetch, copy_into_instance, fetch_all};
-use crate::managed::disabled_path;
+use crate::managed::{RecordedJar, disabled_path, recorded_jar, settle_recorded_paths};
 use crate::recipe::{PackFileRecipe, PackRecipe, ProviderFileIdentity};
 use crate::store::SourceStore;
 
@@ -114,8 +114,13 @@ pub struct ManagedMutationReport {
     /// version. Repair, not a change: the recipe entry is unchanged.
     pub repaired: Vec<PathBuf>,
     /// Requested mods that were already installed at exactly the requested
-    /// version, so nothing was written for them.
+    /// version, so nothing was written for them. The path is the one the recipe
+    /// records, which is not necessarily the one the request named.
     pub unchanged: Vec<PathBuf>,
+    /// Requested mods recorded at the requested version whose jar holds other
+    /// bytes than the recorded ones. They were left exactly as they are: a
+    /// changed jar is very often the local build the instance exists to test.
+    pub modified: Vec<PathBuf>,
     pub reused_from_cache: usize,
     pub bytes: u64,
     /// Cleanup that could not finish after the new recipe was published.
@@ -174,6 +179,9 @@ enum Action {
     Unchanged,
     /// The same version is recorded and its jar has gone missing.
     Repair,
+    /// The same version is recorded and a jar is there, but not the recorded
+    /// one. It is left alone.
+    Altered,
     /// A different version is recorded. The old entry's path is carried so the
     /// old jar can be retired even when the file name did not change.
     Replace(Box<PackFileRecipe>),
@@ -199,11 +207,13 @@ pub async fn mutate_managed(request: ManagedMutation<'_>) -> PackResult<ManagedM
         fetch,
     } = request;
     let cancel = fetch.cancel;
+    let settled = settle_recorded_paths(recipe, upserts);
+    let upserts = settled.as_slice();
 
     // Nothing below this line runs until the whole desired state is known to be
     // reachable: every destination safe, every removal something Ephervex
     // actually installed.
-    let actions = plan(recipe, upserts, removals, game_dir)?;
+    let actions = plan(recipe, upserts, removals, game_dir).await?;
     let retirements = retirements(recipe, upserts, &actions, removals, game_dir);
     // The replacements whose predecessor was turned off, so the new build can
     // be written the same way round.
@@ -223,6 +233,10 @@ pub async fn mutate_managed(request: ManagedMutation<'_>) -> PackResult<ManagedM
         .filter(|(file, action)| match action {
             Action::Unchanged => {
                 report.unchanged.push(file.logical_path.clone());
+                false
+            }
+            Action::Altered => {
+                report.modified.push(file.logical_path.clone());
                 false
             }
             _ => true,
@@ -287,6 +301,7 @@ pub async fn mutate_managed(request: ManagedMutation<'_>) -> PackResult<ManagedM
         removed = report.removed.len(),
         repaired = report.repaired.len(),
         unchanged = report.unchanged.len(),
+        modified = report.modified.len(),
         "mutated managed mods"
     );
     Ok(report)
@@ -294,7 +309,7 @@ pub async fn mutate_managed(request: ManagedMutation<'_>) -> PackResult<ManagedM
 
 /// Decides what to do with every requested mod, and refuses the whole mutation
 /// if any of it is unsafe.
-fn plan(
+async fn plan(
     recipe: &PackRecipe,
     upserts: &[PackFileRecipe],
     removals: &[ManagedProject],
@@ -337,10 +352,11 @@ fn plan(
     // The paths this mutation frees. A new jar may land on one of them.
     let freed: BTreeSet<PathBuf> = freed_paths(recipe, upserts, removals);
 
-    upserts
-        .iter()
-        .map(|file| action_for(recipe, file, game_dir, &freed))
-        .collect()
+    let mut actions = Vec::with_capacity(upserts.len());
+    for file in upserts {
+        actions.push(action_for(recipe, file, game_dir, &freed).await?);
+    }
+    Ok(actions)
 }
 
 /// Every path this mutation vacates, whether by replacing a mod or removing it.
@@ -367,7 +383,7 @@ fn freed_paths(
 }
 
 /// What to do with one requested mod.
-fn action_for(
+async fn action_for(
     recipe: &PackRecipe,
     file: &PackFileRecipe,
     game_dir: &Path,
@@ -383,15 +399,16 @@ fn action_for(
 
     match existing {
         Some(entry) if version_of(entry) == version_of(file) => {
-            // The same mod at the same version. Present is a no-op - including
-            // present but turned off, which is a state to leave alone rather
-            // than a jar to put back. Absent is a repair, which restores the
-            // recorded jar without changing what is recorded.
-            if installed_jar(game_dir, &file.logical_path).is_some() {
-                Ok(Action::Unchanged)
-            } else {
-                Ok(Action::Repair)
-            }
+            // The same mod at the same version. Present with the recorded bytes
+            // is a no-op - including present but turned off, which is a state
+            // to leave alone rather than a jar to put back. Absent is a repair,
+            // which restores the recorded jar without changing what is
+            // recorded. Present with other bytes is left alone and reported.
+            Ok(match recorded_jar(game_dir, entry).await {
+                RecordedJar::Intact => Action::Unchanged,
+                RecordedJar::Missing => Action::Repair,
+                RecordedJar::Altered => Action::Altered,
+            })
         }
         Some(entry) if entry.origin == ModOrigin::HandPlaced => {
             // Installing this project would retire the user's own jar as
@@ -596,7 +613,7 @@ fn write_new_files(
                 version: version_of(file).map(ToOwned::to_owned),
             }),
             Action::Install => report.installed.push(file.logical_path.clone()),
-            Action::Unchanged => {}
+            Action::Unchanged | Action::Altered => {}
         }
     }
     Ok(())
@@ -724,8 +741,9 @@ fn publish(
                 updated.files[position] = replacement;
             }
             // A repair changes nothing about the record, and an unchanged mod
-            // is already exactly what is asked for.
-            Action::Repair | Action::Unchanged => {}
+            // is already exactly what is asked for. A modified one is left as
+            // it is, record included.
+            Action::Repair | Action::Unchanged | Action::Altered => {}
         }
     }
     for addition in additions {
@@ -737,20 +755,6 @@ fn publish(
     store.write_recipe(&updated)?;
     *recipe = updated;
     Ok(())
-}
-
-/// The provider and project an entry names, if it names both.
-/// The jar a recorded mod actually has in the game directory, if it has one.
-///
-/// A mod somebody turned off sits at `<name>.jar.disabled`, so looking only at
-/// the enabled spelling would read it as deleted.
-fn installed_jar(game_dir: &Path, logical_path: &Path) -> Option<PathBuf> {
-    let enabled = game_dir.join(logical_path);
-    if enabled.is_file() {
-        return Some(enabled);
-    }
-    let disabled = disabled_path(&enabled);
-    disabled.is_file().then_some(disabled)
 }
 
 /// Whether a recorded mod's jar is currently turned off.
@@ -771,6 +775,7 @@ fn occupied_by(game_dir: &Path, logical_path: &Path) -> Option<PathBuf> {
     disabled.exists().then_some(disabled)
 }
 
+/// The provider and project an entry names, if it names both.
 fn project_of(file: &PackFileRecipe) -> Option<(ModProvider, &str)> {
     file.identity
         .as_ref()
@@ -817,6 +822,9 @@ pub fn projected(
             continue;
         };
         match positions.get(&(provider, project_id.to_owned())) {
+            // The recorded version is what the mutation keeps, whatever path or
+            // sides the request spelled.
+            Some(&index) if version_of(&projected.files[index]) == version_of(file) => {}
             Some(&index) => {
                 let mut replacement = file.clone();
                 replacement.origin = projected.files[index].origin;
