@@ -69,6 +69,9 @@ pub trait ModProviderApi: std::fmt::Debug + Send + Sync {
     /// cannot enumerate a decade of releases to answer one question, so it asks
     /// its own API for the release and loader in hand, at the cost of having
     /// nothing left to explain an incompatible version with.
+    ///
+    /// Every version returned belongs to `project_id`; the resolver drops any
+    /// that does not.
     async fn versions(
         &self,
         project_id: &str,
@@ -94,6 +97,9 @@ pub trait ModProviderApi: std::fmt::Debug + Send + Sync {
     /// Used when a dependency pins an exact version: those arrive in batches,
     /// and asking for them one at a time would spend a rate-limit budget on
     /// round trips.
+    ///
+    /// Order is not significant and an id may be missing from the answer. The
+    /// resolver matches each version to a requested id and ignores the rest.
     async fn versions_by_id(
         &self,
         ids: &[String],

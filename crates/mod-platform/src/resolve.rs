@@ -615,8 +615,13 @@ impl<'a> Resolver<'a> {
             .collect()
     }
 
+    /// A project's candidate versions, limited to releases that project owns.
+    ///
+    /// An entry owned by another project would put that project's artifact and
+    /// dependencies under this project's identity.
     async fn versions(&self, project_id: &str) -> ModPlatformResult<Vec<ModVersionInfo>> {
-        self.request
+        let mut versions = self
+            .request
             .provider
             .versions(
                 project_id,
@@ -624,9 +629,15 @@ impl<'a> Resolver<'a> {
                 self.request.reporter,
                 self.request.cancel,
             )
-            .await
+            .await?;
+        versions.retain(|version| version.project_id == project_id);
+        Ok(versions)
     }
 
+    /// The version with exactly this id.
+    ///
+    /// Matched by id rather than taken by position, so a response carrying a
+    /// different release can never stand in for the one that was pinned.
     async fn fetch_version(&self, version_id: &str) -> ModPlatformResult<ModVersionInfo> {
         self.request
             .provider
@@ -637,7 +648,7 @@ impl<'a> Resolver<'a> {
             )
             .await?
             .into_iter()
-            .next()
+            .find(|version| version.id == version_id)
             .ok_or_else(|| ModPlatformError::VersionUnknown {
                 provider: self.request.provider.provider(),
                 version_id: version_id.to_owned(),
@@ -1053,11 +1064,19 @@ mod tests {
     #[derive(Debug, Default)]
     struct Catalog {
         versions: BTreeMap<String, Vec<ModVersionInfo>>,
+        /// What `versions_by_id` answers with whatever was asked, for a
+        /// provider that returns something other than the requested ids.
+        by_id_response: Option<Vec<ModVersionInfo>>,
     }
 
     impl Catalog {
         fn with(mut self, project_id: &str, versions: Vec<ModVersionInfo>) -> Self {
             self.versions.insert(project_id.to_owned(), versions);
+            self
+        }
+
+        fn answering_by_id_with(mut self, response: Vec<ModVersionInfo>) -> Self {
+            self.by_id_response = Some(response);
             self
         }
 
@@ -1079,6 +1098,10 @@ mod tests {
                         (project.clone(), versions)
                     })
                     .collect(),
+                by_id_response: self.by_id_response.clone().map(|mut response| {
+                    response.reverse();
+                    response
+                }),
             }
         }
     }
@@ -1147,6 +1170,9 @@ mod tests {
             _reporter: &OperationReporter,
             _cancel: &CancellationToken,
         ) -> ModPlatformResult<Vec<ModVersionInfo>> {
+            if let Some(response) = &self.by_id_response {
+                return Ok(response.clone());
+            }
             Ok(self
                 .versions
                 .values()
@@ -1251,6 +1277,94 @@ mod tests {
             plan.root.version.id, "old",
             "an explicit choice is never quietly upgraded"
         );
+    }
+
+    #[tokio::test]
+    async fn a_pinned_version_is_found_by_id_whatever_order_the_response_has() {
+        let pinned = at(compatible("pinned", "ROOT"), 0);
+        let other = at(compatible("other", "ROOT"), 60);
+
+        for response in [
+            vec![other.clone(), pinned.clone()],
+            vec![pinned.clone(), other.clone()],
+        ] {
+            let catalog = Catalog::default()
+                .with("ROOT", vec![pinned.clone(), other.clone()])
+                .answering_by_id_with(response);
+            let plan = plan(&catalog, InstallSelection::new("ROOT").at_version("pinned")).await;
+            assert_eq!(plan.root.version.id, "pinned");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pinned_version_the_provider_does_not_return_is_unknown_not_substituted() {
+        let catalog = Catalog::default()
+            .with("ROOT", vec![compatible("pinned", "ROOT")])
+            .answering_by_id_with(vec![compatible("other", "ROOT")]);
+
+        let error = plan_with(
+            &catalog,
+            InstallSelection::new("ROOT").at_version("pinned"),
+            &[],
+        )
+        .await
+        .expect_err("must refuse");
+        assert!(matches!(
+            error,
+            ModPlatformError::VersionUnknown { ref version_id, .. } if version_id == "pinned"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_dependency_pin_is_not_satisfied_by_a_different_release() {
+        let mut root = compatible("v1", "ROOT");
+        root.dependencies.push(ModDependency {
+            kind: ModRelationKind::Required,
+            project_id: Some("LIB".to_owned()),
+            version_id: Some("pinned".to_owned()),
+            file_name: None,
+        });
+        let catalog = Catalog::default()
+            .with("ROOT", vec![root])
+            .with("LIB", vec![compatible("other", "LIB")])
+            .answering_by_id_with(vec![compatible("other", "LIB")]);
+
+        let error = plan_with(&catalog, InstallSelection::new("ROOT"), &[])
+            .await
+            .expect_err("must refuse");
+        assert!(matches!(
+            error,
+            ModPlatformError::VersionUnknown { ref version_id, .. } if version_id == "pinned"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_listing_entry_owned_by_another_project_is_never_selected() {
+        let catalog = Catalog::default().with(
+            "ROOT",
+            vec![
+                at(compatible("own", "ROOT"), 0),
+                // Newer and compatible, but it belongs to a different project.
+                at(compatible("foreign", "OTHER"), 60),
+            ],
+        );
+
+        let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+        assert_eq!(plan.root.version.id, "own");
+        assert_eq!(plan.root.version.project_id, "ROOT");
+    }
+
+    #[tokio::test]
+    async fn a_listing_with_only_foreign_entries_has_no_compatible_version() {
+        let catalog = Catalog::default().with("ROOT", vec![compatible("foreign", "OTHER")]);
+
+        let error = plan_with(&catalog, InstallSelection::new("ROOT"), &[])
+            .await
+            .expect_err("must refuse");
+        assert!(matches!(
+            error,
+            ModPlatformError::NoCompatibleVersion { ref project_id, .. } if project_id == "ROOT"
+        ));
     }
 
     #[tokio::test]
