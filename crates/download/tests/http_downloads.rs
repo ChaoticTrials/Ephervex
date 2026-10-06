@@ -709,6 +709,87 @@ async fn a_canceled_download_leaves_no_file_behind() {
 }
 
 #[tokio::test]
+async fn a_canceled_waiter_behind_a_held_destination_returns_canceled_promptly() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/slow.jar"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_bytes(BODY)
+                .set_delay(Duration::from_secs(3)),
+        )
+        .mount(&server)
+        .await;
+
+    let dir = TempDir::new().expect("temp dir");
+    let destination = dir.path().join("slow.jar");
+    let manager = Arc::new(manager(RetryPolicy::none()));
+
+    let holder_cancel = CancellationToken::new();
+    let holder = {
+        let manager = Arc::clone(&manager);
+        let request = request(&server, "/slow.jar", &destination);
+        let cancel = holder_cancel.clone();
+        tokio::spawn(async move {
+            manager
+                .download(&request, &OperationReporter::silent("holder"), &cancel)
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let waiter_cancel = CancellationToken::new();
+    let canceller = waiter_cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        canceller.cancel();
+    });
+    let started = Instant::now();
+    let error = manager
+        .download(
+            &request(&server, "/slow.jar", &destination),
+            &OperationReporter::silent("waiter"),
+            &waiter_cancel,
+        )
+        .await
+        .expect_err("a canceled waiter must not be served");
+
+    assert!(error.is_cancellation(), "got {error:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the waiter must leave the queue when canceled, not when the holder finishes"
+    );
+
+    holder_cancel.cancel();
+    let _ = holder.await;
+}
+
+#[tokio::test]
+async fn a_canceled_request_for_a_cached_artifact_is_not_reported_as_cached() {
+    let server = MockServer::start().await;
+    let dir = TempDir::new().expect("temp dir");
+    let destination = dir.path().join("artifact.jar");
+    std::fs::write(&destination, BODY).expect("seed the cache");
+
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let error = manager(RetryPolicy::none())
+        .download(
+            &request(&server, "/artifact.jar", &destination).verifying(sha1_of(BODY)),
+            &OperationReporter::silent("download"),
+            &cancel,
+        )
+        .await
+        .expect_err("a canceled caller gets no cache success");
+
+    assert!(error.is_cancellation(), "got {error:?}");
+    assert!(
+        destination.exists(),
+        "canceling must not discard a valid cache entry"
+    );
+}
+
+#[tokio::test]
 async fn an_already_cached_artifact_is_not_fetched_again() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

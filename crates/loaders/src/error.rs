@@ -134,9 +134,16 @@ impl LoaderError {
         }
     }
 
+    /// Whether the user canceled, including a cancellation carried by the
+    /// metadata or download failure it surfaced as.
     #[must_use]
-    pub const fn is_cancellation(&self) -> bool {
-        matches!(self, Self::Canceled)
+    pub fn is_cancellation(&self) -> bool {
+        match self {
+            Self::Canceled => true,
+            Self::MetadataUnavailable { source, .. } => source.is_cancellation(),
+            Self::Download { source, .. } => source.is_cancellation(),
+            _ => false,
+        }
     }
 
     #[must_use]
@@ -153,3 +160,46 @@ impl LoaderError {
 }
 
 pub type LoaderResult<T> = Result<T, LoaderError>;
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use ephervex_download::{DownloadError, MetadataCacheError};
+
+    use super::*;
+
+    fn canceled() -> DownloadError {
+        DownloadError::Canceled {
+            url: "https://example.invalid/".to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_cancellation_carried_by_a_metadata_or_download_failure_is_still_a_cancellation() {
+        let metadata = LoaderError::MetadataUnavailable {
+            provider: "Forge",
+            source: Box::new(MetadataCacheError::Fetch {
+                key: "forge".to_owned(),
+                source: Box::new(canceled()),
+            }),
+        };
+        let download = LoaderError::Download {
+            artifact: "installer".to_owned(),
+            source: Box::new(canceled()),
+        };
+        assert!(metadata.is_cancellation());
+        assert!(download.is_cancellation());
+    }
+
+    #[test]
+    fn an_unreachable_provider_is_not_a_cancellation() {
+        let error = LoaderError::MetadataUnavailable {
+            provider: "Forge",
+            source: Box::new(MetadataCacheError::Unavailable {
+                key: "forge".to_owned(),
+                source: Box::new(DownloadError::ShuttingDown),
+            }),
+        };
+        assert!(!error.is_cancellation());
+    }
+}

@@ -15,6 +15,7 @@ use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha512};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt as _;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::{ArtifactStep, DownloadError};
 
@@ -146,8 +147,20 @@ impl HashVerifier {
 /// everywhere else: verification is a no-op when nothing was published to
 /// check against.
 pub async fn file_matches_hashes(path: &Path, expected: &[Hash]) -> Result<bool, DownloadError> {
+    Ok(hashes_match_until(path, expected, None)
+        .await?
+        .unwrap_or(false))
+}
+
+/// [`file_matches_hashes`] that stops reading when `cancel` fires, answering
+/// `None` instead of a verdict nobody finished computing.
+async fn hashes_match_until(
+    path: &Path,
+    expected: &[Hash],
+    cancel: Option<&CancellationToken>,
+) -> Result<Option<bool>, DownloadError> {
     if expected.is_empty() {
-        return Ok(true);
+        return Ok(Some(true));
     }
     let mut file = File::open(path)
         .await
@@ -155,6 +168,9 @@ pub async fn file_matches_hashes(path: &Path, expected: &[Hash]) -> Result<bool,
     let mut verifier = HashVerifier::new(expected);
     let mut buffer = vec![0; 64 * 1024];
     loop {
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            return Ok(None);
+        }
         let read = file
             .read(&mut buffer)
             .await
@@ -164,7 +180,7 @@ pub async fn file_matches_hashes(path: &Path, expected: &[Hash]) -> Result<bool,
         }
         verifier.update(&buffer[..read]);
     }
-    Ok(verifier.finish().is_ok())
+    Ok(Some(verifier.finish().is_ok()))
 }
 
 /// Whether `path` holds the artifact described: a regular file, of
@@ -178,15 +194,30 @@ pub async fn stored_file_matches(
     expected_size: Option<u64>,
     expected: &[Hash],
 ) -> Result<bool, DownloadError> {
+    Ok(
+        stored_file_matches_until(path, expected_size, expected, None)
+            .await?
+            .unwrap_or(false),
+    )
+}
+
+/// [`stored_file_matches`] that gives up with `None` once `cancel` fires,
+/// rather than reading the rest of a large file for a caller that has left.
+pub(crate) async fn stored_file_matches_until(
+    path: &Path,
+    expected_size: Option<u64>,
+    expected: &[Hash],
+    cancel: Option<&CancellationToken>,
+) -> Result<Option<bool>, DownloadError> {
     let metadata = match tokio::fs::symlink_metadata(path).await {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Some(false)),
         Err(source) => return Err(DownloadError::io(ArtifactStep::ReadCached, path, source)),
     };
     if !metadata.is_file() || expected_size.is_some_and(|size| size != metadata.len()) {
-        return Ok(false);
+        return Ok(Some(false));
     }
-    file_matches_hashes(path, expected).await
+    hashes_match_until(path, expected, cancel).await
 }
 
 /// Computes one digest of a file already on disk.
@@ -368,5 +399,26 @@ mod tests {
                 .await
                 .expect("hashing succeeds")
         );
+    }
+
+    #[tokio::test]
+    async fn hashing_a_stored_file_stops_once_the_token_is_canceled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("large.jar");
+        std::fs::write(&path, vec![7_u8; 1024 * 1024]).expect("write fixture");
+        let expected =
+            vec![Hash::new(HashAlgorithm::Sha1, &sha1_of(&[7_u8; 1024 * 1024])).unwrap()];
+        let cancel = CancellationToken::new();
+
+        let verdict = stored_file_matches_until(&path, None, &expected, Some(&cancel))
+            .await
+            .expect("hashing succeeds");
+        assert_eq!(verdict, Some(true));
+
+        cancel.cancel();
+        let verdict = stored_file_matches_until(&path, None, &expected, Some(&cancel))
+            .await
+            .expect("hashing succeeds");
+        assert_eq!(verdict, None, "a canceled hash has no verdict");
     }
 }

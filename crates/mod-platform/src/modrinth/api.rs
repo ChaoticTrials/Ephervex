@@ -402,6 +402,7 @@ fn unreachable(error: MetadataCacheError) -> ModPlatformError {
             provider: ModProvider::Modrinth,
             detail: format!("{key}: {source}"),
         },
+        other if other.is_cancellation() => ModPlatformError::Canceled,
         other => ModPlatformError::Unreachable {
             provider: ModProvider::Modrinth,
             source: Box::new(other),
@@ -430,6 +431,22 @@ mod tests {
 
     fn target() -> InstanceTarget {
         InstanceTarget::new("1.20.1", LoaderKind::NeoForge)
+    }
+
+    #[test]
+    fn a_canceled_metadata_fetch_is_a_cancellation_not_an_outage() {
+        let canceled = MetadataCacheError::Fetch {
+            key: "project".to_owned(),
+            source: Box::new(ephervex_download::DownloadError::Canceled {
+                url: "https://example.invalid/".to_owned(),
+            }),
+        };
+        let error = unreachable(canceled);
+        assert!(error.is_cancellation(), "got {error:?}");
+        assert!(
+            project_unknown(error, "jei").is_cancellation(),
+            "a canceled lookup must not become an unknown project"
+        );
     }
 
     #[test]

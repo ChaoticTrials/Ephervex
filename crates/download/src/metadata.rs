@@ -356,6 +356,27 @@ pub enum MetadataCacheError {
 }
 
 impl MetadataCacheError {
+    /// Whether the caller canceled, as opposed to the provider failing.
+    #[must_use]
+    pub fn is_cancellation(&self) -> bool {
+        match self {
+            Self::Fetch { source, .. } | Self::Unavailable { source, .. } => {
+                source.is_cancellation()
+            }
+            _ => false,
+        }
+    }
+
+    /// The error for a canceled caller, which no cached copy may stand in for.
+    fn canceled(key: &MetadataKey, url: &Url) -> Self {
+        Self::Fetch {
+            key: key.to_string(),
+            source: Box::new(DownloadError::Canceled {
+                url: crate::allowlist::redacted(url),
+            }),
+        }
+    }
+
     /// Promotes an unreachable-provider failure to the offline case, once the
     /// caller has established there is nothing cached to serve instead.
     fn into_unavailable(self) -> Self {
@@ -458,6 +479,9 @@ impl MetadataCache {
     /// [`Freshness::Stale`] and the failure is logged rather than propagated:
     /// the launcher stays usable while the provider is down, and the caller is
     /// told exactly what it is looking at.
+    ///
+    /// A canceled caller is never served from the cache, fresh or stale: the
+    /// error says it was canceled (see [`MetadataCacheError::is_cancellation`]).
     pub async fn fetch(
         &self,
         manager: &DownloadManager,
@@ -466,6 +490,9 @@ impl MetadataCache {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> Result<CachedMetadata, MetadataCacheError> {
+        if cancel.is_cancelled() {
+            return Err(MetadataCacheError::canceled(key, url));
+        }
         let cached = self.peek(key).await;
         if let Some(entry) = cached.as_ref().filter(|entry| !entry.freshness.is_stale()) {
             debug!(%key, age_s = entry.age().as_secs(), "serving cached provider metadata");
@@ -474,6 +501,8 @@ impl MetadataCache {
 
         match self.refresh(manager, key, url, reporter, cancel).await {
             Ok(entry) => Ok(entry),
+            // Canceling is not a provider outage, so no stale copy answers it.
+            Err(error) if error.is_cancellation() => Err(error),
             Err(error) => match cached {
                 Some(entry) => {
                     warn!(
@@ -502,6 +531,9 @@ impl MetadataCache {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> Result<CachedMetadata, MetadataCacheError> {
+        if cancel.is_cancelled() {
+            return Err(MetadataCacheError::canceled(key, url));
+        }
         let cached = self.peek(key).await;
         if let Some(entry) = cached.as_ref().filter(|entry| !entry.freshness.is_stale()) {
             debug!(%key, age_s = entry.age().as_secs(), "serving cached provider text");
@@ -510,6 +542,7 @@ impl MetadataCache {
 
         match self.refresh_text(manager, key, url, reporter, cancel).await {
             Ok(entry) => Ok(entry),
+            Err(error) if error.is_cancellation() => Err(error),
             Err(error) => match cached {
                 Some(entry) => {
                     warn!(
@@ -1007,6 +1040,66 @@ mod tests {
             matches!(error, MetadataCacheError::Unavailable { .. }),
             "expected the offline case, got {error:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_canceled_refresh_is_an_error_rather_than_a_stale_copy() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let layout = CacheLayout::new(base.path());
+        let key = MetadataKey::new("provider-index").expect("safe key");
+        MetadataCache::new(layout.clone())
+            .store(&key, &url(), raw(r#"{"versions":[1]}"#))
+            .await
+            .expect("store");
+        let expired = MetadataCache::with_ttl(layout, Duration::ZERO);
+
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let json = expired
+            .fetch(
+                &unreachable_manager(),
+                &key,
+                &url(),
+                &OperationReporter::silent("metadata"),
+                &cancel,
+            )
+            .await
+            .expect_err("a canceled caller is not served stale data");
+        assert!(json.is_cancellation(), "got {json:?}");
+
+        let text = expired
+            .fetch_text(
+                &unreachable_manager(),
+                &key,
+                &url(),
+                &OperationReporter::silent("metadata"),
+                &cancel,
+            )
+            .await
+            .expect_err("a canceled caller is not served stale text");
+        assert!(text.is_cancellation(), "got {text:?}");
+    }
+
+    #[tokio::test]
+    async fn a_canceled_caller_is_not_served_a_fresh_cached_copy() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let cache = MetadataCache::new(CacheLayout::new(base.path()));
+        let key = MetadataKey::new("provider-index").expect("safe key");
+        cache.store(&key, &url(), raw("{}")).await.expect("store");
+
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let error = cache
+            .fetch(
+                &unreachable_manager(),
+                &key,
+                &url(),
+                &OperationReporter::silent("metadata"),
+                &cancel,
+            )
+            .await
+            .expect_err("cancellation wins over a cache hit");
+        assert!(error.is_cancellation(), "got {error:?}");
     }
 
     /// The stale path logs why the refresh failed, and that reason is read by

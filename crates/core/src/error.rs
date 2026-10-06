@@ -596,7 +596,7 @@ impl CoreError {
 
     /// Whether the user canceled rather than something failing.
     #[must_use]
-    pub const fn is_cancellation(&self) -> bool {
+    pub fn is_cancellation(&self) -> bool {
         match self {
             Self::Auth(error) => error.is_cancellation(),
             Self::Loader(error) => error.is_cancellation(),

@@ -42,7 +42,7 @@ use crate::client::{HttpConfig, build_allowlisted_client, build_client};
 use crate::error::{ArtifactStep, AttemptFailure, BatchDownloadError, DownloadError};
 use crate::progress::{ByteTally, OperationReporter};
 use crate::retry::{RetryPolicy, retry_after};
-use crate::verify::{HashVerifier, stored_file_matches};
+use crate::verify::{HashVerifier, stored_file_matches_until};
 
 /// The longest filename Ephervex generates for its own scratch files.
 ///
@@ -573,7 +573,7 @@ impl DownloadManager {
     ) -> Result<Option<DownloadOutcome>, DownloadError> {
         let destination_lock = destination_lock(&request.destination);
         let _destination_guard = destination_lock.lock().await;
-        revalidate_cached(request).await
+        revalidate_cached(request, None).await
     }
 
     /// Fetches one artifact as a stage of the caller's operation.
@@ -685,34 +685,49 @@ impl DownloadManager {
         let url_label = redacted(&request.url);
         check_transport(&request.url, self.config.http.allow_plaintext_http)?;
 
+        let canceled = || DownloadError::Canceled {
+            url: url_label.clone(),
+        };
+        // A canceled caller gets no answer at all, success from the cache
+        // included, and no queue position behind someone else's transfer.
+        if cancel.is_cancelled() {
+            return Err(canceled());
+        }
+
         let destination_lock = destination_lock(&request.destination);
-        let _destination_guard = destination_lock.lock().await;
+        let _destination_guard = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(canceled()),
+            guard = destination_lock.lock() => guard,
+        };
 
         // Bounded on its own, because this runs before a transfer permit is
         // taken so that a cached artifact never waits behind a download.
         let probe = {
-            let _probe_permit = self
-                .cache_probes
-                .acquire()
-                .await
-                .map_err(|_| DownloadError::ShuttingDown)?;
-            already_cached(request, cursor).await?
+            let _probe_permit = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(canceled()),
+                permit = self.cache_probes.acquire() => permit,
+            }
+            .map_err(|_| DownloadError::ShuttingDown)?;
+            already_cached(request, cursor, cancel).await?
         };
         if let Some(cached) = probe {
             trace!(url = %url_label, path = %request.destination.display(), "artifact already cached");
             return Ok(cached);
         }
 
-        let _permit = self
-            .permits
-            .acquire()
-            .await
-            .map_err(|_| DownloadError::ShuttingDown)?;
+        let _permit = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(canceled()),
+            permit = self.permits.acquire() => permit,
+        }
+        .map_err(|_| DownloadError::ShuttingDown)?;
 
         // Re-check under the permit: a sibling transfer in the same batch may
         // have deposited the identical content-addressed artifact while this
         // one was queued.
-        if let Some(cached) = already_cached(request, cursor).await? {
+        if let Some(cached) = already_cached(request, cursor, cancel).await? {
             return Ok(cached);
         }
 
@@ -769,24 +784,34 @@ impl DownloadManager {
             }
         };
 
-        match result {
-            Ok(bytes) => Ok(DownloadOutcome {
-                path: request.destination.clone(),
-                bytes,
-                source: ArtifactSource::Network,
-            }),
-            Err(error) => {
-                // The `.part` file is only useful for resuming inside this
-                // call, and its validator does not survive the process. Leaving
-                // it behind would litter the cache with bytes nothing can ever
-                // use.
-                if let Err(cleanup) = fs::remove_file(&part).await {
-                    if cleanup.kind() != std::io::ErrorKind::NotFound {
-                        debug!(path = %part.display(), error = %cleanup, "could not remove partial download");
-                    }
+        finish_transfer(request, &part, result).await
+    }
+}
+
+/// Turns a transfer's result into the outcome, removing its partial file when
+/// it failed.
+async fn finish_transfer(
+    request: &DownloadRequest,
+    part: &Path,
+    result: Result<u64, DownloadError>,
+) -> Result<DownloadOutcome, DownloadError> {
+    match result {
+        Ok(bytes) => Ok(DownloadOutcome {
+            path: request.destination.clone(),
+            bytes,
+            source: ArtifactSource::Network,
+        }),
+        Err(error) => {
+            // The `.part` file is only useful for resuming inside this
+            // call, and its validator does not survive the process. Leaving
+            // it behind would litter the cache with bytes nothing can ever
+            // use.
+            if let Err(cleanup) = fs::remove_file(part).await {
+                if cleanup.kind() != std::io::ErrorKind::NotFound {
+                    debug!(path = %part.display(), error = %cleanup, "could not remove partial download");
                 }
-                Err(error)
             }
+            Err(error)
         }
     }
 }
@@ -1144,11 +1169,20 @@ impl Transfer<'_, '_> {
 ///
 /// Expectations are checked again because logical cache paths and files copied
 /// in by older builds do not carry proof of which request verified them.
+///
+/// Cancellation wins over a hit: a caller that has gone is never told the
+/// artifact is there.
 async fn already_cached(
     request: &DownloadRequest,
     cursor: &mut ProgressCursor<'_>,
+    cancel: &CancellationToken,
 ) -> Result<Option<DownloadOutcome>, DownloadError> {
-    let cached = revalidate_cached(request).await?;
+    let cached = revalidate_cached(request, Some(cancel)).await?;
+    if cancel.is_cancelled() {
+        return Err(DownloadError::Canceled {
+            url: redacted(&request.url),
+        });
+    }
     if let Some(outcome) = &cached {
         cursor.report(outcome.bytes, Some(outcome.bytes));
     }
@@ -1156,12 +1190,13 @@ async fn already_cached(
 }
 
 /// Revalidates whatever is at a request's destination with
-/// [`stored_file_matches`], discarding it unless it is the artifact the request
-/// describes. A cache path whose contents do not match the request is worse than
-/// an empty one: the atomicity invariant entitles the rest of the launcher to
-/// treat presence as proof.
+/// [`stored_file_matches_until`], discarding it unless it is the artifact the
+/// request describes. A cache path whose contents do not match the request is
+/// worse than an empty one: the atomicity invariant entitles the rest of the
+/// launcher to treat presence as proof.
 async fn revalidate_cached(
     request: &DownloadRequest,
+    cancel: Option<&CancellationToken>,
 ) -> Result<Option<DownloadOutcome>, DownloadError> {
     let destination = &request.destination;
     let metadata = match fs::symlink_metadata(destination).await {
@@ -1177,7 +1212,17 @@ async fn revalidate_cached(
         }
     };
     let bytes = metadata.len();
-    if !stored_file_matches(destination, request.expected_size, &request.expected_hashes).await? {
+    let matches = stored_file_matches_until(
+        destination,
+        request.expected_size,
+        &request.expected_hashes,
+        cancel,
+    )
+    .await?
+    .ok_or_else(|| DownloadError::Canceled {
+        url: redacted(&request.url),
+    })?;
+    if !matches {
         warn!(path = %destination.display(), "discarding a cache entry that does not match its request");
         fs::remove_file(destination)
             .await
