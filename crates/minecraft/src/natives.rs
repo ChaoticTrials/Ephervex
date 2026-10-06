@@ -25,6 +25,12 @@
 //! * directory entries and symlinks are skipped - a natives jar contains
 //!   neither, and honoring one would reintroduce the link-through-link problem
 //!   `ephervex-java::archive` documents,
+//! * directories below the natives directory must be real directories: a link
+//!   already sitting in the shared store is refused rather than followed out of
+//!   it, and a link at a file's own path is replaced, never written through,
+//! * a file is written to a unique sibling and renamed over its destination, so
+//!   an instance that has the previous file mapped keeps a complete file and a
+//!   concurrent unpack never exposes a partial one (ADR 0011),
 //! * `extract.exclude` from the metadata is applied as a *filter* on top, never
 //!   as a substitute for the checks above.
 //!
@@ -33,8 +39,9 @@
 //! of rules mean one of them gets forgotten, and it will be the one with the
 //! vulnerability (see `docs/architecture.md`).
 
-use std::io::Read as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tracing::{debug, trace};
 
@@ -187,11 +194,8 @@ pub fn extract(
         // written where it says rather than flattened - flattening would let
         // two entries collide silently.
         let target = destination.join(&relative);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| NativesError::Write {
-                path: parent.to_path_buf(),
-                source,
-            })?;
+        if let Some(parent) = relative.parent() {
+            create_contained_directories(archive, destination, parent, &name)?;
         }
 
         let mut bytes = Vec::with_capacity(usize::try_from(entry.size()).unwrap_or(0));
@@ -217,29 +221,131 @@ pub fn extract(
     Ok(report)
 }
 
-/// Writes a file and makes it readable and executable by its owner.
+static TEMPORARY_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Most unique temporary names tried before giving up on a directory.
+const MAX_TEMPORARY_ATTEMPTS: usize = 16;
+
+/// Creates the directories between `destination` and `destination/relative`,
+/// refusing any that is already a link or a non-directory.
+///
+/// `create_dir_all` and `fs::write` follow links that already exist, and the
+/// natives directory is shared state that outlives any one launch, so each
+/// component is inspected without following it.
+fn create_contained_directories(
+    archive: &Path,
+    destination: &Path,
+    relative: &Path,
+    entry: &str,
+) -> Result<(), NativesError> {
+    let unsafe_path = || NativesError::UnsafePath {
+        path: archive.to_path_buf(),
+        entry: entry.to_owned(),
+    };
+    let mut current = destination.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        let metadata = match std::fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::create_dir(&current) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(source) => {
+                        return Err(NativesError::Write {
+                            path: current,
+                            source,
+                        });
+                    }
+                }
+                // A concurrent unpack may have created the name first, so the
+                // result is checked again rather than assumed.
+                std::fs::symlink_metadata(&current).map_err(|source| NativesError::Write {
+                    path: current.clone(),
+                    source,
+                })?
+            }
+            Err(source) => {
+                return Err(NativesError::Write {
+                    path: current,
+                    source,
+                });
+            }
+        };
+        if !metadata.is_dir() {
+            return Err(unsafe_path());
+        }
+    }
+    Ok(())
+}
+
+/// Publishes a file at `path`, readable and executable by its owner.
+///
+/// The bytes go to a unique sibling that is renamed over `path`, so `path` is
+/// replaced by a different inode: a reader never observes a truncated file, a
+/// process that has the old file mapped keeps its complete contents, and a link
+/// already at `path` is replaced rather than written through.
 ///
 /// A shared object does not strictly need the executable bit on Linux to be
 /// `dlopen`ed, but some of what Mojang ships in these jars is a helper binary,
 /// and Java runtime support already learned that dropping the bit produces an install that
 /// is inert with no obvious cause.
 fn write_executable(path: &Path, bytes: &[u8]) -> Result<(), NativesError> {
-    std::fs::write(path, bytes).map_err(|source| NativesError::Write {
+    let write_error = |source: std::io::Error| NativesError::Write {
         path: path.to_path_buf(),
         source,
-    })?;
+    };
+    let parent = path
+        .parent()
+        .ok_or_else(|| write_error(std::io::Error::other("native has no parent directory")))?;
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).map_err(
-            |source| NativesError::Write {
-                path: path.to_path_buf(),
-                source,
-            },
-        )?;
+    let (mut file, temporary) = create_temporary_sibling(path, parent).map_err(write_error)?;
+    let published = (|| {
+        file.write_all(bytes)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            file.set_permissions(std::fs::Permissions::from_mode(0o755))?;
+        }
+        drop(file);
+        std::fs::rename(&temporary, path)
+    })();
+    if let Err(source) = published {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(write_error(source));
     }
     Ok(())
+}
+
+/// Exclusively creates a uniquely named file next to `path`.
+///
+/// `create_new` refuses an existing name, including a link, so the temporary
+/// can never be a way to write through something already there.
+fn create_temporary_sibling(
+    path: &Path,
+    parent: &Path,
+) -> std::io::Result<(std::fs::File, PathBuf)> {
+    let name = path.file_name().unwrap_or_default();
+    for _ in 0..MAX_TEMPORARY_ATTEMPTS {
+        let counter = TEMPORARY_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut temporary_name = std::ffi::OsString::from(".");
+        temporary_name.push(name);
+        temporary_name.push(format!(".{}.{counter}.part", std::process::id()));
+        let temporary = parent.join(temporary_name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
+            Ok(file) => return Ok((file, temporary)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "no unused temporary name",
+    ))
 }
 
 /// Validates an archive entry name as a relative path that cannot escape.
@@ -277,7 +383,6 @@ fn safe_relative_path(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-    use std::io::Write as _;
 
     use super::*;
 
@@ -394,5 +499,135 @@ mod tests {
                 "`{hostile}` should be refused"
             );
         }
+    }
+
+    #[test]
+    fn re_extracting_a_native_replaces_the_file_instead_of_rewriting_it() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let archive = jar(&[("liblwjgl.so", b"new contents")]);
+        let destination = tempfile::tempdir().expect("temp dir");
+        let target = destination.path().join("liblwjgl.so");
+        std::fs::write(&target, b"old contents").expect("seed");
+        // A process that has the previous file open keeps seeing it whole.
+        let mut held = std::fs::File::open(&target).expect("open previous file");
+        let previous_inode = std::fs::metadata(&target).expect("metadata").ino();
+
+        extract(archive.path(), destination.path(), &[]).expect("unpack");
+
+        let mut seen = String::new();
+        held.read_to_string(&mut seen).expect("read held file");
+        assert_eq!(seen, "old contents");
+        assert_ne!(
+            std::fs::metadata(&target).expect("metadata").ino(),
+            previous_inode
+        );
+        assert_eq!(std::fs::read(&target).expect("read"), b"new contents");
+    }
+
+    #[test]
+    fn extraction_leaves_no_temporary_files_behind() {
+        let archive = jar(&[("liblwjgl.so", b"elf"), ("linux/libfoo.so", b"elf")]);
+        let destination = tempfile::tempdir().expect("temp dir");
+        extract(archive.path(), destination.path(), &[]).expect("unpack");
+        extract(archive.path(), destination.path(), &[]).expect("unpack again");
+
+        for directory in [
+            destination.path().to_path_buf(),
+            destination.path().join("linux"),
+        ] {
+            for entry in std::fs::read_dir(directory).expect("read dir") {
+                let name = entry.expect("entry").file_name();
+                assert!(!name.to_string_lossy().ends_with(".part"), "{name:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn concurrent_unpacks_never_expose_a_partial_native() {
+        let payload = vec![7_u8; 4 * 1024 * 1024];
+        let archive = jar(&[("libbig.so", payload.as_slice())]);
+        let destination = tempfile::tempdir().expect("temp dir");
+        extract(archive.path(), destination.path(), &[]).expect("seed");
+        let target = destination.path().join("libbig.so");
+        let done = std::sync::atomic::AtomicBool::new(false);
+
+        std::thread::scope(|scope| {
+            let observer = scope.spawn(|| {
+                while !done.load(Ordering::Relaxed) {
+                    let length = std::fs::metadata(&target).expect("metadata").len();
+                    assert_eq!(length, payload.len() as u64, "observed a partial native");
+                }
+            });
+            let writers: Vec<_> = (0..2)
+                .map(|_| {
+                    scope.spawn(|| {
+                        for _ in 0..20 {
+                            extract(archive.path(), destination.path(), &[]).expect("unpack");
+                        }
+                    })
+                })
+                .collect();
+            // The observer is stopped before any failure is raised, or a
+            // panicking writer would leave it looping and hang the scope.
+            let writer_results: Vec<_> = writers
+                .into_iter()
+                .map(std::thread::ScopedJoinHandle::join)
+                .collect();
+            done.store(true, Ordering::Relaxed);
+            let observer_result = observer.join();
+            for result in writer_results {
+                result.expect("writer");
+            }
+            observer_result.expect("observer");
+        });
+    }
+
+    #[test]
+    fn a_link_already_at_a_native_path_is_replaced_not_written_through() {
+        let archive = jar(&[("lib.so", b"extracted")]);
+        let destination = tempfile::tempdir().expect("temp dir");
+        let outside = tempfile::tempdir().expect("outside dir");
+        let victim = outside.path().join("victim");
+        std::fs::write(&victim, b"untouched").expect("seed victim");
+        std::os::unix::fs::symlink(&victim, destination.path().join("lib.so")).expect("link");
+
+        extract(archive.path(), destination.path(), &[]).expect("unpack");
+
+        assert_eq!(std::fs::read(&victim).expect("read"), b"untouched");
+        let published = destination.path().join("lib.so");
+        assert!(
+            !std::fs::symlink_metadata(&published)
+                .expect("metadata")
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read(&published).expect("read"), b"extracted");
+    }
+
+    #[test]
+    fn a_linked_directory_below_the_natives_directory_is_refused() {
+        let archive = jar(&[("linux/lib.so", b"extracted")]);
+        let destination = tempfile::tempdir().expect("temp dir");
+        let outside = tempfile::tempdir().expect("outside dir");
+        std::os::unix::fs::symlink(outside.path(), destination.path().join("linux")).expect("link");
+
+        let outcome = extract(archive.path(), destination.path(), &[]);
+
+        assert!(
+            matches!(outcome, Err(NativesError::UnsafePath { .. })),
+            "got {outcome:?}"
+        );
+        assert!(!outside.path().join("lib.so").exists());
+    }
+
+    #[test]
+    fn a_file_where_a_native_directory_is_needed_is_refused() {
+        let archive = jar(&[("linux/lib.so", b"extracted")]);
+        let destination = tempfile::tempdir().expect("temp dir");
+        std::fs::write(destination.path().join("linux"), b"file").expect("seed");
+
+        let outcome = extract(archive.path(), destination.path(), &[]);
+
+        assert!(matches!(outcome, Err(NativesError::UnsafePath { .. })));
     }
 }

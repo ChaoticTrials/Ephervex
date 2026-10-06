@@ -92,7 +92,11 @@ the canonical client jar.
   and later the directory is scratch space rather than content, and the three
   libraries that write into it - LWJGL, JNA, and Netty - each create and manage
   their own subdirectory, so concurrent instances of one version do not collide.
-- Unpacking is idempotent and overwrites in place, so a natives directory is
-  never deleted while a game might have its contents `dlopen`ed.
+- Unpacking is idempotent and publishes each file by renaming a complete
+  temporary sibling over it, so a natives directory is never deleted while a
+  game might have its contents `dlopen`ed, and no reader, including a
+  concurrent unpack of the same version, sees a truncated file or has a mapped
+  file changed under it. A link already present in the directory is replaced at
+  a file's own path and refused as a directory component, never followed.
 - The platform is part of the key, so a future cross-platform build cannot mix
   one operating system's shared objects into another's launch.
