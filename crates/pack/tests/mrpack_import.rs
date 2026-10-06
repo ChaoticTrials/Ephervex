@@ -164,6 +164,17 @@ async fn import(
     policy: &PackPolicy,
     selection: &OptionalSelection,
 ) -> Imported {
+    try_import(workspace, archive, policy, selection)
+        .await
+        .expect("materialize")
+}
+
+async fn try_import(
+    workspace: &Path,
+    archive: &Path,
+    policy: &PackPolicy,
+    selection: &OptionalSelection,
+) -> Result<Imported, PackError> {
     let (mut opened, analysis) = analyze(archive, policy).expect("analyze");
     assert_eq!(analysis.format, PackFormat::ModrinthPack);
 
@@ -184,9 +195,8 @@ async fn import(
         reporter: &OperationReporter::silent("modrinth-pack-import"),
         cancel: &CancellationToken::new(),
     })
-    .await
-    .expect("materialize");
-    imported
+    .await?;
+    Ok(imported)
 }
 
 #[tokio::test]
@@ -603,4 +613,147 @@ async fn a_pack_whose_archive_carries_a_traversing_override_is_refused_before_it
         .expect_err("must refuse");
     assert!(matches!(error, PackError::EntryPathUnsafe { .. }));
     assert!(!Path::new("/tmp/ephervex-escape").exists());
+}
+
+/// Builds a `.mrpack` that declares `mods/a.jar` (the bytes `abc`, served from
+/// `server`) and carries exactly the given archive entries.
+async fn pack_declaring_a_mod_and_shipping(
+    workspace: &Path,
+    server: &MockServer,
+    shipped: &[(&str, &[u8])],
+) -> PathBuf {
+    use sha1::Digest as _;
+    let declared: &[u8] = b"abc";
+    Mock::given(method("GET"))
+        .and(path_matcher("/data/a/a.jar"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(declared.to_vec()))
+        .mount(server)
+        .await;
+    let index = serde_json::json!({
+        "formatVersion": 1,
+        "game": "minecraft",
+        "versionId": "1.0.0",
+        "name": "Layer collision",
+        "files": [{
+            "path": "mods/a.jar",
+            "hashes": {
+                "sha1": hex::encode(sha1::Sha1::digest(declared)),
+                "sha512": hex::encode(sha2::Sha512::digest(declared)),
+            },
+            "env": { "client": "required", "server": "required" },
+            "downloads": [format!("{}/data/a/a.jar", server.uri())],
+            "fileSize": declared.len(),
+        }],
+        "dependencies": { "minecraft": "1.20.1", "neoforge": "47.1.106" },
+    });
+
+    let archive = workspace.join("layer-collision.mrpack");
+    let mut writer = zip::ZipWriter::new(std::fs::File::create(&archive).expect("create archive"));
+    let options: zip::write::FileOptions<'_, ()> =
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    writer
+        .start_file("modrinth.index.json", options)
+        .expect("start index");
+    writer
+        .write_all(index.to_string().as_bytes())
+        .expect("write index");
+    for (name, body) in shipped {
+        writer.start_file(*name, options).expect("start entry");
+        writer.write_all(body).expect("write entry");
+    }
+    writer.finish().expect("finish archive");
+    archive
+}
+
+/// Layers extract over the declared file in order, so the bytes on disk are the
+/// last layer's. The recipe has to say the same, or repair, mutation and a
+/// server built from it would treat the layer's bytes as the declared release.
+#[tokio::test]
+async fn an_override_that_wins_over_a_declared_mod_replaces_the_recorded_provenance() {
+    let server = MockServer::start().await;
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let archive = pack_declaring_a_mod_and_shipping(
+        workspace.path(),
+        &server,
+        &[
+            ("overrides/mods/a.jar", b"common"),
+            ("client-overrides/mods/a.jar", b"client"),
+        ],
+    )
+    .await;
+
+    let imported = import(
+        workspace.path(),
+        &archive,
+        &loopback_policy(&server),
+        &OptionalSelection::none(),
+    )
+    .await;
+
+    assert_eq!(
+        std::fs::read(imported.game.join("mods/a.jar")).expect("read"),
+        b"client",
+        "the later layer won on disk"
+    );
+    let recipe = retained_recipe(&imported.source).expect("the recipe was retained");
+    let entries: Vec<_> = recipe
+        .files
+        .iter()
+        .filter(|file| file.display_name() == "mods/a.jar")
+        .collect();
+    assert_eq!(entries.len(), 1);
+    let entry = entries[0];
+    assert_eq!(entry.origin, ModOrigin::PackOverride);
+    assert!(
+        entry.hashes.is_empty(),
+        "no declared hash for shipped bytes"
+    );
+    assert!(entry.downloads.is_empty());
+    assert_eq!(entry.size, None);
+    assert_eq!(entry.identity, None);
+    assert_eq!(entry.client, SideRequirement::Required);
+    assert_eq!(
+        entry.server,
+        SideRequirement::Required,
+        "the common layer places it on a server too"
+    );
+
+    let plan = recipe.plan(PackSide::Server, &OptionalSelection::none());
+    assert!(
+        plan.files.iter().all(|file| !file.is_layer_supplied()),
+        "a server is rebuilt from the retained layers, never by fetching the declared release"
+    );
+    assert!(
+        plan.files
+            .iter()
+            .all(|file| file.display_name() != "mods/a.jar"),
+        "the declared download is not part of the server plan"
+    );
+}
+
+#[tokio::test]
+async fn an_override_that_replaces_a_declared_mod_on_only_one_side_is_refused() {
+    let server = MockServer::start().await;
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let archive = pack_declaring_a_mod_and_shipping(
+        workspace.path(),
+        &server,
+        &[("client-overrides/mods/a.jar", b"client")],
+    )
+    .await;
+
+    let error = try_import(
+        workspace.path(),
+        &archive,
+        &loopback_policy(&server),
+        &OptionalSelection::none(),
+    )
+    .await
+    .map(|_| ())
+    .expect_err("one entry cannot describe different bytes per side");
+
+    assert!(
+        matches!(error, PackError::OverrideShadowsDeclaredFile { ref path } if path == Path::new("mods/a.jar")),
+        "{error:?}"
+    );
 }

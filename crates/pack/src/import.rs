@@ -397,6 +397,7 @@ pub async fn materialize(request: MaterializeRequest<'_>) -> PackResult<Material
     // progress bar that has stopped moving for no visible reason.
     reporter.set_stage(Some("operation-stage-extracting-overrides".to_owned()));
     let layers = install::apply_overrides(archive, &recipe, side, game_dir)?;
+    let mut shipped_mods: Vec<(PathBuf, OverrideScope)> = Vec::new();
     for applied in &layers {
         if let Some(layer) = recipe
             .override_layers
@@ -407,16 +408,22 @@ pub async fn materialize(request: MaterializeRequest<'_>) -> PackResult<Material
         }
         // The pack shipped these jars rather than declaring them, so this is
         // the only place the desired state can learn they are its mods.
-        for path in &applied.mod_files {
-            recipe.record_layer_mod(path.clone(), applied.layer.scope, 0);
-        }
+        shipped_mods.extend(
+            applied
+                .mod_files
+                .iter()
+                .map(|path| (path.clone(), applied.layer.scope)),
+        );
     }
 
     // 3. Retain the source recipe, which is mandatory even for a client-only
     //    import.
     reporter.set_stage(Some("operation-stage-retaining-source".to_owned()));
     let store = SourceStore::new(source_dir);
-    retain_source(archive, &mut recipe, side, &store)?;
+    shipped_mods.extend(retain_source(archive, &mut recipe, side, &store)?);
+    // Recorded once every layer is known: what a shipped path means depends on
+    // all the layers that place it, and on the declared file at the same path.
+    recipe.record_layer_mods(&shipped_mods)?;
     let recipe_path = store.write_recipe(&recipe)?;
 
     info!(
@@ -441,12 +448,15 @@ pub async fn materialize(request: MaterializeRequest<'_>) -> PackResult<Material
 /// layer this side just extracted into the game directory is not duplicated:
 /// A modpack's overrides are often the bulk of its bytes, so the layer already
 /// installed for this side is not duplicated.
+///
+/// Returns the mod jars the retained layers place, for the recipe to record
+/// together with the applied layers' jars.
 fn retain_source(
     archive: &mut PackArchive,
     recipe: &mut PackRecipe,
     side: PackSide,
     store: &SourceStore,
-) -> PackResult<()> {
+) -> PackResult<Vec<(PathBuf, OverrideScope)>> {
     let kind = recipe.source_kind;
     let manifest_entry = manifest_entry_for(kind);
     if let Some(entry) = manifest_entry {
@@ -456,7 +466,7 @@ fn retain_source(
     }
 
     let already_applied = side.override_scope();
-    // Collected while the layers are borrowed, and recorded once they are not.
+    // Collected while the layers are borrowed.
     let mut retained_mods: Vec<(OverrideScope, Vec<PathBuf>)> = Vec::new();
     for layer in &mut recipe.override_layers {
         if layer.scope == already_applied {
@@ -482,12 +492,10 @@ fn retain_source(
         layer.retained_at = Some(relative);
         retained_mods.push((layer.scope, mod_files));
     }
-    for (scope, paths) in retained_mods {
-        for path in paths {
-            recipe.record_layer_mod(path, scope, 0);
-        }
-    }
-    Ok(())
+    Ok(retained_mods
+        .into_iter()
+        .flat_map(|(scope, paths)| paths.into_iter().map(move |path| (path, scope)))
+        .collect())
 }
 
 /// The manifest file name one provider's retained state keeps.

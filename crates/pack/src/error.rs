@@ -278,6 +278,11 @@ pub enum PackError {
     #[error("two selected recipe files both install as `{path}`")]
     RecipeDestinationCollision { path: PathBuf },
 
+    /// An override layer replaces a declared file on only some of the sides the
+    /// declared file applies to.
+    #[error("an override layer replaces the declared file `{path}` on only some sides")]
+    OverrideShadowsDeclaredFile { path: PathBuf },
+
     /// A selected recipe file would overwrite a file from the base server.
     #[error("the selected recipe file would overwrite {path}")]
     RecipeDestinationOccupied { path: PathBuf },
@@ -398,6 +403,7 @@ impl PackError {
             Self::RecipeTargetMismatch { .. } => "error-pack-recipe-target-mismatch",
             Self::RecipeDestinationCollision { .. } => "error-pack-recipe-destination-collision",
             Self::RecipeDestinationOccupied { .. } => "error-pack-recipe-destination-occupied",
+            Self::OverrideShadowsDeclaredFile { .. } => "error-pack-override-shadows-declared-file",
             Self::ManagedIdentityMissing { .. } => "error-mod-managed-identity-missing",
             Self::HandPlacedNotMutable { .. } => "error-mod-hand-placed-not-mutable",
             Self::ManagedVersionConflict { .. } => "error-mod-already-installed",
@@ -429,6 +435,7 @@ impl PackError {
             | Self::RetainedLayerUnavailable { path, .. }
             | Self::UnknownServerSelection { path }
             | Self::RecipeDestinationCollision { path }
+            | Self::OverrideShadowsDeclaredFile { path }
             | Self::RecipeDestinationOccupied { path }
             | Self::DestinationOccupied { path }
             | Self::ManagedPathUnsafe { path }
@@ -722,6 +729,9 @@ mod tests {
             },
             PackError::RecipeDestinationCollision {
                 path: PathBuf::from("mods/same.jar"),
+            },
+            PackError::OverrideShadowsDeclaredFile {
+                path: PathBuf::from("mods/a.jar"),
             },
             PackError::RecipeDestinationOccupied {
                 path: PathBuf::from("/server/minecraft_server.jar"),

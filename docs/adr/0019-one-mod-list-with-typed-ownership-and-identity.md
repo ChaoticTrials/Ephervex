@@ -239,8 +239,19 @@ origin, so the wrong answer was permanent.
 A mod the pack ships inside its override tree is `ModOrigin::PackOverride`. The
 pack owns it, Ephervex placed it by extracting that tree and may place it again,
 and it is part of the instance's desired state, so a reinstall restores it and
-the list is complete. It is recorded while the layer is extracted, which is the
-only moment its contents are known.
+the list is complete. Its path is collected while the layer is extracted, which
+is the only moment the layer's contents are known, and recorded once every layer
+is known.
+
+Layers extract over a declared file at the same path, later layer winning, and
+the recipe follows the bytes that win. A path shipped by several layers is one
+entry, required on every side a layer applies to. When layers win on every side
+the declared file applies to, the entry stops being the declared release: its
+hashes, addresses, and identity are dropped, because they describe bytes that
+are not installed. When the declared file would still be installed on some side
+(a client-only layer over a file declared for both sides, say), one entry would
+have to describe different bytes per side, and the import is refused instead of
+recording either one.
 
 It is **not** `PackDeclared`, and the difference is not cosmetic. A declared
 file is fetched and verified against published hashes; this one has no address
