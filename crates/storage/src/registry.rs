@@ -51,6 +51,7 @@ use crate::index::{Index, IndexError};
 use crate::lock::{FileGuard, GuardError, LAUNCH_LOCK_FILE};
 use crate::metadata::{self, MetadataError};
 use crate::paths::{PathError, Paths, create_dir_all};
+use crate::reconcile::RecordRef;
 use crate::records::{
     ClientRecord, DUPLICATE_NAME_SUFFIX, DuplicateClient, DuplicatedClient, FileDisposition,
     ImportSource, JavaOverride, JvmSettings, NewClient, NewServer, ServerCommit,
@@ -82,12 +83,13 @@ pub enum RegistryError {
     /// rolled back yet.
     #[error("{path} has an interrupted snapshot restore that startup has not recovered")]
     RestoreUnfinished { path: PathBuf },
-    /// Another move of this instance or server is still running.
-    #[error("{path} is already being moved to another storage root")]
-    MoveInProgress { path: PathBuf },
-    /// The file that keeps two moves of one host apart could not be used.
-    #[error("the move guard at {path} could not be used")]
-    MoveGuardUnusable {
+    /// A snapshot restore or storage move of this instance or server is still
+    /// running.
+    #[error("{path} is being changed by a snapshot restore or a move to another storage root")]
+    HostBusy { path: PathBuf },
+    /// The file that keeps changes to one host apart could not be used.
+    #[error("the host guard at {path} could not be used")]
+    HostGuardUnusable {
         path: PathBuf,
         #[source]
         source: std::io::Error,
@@ -123,8 +125,8 @@ impl RegistryError {
             Self::ServerUnknown { .. } => "error-registry-server-unknown",
             Self::RootOccupied { .. } => "error-registry-root-occupied",
             Self::RestoreUnfinished { .. } => "error-registry-restore-unfinished",
-            Self::MoveInProgress { .. } => "error-registry-move-in-progress",
-            Self::MoveGuardUnusable { .. } => "error-registry-move-guard-unusable",
+            Self::HostBusy { .. } => "error-registry-host-busy",
+            Self::HostGuardUnusable { .. } => "error-registry-host-guard-unusable",
             Self::RootMissing { .. } => "error-registry-root-missing",
             Self::Io { .. } => "error-paths-directory-creation",
             Self::Index(error) => error.message_id(),
@@ -321,7 +323,7 @@ impl Registry {
             return Ok(record);
         }
 
-        let _claim = claim_move(&self.paths, &client_host(id), &record.root)?;
+        let _claim = claim_host(&self.paths, RecordRef::Client(id), &record.root)?;
         // Another move may have finished while this one was starting.
         let mut record = self.client(id)?;
         if record.storage == storage {
@@ -370,7 +372,7 @@ impl Registry {
             });
         }
 
-        let _claim = claim_move(&self.paths, &server_host(id), &record.root)?;
+        let _claim = claim_host(&self.paths, RecordRef::Server(id), &record.root)?;
         let mut record = self.server(id)?;
         if record.storage == storage {
             return Ok(ServerCommit {
@@ -1214,7 +1216,7 @@ fn ensure_free_root(root: &Path) -> Result<(), RegistryError> {
 ///
 /// `record` writes the moved host's metadata and index row. A copy it fails to
 /// record is withdrawn; a renamed tree is the only copy and is kept. The caller
-/// holds the host's [`claim_move`].
+/// holds the host's [`HostClaim`].
 fn move_host<T>(
     source: &Path,
     destination: &Path,
@@ -1305,37 +1307,96 @@ fn move_host<T>(
     Ok((recorded, report))
 }
 
-/// Claims one host for one move, so a second move of it is refused rather than
-/// discarding a copy the first one is still making.
+/// One host's exclusive claim on being changed by a snapshot restore or a
+/// storage move.
 ///
-/// Kept outside the tree being moved, so every mover finds it whichever way the
-/// tree goes. The kernel drops it when its holder dies.
-fn claim_move(paths: &Paths, host: &str, root: &Path) -> Result<FileGuard, RegistryError> {
+/// Held for the whole change, so a second restore or move of the host is
+/// refused instead of publishing into, copying from, or discarding what the
+/// first one is still using, and so reconciliation can tell a change still
+/// running from one that was abandoned. The kernel drops the claim when its
+/// holder dies, which is what makes an abandoned change recoverable.
+pub struct HostClaim {
+    _guard: FileGuard,
+}
+
+impl std::fmt::Debug for HostClaim {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostClaim").finish_non_exhaustive()
+    }
+}
+
+/// What reconciliation learns by probing a host's claim.
+pub(crate) enum HostProbe {
+    /// Nothing is changing the host; the claim is held until it is dropped.
+    Idle(#[allow(dead_code)] HostClaim),
+    /// A restore or move of the host, in this process or another, is running.
+    Mutating,
+    /// The claim could not be tried, so an abandoned change cannot be told
+    /// from a running one.
+    Unusable,
+}
+
+impl Registry {
+    /// Claims an indexed host for a snapshot restore or other change that must
+    /// not overlap a move of it, refusing while another holds it.
+    pub fn claim_host(&self, host: RecordRef) -> Result<HostClaim, RegistryError> {
+        let root = match host {
+            RecordRef::Client(id) => self.client(id)?.root,
+            RecordRef::Server(id) => self.server(id)?.root,
+        };
+        claim_host(&self.paths, host, &root)
+    }
+
+    /// Tries a host's claim without waiting.
+    pub(crate) fn probe_host(&self, host: RecordRef) -> HostProbe {
+        match try_claim_host(&self.paths, host) {
+            Ok(guard) => HostProbe::Idle(HostClaim { _guard: guard }),
+            Err(GuardError::Busy { .. }) => HostProbe::Mutating,
+            Err(GuardError::Unusable { path, source }) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %source,
+                    "could not tell whether a host is being changed"
+                );
+                HostProbe::Unusable
+            }
+        }
+    }
+}
+
+/// Kept outside the tree being changed, so every holder finds it whichever way
+/// the tree goes.
+fn claim_host(paths: &Paths, host: RecordRef, root: &Path) -> Result<HostClaim, RegistryError> {
+    try_claim_host(paths, host)
+        .map(|guard| HostClaim { _guard: guard })
+        .map_err(|error| match error {
+            GuardError::Busy { .. } => RegistryError::HostBusy {
+                path: root.to_path_buf(),
+            },
+            GuardError::Unusable { path, source } => {
+                RegistryError::HostGuardUnusable { path, source }
+            }
+        })
+}
+
+fn try_claim_host(paths: &Paths, host: RecordRef) -> Result<FileGuard, GuardError> {
     let directory = paths.move_guards_dir();
-    create_dir_all(&directory)?;
+    std::fs::create_dir_all(&directory).map_err(|source| GuardError::Unusable {
+        path: directory.clone(),
+        source,
+    })?;
     FileGuard::take(
         &directory,
-        &move_guard_name(host),
+        &host_guard_name(host),
         std::time::Duration::ZERO,
     )
-    .map_err(|error| match error {
-        GuardError::Busy { .. } => RegistryError::MoveInProgress {
-            path: root.to_path_buf(),
-        },
-        GuardError::Unusable { path, source } => RegistryError::MoveGuardUnusable { path, source },
-    })
 }
 
-fn move_guard_name(host: &str) -> String {
-    format!("{host}.guard")
-}
-
-fn client_host(id: InstanceId) -> String {
-    format!("client-{id}")
-}
-
-fn server_host(id: ServerId) -> String {
-    format!("server-{id}")
+pub(crate) fn host_guard_name(host: RecordRef) -> String {
+    match host {
+        RecordRef::Client(id) => format!("client-{id}.guard"),
+        RecordRef::Server(id) => format!("server-{id}.guard"),
+    }
 }
 
 /// Drops the launch lock before a move.
@@ -1997,14 +2058,15 @@ mod tests {
         let client = registry
             .create_published_client(NewClient::new("x", "1.20.1", LoaderSelection::vanilla()))
             .expect("create");
-        let _running =
-            claim_move(registry.paths(), &client_host(client.id), &client.root).expect("claim");
+        let _running = registry
+            .claim_host(RecordRef::Client(client.id))
+            .expect("claim");
 
         let error = registry
             .relocate_client(client.id, StorageClass::Persistent, &mut |_| {})
             .expect_err("the first move still holds the claim");
 
-        assert!(matches!(error, RegistryError::MoveInProgress { .. }));
+        assert!(matches!(error, RegistryError::HostBusy { .. }));
         assert!(client.root.is_dir());
     }
 

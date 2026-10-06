@@ -39,9 +39,16 @@ A restore replaces captured parts rather than merging them. By default it
 first creates a safety snapshot with origin `before_restore`. Restoration uses
 a versioned journal under launcher-owned staging. The journal contains only
 typed, fixed host parts rather than arbitrary paths. Each original part moves
-inside the transaction before its replacement is published. Reconciliation
-rolls a recognized interrupted restore back in full; unfamiliar or ambiguous
-state remains untouched for manual review.
+inside the transaction before its replacement is published. A restore holds
+the host's claim, shared with storage moves (ADR 0025), from before its safety
+snapshot until it finishes or is rolled back, so a move and a restore of one
+host exclude each other. Reconciliation rolls a recognized interrupted restore
+back in full only when it can take that claim, which shows the restore's
+process is gone; a host whose claim is held is left entirely alone. On a
+filesystem with no file locking the claim only separates threads of one
+process, so a restore running in another launcher cannot be told from an
+abandoned one there. Unfamiliar
+or ambiguous state remains untouched for manual review.
 
 ## Consequences
 

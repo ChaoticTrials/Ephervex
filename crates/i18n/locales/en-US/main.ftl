@@ -201,13 +201,13 @@ error-registry-metadata-unsupported-version = The instance metadata at { $path }
 error-registry-root-occupied = That instance directory already contains files.
 .action = Choose a different name, or remove { $path } first.
 
-error-registry-move-in-progress = That instance or server is already being moved to another storage location.
-.action = Wait for the other move to finish, then try again.
+error-registry-host-busy = That instance or server is being restored from a snapshot or moved to another storage location.
+.action = Wait for the other change to finish, then try again.
 
 error-registry-restore-unfinished = That instance has an interrupted snapshot restore that has not been recovered yet.
 .action = Restart { app-name } so it can recover the restore, then try again.
 
-error-registry-move-guard-unusable = The lock that keeps two moves of one instance apart could not be used.
+error-registry-host-guard-unusable = The lock that keeps changes to one instance or server apart could not be used.
 .action = Check that { $path } can be written, then try again.
 
 # A persistent instance whose directory vanished keeps its record rather than
@@ -1037,6 +1037,8 @@ error-storage-full = The storage device is full.
 
 error-snapshot-host-running = { $host } is running, so its state cannot be captured or restored safely.
 .action = Stop the client or server, then try again.
+error-snapshot-host-busy = That instance or server is being restored from a snapshot or moved to another storage location.
+.action = Wait for the other change to finish, then try again.
 error-snapshot-not-found = Snapshot { $snapshot } no longer exists.
 error-snapshot-host-mismatch = Snapshot { $snapshot } belongs to { $found }, not { $expected }.
 .action = Restore it only from the host that created it.

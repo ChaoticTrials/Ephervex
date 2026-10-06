@@ -77,7 +77,7 @@ pub use records::{
     ServerCommitWarning, ServerCreationSource, ServerNetworkSettings, ServerOperatorIdentity,
     ServerOperatorProfile, ServerOperatorSetup, ServerPortSelection, ServerRecord,
 };
-pub use registry::{Registry, RegistryError};
+pub use registry::{HostClaim, Registry, RegistryError};
 pub use restore::{
     RestorePart, RestorePartState, RestoreTransaction, prepare_restore,
     recover_interrupted_restores,

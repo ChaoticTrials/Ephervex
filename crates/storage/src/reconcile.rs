@@ -26,7 +26,7 @@ use ephervex_model::{AttentionReason, InstanceId, ServerId, StorageClass};
 
 use crate::metadata;
 use crate::records::FileDisposition;
-use crate::registry::{Registry, RegistryError};
+use crate::registry::{HostProbe, Registry, RegistryError};
 
 /// Which record a reconciliation entry refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -195,7 +195,15 @@ fn reconcile_clients(
         }
 
         if record.root.is_dir() {
-            if recover_restore_state(&record.root, &entry, report) {
+            // A restore or move another process is still running owns the
+            // host's files and transaction state; none of it is abandoned.
+            let probe = registry.probe_host(RecordRef::Client(record.id));
+            if matches!(probe, HostProbe::Mutating) {
+                continue;
+            }
+            if matches!(probe, HostProbe::Idle(_))
+                && recover_restore_state(&record.root, &entry, report)
+            {
                 let mut canonical = metadata::read_client_metadata(&record.root)?;
                 if canonical.id != record.id {
                     report.persistence_unhealthy.push(entry);
@@ -298,7 +306,13 @@ fn reconcile_servers(
         }
 
         if record.root.is_dir() {
-            recover_restore_state(&record.root, &entry, report);
+            let probe = registry.probe_host(RecordRef::Server(record.id));
+            if matches!(probe, HostProbe::Mutating) {
+                continue;
+            }
+            if matches!(probe, HostProbe::Idle(_)) {
+                recover_restore_state(&record.root, &entry, report);
+            }
             match metadata::read_server_metadata(&record.root) {
                 Ok(mut canonical) if canonical.id == record.id => {
                     canonical.root.clone_from(&record.root);
@@ -402,7 +416,12 @@ fn reindex_orphaned_clients(
         // A move's copy that was never renamed into place is part of a host at
         // best, never adopted, and may not hold its metadata yet.
         if let Some(staged) = crate::relocate::staged_name(&directory) {
-            if let Ok(id) = staged.parse::<InstanceId>() {
+            if let Ok(id) = staged.parse::<InstanceId>()
+                && !matches!(
+                    registry.probe_host(RecordRef::Client(id)),
+                    HostProbe::Mutating
+                )
+            {
                 let name = metadata::read_client_metadata(&directory)
                     .map_or_else(|_| staged.to_owned(), |record| record.name);
                 report_unfinished_move(report, RecordRef::Client(id), name, directory);
@@ -488,7 +507,12 @@ fn reindex_orphaned_servers(
     let mut discovered = std::collections::BTreeMap::<ServerId, Vec<PathBuf>>::new();
     for directory in candidate_directories(&registry.paths().persistent_servers_dir()) {
         if let Some(staged) = crate::relocate::staged_name(&directory) {
-            if let Ok(id) = staged.parse::<ServerId>() {
+            if let Ok(id) = staged.parse::<ServerId>()
+                && !matches!(
+                    registry.probe_host(RecordRef::Server(id)),
+                    HostProbe::Mutating
+                )
+            {
                 let name = metadata::read_server_metadata(&directory)
                     .map_or_else(|_| staged.to_owned(), |record| record.name);
                 report_unfinished_move(report, RecordRef::Server(id), name, directory);
@@ -1283,5 +1307,78 @@ mod tests {
         let report = reconcile(&registry).expect("reconcile");
         assert_eq!(report.persistence_unhealthy.len(), 1);
         assert_eq!(registry.server(server.id).expect("recovery copy"), server);
+    }
+
+    /// Takes the host's guard the way another process would: through its own
+    /// open file, with no in-process claim, so only the kernel lock shows it.
+    fn hold_as_another_process(registry: &Registry, host: RecordRef) -> std::fs::File {
+        use rustix::fs::{FlockOperation, flock};
+
+        let directory = registry.paths().move_guards_dir();
+        std::fs::create_dir_all(&directory).unwrap();
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(directory.join(crate::registry::host_guard_name(host)))
+            .unwrap();
+        flock(&file, FlockOperation::NonBlockingLockExclusive).unwrap();
+        file
+    }
+
+    #[test]
+    fn a_restore_another_process_holds_is_not_rolled_back() {
+        use crate::restore::{RestorePart, RestorePartState, prepare_restore};
+
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new("x", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        let game = metadata::client_game_dir(&client.root);
+        std::fs::write(game.join("state"), b"original").unwrap();
+        let _other_process = hold_as_another_process(&registry, RecordRef::Client(client.id));
+        let transaction = prepare_restore(
+            &client.root,
+            ephervex_model::SnapshotId::new(),
+            vec![RestorePartState {
+                part: RestorePart::ClientGame,
+                original_present: true,
+                replacement_present: true,
+            }],
+        )
+        .unwrap();
+        let incoming = transaction.incoming_path(RestorePart::ClientGame);
+        std::fs::create_dir_all(&incoming).unwrap();
+        std::fs::write(incoming.join("state"), b"restored").unwrap();
+        transaction.publish().unwrap();
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert!(report.restores_rolled_back.is_empty());
+        assert!(report.interrupted_hosts.is_empty());
+        assert_eq!(std::fs::read(game.join("state")).unwrap(), b"restored");
+        transaction.finish().expect("the restore still finishes");
+    }
+
+    #[test]
+    fn a_move_another_process_holds_leaves_its_staging_directory_unreported() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let id = ServerId::new();
+        let staging = registry
+            .paths()
+            .persistent_servers_dir()
+            .join(format!(".{id}.moving"));
+        std::fs::create_dir_all(&staging).unwrap();
+
+        let other_process = hold_as_another_process(&registry, RecordRef::Server(id));
+        let running = reconcile(&registry).expect("reconcile");
+        assert!(running.unfinished_instances.is_empty());
+
+        drop(other_process);
+        let abandoned = reconcile(&registry).expect("reconcile");
+        assert_eq!(abandoned.unfinished_instances.len(), 1);
+        assert!(staging.is_dir());
     }
 }

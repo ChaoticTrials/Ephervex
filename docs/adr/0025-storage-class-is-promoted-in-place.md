@@ -60,9 +60,11 @@ retry finds what an interrupted attempt left there and replaces it. A directory
 at the destination itself that names the same instance is a copy an earlier
 attempt finished but could not record, while the instance still stands at its
 source, and is replaced. Anything else there is a conflict and is refused. A
-move holds a claim on the instance for as long as it runs, so a second move of
-the same instance is refused rather than replacing a copy that is still being
-made. A move neither writes nor clears the incomplete marker, and refuses an
+move holds the instance's host claim for as long as it runs, so a second move
+or a snapshot restore of the same instance is refused rather than replacing or
+reading a copy that is still being made. Reconciliation skips a staging
+directory whose claim another process holds, because that move is still
+running. A move neither writes nor clears the incomplete marker, and refuses an
 instance that carries one: it is an interrupted snapshot restore's, and
 recovering it after the move would put the pre-restore metadata back over the
 move's.

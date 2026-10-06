@@ -131,6 +131,8 @@ impl SnapshotDocument {
 pub enum SnapshotError {
     #[error("{host} is running")]
     HostRunning { host: String },
+    #[error("{path} is being restored or moved by another operation")]
+    HostBusy { path: PathBuf },
     #[error("snapshot {id} does not exist")]
     NotFound { id: SnapshotId },
     #[error("snapshot {snapshot} belongs to {found}, not {expected}")]
@@ -174,6 +176,7 @@ impl SnapshotError {
     pub const fn message_id(&self) -> &'static str {
         match self {
             Self::HostRunning { .. } => "error-snapshot-host-running",
+            Self::HostBusy { .. } => "error-snapshot-host-busy",
             Self::NotFound { .. } => "error-snapshot-not-found",
             Self::HostMismatch { .. } => "error-snapshot-host-mismatch",
             Self::LabelInvalid => "error-snapshot-label-invalid",
@@ -212,7 +215,8 @@ impl SnapshotError {
     #[must_use]
     pub fn failing_path(&self) -> Option<PathBuf> {
         match self {
-            Self::Unreadable { path, .. }
+            Self::HostBusy { path }
+            | Self::Unreadable { path, .. }
             | Self::Unwritable { path, .. }
             | Self::Invalid { path, .. }
             | Self::UnsupportedVersion { path, .. } => Some(path.clone()),
@@ -388,6 +392,21 @@ impl App {
         cancel: &CancellationToken,
     ) -> Result<SnapshotRestore, SnapshotError> {
         self.refuse_snapshot_while_running(host)?;
+        // Held until the restore is finished, rolled back, or abandoned: it
+        // keeps a move from carrying the host away mid-restore and tells
+        // reconciliation in another launcher that this restore is running.
+        let _claim = self
+            .registry()
+            .claim_host(match host {
+                InstalledHost::Instance(id) => ephervex_storage::RecordRef::Client(id),
+                InstalledHost::Server(id) => ephervex_storage::RecordRef::Server(id),
+            })
+            .map_err(|error| match error {
+                ephervex_storage::RegistryError::HostBusy { path } => {
+                    SnapshotError::HostBusy { path }
+                }
+                other => snapshot_core_error(crate::CoreError::from(other)),
+            })?;
         let layout = self.host_layout(host).map_err(snapshot_core_error)?;
         let snapshot = self.snapshot_directory(host, id)?;
         let restored = read_manifest(&snapshot)?;
@@ -1112,6 +1131,57 @@ mod tests {
             )
             .expect("read safety state"),
             b"changed"
+        );
+    }
+
+    #[test]
+    fn a_host_held_by_a_move_refuses_snapshot_restoration_untouched() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let app = App::open_at(Paths::rooted_at(temporary.path())).expect("open app");
+        let client = app
+            .create_client_for_test(NewClient::new(
+                "moving client",
+                "1.21.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create client");
+        let game = ephervex_storage::metadata::client_game_dir(&client.root);
+        std::fs::write(game.join("state.txt"), b"captured").expect("write state");
+        let snapshot = app
+            .create_snapshot(
+                InstalledHost::Instance(client.id),
+                "known good",
+                SnapshotOrigin::Manual,
+                &CancellationToken::new(),
+            )
+            .expect("create snapshot");
+        std::fs::write(game.join("state.txt"), b"changed").expect("change state");
+        let _move = app
+            .registry()
+            .claim_host(ephervex_storage::RecordRef::Client(client.id))
+            .expect("claim");
+
+        let error = app
+            .restore_snapshot(
+                InstalledHost::Instance(client.id),
+                snapshot.id,
+                SnapshotRestoreOptions::default(),
+                &CancellationToken::new(),
+            )
+            .expect_err("a move holds the host");
+
+        assert!(matches!(error, SnapshotError::HostBusy { .. }));
+        assert_eq!(error.message_id(), "error-snapshot-host-busy");
+        assert_eq!(
+            std::fs::read(game.join("state.txt")).expect("read"),
+            b"changed"
+        );
+        assert_eq!(
+            app.snapshots(InstalledHost::Instance(client.id))
+                .expect("list snapshots")
+                .len(),
+            1,
+            "refusal must happen before creating a safety snapshot"
         );
     }
 

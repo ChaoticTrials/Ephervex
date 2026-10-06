@@ -122,6 +122,8 @@ impl RestoreTransaction {
 }
 
 /// Creates a durable journal before any live path is moved.
+///
+/// The caller holds the host's claim until the transaction ends.
 pub fn prepare_restore(
     root: &Path,
     id: SnapshotId,
@@ -159,6 +161,9 @@ pub fn prepare_restore(
 }
 
 /// Rolls back every recognized interrupted restore under a host root.
+///
+/// Every transaction found is treated as abandoned, so the caller must hold the
+/// host's claim: a restore still running holds it until it ends.
 ///
 /// An invalid or unfamiliar staging directory is left untouched and returns
 /// an error, allowing reconciliation to surface it as suspicious state.

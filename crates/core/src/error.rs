@@ -882,9 +882,9 @@ fn registry_failing_path(error: &ephervex_storage::RegistryError) -> Option<Path
     use ephervex_storage::{IndexError, RegistryError};
     match error {
         RegistryError::RootOccupied { path }
-        | RegistryError::MoveInProgress { path }
+        | RegistryError::HostBusy { path }
         | RegistryError::RestoreUnfinished { path }
-        | RegistryError::MoveGuardUnusable { path, .. }
+        | RegistryError::HostGuardUnusable { path, .. }
         | RegistryError::RootMissing { path }
         | RegistryError::Io { path, .. }
         | RegistryError::Index(IndexError::Unopenable { path, .. }) => Some(path.clone()),
