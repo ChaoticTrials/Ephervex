@@ -1242,6 +1242,15 @@ policy. The strongest supplied hashes are checked, and a mismatch is a hard
 failure. Atomic publication ensures another operation cannot mistake partial or
 unverified bytes for a cached artifact.
 
+A download whose address came from remote input, such as a pack file, a managed
+mod's artifact, or a pack archive behind a link, carries a host scope. The
+address is checked against the scope's hosts again when it is sent, and a
+redirect may reach only those hosts and the short list of delivery hosts they
+are known to redirect to (the storage hosts behind GitHub release assets for
+Modrinth packs). Any other redirect is not followed and fails naming the host,
+so a host the launcher was allowed to contact cannot send it to one it was not
+(ADR 0027).
+
 Resume is allowed only with a strong ETag and compatible range metadata. Pack
 URLs must also pass the pack-download allowlist; loopback exceptions are scoped
 to tests.
@@ -1278,7 +1287,8 @@ listed delivery hosts, and the client whose redirects cannot leave that list is
 owned by the credential itself rather than by the downloader. That is what lets
 one operation fetch artifacts from several providers through one download
 manager: the authenticated request is confined, and an unrelated provider's
-download keeps the ordinary redirect policy and is never offered the header.
+download is confined to its own provider's hosts and is never offered the
+header.
 An operation reads the credential once and holds it for that operation's requests
 and no longer. Frontends learn whether a key is configured and never what it
 is.

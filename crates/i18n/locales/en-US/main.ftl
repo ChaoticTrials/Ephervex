@@ -1767,6 +1767,9 @@ gui-open-pack-link = Open a modpack
 # $value is the address with its query and fragment removed, so a link's
 # identifiers and tokens are not printed in a prompt.
 gui-open-pack-link-detail = A link asked Ephervex to download a modpack from:
+# The download of an agreed link was redirected to another site. The address
+# shown has its query and fragment removed.
+gui-open-pack-link-redirected-detail = The download was redirected to another site. Ephervex would download the modpack from:
 gui-open-pack-link-remember = Do not ask again for this site
 gui-open-pack-link-confirm = Download it
 gui-downloading-pack = Downloading the modpack...

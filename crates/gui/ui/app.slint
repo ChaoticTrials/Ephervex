@@ -583,8 +583,12 @@ export component AppWindow inherits Window {
     // with its query removed so a prompt never prints a token.
     in-out property <string> pack-link-url;
     in-out property <string> pack-link-display;
+    // The host the open question is about, sent back with the answer.
+    in-out property <string> pack-link-host;
+    // The download was redirected to the address shown, off the link's own site.
+    in-out property <bool> pack-link-redirected;
     in-out property <bool> pack-link-remember: true;
-    callback open-pack-link(string, bool);
+    callback open-pack-link(string, string, bool);
     // A link this process was started for, or one a later launch handed
     // over. Asking is still the backend's decision, not this call's.
     callback deliver-pack-link(string);
@@ -2455,13 +2459,13 @@ export component AppWindow inherits Window {
                     ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } }
                 }
                 if root.modal == "open-pack-link" : VerticalLayout { spacing: 14px;
-                    BodyText { text: GuiI18n.text("gui-open-pack-link-detail"); wrap: word-wrap; }
+                    BodyText { text: root.pack-link-redirected ? GuiI18n.text("gui-open-pack-link-redirected-detail") : GuiI18n.text("gui-open-pack-link-detail"); wrap: word-wrap; }
                     // The address itself, on its own line and selectable by
                     // eye: this is the thing being agreed to.
                     Rectangle { border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.background; VerticalLayout { padding: 12px; BodyText { text: root.pack-link-display; font-family: Theme.mono-family; wrap: word-wrap; } } }
                     HorizontalLayout { spacing: 8px; VerticalLayout { alignment: center; Toggle { checked: root.pack-link-remember; accessible-name: GuiI18n.text("gui-open-pack-link-remember"); toggled(on) => { root.pack-link-remember = on; } } } BodyText { text: GuiI18n.text("gui-open-pack-link-remember"); vertical-alignment: center; } }
                     if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; }
-                    ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; root.modal-error = ""; } } AppButton { text: GuiI18n.text("gui-open-pack-link-confirm"); tone: "primary"; clicked => { root.open-pack-link(root.pack-link-url, root.pack-link-remember); } } }
+                    ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; root.modal-error = ""; } } AppButton { text: GuiI18n.text("gui-open-pack-link-confirm"); tone: "primary"; clicked => { root.open-pack-link(root.pack-link-url, root.pack-link-host, root.pack-link-remember); } } }
                 }
                 if root.modal == "make-persistent" : VerticalLayout { spacing: 14px;
                     BodyText { text: GuiI18n.value("gui-make-persistent-detail", root.promote-instance-name); wrap: word-wrap; }

@@ -22,6 +22,7 @@ use slint::{ComponentHandle, PhysicalSize};
 const ADDRESS: &str =
     "https://dumps.chaotictrials.de/api/dump/5ca16367/modpack?platform=modrinth&token=s3cret";
 const SHOWN: &str = "https://dumps.chaotictrials.de/api/dump/5ca16367/modpack";
+const HOST: &str = "dumps.chaotictrials.de";
 
 #[test]
 fn the_dialog_shows_the_address_being_agreed_to() {
@@ -59,8 +60,42 @@ fn confirming_sends_the_address_back_with_the_answer() {
 
     assert_eq!(
         answered.borrow().as_slice(),
-        [(ADDRESS.to_owned(), true)],
-        "the address has to go back whole, with the remembering answer"
+        [(ADDRESS.to_owned(), HOST.to_owned(), true)],
+        "the address has to go back whole, with the host and the remembering answer"
+    );
+}
+
+/// A download that moved to another site asks about that site, in words that
+/// say so, and the answer comes back naming it rather than the link's own host.
+#[test]
+fn a_redirect_is_asked_about_as_such_and_answered_for_the_new_host() {
+    let ui = window();
+    let answered = record_answers(&ui);
+    consent_dialog(&ui);
+    ui.set_pack_link_display("https://cdn.example.net/stored/pack".into());
+    ui.set_pack_link_host("cdn.example.net".into());
+    ui.set_pack_link_redirected(true);
+    settle(&ui);
+
+    assert!(
+        ElementHandle::find_by_accessible_label(
+            &ui,
+            &lookup("gui-open-pack-link-redirected-detail")
+        )
+        .any(|element| element.size().width > 0.0),
+        "the dialog has to say the download moved"
+    );
+    assert!(
+        !ElementHandle::find_by_accessible_label(&ui, &lookup("gui-open-pack-link-detail"))
+            .any(|element| element.size().width > 0.0),
+        "and not describe a first request"
+    );
+
+    confirm(&ui);
+
+    assert_eq!(
+        answered.borrow().as_slice(),
+        [(ADDRESS.to_owned(), "cdn.example.net".to_owned(), true)]
     );
 }
 
@@ -78,7 +113,10 @@ fn declining_to_remember_still_downloads_but_records_nothing() {
     settle(&ui);
     confirm(&ui);
 
-    assert_eq!(answered.borrow().as_slice(), [(ADDRESS.to_owned(), false)]);
+    assert_eq!(
+        answered.borrow().as_slice(),
+        [(ADDRESS.to_owned(), HOST.to_owned(), false)]
+    );
 }
 
 #[test]
@@ -195,6 +233,8 @@ fn consent_dialog(ui: &AppWindow) {
     ui.set_page(0);
     ui.set_pack_link_url(ADDRESS.into());
     ui.set_pack_link_display(SHOWN.into());
+    ui.set_pack_link_host(HOST.into());
+    ui.set_pack_link_redirected(false);
     ui.set_pack_link_remember(true);
     ui.set_modal("open-pack-link".into());
     settle(ui);
@@ -212,11 +252,14 @@ fn remember_switch(ui: &AppWindow) -> Option<ElementHandle> {
         .find(|element| element.size().width > 0.0)
 }
 
-fn record_answers(ui: &AppWindow) -> Rc<RefCell<Vec<(String, bool)>>> {
-    let answered: Rc<RefCell<Vec<(String, bool)>>> = Rc::default();
+type Answers = Rc<RefCell<Vec<(String, String, bool)>>>;
+
+fn record_answers(ui: &AppWindow) -> Answers {
+    let answered: Answers = Rc::default();
     let sink = Rc::clone(&answered);
-    ui.on_open_pack_link(move |url, remember| {
-        sink.borrow_mut().push((url.to_string(), remember));
+    ui.on_open_pack_link(move |url, host, remember| {
+        sink.borrow_mut()
+            .push((url.to_string(), host.to_string(), remember));
     });
     answered
 }

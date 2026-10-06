@@ -157,7 +157,7 @@ pub use mutation::{
 };
 pub use pack_url::{
     HostConsent, LAUNCHER_URL_SCHEME, LauncherUrl, LauncherUrlError, MAX_LAUNCHER_URL_BYTES,
-    MAX_PACK_ARCHIVE_BYTES, PackSource, StagedPack,
+    MAX_PACK_ARCHIVE_BYTES, PackConsents, PackSource, StagedPack,
 };
 pub use promotion::{
     PromotableServer, PromotionOutcome, PromotionPlan, PromotionRequest, PromotionWarning,

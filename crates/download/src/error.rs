@@ -28,6 +28,17 @@ pub enum DownloadError {
     #[error("http {status} from {url}")]
     HttpStatus { url: String, status: u16 },
 
+    /// A download confined to a set of hosts was redirected to a host outside
+    /// it, and the redirect was not followed.
+    #[error("{url} redirected to {target}, which is not a permitted host")]
+    RedirectRefused {
+        url: String,
+        /// The redirect target, without its query or credentials.
+        target: String,
+        /// The host the redirect named, for a caller that can ask about it.
+        host: String,
+    },
+
     /// Connection, TLS, timeout, or truncated-body failure.
     #[error("transport failure for {url}")]
     Transport {
@@ -133,6 +144,7 @@ impl DownloadError {
             }
             Self::RangeNotHonored { .. } => true,
             Self::Policy(_)
+            | Self::RedirectRefused { .. }
             | Self::ClientBuild { .. }
             | Self::HashMismatch { .. }
             | Self::SizeMismatch { .. }

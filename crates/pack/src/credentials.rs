@@ -26,7 +26,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use ephervex_download::AuthenticatedSource;
+use ephervex_download::{AuthenticatedSource, DownloadError, HostScope};
 
 use crate::recipe::ProviderFileIdentity;
 
@@ -107,6 +107,22 @@ pub trait ArtifactCredentials: fmt::Debug {
         identity: Option<&ProviderFileIdentity>,
         status: u16,
     ) -> Option<CredentialUnavailable>;
+
+    /// The hosts this file's download may reach, decided like the credential
+    /// from the recorded identity alone.
+    ///
+    /// A recorded address was checked against its source's host list when it
+    /// arrived, and a scope keeps both that address and every redirect it leads
+    /// to on that list. `None` leaves the download unconfined, which is right
+    /// only for a supplier whose files come from addresses nobody else chose.
+    /// An error means the scope could not be built, and the file is not fetched
+    /// unconfined instead.
+    fn hosts_for(
+        &self,
+        _identity: Option<&ProviderFileIdentity>,
+    ) -> Result<Option<Arc<HostScope>>, DownloadError> {
+        Ok(None)
+    }
 }
 
 /// The supplier for an operation whose artifacts all come from sources that

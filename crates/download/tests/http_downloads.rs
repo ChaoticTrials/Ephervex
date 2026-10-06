@@ -13,9 +13,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ephervex_download::{
-    ArtifactSource, BatchDownloadError, CacheLayout, ChannelSink, ContentStore, DownloadError,
-    DownloadManager, DownloadRequest, DownloaderConfig, FileExtension, HttpConfig,
-    OperationReporter, ProgressSink, RetryPolicy, UrlPolicyError,
+    ArtifactSource, BatchDownloadError, CacheLayout, ChannelSink, ContentStore, DomainAllowlist,
+    DownloadError, DownloadManager, DownloadRequest, DownloaderConfig, FileExtension, HostScope,
+    HttpConfig, OperationReporter, ProgressSink, RetryPolicy, UrlPolicyError,
 };
 use ephervex_model::{Hash, HashAlgorithm, OperationStatus, Progress};
 use sha1::{Digest, Sha1};
@@ -189,6 +189,125 @@ async fn a_redirect_is_followed_to_the_final_body() {
         .expect("redirect is followed");
 
     assert_eq!(std::fs::read(&destination).expect("artifact exists"), BODY);
+}
+
+/// The same loopback server under a second host name, which a host allowlist
+/// tells apart from `127.0.0.1`.
+fn under_localhost(server: &MockServer, route: &str) -> String {
+    format!("http://localhost:{}{route}", server.address().port())
+}
+
+fn loopback_scope(hosts: DomainAllowlist) -> Arc<HostScope> {
+    Arc::new(HostScope::new(hosts, &HttpConfig::for_loopback_tests()).expect("scope builds"))
+}
+
+#[tokio::test]
+async fn a_confined_download_does_not_follow_a_redirect_off_its_hosts() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/redirect"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("location", under_localhost(&server, "/final?token=secret")),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/final"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let dir = TempDir::new().expect("temp dir");
+    let destination = dir.path().join("artifact.jar");
+    let error = manager(RetryPolicy::none())
+        .download(
+            &request(&server, "/redirect", &destination)
+                .verifying(sha1_of(BODY))
+                .within(loopback_scope(DomainAllowlist::for_loopback_tests(
+                    "127.0.0.1",
+                ))),
+            &OperationReporter::silent("download"),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("the redirect leaves the permitted hosts");
+
+    let DownloadError::RedirectRefused { host, target, .. } = &error else {
+        panic!("expected a refused redirect, got {error:?}");
+    };
+    assert_eq!(host, "localhost");
+    assert!(
+        !target.contains("secret"),
+        "the target is reported without its query"
+    );
+    assert!(!destination.exists());
+}
+
+#[tokio::test]
+async fn a_confined_download_follows_a_redirect_to_a_redirect_only_host() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/redirect"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("location", under_localhost(&server, "/final")),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/final"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+        .mount(&server)
+        .await;
+
+    let dir = TempDir::new().expect("temp dir");
+    let destination = dir.path().join("artifact.jar");
+    let scope = DomainAllowlist::for_loopback_tests("127.0.0.1").allowing_redirects_to("localhost");
+    manager(RetryPolicy::none())
+        .download(
+            &request(&server, "/redirect", &destination)
+                .verifying(sha1_of(BODY))
+                .within(loopback_scope(scope)),
+            &OperationReporter::silent("download"),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("a redirect-only host is reachable by redirect");
+
+    assert_eq!(std::fs::read(&destination).expect("artifact exists"), BODY);
+}
+
+#[tokio::test]
+async fn a_confined_download_is_not_sent_to_an_address_off_its_hosts() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let dir = TempDir::new().expect("temp dir");
+    let destination = dir.path().join("artifact.jar");
+    let url = reqwest::Url::parse(&under_localhost(&server, "/a.jar")).expect("url");
+    // Reachable by redirect, but never named directly.
+    let scope = DomainAllowlist::for_loopback_tests("127.0.0.1").allowing_redirects_to("localhost");
+    let error = manager(RetryPolicy::none())
+        .download(
+            &DownloadRequest::new(url, &destination)
+                .verifying(sha1_of(BODY))
+                .within(loopback_scope(scope)),
+            &OperationReporter::silent("download"),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("the address names a host the scope does not permit");
+
+    assert!(matches!(
+        error,
+        DownloadError::Policy(UrlPolicyError::HostNotAllowed { ref host, .. }) if host == "localhost"
+    ));
 }
 
 #[tokio::test]
@@ -785,7 +904,7 @@ async fn a_credential_confines_its_own_redirects_without_confining_anything_else
         .await
         .expect_err("a redirect off the permitted hosts is refused");
     assert!(
-        matches!(error, DownloadError::HttpStatus { status: 302, .. }),
+        matches!(error, DownloadError::RedirectRefused { ref host, .. } if host == "localhost"),
         "{error:?}"
     );
     assert!(!confined.exists());

@@ -594,7 +594,8 @@ fn request_for(
             .cache
             .content(ContentStore::Downloads, hash, extension_of(file).as_ref());
 
-    // The provider parser has already applied its domain allowlist. Parse the
+    // The provider parser applied its domain allowlist when the address
+    // arrived, and the file's scope applies it again when it is sent. Parse the
     // serialized recipe value without repeating the downloader's transport
     // policy so loopback integration tests can exercise the full pipeline.
     let url = Url::parse(address).map_err(|_| PackError::DownloadUrlRejected {
@@ -616,6 +617,16 @@ fn request_for(
         // The source decides whether this particular address may receive the
         // credential; attaching it here only offers it.
         request = request.authenticated_by(Arc::clone(source));
+    }
+    let scope = fetch
+        .credentials
+        .hosts_for(file.identity.as_ref())
+        .map_err(|source| PackError::DownloadFailed {
+            path: file.display_name(),
+            source: Box::new(source),
+        })?;
+    if let Some(scope) = scope {
+        request = request.within(scope);
     }
     Ok(request)
 }

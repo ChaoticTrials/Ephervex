@@ -142,16 +142,17 @@ pub fn build_single_origin_client(
 
 /// Builds a client that will not follow a redirect off an explicit host list.
 ///
-/// The counterpart to [`build_single_origin_client`] for a caller whose
-/// credential is scoped to a *set* of hosts rather than to one origin: a
-/// provider that answers with a download address may legitimately hand out
-/// several delivery hosts and redirect between them, and a client that refused
-/// the second one could not fetch the file at all.
+/// The counterpart to [`build_single_origin_client`] for a caller scoped to a
+/// *set* of hosts rather than to one origin: a provider that answers with a
+/// download address may legitimately hand out several delivery hosts and
+/// redirect between them, and a client that refused the second one could not
+/// fetch the file at all. A redirect may also reach the list's redirect-only
+/// hosts ([`DomainAllowlist::validate_redirect`]).
 ///
-/// The guarantee is the same one, widened by exactly the list: a redirect to a
-/// host the caller has not vouched for is stopped rather than followed, so the
-/// header the request carries cannot reach it. The caller receives the `3xx`
-/// response and treats it as a failure, which is the honest outcome.
+/// A redirect to a host the caller has not vouched for is stopped rather than
+/// followed, so neither a credential the request carries nor the request itself
+/// reaches it. The caller receives the `3xx` response and treats it as a
+/// failure, which is the honest outcome.
 pub fn build_allowlisted_client(
     config: &HttpConfig,
     allowlist: &DomainAllowlist,
@@ -159,12 +160,12 @@ pub fn build_allowlisted_client(
     let permitted = allowlist.clone();
     let max_redirects = config.max_redirects;
     let policy = redirect::Policy::custom(move |attempt| {
-        if permitted.validate_url(attempt.url()).is_err() {
+        if permitted.validate_redirect(attempt.url()).is_err() {
             // The address, never its query string: a redirect target can carry
             // a signed token, and this line exists to explain a refusal.
             warn!(
                 target = %redacted(attempt.url()),
-                "refusing to follow an authenticated download off its permitted hosts"
+                "refusing to follow a download off its permitted hosts"
             );
             return attempt.stop();
         }

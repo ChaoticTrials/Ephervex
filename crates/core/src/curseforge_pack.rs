@@ -57,7 +57,10 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
-use ephervex_download::{AuthenticatedSource, DomainAllowlist, DownloadManager, DownloaderConfig};
+use ephervex_download::{
+    AuthenticatedSource, DomainAllowlist, DownloadError, DownloadManager, DownloaderConfig,
+    HostScope,
+};
 use ephervex_mod_platform::{
     CURSEFORGE_API_KEY_HEADER, CurseForgeFileRelease, CurseForgeOperation, CurseForgeProject,
     CurseForgeProjectClass, MINECRAFT_GAME_ID, ModPlatformError, file_browser_url,
@@ -282,6 +285,27 @@ impl App {
         DomainAllowlist::curseforge_artifact_defaults()
     }
 
+    /// The hosts a Modrinth file, or a pack file whose identity names no
+    /// catalog, may be fetched from. A method for the same reason as
+    /// [`Self::curseforge_artifact_hosts`].
+    #[cfg_attr(
+        not(test),
+        expect(
+            clippy::unused_self,
+            reason = "only a test build reads the loopback flag"
+        )
+    )]
+    pub(crate) fn modrinth_artifact_hosts(&self) -> DomainAllowlist {
+        // `localhost` stands in for the release-asset hosts a listed address
+        // may redirect to.
+        #[cfg(test)]
+        if self.loopback_http {
+            return DomainAllowlist::for_loopback_tests("127.0.0.1")
+                .allowing_redirects_to("localhost");
+        }
+        DomainAllowlist::modrinth_pack_defaults()
+    }
+
     /// Wraps a CurseForge API key as a credential an artifact download may
     /// carry.
     ///
@@ -328,6 +352,8 @@ impl App {
         ProviderCredentials {
             app: self,
             curseforge: OnceLock::new(),
+            curseforge_hosts: OnceLock::new(),
+            modrinth_hosts: OnceLock::new(),
         }
     }
 }
@@ -378,6 +404,8 @@ pub(crate) struct ProviderCredentials<'a> {
     /// Built on the first CurseForge artifact this operation actually fetches,
     /// and never for an operation that fetches none.
     curseforge: OnceLock<Arc<AuthenticatedSource>>,
+    curseforge_hosts: OnceLock<Arc<HostScope>>,
+    modrinth_hosts: OnceLock<Arc<HostScope>>,
 }
 
 impl fmt::Debug for ProviderCredentials<'_> {
@@ -458,6 +486,34 @@ impl ArtifactCredentials for ProviderCredentials<'_> {
             // one refused: whatever this status is, it is about the download.
             _ => None,
         }
+    }
+
+    fn hosts_for(
+        &self,
+        identity: Option<&ProviderFileIdentity>,
+    ) -> Result<Option<Arc<HostScope>>, DownloadError> {
+        let (cell, hosts) = match identity.and_then(|identity| identity.provider) {
+            Some(ModProvider::CurseForge) => {
+                (&self.curseforge_hosts, self.app.curseforge_artifact_hosts())
+            }
+            // A pack index names no catalog; its addresses were held to
+            // Modrinth's pack host list when it was read.
+            Some(ModProvider::Modrinth) | None => {
+                (&self.modrinth_hosts, self.app.modrinth_artifact_hosts())
+            }
+            // A catalog with no list of its own vouches for no host.
+            Some(_) => {
+                return Ok(Some(Arc::new(HostScope::new(
+                    DomainAllowlist::empty(),
+                    &self.app.http_config(),
+                )?)));
+            }
+        };
+        if let Some(scope) = cell.get() {
+            return Ok(Some(Arc::clone(scope)));
+        }
+        let scope = Arc::new(HostScope::new(hosts, &self.app.http_config())?);
+        Ok(Some(Arc::clone(cell.get_or_init(|| scope))))
     }
 }
 
@@ -4065,9 +4121,10 @@ mod tests {
         let server = MockServer::start().await;
         serve_pack_guarded(&server).await;
         // The other catalog's artifact, redirected once to a host the CurseForge
-        // allowlist does not contain. Following it is correct - this request
-        // carries no CurseForge secret - and proves that one provider's redirect
-        // containment did not become everybody's.
+        // allowlist does not contain but Modrinth's redirect-only hosts do.
+        // Following it is correct - this request carries no CurseForge secret -
+        // and proves that one provider's redirect containment did not become
+        // everybody's.
         let elsewhere = format!(
             "http://localhost:{}/relocated/from-modrinth.jar",
             server.address().port()
@@ -4110,7 +4167,7 @@ mod tests {
         assert_eq!(
             std::fs::read(target.join(MODRINTH_PATH)).expect("read"),
             MODRINTH_BODY,
-            "an unauthenticated download still follows an ordinary redirect"
+            "an unauthenticated download still follows a redirect its own hosts allow"
         );
 
         let (curseforge, curseforge_authenticated) = artifact_requests(&server, "/files/").await;
@@ -4123,6 +4180,99 @@ mod tests {
                 "{prefix} was offered another provider's credential"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_managed_modrinth_artifact_naming_an_unapproved_host_is_never_requested() {
+        let server = MockServer::start().await;
+        serve_pack_guarded(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/modrinth/from-modrinth.jar"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(MODRINTH_BODY.to_vec(), "application/java-archive"),
+            )
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_at(dir.path(), "repro.zip");
+        let app = app_against(dir.path(), &server);
+        let imported = import_then_evict(&app, &archive).await;
+        // A provider response named an address on a host that is not Modrinth's:
+        // `localhost` reaches the same loopback server but is not on the list an
+        // address may name.
+        let mut entry = modrinth_entry(&server);
+        entry.downloads = vec![format!(
+            "http://localhost:{}/modrinth/from-modrinth.jar",
+            server.address().port()
+        )];
+        let source = SourceStore::new(app.pack_source_dir(imported.record.id).expect("source dir"));
+        let mut recipe = source.read_recipe().expect("the retained recipe");
+        recipe.files.push(entry);
+        source
+            .write_recipe(&recipe)
+            .expect("retain the mixed recipe");
+
+        let error = reconstruct_server(&app, &imported, &dir.path().join("server"))
+            .await
+            .expect_err("the initial address is off the approved hosts");
+
+        assert!(
+            matches!(
+                &error,
+                CoreError::Pack(PackError::DownloadFailed { source, .. })
+                    if matches!(
+                        **source,
+                        ephervex_download::DownloadError::Policy(
+                            ephervex_download::UrlPolicyError::HostNotAllowed { ref host, .. }
+                        ) if host == "localhost"
+                    )
+            ),
+            "{error:?}"
+        );
+        let (requested, _) = artifact_requests(&server, "/modrinth/").await;
+        assert_eq!(requested, 0, "the unapproved host was contacted");
+    }
+
+    #[tokio::test]
+    async fn a_modrinth_artifact_is_not_redirected_off_its_permitted_hosts() {
+        let server = MockServer::start().await;
+        serve_pack_guarded(&server).await;
+        // A loopback address no Modrinth host list names, so the redirect
+        // policy alone decides whether it is contacted.
+        let elsewhere = format!(
+            "http://127.0.0.2:{}/relocated/from-modrinth.jar",
+            server.address().port()
+        );
+        Mock::given(method("GET"))
+            .and(path("/modrinth/from-modrinth.jar"))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", elsewhere.as_str()))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_at(dir.path(), "repro.zip");
+        let app = app_against(dir.path(), &server);
+        let imported = import_then_evict(&app, &archive).await;
+        let source = SourceStore::new(app.pack_source_dir(imported.record.id).expect("source dir"));
+        let mut recipe = source.read_recipe().expect("the retained recipe");
+        recipe.files.push(modrinth_entry(&server));
+        source
+            .write_recipe(&recipe)
+            .expect("retain the mixed recipe");
+
+        let error = reconstruct_server(&app, &imported, &dir.path().join("server"))
+            .await
+            .expect_err("the redirect leaves Modrinth's hosts");
+        assert!(
+            matches!(
+                &error,
+                CoreError::Pack(PackError::DownloadFailed { source, .. })
+                    if matches!(**source, ephervex_download::DownloadError::RedirectRefused { ref host, .. } if host == "127.0.0.2")
+            ),
+            "{error:?}"
+        );
     }
 
     #[tokio::test]

@@ -23,10 +23,11 @@
 //! rather than after it has filled a disk.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ephervex_download::{
-    DownloadManager, DownloadRequest, DownloaderConfig, OperationReporter, Url, check_transport,
-    redacted,
+    DomainAllowlist, DownloadError, DownloadManager, DownloadRequest, DownloaderConfig, HostScope,
+    OperationReporter, Url, check_transport, redacted,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
@@ -85,6 +86,49 @@ pub enum HostConsent {
     JustOnce,
     /// The user agreed and asked not to be prompted for this host again.
     Remember,
+}
+
+/// What the user has answered about hosts while fetching one pack link.
+///
+/// A link can redirect, and every host the download reaches needs consent
+/// (ADR 0027), so one fetch can need answers for several. A frontend keeps the
+/// answers it collected and passes all of them again when it retries.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PackConsents {
+    answers: std::collections::BTreeMap<String, HostConsent>,
+}
+
+impl PackConsents {
+    /// No answers yet: only hosts agreed to before may be reached.
+    #[must_use]
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Records an answer for `host`, replacing an earlier one.
+    #[must_use]
+    pub fn agreeing(mut self, host: &str, consent: HostConsent) -> Self {
+        self.answers
+            .insert(host.trim().to_ascii_lowercase(), consent);
+        self
+    }
+
+    /// Whether an answer has been recorded for `host`.
+    #[must_use]
+    pub fn agrees_to(&self, host: &str) -> bool {
+        self.answers.contains_key(&host.trim().to_ascii_lowercase())
+    }
+
+    fn remembered(&self) -> impl Iterator<Item = &str> {
+        self.answers
+            .iter()
+            .filter(|(_, consent)| **consent == HostConsent::Remember)
+            .map(|(host, _)| host.as_str())
+    }
+
+    fn hosts(&self) -> impl Iterator<Item = &str> {
+        self.answers.keys().map(String::as_str)
+    }
 }
 
 /// A downloaded pack archive, removed when it goes out of scope.
@@ -298,31 +342,36 @@ impl App {
 
     /// Downloads a pack archive into a staging location.
     ///
-    /// Refuses unless the host is already trusted or `consent` says the user
+    /// Refuses unless the host is already trusted or `consents` says the user
     /// has just agreed to it. The check lives here rather than in each frontend,
     /// so there is one place that decides whether a fetch is allowed and no way
     /// to reach the download by forgetting to ask.
+    ///
+    /// A redirect is followed only to a host agreed to the same way. One to any
+    /// other host is not followed and fails as [`CoreError::PackHostNotTrusted`]
+    /// naming that host, so the frontend can ask about it and retry with every
+    /// answer it has.
     #[instrument(skip(self, reporter, cancel), fields(host = %source.host()))]
     pub async fn fetch_pack(
         &mut self,
         source: &PackSource,
-        consent: Option<HostConsent>,
+        consents: &PackConsents,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<StagedPack> {
-        match consent {
-            Some(HostConsent::Remember) => {
-                let host = source.host().to_owned();
-                self.mutate_config(|config| config.import.trust(&host))?;
-            }
-            Some(HostConsent::JustOnce) => {}
-            None if self.pack_host_is_trusted(source) => {}
-            None => {
-                return Err(CoreError::PackHostNotTrusted {
-                    url: source.display().to_owned(),
-                    host: source.host().to_owned(),
-                });
-            }
+        let remembered: Vec<String> = consents.remembered().map(str::to_owned).collect();
+        if !remembered.is_empty() {
+            self.mutate_config(|config| {
+                for host in &remembered {
+                    config.import.trust(host);
+                }
+            })?;
+        }
+        if !consents.agrees_to(source.host()) && !self.pack_host_is_trusted(source) {
+            return Err(CoreError::PackHostNotTrusted {
+                url: source.display().to_owned(),
+                host: source.host().to_owned(),
+            });
         }
 
         let staging = pack_download_dir(self.paths());
@@ -335,10 +384,16 @@ impl App {
         // where a file lands. The format is detected by content anyway.
         let destination = staging.join(format!("{}.pack", uuid::Uuid::new_v4()));
 
-        let manager = self.pack_download_manager()?;
+        let config = self.pack_download_config();
+        let manager = DownloadManager::new(config.clone())
+            .map_err(|error| unusable_pack_downloader(&error))?;
+        let agreed = self.agreed_pack_hosts(consents);
+        let scope = HostScope::new(agreed, &config.http)
+            .map_err(|error| unusable_pack_downloader(&error))?;
         let request = DownloadRequest::new(source.url().clone(), &destination)
             .bounded_by(MAX_PACK_ARCHIVE_BYTES)
-            .labeled(source.display().to_owned());
+            .labeled(source.display().to_owned())
+            .within(Arc::new(scope));
 
         let staged = StagedPack {
             path: destination,
@@ -349,9 +404,14 @@ impl App {
         manager
             .download(&request, reporter, cancel)
             .await
-            .map_err(|error| CoreError::PackDownloadFailed {
-                url: source.display().to_owned(),
-                detail: error.to_string(),
+            .map_err(|error| match error {
+                DownloadError::RedirectRefused { target, host, .. } => {
+                    CoreError::PackHostNotTrusted { url: target, host }
+                }
+                error => CoreError::PackDownloadFailed {
+                    url: source.display().to_owned(),
+                    detail: error.to_string(),
+                },
             })?;
 
         info!(
@@ -362,9 +422,9 @@ impl App {
         Ok(staged)
     }
 
-    /// A manager for the one transfer a pack URL causes.
-    fn pack_download_manager(&self) -> CoreResult<DownloadManager> {
-        let config = if self.allows_plaintext_http() {
+    /// The configuration for the one transfer a pack URL causes.
+    fn pack_download_config(&self) -> DownloaderConfig {
+        if self.allows_plaintext_http() {
             DownloaderConfig {
                 http: ephervex_download::HttpConfig::for_loopback_tests(),
                 retry: ephervex_download::RetryPolicy::none(),
@@ -372,11 +432,24 @@ impl App {
             }
         } else {
             DownloaderConfig::default()
+        }
+    }
+
+    /// Every host this fetch may reach: those agreed to before, and those the
+    /// user has just answered for, on any port. Consent is to a host, not to
+    /// one address on it (ADR 0027), and the address parser accepts any port.
+    fn agreed_pack_hosts(&self, consents: &PackConsents) -> DomainAllowlist {
+        let base = if self.allows_plaintext_http() {
+            DomainAllowlist::for_loopback_tests("")
+        } else {
+            DomainAllowlist::empty()
         };
-        DownloadManager::new(config).map_err(|source| CoreError::PackDownloadFailed {
-            url: String::new(),
-            detail: source.to_string(),
-        })
+        self.trusted_pack_hosts()
+            .iter()
+            .map(String::as_str)
+            .chain(consents.hosts())
+            .fold(base, DomainAllowlist::allowing)
+            .allowing_any_port()
     }
 
     /// Whether this build may talk to a loopback HTTP server.
@@ -393,6 +466,14 @@ impl App {
     #[allow(clippy::unused_self)]
     const fn allows_plaintext_http(&self) -> bool {
         false
+    }
+}
+
+/// A downloader that could not be built, as the failure a pack link reports.
+fn unusable_pack_downloader(source: &DownloadError) -> CoreError {
+    CoreError::PackDownloadFailed {
+        url: String::new(),
+        detail: source.to_string(),
     }
 }
 
@@ -615,7 +696,12 @@ mod tests {
             .expect("a loopback address");
 
         let error = app
-            .fetch_pack(&source, None, &silent(), &CancellationToken::new())
+            .fetch_pack(
+                &source,
+                &PackConsents::none(),
+                &silent(),
+                &CancellationToken::new(),
+            )
             .await
             .expect_err("nobody has agreed to this host");
 
@@ -627,6 +713,103 @@ mod tests {
             server.received_requests().await.expect("requests").len(),
             0,
             "a refusal must happen before anything reaches the network"
+        );
+    }
+
+    #[test]
+    fn an_agreed_host_may_serve_a_pack_from_any_port_and_no_other_host_may() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let source = app
+            .pack_source("https://packs.example:8443/p.mrpack")
+            .expect("an address on a non-default port");
+        let agreed = PackConsents::none().agreeing(source.host(), HostConsent::JustOnce);
+
+        let hosts = app.agreed_pack_hosts(&agreed);
+
+        assert!(hosts.validate_url(source.url()).is_ok());
+        assert!(
+            hosts
+                .validate("https://elsewhere.example:8443/p.mrpack")
+                .is_err()
+        );
+        assert!(
+            app.agreed_pack_hosts(&PackConsents::none())
+                .validate_url(source.url())
+                .is_err(),
+            "without an answer the host is not reachable"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_link_redirected_to_another_host_asks_about_that_host_before_following_it() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let server = MockServer::start().await;
+        // The same loopback server under a second host name.
+        let elsewhere = format!(
+            "http://localhost:{}/stored/pack?signature=secret",
+            server.address().port()
+        );
+        Mock::given(method("GET"))
+            .and(path("/pack"))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", elsewhere.as_str()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/stored/pack"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"a pack archive".to_vec()))
+            .mount(&server)
+            .await;
+        let mut app = app_rooted_at(base.path());
+        let source = app
+            .pack_source(&format!("{}/pack", server.uri()))
+            .expect("a loopback address");
+        let agreed = PackConsents::none().agreeing(source.host(), HostConsent::JustOnce);
+
+        let error = app
+            .fetch_pack(&source, &agreed, &silent(), &CancellationToken::new())
+            .await
+            .expect_err("the redirect names a host nobody agreed to");
+
+        let CoreError::PackHostNotTrusted { url, host } = &error else {
+            panic!("expected a consent refusal for the redirect, got {error}");
+        };
+        assert_eq!(host, "localhost");
+        assert!(
+            !url.contains("secret"),
+            "the address is shown without its query"
+        );
+        let stored_requests = server
+            .received_requests()
+            .await
+            .expect("requests")
+            .iter()
+            .filter(|request| request.url.path() == "/stored/pack")
+            .count();
+        assert_eq!(stored_requests, 0, "the new host was not contacted");
+
+        let staged = app
+            .fetch_pack(
+                &source,
+                &agreed.agreeing("localhost", HostConsent::Remember),
+                &silent(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("both hosts are agreed to");
+        assert_eq!(
+            std::fs::read(staged.path()).expect("read"),
+            b"a pack archive"
+        );
+        assert!(
+            app.trusted_pack_hosts()
+                .iter()
+                .any(|host| host == "localhost"),
+            "a remembered answer for the redirect host is kept"
+        );
+        assert!(
+            !app.pack_host_is_trusted(&source),
+            "the link's own host was agreed to once only"
         );
     }
 
@@ -642,7 +825,7 @@ mod tests {
         let staged = app
             .fetch_pack(
                 &source,
-                Some(HostConsent::JustOnce),
+                &PackConsents::none().agreeing(source.host(), HostConsent::JustOnce),
                 &silent(),
                 &CancellationToken::new(),
             )
@@ -670,7 +853,7 @@ mod tests {
 
         app.fetch_pack(
             &source,
-            Some(HostConsent::Remember),
+            &PackConsents::none().agreeing(source.host(), HostConsent::Remember),
             &silent(),
             &CancellationToken::new(),
         )
@@ -684,7 +867,12 @@ mod tests {
         assert!(reopened.pack_host_is_trusted(&source));
 
         let staged = reopened
-            .fetch_pack(&source, None, &silent(), &CancellationToken::new())
+            .fetch_pack(
+                &source,
+                &PackConsents::none(),
+                &silent(),
+                &CancellationToken::new(),
+            )
             .await
             .expect("an agreed host needs no second answer");
         assert_eq!(
@@ -716,7 +904,7 @@ mod tests {
         let staged = app
             .fetch_pack(
                 &source,
-                Some(HostConsent::JustOnce),
+                &PackConsents::none().agreeing(source.host(), HostConsent::JustOnce),
                 &silent(),
                 &CancellationToken::new(),
             )
@@ -773,7 +961,7 @@ mod tests {
         let staged = app
             .fetch_pack(
                 &source,
-                Some(HostConsent::Remember),
+                &PackConsents::none().agreeing(source.host(), HostConsent::Remember),
                 &silent(),
                 &CancellationToken::new(),
             )
@@ -810,7 +998,7 @@ mod tests {
         let staging = pack_download_dir(app.paths());
         std::fs::create_dir_all(&staging).expect("staging");
         let destination = staging.join("bounded.pack");
-        let manager = app.pack_download_manager().expect("manager");
+        let manager = DownloadManager::new(app.pack_download_config()).expect("manager");
         let request =
             DownloadRequest::new(source.url().clone(), &destination).bounded_by(request_ceiling);
 

@@ -102,10 +102,9 @@ pub struct DownloadOutcome {
 pub struct AuthenticatedSource {
     header: HeaderName,
     secret: SecretString,
-    hosts: DomainAllowlist,
-    /// The client every request carrying this credential is sent through. See
-    /// [`build_allowlisted_client`](crate::build_allowlisted_client).
-    client: Client,
+    /// The hosts the credential may reach, and the client every request
+    /// carrying it is sent through.
+    scope: HostScope,
 }
 
 impl AuthenticatedSource {
@@ -124,24 +123,22 @@ impl AuthenticatedSource {
         hosts: DomainAllowlist,
         http: &HttpConfig,
     ) -> Result<Self, DownloadError> {
-        let client = build_allowlisted_client(http, &hosts)?;
         Ok(Self {
             header,
             secret,
-            hosts,
-            client,
+            scope: HostScope::new(hosts, http)?,
         })
     }
 
     /// The client a request carrying this credential must be sent through.
-    fn client(&self) -> &Client {
-        &self.client
+    const fn client(&self) -> &Client {
+        &self.scope.client
     }
 
     /// Whether this address may receive the credential.
     #[must_use]
     pub fn permits(&self, url: &Url) -> bool {
-        self.hosts.validate_url(url).is_ok()
+        self.scope.permits(url)
     }
 
     /// The header name, for tests and diagnostics. Never the value.
@@ -179,6 +176,56 @@ impl AuthenticatedSource {
     }
 }
 
+/// The hosts a download may reach, and a client whose redirects stay among
+/// them.
+///
+/// For a request whose address came from remote input and was checked against
+/// a host list: the address is checked again before anything is sent, and a
+/// redirect may only lead to the list's hosts and its redirect-only hosts
+/// ([`DomainAllowlist::validate_redirect`]). A redirect anywhere else is not
+/// followed and fails as [`DownloadError::RedirectRefused`], naming the host.
+#[derive(Debug, Clone)]
+pub struct HostScope {
+    hosts: DomainAllowlist,
+    client: Client,
+}
+
+impl HostScope {
+    /// Fallible because the confining client is built here: a download that
+    /// cannot be confined to its hosts is not sent.
+    pub fn new(hosts: DomainAllowlist, http: &HttpConfig) -> Result<Self, DownloadError> {
+        let client = build_allowlisted_client(http, &hosts)?;
+        Ok(Self { hosts, client })
+    }
+
+    /// Whether a request may be sent to this address.
+    #[must_use]
+    pub fn permits(&self, url: &Url) -> bool {
+        self.hosts.validate_url(url).is_ok()
+    }
+
+    /// Why the confining client stopped at a redirect to `target`.
+    ///
+    /// Only a host the scope does not permit is a refused redirect a caller can
+    /// ask about. A scheme, port or userinfo the rules refuse is a policy
+    /// failure whatever the host, so it is reported as one.
+    fn refusal(&self, from: &str, status: StatusCode, target: &Url) -> DownloadError {
+        match self.hosts.validate_redirect(target) {
+            Err(UrlPolicyError::HostNotAllowed { host, .. }) => DownloadError::RedirectRefused {
+                url: from.to_owned(),
+                target: redacted(target),
+                host,
+            },
+            Err(error) => DownloadError::Policy(error),
+            // The client stopped for a reason this check does not repeat.
+            Ok(()) => DownloadError::HttpStatus {
+                url: from.to_owned(),
+                status: status.as_u16(),
+            },
+        }
+    }
+}
+
 /// One artifact to fetch.
 #[derive(Debug, Clone)]
 pub struct DownloadRequest {
@@ -201,6 +248,9 @@ pub struct DownloadRequest {
     /// from one operation's credential, and one secret in memory is one secret
     /// to keep out of a core dump.
     authenticated: Option<Arc<AuthenticatedSource>>,
+    /// The hosts this request may reach, when its address came from remote
+    /// input. Shared for the same reason as the credential.
+    scope: Option<Arc<HostScope>>,
 }
 
 impl DownloadRequest {
@@ -220,7 +270,16 @@ impl DownloadRequest {
             label: None,
             max_bytes: None,
             authenticated: None,
+            scope: None,
         }
+    }
+
+    /// Confines this request to `scope`: its address must be one of the
+    /// scope's hosts, and its redirects may not leave them.
+    #[must_use]
+    pub fn within(mut self, scope: Arc<HostScope>) -> Self {
+        self.scope = Some(scope);
+        self
     }
 
     /// Parses a URL and applies the transport policy, rejecting anything that
@@ -793,16 +852,25 @@ impl Transfer<'_, '_> {
     }
 
     async fn send(&self, resuming: bool) -> Result<Response, AttemptFailure> {
+        if let Some(scope) = &self.request.scope {
+            scope
+                .hosts
+                .validate_url(&self.request.url)
+                .map_err(|error| AttemptFailure {
+                    retry_after: None,
+                    error: DownloadError::Policy(error),
+                })?;
+        }
         // A request carrying a credential goes through that credential's own
-        // client, whose redirect policy cannot leave the hosts the secret is
-        // scoped to. Everything else keeps the manager's ordinary client, so one
-        // provider's containment never becomes another provider's redirect rule
-        // in a batch that mixes them.
-        let client = self
-            .request
-            .authenticated
-            .as_ref()
-            .map_or(&self.manager.client, |source| source.client());
+        // client, and a confined one through its scope's, whose redirect
+        // policies cannot leave their hosts. Everything else keeps the manager's
+        // ordinary client, so one provider's containment never becomes another
+        // provider's redirect rule in a batch that mixes them.
+        let client = match (&self.request.authenticated, &self.request.scope) {
+            (Some(source), _) => source.client(),
+            (None, Some(scope)) => &scope.client,
+            (None, None) => &self.manager.client,
+        };
         let mut builder = client.get(self.request.url.clone());
         if let Some(source) = &self.request.authenticated
             && let Some(value) = source.header_value(&self.request.url)
@@ -832,6 +900,23 @@ impl Transfer<'_, '_> {
         })?;
 
         let status = response.status();
+        // The scope of whichever confining client sent the request.
+        let confining = self
+            .request
+            .authenticated
+            .as_ref()
+            .map(|source| &source.scope)
+            .or(self.request.scope.as_deref());
+        if status.is_redirection()
+            && let Some(scope) = confining
+            && let Some(target) = redirect_target(&response)
+        {
+            // A confining client only hands back a redirect it refused to follow.
+            return Err(AttemptFailure {
+                retry_after: None,
+                error: scope.refusal(&self.url_label, status, &target),
+            });
+        }
         if !status.is_success() {
             return Err(AttemptFailure {
                 retry_after: retry_after(response.headers()),
@@ -1238,6 +1323,12 @@ pub async fn publish_staged(staged: &Path, destination: &Path) -> std::io::Resul
     Ok(())
 }
 
+/// Where a redirect response points, resolved against the address that sent it.
+fn redirect_target(response: &Response) -> Option<Url> {
+    let location = response.headers().get(reqwest::header::LOCATION)?;
+    response.url().join(location.to_str().ok()?).ok()
+}
+
 /// Best-effort durability for the rename itself.
 ///
 /// Renaming makes the artifact visible immediately, but on a crash the
@@ -1262,6 +1353,45 @@ async fn sync_parent_directory(destination: &Path) {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
+
+    #[test]
+    fn only_a_host_the_scope_does_not_permit_is_a_refused_redirect() {
+        let scope = HostScope::new(
+            DomainAllowlist::new(["a.example"]).allowing_redirects_to("storage.example"),
+            &HttpConfig::default(),
+        )
+        .expect("scope builds");
+        let refuse = |target: &str| {
+            scope.refusal(
+                "https://a.example/pack",
+                StatusCode::FOUND,
+                &Url::parse(target).expect("url"),
+            )
+        };
+
+        assert!(matches!(
+            refuse("https://evil.example/pack?token=secret"),
+            DownloadError::RedirectRefused { ref host, ref target, .. }
+                if host == "evil.example" && !target.contains("secret")
+        ));
+        assert!(matches!(
+            refuse("https://a.example:8443/pack"),
+            DownloadError::Policy(UrlPolicyError::PortNotPermitted { port: 8443, .. })
+        ));
+        assert!(matches!(
+            refuse("http://a.example/pack"),
+            DownloadError::Policy(UrlPolicyError::SchemeNotPermitted { .. })
+        ));
+        assert!(matches!(
+            refuse("https://user:pass@a.example/pack"),
+            DownloadError::Policy(UrlPolicyError::CredentialsInUrl { .. })
+        ));
+        // A host a redirect may reach is not one the scope refuses.
+        assert!(matches!(
+            refuse("https://storage.example/pack"),
+            DownloadError::HttpStatus { status: 302, .. }
+        ));
+    }
 
     /// The shortest filename limit Ephervex has to work under.
     ///

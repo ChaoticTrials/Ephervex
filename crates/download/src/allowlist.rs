@@ -37,6 +37,22 @@ pub const MODRINTH_PACK_HOSTS: &[&str] = &[
     "gitlab.com",
 ];
 
+/// Hosts a [`MODRINTH_PACK_HOSTS`] address may redirect to, but that no pack
+/// address may name itself.
+///
+/// A GitHub release-asset address on `github.com` answers with a redirect to
+/// the storage host that serves the file, so following redirects only within
+/// [`MODRINTH_PACK_HOSTS`] would refuse every pack file published as a release
+/// asset. Keeping these out of the list an address is checked against means an
+/// archive still cannot point the launcher at them directly.
+///
+/// Audit note: the same rules as [`MODRINTH_PACK_HOSTS`]. An entry belongs here
+/// only as the delivery host of a host on that list.
+pub const MODRINTH_PACK_REDIRECT_HOSTS: &[&str] = &[
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+];
+
 /// Hosts CurseForge delivers project files from.
 ///
 /// A CurseForge export manifest names no download address: the address comes
@@ -145,6 +161,8 @@ pub fn check_transport(url: &Url, allow_plaintext_http: bool) -> Result<(), UrlP
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DomainAllowlist {
     hosts: BTreeSet<String>,
+    /// Hosts reachable only by a redirect from a permitted address.
+    redirect_hosts: BTreeSet<String>,
     allow_plaintext_http: bool,
     allow_non_default_ports: bool,
 }
@@ -154,7 +172,10 @@ impl DomainAllowlist {
     /// [`MODRINTH_PACK_HOSTS`] for the source and the audit rules.
     #[must_use]
     pub fn modrinth_pack_defaults() -> Self {
-        Self::new(MODRINTH_PACK_HOSTS.iter().copied())
+        MODRINTH_PACK_REDIRECT_HOSTS.iter().fold(
+            Self::new(MODRINTH_PACK_HOSTS.iter().copied()),
+            |allowlist, host| allowlist.allowing_redirects_to(host),
+        )
     }
 
     /// The list Ephervex applies to CurseForge artifact downloads: see
@@ -184,6 +205,7 @@ impl DomainAllowlist {
                 .map(|host| host.as_ref().trim().to_ascii_lowercase())
                 .filter(|host| !host.is_empty())
                 .collect(),
+            redirect_hosts: BTreeSet::new(),
             allow_plaintext_http: false,
             allow_non_default_ports: false,
         }
@@ -201,6 +223,7 @@ impl DomainAllowlist {
                 .into_iter()
                 .filter(|host| !host.is_empty())
                 .collect(),
+            redirect_hosts: BTreeSet::new(),
             allow_plaintext_http: true,
             allow_non_default_ports: true,
         }
@@ -213,6 +236,26 @@ impl DomainAllowlist {
         let host = host.trim().to_ascii_lowercase();
         if !host.is_empty() {
             self.hosts.insert(host);
+        }
+        self
+    }
+
+    /// Lets an address name any port on a permitted host, not only the default.
+    ///
+    /// For a consent given to a host rather than to one address (ADR 0027).
+    #[must_use]
+    pub fn allowing_any_port(mut self) -> Self {
+        self.allow_non_default_ports = true;
+        self
+    }
+
+    /// Adds a host that a redirect from a permitted address may reach, but that
+    /// an address may not name itself.
+    #[must_use]
+    pub fn allowing_redirects_to(mut self, host: &str) -> Self {
+        let host = host.trim().to_ascii_lowercase();
+        if !host.is_empty() {
+            self.redirect_hosts.insert(host);
         }
         self
     }
@@ -244,6 +287,25 @@ impl DomainAllowlist {
 
     /// Validates an already-parsed URL.
     pub fn validate_url(&self, url: &Url) -> Result<(), UrlPolicyError> {
+        self.validate_with(url, |host| self.permits_host(host))
+    }
+
+    /// Validates where a redirect from a permitted address leads, which may
+    /// also be one of the redirect-only hosts.
+    pub fn validate_redirect(&self, url: &Url) -> Result<(), UrlPolicyError> {
+        self.validate_with(url, |host| {
+            self.permits_host(host)
+                || self
+                    .redirect_hosts
+                    .contains(&host.trim().to_ascii_lowercase())
+        })
+    }
+
+    fn validate_with(
+        &self,
+        url: &Url,
+        permitted: impl Fn(&str) -> bool,
+    ) -> Result<(), UrlPolicyError> {
         check_transport(url, self.allow_plaintext_http)?;
 
         let display = redacted(url);
@@ -255,7 +317,7 @@ impl DomainAllowlist {
             // anything here is an explicit non-443 port.
             return Err(UrlPolicyError::PortNotPermitted { url: display, port });
         }
-        if !self.permits_host(host) {
+        if !permitted(host) {
             return Err(UrlPolicyError::HostNotAllowed {
                 url: display,
                 host: host.to_ascii_lowercase(),
@@ -269,6 +331,46 @@ impl DomainAllowlist {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
+
+    #[test]
+    fn a_host_consent_covers_every_port_only_when_it_says_so() {
+        let url = Url::parse("https://packs.example:8443/p.mrpack").expect("url");
+        let host = DomainAllowlist::new(["packs.example"]);
+
+        assert!(matches!(
+            host.validate_url(&url),
+            Err(UrlPolicyError::PortNotPermitted { port: 8443, .. })
+        ));
+        let any_port = host.allowing_any_port();
+        assert!(any_port.validate_url(&url).is_ok());
+        assert!(
+            any_port
+                .validate_url(&Url::parse("https://other.example:8443/p").expect("url"))
+                .is_err(),
+            "any port is not any host"
+        );
+    }
+
+    #[test]
+    fn a_release_asset_host_is_reachable_by_redirect_but_never_named_directly() {
+        let allowlist = DomainAllowlist::modrinth_pack_defaults();
+        let asset = Url::parse(
+            "https://objects.githubusercontent.com/github-production-release-asset/1/a.jar",
+        )
+        .expect("url");
+        assert!(matches!(
+            allowlist.validate_url(&asset),
+            Err(UrlPolicyError::HostNotAllowed { .. })
+        ));
+        assert!(allowlist.validate_redirect(&asset).is_ok());
+        let elsewhere = Url::parse("https://unapproved.example/a.jar").expect("url");
+        assert!(allowlist.validate_redirect(&elsewhere).is_err());
+        assert!(
+            DomainAllowlist::curseforge_artifact_defaults()
+                .validate_redirect(&asset)
+                .is_err()
+        );
+    }
 
     fn modrinth() -> DomainAllowlist {
         DomainAllowlist::modrinth_pack_defaults()

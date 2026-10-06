@@ -211,9 +211,12 @@ pub enum Command {
     /// Find out whether duplicating this instance has a question to ask first.
     PlanDuplicate(InstanceId),
     /// A modpack address a link carried. Asks before it downloads, unless the
-    /// host has been agreed to before or `consent` carries the answer.
+    /// host has been agreed to before or `consent` carries the answer for
+    /// `host`, the host the question was about. A link that redirects to another
+    /// host asks again for that one.
     OpenPackUrl {
         url: String,
+        host: Option<String>,
         consent: Option<ephervex_core::HostConsent>,
     },
     /// Read what this copy remembers about modpack links.
@@ -1495,6 +1498,11 @@ pub enum Event {
     PackUrlConsent {
         url: String,
         display: String,
+        /// The host the question is about, which the answer comes back with.
+        host: String,
+        /// The download was redirected to `display`, a host other than the
+        /// link's own.
+        redirected: bool,
     },
     /// A modpack that arrived over a link, ready for the import dialog.
     ///
@@ -2070,6 +2078,10 @@ fn run_worker(
     // it, it does not assign it.
     let mut import_resolve_cancel: Option<CancellationToken> = None;
 
+    // What the user has answered about the hosts of the modpack link being
+    // opened, kept until it opens or a new link replaces it.
+    let mut pack_link_answers = PackLinkAnswers::default();
+
     // Sign-in and other detached operations write the configuration through an
     // `App` of their own, so it is reread whenever the file has changed.
     let config_file = app.paths().config_file();
@@ -2586,8 +2598,15 @@ fn run_worker(
                 Ok(_) => send_link_settings(&app, &events),
                 Err(error) => send_error(&events, &error),
             },
-            Command::OpenPackUrl { url, consent } => {
-                runtime.block_on(open_pack_url(&mut app, &url, consent, &events));
+            Command::OpenPackUrl { url, host, consent } => {
+                runtime.block_on(open_pack_url(
+                    &mut app,
+                    &url,
+                    host.as_deref(),
+                    consent,
+                    &mut pack_link_answers,
+                    &events,
+                ));
             }
             Command::PlanPromotion(instance) => match app.plan_instance_promotion(instance) {
                 Ok(plan) => {
@@ -5111,16 +5130,53 @@ fn send_link_settings(app: &App, events: &Sender<Event>) {
     }));
 }
 
+/// What the user has answered while one modpack link is being opened.
+///
+/// A link can redirect, and each host the download reaches is asked about on
+/// its own, so the answers are kept between the questions.
+#[derive(Debug, Default)]
+struct PackLinkAnswers {
+    url: String,
+    consents: ephervex_core::PackConsents,
+}
+
+impl PackLinkAnswers {
+    /// Takes in what the user did with `url`: a link delivered anew starts over,
+    /// and an answer is recorded for `asked`, the host the question was about,
+    /// or for the link's own host when it names none.
+    fn receive(
+        &mut self,
+        url: &str,
+        link_host: &str,
+        asked: Option<&str>,
+        consent: Option<ephervex_core::HostConsent>,
+    ) {
+        if consent.is_none() || self.url != url {
+            *self = Self {
+                url: url.to_owned(),
+                ..Self::default()
+            };
+        }
+        if let Some(consent) = consent {
+            self.consents =
+                std::mem::take(&mut self.consents).agreeing(asked.unwrap_or(link_host), consent);
+        }
+    }
+}
+
 /// Turns an address a link carried into an archive the import dialog can open.
 ///
-/// Asks first whenever the host has not been agreed to before. The question is
-/// the whole point of the feature's safety story, so it is asked here rather
-/// than assumed by the caller: a frontend that forgot would otherwise download
-/// from whatever a web page named (ADR 0027).
+/// Asks first whenever a host the download reaches has not been agreed to
+/// before: the link's own, and any other a redirect names. The question is the
+/// whole point of the feature's safety story, so it is asked here rather than
+/// assumed by the caller: a frontend that forgot would otherwise download from
+/// whatever a web page named (ADR 0027).
 async fn open_pack_url(
     app: &mut App,
     url: &str,
+    asked: Option<&str>,
     consent: Option<ephervex_core::HostConsent>,
+    answers: &mut PackLinkAnswers,
     events: &Sender<Event>,
 ) {
     let source = match app.pack_source(url) {
@@ -5130,18 +5186,16 @@ async fn open_pack_url(
             return;
         }
     };
-
-    if consent.is_none() && !app.pack_host_is_trusted(&source) {
-        let _ = events.send(Event::PackUrlConsent {
-            url: url.to_owned(),
-            display: source.display().to_owned(),
-        });
-        return;
-    }
+    answers.receive(url, source.host(), asked, consent);
 
     let reporter = OperationReporter::silent("operation-downloading-pack");
     let outcome = app
-        .fetch_pack(&source, consent, &reporter, &CancellationToken::new())
+        .fetch_pack(
+            &source,
+            &answers.consents,
+            &reporter,
+            &CancellationToken::new(),
+        )
         .await;
     // Either way: the host is agreed to before a byte is fetched, so a download
     // that then failed still added a site the settings page has to show. Left
@@ -5154,6 +5208,15 @@ async fn open_pack_url(
         Ok(staged) => {
             let _ = events.send(Event::PackDownloaded {
                 archive: staged.keep(),
+            });
+        }
+        Err(ephervex_core::CoreError::PackHostNotTrusted { url: shown, host }) => {
+            let redirected = host != source.host();
+            let _ = events.send(Event::PackUrlConsent {
+                url: url.to_owned(),
+                display: shown,
+                host,
+                redirected,
             });
         }
         Err(error) => send_modal_error(events, &error),
@@ -9569,7 +9632,9 @@ mod tests {
         runtime.block_on(open_pack_url(
             &mut app,
             "https://packs.invalid.localhost:1/pack.mrpack",
+            None,
             Some(ephervex_core::HostConsent::Remember),
+            &mut PackLinkAnswers::default(),
             &events,
         ));
 
@@ -9585,6 +9650,68 @@ mod tests {
             vec![vec!["packs.invalid.localhost".to_owned()]],
             "the site the user just agreed to has to reach the settings page"
         );
+    }
+
+    #[test]
+    fn an_answer_applies_to_the_host_the_question_was_about_however_often_it_is_given() {
+        use ephervex_core::HostConsent;
+
+        let url = "https://example.com/pack";
+        let mut answers = PackLinkAnswers::default();
+
+        // The link is delivered, then the user answers for its own host.
+        answers.receive(url, "example.com", None, None);
+        answers.receive(
+            url,
+            "example.com",
+            Some("example.com"),
+            Some(HostConsent::JustOnce),
+        );
+        assert!(answers.consents.agrees_to("example.com"));
+
+        // The download redirected, and the question on screen is about that host.
+        // Confirming it twice, as after an error shown in the same prompt, never
+        // lands on the link's own host.
+        for _ in 0..2 {
+            answers.receive(
+                url,
+                "example.com",
+                Some("cdn.example.net"),
+                Some(HostConsent::Remember),
+            );
+        }
+        assert!(answers.consents.agrees_to("cdn.example.net"));
+        assert!(answers.consents.agrees_to("example.com"));
+
+        // Delivering the link again forgets every answer.
+        answers.receive(url, "example.com", None, None);
+        assert!(!answers.consents.agrees_to("example.com"));
+        assert!(!answers.consents.agrees_to("cdn.example.net"));
+    }
+
+    #[test]
+    fn an_answer_for_a_host_applies_even_after_another_link_replaced_the_state() {
+        use ephervex_core::HostConsent;
+
+        let mut answers = PackLinkAnswers::default();
+        answers.receive("https://one.example/pack", "one.example", None, None);
+        // Another link was delivered while the first link's redirect question
+        // stayed on screen, and the user answers that question.
+        answers.receive("https://two.example/pack", "two.example", None, None);
+
+        answers.receive(
+            "https://one.example/pack",
+            "one.example",
+            Some("cdn.one.example"),
+            Some(HostConsent::Remember),
+        );
+
+        assert!(answers.consents.agrees_to("cdn.one.example"));
+        assert!(
+            !answers.consents.agrees_to("one.example"),
+            "the answer was for the host that was shown, not the link's own"
+        );
+        assert_eq!(answers.url, "https://one.example/pack");
     }
 
     /// A client that came up with its pair is registered with the server it

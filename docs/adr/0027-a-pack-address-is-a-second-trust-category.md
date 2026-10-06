@@ -42,6 +42,16 @@ query is where a link carries identifiers and tokens, and a confirmation prompt
 that printed one would be teaching users to skim past secrets; what is being
 asked is which machine Ephervex will talk to, and that is what is shown.
 
+**A redirect is a new host, and needs its own consent.** The consent covers the
+machine the launcher contacts, so a download that is redirected off an agreed
+host stops there rather than following. The new host is asked about on its own,
+with its address shown without a query, and the download is tried again with
+every answer given so far. A command line answers for the address it was
+given and refuses a redirect it cannot ask about, naming where it went. The
+hosts a pack's own files may redirect to are a fixed, audited list kept apart
+from the hosts they may name, so an archive still cannot point the launcher at
+them directly.
+
 **The answer is remembered, revocably, in configuration.** A host the user
 agreed to goes in `config.toml` under `[import]`, so the second import from the
 same site is one click. It is a host name rather than a credential, which is why

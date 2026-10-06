@@ -6347,11 +6347,28 @@ async fn fetch_if_address(
     }
 
     let source = app.pack_source(&args.archive)?;
-    let consent = resolve_host_consent(app, &source, args, json)?;
+    let mut consents = ephervex_core::PackConsents::none();
+    if let Some(consent) = resolve_host_consent(app, &source, args, json)? {
+        consents = consents.agreeing(source.host(), consent);
+    }
     let reporter = ephervex_core::OperationReporter::silent("operation-downloading-pack");
-    let staged = app
-        .fetch_pack(&source, consent, &reporter, &CancellationToken::new())
-        .await?;
+    // A redirect to another site asks about that site, and the download is tried
+    // again with every answer given so far.
+    let staged = loop {
+        match app
+            .fetch_pack(&source, &consents, &reporter, &CancellationToken::new())
+            .await
+        {
+            Ok(staged) => break staged,
+            Err(ephervex_core::CoreError::PackHostNotTrusted { url, host })
+                if host != source.host() =>
+            {
+                let consent = resolve_redirect_consent(&url, &host, json)?;
+                consents = consents.agreeing(&host, consent);
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
     if !json {
         eprintln!(
             "{}",
@@ -6407,6 +6424,35 @@ fn resolve_host_consent(
     match answer.trim().to_ascii_lowercase().as_str() {
         "y" | "yes" => Ok(Some(ephervex_core::HostConsent::Remember)),
         "once" | "o" => Ok(Some(ephervex_core::HostConsent::JustOnce)),
+        _ => anyhow::bail!("the download was not agreed to"),
+    }
+}
+
+/// Whether a download may follow a redirect to another site.
+///
+/// `--trust` answers for the address that was typed, not for a site a server
+/// sent the download to, so this asks on an interactive terminal and is refused
+/// anywhere else (ADR 0027).
+fn resolve_redirect_consent(
+    target: &str,
+    host: &str,
+    json: bool,
+) -> anyhow::Result<ephervex_core::HostConsent> {
+    if json || !std::io::stdin().is_terminal() {
+        anyhow::bail!(
+            "the download was redirected to {target}, which has not been agreed to; import from that address directly to agree to it"
+        );
+    }
+
+    outln!("The download was redirected to another site. Ephervex would download from:");
+    outln!("  {target}");
+    out!("Download from {host} and remember it? [y/N/once] ");
+    std::io::stdout().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    match answer.trim().to_ascii_lowercase().as_str() {
+        "y" | "yes" => Ok(ephervex_core::HostConsent::Remember),
+        "once" | "o" => Ok(ephervex_core::HostConsent::JustOnce),
         _ => anyhow::bail!("the download was not agreed to"),
     }
 }
@@ -7525,6 +7571,20 @@ mod tests {
             Command::Import(parsed) => Ok(parsed),
             other => panic!("expected an Import command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_redirect_to_another_site_is_refused_without_a_terminal_and_names_where_it_went() {
+        let error =
+            resolve_redirect_consent("https://cdn.example.net/pack", "cdn.example.net", true)
+                .expect_err("--json never prompts");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("https://cdn.example.net/pack"),
+            "{message}"
+        );
+        assert!(message.contains("not been agreed to"), "{message}");
     }
 
     #[test]

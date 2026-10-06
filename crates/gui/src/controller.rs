@@ -4222,13 +4222,14 @@ fn register_pack_link_actions(ui: &AppWindow, commands: &Sender<Command>) {
             &sender,
             Command::OpenPackUrl {
                 url: url.to_string(),
+                host: None,
                 consent: None,
             },
         );
     });
 
     let sender = commands.clone();
-    ui.on_open_pack_link(move |url, remember| {
+    ui.on_open_pack_link(move |url, host, remember| {
         let consent = if remember {
             ephervex_core::HostConsent::Remember
         } else {
@@ -4238,6 +4239,7 @@ fn register_pack_link_actions(ui: &AppWindow, commands: &Sender<Command>) {
             &sender,
             Command::OpenPackUrl {
                 url: url.to_string(),
+                host: Some(host.to_string()),
                 consent: Some(consent),
             },
         );
@@ -6894,9 +6896,16 @@ fn apply_event(
         }
         Event::AbsentMods(absent) => apply_absent_mods(ui, &absent, commands),
         Event::PromotionPlan(plan) => apply_promotion_plan(ui, &plan),
-        Event::PackUrlConsent { url, display } => {
+        Event::PackUrlConsent {
+            url,
+            display,
+            host,
+            redirected,
+        } => {
             ui.set_pack_link_url(url.as_str().into());
             ui.set_pack_link_display(display.as_str().into());
+            ui.set_pack_link_host(host.as_str().into());
+            ui.set_pack_link_redirected(redirected);
             ui.set_pack_link_remember(true);
             ui.set_modal_error(SharedString::default());
             ui.set_modal("open-pack-link".into());

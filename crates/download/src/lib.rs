@@ -67,8 +67,8 @@ pub mod retry;
 pub mod verify;
 
 pub use allowlist::{
-    CURSEFORGE_ARTIFACT_HOSTS, DomainAllowlist, MODRINTH_PACK_HOSTS, UrlPolicyError,
-    check_transport, redacted,
+    CURSEFORGE_ARTIFACT_HOSTS, DomainAllowlist, MODRINTH_PACK_HOSTS, MODRINTH_PACK_REDIRECT_HOSTS,
+    UrlPolicyError, check_transport, redacted,
 };
 pub use artifact_cache::{
     ArtifactCache, ArtifactCacheError, ArtifactCacheLease, ArtifactCacheMaintenance,
@@ -83,7 +83,7 @@ pub use client::{HttpConfig, build_allowlisted_client, build_client, build_singl
 pub use error::{ArtifactStep, BatchDownloadError, DownloadError};
 pub use manager::{
     ArtifactSource, AuthenticatedSource, DownloadManager, DownloadOutcome, DownloadRequest,
-    DownloaderConfig, publish_staged, staging_path,
+    DownloaderConfig, HostScope, publish_staged, staging_path,
 };
 pub use metadata::{
     CachedMetadata, DEFAULT_METADATA_TTL, Freshness, MAX_METADATA_BYTES, METADATA_ENVELOPE_VERSION,
