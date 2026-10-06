@@ -48,7 +48,7 @@ use ephervex_model::{
 use rusqlite::{Row, params};
 
 use crate::index::{Index, IndexError};
-use crate::lock::LAUNCH_LOCK_FILE;
+use crate::lock::{FileGuard, GuardError, LAUNCH_LOCK_FILE};
 use crate::metadata::{self, MetadataError};
 use crate::paths::{PathError, Paths, create_dir_all};
 use crate::records::{
@@ -78,6 +78,20 @@ pub enum RegistryError {
     /// The directory chosen for a new instance already has contents.
     #[error("the instance directory {path} already contains files")]
     RootOccupied { path: PathBuf },
+    /// An interrupted snapshot restore of this instance or server has not been
+    /// rolled back yet.
+    #[error("{path} has an interrupted snapshot restore that startup has not recovered")]
+    RestoreUnfinished { path: PathBuf },
+    /// Another move of this instance or server is still running.
+    #[error("{path} is already being moved to another storage root")]
+    MoveInProgress { path: PathBuf },
+    /// The file that keeps two moves of one host apart could not be used.
+    #[error("the move guard at {path} could not be used")]
+    MoveGuardUnusable {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     /// The instance is indexed but its files are gone.
     ///
     /// Distinct from [`Self::InstanceUnknown`] on purpose: the record is right
@@ -108,6 +122,9 @@ impl RegistryError {
             Self::InstanceUnknown { .. } => "error-registry-instance-unknown",
             Self::ServerUnknown { .. } => "error-registry-server-unknown",
             Self::RootOccupied { .. } => "error-registry-root-occupied",
+            Self::RestoreUnfinished { .. } => "error-registry-restore-unfinished",
+            Self::MoveInProgress { .. } => "error-registry-move-in-progress",
+            Self::MoveGuardUnusable { .. } => "error-registry-move-guard-unusable",
             Self::RootMissing { .. } => "error-registry-root-missing",
             Self::Io { .. } => "error-paths-directory-creation",
             Self::Index(error) => error.message_id(),
@@ -299,49 +316,29 @@ impl Registry {
         storage: StorageClass,
         progress: &mut dyn FnMut(usize),
     ) -> Result<ClientRecord, RegistryError> {
+        let record = self.client(id)?;
+        if record.storage == storage {
+            return Ok(record);
+        }
+
+        let _claim = claim_move(&self.paths, &client_host(id), &record.root)?;
+        // Another move may have finished while this one was starting.
         let mut record = self.client(id)?;
         if record.storage == storage {
             return Ok(record);
         }
-        if !record.root.is_dir() {
-            return Err(RegistryError::RootMissing {
-                path: record.root.clone(),
-            });
-        }
 
         let destination = self.paths.instance_root(storage, id);
-        clear_own_abandoned_move(&destination, |root| {
-            metadata::read_client_metadata(root).is_ok_and(|found| found.id == id)
-        })?;
-        discard_launch_lock(&record.root);
-
-        let report = crate::relocate::relocate_tree(&record.root, &destination, progress).map_err(
-            |source| RegistryError::Io {
-                path: destination.clone(),
-                source,
-            },
-        )?;
-
-        let source = std::mem::replace(&mut record.root, destination);
-        record.storage = storage;
-        // Metadata first, then the index, so an interruption leaves a directory
-        // reconciliation can adopt rather than a row pointing at nothing.
-        self.update_client(&mut record)?;
-        metadata::clear_incomplete(&record.root)?;
-
-        if !report.renamed {
-            // The instance is recorded at its new address, so what is left at
-            // the old one is a stale copy under a root the OS owns. Failing to
-            // remove it costs temporary space and nothing else.
-            if let Err(error) = remove_tree(&source) {
-                tracing::warn!(
-                    instance_id = %id,
-                    root = %source.display(),
-                    %error,
-                    "could not remove an instance's old directory after moving it"
-                );
-            }
-        }
+        let names_this_instance =
+            |root: &Path| metadata::read_client_metadata(root).is_ok_and(|found| found.id == id);
+        let source = record.root.clone();
+        let (record, report) =
+            move_host(&source, &destination, names_this_instance, progress, || {
+                record.root.clone_from(&destination);
+                record.storage = storage;
+                self.update_client(&mut record)?;
+                Ok(record)
+            })?;
 
         tracing::info!(
             instance_id = %id,
@@ -365,6 +362,15 @@ impl Registry {
         storage: StorageClass,
         progress: &mut dyn FnMut(usize),
     ) -> Result<ServerCommit<ServerRecord>, RegistryError> {
+        let record = self.server(id)?;
+        if record.storage == storage {
+            return Ok(ServerCommit {
+                record,
+                warnings: Vec::new(),
+            });
+        }
+
+        let _claim = claim_move(&self.paths, &server_host(id), &record.root)?;
         let mut record = self.server(id)?;
         if record.storage == storage {
             return Ok(ServerCommit {
@@ -372,39 +378,20 @@ impl Registry {
                 warnings: Vec::new(),
             });
         }
-        if !record.root.is_dir() {
-            return Err(RegistryError::RootMissing {
-                path: record.root.clone(),
-            });
-        }
 
         let destination = self.paths.server_root(storage, id);
-        clear_own_abandoned_move(&destination, |root| {
-            metadata::read_server_metadata(root).is_ok_and(|found| found.id == id)
-        })?;
+        let names_this_server =
+            |root: &Path| metadata::read_server_metadata(root).is_ok_and(|found| found.id == id);
 
-        let report = crate::relocate::relocate_tree(&record.root, &destination, progress).map_err(
-            |source| RegistryError::Io {
-                path: destination.clone(),
-                source,
-            },
-        )?;
-
-        let source = std::mem::replace(&mut record.root, destination);
-        record.storage = storage;
-        let commit = self.update_server_committed(&mut record)?;
-        metadata::clear_incomplete(&commit.record.root)?;
-
-        if !report.renamed
-            && let Err(error) = remove_tree(&source)
-        {
-            tracing::warn!(
-                server_id = %id,
-                root = %source.display(),
-                %error,
-                "could not remove a server's old directory after moving it"
-            );
-        }
+        let source = record.root.clone();
+        // `server.json` is the commit point: an index failure after it is a
+        // warning on a recorded move, not a failed one.
+        let (commit, report) =
+            move_host(&source, &destination, names_this_server, progress, || {
+                record.root.clone_from(&destination);
+                record.storage = storage;
+                self.update_server_committed(&mut record)
+            })?;
 
         tracing::info!(
             server_id = %id,
@@ -1222,25 +1209,133 @@ fn ensure_free_root(root: &Path) -> Result<(), RegistryError> {
     }
 }
 
-/// Frees the destination of a move, if what is there is our own leftover.
+/// The move both host kinds share: move the tree, record the move, then remove
+/// the old copy (ADR 0025).
 ///
-/// A move's destination is derived from the entity's id, so an interrupted
-/// attempt blocks every retry at exactly the path the retry needs. A directory
-/// that carries the incomplete marker *and* whose metadata names the same
-/// entity is provably that attempt and nothing else, so it is cleared. Anything
-/// else at that path is somebody's files and is refused (ADR 0025).
-fn clear_own_abandoned_move(
+/// `record` writes the moved host's metadata and index row. A copy it fails to
+/// record is withdrawn; a renamed tree is the only copy and is kept. The caller
+/// holds the host's [`claim_move`].
+fn move_host<T>(
+    source: &Path,
     destination: &Path,
-    names_the_same_entity: impl Fn(&Path) -> bool,
-) -> Result<(), RegistryError> {
-    if metadata::is_incomplete(destination) && names_the_same_entity(destination) {
+    names_this_host: impl Fn(&Path) -> bool,
+    progress: &mut dyn FnMut(usize),
+    record: impl FnOnce() -> Result<T, RegistryError>,
+) -> Result<(T, crate::relocate::RelocationReport), RegistryError> {
+    if !source.is_dir() {
+        // Nothing else is moving this host, and a copy only reaches the
+        // destination complete, so a tree standing there under this host's
+        // name is one an earlier move renamed but could not record.
+        if names_this_host(destination) {
+            let renamed = crate::relocate::RelocationReport {
+                renamed: true,
+                ..crate::relocate::RelocationReport::default()
+            };
+            return Ok((record()?, renamed));
+        }
+        return Err(RegistryError::RootMissing {
+            path: source.to_path_buf(),
+        });
+    }
+
+    if source == destination {
+        // The record names a root the host already stands at, so only the
+        // record is stale.
+        let renamed = crate::relocate::RelocationReport {
+            renamed: true,
+            ..crate::relocate::RelocationReport::default()
+        };
+        return Ok((record()?, renamed));
+    }
+
+    // The marker of a published host is a snapshot restore's. Recovery would
+    // put the host's pre-restore metadata back over the move's, so the move
+    // waits for startup to recover it.
+    if metadata::is_incomplete(source) {
+        return Err(RegistryError::RestoreUnfinished {
+            path: source.to_path_buf(),
+        });
+    }
+
+    // The source still stands, so it is the host. A tree at the destination
+    // under this host's name is a copy an earlier move finished but could not
+    // record, and the caller's claim means no live move owns it.
+    if names_this_host(destination) {
         tracing::info!(
             path = %destination.display(),
-            "clearing an unfinished move left at the destination by an earlier attempt"
+            "replacing a finished copy that an earlier move could not record"
         );
         remove_tree(destination)?;
     }
-    ensure_free_root(destination)
+    ensure_free_root(destination)?;
+    discard_launch_lock(source);
+    let report =
+        crate::relocate::relocate_tree(source, destination, progress).map_err(|error| {
+            RegistryError::Io {
+                path: destination.to_path_buf(),
+                source: error,
+            }
+        })?;
+
+    // Metadata first, then the index, so an interruption leaves a directory
+    // reconciliation can adopt rather than a row pointing at nothing.
+    let recorded = record().inspect_err(|_| {
+        if !report.renamed
+            && let Err(error) = crate::relocate::discard_tree(destination)
+        {
+            tracing::warn!(
+                path = %destination.display(),
+                %error,
+                "could not remove the copy of a move that could not be recorded"
+            );
+        }
+    })?;
+
+    // What is left at the old address is a stale copy under a root the OS
+    // owns. Failing to remove it costs temporary space and nothing else.
+    if !report.renamed
+        && let Err(error) = crate::relocate::discard_tree(source)
+    {
+        tracing::warn!(
+            root = %source.display(),
+            %error,
+            "could not remove a host's old directory after moving it"
+        );
+    }
+    Ok((recorded, report))
+}
+
+/// Claims one host for one move, so a second move of it is refused rather than
+/// discarding a copy the first one is still making.
+///
+/// Kept outside the tree being moved, so every mover finds it whichever way the
+/// tree goes. The kernel drops it when its holder dies.
+fn claim_move(paths: &Paths, host: &str, root: &Path) -> Result<FileGuard, RegistryError> {
+    let directory = paths.move_guards_dir();
+    create_dir_all(&directory)?;
+    FileGuard::take(
+        &directory,
+        &move_guard_name(host),
+        std::time::Duration::ZERO,
+    )
+    .map_err(|error| match error {
+        GuardError::Busy { .. } => RegistryError::MoveInProgress {
+            path: root.to_path_buf(),
+        },
+        GuardError::Unusable { path, source } => RegistryError::MoveGuardUnusable { path, source },
+    })
+}
+
+fn move_guard_name(host: &str) -> String {
+    format!("{host}.guard")
+}
+
+fn client_host(id: InstanceId) -> String {
+    format!("client-{id}")
+}
+
+fn server_host(id: ServerId) -> String {
+    format!("server-{id}")
 }
 
 /// Drops the launch lock before a move.
@@ -1267,14 +1362,10 @@ fn discard_launch_lock(root: &Path) {
 /// Reconciliation and user deletion both race with the OS clearing the
 /// temporary root, and losing that race is not an error (ADR 0006).
 fn remove_tree(root: &Path) -> Result<(), RegistryError> {
-    match std::fs::remove_dir_all(root) {
-        Ok(()) => Ok(()),
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(RegistryError::Io {
-            path: root.to_path_buf(),
-            source,
-        }),
-    }
+    crate::relocate::remove_tree_if_present(root).map_err(|source| RegistryError::Io {
+        path: root.to_path_buf(),
+        source,
+    })
 }
 
 #[cfg(test)]
@@ -1805,5 +1896,244 @@ mod tests {
             "curseforge_pack"
         );
         assert!(loader_kind_from_sql("fabric").is_err());
+    }
+
+    fn write_payload(directory: &Path) {
+        for name in ["one.jar", "two.jar", "three.jar"] {
+            std::fs::write(directory.join(name), name).expect("payload");
+        }
+    }
+
+    fn assert_payload(directory: &Path) {
+        for name in ["one.jar", "two.jar", "three.jar"] {
+            assert!(directory.join(name).is_file(), "{name} arrived");
+        }
+    }
+
+    #[test]
+    fn a_promotion_across_filesystems_records_the_copy_and_removes_the_source() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new("x", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        write_payload(&metadata::client_game_dir(&client.root));
+
+        crate::relocate::force_copy(true);
+        let promoted = registry
+            .relocate_client(client.id, StorageClass::Persistent, &mut |_| {})
+            .expect("move");
+        crate::relocate::force_copy(false);
+
+        assert_eq!(promoted.storage, StorageClass::Persistent);
+        assert_eq!(
+            registry.client(client.id).expect("indexed").root,
+            promoted.root
+        );
+        assert_payload(&metadata::client_game_dir(&promoted.root));
+        assert!(
+            !client.root.exists(),
+            "the old copy is removed once recorded"
+        );
+    }
+
+    #[test]
+    fn a_promotion_retried_after_an_interrupted_copy_finishes_the_move() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new("x", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        write_payload(&metadata::client_game_dir(&client.root));
+        let destination = registry
+            .paths()
+            .instance_root(StorageClass::Persistent, client.id);
+        crate::test_support::interrupt_copy_after(&client.root, &destination, 2);
+        assert!(
+            !destination.exists(),
+            "nothing partial stands at the destination"
+        );
+
+        crate::relocate::force_copy(true);
+        let promoted = registry
+            .relocate_client(client.id, StorageClass::Persistent, &mut |_| {})
+            .expect("the retry replaces what the interrupted copy left");
+        crate::relocate::force_copy(false);
+
+        assert_eq!(promoted.root, destination);
+        assert_payload(&metadata::client_game_dir(&destination));
+    }
+
+    #[test]
+    fn a_server_promotion_retried_after_an_interrupted_copy_finishes_the_move() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = registry
+            .create_server(NewServer::new("x", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        assert_eq!(server.storage, StorageClass::Temporary);
+        write_payload(&metadata::server_game_dir(&server.root));
+        let destination = registry
+            .paths()
+            .server_root(StorageClass::Persistent, server.id);
+        crate::test_support::interrupt_copy_after(&server.root, &destination, 2);
+
+        crate::relocate::force_copy(true);
+        let promoted = registry
+            .relocate_server(server.id, StorageClass::Persistent, &mut |_| {})
+            .expect("the retry replaces what the interrupted copy left")
+            .record;
+        crate::relocate::force_copy(false);
+
+        assert_eq!(promoted.root, destination);
+        assert_payload(&metadata::server_game_dir(&destination));
+        assert!(!server.root.exists());
+    }
+
+    #[test]
+    fn a_move_refuses_while_another_move_of_the_same_instance_runs() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new("x", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        let _running =
+            claim_move(registry.paths(), &client_host(client.id), &client.root).expect("claim");
+
+        let error = registry
+            .relocate_client(client.id, StorageClass::Persistent, &mut |_| {})
+            .expect_err("the first move still holds the claim");
+
+        assert!(matches!(error, RegistryError::MoveInProgress { .. }));
+        assert!(client.root.is_dir());
+    }
+
+    #[test]
+    fn a_retry_finishes_a_rename_an_earlier_move_could_not_record() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new("x", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        let destination = registry
+            .paths()
+            .instance_root(StorageClass::Persistent, client.id);
+        std::fs::create_dir_all(destination.parent().expect("parent")).expect("mkdir");
+        std::fs::rename(&client.root, &destination).expect("the earlier move's rename");
+
+        let promoted = registry
+            .relocate_client(client.id, StorageClass::Persistent, &mut |_| {})
+            .expect("the retry records the rename");
+
+        assert_eq!(promoted.root, destination);
+        assert_eq!(
+            registry.client(client.id).expect("indexed").root,
+            destination
+        );
+    }
+
+    fn prepare_unfinished_restore(root: &Path, part: crate::restore::RestorePart) {
+        let transaction = crate::restore::prepare_restore(
+            root,
+            ephervex_model::SnapshotId::new(),
+            vec![crate::restore::RestorePartState {
+                part,
+                original_present: true,
+                replacement_present: true,
+            }],
+        )
+        .expect("prepare");
+        let incoming = transaction.incoming_path(part);
+        std::fs::create_dir_all(incoming.parent().expect("parent")).expect("incoming");
+        std::fs::copy(root.join(".launcher/instance.json"), &incoming).expect("replacement");
+        transaction.publish().expect("publish, never finished");
+    }
+
+    /// Recovery puts the pre-restore metadata back, which would contradict a
+    /// move recorded in between.
+    #[test]
+    fn a_move_refuses_a_host_whose_snapshot_restore_is_unfinished() {
+        for copy in [false, true] {
+            let environment = TestEnvironment::new();
+            let registry = environment.registry();
+            let client = registry
+                .create_published_client(NewClient::new("x", "1.20.1", LoaderSelection::vanilla()))
+                .expect("create");
+            prepare_unfinished_restore(&client.root, crate::restore::RestorePart::ClientMetadata);
+
+            crate::relocate::force_copy(copy);
+            let error = registry
+                .relocate_client(client.id, StorageClass::Persistent, &mut |_| {})
+                .expect_err("startup recovers the restore first");
+            crate::relocate::force_copy(false);
+
+            assert!(
+                matches!(error, RegistryError::RestoreUnfinished { .. }),
+                "copy: {copy}"
+            );
+            assert!(client.root.is_dir());
+            assert_eq!(
+                registry.client(client.id).expect("indexed").storage,
+                StorageClass::Temporary
+            );
+            let destination = registry
+                .paths()
+                .instance_root(StorageClass::Persistent, client.id);
+            assert!(!destination.exists());
+        }
+    }
+
+    #[test]
+    fn a_move_never_replaces_the_tree_the_record_already_names() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new("x", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        write_payload(&metadata::client_game_dir(&client.root));
+        let persistent = registry
+            .paths()
+            .instance_root(StorageClass::Persistent, client.id);
+        std::fs::create_dir_all(persistent.parent().expect("parent")).expect("mkdir");
+        std::fs::rename(&client.root, &persistent).expect("the host stands at the persistent path");
+        let mut stale = client.clone();
+        stale.root.clone_from(&persistent);
+        registry
+            .update_client(&mut stale)
+            .expect("a record with the wrong class");
+
+        let promoted = registry
+            .relocate_client(client.id, StorageClass::Persistent, &mut |_| {})
+            .expect("only the record was stale");
+
+        assert_eq!(promoted.storage, StorageClass::Persistent);
+        assert_eq!(promoted.root, persistent);
+        assert_payload(&metadata::client_game_dir(&persistent));
+    }
+
+    #[test]
+    fn a_move_refuses_a_destination_holding_another_instance_s_files() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new("x", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        let other = registry
+            .create_published_client(NewClient::new("y", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        let destination = registry
+            .paths()
+            .instance_root(StorageClass::Persistent, client.id);
+        crate::relocate::force_copy(true);
+        crate::relocate::relocate_tree(&other.root, &destination, &mut |_| {}).expect("copy");
+        crate::relocate::force_copy(false);
+
+        let error = registry
+            .relocate_client(client.id, StorageClass::Persistent, &mut |_| {})
+            .expect_err("somebody else's files");
+
+        assert!(matches!(error, RegistryError::RootOccupied { .. }));
+        assert!(destination.join(".launcher/instance.json").is_file());
+        assert!(client.root.is_dir());
     }
 }

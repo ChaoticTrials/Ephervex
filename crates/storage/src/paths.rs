@@ -345,6 +345,13 @@ impl Paths {
         self.state.join(DATABASE_FILE_NAME)
     }
 
+    /// `$XDG_STATE_HOME/ephervex/moves/`, holding one guard file per host a
+    /// storage move has claimed.
+    #[must_use]
+    pub(crate) fn move_guards_dir(&self) -> PathBuf {
+        self.state.join("moves")
+    }
+
     /// `$XDG_STATE_HOME/ephervex/logs/`.
     #[must_use]
     pub fn logs_dir(&self) -> PathBuf {

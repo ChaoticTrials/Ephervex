@@ -399,6 +399,16 @@ fn reindex_orphaned_clients(
         .collect();
 
     for directory in candidate_directories(&registry.paths().persistent_instances_dir()) {
+        // A move's copy that was never renamed into place is part of a host at
+        // best, never adopted, and may not hold its metadata yet.
+        if let Some(staged) = crate::relocate::staged_name(&directory) {
+            if let Ok(id) = staged.parse::<InstanceId>() {
+                let name = metadata::read_client_metadata(&directory)
+                    .map_or_else(|_| staged.to_owned(), |record| record.name);
+                report_unfinished_move(report, RecordRef::Client(id), name, directory);
+            }
+            continue;
+        }
         if !metadata::is_client_instance_root(&directory) {
             continue;
         }
@@ -477,6 +487,14 @@ fn reindex_orphaned_servers(
 
     let mut discovered = std::collections::BTreeMap::<ServerId, Vec<PathBuf>>::new();
     for directory in candidate_directories(&registry.paths().persistent_servers_dir()) {
+        if let Some(staged) = crate::relocate::staged_name(&directory) {
+            if let Ok(id) = staged.parse::<ServerId>() {
+                let name = metadata::read_server_metadata(&directory)
+                    .map_or_else(|_| staged.to_owned(), |record| record.name);
+                report_unfinished_move(report, RecordRef::Server(id), name, directory);
+            }
+            continue;
+        }
         if !metadata::is_server_root(&directory) {
             continue;
         }
@@ -551,9 +569,7 @@ fn reindex_orphaned_servers(
 ///
 /// All three conditions matter. The directory has to look like an instance, its
 /// metadata has to name this instance rather than another one, and it must not
-/// carry the incomplete marker -- a move that was interrupted partway through
-/// copying leaves a marked directory, and adopting that would hand the user a
-/// half-copied instance while the whole one is still where it was.
+/// carry the incomplete marker, which no finished move leaves behind (ADR 0025).
 fn is_finished_client_root(root: &Path, id: InstanceId) -> bool {
     metadata::is_client_instance_root(root)
         && !metadata::is_incomplete(root)
@@ -565,6 +581,24 @@ fn is_finished_server_root(root: &Path, id: ServerId) -> bool {
     metadata::is_server_root(root)
         && !metadata::is_incomplete(root)
         && metadata::read_server_metadata(root).is_ok_and(|found| found.id == id)
+}
+
+fn report_unfinished_move(
+    report: &mut ReconciliationReport,
+    reference: RecordRef,
+    name: String,
+    root: PathBuf,
+) {
+    tracing::warn!(
+        path = %root.display(),
+        "a move's copy was never put in place; leaving it unindexed"
+    );
+    report.unfinished_instances.push(ReconciledRecord {
+        reference,
+        name,
+        root,
+        storage: StorageClass::Persistent,
+    });
 }
 
 /// Immediate subdirectories of `root`, or nothing if it does not exist.
@@ -737,11 +771,10 @@ mod tests {
         assert!(!report.needs_attention());
     }
 
-    /// The destination of an interrupted *copy* is marked incomplete. Adopting
-    /// it would hand the user a half-copied instance while the whole one is
-    /// still sitting in the temporary root.
+    /// An interrupted copy leaves only its staging directory. Adopting it would
+    /// hand the user a half-copied instance.
     #[test]
-    fn a_half_copied_destination_is_not_mistaken_for_a_finished_move() {
+    fn an_interrupted_copy_is_reported_and_never_adopted() {
         let environment = TestEnvironment::new();
         let registry = environment.registry();
         let client = registry
@@ -751,23 +784,79 @@ mod tests {
                 LoaderSelection::vanilla(),
             ))
             .expect("create");
-
+        for name in ["one.jar", "two.jar", "three.jar"] {
+            std::fs::write(client.root.join("minecraft").join(name), name).expect("payload");
+        }
         let destination = registry
             .paths()
             .instance_root(StorageClass::Persistent, client.id);
-        std::fs::create_dir_all(&destination).expect("mkdir");
-        crate::metadata::mark_incomplete(&destination).expect("mark");
-        crate::metadata::write_client_metadata(&destination, &client).expect("metadata");
+        let all = crate::test_support::count_files(&client.root);
+        crate::test_support::interrupt_copy_after(&client.root, &destination, all);
         std::fs::remove_dir_all(&client.root).expect("clear temp");
 
         let report = reconcile(&registry).expect("reconcile");
 
         assert!(report.relocated.is_empty());
-        assert_eq!(
-            report.removed_stale_temporary.len(),
-            1,
-            "an unfinished copy is not the instance"
-        );
+        assert!(report.reindexed.is_empty());
+        assert_eq!(report.removed_stale_temporary.len(), 1);
+        assert_eq!(report.unfinished_instances.len(), 1);
+        assert!(registry.list_clients().expect("list").is_empty());
+    }
+
+    #[test]
+    fn an_interrupted_server_copy_is_reported_and_never_adopted() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = registry
+            .create_server(NewServer::new(
+                "repro server",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        for name in ["one.jar", "two.jar", "three.jar"] {
+            std::fs::write(server.root.join("server").join(name), name).expect("payload");
+        }
+        let destination = registry
+            .paths()
+            .server_root(StorageClass::Persistent, server.id);
+        let all = crate::test_support::count_files(&server.root);
+        crate::test_support::interrupt_copy_after(&server.root, &destination, all);
+        std::fs::remove_dir_all(&server.root).expect("clear temp");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert!(report.relocated.is_empty());
+        assert!(report.reindexed.is_empty());
+        assert!(report.server_conflicts.is_empty());
+        assert_eq!(report.unfinished_instances.len(), 1);
+        assert!(registry.server(server.id).is_err());
+    }
+
+    /// A marked root is not a finished move; its marker is a restore's or a
+    /// creation's, and neither is a complete host to follow.
+    #[test]
+    fn a_marked_root_at_the_persistent_path_is_not_followed() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new(
+                "repro",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        crate::metadata::mark_incomplete(&client.root).expect("a marker");
+        let moved = registry
+            .paths()
+            .instance_root(StorageClass::Persistent, client.id);
+        std::fs::create_dir_all(moved.parent().expect("parent")).expect("mkdir");
+        std::fs::rename(&client.root, &moved).expect("move the files");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert!(report.relocated.is_empty());
+        assert_eq!(report.removed_stale_temporary.len(), 1);
         assert_eq!(report.unfinished_instances.len(), 1);
     }
 

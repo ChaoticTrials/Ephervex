@@ -58,3 +58,35 @@ impl TestEnvironment {
         }
     }
 }
+
+/// Runs the cross-filesystem copy a promotion uses and kills it once `files`
+/// files have landed, leaving what an interrupted promotion leaves behind.
+pub(crate) fn interrupt_copy_after(source: &Path, destination: &Path, files: usize) {
+    crate::relocate::force_copy(true);
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::relocate::relocate_tree(source, destination, &mut |copied| {
+            assert!(copied < files, "the copy is interrupted here");
+        })
+    }));
+    crate::relocate::force_copy(false);
+    assert!(
+        outcome.is_err(),
+        "the copy finished before it was interrupted"
+    );
+}
+
+/// How many regular files a tree holds, for interrupting a copy after its last.
+pub(crate) fn count_files(root: &Path) -> usize {
+    std::fs::read_dir(root)
+        .expect("read the tree")
+        .map(|entry| entry.expect("an entry").path())
+        .map(|path| {
+            let kind = std::fs::symlink_metadata(&path).expect("stat").file_type();
+            if kind.is_dir() {
+                count_files(&path)
+            } else {
+                usize::from(kind.is_file())
+            }
+        })
+        .sum()
+}

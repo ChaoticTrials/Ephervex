@@ -563,15 +563,45 @@ fn launch_id_of(name: &str) -> Option<LockName> {
 }
 
 /// Holds the right to decide who holds an instance's launch locks.
+struct OwnershipGuard(FileGuard);
+
+impl OwnershipGuard {
+    /// The guard file.
+    fn path(&self) -> &Path {
+        self.0.path()
+    }
+
+    /// Waits a bounded time, so a stopped or wedged launcher cannot hang this one.
+    fn take(directory: &Path) -> Result<Self, LockError> {
+        FileGuard::take(directory, OWNERSHIP_GUARD_FILE, OWNERSHIP_GUARD_PATIENCE)
+            .map(Self)
+            .map_err(|error| match error {
+                GuardError::Busy { path } => LockError::Busy { path },
+                GuardError::Unusable { path, source } => LockError::unusable(&path, source),
+            })
+    }
+}
+
+/// An exclusive claim on a guard file, shared by every process and thread.
 ///
 /// A `flock` rather than a lock file recording a pid: the kernel drops it when
 /// the holder dies. Taken on a file opened for writing, because NFS refuses an
 /// exclusive lock on a read-only descriptor. NFS also gives a process one lock
 /// per file shared by all its threads, so threads are kept apart in-process too.
-struct OwnershipGuard {
+pub(crate) struct FileGuard {
     // Declared first so the flock is released before the in-process claim.
     _file: Option<std::fs::File>,
     claim: InProcessClaim,
+}
+
+/// Why a [`FileGuard`] could not be taken.
+pub(crate) enum GuardError {
+    /// Someone else held it for longer than the caller waits.
+    Busy { path: PathBuf },
+    Unusable {
+        path: PathBuf,
+        source: std::io::Error,
+    },
 }
 
 /// This process's claim on one guard file.
@@ -581,23 +611,34 @@ struct InProcessClaim(PathBuf);
 static HELD_IN_PROCESS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
 static RELEASED_IN_PROCESS: std::sync::Condvar = std::sync::Condvar::new();
 
-impl OwnershipGuard {
+impl FileGuard {
     /// The guard file.
-    fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.claim.0
     }
 
-    /// Waits a bounded time, so a stopped or wedged launcher cannot hang this one.
-    fn take(directory: &Path) -> Result<Self, LockError> {
+    /// Takes the guard file `name` in `directory`, waiting at most `patience`.
+    pub(crate) fn take(
+        directory: &Path,
+        name: &str,
+        patience: std::time::Duration,
+    ) -> Result<Self, GuardError> {
         use rustix::fs::{FlockOperation, Mode, OFlags, flock};
         use rustix::io::Errno;
 
-        // Canonical, so two spellings of one instance claim the same guard.
+        // Canonical, so two spellings of one directory claim the same guard.
         let path = std::fs::canonicalize(directory)
-            .map_err(|error| LockError::unusable(directory, error))?
-            .join(OWNERSHIP_GUARD_FILE);
-        let deadline = std::time::Instant::now() + OWNERSHIP_GUARD_PATIENCE;
-        let busy = || LockError::Busy { path: path.clone() };
+            .map_err(|source| GuardError::Unusable {
+                path: directory.to_path_buf(),
+                source,
+            })?
+            .join(name);
+        let deadline = std::time::Instant::now() + patience;
+        let busy = || GuardError::Busy { path: path.clone() };
+        let unusable = |source| GuardError::Unusable {
+            path: path.clone(),
+            source,
+        };
 
         let mut held = HELD_IN_PROCESS
             .lock()
@@ -622,7 +663,7 @@ impl OwnershipGuard {
             Mode::RUSR | Mode::WUSR,
         )
         .map(std::fs::File::from)
-        .map_err(|errno| LockError::unusable(&path, errno.into()))?;
+        .map_err(|errno| unusable(errno.into()))?;
         loop {
             match flock(&file, FlockOperation::NonBlockingLockExclusive) {
                 Ok(()) => break,
@@ -634,10 +675,10 @@ impl OwnershipGuard {
                 // A filesystem with no locking at all keeps the in-process
                 // exclusion, which is as much as the lock files alone gave.
                 Err(errno @ (Errno::NOLCK | Errno::OPNOTSUPP | Errno::NOSYS)) => {
-                    warn!(path = %path.display(), %errno, "launch locks are not guarded across processes here");
+                    warn!(path = %path.display(), %errno, "this guard is not shared across processes here");
                     return Ok(Self { _file: None, claim });
                 }
-                Err(errno) => return Err(LockError::unusable(&path, errno.into())),
+                Err(errno) => return Err(unusable(errno.into())),
             }
         }
         Ok(Self {

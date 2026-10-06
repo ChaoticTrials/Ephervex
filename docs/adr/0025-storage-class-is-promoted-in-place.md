@@ -52,11 +52,20 @@ rather than followed or dropped. A link's target lies outside the tree being
 moved, so recreating it verbatim is what keeps it pointing where it pointed.
 The source is removed only after the move is recorded.
 
-**An interrupted promotion is resumable rather than wedged.** The destination
-path is derived from the instance id, so a retry lands where the interrupted
-attempt did. A directory there that carries the incomplete marker and whose
-metadata names the same instance is provably that attempt, and is cleared. A
-directory there that is anything else is a conflict and is refused.
+**An interrupted promotion is resumable rather than wedged.** A copy is made
+into a hidden staging directory beside the destination, flushed, and renamed
+into place in one step, so the destination path only ever holds a complete
+instance. The staging directory's name is derived from the instance id, so a
+retry finds what an interrupted attempt left there and replaces it. A directory
+at the destination itself that names the same instance is a copy an earlier
+attempt finished but could not record, while the instance still stands at its
+source, and is replaced. Anything else there is a conflict and is refused. A
+move holds a claim on the instance for as long as it runs, so a second move of
+the same instance is refused rather than replacing a copy that is still being
+made. A move neither writes nor clears the incomplete marker, and refuses an
+instance that carries one: it is an interrupted snapshot restore's, and
+recovering it after the move would put the pre-restore metadata back over the
+move's.
 
 **Reconciliation adopts a moved root instead of forgetting the record.** A
 temporary record whose root has vanished is normally expected cleanup, and
@@ -64,7 +73,8 @@ dropping it also unlinks its servers. Before treating it that way,
 reconciliation checks whether the instance's files are standing, complete, at
 the persistent path for that same id. If they are, they were moved, and the
 record is corrected rather than deleted. Without this, an interrupted promotion
-would cost the instance its linked servers on the next start.
+would cost the instance its linked servers on the next start. A staging
+directory is never adopted; reconciliation reports it and leaves it alone.
 
 **Linked servers are a per-server choice, not a cascade.** A server has its own
 storage class and its own world. Every temporary linked server is offered,

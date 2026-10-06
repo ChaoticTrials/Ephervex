@@ -424,16 +424,17 @@ fn a_promotion_retried_after_an_interrupted_copy_clears_its_own_leftover() {
         .expect("create");
     registry.publish_client(&original).expect("publish");
 
-    // What a promotion killed mid-copy leaves at the destination.
+    // What a promotion killed mid-copy leaves: its hidden staging directory
+    // beside the destination, never anything at the destination itself.
     let destination = paths.instance_root(StorageClass::Persistent, original.id);
-    std::fs::create_dir_all(destination.join(".launcher")).expect("create the abandoned root");
+    let stage = destination.with_file_name(format!(".{}.moving", original.id));
+    std::fs::create_dir_all(stage.join(".launcher")).expect("create the abandoned copy");
     std::fs::copy(
         original.root.join(".launcher/instance.json"),
-        destination.join(".launcher/instance.json"),
+        stage.join(".launcher/instance.json"),
     )
     .expect("the metadata the interrupted copy carried");
-    std::fs::write(destination.join(".launcher/incomplete"), b"").expect("mark it incomplete");
-    std::fs::write(destination.join("half-written.bin"), b"partial").expect("partial content");
+    std::fs::write(stage.join("half-written.bin"), b"partial").expect("partial content");
 
     let promoted = registry
         .relocate_client(original.id, StorageClass::Persistent, &mut |_| {})
@@ -441,9 +442,10 @@ fn a_promotion_retried_after_an_interrupted_copy_clears_its_own_leftover() {
 
     assert_eq!(promoted.root, destination);
     assert!(
-        !destination.join("half-written.bin").exists(),
-        "the abandoned attempt's contents must not survive into the finished move"
+        !stage.exists(),
+        "the abandoned attempt's contents must not survive the finished move"
     );
+    assert!(!destination.join("half-written.bin").exists());
     assert!(promoted.root.join("minecraft").is_dir());
 }
 
