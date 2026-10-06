@@ -21,9 +21,9 @@
 //! # Determinism
 //!
 //! Everything is keyed in `BTreeMap`/`BTreeSet`, the next project to resolve is
-//! the smallest id among those needing work, and version candidates are ordered
-//! by publication date and then by id. Reversing any response array changes
-//! nothing about the result.
+//! the smallest id among the most informative of those needing work, and
+//! version candidates are ordered by publication date and then by id.
+//! Reversing any response array changes nothing about the result.
 //!
 //! # Nothing here writes
 //!
@@ -42,13 +42,13 @@ use crate::error::{ModPlatformError, ModPlatformResult};
 use crate::model::{Compatibility, InstanceTarget, ModDependency, ModProject, ModVersionInfo};
 use crate::provider::ModProviderApi;
 
-/// How many resolution rounds are allowed before the resolver declares its own
-/// invariant broken.
+/// How many resolution rounds are allowed before the resolver gives up.
 ///
-/// A project's pin can only move from "unstated" to "pinned" - a second,
-/// different pin is a hard failure - so each project is resolved at most twice
-/// and this ceiling is unreachable. It exists so that a bug in that reasoning
-/// surfaces as a refused install rather than as a launcher that never finishes.
+/// Resolution follows only what the root's current selection reaches, so a
+/// project can be resolved again when the release that pinned it is replaced.
+/// A graph with no consistent choice of versions can keep replacing releases
+/// indefinitely, and this ceiling turns that into a refused install rather than
+/// a launcher that never finishes.
 const MAX_RESOLUTION_ROUNDS: usize = 512;
 
 /// The name the plan gives the mod the user asked for.
@@ -388,6 +388,21 @@ pub async fn resolve(request: ResolveRequest<'_>) -> ModPlatformResult<ModInstal
     state.run().await
 }
 
+/// Whether an error describes the catalog's content for one project, so that
+/// it holds only for as long as the graph keeps asking for that project, as
+/// opposed to the provider failing.
+const fn is_graph_refusal(error: &ModPlatformError) -> bool {
+    matches!(
+        error,
+        ModPlatformError::IncompatibleSelectedVersion { .. }
+            | ModPlatformError::NoCompatibleVersion { .. }
+            | ModPlatformError::ProjectUnknown { .. }
+            | ModPlatformError::VersionUnknown { .. }
+            | ModPlatformError::InconsistentDependency { .. }
+            | ModPlatformError::MalformedDependency { .. }
+    )
+}
+
 struct Resolver<'a> {
     request: ResolveRequest<'a>,
     constraints: BTreeMap<String, Constraint>,
@@ -396,6 +411,15 @@ struct Resolver<'a> {
     /// version so that re-resolving a project retracts exactly what its
     /// previous version said.
     edges: BTreeMap<(String, String), Vec<Normalized>>,
+    /// Projects whose version could not be selected or whose release could not
+    /// be read under the pin they carried, with that pin. The refusal is final
+    /// only once nothing else can change what the project is asked for, so it
+    /// is kept rather than returned.
+    refused: BTreeMap<String, (Option<String>, ModPlatformError)>,
+    /// Projects the current graph pins to two different versions. Reported only
+    /// once nothing else is left to resolve, because resolving a project that
+    /// has not been explored yet can retract either side.
+    conflicts: BTreeMap<String, ModPlatformError>,
     optional: BTreeMap<String, OptionalCandidate>,
     external: Vec<ExternalDependency>,
     embedded: Vec<EmbeddedNote>,
@@ -412,6 +436,8 @@ impl<'a> Resolver<'a> {
             constraints: BTreeMap::new(),
             resolved: BTreeMap::new(),
             edges: BTreeMap::new(),
+            refused: BTreeMap::new(),
+            conflicts: BTreeMap::new(),
             optional: BTreeMap::new(),
             external: Vec::new(),
             embedded: Vec::new(),
@@ -431,20 +457,50 @@ impl<'a> Resolver<'a> {
                 return Err(ModPlatformError::ResolutionDidNotConverge { iterations: round });
             }
 
-            self.refold()?;
-            let Some(next) = self.next_dirty() else { break };
+            self.refold();
+            self.refused.retain(|project, (pin, _)| {
+                self.constraints
+                    .get(project)
+                    .is_some_and(|constraint| &constraint.pin == pin)
+            });
+            let Some(next) = self.next_dirty() else {
+                if let Some((_, conflict)) = self.conflicts.pop_first() {
+                    return Err(conflict);
+                }
+                if let Some((_, (_, refusal))) = self.refused.pop_first() {
+                    return Err(refusal);
+                }
+                break;
+            };
 
             let pin = self
                 .constraints
                 .get(&next)
                 .and_then(|constraint| constraint.pin.clone());
-            let version = self.select_version(&next, pin.as_deref()).await?;
+            let version = match self.select_version(&next, pin.as_deref()).await {
+                Ok(version) => version,
+                Err(refusal) if is_graph_refusal(&refusal) => {
+                    self.refused.insert(next, (pin, refusal));
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             debug!(project = %next, version = %version.id, "resolved a project");
 
             // A project's relations belong to the version that declared them,
             // so re-resolving retracts the old ones wholesale.
             self.edges.retain(|(project, _), _| project != &next);
-            let normalized = self.normalize_all(&version).await?;
+            let normalized = match self.normalize_all(&version).await {
+                Ok(normalized) => normalized,
+                Err(refusal) if is_graph_refusal(&refusal) => {
+                    // The old release's relations are gone, so it must not stay
+                    // resolved without them.
+                    self.resolved.remove(&next);
+                    self.refused.insert(next, (pin, refusal));
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             self.edges
                 .insert((next.clone(), version.id.clone()), normalized);
             self.resolved.insert(
@@ -459,58 +515,36 @@ impl<'a> Resolver<'a> {
         self.finish(&root_id).await
     }
 
-    /// Rebuilds the constraint map from the root plus every surviving edge.
+    /// Rebuilds the constraint map from the root plus the edges reachable from it.
     ///
     /// Recomputed from scratch rather than patched: a retracted edge must not
     /// be able to leave a constraint behind, and proving that of an incremental
     /// update is harder than doing the work.
-    fn refold(&mut self) -> ModPlatformResult<()> {
-        let selection = self.request.selection;
-        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+    ///
+    /// A pin conflict is recorded rather than returned, see `conflicts`.
+    fn refold(&mut self) {
+        let (mut constraints, mut conflicts) = self.fold(&BTreeSet::new());
 
-        constraints
-            .entry(selection.project_id.clone())
-            .or_default()
-            .merge(
-                &selection.project_id,
-                selection.version_id.as_deref(),
-                ROOT,
-                ModOrigin::UserSelected,
-            )?;
-
-        // Only edges from projects that are still in the graph count. A project
-        // dropped by an earlier retraction contributes nothing.
-        let edges: Vec<((String, String), Vec<Normalized>)> = self
-            .edges
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect();
-
-        for ((source, _), relations) in edges {
-            for relation in relations {
-                let Normalized::Project {
-                    kind,
-                    project_id,
-                    pinned_version,
-                } = relation
-                else {
-                    continue;
-                };
-                let origin = match kind {
-                    ModRelationKind::Required => ModOrigin::RequiredDependency,
-                    ModRelationKind::Optional if selection.optional.contains(&project_id) => {
-                        ModOrigin::SelectedOptionalDependency
-                    }
-                    // Optional and not taken, incompatible, or embedded: none
-                    // of these put anything in the graph.
-                    _ => continue,
-                };
-                constraints.entry(project_id.clone()).or_default().merge(
-                    &project_id,
-                    pinned_version.as_deref(),
-                    &source,
-                    origin,
-                )?;
+        // A pin that only the conflicted project's own release brings in does
+        // not outvote one declared independently of it: moving the project
+        // retracts the former.
+        for project in conflicts.keys().cloned().collect::<Vec<_>>() {
+            let (without_own, still_conflicted) = self.fold(&BTreeSet::from([project.clone()]));
+            let independent = without_own
+                .get(&project)
+                .and_then(|constraint| constraint.pin.clone());
+            let Some(pin) = independent else { continue };
+            if still_conflicted.contains_key(&project)
+                || self
+                    .resolved
+                    .get(&project)
+                    .is_some_and(|resolution| resolution.under.as_deref() == Some(pin.as_str()))
+            {
+                continue;
+            }
+            if let Some(constraint) = constraints.get_mut(&project) {
+                constraint.pin = Some(pin);
+                conflicts.remove(&project);
             }
         }
 
@@ -521,22 +555,163 @@ impl<'a> Resolver<'a> {
         self.edges
             .retain(|(project, _), _| constraints.contains_key(project));
         self.constraints = constraints;
-        Ok(())
+        self.conflicts = conflicts;
     }
 
-    /// The smallest project id that still needs resolving.
+    /// The resolved projects the graph now pins to a version other than the
+    /// one they were resolved under, so their current release is about to be
+    /// replaced.
+    fn superseded_projects(&self) -> BTreeSet<String> {
+        self.resolved
+            .iter()
+            .filter(|(project, resolution)| {
+                self.constraints.get(*project).is_some_and(|constraint| {
+                    constraint.pin.is_some() && constraint.pin != resolution.under
+                })
+            })
+            .map(|(project, _)| project.clone())
+            .collect()
+    }
+
+    /// Folds the root and every reachable edge into constraints, leaving out
+    /// the edges of the `skipped` projects.
+    ///
+    /// Pin conflicts are returned beside the constraints rather than aborting
+    /// the fold, because the caller decides when they count.
+    fn fold(
+        &self,
+        skipped: &BTreeSet<String>,
+    ) -> (
+        BTreeMap<String, Constraint>,
+        BTreeMap<String, ModPlatformError>,
+    ) {
+        let selection = self.request.selection;
+        let reachable = self.reachable_projects(skipped);
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        let mut conflicts = BTreeMap::new();
+
+        let root = constraints.entry(selection.project_id.clone()).or_default();
+        if let Err(error) = root.merge(
+            &selection.project_id,
+            selection.version_id.as_deref(),
+            ROOT,
+            ModOrigin::UserSelected,
+        ) {
+            conflicts
+                .entry(selection.project_id.clone())
+                .or_insert(error);
+        }
+
+        for ((source, _), relations) in &self.edges {
+            if !reachable.contains(source) || skipped.contains(source) {
+                continue;
+            }
+            for relation in relations {
+                let Normalized::Project {
+                    kind,
+                    project_id,
+                    pinned_version,
+                } = relation
+                else {
+                    continue;
+                };
+                let Some(origin) = self.graph_origin(*kind, project_id) else {
+                    continue;
+                };
+                if let Err(error) = constraints.entry(project_id.clone()).or_default().merge(
+                    project_id,
+                    pinned_version.as_deref(),
+                    source,
+                    origin,
+                ) {
+                    conflicts.entry(project_id.clone()).or_insert(error);
+                }
+            }
+        }
+        (constraints, conflicts)
+    }
+
+    /// The projects the root's current selection reaches through the stored
+    /// edges, following only relations that put something in the graph.
+    fn reachable_projects(&self, skipped: &BTreeSet<String>) -> BTreeSet<String> {
+        let mut reachable = BTreeSet::from([self.request.selection.project_id.clone()]);
+        let mut grew = true;
+        while grew {
+            grew = false;
+            for ((source, _), relations) in &self.edges {
+                if !reachable.contains(source) || skipped.contains(source) {
+                    continue;
+                }
+                for relation in relations {
+                    let Normalized::Project {
+                        kind, project_id, ..
+                    } = relation
+                    else {
+                        continue;
+                    };
+                    if self.graph_origin(*kind, project_id).is_some() {
+                        grew |= reachable.insert(project_id.clone());
+                    }
+                }
+            }
+        }
+        reachable
+    }
+
+    /// The origin a relation gives its target, or `None` when the relation puts
+    /// nothing in the graph: optional and not taken, incompatible, or embedded.
+    fn graph_origin(&self, kind: ModRelationKind, project_id: &str) -> Option<ModOrigin> {
+        match kind {
+            ModRelationKind::Required => Some(ModOrigin::RequiredDependency),
+            ModRelationKind::Optional if self.request.selection.optional.contains(project_id) => {
+                Some(ModOrigin::SelectedOptionalDependency)
+            }
+            _ => None,
+        }
+    }
+
+    /// The project to resolve next: the smallest id of the most informative
+    /// kind.
     ///
     /// "Needs resolving" is either never resolved, or resolved under a weaker
     /// constraint than it now carries - which is precisely the case a `visited`
-    /// set gets wrong.
+    /// set gets wrong. What a superseded project's current release declares is
+    /// about to be replaced, so the order follows what survives without it:
+    ///
+    /// 0. a project pinned by a release that is not itself superseded, since
+    ///    that choice is forced;
+    /// 1. a project nothing pins, reached the same way, which takes its newest
+    ///    release;
+    /// 2. a project pinned only through superseded releases;
+    /// 3. a project whose pin has gone, which keeps its release in the graph
+    ///    until nothing else can still be explored through it;
+    /// 4. a project reached only through a superseded release.
+    ///
+    /// A project whose last attempt was refused, or that the graph pins to two
+    /// versions, is left alone until its pin changes.
     fn next_dirty(&self) -> Option<String> {
+        let settled = self.fold(&self.superseded_projects()).0;
         self.constraints
             .iter()
-            .find(|(project, constraint)| match self.resolved.get(*project) {
-                None => true,
-                Some(resolution) => resolution.under != constraint.pin,
+            .filter(|(project, _)| {
+                !self.refused.contains_key(*project) && !self.conflicts.contains_key(*project)
             })
-            .map(|(project, _)| project.clone())
+            .filter_map(|(project, constraint)| {
+                let resolution = self.resolved.get(project);
+                if resolution.is_some_and(|resolution| resolution.under == constraint.pin) {
+                    return None;
+                }
+                let rank = match (settled.get(project), resolution) {
+                    (None, _) => 4,
+                    (Some(live), _) if constraint.pin.is_some() && live.pin == constraint.pin => 0,
+                    (Some(_), None) if constraint.pin.is_none() => 1,
+                    (Some(_), _) if constraint.pin.is_some() => 2,
+                    (Some(_), _) => 3,
+                };
+                Some((rank, project))
+            })
+            .min()
+            .map(|(_, project)| project.clone())
     }
 
     /// Picks the version one project resolves to.
@@ -1242,6 +1417,28 @@ mod tests {
             .collect()
     }
 
+    /// The `(project, version)` pairs a plan ends up with, sorted.
+    fn chosen_versions(plan: &ModInstallPlan) -> Vec<(String, String)> {
+        let mut chosen: Vec<(String, String)> = plan
+            .all_mods()
+            .into_iter()
+            .map(|planned| {
+                (
+                    planned.version.project_id.clone(),
+                    planned.version.id.clone(),
+                )
+            })
+            .collect();
+        chosen.sort();
+        chosen
+    }
+
+    fn pairs<const N: usize>(expected: [(&str, &str); N]) -> Vec<(String, String)> {
+        expected
+            .map(|(project, version)| (project.to_owned(), version.to_owned()))
+            .to_vec()
+    }
+
     // -- version selection -------------------------------------------------
 
     #[tokio::test]
@@ -1731,6 +1928,1072 @@ mod tests {
         );
     }
 
+    /// ROOT requires AAA and ZZZ. The newest AAA requires BBB, which requires
+    /// CCC, but ZZZ pins an older AAA with no dependencies. AAA resolves first
+    /// to its newest, so the superseded branch has already been folded when the
+    /// pin arrives.
+    fn superseded_branch_catalog(ccc: Vec<ModVersionInfo>) -> Catalog {
+        Catalog::default()
+            .with(
+                "ROOT",
+                vec![needs(
+                    needs(compatible("v1", "ROOT"), ModRelationKind::Required, "AAA"),
+                    ModRelationKind::Required,
+                    "ZZZ",
+                )],
+            )
+            .with(
+                "AAA",
+                vec![
+                    at(compatible("old", "AAA"), 0),
+                    at(
+                        needs(compatible("new", "AAA"), ModRelationKind::Required, "BBB"),
+                        60,
+                    ),
+                ],
+            )
+            .with(
+                "BBB",
+                vec![needs(
+                    compatible("v1", "BBB"),
+                    ModRelationKind::Required,
+                    "CCC",
+                )],
+            )
+            .with("CCC", ccc)
+            .with(
+                "ZZZ",
+                vec![pins(
+                    compatible("v1", "ZZZ"),
+                    ModRelationKind::Required,
+                    "old",
+                )],
+            )
+    }
+
+    #[tokio::test]
+    async fn a_superseded_branch_leaves_none_of_its_transitive_mods_in_the_plan() {
+        let catalog = superseded_branch_catalog(vec![compatible("v1", "CCC")]);
+
+        let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+        let mut projects = ids(plan.all_mods());
+        projects.sort();
+        assert_eq!(projects, ["AAA", "ROOT", "ZZZ"]);
+    }
+
+    #[tokio::test]
+    async fn a_conflict_declared_by_an_unreachable_mod_does_not_refuse_the_plan() {
+        let catalog = superseded_branch_catalog(vec![needs(
+            compatible("v1", "CCC"),
+            ModRelationKind::Incompatible,
+            "ROOT",
+        )]);
+
+        let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+        assert!(!ids(plan.all_mods()).contains(&"CCC".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn a_pin_declared_by_a_superseded_branch_does_not_conflict_with_a_live_pin() {
+        // BBB is only reachable through the superseded AAA, so its pin on CCC
+        // must not clash with the different pin ZZZ states.
+        let catalog = superseded_branch_catalog(vec![
+            at(compatible("ccc-old", "CCC"), 0),
+            at(compatible("ccc-new", "CCC"), 60),
+        ])
+        .with(
+            "BBB",
+            vec![pins(
+                compatible("v1", "BBB"),
+                ModRelationKind::Required,
+                "ccc-new",
+            )],
+        )
+        .with(
+            "ZZZ",
+            vec![pins(
+                pins(compatible("v1", "ZZZ"), ModRelationKind::Required, "old"),
+                ModRelationKind::Required,
+                "ccc-old",
+            )],
+        );
+
+        let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+        let chosen = chosen_versions(&plan);
+        assert!(chosen.contains(&("CCC".to_owned(), "ccc-old".to_owned())));
+        assert!(!chosen.iter().any(|(project, _)| project == "BBB"));
+    }
+
+    #[tokio::test]
+    async fn a_pin_held_by_a_dependency_of_the_project_it_pins_keeps_that_dependency() {
+        // Both releases of SSS need NNN, and NNN pins the older one. Resolving
+        // SSS to its newest makes it stale, but the pin that says so comes from
+        // a dependency of that very release, so retracting the release's edges
+        // must not also retract the reason to resolve it again.
+        let catalog = Catalog::default()
+            .with(
+                "ROOT",
+                vec![needs(
+                    compatible("v1", "ROOT"),
+                    ModRelationKind::Required,
+                    "SSS",
+                )],
+            )
+            .with(
+                "SSS",
+                vec![
+                    at(
+                        needs(compatible("s-old", "SSS"), ModRelationKind::Required, "NNN"),
+                        0,
+                    ),
+                    at(
+                        needs(compatible("s-new", "SSS"), ModRelationKind::Required, "NNN"),
+                        60,
+                    ),
+                ],
+            )
+            .with(
+                "NNN",
+                vec![pins(
+                    compatible("n1", "NNN"),
+                    ModRelationKind::Required,
+                    "s-old",
+                )],
+            );
+
+        let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+        assert_eq!(
+            chosen_versions(&plan),
+            pairs([("NNN", "n1"), ("ROOT", "v1"), ("SSS", "s-old")])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_project_is_resolved_again_before_those_pinned_through_it() {
+        // DDD pins BBB through PPP's newest release, and ZZZ pins PPP to its
+        // older one. Retracting PPP's edges hides DDD's pin on BBB, which must
+        // not send BBB back to its newest release ahead of PPP.
+        let catalog = Catalog::default()
+            .with(
+                "ROOT",
+                vec![needs(
+                    needs(
+                        needs(compatible("v1", "ROOT"), ModRelationKind::Required, "BBB"),
+                        ModRelationKind::Required,
+                        "PPP",
+                    ),
+                    ModRelationKind::Required,
+                    "ZZZ",
+                )],
+            )
+            .with(
+                "BBB",
+                vec![
+                    at(compatible("b-old", "BBB"), 0),
+                    at(compatible("b-new", "BBB"), 60),
+                ],
+            )
+            .with(
+                "PPP",
+                vec![
+                    at(
+                        needs(compatible("p-old", "PPP"), ModRelationKind::Required, "DDD"),
+                        0,
+                    ),
+                    at(
+                        needs(compatible("p-new", "PPP"), ModRelationKind::Required, "DDD"),
+                        60,
+                    ),
+                ],
+            )
+            .with(
+                "DDD",
+                vec![pins(
+                    compatible("d1", "DDD"),
+                    ModRelationKind::Required,
+                    "b-old",
+                )],
+            )
+            .with(
+                "ZZZ",
+                vec![pins(
+                    compatible("z1", "ZZZ"),
+                    ModRelationKind::Required,
+                    "p-old",
+                )],
+            );
+
+        for catalog in [catalog.reversed(), catalog] {
+            let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+            assert_eq!(
+                chosen_versions(&plan),
+                pairs([
+                    ("BBB", "b-old"),
+                    ("DDD", "d1"),
+                    ("PPP", "p-old"),
+                    ("ROOT", "v1"),
+                    ("ZZZ", "z1"),
+                ])
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pin_that_only_a_superseded_release_declares_does_not_hold_its_target() {
+        // KKK's newest release needs BBB, and BBB pins KKK's older one, which
+        // ZZZ pins too. Once KKK is back on its older release BBB is gone, and
+        // ZZZ is what keeps KKK there. ZZZ sorts after KKK, so it must be
+        // resolved before KKK is moved again.
+        let catalog = Catalog::default()
+            .with(
+                "ROOT",
+                vec![needs(
+                    needs(compatible("v1", "ROOT"), ModRelationKind::Required, "KKK"),
+                    ModRelationKind::Required,
+                    "ZZZ",
+                )],
+            )
+            .with(
+                "KKK",
+                vec![
+                    at(compatible("k-old", "KKK"), 0),
+                    at(
+                        needs(compatible("k-new", "KKK"), ModRelationKind::Required, "BBB"),
+                        60,
+                    ),
+                ],
+            )
+            .with(
+                "BBB",
+                vec![pins(
+                    compatible("b1", "BBB"),
+                    ModRelationKind::Required,
+                    "k-old",
+                )],
+            )
+            .with(
+                "ZZZ",
+                vec![pins(
+                    compatible("z1", "ZZZ"),
+                    ModRelationKind::Required,
+                    "k-old",
+                )],
+            );
+
+        for catalog in [catalog.reversed(), catalog] {
+            let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+            assert_eq!(
+                chosen_versions(&plan),
+                pairs([("KKK", "k-old"), ("ROOT", "v1"), ("ZZZ", "z1")])
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_project_whose_pin_vanishes_with_its_own_release_still_reaches_its_new_dependencies()
+    {
+        // ZZZ's older release needs BBB, and its newer one pins a version of
+        // QQQ that pins the older ZZZ. Settling on the older release removes
+        // the only source of that pin, but the older release's own
+        // dependencies still belong in the plan.
+        let catalog = Catalog::default()
+            .with(
+                "ROOT",
+                vec![needs(
+                    compatible("v1", "ROOT"),
+                    ModRelationKind::Required,
+                    "ZZZ",
+                )],
+            )
+            .with(
+                "ZZZ",
+                vec![
+                    at(
+                        needs(compatible("z-old", "ZZZ"), ModRelationKind::Required, "BBB"),
+                        0,
+                    ),
+                    at(
+                        pins(compatible("z-new", "ZZZ"), ModRelationKind::Required, "q1"),
+                        60,
+                    ),
+                ],
+            )
+            .with(
+                "QQQ",
+                vec![pins(
+                    compatible("q1", "QQQ"),
+                    ModRelationKind::Required,
+                    "z-old",
+                )],
+            )
+            .with(
+                "BBB",
+                vec![pins(
+                    compatible("b1", "BBB"),
+                    ModRelationKind::Required,
+                    "q1",
+                )],
+            );
+
+        for catalog in [catalog.reversed(), catalog] {
+            let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+            assert_eq!(
+                chosen_versions(&plan),
+                pairs([
+                    ("BBB", "b1"),
+                    ("QQQ", "q1"),
+                    ("ROOT", "v1"),
+                    ("ZZZ", "z-old"),
+                ])
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pin_declared_only_behind_another_waiting_project_is_not_acted_on_first() {
+        // MMM's older release does not fit the instance. PPP's newest release
+        // pins it, but AAA pins PPP to its older release, so that pin is about
+        // to disappear. PPP has to move first.
+        let catalog = Catalog::default()
+            .with(
+                "ROOT",
+                vec![needs(
+                    needs(compatible("v1", "ROOT"), ModRelationKind::Required, "MMM"),
+                    ModRelationKind::Required,
+                    "PPP",
+                )],
+            )
+            .with(
+                "MMM",
+                vec![
+                    at(version("m-old", "MMM", &["1.19.2"], &["neoforge"]), 0),
+                    at(compatible("m-new", "MMM"), 60),
+                ],
+            )
+            .with(
+                "PPP",
+                vec![
+                    at(
+                        needs(compatible("p-old", "PPP"), ModRelationKind::Required, "AAA"),
+                        0,
+                    ),
+                    at(
+                        pins(
+                            needs(compatible("p-new", "PPP"), ModRelationKind::Required, "AAA"),
+                            ModRelationKind::Required,
+                            "m-old",
+                        ),
+                        60,
+                    ),
+                ],
+            )
+            .with(
+                "AAA",
+                vec![pins(
+                    compatible("a1", "AAA"),
+                    ModRelationKind::Required,
+                    "p-old",
+                )],
+            );
+
+        let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+        assert_eq!(
+            chosen_versions(&plan),
+            pairs([
+                ("AAA", "a1"),
+                ("MMM", "m-new"),
+                ("PPP", "p-old"),
+                ("ROOT", "v1"),
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pin_from_a_waiting_root_release_is_not_acted_on_before_it_is_replaced() {
+        // ROOT's newest release pins an unusable ZZZ, but BBB pins ROOT's
+        // older one, so that pin is about to disappear. ZZZ must not be
+        // resolved under it.
+        let catalog = Catalog::default()
+            .with(
+                "ROOT",
+                vec![
+                    at(
+                        pins(
+                            compatible("r-old", "ROOT"),
+                            ModRelationKind::Required,
+                            "b-old",
+                        ),
+                        0,
+                    ),
+                    at(
+                        pins(
+                            pins(
+                                compatible("r-new", "ROOT"),
+                                ModRelationKind::Required,
+                                "z-new",
+                            ),
+                            ModRelationKind::Required,
+                            "b-old",
+                        ),
+                        60,
+                    ),
+                ],
+            )
+            .with(
+                "BBB",
+                vec![pins(
+                    compatible("b-old", "BBB"),
+                    ModRelationKind::Required,
+                    "r-old",
+                )],
+            )
+            .with(
+                "ZZZ",
+                vec![
+                    at(compatible("z-old", "ZZZ"), 0),
+                    at(version("z-new", "ZZZ", &["1.19.2"], &["neoforge"]), 60),
+                ],
+            );
+
+        for catalog in [catalog.reversed(), catalog] {
+            let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+            assert_eq!(
+                chosen_versions(&plan),
+                pairs([("BBB", "b-old"), ("ROOT", "r-old")])
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_project_whose_pin_vanishes_is_resolved_after_one_that_still_has_a_pin() {
+        // ROOT's older release needs ZZZ and its newer one needs BBB. BBB's
+        // older release pins ROOT's older one, and ZZZ pins BBB's older one.
+        // Once BBB settles on its older release its own pin on ZZZ is gone
+        // and ROOT's pin is what keeps the graph together.
+        let catalog = Catalog::default()
+            .with(
+                "ROOT",
+                vec![
+                    at(
+                        needs(
+                            compatible("r-old", "ROOT"),
+                            ModRelationKind::Required,
+                            "ZZZ",
+                        ),
+                        0,
+                    ),
+                    at(
+                        needs(
+                            compatible("r-new", "ROOT"),
+                            ModRelationKind::Required,
+                            "BBB",
+                        ),
+                        60,
+                    ),
+                ],
+            )
+            .with(
+                "BBB",
+                vec![
+                    at(
+                        pins(
+                            compatible("b-old", "BBB"),
+                            ModRelationKind::Required,
+                            "r-old",
+                        ),
+                        0,
+                    ),
+                    at(
+                        pins(
+                            compatible("b-new", "BBB"),
+                            ModRelationKind::Required,
+                            "z-old",
+                        ),
+                        60,
+                    ),
+                ],
+            )
+            .with(
+                "ZZZ",
+                vec![pins(
+                    compatible("z-old", "ZZZ"),
+                    ModRelationKind::Required,
+                    "b-old",
+                )],
+            );
+
+        for catalog in [catalog.reversed(), catalog] {
+            let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+            assert_eq!(
+                chosen_versions(&plan),
+                pairs([("BBB", "b-old"), ("ROOT", "r-old"), ("ZZZ", "z-old")])
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_forced_pin_is_followed_before_an_unexplored_project_adds_a_conflicting_one() {
+        // MMM pins KKK's older release, which pins ZZZ's older release. ZZZ's
+        // newest release would pin KKK's newest, so ZZZ must not be explored
+        // until KKK has moved.
+        let catalog = Catalog::default()
+            .with(
+                "ROOT",
+                vec![needs(
+                    needs(
+                        needs(compatible("r1", "ROOT"), ModRelationKind::Required, "KKK"),
+                        ModRelationKind::Required,
+                        "MMM",
+                    ),
+                    ModRelationKind::Required,
+                    "ZZZ",
+                )],
+            )
+            .with(
+                "KKK",
+                vec![
+                    at(
+                        pins(
+                            compatible("k-old", "KKK"),
+                            ModRelationKind::Required,
+                            "z-old",
+                        ),
+                        0,
+                    ),
+                    at(compatible("k-new", "KKK"), 60),
+                ],
+            )
+            .with(
+                "MMM",
+                vec![pins(
+                    compatible("m1", "MMM"),
+                    ModRelationKind::Required,
+                    "k-old",
+                )],
+            )
+            .with(
+                "ZZZ",
+                vec![
+                    at(compatible("z-old", "ZZZ"), 0),
+                    at(
+                        pins(
+                            compatible("z-new", "ZZZ"),
+                            ModRelationKind::Required,
+                            "k-new",
+                        ),
+                        60,
+                    ),
+                ],
+            );
+
+        for catalog in [catalog.reversed(), catalog] {
+            let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+            assert_eq!(
+                chosen_versions(&plan),
+                pairs([
+                    ("KKK", "k-old"),
+                    ("MMM", "m1"),
+                    ("ROOT", "r1"),
+                    ("ZZZ", "z-old"),
+                ])
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_conflict_inside_a_branch_only_a_superseded_release_reaches_is_never_reported() {
+        // AAA's newest release needs ZCC, whose only release pins two versions
+        // of MMM. YYY's newest release pins AAA's older one, so that branch is
+        // dropped and its conflict never applies.
+        let catalog = Catalog::default()
+            .with(
+                "ROOT",
+                vec![needs(
+                    needs(compatible("r1", "ROOT"), ModRelationKind::Required, "AAA"),
+                    ModRelationKind::Required,
+                    "YYY",
+                )],
+            )
+            .with(
+                "AAA",
+                vec![
+                    at(compatible("a-old", "AAA"), 0),
+                    at(
+                        needs(compatible("a-new", "AAA"), ModRelationKind::Required, "ZCC"),
+                        60,
+                    ),
+                ],
+            )
+            .with(
+                "ZCC",
+                vec![pins(
+                    pins(compatible("z1", "ZCC"), ModRelationKind::Required, "m1"),
+                    ModRelationKind::Required,
+                    "m2",
+                )],
+            )
+            .with(
+                "MMM",
+                vec![
+                    at(compatible("m1", "MMM"), 0),
+                    at(
+                        pins(compatible("m2", "MMM"), ModRelationKind::Required, "y-free"),
+                        60,
+                    ),
+                ],
+            )
+            .with(
+                "YYY",
+                vec![
+                    at(compatible("y-free", "YYY"), 0),
+                    at(
+                        pins(
+                            compatible("y-pin", "YYY"),
+                            ModRelationKind::Required,
+                            "a-old",
+                        ),
+                        60,
+                    ),
+                ],
+            );
+
+        for catalog in [catalog.reversed(), catalog] {
+            let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+            assert_eq!(
+                chosen_versions(&plan),
+                pairs([("AAA", "a-old"), ("ROOT", "r1"), ("YYY", "y-pin")])
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_dependency_that_cannot_be_read_inside_a_superseded_branch_does_not_refuse_the_plan()
+    {
+        // BBB's newest release needs a project whose release names something
+        // unusable. YYY pins BBB's older release, so that branch is dropped,
+        // whichever of the two projects sorts first.
+        let unreadable = |what: &str, project: &str| match what {
+            "a project nobody lists" => {
+                needs(compatible("z1", project), ModRelationKind::Required, "GONE")
+            }
+            "a version nobody lists" => {
+                pins(compatible("z1", project), ModRelationKind::Required, "gone")
+            }
+            _ => {
+                let mut release = compatible("z1", project);
+                release.dependencies.push(crate::model::ModDependency {
+                    kind: ModRelationKind::Required,
+                    project_id: None,
+                    version_id: None,
+                    file_name: None,
+                });
+                release
+            }
+        };
+
+        for what in [
+            "a project nobody lists",
+            "a version nobody lists",
+            "a relation naming nothing",
+        ] {
+            for branch in ["ACC", "ZCC"] {
+                let catalog = Catalog::default()
+                    .with(
+                        "ROOT",
+                        vec![needs(
+                            needs(compatible("r1", "ROOT"), ModRelationKind::Required, "BBB"),
+                            ModRelationKind::Required,
+                            "YYY",
+                        )],
+                    )
+                    .with(
+                        "BBB",
+                        vec![
+                            at(compatible("b-old", "BBB"), 0),
+                            at(
+                                needs(
+                                    compatible("b-new", "BBB"),
+                                    ModRelationKind::Required,
+                                    branch,
+                                ),
+                                60,
+                            ),
+                        ],
+                    )
+                    .with(branch, vec![unreadable(what, branch)])
+                    .with(
+                        "YYY",
+                        vec![pins(
+                            compatible("y1", "YYY"),
+                            ModRelationKind::Required,
+                            "b-old",
+                        )],
+                    );
+
+                for catalog in [catalog.reversed(), catalog] {
+                    let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+                    assert_eq!(
+                        chosen_versions(&plan),
+                        pairs([("BBB", "b-old"), ("ROOT", "r1"), ("YYY", "y1")]),
+                        "{what} behind {branch}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pin_conflict_waits_for_projects_that_can_still_retract_a_side() {
+        // ZZZ's release pins QQQ's newest release, and BBB's newest release
+        // pins an older one. KKK pins BBB's older release, which declares no
+        // pin, but KKK is only explored after BBB. The conflict must not be
+        // reported on sight.
+        let catalog = Catalog::default()
+            .with(
+                "ROOT",
+                vec![pins(
+                    needs(compatible("r1", "ROOT"), ModRelationKind::Required, "KKK"),
+                    ModRelationKind::Required,
+                    "z1",
+                )],
+            )
+            .with(
+                "ZZZ",
+                vec![needs(
+                    pins(compatible("z1", "ZZZ"), ModRelationKind::Required, "q-new"),
+                    ModRelationKind::Required,
+                    "BBB",
+                )],
+            )
+            .with(
+                "BBB",
+                vec![
+                    at(compatible("b-old", "BBB"), 0),
+                    at(
+                        pins(
+                            compatible("b-new", "BBB"),
+                            ModRelationKind::Required,
+                            "q-old",
+                        ),
+                        60,
+                    ),
+                ],
+            )
+            .with(
+                "KKK",
+                vec![pins(
+                    compatible("k1", "KKK"),
+                    ModRelationKind::Required,
+                    "b-old",
+                )],
+            )
+            .with(
+                "QQQ",
+                vec![
+                    at(compatible("q-old", "QQQ"), 0),
+                    at(compatible("q-new", "QQQ"), 60),
+                ],
+            );
+
+        for catalog in [catalog.reversed(), catalog] {
+            let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+            assert_eq!(
+                chosen_versions(&plan),
+                pairs([
+                    ("BBB", "b-old"),
+                    ("KKK", "k1"),
+                    ("QQQ", "q-new"),
+                    ("ROOT", "r1"),
+                    ("ZZZ", "z1"),
+                ])
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pin_only_a_projects_own_release_brings_in_does_not_outvote_an_independent_pin() {
+        // BBB's newest release needs AAA, which pins BBB's newest release, but
+        // KKK pins BBB's older one. Moving BBB drops AAA and with it the pin
+        // that was holding BBB in place.
+        let catalog = Catalog::default()
+            .with(
+                "ROOT",
+                vec![needs(
+                    needs(compatible("r1", "ROOT"), ModRelationKind::Required, "BBB"),
+                    ModRelationKind::Required,
+                    "KKK",
+                )],
+            )
+            .with(
+                "BBB",
+                vec![
+                    at(compatible("b-old", "BBB"), 0),
+                    at(
+                        needs(compatible("b-new", "BBB"), ModRelationKind::Required, "AAA"),
+                        60,
+                    ),
+                ],
+            )
+            .with(
+                "AAA",
+                vec![pins(
+                    compatible("a1", "AAA"),
+                    ModRelationKind::Required,
+                    "b-new",
+                )],
+            )
+            .with(
+                "KKK",
+                vec![pins(
+                    compatible("k1", "KKK"),
+                    ModRelationKind::Required,
+                    "b-old",
+                )],
+            );
+
+        for catalog in [catalog.reversed(), catalog] {
+            let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+            assert_eq!(
+                chosen_versions(&plan),
+                pairs([("BBB", "b-old"), ("KKK", "k1"), ("ROOT", "r1")])
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_superseded_pin_that_sorts_first_does_not_decide_a_later_projects_version() {
+        // AAA's newest release pins an unusable PPP, but BBB pins AAA's older
+        // release and the usable PPP. The superseded pin is seen first and
+        // must not be acted on.
+        let catalog = Catalog::default()
+            .with(
+                "ROOT",
+                vec![needs(
+                    needs(compatible("r1", "ROOT"), ModRelationKind::Required, "AAA"),
+                    ModRelationKind::Required,
+                    "BBB",
+                )],
+            )
+            .with(
+                "AAA",
+                vec![
+                    at(compatible("a-old", "AAA"), 0),
+                    at(
+                        pins(
+                            compatible("a-new", "AAA"),
+                            ModRelationKind::Required,
+                            "p-bad",
+                        ),
+                        60,
+                    ),
+                ],
+            )
+            .with(
+                "BBB",
+                vec![pins(
+                    pins(compatible("b1", "BBB"), ModRelationKind::Required, "a-old"),
+                    ModRelationKind::Required,
+                    "p-good",
+                )],
+            )
+            .with(
+                "PPP",
+                vec![
+                    at(compatible("p-good", "PPP"), 0),
+                    at(version("p-bad", "PPP", &["1.19.2"], &["neoforge"]), 60),
+                ],
+            );
+
+        for catalog in [catalog.reversed(), catalog] {
+            let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+            assert_eq!(
+                chosen_versions(&plan),
+                pairs([
+                    ("AAA", "a-old"),
+                    ("BBB", "b1"),
+                    ("PPP", "p-good"),
+                    ("ROOT", "r1"),
+                ])
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pin_declared_through_a_waiting_project_is_not_acted_on_first() {
+        // AAA's newest release needs SSS, whose newest pins an unusable XXX,
+        // but QQQ pins AAA's older release. SSS is only reached through AAA,
+        // so it must not be resolved, and XXX must not be pinned, before AAA
+        // moves.
+        let catalog = Catalog::default()
+            .with(
+                "ROOT",
+                vec![needs(
+                    needs(compatible("r1", "ROOT"), ModRelationKind::Required, "AAA"),
+                    ModRelationKind::Required,
+                    "QQQ",
+                )],
+            )
+            .with(
+                "AAA",
+                vec![
+                    at(
+                        pins(
+                            compatible("a-old", "AAA"),
+                            ModRelationKind::Required,
+                            "s-old",
+                        ),
+                        0,
+                    ),
+                    at(
+                        needs(compatible("a-new", "AAA"), ModRelationKind::Required, "SSS"),
+                        60,
+                    ),
+                ],
+            )
+            .with(
+                "SSS",
+                vec![
+                    at(compatible("s-old", "SSS"), 0),
+                    at(
+                        pins(
+                            compatible("s-new", "SSS"),
+                            ModRelationKind::Required,
+                            "x-old",
+                        ),
+                        60,
+                    ),
+                ],
+            )
+            .with(
+                "XXX",
+                vec![
+                    at(version("x-old", "XXX", &["1.19.2"], &["neoforge"]), 0),
+                    at(compatible("x-new", "XXX"), 60),
+                ],
+            )
+            .with(
+                "QQQ",
+                vec![pins(
+                    compatible("q1", "QQQ"),
+                    ModRelationKind::Required,
+                    "a-old",
+                )],
+            );
+
+        for catalog in [catalog.reversed(), catalog] {
+            let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+            assert_eq!(
+                chosen_versions(&plan),
+                pairs([
+                    ("AAA", "a-old"),
+                    ("QQQ", "q1"),
+                    ("ROOT", "r1"),
+                    ("SSS", "s-old"),
+                ])
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_requirement_only_a_waiting_release_declares_is_not_resolved_first() {
+        // ROOT's newest release needs a project with no usable version, but
+        // MMM pins ROOT's older one, which does not.
+        let catalog = Catalog::default()
+            .with(
+                "ROOT",
+                vec![
+                    at(
+                        pins(compatible("r-old", "ROOT"), ModRelationKind::Required, "m1"),
+                        0,
+                    ),
+                    at(
+                        needs(
+                            pins(compatible("r-new", "ROOT"), ModRelationKind::Required, "m1"),
+                            ModRelationKind::Required,
+                            "ZZZ",
+                        ),
+                        60,
+                    ),
+                ],
+            )
+            .with(
+                "MMM",
+                vec![pins(
+                    compatible("m1", "MMM"),
+                    ModRelationKind::Required,
+                    "r-old",
+                )],
+            )
+            .with(
+                "ZZZ",
+                vec![version("z1", "ZZZ", &["1.19.2"], &["neoforge"])],
+            );
+
+        for catalog in [catalog.reversed(), catalog] {
+            let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+            assert_eq!(
+                chosen_versions(&plan),
+                pairs([("MMM", "m1"), ("ROOT", "r-old")])
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pin_conflict_inside_a_waiting_branch_does_not_depend_on_relation_order() {
+        // ZCC pins two releases of MMM, one unusable, but it is only reached
+        // through BBB's newest release, which YYY's pin replaces.
+        let catalog = Catalog::default()
+            .with(
+                "ROOT",
+                vec![needs(
+                    needs(compatible("r1", "ROOT"), ModRelationKind::Required, "BBB"),
+                    ModRelationKind::Required,
+                    "YYY",
+                )],
+            )
+            .with(
+                "BBB",
+                vec![
+                    at(compatible("b-old", "BBB"), 0),
+                    at(
+                        needs(compatible("b-new", "BBB"), ModRelationKind::Required, "ZCC"),
+                        60,
+                    ),
+                ],
+            )
+            .with(
+                "ZCC",
+                vec![pins(
+                    pins(compatible("z1", "ZCC"), ModRelationKind::Required, "m-good"),
+                    ModRelationKind::Required,
+                    "m-bad",
+                )],
+            )
+            .with(
+                "MMM",
+                vec![
+                    at(version("m-bad", "MMM", &["1.19.2"], &["neoforge"]), 0),
+                    at(compatible("m-good", "MMM"), 60),
+                ],
+            )
+            .with(
+                "YYY",
+                vec![pins(
+                    compatible("y1", "YYY"),
+                    ModRelationKind::Required,
+                    "b-old",
+                )],
+            );
+
+        for catalog in [catalog.reversed(), catalog] {
+            let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+            assert_eq!(
+                chosen_versions(&plan),
+                pairs([("BBB", "b-old"), ("ROOT", "r1"), ("YYY", "y1")])
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_pin_is_not_weakened_by_a_later_unpinned_requirement() {
         let catalog = Catalog::default()
@@ -1989,6 +3252,80 @@ mod tests {
             [PlanWarning::UncheckableConflict { file_name, .. }]
                 if file_name == "conflicts-with-this.jar"
         ));
+    }
+
+    #[tokio::test]
+    async fn a_release_that_cannot_be_read_does_not_strand_the_one_it_replaced() {
+        // BBB's newest release pins an AAA release whose relations are
+        // malformed, but YYY pins BBB's older one, so that pin goes away. AAA
+        // must still bring its own dependency.
+        let mut unreadable = compatible("a-bad", "AAA");
+        unreadable.dependencies.push(ModDependency {
+            kind: ModRelationKind::Required,
+            project_id: None,
+            version_id: None,
+            file_name: None,
+        });
+        let catalog = Catalog::default()
+            .with(
+                "ROOT",
+                vec![needs(
+                    needs(
+                        needs(compatible("r1", "ROOT"), ModRelationKind::Required, "AAA"),
+                        ModRelationKind::Required,
+                        "BBB",
+                    ),
+                    ModRelationKind::Required,
+                    "YYY",
+                )],
+            )
+            .with(
+                "AAA",
+                vec![
+                    at(unreadable, 0),
+                    at(
+                        needs(compatible("a-new", "AAA"), ModRelationKind::Required, "DEP"),
+                        60,
+                    ),
+                ],
+            )
+            .with(
+                "BBB",
+                vec![
+                    at(compatible("b-old", "BBB"), 0),
+                    at(
+                        pins(
+                            compatible("b-new", "BBB"),
+                            ModRelationKind::Required,
+                            "a-bad",
+                        ),
+                        60,
+                    ),
+                ],
+            )
+            .with(
+                "YYY",
+                vec![pins(
+                    compatible("y1", "YYY"),
+                    ModRelationKind::Required,
+                    "b-old",
+                )],
+            )
+            .with("DEP", vec![compatible("d1", "DEP")]);
+
+        for catalog in [catalog.reversed(), catalog] {
+            let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+            assert_eq!(
+                chosen_versions(&plan),
+                pairs([
+                    ("AAA", "a-new"),
+                    ("BBB", "b-old"),
+                    ("DEP", "d1"),
+                    ("ROOT", "r1"),
+                    ("YYY", "y1"),
+                ])
+            );
+        }
     }
 
     #[tokio::test]
