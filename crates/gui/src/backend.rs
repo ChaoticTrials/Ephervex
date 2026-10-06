@@ -415,6 +415,10 @@ pub enum Command {
         /// resolved one, in which case the newest that fits is installed.
         version: String,
         servers: Vec<ServerId>,
+        /// Whether a confirmation dialog asked for this install. Only then
+        /// does finishing it close a dialog: an install the queue ran without
+        /// one must leave whatever the user has open alone.
+        confirmed: bool,
     },
     CreateServer {
         request_id: String,
@@ -3600,6 +3604,7 @@ fn run_worker(
                 project,
                 version,
                 servers,
+                confirmed,
             } => {
                 let paths = app.paths().clone();
                 let reports = events.clone();
@@ -3692,7 +3697,14 @@ fn run_worker(
                         }
                         refresh_enriched_mods(app.paths().clone(), &reports, instance);
                         if outcome.targets.is_empty() {
-                            return Ok(OperationReport::Toast(message));
+                            if confirmed {
+                                return Ok(OperationReport::Toast(message));
+                            }
+                            let _ = reports.send(Event::Toast {
+                                message,
+                                error: false,
+                            });
+                            return Ok(OperationReport::Reported);
                         }
                         // Several targets took part, so several results have to
                         // be shown. One toast could only be right about one.

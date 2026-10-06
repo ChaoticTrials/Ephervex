@@ -3665,11 +3665,9 @@ fn apply_minecraft_selection(ui: &AppWindow, form: &str, minecraft: &str) {
 /// staleness bookkeeping.
 fn register_browser_install(ui: &AppWindow, commands: &Sender<Command>, workspace: &Workspace) {
     let sender = commands.clone();
-    let handle = ui.as_weak();
     let install_workspace = workspace.clone();
     let install_queue = Rc::clone(&workspace.browser);
     ui.on_install_from_browser(move |instance, provider, project| {
-        let Some(ui) = handle.upgrade() else { return };
         if backend::parse_instance_id(&instance).is_none()
             || ModProvider::parse(&provider).is_none()
         {
@@ -3682,7 +3680,7 @@ fn register_browser_install(ui: &AppWindow, commands: &Sender<Command>, workspac
         };
         let start = install_queue.installs.borrow_mut().enqueue(request);
         if let Some(request) = start {
-            start_browser_install(&ui, &sender, &request, false);
+            start_browser_install(&sender, &request);
         }
         mark_queued(&install_workspace);
     });
@@ -3690,11 +3688,9 @@ fn register_browser_install(ui: &AppWindow, commands: &Sender<Command>, workspac
     // Diagnostics names a missing mod, not a release, so its plan is always
     // shown before anything is installed.
     let sender = commands.clone();
-    let handle = ui.as_weak();
     let install_workspace = workspace.clone();
     let install_queue = Rc::clone(&workspace.browser);
     ui.on_install_from_diagnostics(move |instance, provider, project| {
-        let Some(ui) = handle.upgrade() else { return };
         if backend::parse_instance_id(&instance).is_none()
             || ModProvider::parse(&provider).is_none()
         {
@@ -3710,47 +3706,34 @@ fn register_browser_install(ui: &AppWindow, commands: &Sender<Command>, workspac
             .borrow_mut()
             .enqueue_confirmed(request);
         if let Some(request) = start {
-            start_browser_install(&ui, &sender, &request, true);
+            start_browser_install(&sender, &request);
         }
         mark_queued(&install_workspace);
     });
 
-    let handle = ui.as_weak();
     let sender = commands.clone();
     let abandon_workspace = workspace.clone();
     ui.on_abandon_browser_install(move || {
-        let Some(ui) = handle.upgrade() else { return };
         let next = abandon_workspace
             .browser
             .installs
             .borrow_mut()
             .finish_active();
-        advance_browser_install(&ui, &sender, &abandon_workspace, next);
+        advance_browser_install(&sender, &abandon_workspace, next);
     });
 }
 
-/// Asks for one queued install's plan and records the question it answers.
-/// `confirm` shows the plan even when it leaves nothing to decide.
-fn start_browser_install(
-    ui: &AppWindow,
-    commands: &Sender<Command>,
-    request: &BrowserInstall,
-    confirm: bool,
-) {
+/// Asks for one queued install's plan.
+///
+/// The request is identified by the queue alone. Whatever dialog is open belongs
+/// to the user, so nothing here reads or writes its host or its selections.
+fn start_browser_install(commands: &Sender<Command>, request: &BrowserInstall) {
     let (Some(instance), Some(catalog)) = (
         backend::parse_instance_id(&request.instance),
         ModProvider::parse(&request.provider),
     ) else {
         return;
     };
-    ui.set_mod_action_host(request.instance.as_str().into());
-    ui.set_mod_plan_requested(request.project.as_str().into());
-    ui.set_mod_plan_requested_provider(request.provider.as_str().into());
-    ui.set_mod_plan_direct(!confirm);
-    // The rows an earlier confirmation left behind name servers chosen for a
-    // different operation, and a plan that needs no confirmation submits
-    // whatever is in this model.
-    ui.set_linked_targets(model(Vec::new()));
     send(
         commands,
         Command::PlanMod {
@@ -3763,14 +3746,12 @@ fn start_browser_install(
 
 /// Starts whatever the queue handed back, and repaints the rows either way.
 fn advance_browser_install(
-    ui: &AppWindow,
     commands: &Sender<Command>,
     workspace: &Workspace,
     next: Option<BrowserInstall>,
 ) {
     if let Some(next) = next {
-        let confirm = workspace.browser.installs.borrow().confirms(&next);
-        start_browser_install(ui, commands, &next, confirm);
+        start_browser_install(commands, &next);
     }
     mark_queued(workspace);
 }
@@ -3885,24 +3866,37 @@ fn register_mod_mutations(ui: &AppWindow, commands: &Sender<Command>) {
     let handle = ui.as_weak();
     ui.on_install_mod(move |instance, provider, project, version| {
         let Some(ui) = handle.upgrade() else { return };
-        let Some(catalog) = ModProvider::parse(&provider) else {
-            return;
-        };
-        if let Some(instance) = backend::parse_instance_id(&instance) {
-            send(
-                &sender,
-                Command::InstallMod {
-                    instance,
-                    provider: catalog,
-                    project: project.to_string(),
-                    // The exact release the confirmation showed, from the
-                    // catalog the confirmation was for.
-                    version: version.to_string(),
-                    servers: chosen_linked_servers(&ui),
-                },
-            );
+        if let Some(command) = install_command(
+            &instance,
+            &provider,
+            &project,
+            &version,
+            chosen_linked_servers(&ui),
+            true,
+        ) {
+            send(&sender, command);
         }
     });
+}
+
+/// The install of one exact release the confirmation showed, from the catalog
+/// the confirmation was for. `confirmed` says a dialog asked for it.
+fn install_command(
+    instance: &str,
+    provider: &str,
+    project: &str,
+    version: &str,
+    servers: Vec<ephervex_model::ServerId>,
+    confirmed: bool,
+) -> Option<Command> {
+    Some(Command::InstallMod {
+        instance: backend::parse_instance_id(instance)?,
+        provider: ModProvider::parse(provider)?,
+        project: project.to_owned(),
+        version: version.to_owned(),
+        servers,
+        confirmed,
+    })
 }
 
 /// The linked servers the user ticked, by their own stable ids.
@@ -7024,7 +7018,7 @@ fn apply_event(
             )));
         }
         Event::ModVersions(data) => apply_mod_versions(ui, data),
-        Event::ModAcquisitionRequired(data) => apply_mod_acquisition(ui, &data),
+        Event::ModAcquisitionRequired(data) => apply_mod_acquisition(ui, &data, workspace),
         Event::ModRelations(data) => apply_mod_relations(ui, &data),
         Event::ModRemovalPlan(data) => apply_mod_removal_plan(ui, data),
         Event::ModResults(results) => apply_mod_results(workspace, results, commands),
@@ -7040,7 +7034,7 @@ fn apply_event(
                 project,
             };
             let next = workspace.browser.installs.borrow_mut().finish(&finished);
-            advance_browser_install(ui, commands, workspace, next);
+            advance_browser_install(commands, workspace, next);
         }
         // The question will never be answered, so whatever asked it stops
         // waiting. The reason itself already arrived as an error.
@@ -7055,7 +7049,7 @@ fn apply_event(
                 project: requested,
             };
             let next = workspace.browser.installs.borrow_mut().finish(&abandoned);
-            advance_browser_install(ui, commands, workspace, next);
+            advance_browser_install(commands, workspace, next);
         }
         Event::LinkedApply(section) => apply_linked_confirmation(ui, section),
         Event::LinkedResult(result) => apply_linked_result(ui, result),
@@ -8360,11 +8354,22 @@ fn apply_mod_versions(ui: &AppWindow, data: backend::ModVersionsData) {
 /// and the same folder watcher is already running over it in the backend, so
 /// nothing here has to poll or retry: the finished change arrives as an
 /// ordinary result.
-fn apply_mod_acquisition(ui: &AppWindow, data: &backend::ModAcquisitionData) {
+fn apply_mod_acquisition(
+    ui: &AppWindow,
+    data: &backend::ModAcquisitionData,
+    workspace: &Workspace,
+) {
     // Addressed to the instance rather than to one open mod: installing a mod
-    // from the browser reaches this with no mod open at all, and the question
-    // it asks is about the operation the user just started here.
-    if !presentation::result_is_current(&data.instance, &ui.get_mod_action_host()) {
+    // from the browser reaches this with no mod open at all, so the install the
+    // queue is running counts as the operation the user started.
+    let installing = workspace
+        .browser
+        .installs
+        .borrow()
+        .active
+        .as_ref()
+        .is_some_and(|active| active.instance == data.instance);
+    if !installing && !presentation::result_is_current(&data.instance, &ui.get_mod_action_host()) {
         return;
     }
     ui.set_mod_action_pending(false);
@@ -8480,81 +8485,80 @@ fn apply_mod_install_plan(
     commands: &Sender<Command>,
 ) {
     let browser = &workspace.browser;
-    // Whether the queue is waiting on this exact answer, decided before
-    // anything below can discard it: a plan that is dropped still ends the
-    // request that asked for it, or everything behind it waits forever.
+    // The plan answers the request the queue is waiting on, or nobody: a
+    // request that was abandoned or already ended has no one to show it to.
+    // What dialog is open, and for which instance, has no say in that.
     let awaited = BrowserInstall {
         instance: plan.instance.clone(),
         provider: plan.provider.clone(),
         project: plan.requested.clone(),
     };
-    let queued = browser.installs.borrow().active.as_ref() == Some(&awaited);
-    let retire = |ui: &AppWindow| {
-        if queued {
-            let next = browser.installs.borrow_mut().finish(&awaited);
-            advance_browser_install(ui, commands, workspace, next);
-        }
+    let (queued, direct) = {
+        let queue = browser.installs.borrow();
+        (
+            queue.active.as_ref() == Some(&awaited),
+            !queue.confirms(&awaited),
+        )
+    };
+    if !queued {
+        return;
+    }
+    let retire = || {
+        let next = browser.installs.borrow_mut().finish(&awaited);
+        advance_browser_install(commands, workspace, next);
     };
 
-    if !presentation::result_is_current(&plan.instance, &ui.get_mod_action_host()) {
-        retire(ui);
-        return;
-    }
-    // A confirmation arriving over a modal the user opened while it was being
-    // planned would replace what they are looking at, and would leave the
-    // linked-server rows describing a different operation than the one on
-    // screen.
-    let modal = ui.get_modal();
-    if !modal.is_empty() && modal != "mod-plan" {
-        retire(ui);
-        return;
-    }
-    // Two reviews can be in flight; the older one must not replace the newer,
-    // and neither may one for the same project id on the other catalog.
-    let selected = ui.get_mod_action_host();
-    let requested = ui.get_mod_plan_requested();
-    let catalog = ui.get_mod_plan_requested_provider();
-    if !presentation::browser_answer_is_current(
-        presentation::BrowserQuestion {
-            instance: &selected,
-            provider: &catalog,
-            reference: &requested,
-        },
-        presentation::BrowserQuestion {
-            instance: &plan.instance,
-            provider: &plan.provider,
-            reference: &plan.requested,
-        },
-    ) {
-        retire(ui);
-        return;
-    }
-    let direct = ui.get_mod_plan_direct();
-    ui.set_mod_plan_direct(false);
     match plan_disposition(direct, &plan) {
         PlanDisposition::Install => {
             // The queue is retired by this install's own completion, not here:
             // the next one may not start while this one is writing the recipe.
-            ui.set_mod_action_pending(true);
-            // Nothing was offered, so nothing was chosen. Submitting the rows
-            // still in the model would act on servers this plan never named.
-            ui.set_linked_targets(model(Vec::new()));
-            ui.invoke_install_mod(
-                plan.instance.into(),
-                plan.provider.into(),
-                plan.project.into(),
-                plan.version_id.into(),
-            );
+            // Nothing was offered, so no linked server was chosen, whatever
+            // rows an open dialog holds.
+            let Some(command) = install_command(
+                &plan.instance,
+                &plan.provider,
+                &plan.project,
+                &plan.version_id,
+                Vec::new(),
+                false,
+            ) else {
+                retire();
+                return;
+            };
+            send(commands, command);
             return;
         }
         PlanDisposition::NothingToDo => {
             ui.invoke_present_toast(lookup("gui-mod-already-present").into(), false);
-            retire(ui);
+            retire();
             return;
         }
         // The confirmation owns the request until it is answered or closed.
         PlanDisposition::Confirm => {}
     }
+    // A confirmation arriving over a dialog the user opened while it was being
+    // planned would replace what they are looking at, and would leave the
+    // linked-server rows describing a different operation than the one on
+    // screen.
+    let modal = ui.get_modal();
+    if !modal.is_empty() && modal != "mod-plan" {
+        let name = if plan.title.is_empty() {
+            plan.project.as_str()
+        } else {
+            plan.title.as_str()
+        };
+        ui.invoke_present_toast(
+            lookup_args("gui-mod-install-not-shown", [("name", Arg::from(name))]).into(),
+            true,
+        );
+        retire();
+        return;
+    }
+    // No dialog is open here, so the confirmation can take the dialog
+    // addressing. Left as an earlier dialog set it, a late answer for that
+    // closed dialog would replace this confirmation and strand the queue.
+    ui.set_mod_action_host(plan.instance.as_str().into());
+    ui.set_mod_action_path(SharedString::default());
     ui.set_mod_plan_instance(plan.instance.into());
     ui.set_mod_plan_provider(plan.provider.into());
     ui.set_mod_plan_project(plan.project.into());
@@ -12906,8 +12910,11 @@ mod tests {
                 .try_iter()
                 .filter_map(|command| match command {
                     Command::InstallMod {
-                        project, version, ..
-                    } => Some((project, version)),
+                        project,
+                        version,
+                        confirmed,
+                        ..
+                    } => Some((project, version, confirmed)),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -12957,13 +12964,13 @@ mod tests {
                 );
                 assert_eq!(
                     installs(&commands),
-                    [("utilitix".to_owned(), "abcd1234".to_owned())]
+                    [("utilitix".to_owned(), "abcd1234".to_owned(), true)]
                 );
             } else {
                 assert_eq!(ui.get_modal(), "");
                 assert_eq!(
                     installs(&commands),
-                    [("utilitix".to_owned(), "abcd1234".to_owned())]
+                    [("utilitix".to_owned(), "abcd1234".to_owned(), false)]
                 );
             }
         }
@@ -12989,6 +12996,222 @@ mod tests {
         assert_eq!(queue.finish(&request("libx")), None);
         assert_eq!(queue.enqueue(request("libx")), Some(request("libx")));
         assert!(!queue.confirms(&request("libx")));
+    }
+
+    /// An open mod dialog, for one instance, with a linked server ticked.
+    fn open_mod_dialog(ui: &AppWindow, instance: &str) {
+        ui.set_mod_action_host(instance.into());
+        ui.set_mod_action_path("mods/m.jar".into());
+        ui.set_linked_targets(model(vec![LinkedTargetRow {
+            id: ephervex_model::ServerId::new().to_string().into(),
+            actionable: true,
+            selected: true,
+            ..LinkedTargetRow::default()
+        }]));
+        ui.set_modal("mod-remove".into());
+    }
+
+    fn plan_for(instance: &str, project: &str, install_count: usize) -> backend::ModPlanData {
+        let mut planned = plan(install_count, 0);
+        planned.instance = instance.to_owned();
+        planned.linked.instance = instance.to_owned();
+        planned.requested = project.to_owned();
+        planned.project = project.to_owned();
+        planned
+    }
+
+    /// The queue moving on to its next request must not retarget a dialog the
+    /// user opened for another instance, nor clear what they ticked in it.
+    #[test]
+    fn the_install_queue_moving_on_leaves_an_open_dialog_alone() {
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        register_browser_install(&ui, &workspace.commands, &workspace);
+        let queued = ephervex_model::InstanceId::new().to_string();
+        let open = ephervex_model::InstanceId::new().to_string();
+        for project in ["first", "second"] {
+            ui.invoke_install_from_browser(
+                queued.as_str().into(),
+                "modrinth".into(),
+                project.into(),
+            );
+        }
+        open_mod_dialog(&ui, &open);
+        let ticked = ui.get_linked_targets().row_data(0).expect("row").id;
+
+        apply_mod_install_plan(
+            &ui,
+            plan_for(&queued, "first", 1),
+            &workspace,
+            &workspace.commands,
+        );
+        let next = workspace
+            .browser
+            .installs
+            .borrow_mut()
+            .finish(&BrowserInstall {
+                instance: queued.clone(),
+                provider: "modrinth".to_owned(),
+                project: "first".to_owned(),
+            });
+        advance_browser_install(&workspace.commands, &workspace, next);
+
+        assert_eq!(ui.get_mod_action_host(), open.as_str());
+        assert_eq!(ui.get_modal(), "mod-remove");
+        let rows = ui.get_linked_targets();
+        assert_eq!(rows.row_count(), 1);
+        let row = rows.row_data(0).expect("row");
+        assert!(row.selected && row.id == ticked);
+        let planned = commands
+            .try_iter()
+            .filter(|command| matches!(command, Command::PlanMod { .. }))
+            .count();
+        assert_eq!(planned, 2, "the second request still starts");
+    }
+
+    /// A plan that needs no confirmation installs whatever dialog is open, and
+    /// never takes the servers ticked in that dialog.
+    #[test]
+    fn a_direct_install_goes_ahead_under_an_open_dialog_without_its_servers() {
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        register_browser_install(&ui, &workspace.commands, &workspace);
+        let queued = ephervex_model::InstanceId::new().to_string();
+        ui.invoke_install_from_browser(queued.as_str().into(), "modrinth".into(), "first".into());
+        open_mod_dialog(&ui, &queued);
+
+        apply_mod_install_plan(
+            &ui,
+            plan_for(&queued, "first", 1),
+            &workspace,
+            &workspace.commands,
+        );
+
+        let installs: Vec<_> = commands
+            .try_iter()
+            .filter_map(|command| match command {
+                Command::InstallMod {
+                    project,
+                    servers,
+                    confirmed,
+                    ..
+                } => Some((project, servers, confirmed)),
+                _ => None,
+            })
+            .collect();
+        // Unconfirmed, so finishing it has no dialog of its own to close.
+        assert_eq!(installs, [("first".to_owned(), Vec::new(), false)]);
+        assert_eq!(ui.get_modal(), "mod-remove");
+        assert_eq!(ui.get_linked_targets().row_count(), 1);
+    }
+
+    /// A confirmation cannot replace the dialog the user is in. The request
+    /// ends rather than waiting forever, and the next one still starts.
+    #[test]
+    fn a_confirmation_that_cannot_be_shown_ends_its_request() {
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        register_browser_install(&ui, &workspace.commands, &workspace);
+        let queued = ephervex_model::InstanceId::new().to_string();
+        for project in ["first", "second"] {
+            ui.invoke_install_from_diagnostics(
+                queued.as_str().into(),
+                "modrinth".into(),
+                project.into(),
+            );
+        }
+        open_mod_dialog(&ui, &queued);
+        commands.try_iter().for_each(drop);
+
+        apply_mod_install_plan(
+            &ui,
+            plan_for(&queued, "first", 1),
+            &workspace,
+            &workspace.commands,
+        );
+
+        assert_eq!(ui.get_modal(), "mod-remove");
+        let active = workspace.browser.installs.borrow().active.clone();
+        assert_eq!(active.map(|request| request.project), Some("second".into()));
+        assert!(commands.try_iter().any(
+            |command| matches!(command, Command::PlanMod { project, .. } if project == "second")
+        ));
+    }
+
+    /// The answer to a mod dialog the user already closed cannot replace the
+    /// install confirmation that opened afterwards, which would leave the queue
+    /// waiting on a confirmation nobody can answer.
+    #[test]
+    fn a_late_answer_for_a_closed_dialog_cannot_replace_an_install_confirmation() {
+        let ui = test_window();
+        let (workspace, _commands) = test_workspace_sending(&ui);
+        register_browser_install(&ui, &workspace.commands, &workspace);
+        let queued = ephervex_model::InstanceId::new().to_string();
+        let closed = ephervex_model::InstanceId::new().to_string();
+        open_mod_dialog(&ui, &closed);
+        ui.set_modal(SharedString::default());
+        ui.invoke_install_from_diagnostics(
+            queued.as_str().into(),
+            "modrinth".into(),
+            "first".into(),
+        );
+        apply_mod_install_plan(
+            &ui,
+            plan_for(&queued, "first", 1),
+            &workspace,
+            &workspace.commands,
+        );
+        assert_eq!(ui.get_modal(), "mod-plan");
+
+        let mut late = plan_for(&closed, "first", 1).linked;
+        late.path = "mods/m.jar".to_owned();
+        apply_linked_confirmation(&ui, late);
+
+        assert_eq!(ui.get_modal(), "mod-plan");
+        assert_eq!(ui.get_mod_plan_instance(), queued.as_str());
+        assert!(workspace.browser.installs.borrow().active.is_some());
+    }
+
+    #[test]
+    fn a_plan_nothing_is_waiting_for_is_ignored() {
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        register_browser_install(&ui, &workspace.commands, &workspace);
+        let instance = ephervex_model::InstanceId::new().to_string();
+
+        apply_mod_install_plan(
+            &ui,
+            plan_for(&instance, "first", 1),
+            &workspace,
+            &workspace.commands,
+        );
+
+        assert_eq!(ui.get_modal(), "");
+        assert_eq!(commands.try_iter().count(), 0);
+    }
+
+    /// A release that must be fetched by hand is asked for even though the
+    /// install was started without any dialog naming its instance.
+    #[test]
+    fn a_manual_download_prompt_for_the_running_install_is_shown() {
+        let ui = test_window();
+        let (workspace, _commands) = test_workspace_sending(&ui);
+        register_browser_install(&ui, &workspace.commands, &workspace);
+        let queued = ephervex_model::InstanceId::new().to_string();
+        let other = ephervex_model::InstanceId::new().to_string();
+        let prompt = |instance: &str| backend::ModAcquisitionData {
+            instance: instance.to_owned(),
+            logical_path: String::new(),
+            name: "UtilitiX".to_owned(),
+            items: Vec::new(),
+        };
+        ui.invoke_install_from_browser(queued.as_str().into(), "modrinth".into(), "first".into());
+
+        apply_mod_acquisition(&ui, &prompt(&other), &workspace);
+        assert_eq!(ui.get_modal(), "", "another instance's prompt stays hidden");
+
+        apply_mod_acquisition(&ui, &prompt(&queued), &workspace);
+        assert_eq!(ui.get_modal(), "mod-acquire");
     }
 
     #[test]

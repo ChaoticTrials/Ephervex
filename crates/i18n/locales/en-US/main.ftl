@@ -2591,6 +2591,7 @@ gui-mod-plan-warnings = { $count ->
 }
 gui-install = Install
 gui-mod-already-present = That mod and everything it requires are already installed.
+gui-mod-install-not-shown = { $name } was not installed because another dialog was open. Press Install to try again.
 gui-install-required = Install Required Set
 gui-eula-detail = Minecraft's server EULA is a legal agreement. Ephervex records global consent only after this explicit action; starting a server never accepts it for you.
 gui-open-minecraft-eula = Open Minecraft EULA

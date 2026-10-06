@@ -359,17 +359,6 @@ export component AppWindow inherits Window {
     in-out property <bool> show-inspector: true;
     in-out property <bool> compact-layout;
     in-out property <string> mod-plan-instance;
-    // The reference the open review asked about, so an answer to an
-    // earlier one cannot replace it.
-    in-out property <string> mod-plan-requested;
-    // The catalog the open review asked. Part of the identity an answer is
-    // matched against, and what an install is sent with.
-    in-out property <string> mod-plan-requested-provider;
-    // Whether the plan being awaited was asked for by the browser's Install
-    // button. Such a plan installs itself the moment it comes back with
-    // nothing left for the user to decide; the confirmation opens only when
-    // there is a choice, which today means linked servers to target.
-    in-out property <bool> mod-plan-direct: false;
     in-out property <string> mod-plan-provider;
     in-out property <string> mod-plan-project;
     // The exact release the confirmation showed, which is the release
