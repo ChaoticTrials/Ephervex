@@ -41,7 +41,7 @@ use zip::ZipArchive;
 
 use crate::detect::{PackFormat, identify};
 use crate::error::{PackError, PackResult};
-use crate::path::{contained_join, is_reserved, safe_relative_path};
+use crate::path::{DestinationLinks, contained_join, is_reserved, safe_relative_path};
 
 /// Bounds on what an archive may expand into.
 ///
@@ -347,6 +347,7 @@ impl PackArchive {
 
         let archive_path = self.path.clone();
         let mut report = ExtractionReport::default();
+        let mut links = DestinationLinks::new(&root);
         for index in 0..self.zip.len() {
             let (name, relative, is_dir, declared) = {
                 let entry =
@@ -387,6 +388,11 @@ impl PackArchive {
             let Some(target) = contained_join(&root, &relative) else {
                 return Err(PackError::EntryPathUnsafe { entry: name });
             };
+            // Containment above is lexical. A destination that is already a
+            // link would carry the write somewhere else.
+            if links.walks_a_link(&relative) {
+                return Err(PackError::EntryPathUnsafe { entry: name });
+            }
 
             if is_dir {
                 std::fs::create_dir_all(&target).map_err(|source| PackError::Unwritable {
@@ -1133,6 +1139,56 @@ mod tests {
             "unexpected error: {error:?}"
         );
         assert!(!destination.join("escape.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_entry_beneath_an_existing_directory_link_is_refused_rather_than_followed() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("pack.mrpack");
+        zip_file(&archive, &[("overrides/config/x.toml", b"archive")]);
+        let sibling = dir.path().join("sibling");
+        std::fs::create_dir_all(&sibling).expect("sibling");
+        std::fs::write(sibling.join("x.toml"), b"sibling").expect("sibling file");
+        let destination = dir.path().join("out");
+        std::fs::create_dir_all(&destination).expect("destination");
+        std::os::unix::fs::symlink(&sibling, destination.join("config")).expect("link");
+
+        let error = open(&archive)
+            .extract_prefix("overrides", &destination)
+            .expect_err("a linked ancestor is refused");
+
+        assert!(
+            matches!(error, PackError::EntryPathUnsafe { .. }),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(
+            std::fs::read(sibling.join("x.toml")).expect("read"),
+            b"sibling"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_entry_that_is_itself_an_existing_link_is_refused_rather_than_followed() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("pack.mrpack");
+        zip_file(&archive, &[("overrides/config/x.toml", b"archive")]);
+        let outside = dir.path().join("outside.toml");
+        std::fs::write(&outside, b"outside").expect("outside file");
+        let destination = dir.path().join("out");
+        std::fs::create_dir_all(destination.join("config")).expect("config");
+        std::os::unix::fs::symlink(&outside, destination.join("config/x.toml")).expect("link");
+
+        let error = open(&archive)
+            .extract_prefix("overrides", &destination)
+            .expect_err("a linked destination file is refused");
+
+        assert!(
+            matches!(error, PackError::EntryPathUnsafe { .. }),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(std::fs::read(&outside).expect("read"), b"outside");
     }
 
     #[test]

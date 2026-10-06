@@ -15,9 +15,10 @@
 //! Everything here is **lexical**: it describes where an archive *says* an entry
 //! goes. `fs::canonicalize` is deliberately not used, because it follows the
 //! links that are themselves the untrusted input. [`walks_through_a_link`]
-//! closes the remaining gap for archives that can carry links at all.
+//! closes the remaining gap for archives that can carry links at all, and
+//! [`DestinationLinks`] closes it for links already on disk.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 /// The launcher-owned metadata directory, which pack contents may never write
@@ -174,6 +175,52 @@ pub fn walks_through_a_link(relative: &Path, links: &BTreeSet<PathBuf>) -> bool 
         .any(|ancestor| links.contains(ancestor))
 }
 
+/// Remembers which destinations under one root are symlinks on disk.
+///
+/// Containment is lexical, so a destination that is already a link, or sits
+/// beneath one, lands wherever the link points. A loader installation makes
+/// `libraries/` such a link into the shared store, and writing pack bytes
+/// through it would change every server that shares that store. Every writer
+/// of untrusted pack content into an existing directory asks this first.
+///
+/// Every entry would otherwise re-`lstat` the same handful of parent
+/// directories, and a pack with thousands of entries under `config/` would pay
+/// for that once per entry. A cached answer stays valid because the writers
+/// never create links.
+#[derive(Debug)]
+pub(crate) struct DestinationLinks<'a> {
+    root: &'a Path,
+    known: BTreeMap<PathBuf, bool>,
+}
+
+impl<'a> DestinationLinks<'a> {
+    pub(crate) const fn new(root: &'a Path) -> Self {
+        Self {
+            root,
+            known: BTreeMap::new(),
+        }
+    }
+
+    /// Whether the destination, or anything it would be written underneath, is
+    /// already a link on disk.
+    pub(crate) fn walks_a_link(&mut self, relative: &Path) -> bool {
+        relative
+            .ancestors()
+            .filter(|ancestor| !ancestor.as_os_str().is_empty())
+            .any(|ancestor| self.is_link(ancestor))
+    }
+
+    fn is_link(&mut self, relative: &Path) -> bool {
+        if let Some(known) = self.known.get(relative) {
+            return *known;
+        }
+        let link = std::fs::symlink_metadata(self.root.join(relative))
+            .is_ok_and(|metadata| metadata.is_symlink());
+        self.known.insert(relative.to_path_buf(), link);
+        link
+    }
+}
+
 /// Joins a validated relative path onto a root, restating the containment
 /// invariant.
 ///
@@ -283,5 +330,26 @@ mod tests {
             contained_join(root, Path::new("mods/a.jar")),
             Some(PathBuf::from("/instances/x/minecraft/mods/a.jar"))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_destination_beneath_or_at_an_existing_link_is_reported() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("outside");
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(root.join("plain")).expect("plain");
+        std::os::unix::fs::symlink(&outside, root.join("linked")).expect("directory link");
+        std::os::unix::fs::symlink(root.join("missing"), root.join("plain/dangling"))
+            .expect("dangling link");
+
+        let mut links = DestinationLinks::new(&root);
+
+        assert!(links.walks_a_link(Path::new("linked/x/y.txt")));
+        assert!(links.walks_a_link(Path::new("linked")));
+        assert!(links.walks_a_link(Path::new("plain/dangling")));
+        assert!(!links.walks_a_link(Path::new("plain/new/file.txt")));
+        assert!(!links.walks_a_link(Path::new("absent/file.txt")));
     }
 }

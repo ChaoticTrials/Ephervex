@@ -71,11 +71,12 @@ use tracing::{debug, info, instrument, warn};
 use crate::archive::{EntryDecision, ExtractionLimits, ExtractionReport, PackArchive};
 use crate::credentials::ArtifactCredentials;
 use crate::error::{PackError, PackResult};
-use crate::path::{contained_join, is_reserved, safe_relative_path};
+use crate::path::{DestinationLinks, contained_join, is_reserved, safe_relative_path};
 use crate::recipe::{
     OptionalSelection, OverrideLayer, PackFileRecipe, PackRecipe, PackSide,
     ServerReconstructionPlan, UnknownServerFiles, is_mod_file_path,
 };
+use crate::server_pack::LIBRARIES_DIR;
 use crate::store::SourceStore;
 
 /// What materializing one side of a pack produced.
@@ -389,6 +390,7 @@ async fn install_selected_files(
 
 fn preflight_destinations(wanted: &[&PackFileRecipe], game_dir: &Path) -> PackResult<()> {
     let mut claimed = BTreeSet::new();
+    let mut links = DestinationLinks::new(game_dir);
     for file in wanted {
         let raw = file
             .logical_path
@@ -420,6 +422,13 @@ fn preflight_destinations(wanted: &[&PackFileRecipe], game_dir: &Path) -> PackRe
             contained_join(game_dir, &safe).ok_or_else(|| PackError::EntryPathUnsafe {
                 entry: file.display_name(),
             })?;
+        // A recipe path under an existing link would be written wherever the
+        // link points, which for `libraries/` is the shared store.
+        if links.walks_a_link(&safe) {
+            return Err(PackError::EntryPathUnsafe {
+                entry: file.display_name(),
+            });
+        }
         if destination.exists() {
             return Err(PackError::RecipeDestinationOccupied { path: destination });
         }
@@ -898,7 +907,13 @@ pub fn apply_retained_overrides(
                     path: store.dir().to_path_buf(),
                 })?;
         let source = validate_retained_root(store, relative, layer.scope.as_str())?;
-        let report = copy_retained_tree(&source, game_dir, &limits, &mut spent)?;
+        let report = copy_retained_tree(
+            &source,
+            game_dir,
+            RetainedDestination::GameDirectory,
+            &limits,
+            &mut spent,
+        )?;
         applied.push(AppliedLayer {
             layer: layer.clone(),
             files: report.files,
@@ -963,126 +978,155 @@ fn validate_retained_root(
     Ok(source)
 }
 
+/// Where a retained layer is being copied to, which decides whether the
+/// loader installation's own destinations are off limits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetainedDestination {
+    /// A running game directory. `libraries/` there belongs to the loader
+    /// installation, not to the pack.
+    GameDirectory,
+    /// A source store keeping the layer exactly as the pack shipped it.
+    SourceStore,
+}
+
+/// One retained layer being copied into a destination.
+struct RetainedCopy<'a> {
+    root: &'a Path,
+    destination: &'a Path,
+    kind: RetainedDestination,
+    limits: &'a ExtractionLimits,
+    spent: &'a mut ExtractionReport,
+    links: DestinationLinks<'a>,
+    report: ExtractionReport,
+}
+
 fn copy_retained_tree(
     source: &Path,
     destination: &Path,
+    kind: RetainedDestination,
     limits: &ExtractionLimits,
     spent: &mut ExtractionReport,
 ) -> PackResult<ExtractionReport> {
-    let mut report = ExtractionReport::default();
-    copy_retained_directory(source, source, destination, limits, spent, &mut report)?;
-    Ok(report)
+    let mut copy = RetainedCopy {
+        root: source,
+        destination,
+        kind,
+        limits,
+        spent,
+        links: DestinationLinks::new(destination),
+        report: ExtractionReport::default(),
+    };
+    copy.directory(source)?;
+    Ok(copy.report)
 }
 
-fn copy_retained_directory(
-    root: &Path,
-    source: &Path,
-    destination: &Path,
-    limits: &ExtractionLimits,
-    spent: &mut ExtractionReport,
-    report: &mut ExtractionReport,
-) -> PackResult<()> {
-    std::fs::create_dir_all(destination).map_err(|source| PackError::Unwritable {
-        path: destination.to_path_buf(),
-        source,
-    })?;
-    for entry in std::fs::read_dir(source).map_err(|error| PackError::Unwritable {
-        path: source.to_path_buf(),
-        source: error,
-    })? {
-        let entry = entry.map_err(|error| PackError::Unwritable {
+impl RetainedCopy<'_> {
+    fn directory(&mut self, source: &Path) -> PackResult<()> {
+        std::fs::create_dir_all(self.destination).map_err(|source| PackError::Unwritable {
+            path: self.destination.to_path_buf(),
+            source,
+        })?;
+        for entry in std::fs::read_dir(source).map_err(|error| PackError::Unwritable {
             path: source.to_path_buf(),
             source: error,
-        })?;
-        let from = entry.path();
-        copy_retained_entry(root, &from, destination, limits, spent, report)?;
+        })? {
+            let entry = entry.map_err(|error| PackError::Unwritable {
+                path: source.to_path_buf(),
+                source: error,
+            })?;
+            self.entry(&entry.path())?;
+        }
+        Ok(())
     }
-    Ok(())
-}
 
-fn copy_retained_entry(
-    root: &Path,
-    from: &Path,
-    destination: &Path,
-    limits: &ExtractionLimits,
-    spent: &mut ExtractionReport,
-    report: &mut ExtractionReport,
-) -> PackResult<()> {
-    let relative = from
-        .strip_prefix(root)
-        .map_err(|_| PackError::EntryPathUnsafe {
-            entry: from.display().to_string(),
-        })?;
-    let raw = relative
-        .to_str()
-        .ok_or_else(|| PackError::EntryPathUnsafe {
-            entry: relative.display().to_string(),
-        })?;
-    if safe_relative_path(raw.as_bytes(), 0).as_deref() != Some(relative) {
-        return Err(PackError::EntryPathUnsafe {
-            entry: raw.to_owned(),
-        });
-    }
-    if is_reserved(relative) {
-        return Err(PackError::EntryReserved {
-            entry: raw.to_owned(),
-        });
-    }
-    let kind = std::fs::symlink_metadata(from)
-        .map_err(|source| PackError::Unwritable {
-            path: from.to_path_buf(),
-            source,
-        })?
-        .file_type();
-    let to = destination.join(relative);
-    if kind.is_symlink() {
-        return Err(PackError::EntryTypeUnsupported {
-            entry: raw.to_owned(),
-            kind: "symlink",
-        });
-    }
-    if kind.is_dir() {
-        let entries = spent
-            .files
-            .saturating_add(spent.directories)
-            .saturating_add(1);
-        if entries > limits.max_entries {
-            return Err(PackError::LimitExceeded {
-                limit: "entry-count",
-                allowed: limits.max_entries,
-                reached: entries,
+    fn entry(&mut self, from: &Path) -> PackResult<()> {
+        let relative = from
+            .strip_prefix(self.root)
+            .map_err(|_| PackError::EntryPathUnsafe {
+                entry: from.display().to_string(),
+            })?;
+        let raw = relative
+            .to_str()
+            .ok_or_else(|| PackError::EntryPathUnsafe {
+                entry: relative.display().to_string(),
+            })?;
+        if safe_relative_path(raw.as_bytes(), 0).as_deref() != Some(relative) {
+            return Err(PackError::EntryPathUnsafe {
+                entry: raw.to_owned(),
             });
         }
-        spent.directories = spent.directories.saturating_add(1);
-        report.directories = report.directories.saturating_add(1);
-        std::fs::create_dir_all(&to)
-            .map_err(|source| PackError::Unwritable { path: to, source })?;
-        copy_retained_directory(root, from, destination, limits, spent, report)?;
-        return Ok(());
+        if is_reserved(relative) {
+            return Err(PackError::EntryReserved {
+                entry: raw.to_owned(),
+            });
+        }
+        let kind = std::fs::symlink_metadata(from)
+            .map_err(|source| PackError::Unwritable {
+                path: from.to_path_buf(),
+                source,
+            })?
+            .file_type();
+        if kind.is_symlink() {
+            return Err(PackError::EntryTypeUnsupported {
+                entry: raw.to_owned(),
+                kind: "symlink",
+            });
+        }
+        if self.kind == RetainedDestination::GameDirectory && relative.starts_with(LIBRARIES_DIR) {
+            self.report.skipped = self.report.skipped.saturating_add(1);
+            return Ok(());
+        }
+        // Containment is lexical, so a destination that is already a link would
+        // carry the write somewhere else.
+        if self.links.walks_a_link(relative) {
+            return Err(PackError::EntryPathUnsafe {
+                entry: raw.to_owned(),
+            });
+        }
+        let to = self.destination.join(relative);
+        if kind.is_dir() {
+            let entries = self
+                .spent
+                .files
+                .saturating_add(self.spent.directories)
+                .saturating_add(1);
+            if entries > self.limits.max_entries {
+                return Err(PackError::LimitExceeded {
+                    limit: "entry-count",
+                    allowed: self.limits.max_entries,
+                    reached: entries,
+                });
+            }
+            self.spent.directories = self.spent.directories.saturating_add(1);
+            self.report.directories = self.report.directories.saturating_add(1);
+            std::fs::create_dir_all(&to)
+                .map_err(|source| PackError::Unwritable { path: to, source })?;
+            return self.directory(from);
+        }
+        if !kind.is_file() {
+            return Err(PackError::EntryTypeUnsupported {
+                entry: raw.to_owned(),
+                kind: "special file",
+            });
+        }
+        let size = std::fs::metadata(from)
+            .map_err(|source| PackError::Unwritable {
+                path: from.to_path_buf(),
+                source,
+            })?
+            .len();
+        charge_retained_file(size, self.limits, self.spent)?;
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| PackError::Unwritable {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        std::fs::copy(from, &to).map_err(|source| PackError::Unwritable { path: to, source })?;
+        self.report.files = self.report.files.saturating_add(1);
+        self.report.bytes = self.report.bytes.saturating_add(size);
+        Ok(())
     }
-    if !kind.is_file() {
-        return Err(PackError::EntryTypeUnsupported {
-            entry: raw.to_owned(),
-            kind: "special file",
-        });
-    }
-    let size = std::fs::metadata(from)
-        .map_err(|source| PackError::Unwritable {
-            path: from.to_path_buf(),
-            source,
-        })?
-        .len();
-    charge_retained_file(size, limits, spent)?;
-    if let Some(parent) = to.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| PackError::Unwritable {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-    }
-    std::fs::copy(from, &to).map_err(|source| PackError::Unwritable { path: to, source })?;
-    report.files = report.files.saturating_add(1);
-    report.bytes = report.bytes.saturating_add(size);
-    Ok(())
 }
 
 fn charge_retained_file(
@@ -1131,7 +1175,13 @@ fn copy_server_source(
                     path: client.dir().to_path_buf(),
                 })?;
         let source = validate_retained_root(client, relative, layer.scope.as_str())?;
-        copy_retained_tree(&source, &server.resolve(relative), &limits, &mut spent)?;
+        copy_retained_tree(
+            &source,
+            &server.resolve(relative),
+            RetainedDestination::SourceStore,
+            &limits,
+            &mut spent,
+        )?;
     }
     if let Some(relative) = &recipe.provider_metadata.manifest_file {
         let raw = relative
@@ -1237,7 +1287,93 @@ mod tests {
     fn copy_layer(source: &Path, destination: &Path) -> PackResult<ExtractionReport> {
         let limits = ExtractionLimits::default();
         let mut spent = ExtractionReport::default();
-        copy_retained_tree(source, destination, &limits, &mut spent)
+        copy_retained_tree(
+            source,
+            destination,
+            RetainedDestination::GameDirectory,
+            &limits,
+            &mut spent,
+        )
+    }
+
+    #[test]
+    fn a_retained_layers_libraries_are_left_out_of_a_game_directory_only() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let layer = dir.path().join("layer");
+        std::fs::create_dir_all(layer.join("libraries/net/example")).expect("create");
+        std::fs::write(layer.join("libraries/net/example/a.jar"), b"pack").expect("write");
+        std::fs::write(layer.join("server.properties"), b"motd=x\n").expect("write");
+        let limits = ExtractionLimits::default();
+
+        let game = dir.path().join("game");
+        let report = copy_retained_tree(
+            &layer,
+            &game,
+            RetainedDestination::GameDirectory,
+            &limits,
+            &mut ExtractionReport::default(),
+        )
+        .expect("copy into a game directory");
+        assert_eq!(report.files, 1);
+        assert!(game.join("server.properties").is_file());
+        assert!(!game.join("libraries").exists());
+
+        let store = dir.path().join("store");
+        copy_retained_tree(
+            &layer,
+            &store,
+            RetainedDestination::SourceStore,
+            &limits,
+            &mut ExtractionReport::default(),
+        )
+        .expect("copy into a source store");
+        assert!(store.join("libraries/net/example/a.jar").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_retained_layer_is_not_written_through_a_link_in_its_destination() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let layer = dir.path().join("layer");
+        std::fs::create_dir_all(layer.join("config")).expect("create");
+        std::fs::write(layer.join("config/a.toml"), b"pack").expect("write");
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("create");
+        std::fs::write(elsewhere.join("a.toml"), b"original").expect("write");
+        let game = dir.path().join("game");
+        std::fs::create_dir_all(&game).expect("create");
+        std::os::unix::fs::symlink(&elsewhere, game.join("config")).expect("link");
+
+        let error = copy_layer(&layer, &game).expect_err("a linked destination is refused");
+
+        assert!(
+            matches!(error, PackError::EntryPathUnsafe { .. }),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(
+            std::fs::read(elsewhere.join("a.toml")).expect("read"),
+            b"original"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_declared_file_beneath_a_link_in_the_game_directory_is_refused() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let shared = dir.path().join("shared");
+        std::fs::create_dir_all(&shared).expect("create");
+        let game = dir.path().join("game");
+        std::fs::create_dir_all(&game).expect("create");
+        std::os::unix::fs::symlink(&shared, game.join("libraries")).expect("link");
+        let declared = file("libraries/net/example/a.jar");
+
+        let error = preflight_destinations(&[&declared], &game)
+            .expect_err("a recipe path under a link is refused");
+
+        assert!(
+            matches!(error, PackError::EntryPathUnsafe { .. }),
+            "unexpected error: {error:?}"
+        );
     }
 
     #[cfg(unix)]
@@ -1317,8 +1453,14 @@ mod tests {
             ..ExtractionLimits::default()
         };
         let mut spent = ExtractionReport::default();
-        let error = copy_retained_tree(&layer, &dir.path().join("out"), &limits, &mut spent)
-            .expect_err("an oversize retained file is refused");
+        let error = copy_retained_tree(
+            &layer,
+            &dir.path().join("out"),
+            RetainedDestination::GameDirectory,
+            &limits,
+            &mut spent,
+        )
+        .expect_err("an oversize retained file is refused");
         assert!(
             matches!(
                 error,

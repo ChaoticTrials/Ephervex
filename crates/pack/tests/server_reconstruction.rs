@@ -573,3 +573,74 @@ async fn an_addressless_file_the_client_does_not_have_either_still_fails() {
         "{error:?}"
     );
 }
+
+/// A loader installation replaces `<server>/libraries` with a link into the
+/// shared libraries store, and reconstruction runs after it. Retained pack
+/// content must not be written through that link into storage every other
+/// server shares.
+#[cfg(unix)]
+#[tokio::test]
+async fn retained_overrides_never_write_through_the_shared_library_link() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (recipe, bodies) = recipe();
+    let client_source = temp.path().join("client/.launcher/source");
+    let cache = CacheLayout::new(temp.path().join("cache"));
+    SourceStore::new(&client_source)
+        .write_recipe(&recipe)
+        .expect("client recipe");
+    write(
+        &client_source.join("modrinth/modrinth.index.json"),
+        b"manifest",
+    );
+    write(&client_source.join("modrinth/overrides/empty"), b"");
+    let shipped =
+        "modrinth/server-overrides/libraries/net/minecraftforge/forge/1.20.1-47.2.0/unix_args.txt";
+    write(&client_source.join(shipped), b"from the pack");
+    write(
+        &client_source.join("modrinth/server-overrides/server.properties"),
+        b"motd=retained\n",
+    );
+    for (entry, body) in recipe.files.iter().zip(&bodies) {
+        cache_file(&cache, entry, body);
+    }
+
+    let shared = temp.path().join("shared-libraries");
+    let shared_args = shared.join("net/minecraftforge/forge/1.20.1-47.2.0/unix_args.txt");
+    write(&shared_args, b"installed by the loader");
+    let game = temp.path().join("server/server");
+    std::fs::create_dir_all(&game).expect("server directory");
+    std::os::unix::fs::symlink(&shared, game.join("libraries")).expect("libraries link");
+    let server_source = temp.path().join("server/.launcher/source");
+
+    reconstruct(
+        &recipe,
+        &UnknownServerFiles::only(OptionalSelection::none()),
+        &game,
+        &client_source,
+        &server_source,
+        &cache,
+    )
+    .await
+    .expect("reconstruct beside a linked libraries directory");
+
+    assert_eq!(
+        std::fs::read(&shared_args).expect("shared file"),
+        b"installed by the loader",
+        "the shared store belongs to every server, not to one pack"
+    );
+    assert!(
+        std::fs::symlink_metadata(game.join("libraries"))
+            .expect("libraries")
+            .is_symlink()
+    );
+    assert_eq!(
+        std::fs::read(game.join("server.properties")).expect("properties"),
+        b"motd=retained\n",
+        "the rest of the layer is still applied"
+    );
+    assert_eq!(
+        std::fs::read(server_source.join(shipped)).expect("retained copy"),
+        b"from the pack",
+        "the server's own source keeps the layer exactly as shipped"
+    );
+}

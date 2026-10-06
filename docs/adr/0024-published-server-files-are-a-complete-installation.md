@@ -46,6 +46,11 @@ The archive does not decide these destinations:
 - `eula.txt`, because consent is launcher-global and explicit (ADR 0014).
 - `.launcher/`, which no archive may ever name (ADR 0002).
 
+When a linked server is reconstructed from retained override layers, `libraries/`
+is left out and `.launcher/` is refused as well. In every flow, a pack entry whose
+destination is or sits beneath an existing link is refused rather than written
+through it.
+
 Everything else is installed, including start scripts and `user_jvm_args.txt`.
 Nothing runs them, and leaving them out would hide what the author shipped.
 

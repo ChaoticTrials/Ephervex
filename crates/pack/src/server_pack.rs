@@ -18,10 +18,9 @@
 //! `<server>/libraries` with a **symlink into the shared libraries store**, and
 //! containment here is lexical, so an entry named `libraries/…` would be
 //! written straight through that link into storage every other instance and
-//! server shares. It is excluded by name, and any other entry whose path walks
-//! an existing link is refused outright rather than followed.
+//! server shares. It is excluded by name, and the extractor refuses any other
+//! entry whose path walks an existing link rather than following it.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use tracing::{debug, info, instrument};
@@ -115,14 +114,10 @@ pub fn install_server_pack(request: ServerPackInstall<'_>) -> PackResult<Install
     let prefix = stripped_root.clone().unwrap_or_default();
 
     let mut declined = Vec::new();
-    let mut links = LinkCache::new(game_dir);
     let report = pack.extract_prefix_filtered(&prefix, game_dir, &mut |relative| {
         if is_launcher_owned(relative, reserved) {
             declined.push(relative.to_path_buf());
             return EntryDecision::Skip;
-        }
-        if links.walks_a_link(relative) {
-            return EntryDecision::Refuse;
         }
         EntryDecision::Extract
     })?;
@@ -151,45 +146,6 @@ fn is_launcher_owned(relative: &Path, reserved: &[PathBuf]) -> bool {
         return true;
     }
     reserved.iter().any(|owned| relative.starts_with(owned))
-}
-
-/// Remembers which destinations under one root are symlinks.
-///
-/// Every entry would otherwise re-`lstat` the same handful of parent
-/// directories, and an archive with thousands of entries under `config/` would
-/// pay for that once per entry.
-#[derive(Debug)]
-struct LinkCache<'a> {
-    root: &'a Path,
-    known: BTreeMap<PathBuf, bool>,
-}
-
-impl<'a> LinkCache<'a> {
-    const fn new(root: &'a Path) -> Self {
-        Self {
-            root,
-            known: BTreeMap::new(),
-        }
-    }
-
-    /// Whether the entry, or anything it would be written underneath, is
-    /// already a link on disk.
-    fn walks_a_link(&mut self, relative: &Path) -> bool {
-        relative
-            .ancestors()
-            .filter(|ancestor| !ancestor.as_os_str().is_empty())
-            .any(|ancestor| self.is_link(ancestor))
-    }
-
-    fn is_link(&mut self, relative: &Path) -> bool {
-        if let Some(known) = self.known.get(relative) {
-            return *known;
-        }
-        let link = std::fs::symlink_metadata(self.root.join(relative))
-            .is_ok_and(|metadata| metadata.is_symlink());
-        self.known.insert(relative.to_path_buf(), link);
-        link
-    }
 }
 
 /// The jars a server archive left in `mods/`.
