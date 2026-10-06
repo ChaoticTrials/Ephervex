@@ -54,7 +54,9 @@ use tracing::{info, instrument, warn};
 
 use crate::error::{PackError, PackResult};
 use crate::install::{ArtifactFetch, copy_into_instance, fetch_all};
-use crate::managed::{RecordedJar, disabled_path, recorded_jar, settle_recorded_paths};
+use crate::managed::{
+    ManagedDestinations, RecordedJar, disabled_path, occupant, recorded_jar, settle_recorded_paths,
+};
 use crate::recipe::{PackFileRecipe, PackRecipe, ProviderFileIdentity};
 use crate::store::SourceStore;
 
@@ -333,6 +335,7 @@ async fn plan(
     // a provider and a project, so it answers `managed_project` exactly as an
     // installed mod does. Origin is the thing that says whose file it is, so
     // origin is what is checked.
+    let mut destinations = ManagedDestinations::new(game_dir);
     for removal in removals {
         match recipe.managed_project(removal.provider, &removal.project_id) {
             None => {
@@ -345,7 +348,9 @@ async fn plan(
                     path: entry.logical_path.clone(),
                 });
             }
-            Some(_) => {}
+            Some(entry) => {
+                destinations.retirable(&entry.logical_path)?;
+            }
         }
     }
 
@@ -354,7 +359,7 @@ async fn plan(
 
     let mut actions = Vec::with_capacity(upserts.len());
     for file in upserts {
-        actions.push(action_for(recipe, file, game_dir, &freed).await?);
+        actions.push(action_for(recipe, file, game_dir, &mut destinations, &freed).await?);
     }
     Ok(actions)
 }
@@ -387,6 +392,7 @@ async fn action_for(
     recipe: &PackRecipe,
     file: &PackFileRecipe,
     game_dir: &Path,
+    destinations: &mut ManagedDestinations<'_>,
     freed: &BTreeSet<PathBuf>,
 ) -> PackResult<Action> {
     let Some((provider, project_id)) = project_of(file) else {
@@ -394,6 +400,7 @@ async fn action_for(
             path: file.display_name(),
         });
     };
+    destinations.resolve(&file.logical_path)?;
 
     let existing = recipe.managed_project(provider, project_id);
 
@@ -404,9 +411,13 @@ async fn action_for(
             // to leave alone rather than a jar to put back. Absent is a repair,
             // which restores the recorded jar without changing what is
             // recorded. Present with other bytes is left alone and reported.
+            destinations.resolve(&entry.logical_path)?;
             Ok(match recorded_jar(game_dir, entry).await {
                 RecordedJar::Intact => Action::Unchanged,
-                RecordedJar::Missing => Action::Repair,
+                RecordedJar::Missing => {
+                    destinations.writable(&entry.logical_path)?;
+                    Action::Repair
+                }
                 RecordedJar::Altered => Action::Altered,
             })
         }
@@ -420,10 +431,12 @@ async fn action_for(
         }
         Some(entry) => {
             let entry = entry.clone();
+            destinations.retirable(&entry.logical_path)?;
+            let destination = destinations.writable(&file.logical_path)?;
             // The new jar's own destination has to be free by the time it is
             // written. It is free if nothing is there, or if this mutation is
             // about to vacate it.
-            if let Some(path) = occupied_by(game_dir, &file.logical_path)
+            if let Some(path) = occupant(&destination)
                 && !freed.contains(&file.logical_path)
             {
                 return Err(PackError::DestinationOccupied { path });
@@ -431,7 +444,8 @@ async fn action_for(
             Ok(Action::Replace(Box::new(entry)))
         }
         None => {
-            if let Some(path) = occupied_by(game_dir, &file.logical_path)
+            let destination = destinations.writable(&file.logical_path)?;
+            if let Some(path) = occupant(&destination)
                 && !freed.contains(&file.logical_path)
             {
                 // A jar Ephervex did not put there. Almost always the local
@@ -760,19 +774,6 @@ fn publish(
 /// Whether a recorded mod's jar is currently turned off.
 fn is_disabled(game_dir: &Path, logical_path: &Path) -> bool {
     !game_dir.join(logical_path).is_file() && disabled_path(&game_dir.join(logical_path)).is_file()
-}
-
-/// Whatever already stands where a new jar would go, under either spelling.
-///
-/// `exists` rather than `is_file`: a directory sitting on the destination is
-/// not a jar to leave alone, but it still blocks the write.
-fn occupied_by(game_dir: &Path, logical_path: &Path) -> Option<PathBuf> {
-    let enabled = game_dir.join(logical_path);
-    if enabled.exists() {
-        return Some(enabled);
-    }
-    let disabled = disabled_path(&enabled);
-    disabled.exists().then_some(disabled)
 }
 
 /// The provider and project an entry names, if it names both.

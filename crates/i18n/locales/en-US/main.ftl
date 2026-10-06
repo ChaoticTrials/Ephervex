@@ -1463,6 +1463,14 @@ error-pack-canceled = The import was canceled.
 error-mod-destination-occupied = A file Ephervex did not install is already in the way.
 .action = { $path } was not installed by Ephervex, so it was left alone. Move or rename it if you want this mod installed there.
 
+error-mod-path-unsafe = That mod would be written outside its place in the game directory.
+.action = { $path } is not a valid location for a mod file, so nothing was written.
+
+# A link at or above a mod's destination would send the write wherever the link
+# points, which can be outside the instance.
+error-mod-destination-linked = A link is in the way of that mod's file.
+.action = { $path } is a link or inside one, so nothing was written there. Replace the link with a regular file or folder if you want this mod installed there.
+
 error-mod-destination-collision = Two of these mods install under the same file name.
 .action = { $name } is claimed twice, so installing them would leave only one. Install them separately, or leave one out.
 

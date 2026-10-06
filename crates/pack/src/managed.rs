@@ -38,6 +38,7 @@ use tracing::{info, instrument, warn};
 
 use crate::error::{PackError, PackResult};
 use crate::install::{ArtifactFetch, copy_into_instance, fetch_all};
+use crate::path::{DestinationLinks, contained_join, is_reserved, safe_relative_path};
 use crate::recipe::{PackFileRecipe, PackRecipe, ProviderFileIdentity};
 use crate::store::SourceStore;
 
@@ -122,6 +123,107 @@ pub struct ManagedModInstall<'a> {
     /// Where the updated recipe is written.
     pub store: &'a SourceStore,
     pub fetch: ArtifactFetch<'a>,
+}
+
+/// Checks managed mod destinations before anything is written to or moved from
+/// them.
+///
+/// A logical path is public, deserializable input, so it gets the rules an
+/// ordinary pack file does: relative, free of `..`, not launcher-owned. A
+/// destination at or beneath a link on disk is also refused, because the write
+/// would land wherever the link points. One value per operation shares the
+/// link lookups.
+#[derive(Debug)]
+pub(crate) struct ManagedDestinations<'a> {
+    game_dir: &'a Path,
+    links: DestinationLinks<'a>,
+}
+
+impl<'a> ManagedDestinations<'a> {
+    pub(crate) const fn new(game_dir: &'a Path) -> Self {
+        Self {
+            game_dir,
+            links: DestinationLinks::new(game_dir),
+        }
+    }
+
+    /// The enabled path of a logical destination, once the logical path is a
+    /// safe, unreserved path relative to the game directory.
+    pub(crate) fn resolve(&self, logical: &Path) -> PackResult<PathBuf> {
+        let unsafe_path = || PackError::ManagedPathUnsafe {
+            path: logical.to_path_buf(),
+        };
+        let safe = logical
+            .to_str()
+            .and_then(|raw| safe_relative_path(raw.as_bytes(), 0))
+            .filter(|safe| !safe.as_os_str().is_empty() && safe.as_os_str() == logical.as_os_str())
+            .ok_or_else(unsafe_path)?;
+        if is_reserved(&safe) {
+            return Err(unsafe_path());
+        }
+        contained_join(self.game_dir, &safe).ok_or_else(unsafe_path)
+    }
+
+    /// The enabled path of a destination a file is about to be written to,
+    /// refused if either spelling is a link or sits beneath one.
+    pub(crate) fn writable(&mut self, logical: &Path) -> PackResult<PathBuf> {
+        let enabled = self.resolve(logical)?;
+        if self.links.walks_a_link(logical) {
+            return Err(PackError::ManagedDestinationLinked { path: enabled });
+        }
+        let disabled = disabled_path(logical);
+        if self.links.walks_a_link(&disabled) {
+            return Err(PackError::ManagedDestinationLinked {
+                path: self.game_dir.join(disabled),
+            });
+        }
+        Ok(enabled)
+    }
+
+    /// The enabled path of a recorded file about to be moved out of the game
+    /// directory, refused if a directory above it is a link.
+    ///
+    /// A link at the file itself is not an obstacle: moving it moves the link,
+    /// not whatever it points at.
+    pub(crate) fn retirable(&mut self, logical: &Path) -> PackResult<PathBuf> {
+        let enabled = self.resolve(logical)?;
+        if logical
+            .parent()
+            .is_some_and(|parent| self.links.walks_a_link(parent))
+        {
+            return Err(PackError::ManagedDestinationLinked { path: enabled });
+        }
+        Ok(enabled)
+    }
+}
+
+/// What stands at a path, without following a link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Standing {
+    Absent,
+    File,
+    /// A link, a directory, or something that could not be inspected.
+    Other,
+}
+
+fn standing(path: &Path) -> Standing {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => Standing::File,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Standing::Absent,
+        Ok(_) | Err(_) => Standing::Other,
+    }
+}
+
+/// Whatever already stands where a mod would go, under either spelling.
+///
+/// A link counts, dangling or not, and so does anything that could not be
+/// inspected: a destination is free only when it is known to be absent.
+pub(crate) fn occupant(enabled: &Path) -> Option<PathBuf> {
+    let disabled = disabled_path(enabled);
+    [enabled, disabled.as_path()]
+        .into_iter()
+        .find(|path| standing(path) != Standing::Absent)
+        .map(Path::to_path_buf)
 }
 
 /// What the pre-flight decided to do with one planned file.
@@ -233,9 +335,10 @@ async fn plan_destinations(
         }
     }
 
+    let mut destinations = ManagedDestinations::new(game_dir);
     let mut dispositions = Vec::with_capacity(additions.len());
     for file in additions {
-        dispositions.push(disposition_for(recipe, file, game_dir).await?);
+        dispositions.push(disposition_for(recipe, file, game_dir, &mut destinations).await?);
     }
     Ok(dispositions)
 }
@@ -245,14 +348,19 @@ async fn disposition_for(
     recipe: &PackRecipe,
     file: &PackFileRecipe,
     game_dir: &Path,
+    destinations: &mut ManagedDestinations<'_>,
 ) -> PackResult<Disposition> {
     // A recorded mod is judged by what the recipe says about it, wherever that
     // is and however it is spelled on disk.
     if let Some(recorded) = recorded_entry(recipe, file) {
+        destinations.resolve(&recorded.logical_path)?;
         return Ok(match recorded_jar(game_dir, recorded).await {
             // Gone, so restoring it from the verified cache is repair; the
             // recipe entry does not change.
-            RecordedJar::Missing => Disposition::Repair,
+            RecordedJar::Missing => {
+                destinations.writable(&recorded.logical_path)?;
+                Disposition::Repair
+            }
             // An exactly repeated install, which does nothing rather than
             // rewriting a byte-identical file.
             RecordedJar::Intact => Disposition::AlreadyPresent,
@@ -263,9 +371,9 @@ async fn disposition_for(
     // Not recorded. Anything standing here is a file Ephervex did not put
     // there: the local build being debugged, or the jar from the bug report. It
     // is not ours to overwrite, and it is not ours to claim.
-    let destination = game_dir.join(&file.logical_path);
-    if destination.exists() {
-        return Err(PackError::DestinationOccupied { path: destination });
+    let destination = destinations.writable(&file.logical_path)?;
+    if let Some(path) = occupant(&destination) {
+        return Err(PackError::DestinationOccupied { path });
     }
     Ok(Disposition::Install)
 }
@@ -337,8 +445,8 @@ pub(crate) enum RecordedJar {
     Missing,
     /// Present, under either spelling, with the recorded bytes.
     Intact,
-    /// Present, but not provably the recorded artifact: other bytes, a link, or
-    /// a file that could not be read back.
+    /// Present, but not provably the recorded artifact: other bytes, a link, a
+    /// directory, or a file that could not be read back.
     Altered,
 }
 
@@ -349,14 +457,15 @@ pub(crate) enum RecordedJar {
 /// or one that was replaced locally.
 pub(crate) async fn recorded_jar(game_dir: &Path, recorded: &PackFileRecipe) -> RecordedJar {
     let enabled = game_dir.join(&recorded.logical_path);
-    let present = if enabled.is_file() {
-        enabled
-    } else {
-        let disabled = disabled_path(&enabled);
-        if !disabled.is_file() {
-            return RecordedJar::Missing;
-        }
-        disabled
+    let disabled = disabled_path(&enabled);
+    // Inspected without following links, so a dangling link is something
+    // standing there rather than a jar that went missing, and a repair never
+    // writes through it.
+    let present = match (standing(&enabled), standing(&disabled)) {
+        (Standing::File, _) => enabled,
+        (Standing::Other, _) | (Standing::Absent, Standing::Other) => return RecordedJar::Altered,
+        (Standing::Absent, Standing::File) => disabled,
+        (Standing::Absent, Standing::Absent) => return RecordedJar::Missing,
     };
     match stored_file_matches(&present, recorded.size, &recorded.hashes).await {
         Ok(true) => RecordedJar::Intact,

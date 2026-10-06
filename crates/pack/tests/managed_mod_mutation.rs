@@ -1414,3 +1414,276 @@ async fn a_recorded_jar_with_no_address_is_restored_from_the_requests_address() 
         ROOT_V1
     );
 }
+
+// -- destinations ---------------------------------------------------------
+
+/// A directory outside the instance that nothing may be written into.
+fn outside(instance: &Instance) -> PathBuf {
+    let dir = instance.root.join("outside");
+    std::fs::create_dir_all(&dir).expect("outside dir");
+    dir
+}
+
+fn dir_is_empty(dir: &Path) -> bool {
+    std::fs::read_dir(dir).expect("read dir").next().is_none()
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_new_mod_is_never_written_through_a_dangling_link() {
+    let server = MockServer::start().await;
+    serve(&server, "/root-1.jar", ROOT_V1).await;
+    let instance = Instance::new();
+    let target = outside(&instance).join("created.jar");
+    std::os::unix::fs::symlink(&target, instance.jar("root-1.0.jar")).expect("link");
+    let mut recipe = recipe();
+
+    let error = mutate(
+        &instance,
+        &mut recipe,
+        &[root_v1(&server, "root-1.0.jar")],
+        &[],
+    )
+    .await
+    .expect_err("must refuse");
+
+    assert!(matches!(error, PackError::ManagedDestinationLinked { .. }));
+    assert!(!target.exists());
+    assert!(!instance.store.has_recipe());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_linked_mods_directory_is_refused_for_installs() {
+    let server = MockServer::start().await;
+    serve(&server, "/root-1.jar", ROOT_V1).await;
+    let instance = Instance::new();
+    let outside = outside(&instance);
+    std::fs::remove_dir(instance.mods_dir()).expect("remove mods");
+    std::os::unix::fs::symlink(&outside, instance.mods_dir()).expect("link");
+    let mut recipe = recipe();
+
+    let error = mutate(
+        &instance,
+        &mut recipe,
+        &[root_v1(&server, "root-1.0.jar")],
+        &[],
+    )
+    .await
+    .expect_err("must refuse");
+
+    assert!(matches!(error, PackError::ManagedDestinationLinked { .. }));
+    assert!(dir_is_empty(&outside));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_replacement_is_never_written_through_a_dangling_link() {
+    let server = MockServer::start().await;
+    let instance = Instance::new();
+    let mut recipe = installed(&server, &instance).await;
+    serve(&server, "/root-2.jar", ROOT_V2).await;
+    let target = outside(&instance).join("created.jar");
+    std::os::unix::fs::symlink(&target, instance.jar("root-2.0.jar")).expect("link");
+
+    let error = mutate(
+        &instance,
+        &mut recipe,
+        &[entry(
+            &server,
+            "/root-2.jar",
+            "root-2.0.jar",
+            ROOT_V2,
+            "ROOTPROJ",
+            "ROOTV2",
+            ModOrigin::UserSelected,
+        )],
+        &[],
+    )
+    .await
+    .expect_err("must refuse");
+
+    assert!(matches!(error, PackError::ManagedDestinationLinked { .. }));
+    assert!(!target.exists());
+    assert_eq!(
+        std::fs::read(instance.jar("root-1.0.jar")).expect("old jar"),
+        ROOT_V1,
+        "the installed version is untouched"
+    );
+    assert_eq!(version_of(&recipe, "ROOTPROJ").as_deref(), Some("ROOTV1"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_repair_never_writes_through_a_dangling_link_at_the_recorded_path() {
+    let server = MockServer::start().await;
+    let instance = Instance::new();
+    let mut recipe = installed(&server, &instance).await;
+    std::fs::remove_file(instance.jar("root-1.0.jar")).expect("delete the jar");
+    let target = outside(&instance).join("created.jar");
+    std::os::unix::fs::symlink(&target, instance.jar("root-1.0.jar")).expect("link");
+
+    let report = mutate(
+        &instance,
+        &mut recipe,
+        &[root_v1(&server, "root-1.0.jar")],
+        &[],
+    )
+    .await
+    .expect("a link is reported, not repaired");
+
+    assert_eq!(report.modified, [Path::new("mods/root-1.0.jar")]);
+    assert!(report.repaired.is_empty());
+    assert!(!target.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_repair_beneath_a_linked_directory_is_refused_for_mutations() {
+    let server = MockServer::start().await;
+    let instance = Instance::new();
+    let mut recipe = installed(&server, &instance).await;
+    let outside = outside(&instance);
+    std::fs::remove_dir_all(instance.mods_dir()).expect("remove mods");
+    std::os::unix::fs::symlink(&outside, instance.mods_dir()).expect("link");
+
+    let error = mutate(
+        &instance,
+        &mut recipe,
+        &[root_v1(&server, "root-1.0.jar")],
+        &[],
+    )
+    .await
+    .expect_err("must refuse");
+
+    assert!(matches!(error, PackError::ManagedDestinationLinked { .. }));
+    assert!(dir_is_empty(&outside));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_removal_never_moves_a_file_out_of_a_linked_directory() {
+    let server = MockServer::start().await;
+    let instance = Instance::new();
+    let mut recipe = installed(&server, &instance).await;
+    let outside = outside(&instance);
+    std::fs::rename(instance.mods_dir(), outside.join("mods")).expect("move mods away");
+    std::os::unix::fs::symlink(outside.join("mods"), instance.mods_dir()).expect("link");
+
+    let error = mutate(
+        &instance,
+        &mut recipe,
+        &[],
+        &[ManagedProject::new(ModProvider::Modrinth, "ROOTPROJ")],
+    )
+    .await
+    .expect_err("must refuse");
+
+    assert!(matches!(error, PackError::ManagedDestinationLinked { .. }));
+    assert!(outside.join("mods/root-1.0.jar").is_file());
+    assert!(
+        recipe
+            .managed_project(ModProvider::Modrinth, "ROOTPROJ")
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn an_unrecorded_disabled_twin_occupies_a_new_mods_destination() {
+    let server = MockServer::start().await;
+    serve(&server, "/root-1.jar", ROOT_V1).await;
+    let instance = Instance::new();
+    let twin = instance.jar("root-1.0.jar.disabled");
+    std::fs::write(&twin, b"somebody else's file, turned off").expect("write");
+    let mut recipe = recipe();
+
+    let error = mutate(
+        &instance,
+        &mut recipe,
+        &[root_v1(&server, "root-1.0.jar")],
+        &[],
+    )
+    .await
+    .expect_err("must refuse");
+
+    assert!(matches!(error, PackError::DestinationOccupied { .. }));
+    assert_eq!(error.failing_path().as_deref(), Some(twin.as_path()));
+}
+
+#[tokio::test]
+async fn a_logical_path_outside_the_game_directory_is_refused_for_mutations() {
+    let server = MockServer::start().await;
+    serve(&server, "/root-1.jar", ROOT_V1).await;
+    let instance = Instance::new();
+    let absolute = instance.root.join("absolute.jar");
+
+    for logical in [
+        PathBuf::from("../outside.jar"),
+        absolute.clone(),
+        PathBuf::from(".launcher/source/recipe.jar"),
+    ] {
+        let mut recipe = recipe();
+        let mut file = root_v1(&server, "root-1.0.jar");
+        file.logical_path = logical.clone();
+
+        let error = mutate(&instance, &mut recipe, &[file], &[])
+            .await
+            .expect_err("must refuse");
+
+        assert!(
+            matches!(error, PackError::ManagedPathUnsafe { .. }),
+            "{logical:?} gave {error:?}"
+        );
+    }
+    assert!(!instance.root.join("outside.jar").exists());
+    assert!(!absolute.exists());
+    assert!(!instance.store.has_recipe());
+}
+
+#[tokio::test]
+async fn a_recorded_logical_path_outside_the_game_directory_is_never_retired_or_replaced() {
+    let server = MockServer::start().await;
+    let instance = Instance::new();
+    let mut recipe = installed(&server, &instance).await;
+    let victim = instance.root.join("victim.jar");
+    std::fs::write(&victim, b"not a mod of this instance").expect("write");
+    recipe
+        .files
+        .iter_mut()
+        .find(|file| file.logical_path == Path::new("mods/root-1.0.jar"))
+        .expect("recorded root")
+        .logical_path = PathBuf::from("../victim.jar");
+    serve(&server, "/root-2.jar", ROOT_V2).await;
+
+    let removal = mutate(
+        &instance,
+        &mut recipe,
+        &[],
+        &[ManagedProject::new(ModProvider::Modrinth, "ROOTPROJ")],
+    )
+    .await
+    .expect_err("removal must refuse");
+    let replacement = mutate(
+        &instance,
+        &mut recipe,
+        &[entry(
+            &server,
+            "/root-2.jar",
+            "root-2.0.jar",
+            ROOT_V2,
+            "ROOTPROJ",
+            "ROOTV2",
+            ModOrigin::UserSelected,
+        )],
+        &[],
+    )
+    .await
+    .expect_err("replacement must refuse");
+
+    assert!(matches!(removal, PackError::ManagedPathUnsafe { .. }));
+    assert!(matches!(replacement, PackError::ManagedPathUnsafe { .. }));
+    assert!(
+        victim.is_file(),
+        "the file outside the instance is untouched"
+    );
+}

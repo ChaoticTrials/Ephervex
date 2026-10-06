@@ -820,17 +820,31 @@ fn refused_with(error: &DownloadError) -> Option<u16> {
 }
 
 /// Copies a verified cache entry into the instance.
+///
+/// The destination is created exclusively: an existing entry there, including
+/// a link, fails the copy instead of being followed or overwritten. Callers
+/// have already decided the destination is free, so this only holds if that
+/// answer changed in between.
 pub(crate) fn copy_into_instance(source: &Path, destination: &Path) -> PackResult<()> {
+    let unwritable = |error| PackError::Unwritable {
+        path: destination.to_path_buf(),
+        source: error,
+    };
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent).map_err(|source| PackError::Unwritable {
             path: parent.to_path_buf(),
             source,
         })?;
     }
-    std::fs::copy(source, destination).map_err(|error| PackError::Unwritable {
-        path: destination.to_path_buf(),
-        source: error,
-    })?;
+    let mut reader = std::fs::File::open(source).map_err(unwritable)?;
+    let permissions = reader.metadata().map_err(unwritable)?.permissions();
+    let mut writer = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .map_err(unwritable)?;
+    std::io::copy(&mut reader, &mut writer).map_err(unwritable)?;
+    writer.set_permissions(permissions).map_err(unwritable)?;
     Ok(())
 }
 

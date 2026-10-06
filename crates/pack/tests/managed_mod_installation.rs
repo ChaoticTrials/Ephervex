@@ -754,3 +754,213 @@ async fn a_recorded_jar_with_no_address_is_restored_from_the_requests_address() 
         ROOT_JAR
     );
 }
+
+// -- destinations ---------------------------------------------------------
+
+/// A directory outside the instance that nothing may be written into.
+fn outside(instance: &Instance) -> PathBuf {
+    let dir = instance.base.path().join("outside");
+    std::fs::create_dir_all(&dir).expect("outside dir");
+    dir
+}
+
+fn dir_is_empty(dir: &Path) -> bool {
+    std::fs::read_dir(dir).expect("read dir").next().is_none()
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_dangling_link_at_the_destination_is_refused_and_never_followed() {
+    let server = MockServer::start().await;
+    serve(&server, "/root.jar", ROOT_JAR).await;
+    let instance = Instance::new();
+    let target = outside(&instance).join("created.jar");
+    std::os::unix::fs::symlink(&target, instance.jar("root-1.0.jar")).expect("link");
+    let mut recipe = recipe();
+
+    let error = install(
+        &instance,
+        &mut recipe,
+        &[root_addition(&server, "root-1.0.jar")],
+    )
+    .await
+    .expect_err("must refuse");
+
+    assert!(matches!(error, PackError::ManagedDestinationLinked { .. }));
+    assert!(!target.exists(), "nothing was written through the link");
+    assert!(recipe.managed_mods().is_empty());
+    assert!(!instance.store.has_recipe());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_linked_mods_directory_is_refused_and_never_written_through() {
+    let server = MockServer::start().await;
+    serve(&server, "/root.jar", ROOT_JAR).await;
+    let instance = Instance::new();
+    let outside = outside(&instance);
+    std::fs::remove_dir(instance.mods_dir()).expect("remove mods");
+    std::os::unix::fs::symlink(&outside, instance.mods_dir()).expect("link");
+    let mut recipe = recipe();
+
+    let error = install(
+        &instance,
+        &mut recipe,
+        &[root_addition(&server, "root-1.0.jar")],
+    )
+    .await
+    .expect_err("must refuse");
+
+    assert!(matches!(error, PackError::ManagedDestinationLinked { .. }));
+    assert!(dir_is_empty(&outside));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_repair_never_writes_through_a_dangling_link_at_the_recorded_path() {
+    let server = MockServer::start().await;
+    serve(&server, "/root.jar", ROOT_JAR).await;
+    let instance = Instance::new();
+    let mut recipe = recipe();
+    let additions = [root_addition(&server, "root-1.0.jar")];
+    install(&instance, &mut recipe, &additions)
+        .await
+        .expect("first install");
+    std::fs::remove_file(instance.jar("root-1.0.jar")).expect("delete the jar");
+    let target = outside(&instance).join("created.jar");
+    std::os::unix::fs::symlink(&target, instance.jar("root-1.0.jar")).expect("link");
+
+    let report = install(&instance, &mut recipe, &additions)
+        .await
+        .expect("a link is reported, not repaired");
+
+    assert_eq!(report.modified, [Path::new("mods/root-1.0.jar")]);
+    assert!(report.repaired.is_empty());
+    assert!(!target.exists(), "nothing was written through the link");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_repair_beneath_a_linked_directory_is_refused() {
+    let server = MockServer::start().await;
+    serve(&server, "/root.jar", ROOT_JAR).await;
+    let instance = Instance::new();
+    let mut recipe = recipe();
+    let additions = [root_addition(&server, "root-1.0.jar")];
+    install(&instance, &mut recipe, &additions)
+        .await
+        .expect("first install");
+    let outside = outside(&instance);
+    std::fs::remove_dir_all(instance.mods_dir()).expect("remove mods");
+    std::os::unix::fs::symlink(&outside, instance.mods_dir()).expect("link");
+
+    let error = install(&instance, &mut recipe, &additions)
+        .await
+        .expect_err("must refuse");
+
+    assert!(matches!(error, PackError::ManagedDestinationLinked { .. }));
+    assert!(dir_is_empty(&outside));
+}
+
+#[tokio::test]
+async fn an_unrecorded_disabled_twin_occupies_the_destination() {
+    let server = MockServer::start().await;
+    serve(&server, "/root.jar", ROOT_JAR).await;
+    let instance = Instance::new();
+    let twin = instance.jar("root-1.0.jar.disabled");
+    std::fs::write(&twin, b"the developer's own build, turned off").expect("write");
+    let mut recipe = recipe();
+
+    let error = install(
+        &instance,
+        &mut recipe,
+        &[root_addition(&server, "root-1.0.jar")],
+    )
+    .await
+    .expect_err("must refuse");
+
+    assert!(matches!(error, PackError::DestinationOccupied { .. }));
+    assert_eq!(error.failing_path().as_deref(), Some(twin.as_path()));
+    assert!(!instance.jar("root-1.0.jar").exists());
+    assert!(recipe.managed_mods().is_empty());
+}
+
+#[tokio::test]
+async fn a_logical_path_outside_the_game_directory_is_refused_before_anything_is_written() {
+    let server = MockServer::start().await;
+    serve(&server, "/root.jar", ROOT_JAR).await;
+    let instance = Instance::new();
+    let escaped = instance.base.path().join("outside.jar");
+    let absolute = instance.base.path().join("absolute.jar");
+
+    for logical in [
+        PathBuf::from("../outside.jar"),
+        PathBuf::from("mods/../../outside.jar"),
+        absolute.clone(),
+        PathBuf::from(".launcher/source/recipe.jar"),
+        PathBuf::from("mods/./root-1.0.jar"),
+        PathBuf::new(),
+    ] {
+        let mut recipe = recipe();
+        let mut file = root_addition(&server, "root-1.0.jar");
+        file.logical_path = logical.clone();
+
+        let error = install(&instance, &mut recipe, &[file])
+            .await
+            .expect_err("must refuse");
+
+        assert!(
+            matches!(error, PackError::ManagedPathUnsafe { .. }),
+            "{logical:?} gave {error:?}"
+        );
+        assert!(recipe.managed_mods().is_empty());
+    }
+    assert!(!escaped.exists());
+    assert!(!absolute.exists());
+    assert!(!instance.store.has_recipe());
+}
+
+#[tokio::test]
+async fn a_recorded_logical_path_outside_the_game_directory_is_never_repaired() {
+    let server = MockServer::start().await;
+    serve(&server, "/root.jar", ROOT_JAR).await;
+    let instance = Instance::new();
+    let mut recipe = recipe();
+    let additions = [root_addition(&server, "root-1.0.jar")];
+    install(&instance, &mut recipe, &additions)
+        .await
+        .expect("first install");
+    recipe.files[0].logical_path = PathBuf::from("../outside.jar");
+
+    let error = install(&instance, &mut recipe, &additions)
+        .await
+        .expect_err("must refuse");
+
+    assert!(matches!(error, PackError::ManagedPathUnsafe { .. }));
+    assert!(!instance.base.path().join("outside.jar").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_linked_disabled_twin_is_refused_and_named_as_the_link() {
+    let server = MockServer::start().await;
+    serve(&server, "/root.jar", ROOT_JAR).await;
+    let instance = Instance::new();
+    let target = outside(&instance).join("created.jar");
+    let twin = instance.jar("root-1.0.jar.disabled");
+    std::os::unix::fs::symlink(&target, &twin).expect("link");
+    let mut recipe = recipe();
+
+    let error = install(
+        &instance,
+        &mut recipe,
+        &[root_addition(&server, "root-1.0.jar")],
+    )
+    .await
+    .expect_err("must refuse");
+
+    assert!(matches!(error, PackError::ManagedDestinationLinked { .. }));
+    assert_eq!(error.failing_path().as_deref(), Some(twin.as_path()));
+    assert!(!target.exists());
+    assert!(!instance.jar("root-1.0.jar").exists());
+}

@@ -321,6 +321,16 @@ pub enum PackError {
     #[error("`{path}` already exists and was not installed by Ephervex")]
     DestinationOccupied { path: PathBuf },
 
+    /// A managed mod's logical path is not a safe location inside the game
+    /// directory: it is absolute, climbs out with `..`, or is launcher-owned.
+    #[error("`{path}` is not a location inside the game directory that a mod can be written to")]
+    ManagedPathUnsafe { path: PathBuf },
+
+    /// A managed mod's destination is a link, or sits beneath one, so writing
+    /// it would land wherever the link points.
+    #[error("`{path}` is a link or sits inside one, so no mod file is written there")]
+    ManagedDestinationLinked { path: PathBuf },
+
     /// Two mods in one installation resolve to the same file name.
     ///
     /// Installing them in sequence would leave whichever landed last, silently
@@ -393,6 +403,8 @@ impl PackError {
             Self::ManagedVersionConflict { .. } => "error-mod-already-installed",
             Self::DestinationOccupied { .. } => "error-mod-destination-occupied",
             Self::DestinationCollision { .. } => "error-mod-destination-collision",
+            Self::ManagedPathUnsafe { .. } => "error-mod-path-unsafe",
+            Self::ManagedDestinationLinked { .. } => "error-mod-destination-linked",
             Self::RollbackIncomplete { .. } => "error-mod-rollback-incomplete",
             Self::Canceled => "error-pack-canceled",
         }
@@ -419,6 +431,8 @@ impl PackError {
             | Self::RecipeDestinationCollision { path }
             | Self::RecipeDestinationOccupied { path }
             | Self::DestinationOccupied { path }
+            | Self::ManagedPathUnsafe { path }
+            | Self::ManagedDestinationLinked { path }
             | Self::HandPlacedNotMutable { path }
             | Self::FileUnmeasurable { path, .. } => Some(path.clone()),
             Self::RollbackIncomplete { source, issues } => issues
@@ -726,6 +740,12 @@ mod tests {
             },
             PackError::DestinationCollision {
                 name: "mods/a.jar".to_owned(),
+            },
+            PackError::ManagedPathUnsafe {
+                path: PathBuf::from("../outside.jar"),
+            },
+            PackError::ManagedDestinationLinked {
+                path: PathBuf::from("/instance/minecraft/mods/a.jar"),
             },
             PackError::RollbackIncomplete {
                 source: Box::new(PackError::Canceled),
