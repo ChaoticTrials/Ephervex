@@ -41,7 +41,7 @@ use ephervex_core::{
     PromotionRequest, ReconciliationReport, RelatedMod, ReleaseListing, RequiredMods,
     RequirementBasis, RoundAnswer, RuntimeClassification, RuntimeInventory, SearchOptions,
     SecretString, ServerCommitWarning, ServerContentSource, ServerCreateOptions, ServerEvent,
-    ServerFolder, ServerNetworkSettings, ServerObserver, ServerPersistenceHealth, ServerRecord,
+    ServerFolder, ServerNetworkChange, ServerObserver, ServerPersistenceHealth, ServerRecord,
     ServerWarning, Session, SharedArtifactReport, SideRequirement, SkipReason, SnapshotOrigin,
     SnapshotRecord, SnapshotRestoreOptions, SuspectConfidence, SuspectReason, TextAnchor, TextView,
     UnknownServerFiles, VerificationReport, VersionMetadata, VersionRecord, format_binary_bytes,
@@ -1391,18 +1391,30 @@ enum NetworkAccessArg {
 }
 
 #[derive(Debug, Args)]
+#[command(group(
+    clap::ArgGroup::new("change")
+        .required(true)
+        .multiple(true)
+        .args(["online_mode", "access", "port", "address"])
+))]
 struct ServerNetworkArgs {
     id: ServerId,
-    /// Require authenticated Minecraft accounts.
-    #[arg(long)]
-    online_mode: bool,
+    /// Require authenticated Minecraft accounts. Pass `--online-mode=false` to turn it off.
+    #[arg(
+        long,
+        value_name = "BOOL",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true"
+    )]
+    online_mode: Option<bool>,
     /// Network exposure for the server listener.
-    #[arg(long, value_enum, default_value_t = NetworkAccessArg::Localhost)]
-    access: NetworkAccessArg,
+    #[arg(long, value_enum)]
+    access: Option<NetworkAccessArg>,
     /// TCP port; zero is invalid.
-    #[arg(long, default_value_t = 25565)]
-    port: u16,
-    /// IP address required by `--access custom`.
+    #[arg(long)]
+    port: Option<u16>,
+    /// IP address for `--access custom`; the stored address is kept when omitted.
     #[arg(long)]
     address: Option<String>,
 }
@@ -2228,16 +2240,15 @@ async fn run_server_command(
             }
         },
         ServerCommand::Network(args) => {
-            let access = match args.access {
-                NetworkAccessArg::Localhost => NetworkAccess::Localhost,
-                NetworkAccessArg::Lan => NetworkAccess::Lan,
-                NetworkAccessArg::Custom => NetworkAccess::Custom,
-            };
-            let committed = app.set_server_network(
+            let committed = app.update_server_network(
                 args.id,
-                ServerNetworkSettings {
+                &ServerNetworkChange {
                     online_mode: args.online_mode,
-                    access,
+                    access: args.access.map(|access| match access {
+                        NetworkAccessArg::Localhost => NetworkAccess::Localhost,
+                        NetworkAccessArg::Lan => NetworkAccess::Lan,
+                        NetworkAccessArg::Custom => NetworkAccess::Custom,
+                    }),
                     port: args.port,
                     bind_address: args.address.clone(),
                 },

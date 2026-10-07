@@ -610,6 +610,26 @@ impl App {
         Ok(committed)
     }
 
+    /// Applies only the given network options to the stored settings. Options
+    /// left unset keep their stored values.
+    pub fn update_server_network(
+        &self,
+        id: ServerId,
+        change: &ServerNetworkChange,
+    ) -> CoreResult<ServerCommit<ServerRecord>> {
+        let mut record = self.canonical_server_for_mutation(id)?;
+        refuse_if_running(&record)?;
+        let network = change.applied_to(&record.network)?;
+        network_properties(&network)?.validate()?;
+        merge_network_file(&server_properties_path(&record), &network)?;
+        record.network = network;
+        let committed = self
+            .registry_for_services()
+            .update_server_committed(&mut record)?;
+        self.sync_linked_server_list(&committed.record);
+        Ok(committed)
+    }
+
     /// Replaces the server-specific Java and JVM overrides as one canonical
     /// metadata mutation. `None` restores the corresponding global setting.
     pub fn set_server_runtime_settings(
@@ -931,6 +951,40 @@ fn add_unknown_attention(record: &mut ServerRecord, paths: Vec<PathBuf>) {
         record.add_attention(AttentionReason::UnknownServerApplicability(
             path.to_string_lossy().into_owned(),
         ));
+    }
+}
+
+/// A partial change to a server's network settings.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServerNetworkChange {
+    pub online_mode: Option<bool>,
+    pub access: Option<NetworkAccess>,
+    pub port: Option<u16>,
+    /// Requires the resulting access to be [`NetworkAccess::Custom`].
+    pub bind_address: Option<String>,
+}
+
+impl ServerNetworkChange {
+    fn applied_to(&self, current: &ServerNetworkSettings) -> CoreResult<ServerNetworkSettings> {
+        let access = self.access.unwrap_or(current.access);
+        let bind_address = match (access, &self.bind_address) {
+            (NetworkAccess::Custom, Some(address)) => Some(address.clone()),
+            (NetworkAccess::Custom, None) => current.bind_address.clone(),
+            (_, Some(_)) => {
+                return Err(ephervex_server::ServerError::InvalidProperty {
+                    key: "server-ip".to_owned(),
+                    reason: "a bind address requires custom access",
+                }
+                .into());
+            }
+            (_, None) => None,
+        };
+        Ok(ServerNetworkSettings {
+            online_mode: self.online_mode.unwrap_or(current.online_mode),
+            access,
+            port: self.port.unwrap_or(current.port),
+            bind_address,
+        })
     }
 }
 
@@ -1950,6 +2004,116 @@ mod tests {
         let indexed = app.server(server.id).expect("indexed recovery copy");
         assert_eq!(indexed.java_override, Some(java_override));
         assert_eq!(indexed.jvm_override, Some(jvm_override));
+    }
+
+    #[test]
+    fn partial_network_change_keeps_unspecified_settings() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let server = app
+            .registry_for_services()
+            .create_server(NewServer::new(
+                "partial network",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("scaffold");
+        app.set_server_network(
+            server.id,
+            ServerNetworkSettings {
+                online_mode: true,
+                access: NetworkAccess::Lan,
+                port: 25_570,
+                bind_address: None,
+            },
+        )
+        .expect("initial network");
+
+        let committed = app
+            .update_server_network(
+                server.id,
+                &ServerNetworkChange {
+                    port: Some(25_571),
+                    ..ServerNetworkChange::default()
+                },
+            )
+            .expect("port-only change");
+        assert_eq!(
+            committed.record.network,
+            ServerNetworkSettings {
+                online_mode: true,
+                access: NetworkAccess::Lan,
+                port: 25_571,
+                bind_address: None,
+            }
+        );
+        let properties = std::fs::read_to_string(server_properties_path(&committed.record))
+            .expect("properties file");
+        assert!(properties.contains("online-mode=true"));
+        assert!(properties.contains("server-port=25571"));
+
+        let committed = app
+            .update_server_network(
+                server.id,
+                &ServerNetworkChange {
+                    online_mode: Some(false),
+                    ..ServerNetworkChange::default()
+                },
+            )
+            .expect("online mode off");
+        assert!(!committed.record.network.online_mode);
+        assert_eq!(committed.record.network.access, NetworkAccess::Lan);
+        assert_eq!(committed.record.network.port, 25_571);
+    }
+
+    #[test]
+    fn partial_network_change_resolves_the_custom_bind_address() {
+        let custom = ServerNetworkSettings {
+            online_mode: true,
+            access: NetworkAccess::Custom,
+            port: 25_565,
+            bind_address: Some("192.168.1.5".to_owned()),
+        };
+
+        let port_only = ServerNetworkChange {
+            port: Some(25_600),
+            ..ServerNetworkChange::default()
+        };
+        assert_eq!(
+            port_only.applied_to(&custom).expect("port").bind_address,
+            custom.bind_address
+        );
+
+        let leave_custom = ServerNetworkChange {
+            access: Some(NetworkAccess::Localhost),
+            ..ServerNetworkChange::default()
+        };
+        assert_eq!(
+            leave_custom
+                .applied_to(&custom)
+                .expect("localhost")
+                .bind_address,
+            None
+        );
+
+        let address_without_custom = ServerNetworkChange {
+            bind_address: Some("10.0.0.1".to_owned()),
+            ..ServerNetworkChange::default()
+        };
+        assert!(
+            address_without_custom
+                .applied_to(&ServerNetworkSettings::default())
+                .is_err()
+        );
+
+        let custom_without_address = ServerNetworkChange {
+            access: Some(NetworkAccess::Custom),
+            ..ServerNetworkChange::default()
+        };
+        let applied = custom_without_address
+            .applied_to(&ServerNetworkSettings::default())
+            .expect("applies");
+        assert!(network_properties(&applied).is_err());
     }
 
     #[test]
