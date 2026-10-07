@@ -47,7 +47,10 @@ reformatted, or truncated, so the archive shows what the user's disk showed.
 **Local.** The archive is written to a path the user named. Ephervex never
 uploads it, never integrates a paste service or sharing API, and contacts no
 network while planning or exporting a bundle. Where it goes afterwards is the
-user's decision.
+user's decision. The archive is staged beside that path and renamed into place only
+when complete, and a path that is itself one of the files on offer is refused, so
+an export never leaves a truncated archive or destroys the diagnostics it was
+meant to carry.
 
 **What Ephervex does not contribute.** The planner offers only files from the
 scope's diagnostic directories (ADR 0016) and, for a client, its retained

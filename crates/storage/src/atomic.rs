@@ -71,6 +71,13 @@ pub fn sync_parent(path: &Path) -> io::Result<()> {
     let Some(parent) = path.parent() else {
         return Ok(());
     };
+    // A bare file name has the empty path as its parent, which means the
+    // current directory but cannot be opened.
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
     File::open(parent)?.sync_all()
 }
 
@@ -107,6 +114,18 @@ mod tests {
             1,
             "only the original destination remains"
         );
+    }
+
+    #[test]
+    fn a_bare_file_name_is_published_in_the_current_directory() {
+        let name = PathBuf::from(format!("atomic-bare-name-{}.tmp", uuid::Uuid::new_v4()));
+
+        let result = write_bytes_atomic(&name, b"new", AtomicWriteOptions::default());
+        let written = std::fs::read(&name);
+        let _ = std::fs::remove_file(&name);
+
+        result.expect("a bare file name needs no directory part");
+        assert_eq!(written.expect("read file"), b"new");
     }
 
     #[test]

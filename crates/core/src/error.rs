@@ -353,6 +353,10 @@ pub enum CoreError {
     #[error("a diagnostic bundle could not be written to `{}`", path.display())]
     DiagnosticBundleNotWritten { path: PathBuf, detail: String },
 
+    /// The destination of a diagnostic bundle is one of the files it collects.
+    #[error("`{}` is a diagnostic file, so a bundle cannot be written over it", path.display())]
+    DiagnosticBundleOverwritesSource { path: PathBuf },
+
     /// Copying a jar into `mods/` failed part-way.
     ///
     /// The staged copy is discarded, so `mods/` never holds the half of a file
@@ -506,6 +510,9 @@ impl CoreError {
             Self::ModNotHandPlaced { .. } => "error-mod-not-hand-placed",
             Self::ModFileNotDeleted { .. } => "error-mod-file-not-deleted",
             Self::DiagnosticBundleNotWritten { .. } => "error-diagnostic-bundle-not-written",
+            Self::DiagnosticBundleOverwritesSource { .. } => {
+                "error-diagnostic-bundle-overwrites-source"
+            }
             Self::ModFileNotAdded { .. } => "error-mod-file-not-added",
             Self::EntityNameInvalid { reason } => reason.message_id(),
             Self::RepairRefused { reason } => reason.message_id(),
@@ -691,6 +698,7 @@ impl CoreError {
             | Self::ArtifactCache(_)
             | Self::ArtifactCacheLimitInvalid(_)
             | Self::DiagnosticBundleNotWritten { .. }
+            | Self::DiagnosticBundleOverwritesSource { .. }
             | Self::JavaSettingsInvalid { .. }
             | Self::Minecraft(_)
             | Self::Loader(_)
@@ -779,7 +787,8 @@ impl CoreError {
             | Self::ModFileNotDeleted { path, .. }
             | Self::ModFileNotAdded { path, .. }
             | Self::ModIdentityIncomplete { path }
-            | Self::DiagnosticBundleNotWritten { path, .. } => Some(path.clone()),
+            | Self::DiagnosticBundleNotWritten { path, .. }
+            | Self::DiagnosticBundleOverwritesSource { path } => Some(path.clone()),
             Self::ArtifactCache(error) => error.failing_path(),
             Self::Auth(_)
             | Self::ArtifactCacheLimitInvalid(_)

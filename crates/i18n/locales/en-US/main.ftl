@@ -917,6 +917,8 @@ error-mod-not-hand-placed = Ephervex installed that mod, so it is removed rather
 error-mod-file-not-deleted = That mod's file could not be deleted. Check that the mods folder is writable.
 error-diagnostic-bundle-not-written = The diagnostic bundle could not be written.
     .action = Check that there is room and that you can write to { $path }.
+error-diagnostic-bundle-overwrites-source = The bundle cannot be written over one of the diagnostic files it collects.
+    .action = Choose a different file for the bundle than { $path }.
 error-mod-file-not-added = That file could not be copied into the mods folder. Check that there is room and that the folder is writable.
 
 error-repair-host-running = This host cannot be repaired while it is running.

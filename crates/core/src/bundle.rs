@@ -26,6 +26,7 @@
 //! that silently omitted something would be worse than one that says it did.
 
 use std::io::Write as _;
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 
 use tracing::{info, instrument, warn};
@@ -199,6 +200,11 @@ impl App {
     /// Every file goes in byte for byte. A part that cannot be read is reported
     /// and the rest of the archive is still written, because a report missing
     /// one rotated log is worth more than no report.
+    ///
+    /// The archive is published only once it is complete, so a failed write
+    /// never leaves a truncated zip at `destination`. A destination that is one
+    /// of the files on offer is refused: replacing it would destroy the very
+    /// diagnostics the bundle exists to carry.
     #[instrument(skip(self, selection), fields(destination = %destination.display()))]
     pub fn export_diagnostic_bundle(
         &self,
@@ -207,20 +213,15 @@ impl App {
         destination: &Path,
     ) -> CoreResult<BundleReport> {
         let contents = self.plan_diagnostic_bundle(scope)?;
+        if names_an_offered_part(destination, &contents.parts) {
+            return Err(CoreError::DiagnosticBundleOverwritesSource {
+                path: destination.to_path_buf(),
+            });
+        }
         let (chosen, omitted): (Vec<&BundlePart>, Vec<&BundlePart>) = contents
             .parts
             .iter()
             .partition(|part| selection.includes(&part.name));
-
-        let file = std::fs::File::create(destination).map_err(|source| {
-            CoreError::DiagnosticBundleNotWritten {
-                path: destination.to_path_buf(),
-                detail: source.to_string(),
-            }
-        })?;
-        let mut archive = zip::ZipWriter::new(file);
-        let options =
-            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
         let mut included = Vec::new();
         // Something asked for that no longer exists. A log rotates away
@@ -232,30 +233,35 @@ impl App {
             .filter(|name| !contents.parts.iter().any(|part| &&part.name == name))
             .cloned()
             .collect();
-        for part in &chosen {
-            match std::fs::read(&part.path) {
-                Ok(bytes) => {
-                    if write_entry(&mut archive, &part.name, &bytes, options).is_err() {
-                        unreadable.push(part.name.clone());
-                        continue;
+        ephervex_storage::write_atomic(
+            destination,
+            ephervex_storage::AtomicWriteOptions::default(),
+            |file| {
+                let mut archive = zip::ZipWriter::new(file);
+                let options = SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Deflated);
+                for part in &chosen {
+                    match std::fs::read(&part.path) {
+                        Ok(bytes) => {
+                            write_entry(&mut archive, &part.name, &bytes, options)?;
+                            included.push(part.name.clone());
+                        }
+                        Err(error) => {
+                            warn!(%error, part = %part.name, "a diagnostic file could not be read");
+                            unreadable.push(part.name.clone());
+                        }
                     }
-                    included.push(part.name.clone());
                 }
-                Err(error) => {
-                    warn!(%error, part = %part.name, "a diagnostic file could not be read");
-                    unreadable.push(part.name.clone());
-                }
-            }
-        }
 
-        let manifest = manifest(scope, &included, &omitted, &unreadable);
-        let _ = write_entry(&mut archive, "bundle.txt", manifest.as_bytes(), options);
-        archive
-            .finish()
-            .map_err(|source| CoreError::DiagnosticBundleNotWritten {
-                path: destination.to_path_buf(),
-                detail: source.to_string(),
-            })?;
+                let manifest = manifest(scope, &included, &omitted, &unreadable);
+                write_entry(&mut archive, "bundle.txt", manifest.as_bytes(), options)?;
+                archive.finish().map(drop).map_err(std::io::Error::other)
+            },
+        )
+        .map_err(|source| CoreError::DiagnosticBundleNotWritten {
+            path: destination.to_path_buf(),
+            detail: source.to_string(),
+        })?;
 
         let bytes = std::fs::metadata(destination).map_or(0, |data| data.len());
         info!(
@@ -275,8 +281,20 @@ impl App {
     }
 }
 
-fn write_entry(
-    archive: &mut zip::ZipWriter<std::fs::File>,
+/// Whether `destination` is the same file as any part on offer, whether it is
+/// named directly, through a link, or by a second name for the same inode.
+fn names_an_offered_part(destination: &Path, parts: &[BundlePart]) -> bool {
+    let Ok(target) = std::fs::metadata(destination) else {
+        return false;
+    };
+    parts.iter().any(|part| {
+        std::fs::metadata(&part.path)
+            .is_ok_and(|source| source.dev() == target.dev() && source.ino() == target.ino())
+    })
+}
+
+fn write_entry<W: std::io::Write + std::io::Seek>(
+    archive: &mut zip::ZipWriter<W>,
     name: &str,
     bytes: &[u8],
     options: SimpleFileOptions,
@@ -534,5 +552,144 @@ mod tests {
         assert_eq!(report.unreadable, [vanishing.name.as_str()]);
         assert!(!report.included.is_empty(), "the rest was still written");
         assert!(read_entry(&archive, "bundle.txt").contains("could not be read"));
+    }
+
+    fn part_path(app: &App, scope: DiagnosticScope, name: &str) -> PathBuf {
+        app.plan_diagnostic_bundle(scope)
+            .expect("plan")
+            .parts
+            .into_iter()
+            .find(|part| part.name == name)
+            .expect("the part is offered")
+            .path
+    }
+
+    fn assert_refused_and_untouched(
+        app: &App,
+        scope: DiagnosticScope,
+        destination: &Path,
+        source: &Path,
+    ) {
+        let before = std::fs::read(source).expect("read source");
+        let directory = destination.parent().expect("parent");
+        let listing = |path: &Path| {
+            let mut names: Vec<_> = std::fs::read_dir(path)
+                .expect("list")
+                .map(|entry| entry.expect("entry").file_name())
+                .collect();
+            names.sort();
+            names
+        };
+        let siblings = listing(directory);
+
+        let contents = app.plan_diagnostic_bundle(scope).expect("plan");
+        let error = app
+            .export_diagnostic_bundle(scope, &contents.everything(), destination)
+            .expect_err("a source file is never the destination");
+
+        assert!(
+            matches!(error, CoreError::DiagnosticBundleOverwritesSource { .. }),
+            "{error:?}"
+        );
+        assert_eq!(std::fs::read(source).expect("read source"), before);
+        assert_eq!(
+            listing(directory),
+            siblings,
+            "no staging file is left behind"
+        );
+    }
+
+    #[test]
+    fn a_bundle_is_refused_when_its_destination_is_a_chosen_source() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, scope) = instance(base.path());
+        let log = part_path(&app, scope, "logs/latest.log");
+
+        assert_refused_and_untouched(&app, scope, &log, &log);
+        assert_eq!(std::fs::read(&log).expect("read"), b"a game log");
+    }
+
+    #[test]
+    fn a_bundle_is_refused_when_its_destination_reaches_a_source_through_a_link() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, scope) = instance(base.path());
+        let log = part_path(&app, scope, "logs/latest.log");
+        let symlink = base.path().join("link.zip");
+        std::os::unix::fs::symlink(&log, &symlink).expect("symlink");
+        let hard_link = base.path().join("hard.zip");
+        std::fs::hard_link(&log, &hard_link).expect("hard link");
+
+        assert_refused_and_untouched(&app, scope, &symlink, &log);
+        assert_refused_and_untouched(&app, scope, &hard_link, &log);
+    }
+
+    #[test]
+    fn a_bundle_is_refused_over_an_offered_file_that_was_not_chosen() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, scope) = instance(base.path());
+        let log = part_path(&app, scope, "logs/latest.log");
+        let only_the_crash = BundleSelection {
+            names: vec!["crash-reports/crash-2026-01-01.txt".to_owned()],
+        };
+
+        let error = app
+            .export_diagnostic_bundle(scope, &only_the_crash, &log)
+            .expect_err("an offered file is never the destination");
+
+        assert!(matches!(
+            error,
+            CoreError::DiagnosticBundleOverwritesSource { .. }
+        ));
+        assert_eq!(std::fs::read(&log).expect("read"), b"a game log");
+    }
+
+    #[test]
+    fn a_bundle_replaces_an_unrelated_existing_file() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, scope) = instance(base.path());
+        let contents = app.plan_diagnostic_bundle(scope).expect("plan");
+        let archive = base.path().join("bundle.zip");
+        std::fs::write(&archive, b"an earlier bundle").expect("seed");
+
+        app.export_diagnostic_bundle(scope, &contents.everything(), &archive)
+            .expect("export");
+
+        assert_eq!(read_entry(&archive, "logs/latest.log"), "a game log");
+    }
+
+    #[test]
+    fn a_failed_publication_leaves_neither_a_partial_archive_nor_a_staging_file() {
+        // A directory cannot be replaced by a file, so the archive is fully
+        // written to its staging name and publication is what fails.
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, scope) = instance(base.path());
+        let contents = app.plan_diagnostic_bundle(scope).expect("plan");
+        let blocked = base.path().join("out");
+        std::fs::create_dir(&blocked).expect("directory");
+
+        let error = app
+            .export_diagnostic_bundle(scope, &contents.everything(), &blocked)
+            .expect_err("the destination cannot be replaced");
+
+        assert!(matches!(
+            error,
+            CoreError::DiagnosticBundleNotWritten { .. }
+        ));
+        assert!(blocked.is_dir());
+        assert_eq!(
+            std::fs::read_dir(base.path())
+                .expect("list")
+                .filter(|entry| {
+                    entry
+                        .as_ref()
+                        .expect("entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .contains(".tmp.")
+                })
+                .count(),
+            0,
+            "the staging file is removed"
+        );
     }
 }
