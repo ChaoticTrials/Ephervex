@@ -112,22 +112,10 @@ pub fn build_single_origin_client(
     config: &HttpConfig,
     origin: &Url,
 ) -> Result<Client, DownloadError> {
-    let permitted = origin.origin();
+    let origin = origin.clone();
     let max_redirects = config.max_redirects;
     let policy = redirect::Policy::custom(move |attempt| {
-        if attempt.url().origin() != permitted {
-            // The address, never its query string: a redirect target can carry
-            // a signed token, and this line exists to explain a refusal.
-            warn!(
-                target = %redacted(attempt.url()),
-                "refusing to follow an authenticated request off its own origin"
-            );
-            return attempt.stop();
-        }
-        if attempt.previous().len() >= max_redirects {
-            return attempt.error(TooManyRedirects);
-        }
-        attempt.follow()
+        follow_within_origin(attempt, &origin, max_redirects)
     });
 
     Client::builder()
@@ -138,6 +126,58 @@ pub fn build_single_origin_client(
         .read_timeout(config.read_timeout)
         .build()
         .map_err(|source| DownloadError::ClientBuild { source })
+}
+
+/// Builds a client that will not follow a redirect off the origin each request
+/// was first sent to.
+///
+/// For callers that send credentials in a request *body* to several origins
+/// with one client. A `307` or `308` redirect replays the method and body, so
+/// following one to another origin would hand the credential to whoever the
+/// response named; `reqwest` only drops the headers it knows are sensitive.
+///
+/// A redirect that leaves the request's origin is stopped, and the caller
+/// receives the `3xx` response itself. Redirects within the origin are still
+/// followed, bounded by [`HttpConfig::max_redirects`].
+pub fn build_origin_contained_client(config: &HttpConfig) -> Result<Client, DownloadError> {
+    let max_redirects = config.max_redirects;
+    let policy = redirect::Policy::custom(move |attempt| {
+        let Some(first) = attempt.previous().first().cloned() else {
+            return attempt.stop();
+        };
+        follow_within_origin(attempt, &first, max_redirects)
+    });
+
+    Client::builder()
+        .user_agent(config.user_agent.clone())
+        .https_only(!config.allow_plaintext_http)
+        .redirect(policy)
+        .connect_timeout(config.connect_timeout)
+        .read_timeout(config.read_timeout)
+        .build()
+        .map_err(|source| DownloadError::ClientBuild { source })
+}
+
+/// Follows a redirect only while it stays on `permitted`'s origin and within
+/// the redirect bound.
+fn follow_within_origin(
+    attempt: redirect::Attempt<'_>,
+    permitted: &Url,
+    max_redirects: usize,
+) -> redirect::Action {
+    if attempt.url().origin() != permitted.origin() {
+        // The address, never its query string: a redirect target can carry
+        // a signed token, and this line exists to explain a refusal.
+        warn!(
+            target = %redacted(attempt.url()),
+            "refusing to follow an authenticated request off its own origin"
+        );
+        return attempt.stop();
+    }
+    if attempt.previous().len() >= max_redirects {
+        return attempt.error(TooManyRedirects);
+    }
+    attempt.follow()
 }
 
 /// Builds a client that will not follow a redirect off an explicit host list.

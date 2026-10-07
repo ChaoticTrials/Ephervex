@@ -1286,6 +1286,12 @@ Configuration loading strips secret-shaped legacy keys, and saving refuses to
 serialize one. When a keyring is unavailable, Microsoft login can use an
 explicit memory-only session without weakening the persistent-storage rule.
 
+Authentication requests carry credentials in their bodies (authorization codes,
+refresh tokens, identity tokens), so the authentication client refuses to follow
+a redirect that leaves the origin a request was sent to. A `307` or `308` would
+otherwise replay the body to the other origin. The refusal surfaces as a failed
+sign-in or refresh.
+
 The CurseForge third-party API key follows the same rule and adds two of its
 own (ADR 0022). It is sent in an `x-api-key` header set per request rather than
 installed as a default header, and its client refuses to follow a redirect that

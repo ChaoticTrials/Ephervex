@@ -2,12 +2,14 @@
 //!
 //! # There is still only one HTTP client in the workspace
 //!
-//! `ephervex-download`'s [`build_client`] is what constructs it, so every
-//! request made here inherits the same rustls stack, bounded redirect policy,
-//! connect and read timeouts, and launcher `User-Agent` as every artifact
-//! download. A bare `reqwest::Client::new()` in this crate
-//! would opt out of all four at once, and the one that would go unnoticed
-//! longest is the redirect bound.
+//! `ephervex-download`'s [`build_origin_contained_client`] is what constructs
+//! it, so every request made here inherits the same rustls stack, connect and
+//! read timeouts, and launcher `User-Agent` as every artifact download. Its
+//! redirect policy is stricter than the ordinary client's: bounded, and never
+//! leaving the origin a request was sent to, because a `307` or `308` would
+//! replay a credential-carrying body there. A bare `reqwest::Client::new()` in
+//! this crate would opt out of all of it at once, and the redirect policy is the
+//! part that would go unnoticed longest.
 //!
 //! What this crate does *not* reuse is [`DownloadManager`], and the reason is
 //! shape rather than principle: that type exists to stream a body to a path,
@@ -17,7 +19,7 @@
 //! chain through it would mean writing OAuth tokens to disk in order to read
 //! them back, which would expose secrets in user-visible diagnostics.
 //!
-//! [`build_client`]: ephervex_download::build_client
+//! [`build_origin_contained_client`]: ephervex_download::build_origin_contained_client
 //! [`DownloadManager`]: ephervex_download::DownloadManager
 //!
 //! # Redaction is structural
@@ -48,9 +50,14 @@ use crate::stage::AuthStage;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Builds the HTTP client the chain uses.
+///
+/// Every request carries a credential in its body, so a redirect that leaves
+/// the origin the request was sent to is refused rather than replayed.
 pub fn build_client(config: &HttpConfig) -> AuthResult<Client> {
-    ephervex_download::build_client(config).map_err(|source| AuthError::ClientBuild {
-        source: Box::new(source),
+    ephervex_download::build_origin_contained_client(config).map_err(|source| {
+        AuthError::ClientBuild {
+            source: Box::new(source),
+        }
     })
 }
 

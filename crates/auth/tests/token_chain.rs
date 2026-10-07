@@ -639,6 +639,94 @@ async fn an_expired_refresh_token_asks_for_a_login_and_clears_the_dead_credentia
 }
 
 #[tokio::test]
+async fn a_cross_origin_redirect_never_replays_the_refresh_token_to_the_other_origin() {
+    for status in [307_u16, 308] {
+        let server = MockServer::start().await;
+        let elsewhere = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(TOKEN))
+            .mount(&elsewhere)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/consumers/oauth2/v2.0/token"))
+            .respond_with(ResponseTemplate::new(status).insert_header(
+                "location",
+                format!("{}/consumers/oauth2/v2.0/token", elsewhere.uri()),
+            ))
+            .mount(&server)
+            .await;
+        mount_chain(&server).await;
+
+        let store = Arc::new(MemoryStore::new());
+        store
+            .store(
+                &CredentialKey::MicrosoftRefreshToken(account()),
+                &SecretString::new("FAKE-MICROSOFT-REFRESH-TOKEN"),
+            )
+            .expect("seed a previous login");
+
+        let error = provider(&server, store)
+            .resume(
+                account(),
+                &AuthObserver::silent(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("a redirect off the origin is a failure, not a login");
+
+        assert!(
+            matches!(error, AuthError::HttpStatus { status: refused, .. } if refused == status),
+            "{status}: {error:?}"
+        );
+        assert!(
+            elsewhere
+                .received_requests()
+                .await
+                .expect("requests")
+                .is_empty(),
+            "{status}: the credential body must not reach another origin"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_redirect_that_stays_on_the_same_origin_is_still_followed() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/consumers/oauth2/v2.0/token"))
+        .respond_with(
+            ResponseTemplate::new(307)
+                .insert_header("location", format!("{}/token-moved", server.uri())),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/token-moved"))
+        .and(body_string_contains("grant_type=refresh_token"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(TOKEN_ROTATED))
+        .mount(&server)
+        .await;
+    mount_chain(&server).await;
+
+    let store = Arc::new(MemoryStore::new());
+    store
+        .store(
+            &CredentialKey::MicrosoftRefreshToken(account()),
+            &SecretString::new("FAKE-MICROSOFT-REFRESH-TOKEN"),
+        )
+        .expect("seed a previous login");
+
+    provider(&server, store)
+        .resume(
+            account(),
+            &AuthObserver::silent(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("a same-origin redirect reaches the host the credential was issued for");
+}
+
+#[tokio::test]
 async fn logging_out_removes_the_stored_credential() {
     let server = MockServer::start().await;
     let store = Arc::new(MemoryStore::new());
