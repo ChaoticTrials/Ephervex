@@ -1345,6 +1345,42 @@ impl Config {
             .any(|account| account.name.eq_ignore_ascii_case(name.trim()))
     }
 
+    /// Every open table that can hold an arbitrary key, with its dotted prefix.
+    ///
+    /// Both credential traversals read this list, so a new section cannot be
+    /// covered in one direction and missed in the other.
+    fn open_tables(&self) -> [(&toml::Table, &'static str); 9] {
+        [
+            (&self.unknown, ""),
+            (&self.java.unknown, "java"),
+            (&self.display.unknown, "display"),
+            (&self.server_defaults.unknown, "server_defaults"),
+            (&self.eula.unknown, "eula"),
+            // `[api]` is the table a hand edit is most likely to put a
+            // CurseForge key into, since that is where the settings screen
+            // shows the field.
+            (&self.api.unknown, "api"),
+            (&self.cache.unknown, "cache"),
+            (&self.mods.unknown, "mods"),
+            (&self.import.unknown, "import"),
+        ]
+    }
+
+    /// Mutable view of [`Self::open_tables`], in the same order.
+    fn open_tables_mut(&mut self) -> [(&mut toml::Table, &'static str); 9] {
+        [
+            (&mut self.unknown, ""),
+            (&mut self.java.unknown, "java"),
+            (&mut self.display.unknown, "display"),
+            (&mut self.server_defaults.unknown, "server_defaults"),
+            (&mut self.eula.unknown, "eula"),
+            (&mut self.api.unknown, "api"),
+            (&mut self.cache.unknown, "cache"),
+            (&mut self.mods.unknown, "mods"),
+            (&mut self.import.unknown, "import"),
+        ]
+    }
+
     /// Returns the dotted path of the first credential-looking key, if any.
     #[must_use]
     pub fn find_secret_looking_key(&self) -> Option<String> {
@@ -1352,23 +1388,10 @@ impl Config {
         // named field in this module was chosen deliberately and holds no
         // secret. Checking them anyway would flag a future `api_key_present`
         // boolean, which is exactly the non-secret metadata ADR 0004 allows.
-        find_secret_key(&self.unknown, "")
+        self.open_tables()
+            .into_iter()
+            .find_map(|(table, prefix)| find_secret_key(table, prefix))
             .map(|found| found.reported)
-            .or_else(|| find_secret_key(&self.java.unknown, "java").map(|found| found.reported))
-            .or_else(|| {
-                find_secret_key(&self.display.unknown, "display").map(|found| found.reported)
-            })
-            .or_else(|| {
-                find_secret_key(&self.server_defaults.unknown, "server_defaults")
-                    .map(|found| found.reported)
-            })
-            .or_else(|| find_secret_key(&self.eula.unknown, "eula").map(|found| found.reported))
-            // `[api]` is the table a hand edit is most likely to put a
-            // CurseForge key into, since that is where the settings screen
-            // shows the field.
-            .or_else(|| find_secret_key(&self.api.unknown, "api").map(|found| found.reported))
-            .or_else(|| find_secret_key(&self.cache.unknown, "cache").map(|found| found.reported))
-            .or_else(|| find_secret_key(&self.mods.unknown, "mods").map(|found| found.reported))
             .or_else(|| {
                 self.minecraft_preferences
                     .keys()
@@ -1404,16 +1427,7 @@ impl Config {
     }
 
     fn strip_secret_looking_keys(&mut self) {
-        for (table, prefix) in [
-            (&mut self.unknown, ""),
-            (&mut self.java.unknown, "java"),
-            (&mut self.display.unknown, "display"),
-            (&mut self.server_defaults.unknown, "server_defaults"),
-            (&mut self.eula.unknown, "eula"),
-            (&mut self.api.unknown, "api"),
-            (&mut self.cache.unknown, "cache"),
-            (&mut self.mods.unknown, "mods"),
-        ] {
+        for (table, prefix) in self.open_tables_mut() {
             while let Some(found) = find_secret_key(table, prefix) {
                 // The key can itself contain credential material, so neither
                 // the value nor the untrusted key is safe to log.
@@ -2595,6 +2609,56 @@ reference = ""
             config.to_toml_string(),
             Err(ConfigError::SecretRejected { .. })
         ));
+    }
+
+    #[test]
+    fn a_credential_hand_edited_into_the_import_table_is_dropped_on_load() {
+        let text = format!(
+            "{DEFAULT_CONFIG_EXAMPLE}\n[import]\ntrusted_pack_hosts = [\"cdn.example.com\"]\n\
+             api_key = \"FAKE_REVIEW_VALUE\"\n\
+             [import.nested]\naccess_token = \"FAKE_REVIEW_VALUE\"\n\
+             [[import.rows]]\nclient_secret = \"FAKE_REVIEW_VALUE\"\n"
+        );
+        let config = Config::from_toml_str(&text).expect("parse");
+        assert!(config.find_secret_looking_key().is_none());
+        assert!(!config.import.unknown.contains_key("api_key"));
+        assert!(
+            !config
+                .to_toml_string()
+                .expect("serialize")
+                .contains("FAKE_REVIEW_VALUE")
+        );
+        // The setting beside the dropped keys is untouched.
+        assert_eq!(config.import.trusted_pack_hosts, ["cdn.example.com"]);
+    }
+
+    #[test]
+    fn a_credential_shaped_key_under_import_is_refused_on_save() {
+        let mut config = Config::default();
+        config.import.unknown.insert(
+            "api_key".to_owned(),
+            toml::Value::String("FAKE_REVIEW_VALUE".to_owned()),
+        );
+        assert_eq!(
+            config.find_secret_looking_key().as_deref(),
+            Some("import.<redacted>")
+        );
+        assert!(matches!(
+            config.to_toml_string(),
+            Err(ConfigError::SecretRejected { .. })
+        ));
+    }
+
+    #[test]
+    fn ordinary_unknown_keys_under_import_survive_a_round_trip() {
+        let text = format!("{DEFAULT_CONFIG_EXAMPLE}\n[import]\nfuture_setting = \"kept\"\n");
+        let config = Config::from_toml_str(&text).expect("parse");
+        let written = config.to_toml_string().expect("serialize");
+        let reloaded = Config::from_toml_str(&written).expect("reparse");
+        assert_eq!(
+            reloaded.import.unknown.get("future_setting"),
+            Some(&toml::Value::String("kept".to_owned()))
+        );
     }
 
     #[test]
