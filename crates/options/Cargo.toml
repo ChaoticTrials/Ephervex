@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 ephervex-model.workspace = true
+ephervex-storage.workspace = true
 # The remote compatibility feed is an ordinary download: one HTTP policy, one
 # retry policy, one atomic metadata cache. A second fetch path here would opt
 # out of all three.

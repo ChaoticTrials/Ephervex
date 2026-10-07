@@ -23,6 +23,7 @@
 //! whatever it already had. Creating the instance is never blocked by any of
 //! them.
 
+use ephervex_storage::atomic::{AtomicWriteOptions, write_bytes_atomic};
 use std::path::{Path, PathBuf};
 
 use crate::catalog::MinecraftPreferenceCatalog;
@@ -608,8 +609,9 @@ fn read_options(path: &Path) -> Result<Option<ParsedOptions>, OptionsError> {
     }
 }
 
-/// Writes the options file through a temporary sibling, as everything else in
-/// this workspace that a user would hate to lose half of.
+/// Publishes the options file from a uniquely named, exclusively created
+/// sibling, so a link planted at a predictable staging name is never followed
+/// and concurrent writers never publish each other's bytes.
 fn write_options(path: &Path, text: &str) -> Result<(), OptionsError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|source| OptionsError::Unwritable {
@@ -618,14 +620,11 @@ fn write_options(path: &Path, text: &str) -> Result<(), OptionsError> {
         })?;
     }
 
-    let temporary = path.with_extension("txt.tmp");
-    std::fs::write(&temporary, text).map_err(|source| OptionsError::Unwritable {
-        path: temporary.clone(),
-        source,
-    })?;
-    std::fs::rename(&temporary, path).map_err(|source| OptionsError::Unwritable {
-        path: path.to_path_buf(),
-        source,
+    write_bytes_atomic(path, text.as_bytes(), AtomicWriteOptions::default()).map_err(|source| {
+        OptionsError::Unwritable {
+            path: path.to_path_buf(),
+            source,
+        }
     })
 }
 
@@ -901,7 +900,70 @@ mod tests {
 
         apply(&game, "1.20.1", &gui_scale_only());
         assert!(game.join(OPTIONS_FILE_NAME).is_file());
-        assert!(!game.join("options.txt.tmp").exists());
+        assert_eq!(
+            std::fs::read_dir(&game).expect("list").count(),
+            1,
+            "no staging file is left beside options.txt"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_the_old_staging_name_is_not_written_through() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let game = base.path().join("minecraft");
+        std::fs::create_dir(&game).expect("mkdir");
+        let victim = base.path().join("victim.txt");
+        std::fs::write(&victim, "untouched").expect("seed victim");
+        std::os::unix::fs::symlink(&victim, game.join("options.txt.tmp")).expect("plant link");
+
+        apply(&game, "1.20.1", &gui_scale_only());
+
+        assert_eq!(std::fs::read_to_string(&victim).expect("read"), "untouched");
+        let options = game.join(OPTIONS_FILE_NAME);
+        assert!(
+            !std::fs::symlink_metadata(&options)
+                .expect("metadata")
+                .file_type()
+                .is_symlink(),
+            "options.txt is a regular file"
+        );
+        assert!(
+            std::fs::read_to_string(&options)
+                .expect("read")
+                .contains("guiScale")
+        );
+    }
+
+    #[test]
+    fn a_foreign_staging_file_is_neither_adopted_nor_removed() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let game = base.path().to_path_buf();
+        let foreign = game.join("options.txt.tmp");
+        std::fs::write(&foreign, "another writer's bytes").expect("seed foreign staging");
+
+        apply(&game, "1.20.1", &gui_scale_only());
+
+        assert_eq!(
+            std::fs::read_to_string(&foreign).expect("read"),
+            "another writer's bytes"
+        );
+        let options = std::fs::read_to_string(game.join(OPTIONS_FILE_NAME)).expect("read");
+        assert!(!options.contains("another writer"));
+    }
+
+    #[test]
+    fn a_failed_publication_leaves_no_staging_file_behind() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let game = base.path().to_path_buf();
+        // A directory at the destination makes the final rename fail.
+        std::fs::create_dir(game.join(OPTIONS_FILE_NAME)).expect("mkdir");
+        std::fs::write(game.join(OPTIONS_FILE_NAME).join("keep"), "x").expect("seed");
+
+        let error =
+            write_options(&game.join(OPTIONS_FILE_NAME), "k:v\n").expect_err("publication fails");
+        assert!(matches!(error, OptionsError::Unwritable { .. }));
+        assert_eq!(std::fs::read_dir(&game).expect("list").count(), 1);
     }
 
     #[test]

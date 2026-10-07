@@ -1899,6 +1899,7 @@ version = "0.10.0"
 dependencies = [
  "ephervex-download",
  "ephervex-model",
+ "ephervex-storage",
  "reqwest",
  "serde",
  "serde_json",
