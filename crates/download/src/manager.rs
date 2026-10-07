@@ -41,8 +41,9 @@ use crate::cache::PART_SUFFIX;
 use crate::client::{HttpConfig, build_allowlisted_client, build_client};
 use crate::error::{ArtifactStep, AttemptFailure, BatchDownloadError, DownloadError};
 use crate::progress::{ByteTally, OperationReporter};
+use crate::publication::{Discard, discard_unless_replaced, rename_into_place};
 use crate::retry::{RetryPolicy, retry_after};
-use crate::verify::{HashVerifier, stored_file_matches_until};
+use crate::verify::{HashVerifier, StoredFileState, inspect_stored_file};
 
 /// The longest filename Ephervex generates for its own scratch files.
 ///
@@ -1102,7 +1103,7 @@ impl Transfer<'_, '_> {
             .into());
         }
 
-        fs::rename(self.part, &self.request.destination)
+        rename_into_place(self.part, &self.request.destination)
             .await
             .map_err(|source| {
                 DownloadError::io(ArtifactStep::Publish, &self.request.destination, source)
@@ -1189,52 +1190,62 @@ async fn already_cached(
     Ok(cached)
 }
 
-/// Revalidates whatever is at a request's destination with
-/// [`stored_file_matches_until`], discarding it unless it is the artifact the
-/// request describes. A cache path whose contents do not match the request is
-/// worse than an empty one: the atomicity invariant entitles the rest of the
-/// launcher to treat presence as proof.
+/// The most times one revalidation starts over because another process
+/// published a different file while the previous one was being judged.
+const REVALIDATION_ATTEMPTS: usize = 4;
+
+/// Revalidates whatever is at a request's destination, discarding it unless it
+/// is the artifact the request describes. A cache path whose contents do not
+/// match the request is worse than an empty one: the atomicity invariant
+/// entitles the rest of the launcher to treat presence as proof.
+///
+/// A discard only removes the file that was judged. If another process has
+/// published a different file since, that file is judged instead, because it
+/// may be the verified artifact its own caller was just handed.
 async fn revalidate_cached(
     request: &DownloadRequest,
     cancel: Option<&CancellationToken>,
 ) -> Result<Option<DownloadOutcome>, DownloadError> {
     let destination = &request.destination;
-    let metadata = match fs::symlink_metadata(destination).await {
-        Ok(metadata) if metadata.is_file() => metadata,
-        Ok(_) => return Ok(None),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => {
-            return Err(DownloadError::io(
-                ArtifactStep::ReadCached,
-                destination,
-                source,
-            ));
+    for _ in 0..REVALIDATION_ATTEMPTS {
+        let stored = match inspect_stored_file(
+            destination,
+            request.expected_size,
+            &request.expected_hashes,
+            cancel,
+        )
+        .await?
+        {
+            StoredFileState::Missing => return Ok(None),
+            StoredFileState::Canceled => {
+                return Err(DownloadError::Canceled {
+                    url: redacted(&request.url),
+                });
+            }
+            StoredFileState::Present(stored) => stored,
+        };
+        if stored.matches {
+            return Ok(Some(DownloadOutcome {
+                path: destination.clone(),
+                bytes: stored.len,
+                source: ArtifactSource::AlreadyCached,
+            }));
         }
-    };
-    let bytes = metadata.len();
-    let matches = stored_file_matches_until(
-        destination,
-        request.expected_size,
-        &request.expected_hashes,
-        cancel,
-    )
-    .await?
-    .ok_or_else(|| DownloadError::Canceled {
-        url: redacted(&request.url),
-    })?;
-    if !matches {
-        warn!(path = %destination.display(), "discarding a cache entry that does not match its request");
-        fs::remove_file(destination)
+        warn!(path = %destination.display(), "cache entry does not match its request");
+        // Without an identity the entry cannot be told apart from a later
+        // publication, so it is left for the next publication to replace.
+        let Some(identity) = stored.identity else {
+            return Ok(None);
+        };
+        // `stored` stays open across the discard, which keeps the inode unique.
+        let discard = discard_unless_replaced(destination, identity)
             .await
             .map_err(|source| DownloadError::io(ArtifactStep::ReadCached, destination, source))?;
-        return Ok(None);
+        if discard == Discard::Removed {
+            return Ok(None);
+        }
     }
-
-    Ok(Some(DownloadOutcome {
-        path: destination.clone(),
-        bytes,
-        source: ArtifactSource::AlreadyCached,
-    }))
+    Ok(None)
 }
 
 /// A unique partial sibling in the destination's own directory.
@@ -1412,7 +1423,7 @@ pub fn staging_path(destination: &Path) -> PathBuf {
 /// `destination`, so a crash can never leave a renamed-but-empty file there.
 pub async fn publish_staged(staged: &Path, destination: &Path) -> std::io::Result<()> {
     File::open(staged).await?.sync_all().await?;
-    fs::rename(staged, destination).await?;
+    rename_into_place(staged, destination).await?;
     sync_parent_directory(destination).await;
     Ok(())
 }

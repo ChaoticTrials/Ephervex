@@ -18,6 +18,7 @@ use tokio::io::AsyncReadExt as _;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{ArtifactStep, DownloadError};
+use crate::publication::FileIdentity;
 
 /// A verified expectation that was not met.
 ///
@@ -165,6 +166,19 @@ async fn hashes_match_until(
     let mut file = File::open(path)
         .await
         .map_err(|source| DownloadError::io(ArtifactStep::ReadCached, path, source))?;
+    hash_open_file_until(&mut file, path, expected, cancel).await
+}
+
+/// Hashes an already open file from its current position.
+async fn hash_open_file_until(
+    file: &mut File,
+    path: &Path,
+    expected: &[Hash],
+    cancel: Option<&CancellationToken>,
+) -> Result<Option<bool>, DownloadError> {
+    if expected.is_empty() {
+        return Ok(Some(true));
+    }
     let mut verifier = HashVerifier::new(expected);
     let mut buffer = vec![0; 64 * 1024];
     loop {
@@ -209,15 +223,76 @@ pub(crate) async fn stored_file_matches_until(
     expected: &[Hash],
     cancel: Option<&CancellationToken>,
 ) -> Result<Option<bool>, DownloadError> {
-    let metadata = match tokio::fs::symlink_metadata(path).await {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Some(false)),
-        Err(source) => return Err(DownloadError::io(ArtifactStep::ReadCached, path, source)),
-    };
-    if !metadata.is_file() || expected_size.is_some_and(|size| size != metadata.len()) {
-        return Ok(Some(false));
+    Ok(
+        match inspect_stored_file(path, expected_size, expected, cancel).await? {
+            StoredFileState::Missing => Some(false),
+            StoredFileState::Canceled => None,
+            StoredFileState::Present(stored) => Some(stored.matches),
+        },
+    )
+}
+
+/// A regular file at a stored path, judged against a request.
+///
+/// The verdict describes exactly the file `_pin` has open. Keeping the handle
+/// pins its inode, so `identity` stays unique to this file until the caller
+/// is done acting on the verdict.
+pub(crate) struct StoredFile {
+    _pin: File,
+    pub(crate) identity: Option<FileIdentity>,
+    pub(crate) len: u64,
+    pub(crate) matches: bool,
+}
+
+pub(crate) enum StoredFileState {
+    /// Nothing at the path, or something that is not a regular file.
+    Missing,
+    Canceled,
+    Present(StoredFile),
+}
+
+/// Opens a stored file once and checks its size and digests against that handle.
+pub(crate) async fn inspect_stored_file(
+    path: &Path,
+    expected_size: Option<u64>,
+    expected: &[Hash],
+    cancel: Option<&CancellationToken>,
+) -> Result<StoredFileState, DownloadError> {
+    let unreadable = |source| DownloadError::io(ArtifactStep::ReadCached, path, source);
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return Ok(StoredFileState::Missing),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(StoredFileState::Missing);
+        }
+        Err(source) => return Err(unreadable(source)),
     }
-    hashes_match_until(path, expected, cancel).await
+    let mut file = match File::open(path).await {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(StoredFileState::Missing);
+        }
+        Err(source) => return Err(unreadable(source)),
+    };
+    let metadata = file.metadata().await.map_err(unreadable)?;
+    if !metadata.is_file() {
+        return Ok(StoredFileState::Missing);
+    }
+    let len = metadata.len();
+    let matches = if expected_size.is_some_and(|size| size != len) {
+        false
+    } else {
+        match hash_open_file_until(&mut file, path, expected, cancel).await? {
+            Some(matches) => matches,
+            None => return Ok(StoredFileState::Canceled),
+        }
+    };
+    Ok(StoredFileState::Present(StoredFile {
+        _pin: file,
+        identity: FileIdentity::of(&metadata),
+        len,
+        matches,
+    }))
 }
 
 /// Computes one digest of a file already on disk.

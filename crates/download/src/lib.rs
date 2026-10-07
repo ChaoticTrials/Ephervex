@@ -63,6 +63,7 @@ pub mod error;
 pub mod manager;
 pub mod metadata;
 pub mod progress;
+mod publication;
 pub mod retry;
 pub mod verify;
 
