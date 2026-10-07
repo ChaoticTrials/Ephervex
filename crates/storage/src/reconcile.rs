@@ -490,6 +490,11 @@ fn reconcile_server(
 }
 
 /// Reconciles a server whose files are standing at `record.root`.
+///
+/// Servers follow the same rules as [`reconcile_present_client`]: canonical
+/// metadata wins over the index, except that a newer `MissingRoot` row is the
+/// later state and a root with an unresolved restore holds a snapshot's copy,
+/// which is never adopted.
 fn reconcile_present_server(
     registry: &Registry,
     mut record: ServerRecord,
@@ -497,19 +502,53 @@ fn reconcile_present_server(
     report: &mut ReconciliationReport,
 ) -> Result<(), RegistryError> {
     let entry = server_entry(&record);
-    if idle {
-        let _ = recover_restore_state(&record.root, &entry, report);
-    }
+    let recovery = if idle {
+        recover_restore_state(&record.root, &entry, report)
+    } else {
+        RestoreRecovery::Unknown
+    };
+    let restore_unresolved = matches!(recovery, RestoreRecovery::Failed | RestoreRecovery::Unknown)
+        || metadata::is_incomplete(&record.root);
 
+    let mut adopted = false;
     match metadata::read_server_metadata(&record.root) {
         Ok(mut canonical) if canonical.id == record.id => {
-            canonical.root.clone_from(&record.root);
-            if canonical != record {
-                metadata::write_server_metadata(&record.root, &canonical)?;
-                registry.synchronize_server_index(&canonical)?;
-                report.index_repaired.push(server_entry(&canonical));
+            if restore_unresolved {
+                if metadata::is_incomplete(&record.root) {
+                    report.persistence_unhealthy.push(entry);
+                }
+            } else if canonical.storage == StorageClass::Temporary
+                && record.root
+                    != registry
+                        .paths()
+                        .server_root(StorageClass::Temporary, record.id)
+            {
+                // A storage class that contradicts where the files are would
+                // make the next pass forget the record.
+                report.persistence_unhealthy.push(entry);
+                return Ok(());
+            } else {
+                let recorded_root_differs = canonical.root != record.root;
+                canonical.root.clone_from(&record.root);
+                let index_is_newer = record.attention.contains(&AttentionReason::MissingRoot)
+                    && record.updated_at > canonical.updated_at;
+                if index_is_newer {
+                    adopted = true;
+                } else {
+                    if record.attention.contains(&AttentionReason::MissingRoot) {
+                        canonical.add_attention(AttentionReason::MissingRoot);
+                    }
+                    if canonical != record {
+                        if recorded_root_differs {
+                            metadata::write_server_metadata(&record.root, &canonical)?;
+                        }
+                        registry.synchronize_server_index(&canonical)?;
+                        report.index_repaired.push(server_entry(&canonical));
+                    }
+                    record = canonical;
+                    adopted = true;
+                }
             }
-            record = canonical;
         }
         Ok(_) | Err(_) => {
             tracing::warn!(
@@ -533,7 +572,13 @@ fn reconcile_present_server(
     let entry = server_entry(&record);
     changed |= report_interrupted_state(&record.root, &mut record.attention, &entry, report);
     if changed {
-        registry.update_server(&mut record)?;
+        if adopted {
+            registry.update_server(&mut record)?;
+        } else {
+            // The files under this root are not canonical metadata, so only
+            // the index records the new attention.
+            registry.synchronize_server_index(&record)?;
+        }
     }
     Ok(())
 }
@@ -679,7 +724,28 @@ fn reindex_orphaned_servers(
             continue;
         }
         let directory = roots.remove(0);
-        let mut record = metadata::read_server_metadata(&directory)?;
+
+        // An indexed root was reconciled, with its restore recovered, by the
+        // pass over the index.
+        if indexed
+            .iter()
+            .any(|record| record.id == id && record.root == directory)
+        {
+            continue;
+        }
+
+        // The host's claim is held until this root is dealt with. A restore or
+        // move still running owns the files, and one that was abandoned is
+        // recovered before anything is read from them.
+        let probe = registry.probe_host(RecordRef::Server(id));
+        if matches!(probe, HostProbe::Mutating) {
+            continue;
+        }
+        let Some(mut record) =
+            resolve_orphaned_server(id, &directory, matches!(probe, HostProbe::Idle(_)), report)
+        else {
+            continue;
+        };
 
         // Trust the directory that actually contains the metadata. Correct the
         // canonical file atomically before mirroring the index.
@@ -729,6 +795,59 @@ fn reindex_orphaned_servers(
     }
 
     Ok(())
+}
+
+/// Recovers the restore of a server directory the index has lost and returns
+/// its canonical metadata, or reports the directory and returns nothing.
+///
+/// Recovery rewrites canonical metadata, so it is read again afterward. A root
+/// whose restore is unresolved holds a snapshot's copy and possibly
+/// half-replaced contents. It is reported and left unindexed, and the index is
+/// never repaired from it.
+fn resolve_orphaned_server(
+    id: ServerId,
+    directory: &Path,
+    idle: bool,
+    report: &mut ReconciliationReport,
+) -> Option<ServerRecord> {
+    let discovered = metadata::read_server_metadata(directory).ok()?;
+    let entry = ReconciledRecord {
+        reference: RecordRef::Server(id),
+        name: discovered.name,
+        root: directory.to_path_buf(),
+        storage: StorageClass::Persistent,
+    };
+    let recovery = if idle {
+        recover_restore_state(directory, &entry, report)
+    } else if metadata::is_incomplete(directory) || has_interrupted_state(directory) {
+        RestoreRecovery::Unknown
+    } else {
+        // The claim could not be tried, but there is no restore to recover.
+        RestoreRecovery::Nothing
+    };
+
+    let Some(record) = metadata::read_server_metadata(directory)
+        .ok()
+        .filter(|record| record.id == id)
+    else {
+        report.persistence_unhealthy.push(entry);
+        return None;
+    };
+    if matches!(recovery, RestoreRecovery::Failed | RestoreRecovery::Unknown)
+        || metadata::is_incomplete(directory)
+    {
+        tracing::warn!(
+            server_id = %id,
+            path = %directory.display(),
+            "a server directory has an unresolved restore or was never finished; leaving it unindexed"
+        );
+        report.unfinished_instances.push(ReconciledRecord {
+            name: record.name,
+            ..entry
+        });
+        return None;
+    }
+    Some(record)
 }
 
 /// Whether a finished client instance with this id is standing at `root`.
@@ -1873,6 +1992,274 @@ mod tests {
         assert!(report.interrupted_hosts.is_empty());
         assert_eq!(std::fs::read(game.join("state")).unwrap(), b"restored");
         transaction.finish().expect("the restore still finishes");
+    }
+
+    /// Publishes a restore of the server's canonical metadata that replaces it
+    /// with `replacement` and is never finished, as a crash would leave it.
+    fn leave_server_restore_unfinished(
+        environment: &TestEnvironment,
+        server: &ServerRecord,
+        replacement: &ServerRecord,
+    ) -> crate::restore::RestoreTransaction {
+        use crate::restore::{RestorePart, RestorePartState, prepare_restore};
+
+        let transaction = prepare_restore(
+            &server.root,
+            ephervex_model::SnapshotId::new(),
+            vec![RestorePartState {
+                part: RestorePart::ServerMetadata,
+                original_present: true,
+                replacement_present: true,
+            }],
+        )
+        .unwrap();
+        let scratch = environment.base().join("snapshot-copy");
+        metadata::write_server_metadata(&scratch, replacement).unwrap();
+        let incoming = transaction.incoming_path(RestorePart::ServerMetadata);
+        std::fs::create_dir_all(incoming.parent().unwrap()).unwrap();
+        std::fs::copy(metadata::server_metadata_path(&scratch), &incoming).unwrap();
+        transaction.publish().unwrap();
+        transaction
+    }
+
+    fn snapshot_copy_of_a_temporary_server(
+        registry: &Registry,
+        server: &ServerRecord,
+    ) -> ServerRecord {
+        let mut copy = server.clone();
+        copy.name = "snapshot copy".to_owned();
+        copy.storage = StorageClass::Temporary;
+        copy.root = registry
+            .paths()
+            .server_root(StorageClass::Temporary, server.id);
+        copy
+    }
+
+    fn make_restore_unrecoverable(transaction: &crate::restore::RestoreTransaction) {
+        std::fs::write(transaction.directory().join("restore.json"), "not json").unwrap();
+    }
+
+    fn persistent_server(registry: &Registry, name: &str) -> ServerRecord {
+        registry
+            .create_server(
+                NewServer::new(name, "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(StorageClass::Persistent),
+            )
+            .expect("create")
+    }
+
+    #[test]
+    fn an_unindexed_server_with_an_interrupted_restore_is_rolled_back_before_it_is_indexed() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = persistent_server(&registry, "original");
+        let snapshot = snapshot_copy_of_a_temporary_server(&registry, &server);
+        let _transaction = leave_server_restore_unfinished(&environment, &server, &snapshot);
+        registry
+            .delete_server(server.id, FileDisposition::Keep)
+            .expect("lose the index row");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.restores_rolled_back.len(), 1);
+        assert_eq!(report.reindexed.len(), 1);
+        assert!(!metadata::is_incomplete(&server.root));
+        assert_eq!(
+            registry.server(server.id).expect("indexed").name,
+            "original"
+        );
+        assert_eq!(
+            metadata::read_server_metadata(&server.root)
+                .expect("metadata")
+                .name,
+            "original"
+        );
+    }
+
+    #[test]
+    fn an_unindexed_server_whose_restore_cannot_be_recovered_is_reported_and_left_unindexed() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = persistent_server(&registry, "original");
+        let snapshot = snapshot_copy_of_a_temporary_server(&registry, &server);
+        let transaction = leave_server_restore_unfinished(&environment, &server, &snapshot);
+        make_restore_unrecoverable(&transaction);
+        registry
+            .delete_server(server.id, FileDisposition::Keep)
+            .expect("lose the index row");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert!(report.reindexed.is_empty());
+        assert_eq!(report.unfinished_instances.len(), 1);
+        assert_eq!(
+            report.unfinished_instances[0].reference,
+            RecordRef::Server(server.id)
+        );
+        assert!(registry.server(server.id).is_err());
+        assert!(metadata::is_incomplete(&server.root));
+        assert_eq!(
+            metadata::read_server_metadata(&server.root)
+                .expect("metadata")
+                .name,
+            "snapshot copy",
+            "the root is left exactly as it was found"
+        );
+    }
+
+    #[test]
+    fn an_unindexed_server_without_restore_state_is_indexed_when_its_claim_cannot_be_tried() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = persistent_server(&registry, "plain");
+        registry
+            .delete_server(server.id, FileDisposition::Keep)
+            .expect("lose the index row");
+        let guards = registry.paths().move_guards_dir();
+        std::fs::remove_dir_all(&guards).ok();
+        std::fs::write(&guards, b"not a directory").expect("block the guard directory");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.reindexed.len(), 1);
+        assert!(report.unfinished_instances.is_empty());
+        assert_eq!(registry.server(server.id).expect("indexed").name, "plain");
+    }
+
+    #[test]
+    fn an_unindexed_server_a_restore_in_another_process_holds_is_skipped() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = persistent_server(&registry, "original");
+        let snapshot = snapshot_copy_of_a_temporary_server(&registry, &server);
+        let other_process = hold_as_another_process(&registry, RecordRef::Server(server.id));
+        let transaction = leave_server_restore_unfinished(&environment, &server, &snapshot);
+        registry
+            .delete_server(server.id, FileDisposition::Keep)
+            .expect("lose the index row");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert!(report.is_empty());
+        assert!(registry.server(server.id).is_err());
+        assert!(metadata::is_incomplete(&server.root));
+
+        drop(other_process);
+        transaction.finish().expect("the restore still finishes");
+    }
+
+    #[test]
+    fn an_indexed_server_with_an_unrecovered_restore_does_not_adopt_snapshot_metadata() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = persistent_server(&registry, "promoted");
+        let snapshot = snapshot_copy_of_a_temporary_server(&registry, &server);
+        let transaction = leave_server_restore_unfinished(&environment, &server, &snapshot);
+        make_restore_unrecoverable(&transaction);
+
+        let report = reconcile(&registry).expect("first");
+        reconcile(&registry).expect("second");
+
+        assert_eq!(report.persistence_unhealthy.len(), 1);
+        assert!(
+            report.unfinished_instances.is_empty(),
+            "an indexed server is not an unindexed directory"
+        );
+        let kept = registry.server(server.id).expect("the record survives");
+        assert_eq!(kept.name, "promoted");
+        assert_eq!(kept.storage, StorageClass::Persistent);
+        assert_eq!(kept.root, server.root);
+    }
+
+    #[test]
+    fn an_indexed_server_a_restore_in_another_process_holds_keeps_its_index_row() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = persistent_server(&registry, "promoted");
+        let snapshot = snapshot_copy_of_a_temporary_server(&registry, &server);
+        let other_process = hold_as_another_process(&registry, RecordRef::Server(server.id));
+        let transaction = leave_server_restore_unfinished(&environment, &server, &snapshot);
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert!(report.restores_rolled_back.is_empty());
+        assert_eq!(registry.server(server.id).expect("kept"), server);
+
+        drop(other_process);
+        transaction.finish().expect("the restore still finishes");
+    }
+
+    #[test]
+    fn canonical_server_metadata_contradicting_its_location_is_not_adopted() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = persistent_server(&registry, "contradiction");
+        let mut damaged = server.clone();
+        damaged.storage = StorageClass::Temporary;
+        metadata::write_server_metadata(&server.root, &damaged).expect("damage");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.persistence_unhealthy.len(), 1);
+        assert_eq!(registry.server(server.id).expect("kept"), server);
+        reconcile(&registry).expect("second");
+        assert!(registry.server(server.id).is_ok());
+    }
+
+    #[test]
+    fn a_server_edited_while_its_root_was_missing_keeps_the_edit_on_remount() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = persistent_server(&registry, "original");
+        let backup = environment.base().join("backup");
+        std::fs::rename(&server.root, &backup).expect("unmount");
+        reconcile(&registry).expect("reconcile");
+        let mut edited = registry.server(server.id).expect("kept");
+        edited.name = "renamed while unmounted".to_owned();
+        registry
+            .update_server(&mut edited)
+            .expect("index-only edit");
+        std::fs::rename(&backup, &server.root).expect("remount");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.recovered.len(), 1);
+        assert!(report.index_repaired.is_empty());
+        let after = registry.server(server.id).expect("read");
+        assert_eq!(after.name, "renamed while unmounted");
+        assert!(!after.attention.contains(&AttentionReason::MissingRoot));
+        assert_eq!(
+            metadata::read_server_metadata(&server.root)
+                .expect("metadata")
+                .name,
+            "renamed while unmounted"
+        );
+    }
+
+    #[test]
+    fn a_server_whose_root_comes_back_unedited_is_recovered_without_a_repair() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = persistent_server(&registry, "remounted");
+        let backup = environment.base().join("backup");
+        std::fs::rename(&server.root, &backup).expect("unmount");
+        reconcile(&registry).expect("reconcile");
+        std::fs::rename(&backup, &server.root).expect("remount");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.recovered.len(), 1);
+        assert!(
+            report.index_repaired.is_empty(),
+            "the warning lives in the index alone and is not a disagreement"
+        );
+        assert!(
+            !registry
+                .server(server.id)
+                .expect("read")
+                .attention
+                .contains(&AttentionReason::MissingRoot)
+        );
     }
 
     #[test]

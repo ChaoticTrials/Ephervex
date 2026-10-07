@@ -164,13 +164,25 @@ reconciliation; corrupt or missing metadata leaves the SQLite recovery copy
 visible but unusable for launch or mutation. Multiple roots claiming one server
 ID are a blocking conflict rather than a selection opportunity (ADR 0014).
 
-Clients follow the same rule for an indexed instance whose root is present:
-canonical metadata replaces a disagreeing index row, which is how a metadata
-write that landed before a failed index write is repaired. Reconciliation takes
-a host's claim before it reads the record, so it never acts on a record a
-finishing move has just changed, and a host found at its persistent root after
-an interrupted promotion gets the same restore recovery, metadata check, and
-interrupted-state report as one that never moved.
+Clients and servers follow the same rule for an indexed host whose root is
+present: canonical metadata replaces a disagreeing index row, which is how a
+metadata write that landed before a failed index write is repaired. Two cases
+keep the index instead. An edit made while the root was missing could only be
+written to the index, so a row that carries the missing-root warning and is
+newer than canonical metadata is published to the root when it returns. And a
+root whose snapshot restore is unresolved (recovery failed, the host's claim was
+held by another process, or the incomplete marker is still present) holds the
+snapshot's copy of the metadata, which is never adopted or mirrored into the
+index. Canonical metadata whose storage class contradicts where the root stands
+is reported as unhealthy instead of written, because the next pass would
+otherwise forget the record. A server directory the index has lost gets the same
+treatment before it is indexed: its restore is recovered under the host's claim,
+and a root that is still unresolved is reported and left unindexed.
+
+Reconciliation takes a host's claim before it reads the record, so it never acts
+on a record a finishing move has just changed, and a host found at its
+persistent root after an interrupted promotion gets the same restore recovery,
+metadata check, and interrupted-state report as one that never moved.
 
 ## Mutation and interruption recovery
 
