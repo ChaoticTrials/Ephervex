@@ -2719,7 +2719,7 @@ fn run_worker(
                     continue;
                 }
                 match app.delete_client(id, disposition) {
-                    Ok(()) => {
+                    Ok(_) => {
                         let _ = events.send(Event::CloseModal);
                         let _ = events.send(Event::Toast {
                             message: lookup("gui-instance-deleted"),
@@ -8218,7 +8218,7 @@ fn spawn_client_deletion_stopping_servers(
             let result = runtime.block_on(app.delete_client_stopping_linked_servers(id, files));
             drop(in_flight);
             match result {
-                Ok(()) => {
+                Ok(_) => {
                     let _ = events.send(Event::Toast {
                         message: lookup("gui-instance-deleted"),
                         error: false,

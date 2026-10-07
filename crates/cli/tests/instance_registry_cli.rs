@@ -379,3 +379,75 @@ fn persisting_an_instance_that_is_already_persistent_is_refused() {
         "the refusal has to say why: {message}"
     );
 }
+
+#[test]
+fn deleting_an_instance_with_its_files_needs_confirmation_and_reports_what_was_deleted() {
+    let sandbox = Sandbox::new();
+    let created = sandbox.json(&[
+        "--json",
+        "instance",
+        "create",
+        "Doomed repro",
+        "--minecraft",
+        "1.20.1",
+    ]);
+    let id = created["id"].as_str().expect("id").to_owned();
+    let root = PathBuf::from(created["root"].as_str().expect("root"));
+
+    let refused = sandbox.run(&["instance", "delete", &id]);
+    assert!(
+        !refused.status.success(),
+        "no terminal to ask on, so nothing is deleted"
+    );
+    let message = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        message.contains("--yes"),
+        "the refusal says how to confirm: {message}"
+    );
+    assert!(
+        message.contains("Doomed repro"),
+        "the refusal names the instance: {message}"
+    );
+    assert!(root.exists(), "a refused deletion removes nothing");
+    assert_eq!(
+        sandbox
+            .json(&["--json", "instances", "list"])
+            .as_array()
+            .expect("array")
+            .len(),
+        1
+    );
+
+    let deleted = sandbox.json(&["--json", "instance", "delete", "--yes", &id]);
+    assert_eq!(deleted["deleted"], id.as_str());
+    assert_eq!(deleted["files"], "removed");
+    assert_eq!(deleted["servers"], serde_json::json!([]));
+    assert!(!root.exists());
+}
+
+#[test]
+fn deleting_an_instance_while_keeping_its_files_needs_no_confirmation() {
+    let sandbox = Sandbox::new();
+    let created = sandbox.json(&[
+        "--json",
+        "instance",
+        "create",
+        "Kept files",
+        "--minecraft",
+        "1.20.1",
+    ]);
+    let id = created["id"].as_str().expect("id").to_owned();
+    let root = PathBuf::from(created["root"].as_str().expect("root"));
+
+    let deleted = sandbox.json(&["--json", "instance", "delete", "--keep-files", &id]);
+
+    assert_eq!(deleted["files"], "kept");
+    assert!(root.exists(), "the files stay on disk");
+    assert!(
+        sandbox
+            .json(&["--json", "instances", "list"])
+            .as_array()
+            .expect("array")
+            .is_empty()
+    );
+}

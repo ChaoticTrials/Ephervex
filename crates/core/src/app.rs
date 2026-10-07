@@ -599,13 +599,20 @@ impl App {
     /// the whole deletion rather than being stopped as a side effect. Nothing
     /// is removed in that case, so the user can stop it and ask again, or ask
     /// [`App::delete_client_stopping_linked_servers`] to stop the servers.
+    ///
+    /// Returns the linked servers that were deleted with the client, so a
+    /// caller reports what was removed rather than what it expected to remove.
     #[instrument(skip(self))]
-    pub fn delete_client(&self, id: InstanceId, files: FileDisposition) -> CoreResult<()> {
+    pub fn delete_client(
+        &self,
+        id: InstanceId,
+        files: FileDisposition,
+    ) -> CoreResult<Vec<ServerRecord>> {
         self.refuse_while_running(id)?;
-        let servers = self.linked_server_ids(id)?;
+        let mut servers = Vec::new();
         // Every server is checked before any is deleted, so a refusal removes nothing.
-        for server in &servers {
-            let record = self.canonical_server_for_mutation(*server)?;
+        for server in self.linked_server_ids(id)? {
+            let record = self.canonical_server_for_mutation(server)?;
             let runtime = crate::server::settled_runtime(&record.root)?;
             if crate::server::stoppable_for_deletion(&runtime) {
                 return Err(crate::CoreError::LinkedServerRunning { name: record.name });
@@ -613,11 +620,13 @@ impl App {
             if runtime.may_be_running() {
                 return Err(crate::CoreError::LinkedServerUnstoppable { name: record.name });
             }
+            servers.push(record);
         }
-        for server in servers {
-            self.delete_server(server, files)?;
+        for server in &servers {
+            self.delete_server(server.id, files)?;
         }
-        Ok(self.registry().delete_client(id, files)?)
+        self.registry().delete_client(id, files)?;
+        Ok(servers)
     }
 
     /// Deletes a client instance like [`App::delete_client`], stopping its
@@ -631,7 +640,7 @@ impl App {
         &self,
         id: InstanceId,
         files: FileDisposition,
-    ) -> CoreResult<()> {
+    ) -> CoreResult<Vec<ServerRecord>> {
         self.refuse_while_running(id)?;
         self.stop_linked_servers_for_deletion(id, files).await?;
         self.delete_client(id, files)
@@ -1785,9 +1794,15 @@ mod tests {
         let server = linked_server(&app, base.path(), client.id, "Repro Server");
         assert_eq!(app.linked_server_ids(client.id).expect("linked").len(), 1);
 
-        app.delete_client(client.id, FileDisposition::Remove)
+        let deleted = app
+            .delete_client(client.id, FileDisposition::Remove)
             .expect("delete");
 
+        assert_eq!(
+            deleted.iter().map(|record| record.id).collect::<Vec<_>>(),
+            vec![server.id],
+            "the caller is told which servers went with the client"
+        );
         assert!(app.list_clients().expect("clients").is_empty());
         assert!(
             app.list_servers().expect("servers").is_empty(),

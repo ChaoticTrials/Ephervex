@@ -12,6 +12,7 @@
 //!   errors below carry a stable message id, never English prose; the text a
 //!   user reads is resolved here through `ephervex-i18n`.
 
+use std::fmt::Write as _;
 use std::io::{IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -1005,13 +1006,22 @@ enum InstanceCommand {
     },
     /// Remove a client instance from the index.
     ///
-    /// Its linked servers are deleted with it. A running one refuses the
-    /// deletion unless `--stop-linked-servers` is given.
+    /// Its linked servers are deleted with it, and so are their worlds unless
+    /// `--keep-files` is given. A running one refuses the deletion unless
+    /// `--stop-linked-servers` is given.
+    ///
+    /// Unless `--keep-files` is given, this asks for confirmation first,
+    /// naming the instance and every linked server that goes with it. Without
+    /// a terminal to ask on, pass `--yes`. The servers that were deleted are
+    /// listed afterwards.
     Delete {
         id: InstanceId,
         /// Leave the instance directory on disk.
         #[arg(long)]
         keep_files: bool,
+        /// Delete the instance and its linked servers without asking.
+        #[arg(long)]
+        yes: bool,
         /// Stop running linked servers first instead of refusing. With
         /// `--keep-files` they are shut down cleanly where they allow it, and
         /// killed otherwise.
@@ -2020,8 +2030,16 @@ async fn run_instance_command(
         InstanceCommand::Delete {
             id,
             keep_files,
+            yes,
             stop_linked_servers,
-        } => run_instance_delete(app, *id, *keep_files, *stop_linked_servers, json).await?,
+        } => {
+            let files = if *keep_files {
+                FileDisposition::Keep
+            } else {
+                FileDisposition::Remove
+            };
+            run_instance_delete(app, *id, files, *yes, *stop_linked_servers, json).await?;
+        }
         InstanceCommand::Persist {
             id,
             servers,
@@ -2034,32 +2052,83 @@ async fn run_instance_command(
 async fn run_instance_delete(
     app: &App,
     id: InstanceId,
-    keep_files: bool,
+    files: FileDisposition,
+    yes: bool,
     stop_linked_servers: bool,
     json: bool,
 ) -> anyhow::Result<()> {
-    let files = if keep_files {
-        FileDisposition::Keep
-    } else {
-        FileDisposition::Remove
-    };
-    if stop_linked_servers {
-        app.delete_client_stopping_linked_servers(id, files).await?;
-    } else {
-        app.delete_client(id, files)?;
+    let keep_files = matches!(files, FileDisposition::Keep);
+    if !keep_files && !yes {
+        let client = app.client(id)?;
+        let servers = app
+            .linked_server_ids(id)?
+            .into_iter()
+            .map(|server| app.server(server))
+            .collect::<Result<Vec<_>, _>>()?;
+        confirm_instance_deletion(&client.name, id, &servers, json)?;
     }
+    let servers = if stop_linked_servers {
+        app.delete_client_stopping_linked_servers(id, files).await?
+    } else {
+        app.delete_client(id, files)?
+    };
     if json {
         outln!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "deleted": id.to_string(),
                 "files": if keep_files { "kept" } else { "removed" },
+                "servers": servers
+                    .iter()
+                    .map(|server| serde_json::json!({
+                        "id": server.id.to_string(),
+                        "name": server.name,
+                    }))
+                    .collect::<Vec<_>>(),
             }))?
         );
     } else {
         outln!("deleted {id}");
+        for server in &servers {
+            outln!("deleted linked server {} ({})", server.name, server.id);
+        }
     }
     Ok(())
+}
+
+/// Asks before an instance and its linked servers are removed from disk.
+///
+/// The prompt names every server that goes with the instance, so the answer is
+/// about the hosts that will be deleted and not only the id that was typed.
+/// Without a terminal to ask on, or with `--json`, the deletion is refused
+/// instead. The question goes to standard error so output stays parseable.
+fn confirm_instance_deletion(
+    name: &str,
+    id: InstanceId,
+    servers: &[ephervex_core::ServerRecord],
+    json: bool,
+) -> anyhow::Result<()> {
+    let mut summary = format!("{name} ({id}) and all of its files");
+    for server in servers {
+        let _ = write!(
+            summary,
+            ", linked server {} ({}) and all of its files",
+            server.name, server.id
+        );
+    }
+    if json || !std::io::stdin().is_terminal() {
+        anyhow::bail!(
+            "deleting this instance removes {summary}, which cannot be undone; pass --yes to confirm, or --keep-files to leave the files on disk"
+        );
+    }
+    eprint!("Delete {summary}? This cannot be undone. [y/N] ");
+    std::io::stderr().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    match answer.trim().to_ascii_lowercase().as_str() {
+        "y" | "yes" => Ok(()),
+        _ => anyhow::bail!("the instance was not deleted"),
+    }
 }
 
 /// Moves a temporary instance into the persistent instance folder.
