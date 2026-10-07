@@ -176,6 +176,27 @@ async fn reconstruct(
     server_source: &Path,
     cache: &CacheLayout,
 ) -> Result<ephervex_pack::MaterializedServerRecipe, PackError> {
+    reconstruct_reserving(
+        recipe,
+        unknown_server_files,
+        game,
+        client_source,
+        server_source,
+        cache,
+        &[],
+    )
+    .await
+}
+
+async fn reconstruct_reserving(
+    recipe: &PackRecipe,
+    unknown_server_files: &UnknownServerFiles,
+    game: &Path,
+    client_source: &Path,
+    server_source: &Path,
+    cache: &CacheLayout,
+    reserved: &[PathBuf],
+) -> Result<ephervex_pack::MaterializedServerRecipe, PackError> {
     let manager = DownloadManager::new(DownloaderConfig::default()).expect("manager");
     materialize_server_recipe(ServerMaterializeRequest {
         recipe,
@@ -191,6 +212,7 @@ async fn reconstruct(
             .join("minecraft"),
         client_source_dir: client_source,
         server_source_dir: server_source,
+        reserved,
         fetch: ArtifactFetch {
             manager: &manager,
             cache,
@@ -642,5 +664,126 @@ async fn retained_overrides_never_write_through_the_shared_library_link() {
         std::fs::read(server_source.join(shipped)).expect("retained copy"),
         b"from the pack",
         "the server's own source keeps the layer exactly as shipped"
+    );
+}
+
+/// The loader installation puts the jar the server starts from at the server
+/// root. A retained override layer, common or server, must never replace it
+/// with unverified pack bytes, while the rest of the layer still applies.
+#[tokio::test]
+async fn retained_overrides_never_replace_the_launch_descriptor() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (recipe, bodies) = recipe();
+    let client_source = temp.path().join("client/.launcher/source");
+    let cache = CacheLayout::new(temp.path().join("cache"));
+    SourceStore::new(&client_source)
+        .write_recipe(&recipe)
+        .expect("client recipe");
+    write(
+        &client_source.join("modrinth/modrinth.index.json"),
+        b"manifest",
+    );
+    let launch = "forge-1.20.1-47.2.0-server.jar";
+    write(
+        &client_source.join("modrinth/overrides").join(launch),
+        b"common pack bytes",
+    );
+    write(
+        &client_source.join("modrinth/server-overrides").join(launch),
+        b"server pack bytes",
+    );
+    write(
+        &client_source.join("modrinth/server-overrides/server.properties"),
+        b"motd=retained\n",
+    );
+    for (entry, body) in recipe.files.iter().zip(&bodies) {
+        cache_file(&cache, entry, body);
+    }
+
+    let game = temp.path().join("server/server");
+    write(&game.join(launch), b"verified by the loader");
+    let server_source = temp.path().join("server/.launcher/source");
+
+    reconstruct_reserving(
+        &recipe,
+        &UnknownServerFiles::only(OptionalSelection::none()),
+        &game,
+        &client_source,
+        &server_source,
+        &cache,
+        &[PathBuf::from(launch)],
+    )
+    .await
+    .expect("reconstruct beside an installed launch jar");
+
+    assert_eq!(
+        std::fs::read(game.join(launch)).expect("launch jar"),
+        b"verified by the loader",
+        "the server starts from the loader's artifact, never from pack bytes"
+    );
+    assert_eq!(
+        std::fs::read(game.join("server.properties")).expect("properties"),
+        b"motd=retained\n",
+        "the rest of the layer is still applied"
+    );
+    assert_eq!(
+        std::fs::read(server_source.join("modrinth/server-overrides").join(launch))
+            .expect("retained copy"),
+        b"server pack bytes",
+        "the server's own source keeps the layer exactly as shipped"
+    );
+}
+
+/// A declared pack file at the launch path is refused outright, so the
+/// installed loader artifact survives even when the recipe names it.
+#[tokio::test]
+async fn a_declared_file_never_replaces_the_launch_descriptor() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (mut recipe, bodies) = recipe();
+    let launch = "forge-1.20.1-47.2.0-server.jar";
+    let declared_body = b"declared pack bytes";
+    let declared = file(
+        launch,
+        declared_body,
+        SideRequirement::Required,
+        SideRequirement::Required,
+        None,
+    );
+    let client_source = temp.path().join("client/.launcher/source");
+    let cache = CacheLayout::new(temp.path().join("cache"));
+    write(
+        &client_source.join("modrinth/modrinth.index.json"),
+        b"manifest",
+    );
+    write(&client_source.join("modrinth/overrides/empty"), b"");
+    write(&client_source.join("modrinth/server-overrides/empty"), b"");
+    for (entry, body) in recipe.files.iter().zip(&bodies) {
+        cache_file(&cache, entry, body);
+    }
+    cache_file(&cache, &declared, declared_body);
+    recipe.files.push(declared);
+
+    let game = temp.path().join("server/server");
+    write(&game.join(launch), b"verified by the loader");
+
+    let error = reconstruct_reserving(
+        &recipe,
+        &UnknownServerFiles::only(OptionalSelection::none()),
+        &game,
+        &client_source,
+        &temp.path().join("server/.launcher/source"),
+        &cache,
+        &[PathBuf::from(launch)],
+    )
+    .await
+    .expect_err("a declared file cannot take the launch path");
+
+    assert!(
+        matches!(error, PackError::RecipeDestinationOccupied { .. }),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(
+        std::fs::read(game.join(launch)).expect("launch jar"),
+        b"verified by the loader"
     );
 }

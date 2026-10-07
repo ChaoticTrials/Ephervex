@@ -76,7 +76,7 @@ use crate::recipe::{
     OptionalSelection, OverrideLayer, PackFileRecipe, PackRecipe, PackSide,
     ServerReconstructionPlan, UnknownServerFiles, is_mod_file_path,
 };
-use crate::server_pack::LIBRARIES_DIR;
+use crate::server_pack::is_launcher_owned;
 use crate::store::SourceStore;
 
 /// What materializing one side of a pack produced.
@@ -147,6 +147,10 @@ pub struct ServerMaterializeRequest<'a> {
     pub client_game_dir: &'a Path,
     pub client_source_dir: &'a Path,
     pub server_source_dir: &'a Path,
+    /// Paths, relative to `game_dir`, that the loader installation produced and
+    /// retained pack content must not replace. The launch jar or argument file
+    /// goes here.
+    pub reserved: &'a [PathBuf],
     pub fetch: ArtifactFetch<'a>,
 }
 
@@ -224,6 +228,7 @@ pub async fn materialize_server_recipe(
         client_game_dir,
         client_source_dir,
         server_source_dir,
+        reserved,
         fetch,
     } = request;
     let plan = recipe.server_reconstruction_plan(unknown_server_files)?;
@@ -250,7 +255,8 @@ pub async fn materialize_server_recipe(
     )
     .await?;
     let client_store = SourceStore::new(client_source_dir);
-    let layers = apply_retained_overrides(&client_store, recipe, PackSide::Server, game_dir)?;
+    let layers =
+        apply_retained_overrides(&client_store, recipe, PackSide::Server, game_dir, reserved)?;
     remove_retained_eula(game_dir)?;
     let server_store = SourceStore::new(server_source_dir);
     copy_server_source(&client_store, &server_store, recipe, &plan.layers)?;
@@ -902,11 +908,13 @@ pub fn apply_overrides(
 
 /// Applies retained common and side-specific layers in established precedence
 /// order, rejecting missing layers and every link or special filesystem entry.
+/// Destinations the launcher owns, plus `reserved`, are left out.
 pub fn apply_retained_overrides(
     store: &SourceStore,
     recipe: &PackRecipe,
     side: PackSide,
     game_dir: &Path,
+    reserved: &[PathBuf],
 ) -> PackResult<Vec<AppliedLayer>> {
     let mut applied = Vec::new();
     let limits = ExtractionLimits::default();
@@ -924,7 +932,7 @@ pub fn apply_retained_overrides(
         let report = copy_retained_tree(
             &source,
             game_dir,
-            RetainedDestination::GameDirectory,
+            RetainedDestination::GameDirectory { reserved },
             &limits,
             &mut spent,
         )?;
@@ -995,10 +1003,10 @@ fn validate_retained_root(
 /// Where a retained layer is being copied to, which decides whether the
 /// loader installation's own destinations are off limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RetainedDestination {
+enum RetainedDestination<'a> {
     /// A running game directory. `libraries/` there belongs to the loader
-    /// installation, not to the pack.
-    GameDirectory,
+    /// installation, not to the pack, and neither does anything in `reserved`.
+    GameDirectory { reserved: &'a [PathBuf] },
     /// A source store keeping the layer exactly as the pack shipped it.
     SourceStore,
 }
@@ -1007,17 +1015,17 @@ enum RetainedDestination {
 struct RetainedCopy<'a> {
     root: &'a Path,
     destination: &'a Path,
-    kind: RetainedDestination,
+    kind: RetainedDestination<'a>,
     limits: &'a ExtractionLimits,
     spent: &'a mut ExtractionReport,
     links: DestinationLinks<'a>,
     report: ExtractionReport,
 }
 
-fn copy_retained_tree(
-    source: &Path,
-    destination: &Path,
-    kind: RetainedDestination,
+fn copy_retained_tree<'a>(
+    source: &'a Path,
+    destination: &'a Path,
+    kind: RetainedDestination<'a>,
     limits: &ExtractionLimits,
     spent: &mut ExtractionReport,
 ) -> PackResult<ExtractionReport> {
@@ -1086,7 +1094,9 @@ impl RetainedCopy<'_> {
                 kind: "symlink",
             });
         }
-        if self.kind == RetainedDestination::GameDirectory && relative.starts_with(LIBRARIES_DIR) {
+        if let RetainedDestination::GameDirectory { reserved } = self.kind
+            && is_launcher_owned(relative, reserved)
+        {
             self.report.skipped = self.report.skipped.saturating_add(1);
             return Ok(());
         }
@@ -1304,10 +1314,38 @@ mod tests {
         copy_retained_tree(
             source,
             destination,
-            RetainedDestination::GameDirectory,
+            RetainedDestination::GameDirectory { reserved: &[] },
             &limits,
             &mut spent,
         )
+    }
+
+    #[test]
+    fn a_retained_layer_leaves_reserved_destinations_out_of_a_game_directory() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let layer = dir.path().join("layer");
+        std::fs::create_dir_all(layer.join("config")).expect("create");
+        std::fs::write(layer.join("server.jar"), b"pack").expect("write");
+        std::fs::write(layer.join("config/server.jar"), b"nested").expect("write");
+        std::fs::write(layer.join("server.properties"), b"motd=x\n").expect("write");
+        let reserved = [PathBuf::from("server.jar")];
+
+        let game = dir.path().join("game");
+        let report = copy_retained_tree(
+            &layer,
+            &game,
+            RetainedDestination::GameDirectory {
+                reserved: &reserved,
+            },
+            &ExtractionLimits::default(),
+            &mut ExtractionReport::default(),
+        )
+        .expect("copy into a game directory");
+        assert_eq!(report.files, 2);
+        assert_eq!(report.skipped, 1);
+        assert!(!game.join("server.jar").exists());
+        assert!(game.join("config/server.jar").is_file());
+        assert!(game.join("server.properties").is_file());
     }
 
     #[test]
@@ -1323,7 +1361,7 @@ mod tests {
         let report = copy_retained_tree(
             &layer,
             &game,
-            RetainedDestination::GameDirectory,
+            RetainedDestination::GameDirectory { reserved: &[] },
             &limits,
             &mut ExtractionReport::default(),
         )
@@ -1470,7 +1508,7 @@ mod tests {
         let error = copy_retained_tree(
             &layer,
             &dir.path().join("out"),
-            RetainedDestination::GameDirectory,
+            RetainedDestination::GameDirectory { reserved: &[] },
             &limits,
             &mut spent,
         )

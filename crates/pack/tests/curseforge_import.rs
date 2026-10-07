@@ -356,6 +356,7 @@ async fn a_normalized_curseforge_recipe_reconstructs_a_server_through_the_generi
         client_game_dir: &client_game,
         client_source_dir: &client_source,
         server_source_dir: &server_source,
+        reserved: &[],
         fetch: ArtifactFetch {
             manager: &manager,
             cache: &cache,
@@ -389,6 +390,7 @@ async fn a_normalized_curseforge_recipe_reconstructs_a_server_through_the_generi
         client_game_dir: &client_game,
         client_source_dir: &client_source,
         server_source_dir: &server_source,
+        reserved: &[],
         fetch: ArtifactFetch {
             manager: &manager,
             cache: &cache,

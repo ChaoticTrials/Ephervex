@@ -141,7 +141,7 @@ pub fn install_server_pack(request: ServerPackInstall<'_>) -> PackResult<Install
 }
 
 /// Whether a destination belongs to the launcher rather than to the archive.
-fn is_launcher_owned(relative: &Path, reserved: &[PathBuf]) -> bool {
+pub(crate) fn is_launcher_owned(relative: &Path, reserved: &[PathBuf]) -> bool {
     if relative.starts_with(LIBRARIES_DIR) || relative == Path::new(EULA_FILE) {
         return true;
     }

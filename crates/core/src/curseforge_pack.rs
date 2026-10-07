@@ -3888,6 +3888,7 @@ mod tests {
             &imported.record.root,
             &target,
             &staging.join(".launcher/source"),
+            None,
             &options,
             &CancellationToken::new(),
         )
@@ -3934,6 +3935,7 @@ mod tests {
                 &dir.path().join("client"),
                 &staging.join("minecraft"),
                 &staging.join(".launcher/source"),
+                None,
                 &ServerCreateOptions::default(),
                 &CancellationToken::new(),
             )

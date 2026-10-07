@@ -29,7 +29,9 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::app::{App, JavaPlanRequest, JavaTarget};
-use crate::server_pack::{ServerArchiveInstall, ServerContentSource, archive_import_source};
+use crate::server_pack::{
+    ServerArchiveInstall, ServerContentSource, archive_import_source, launch_reserved,
+};
 use crate::{CoreError, CoreResult};
 
 const SERVER_PROPERTIES_FILE: &str = "server.properties";
@@ -277,6 +279,7 @@ impl App {
                     &client_root,
                     &target,
                     &server_source,
+                    record.installation.launch(),
                     options,
                     cancel,
                 )
@@ -378,6 +381,7 @@ impl App {
                     &client_root,
                     &target,
                     &server_source,
+                    record.installation.launch(),
                     options,
                     cancel,
                 )
@@ -462,16 +466,19 @@ impl App {
     /// Crate-visible because it is the seam a server creation is built from:
     /// everything before it is Java and loader installation, and everything the
     /// recipe itself decides happens here.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn materialize_linked_server_recipe(
         &self,
         recipe: &PackRecipe,
         client_root: &Path,
         target: &Path,
         server_source: &Path,
+        launch: Option<&ServerLaunch>,
         options: &ServerCreateOptions,
         cancel: &CancellationToken,
     ) -> CoreResult<Vec<PathBuf>> {
         let manager = self.artifact_manager()?;
+        let reserved = launch_reserved(launch);
         let silent_reporter = OperationReporter::silent("server-content");
         let reporter = options.reporter.as_ref().unwrap_or(&silent_reporter);
         let materialized = ephervex_pack::materialize_server_recipe(ServerMaterializeRequest {
@@ -481,6 +488,7 @@ impl App {
             client_game_dir: &ephervex_storage::metadata::client_game_dir(client_root),
             client_source_dir: &ephervex_storage::metadata::source_dir(client_root),
             server_source_dir: server_source,
+            reserved: &reserved,
             fetch: ArtifactFetch {
                 manager: &manager,
                 cache: &CacheLayout::new(self.paths().cache_dir()),

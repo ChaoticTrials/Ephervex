@@ -158,6 +158,7 @@ async fn a_reconstructed_server_survives_a_full_clear_of_the_reusable_cache() {
         client_game_dir: &client_game,
         client_source_dir: &client_source,
         server_source_dir: &server_source,
+        reserved: &[],
         fetch: ArtifactFetch {
             manager: &manager(),
             cache: &layout,

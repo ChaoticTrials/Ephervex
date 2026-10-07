@@ -134,9 +134,7 @@ impl App {
         if let Some(reporter) = reporter {
             reporter.set_stage(Some("operation-stage-installing-server-pack".to_owned()));
         }
-        let reserved: Vec<PathBuf> = launch
-            .map(|launch| vec![launch.path().as_path().to_path_buf()])
-            .unwrap_or_default();
+        let reserved = launch_reserved(launch);
 
         let archive_path = archive.to_path_buf();
         let destination = game_dir.to_path_buf();
@@ -425,6 +423,14 @@ fn apply_recognized(
         matched += 1;
     }
     matched
+}
+
+/// The destinations a loader installation produced, which pack content must
+/// not replace: the launch jar or argument file.
+pub(crate) fn launch_reserved(launch: Option<&ServerLaunch>) -> Vec<PathBuf> {
+    launch
+        .map(|launch| vec![launch.path().as_path().to_path_buf()])
+        .unwrap_or_default()
 }
 
 /// The record's own note of where its content came from./// The record's own note of where its content came from.
