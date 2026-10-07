@@ -529,9 +529,11 @@ impl App {
                     self.registry().update_client(&mut record)?;
                 }
                 InstalledHost::Server(id) => {
-                    let mut record = self.server(id)?;
-                    record.add_attention(AttentionReason::InterruptedMutation);
-                    self.registry().update_server(&mut record)?;
+                    if let Err(error) =
+                        self.add_server_attention(id, AttentionReason::InterruptedMutation)
+                    {
+                        warn!(%error, "an interrupted repair could not be recorded on the server");
+                    }
                 }
             }
         }

@@ -4074,10 +4074,10 @@ fn run_worker(
                 Err(error) => send_modal_error(&events, &error),
             },
             Command::RenameServer { id, name } => match app.rename_server(id, &name) {
-                Ok(record) => {
+                Ok(committed) => {
                     let _ = events.send(Event::CloseModal);
                     let _ = events.send(Event::Toast {
-                        message: localized_value("gui-renamed", &record.name),
+                        message: localized_value("gui-renamed", &committed.record.name),
                         error: false,
                     });
                     send_snapshot(&app, &events);

@@ -866,6 +866,23 @@ impl App {
         Ok(canonical)
     }
 
+    /// Records `reason` on a server's canonical metadata.
+    ///
+    /// Callers sit on recovery paths and decide what a refusal means for the
+    /// result they already hold, so this reports one rather than replacing the
+    /// canonical file with the index copy.
+    pub(super) fn add_server_attention(
+        &self,
+        id: ServerId,
+        reason: AttentionReason,
+    ) -> CoreResult<()> {
+        let mut record = self.canonical_server_for_mutation(id)?;
+        record.add_attention(reason);
+        self.registry_for_services()
+            .update_server_committed(&mut record)?;
+        Ok(())
+    }
+
     pub(super) fn server_connection_target(
         record: &ServerRecord,
     ) -> CoreResult<ephervex_model::ConnectionTarget> {
@@ -2235,6 +2252,108 @@ mod tests {
         assert!(!server.root.exists());
     }
 
+    fn scaffolded_server(app: &App) -> ServerRecord {
+        app.registry_for_services()
+            .create_server(NewServer::new(
+                "Canonical Server",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("scaffold")
+    }
+
+    #[test]
+    fn rename_keeps_canonical_settings_the_index_copy_lags_behind() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let server = scaffolded_server(&app);
+        let mut canonical = ephervex_storage::metadata::read_server_metadata(&server.root)
+            .expect("canonical metadata");
+        canonical.network.port = 25_599;
+        canonical.java_override = Some(JavaOverride::new("/opt/java/bin/java"));
+        ephervex_storage::metadata::write_server_metadata(&server.root, &canonical)
+            .expect("write canonical metadata only");
+
+        app.rename_server(server.id, "Renamed").expect("rename");
+
+        let after = ephervex_storage::metadata::read_server_metadata(&server.root)
+            .expect("canonical metadata");
+        assert_eq!(after.name, "Renamed");
+        assert_eq!(after.network.port, 25_599);
+        assert_eq!(after.java_override, canonical.java_override);
+        assert_eq!(app.server(server.id).expect("index").network.port, 25_599);
+    }
+
+    #[test]
+    fn rename_refuses_corrupt_canonical_metadata_and_leaves_it_untouched() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let server = scaffolded_server(&app);
+        let path = ephervex_storage::metadata::server_metadata_path(&server.root);
+        std::fs::write(&path, b"{ not json").expect("corrupt the metadata");
+
+        app.rename_server(server.id, "Renamed")
+            .expect_err("corrupt metadata blocks the rename");
+
+        assert_eq!(std::fs::read(&path).expect("read"), b"{ not json");
+        assert_eq!(
+            app.server(server.id).expect("index").name,
+            "Canonical Server"
+        );
+    }
+
+    #[test]
+    fn rename_refuses_missing_canonical_metadata_without_recreating_it() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let server = scaffolded_server(&app);
+        let path = ephervex_storage::metadata::server_metadata_path(&server.root);
+        std::fs::remove_file(&path).expect("remove the metadata");
+
+        app.rename_server(server.id, "Renamed")
+            .expect_err("missing metadata blocks the rename");
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn recording_attention_refuses_corrupt_canonical_metadata_and_leaves_it_untouched() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let server = scaffolded_server(&app);
+        let path = ephervex_storage::metadata::server_metadata_path(&server.root);
+        std::fs::write(&path, b"{ not json").expect("corrupt the metadata");
+
+        app.add_server_attention(server.id, AttentionReason::InterruptedMutation)
+            .expect_err("corrupt metadata blocks the write");
+
+        assert_eq!(std::fs::read(&path).expect("read"), b"{ not json");
+    }
+
+    #[test]
+    fn recording_attention_keeps_canonical_settings_the_index_copy_lags_behind() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let server = scaffolded_server(&app);
+        let mut canonical = ephervex_storage::metadata::read_server_metadata(&server.root)
+            .expect("canonical metadata");
+        canonical.network.port = 25_599;
+        ephervex_storage::metadata::write_server_metadata(&server.root, &canonical)
+            .expect("write canonical metadata only");
+
+        app.add_server_attention(server.id, AttentionReason::InterruptedMutation)
+            .expect("record attention");
+
+        let after = ephervex_storage::metadata::read_server_metadata(&server.root)
+            .expect("canonical metadata");
+        assert_eq!(after.network.port, 25_599);
+        assert!(
+            after
+                .attention
+                .contains(&AttentionReason::InterruptedMutation)
+        );
+    }
+
     #[test]
     fn a_linked_servers_entry_follows_it_through_a_rename_and_a_deletion() {
         let directory = tempfile::tempdir().expect("temp dir");
@@ -2264,7 +2383,8 @@ mod tests {
 
         let renamed = app
             .rename_server(server.id, "Renamed Repro Server")
-            .expect("rename");
+            .expect("rename")
+            .record;
         let entry = read_managed_entry(&servers_dat, renamed.id);
         assert_eq!(
             entry.get("name"),

@@ -1197,9 +1197,11 @@ impl App {
             Err(error) => !error.recovery_issues().is_empty(),
         };
         if recovery_needed {
-            let mut record = self.server(server)?;
-            record.add_attention(AttentionReason::InterruptedMutation);
-            self.registry().update_server(&mut record)?;
+            if let Err(error) =
+                self.add_server_attention(server, AttentionReason::InterruptedMutation)
+            {
+                warn!(%error, "an interrupted mutation could not be recorded on the server");
+            }
         }
 
         Ok(result?)

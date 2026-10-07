@@ -33,8 +33,8 @@ use ephervex_options::{
 };
 use ephervex_pack::{PackSide, SourceStore};
 use ephervex_storage::{
-    ClientFolder, ClientRecord, Config, DuplicateClient, DuplicatedClient, ServerFolder,
-    ServerRecord,
+    ClientFolder, ClientRecord, Config, DuplicateClient, DuplicatedClient, ServerCommit,
+    ServerFolder, ServerRecord,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{instrument, warn};
@@ -486,14 +486,24 @@ impl App {
     }
 
     /// Renames a dedicated server, on the same terms.
+    ///
+    /// The rename starts from the server's own metadata file, never from the
+    /// index copy, so metadata that is missing, unreadable, or about another
+    /// server blocks it instead of being replaced.
     #[instrument(skip(self))]
-    pub fn rename_server(&self, server: ServerId, name: &str) -> CoreResult<ServerRecord> {
+    pub fn rename_server(
+        &self,
+        server: ServerId,
+        name: &str,
+    ) -> CoreResult<ServerCommit<ServerRecord>> {
         let name = validated_entity_name(name)?;
-        let mut record = self.server(server)?;
+        let mut record = self.canonical_server_for_mutation(server)?;
         record.name = name;
-        self.registry_for_services().update_server(&mut record)?;
-        self.sync_linked_server_list(&record);
-        Ok(record)
+        let committed = self
+            .registry_for_services()
+            .update_server_committed(&mut record)?;
+        self.sync_linked_server_list(&committed.record);
+        Ok(committed)
     }
 }
 
