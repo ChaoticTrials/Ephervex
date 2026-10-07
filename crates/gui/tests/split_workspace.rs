@@ -10,15 +10,17 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use ephervex_gui::ui::{
-    AppWindow, GuiI18n, InstanceRow, ServerRow, Theme, WorkspaceHostChoice, WorkspaceLinkedChoice,
-    WorkspacePaneRow,
+    AppWindow, GuiI18n, HostView, InstanceRow, ServerRow, Theme, WorkspaceHostChoice,
+    WorkspaceLinkedChoice, WorkspacePaneRow,
 };
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{
     AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions,
 };
 use slint::platform::{PointerEventButton, WindowEvent};
-use slint::{ComponentHandle, LogicalPosition, LogicalSize, ModelRc, PhysicalSize, VecModel};
+use slint::{
+    ComponentHandle, LogicalPosition, LogicalSize, Model, ModelRc, PhysicalSize, VecModel,
+};
 
 const CLIENT: i32 = 0;
 const SERVER: i32 = 1;
@@ -563,6 +565,214 @@ fn two_panes_on_one_host_show_one_state() {
             "pane {pane} follows the host"
         );
     }
+}
+
+/// A client host whose stored runtime settings differ from the other's, with
+/// the same revision every host has after its first load.
+fn runtime_host(id: &str, java: &str) -> HostView {
+    let mut view = support::client_view(InstanceRow {
+        id: id.into(),
+        ..instance(false)
+    });
+    view.runtime_java = java.into();
+    view.runtime_revision = 1;
+    view
+}
+
+/// A server host whose stored properties differ from the other's, with the
+/// same revision every host has after its first load.
+fn properties_host(id: &str, motd: &str, port: &str, online_mode: bool) -> HostView {
+    let mut view = support::server_view(ServerRow {
+        id: id.into(),
+        ..server(false)
+    });
+    view.property_motd = motd.into();
+    view.property_max_players = "20".into();
+    view.property_difficulty = "normal".into();
+    view.property_gamemode = "survival".into();
+    view.property_online_mode = online_mode;
+    view.property_access = "Localhost".into();
+    view.property_port = port.into();
+    view.properties_revision = 1;
+    view
+}
+
+/// Moves the pane at row 0 onto the host at row 0 the way the controller
+/// rewrites rows when the pane showing another host is closed: both models
+/// keep their first row and drop the last.
+fn close_first_pane(ui: &AppWindow, remaining: WorkspacePaneRow, host: HostView) {
+    let panes = ui.get_workspace_panes();
+    panes.set_row_data(
+        0,
+        WorkspacePaneRow {
+            host: 0,
+            ..remaining
+        },
+    );
+    ui.get_host_views().set_row_data(0, host);
+    for model in [panes.as_any(), ui.get_host_views().as_any()] {
+        if let Some(model) = model.downcast_ref::<VecModel<WorkspacePaneRow>>() {
+            model.remove(1);
+        } else if let Some(model) = model.downcast_ref::<VecModel<HostView>>() {
+            model.remove(1);
+        }
+    }
+    settle(ui);
+}
+
+/// What a pane's Settings form saves when Save is pressed.
+fn save_runtime(ui: &AppWindow, pane: i32) -> (String, String) {
+    let saved = Rc::new(RefCell::new(None));
+    let sink = Rc::clone(&saved);
+    ui.on_save_instance_runtime(move |id, java, _, _, _| {
+        *sink.borrow_mut() = Some((id.to_string(), java.to_string()));
+    });
+    in_pane(
+        ui,
+        pane,
+        &lookup("gui-instance-runtime-save"),
+        AccessibleRole::Button,
+    )
+    .first()
+    .expect("the pane's Save button")
+    .invoke_accessible_default_action();
+    saved.take().expect("Save reported the form")
+}
+
+/// What a pane's Properties form saves when Save is pressed.
+fn save_properties(ui: &AppWindow, pane: i32) -> (String, String, String, bool) {
+    let saved = Rc::new(RefCell::new(None));
+    let sink = Rc::clone(&saved);
+    ui.on_save_server_properties(move |id, motd, _, _, _, _, _, _, online, _, _, port| {
+        *sink.borrow_mut() = Some((id.to_string(), motd.to_string(), port.to_string(), online));
+    });
+    in_pane(
+        ui,
+        pane,
+        &lookup("gui-save-changes"),
+        AccessibleRole::Button,
+    )
+    .first()
+    .expect("the pane's Save button")
+    .invoke_accessible_default_action();
+    saved.take().expect("Save reported the form")
+}
+
+/// A pane's Settings form shows and saves the host the pane shows, also when
+/// the pane is pointed at a host whose stored settings carry the same revision.
+#[test]
+fn a_panes_runtime_form_follows_the_host_the_pane_shows() {
+    let ui = window();
+    let panes = || {
+        vec![
+            placed(1, 0, "Settings", 0, 0, false),
+            placed(2, 1, "Settings", 1, 0, false),
+        ]
+    };
+    support::show(
+        &ui,
+        0,
+        vec![
+            runtime_host("aaaa", "/opt/java-A"),
+            runtime_host("bbbb", "/opt/java-B"),
+        ],
+        panes(),
+    );
+    settle(&ui);
+    assert_eq!(
+        save_runtime(&ui, 1),
+        ("aaaa".to_owned(), "/opt/java-A".to_owned())
+    );
+
+    let rows = ui.get_workspace_panes();
+    rows.set_row_data(
+        0,
+        WorkspacePaneRow {
+            host: 1,
+            ..placed(1, 1, "Settings", 0, 0, false)
+        },
+    );
+    settle(&ui);
+    assert_eq!(
+        save_runtime(&ui, 1),
+        ("bbbb".to_owned(), "/opt/java-B".to_owned()),
+        "a pane pointed at another host"
+    );
+}
+
+/// Closing the pane above leaves the pane below in the first row, which now
+/// shows the other host.
+#[test]
+fn a_runtime_form_follows_the_host_after_the_pane_before_it_closes() {
+    let ui = window();
+    support::show(
+        &ui,
+        0,
+        vec![
+            runtime_host("aaaa", "/opt/java-A"),
+            runtime_host("bbbb", "/opt/java-B"),
+        ],
+        vec![
+            placed(1, 0, "Settings", 0, 0, false),
+            placed(2, 1, "Settings", 1, 0, false),
+        ],
+    );
+    settle(&ui);
+    close_first_pane(
+        &ui,
+        placed(2, 0, "Settings", 0, 0, false),
+        runtime_host("bbbb", "/opt/java-B"),
+    );
+    assert_eq!(
+        save_runtime(&ui, 2),
+        ("bbbb".to_owned(), "/opt/java-B".to_owned())
+    );
+}
+
+/// A pane's Properties form shows and saves the host the pane shows, not the
+/// network exposure or message of the server it showed before.
+#[test]
+fn a_panes_properties_form_follows_the_host_the_pane_shows() {
+    let ui = window();
+    // Large enough that the form's Save button lies inside its pane.
+    ui.window().set_size(PhysicalSize::new(2400, 2400));
+    support::show(
+        &ui,
+        0,
+        vec![
+            properties_host("aaaa", "Server A", "25565", true),
+            properties_host("bbbb", "Server B", "25570", false),
+        ],
+        vec![
+            placed(1, 0, "Properties", 0, 0, false),
+            placed(2, 1, "Properties", 1, 0, false),
+        ],
+    );
+    settle(&ui);
+    assert_eq!(
+        save_properties(&ui, 1),
+        (
+            "aaaa".to_owned(),
+            "Server A".to_owned(),
+            "25565".to_owned(),
+            true
+        )
+    );
+
+    close_first_pane(
+        &ui,
+        placed(2, 0, "Properties", 0, 0, false),
+        properties_host("bbbb", "Server B", "25570", false),
+    );
+    assert_eq!(
+        save_properties(&ui, 2),
+        (
+            "bbbb".to_owned(),
+            "Server B".to_owned(),
+            "25570".to_owned(),
+            false
+        )
+    );
 }
 
 /// A pane's Start, Launch, and Restart act on the host that pane shows.

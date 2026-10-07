@@ -15,7 +15,8 @@ import { HostView } from "../models.slint";
 import { Theme } from "../theme.slint";
 
 // A client's own runtime settings, edited here and saved together. The
-// fields start from what is stored and start over whenever it is read again.
+// fields start from what is stored and start over whenever it is read again
+// or the pane shows another host.
 export component ClientRuntimeForm inherits ScrollView {
     in property <HostView> host;
     in property <string> error;
@@ -25,7 +26,9 @@ export component ClientRuntimeForm inherits ScrollView {
     callback allow-pack-mod-changes(string, bool);
     callback open-global-defaults();
     property <int> revision: root.host.runtime-revision;
+    property <string> host-id: root.host.id;
     changed revision => { root.reset(); }
+    changed host-id => { root.reset(); }
     init => { root.reset(); }
     function reset() {
         java-field.text = root.host.runtime-java;
@@ -63,7 +66,8 @@ export component ClientRuntimeForm inherits ScrollView {
 }
 
 // A server's properties, edited here and saved together. Like the client
-// form, it starts from what is stored and starts over when that is read again.
+// form, it starts from what is stored and starts over when that is read again
+// or the pane shows another host.
 export component ServerPropertiesForm inherits ScrollView {
     in property <HostView> host;
     in property <bool> eula-accepted;
@@ -83,7 +87,9 @@ export component ServerPropertiesForm inherits ScrollView {
     property <string> address-error: PropertyRules.address-error(address-field.text, root.access == "Custom");
     property <string> players-error: PropertyRules.players-error(players-field.text);
     property <int> revision: root.host.properties-revision;
+    property <string> host-id: root.host.id;
     changed revision => { root.reset(); }
+    changed host-id => { root.reset(); }
     init => { root.reset(); }
     function reset() {
         root.access = root.host.property-access;
