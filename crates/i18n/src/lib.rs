@@ -744,6 +744,7 @@ mod tests {
             "error-launch-canceled",
             "launch-preparing",
             "launch-starting",
+            "launch-output-dropped",
             "launch-account-offline",
             "launch-account-microsoft",
             "launch-exited-cleanly",

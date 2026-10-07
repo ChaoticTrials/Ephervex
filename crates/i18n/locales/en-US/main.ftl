@@ -657,6 +657,13 @@ launch-starting = Starting Minecraft…
 launch-account-offline = Launching as { $name } (offline). This account cannot join online-mode servers.
 launch-account-microsoft = Launching as { $name }.
 
+# $lines is how many of Minecraft's output lines were not shown because they
+# arrived faster than they could be read.
+launch-output-dropped = { $lines ->
+        [one] 1 line of Minecraft output was skipped.
+       *[other] { $lines } lines of Minecraft output were skipped.
+    }
+
 # $code is the process exit status.
 launch-exited-cleanly = Minecraft exited normally.
 launch-exited-with-code = Minecraft exited with code { $code }.

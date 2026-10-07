@@ -252,7 +252,6 @@ pub use ephervex_java::{
     RuntimeInventory,
 };
 pub use ephervex_loaders::{InstalledServer, LoaderBuild, LoaderVersionListing, ServerLaunch};
-pub use ephervex_minecraft::LaunchObserver;
 pub use ephervex_minecraft::{
     ArgumentEntry, ArgumentForm, ArgumentGroup, Arguments, Artifact, AssetIndexRef,
     ExcludedLibrary, ExclusionReason, GameExit, Installation, InstallationPlan, JavaRequirement,
@@ -261,6 +260,7 @@ pub use ephervex_minecraft::{
     MinecraftVersionId, OutputLine, OutputStream, Platform, PlayerIdentity, ReleaseListing,
     ReleaseType, VersionMetadata, VersionRecord,
 };
+pub use ephervex_minecraft::{LaunchEvents, LaunchObserver};
 /// The mod catalog's data types, re-exported so a frontend can render a search
 /// result and a dependency plan without naming `ephervex-mod-platform`.
 ///

@@ -2851,13 +2851,18 @@ async fn run_launch(app: &mut App, args: &LaunchArgs, json: bool) -> anyhow::Res
     let (observer, mut events) = LaunchObserver::channel();
     let cancel = CancellationToken::new();
 
-    // Ctrl-C stops the game rather than orphaning it. The task ends with the
-    // process, so nothing has to shut it down.
+    // Ending the launcher stops the game rather than orphaning it. The game
+    // runs in its own process group, so none of these reach it from the
+    // terminal. The task ends with the process, so nothing has to shut it down.
     let interrupt = cancel.clone();
     tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            eprintln!("stopping Minecraft…");
+        if wait_for_termination_request().await {
+            // Canceled first: after a hangup the terminal may refuse the write.
             interrupt.cancel();
+            let _ = std::io::Write::write_fmt(
+                &mut std::io::stderr(),
+                format_args!("stopping Minecraft…\n"),
+            );
         }
     });
 
@@ -3018,6 +3023,16 @@ impl LaunchProgressPrinter {
                 tracing::debug!(command = %command, "launching");
             }
             LaunchEvent::OutputLine(line) => print_game_line(line, json),
+            LaunchEvent::OutputDropped { lines } => eprintln!(
+                "{}",
+                ephervex_i18n::lookup_args(
+                    "launch-output-dropped",
+                    [(
+                        "lines",
+                        MessageArg::from(i64::try_from(*lines).unwrap_or(i64::MAX))
+                    )],
+                )
+            ),
             LaunchEvent::Exited { code, signal } => eprintln!("{}", exit_message(*code, *signal)),
             LaunchEvent::Failed { detail, .. } => tracing::debug!(%detail, "launch failed"),
             // A variant added below this build is not a reason to stop
@@ -3057,6 +3072,31 @@ impl LaunchProgressPrinter {
             ephervex_i18n::lookup(&operation.title),
             decile * 10
         );
+    }
+}
+
+/// Waits for Ctrl-C or, on Unix, for the terminal closing or a termination
+/// request. Returns `false` if the signals cannot be watched.
+async fn wait_for_termination_request() -> bool {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let (Ok(mut hangup), Ok(mut terminate)) = (
+            signal(SignalKind::hangup()),
+            signal(SignalKind::terminate()),
+        ) else {
+            return tokio::signal::ctrl_c().await.is_ok();
+        };
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result.is_ok(),
+            _ = hangup.recv() => true,
+            _ = terminate.recv() => true,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await.is_ok()
     }
 }
 
@@ -7767,5 +7807,25 @@ mod tests {
         ])
         .expect_err("two hosts conflict");
         assert_eq!(conflicting.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hangup_is_a_request_to_stop_the_game() {
+        let waiting = tokio::spawn(wait_for_termination_request());
+        // The handlers are installed when the task first runs.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let status = tokio::process::Command::new("kill")
+            .args(["-HUP", &std::process::id().to_string()])
+            .status()
+            .await
+            .expect("kill runs");
+        assert!(status.success());
+
+        let requested = tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+            .await
+            .expect("the hangup is noticed")
+            .expect("task");
+        assert!(requested);
     }
 }
