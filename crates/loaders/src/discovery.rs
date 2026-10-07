@@ -281,8 +281,24 @@ pub(crate) fn neoforge_listing(
     }
 }
 
+/// The Minecraft release a NeoForge build targets, or `None` when the build
+/// targets no release (a snapshot, pre-release, or release candidate) or its
+/// version is not in a known scheme.
+///
+/// Builds below 26 are `MAJOR.MINOR.PATCH` for Minecraft `1.MAJOR.MINOR`, where
+/// a minor of zero names the release without a patch (`21.0.x` is `1.21`).
+/// Builds from 26 on are `YEAR.DROP.PATCH.BUILD` for Minecraft `YEAR.DROP`, with
+/// the patch kept only when it is not zero. A `+snapshot-N`, `+pre-N`, or
+/// `+rc-N` suffix names the pre-release Minecraft id the installer declares, so
+/// such a build never belongs to the release its numbers precede.
 fn neoforge_minecraft(version: &str) -> Option<String> {
-    let numeric = version.split('-').next()?;
+    let (base, metadata) = version
+        .split_once('+')
+        .map_or((version, None), |(base, metadata)| (base, Some(metadata)));
+    if metadata.is_some_and(targets_unreleased_minecraft) {
+        return None;
+    }
+    let numeric = base.split('-').next()?;
     let parts: Vec<u32> = numeric
         .split('.')
         .map(str::parse)
@@ -298,9 +314,20 @@ fn neoforge_minecraft(version: &str) -> Option<String> {
         } else {
             format!("{}.{}.{}", parts[0], parts[1], patch)
         })
+    } else if parts[1] == 0 {
+        Some(format!("1.{}", parts[0]))
     } else {
         Some(format!("1.{}.{}", parts[0], parts[1]))
     }
+}
+
+fn targets_unreleased_minecraft(metadata: &str) -> bool {
+    let lower = metadata.to_ascii_lowercase();
+    ["snapshot", "pre", "rc"].iter().any(|marker| {
+        lower
+            .strip_prefix(marker)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(['-', '.']))
+    })
 }
 
 fn is_prerelease(version: &str) -> bool {
@@ -458,6 +485,49 @@ mod tests {
         assert_eq!(listed.stable.as_deref(), Some("26.1.2.94"));
         assert_eq!(neoforge_minecraft("21.1.200").as_deref(), Some("1.21.1"));
         assert_eq!(neoforge_minecraft("26.2.0.1").as_deref(), Some("26.2"));
+    }
+
+    #[test]
+    fn neoforge_zero_minor_builds_belong_to_the_release_without_a_patch() {
+        let versions = vec![
+            "20.2.86".to_owned(),
+            "21.0.166".to_owned(),
+            "21.0.167".to_owned(),
+            "21.0.168-beta".to_owned(),
+            "21.1.0".to_owned(),
+            "21.1.200".to_owned(),
+        ];
+        let listed = neoforge_listing("1.21", &versions, Freshness::Cached);
+        let listed_versions: Vec<_> = listed.builds.iter().map(|b| b.version.as_str()).collect();
+        assert_eq!(listed_versions, ["21.0.168-beta", "21.0.167", "21.0.166"]);
+        assert_eq!(listed.latest.as_deref(), Some("21.0.168-beta"));
+        assert_eq!(listed.stable.as_deref(), Some("21.0.167"));
+        assert!(
+            neoforge_listing("1.21.0", &versions, Freshness::Cached)
+                .builds
+                .is_empty()
+        );
+        assert_eq!(neoforge_minecraft("20.2.86").as_deref(), Some("1.20.2"));
+        assert_eq!(neoforge_minecraft("21.1.0").as_deref(), Some("1.21.1"));
+        assert_eq!(neoforge_minecraft("26.1.2.94").as_deref(), Some("26.1.2"));
+    }
+
+    #[test]
+    fn neoforge_snapshot_and_pre_release_builds_are_not_listed_for_a_release() {
+        let versions = vec![
+            "26.1.0.0-alpha.14+snapshot-11".to_owned(),
+            "26.1.0.0-alpha.15+pre-3".to_owned(),
+            "26.1.0.0-beta+rc-1".to_owned(),
+            "26.1.0.1".to_owned(),
+            "26.1.0.2-beta".to_owned(),
+        ];
+        let listed = neoforge_listing("26.1", &versions, Freshness::Cached);
+        let listed_versions: Vec<_> = listed.builds.iter().map(|b| b.version.as_str()).collect();
+        assert_eq!(listed_versions, ["26.1.0.2-beta", "26.1.0.1"]);
+        assert_eq!(listed.stable.as_deref(), Some("26.1.0.1"));
+        for version in &versions[..3] {
+            assert_eq!(neoforge_minecraft(version), None, "{version}");
+        }
     }
 
     #[test]
