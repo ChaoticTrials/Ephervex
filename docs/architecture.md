@@ -164,6 +164,14 @@ reconciliation; corrupt or missing metadata leaves the SQLite recovery copy
 visible but unusable for launch or mutation. Multiple roots claiming one server
 ID are a blocking conflict rather than a selection opportunity (ADR 0014).
 
+Clients follow the same rule for an indexed instance whose root is present:
+canonical metadata replaces a disagreeing index row, which is how a metadata
+write that landed before a failed index write is repaired. Reconciliation takes
+a host's claim before it reads the record, so it never acts on a record a
+finishing move has just changed, and a host found at its persistent root after
+an interrupted promotion gets the same restore recovery, metadata check, and
+interrupted-state report as one that never moved.
+
 ## Mutation and interruption recovery
 
 State-changing operations use a publication boundary or leave durable evidence
@@ -177,7 +185,7 @@ exhaustion with an actionable error.
 | Client creation and pack import | The incomplete marker is cleared, then canonical metadata and the index make the host visible. | A marked, unpublished root is reported and left untouched for manual review. |
 | Server installation | A fully built hidden sibling root is renamed into its final location before it is indexed. | An unpublished or incomplete root is not launched as a server. Reconciliation reports rather than guesses when canonical state is missing or conflicting. |
 | Instance duplication | The complete destination is published by rename, followed by the recoverable index update. | Incomplete destinations are reported. |
-| Storage promotion | One rename when both roots share a filesystem. Otherwise the tree is copied and flushed into a hidden staging sibling, renamed into place, then indexed, and only then is the source removed. | The destination only ever holds a complete host. A retry replaces the staging directory an interrupted copy left, refuses while another move or a snapshot restore of the same host runs, and refuses a host with an unrecovered snapshot restore. Reconciliation never adopts a staging directory, and reports it unless a running move still holds the host. If a promoted root moved before its index update, reconciliation follows the canonical files instead of deleting the record. |
+| Storage promotion | One rename when both roots share a filesystem. Otherwise the tree is copied and flushed into a hidden staging sibling, renamed into place, then indexed, and only then is the source removed. | The destination only ever holds a complete host. A retry replaces the staging directory an interrupted copy left, refuses while another move or a snapshot restore of the same host runs, and refuses a host with an unrecovered snapshot restore. Reconciliation never adopts a staging directory, and reports it unless a running move still holds the host. If a promoted root moved before its index update, reconciliation follows the canonical files instead of deleting the record and then reconciles them like any other present host. |
 | Downloads and shared artifacts | Bytes are staged, verified against the strongest supplied hash, then renamed into the shared store. | Partial or mismatching bytes are never published as cache entries. A retry starts from verified state. |
 | Managed mod install, update, and removal | Old jars move to `.launcher/retired/`; new jars land; the retained recipe is atomically published. | Pre-publication failure removes new jars and restores retired jars. Any failed compensation is returned as a typed recovery issue and persists `InterruptedMutation` attention. Post-publication cleanup failures are also reported. |
 | Dependency-aware enable, disable, and delete | One planned batch applies ordered file changes using the same recorded dependency graph. | Failure rolls back the batch. Any launcher-owned staging or retired content left behind is reported on the next reconciliation. |

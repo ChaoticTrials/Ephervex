@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use ephervex_model::{AttentionReason, InstanceId, ServerId, StorageClass};
 
 use crate::metadata;
-use crate::records::FileDisposition;
+use crate::records::{ClientRecord, FileDisposition, ServerRecord};
 use crate::registry::{HostProbe, Registry, RegistryError};
 
 /// Which record a reconciliation entry refers to.
@@ -170,228 +170,370 @@ pub fn reconcile(registry: &Registry) -> Result<ReconciliationReport, RegistryEr
     Ok(report)
 }
 
+fn client_entry(record: &ClientRecord) -> ReconciledRecord {
+    ReconciledRecord {
+        reference: RecordRef::Client(record.id),
+        name: record.name.clone(),
+        root: record.root.clone(),
+        storage: record.storage,
+    }
+}
+
+fn server_entry(record: &ServerRecord) -> ReconciledRecord {
+    ReconciledRecord {
+        reference: RecordRef::Server(record.id),
+        name: record.name.clone(),
+        root: record.root.clone(),
+        storage: record.storage,
+    }
+}
+
+/// Reconciles every indexed client.
+///
+/// A host's claim is taken before its record is read. A restore or move another
+/// process is still running owns the host's files and transaction state, and
+/// one that finishes after the listing has already changed the record the
+/// listing returned.
 fn reconcile_clients(
     registry: &Registry,
     report: &mut ReconciliationReport,
 ) -> Result<(), RegistryError> {
-    for mut record in registry.list_clients()? {
-        let entry = ReconciledRecord {
-            reference: RecordRef::Client(record.id),
-            name: record.name.clone(),
-            root: record.root.clone(),
-            storage: record.storage,
+    let listed = registry.list_clients()?;
+    reconcile_listed_clients(registry, &listed, report)
+}
+
+/// Reconciles the clients of a listing taken earlier, deciding each from the
+/// record read after its claim rather than from the listing.
+fn reconcile_listed_clients(
+    registry: &Registry,
+    listed: &[ClientRecord],
+    report: &mut ReconciliationReport,
+) -> Result<(), RegistryError> {
+    for listed in listed {
+        let probe = registry.probe_host(RecordRef::Client(listed.id));
+        if matches!(probe, HostProbe::Mutating) {
+            continue;
+        }
+        let record = match registry.client(listed.id) {
+            Ok(record) => record,
+            Err(RegistryError::InstanceUnknown { .. }) => continue,
+            Err(error) => return Err(error),
         };
+        reconcile_client(
+            registry,
+            record,
+            matches!(probe, HostProbe::Idle(_)),
+            report,
+        )?;
+    }
+    Ok(())
+}
 
-        if record.storage == StorageClass::Temporary
-            && record.root != registry.paths().instance_root(record.storage, record.id)
-        {
-            // Temporary roots are launcher-owned and UID-scoped. An older or
-            // tampered record pointing elsewhere must not bypass that boundary;
-            // forget it without deleting the path, which may belong to a user
-            // or to another account on the machine.
-            registry.delete_client(record.id, FileDisposition::Keep)?;
-            report.removed_stale_temporary.push(entry);
-            continue;
-        }
+fn reconcile_client(
+    registry: &Registry,
+    mut record: ClientRecord,
+    idle: bool,
+    report: &mut ReconciliationReport,
+) -> Result<(), RegistryError> {
+    let entry = client_entry(&record);
 
-        if record.root.is_dir() {
-            // A restore or move another process is still running owns the
-            // host's files and transaction state; none of it is abandoned.
-            let probe = registry.probe_host(RecordRef::Client(record.id));
-            if matches!(probe, HostProbe::Mutating) {
-                continue;
-            }
-            if matches!(probe, HostProbe::Idle(_))
-                && recover_restore_state(&record.root, &entry, report)
-            {
-                let mut canonical = metadata::read_client_metadata(&record.root)?;
-                if canonical.id != record.id {
-                    report.persistence_unhealthy.push(entry);
-                    continue;
-                }
-                canonical.root.clone_from(&record.root);
-                registry.update_client(&mut canonical)?;
-                record = canonical;
-            }
-            let mut changed = false;
-            // The disk came back. Clearing the warning here is what stops a
-            // remounted drive from leaving a permanent "needs attention" badge.
-            if record.attention.contains(&AttentionReason::MissingRoot) {
-                record
-                    .attention
-                    .retain(|reason| reason != &AttentionReason::MissingRoot);
-                changed = true;
-                report.recovered.push(entry.clone());
-            }
-            changed |=
-                report_interrupted_state(&record.root, &mut record.attention, &entry, report);
-            if changed {
-                registry.update_client(&mut record)?;
-            }
-            continue;
-        }
+    if record.storage == StorageClass::Temporary
+        && record.root != registry.paths().instance_root(record.storage, record.id)
+    {
+        // Temporary roots are launcher-owned and UID-scoped. An older or
+        // tampered record pointing elsewhere must not bypass that boundary;
+        // forget it without deleting the path, which may belong to a user
+        // or to another account on the machine.
+        registry.delete_client(record.id, FileDisposition::Keep)?;
+        report.removed_stale_temporary.push(entry);
+        return Ok(());
+    }
 
-        if record.storage.vanishing_is_expected() {
-            // Before calling it cleanup, check whether the files simply moved.
-            // A promotion that was interrupted between its rename and its index
-            // row leaves exactly this state, and forgetting the record would
-            // also unlink its servers (ADR 0025).
-            let moved = registry
-                .paths()
-                .instance_root(StorageClass::Persistent, record.id);
-            if is_finished_client_root(&moved, record.id) {
-                record.root.clone_from(&moved);
-                record.storage = StorageClass::Persistent;
-                registry.update_client(&mut record)?;
-                tracing::info!(
-                    instance_id = %record.id,
-                    root = %moved.display(),
-                    "an instance's files were found at the persistent root; the record followed them"
-                );
-                report.relocated.push(ReconciledRecord {
-                    reference: RecordRef::Client(record.id),
-                    name: record.name.clone(),
-                    root: moved,
-                    storage: StorageClass::Persistent,
-                });
-                continue;
-            }
+    if record.root.is_dir() {
+        return reconcile_present_client(registry, record, idle, report);
+    }
 
-            // Expected: the OS owns this directory's lifecycle (ADR 0006).
-            // `Keep` because there is nothing left to remove, and because
-            // asking the filesystem to delete a path the OS already cleared is
-            // how a race turns into an error dialog.
-            registry.delete_client(record.id, FileDisposition::Keep)?;
-            tracing::debug!(
+    if record.storage.vanishing_is_expected() {
+        // Before calling it cleanup, check whether the files simply moved.
+        // A promotion that was interrupted between its rename and its index
+        // row leaves exactly this state, and forgetting the record would
+        // also unlink its servers (ADR 0025).
+        let moved = registry
+            .paths()
+            .instance_root(StorageClass::Persistent, record.id);
+        if is_finished_client_root(&moved, record.id) {
+            record.root.clone_from(&moved);
+            record.storage = StorageClass::Persistent;
+            registry.update_client(&mut record)?;
+            tracing::info!(
                 instance_id = %record.id,
-                root = %record.root.display(),
-                "dropped a stale temporary instance whose directory the OS cleared"
+                root = %moved.display(),
+                "an instance's files were found at the persistent root; the record followed them"
             );
-            report.removed_stale_temporary.push(entry);
-        } else {
-            // Not expected. Keep everything; say so.
-            if !record.attention.contains(&AttentionReason::MissingRoot) {
-                record.add_attention(AttentionReason::MissingRoot);
-                registry.update_client(&mut record)?;
+            report.relocated.push(client_entry(&record));
+            return reconcile_present_client(registry, record, idle, report);
+        }
+
+        // Expected: the OS owns this directory's lifecycle (ADR 0006).
+        // `Keep` because there is nothing left to remove, and because
+        // asking the filesystem to delete a path the OS already cleared is
+        // how a race turns into an error dialog.
+        registry.delete_client(record.id, FileDisposition::Keep)?;
+        tracing::debug!(
+            instance_id = %record.id,
+            root = %record.root.display(),
+            "dropped a stale temporary instance whose directory the OS cleared"
+        );
+        report.removed_stale_temporary.push(entry);
+    } else {
+        // Not expected. Keep everything; say so.
+        if !record.attention.contains(&AttentionReason::MissingRoot) {
+            record.add_attention(AttentionReason::MissingRoot);
+            registry.update_client(&mut record)?;
+        }
+        tracing::warn!(
+            instance_id = %record.id,
+            root = %record.root.display(),
+            "a persistent instance is missing its directory; keeping the record"
+        );
+        report.missing_persistent.push(entry);
+    }
+    Ok(())
+}
+
+/// Reconciles a client whose files are standing at `record.root`.
+///
+/// Canonical metadata wins over the index: ADR 0002 writes it first, so a
+/// disagreeing row is the leftover of an update whose index write failed. Two
+/// cases keep the index instead. While a root was absent only the index could
+/// be written, so a newer row carrying `MissingRoot` is the later state. And a
+/// root with an unresolved restore holds a snapshot's copy in place of
+/// canonical metadata, which is never adopted.
+fn reconcile_present_client(
+    registry: &Registry,
+    mut record: ClientRecord,
+    idle: bool,
+    report: &mut ReconciliationReport,
+) -> Result<(), RegistryError> {
+    let entry = client_entry(&record);
+    let recovery = if idle {
+        recover_restore_state(&record.root, &entry, report)
+    } else {
+        RestoreRecovery::Unknown
+    };
+    let restore_unresolved = matches!(recovery, RestoreRecovery::Failed | RestoreRecovery::Unknown)
+        || metadata::is_incomplete(&record.root);
+
+    let mut adopted = false;
+    match metadata::read_client_metadata(&record.root) {
+        Ok(mut canonical) if canonical.id == record.id => {
+            if restore_unresolved {
+                if metadata::is_incomplete(&record.root) {
+                    report.persistence_unhealthy.push(entry);
+                }
+            } else if canonical.storage == StorageClass::Temporary
+                && record.root
+                    != registry
+                        .paths()
+                        .instance_root(StorageClass::Temporary, record.id)
+            {
+                // A storage class that contradicts where the files are would
+                // make the next pass forget the record.
+                report.persistence_unhealthy.push(entry);
+                return Ok(());
+            } else {
+                let recorded_root_differs = canonical.root != record.root;
+                canonical.root.clone_from(&record.root);
+                let index_is_newer = record.attention.contains(&AttentionReason::MissingRoot)
+                    && record.updated_at > canonical.updated_at;
+                if index_is_newer {
+                    adopted = true;
+                } else {
+                    if record.attention.contains(&AttentionReason::MissingRoot) {
+                        canonical.add_attention(AttentionReason::MissingRoot);
+                    }
+                    if canonical != record {
+                        if recorded_root_differs {
+                            metadata::write_client_metadata(&record.root, &canonical)?;
+                        }
+                        registry.synchronize_client_index(&canonical)?;
+                        report.index_repaired.push(client_entry(&canonical));
+                    }
+                    record = canonical;
+                    adopted = true;
+                }
             }
+        }
+        Ok(_) | Err(_) => {
             tracing::warn!(
                 instance_id = %record.id,
                 root = %record.root.display(),
-                "a persistent instance is missing its directory; keeping the record"
+                "client canonical metadata is unhealthy; retaining only the recovery copy"
             );
-            report.missing_persistent.push(entry);
+            report.persistence_unhealthy.push(entry);
+            return Ok(());
+        }
+    }
+
+    let mut changed = false;
+    // The disk came back. Clearing the warning here is what stops a
+    // remounted drive from leaving a permanent "needs attention" badge.
+    if record.attention.contains(&AttentionReason::MissingRoot) {
+        record
+            .attention
+            .retain(|reason| reason != &AttentionReason::MissingRoot);
+        changed = true;
+        report.recovered.push(client_entry(&record));
+    }
+    let entry = client_entry(&record);
+    changed |= report_interrupted_state(&record.root, &mut record.attention, &entry, report);
+    if changed {
+        if adopted {
+            registry.update_client(&mut record)?;
+        } else {
+            // The files under this root are not canonical metadata, so only
+            // the index records the new attention.
+            registry.synchronize_client_index(&record)?;
         }
     }
     Ok(())
 }
 
+/// Reconciles every indexed server, claim first like [`reconcile_clients`].
 fn reconcile_servers(
     registry: &Registry,
     report: &mut ReconciliationReport,
 ) -> Result<(), RegistryError> {
-    for mut record in registry.list_servers()? {
-        let entry = ReconciledRecord {
-            reference: RecordRef::Server(record.id),
-            name: record.name.clone(),
-            root: record.root.clone(),
-            storage: record.storage,
+    let listed = registry.list_servers()?;
+    reconcile_listed_servers(registry, &listed, report)
+}
+
+fn reconcile_listed_servers(
+    registry: &Registry,
+    listed: &[ServerRecord],
+    report: &mut ReconciliationReport,
+) -> Result<(), RegistryError> {
+    for listed in listed {
+        let probe = registry.probe_host(RecordRef::Server(listed.id));
+        if matches!(probe, HostProbe::Mutating) {
+            continue;
+        }
+        let record = match registry.server(listed.id) {
+            Ok(record) => record,
+            Err(RegistryError::ServerUnknown { .. }) => continue,
+            Err(error) => return Err(error),
         };
+        reconcile_server(
+            registry,
+            record,
+            matches!(probe, HostProbe::Idle(_)),
+            report,
+        )?;
+    }
+    Ok(())
+}
 
-        if record.storage == StorageClass::Temporary
-            && record.root != registry.paths().server_root(record.storage, record.id)
-        {
-            registry.delete_server(record.id, FileDisposition::Keep)?;
-            report.removed_stale_temporary.push(entry);
-            continue;
+fn reconcile_server(
+    registry: &Registry,
+    mut record: ServerRecord,
+    idle: bool,
+    report: &mut ReconciliationReport,
+) -> Result<(), RegistryError> {
+    let entry = server_entry(&record);
+
+    if record.storage == StorageClass::Temporary
+        && record.root != registry.paths().server_root(record.storage, record.id)
+    {
+        registry.delete_server(record.id, FileDisposition::Keep)?;
+        report.removed_stale_temporary.push(entry);
+        return Ok(());
+    }
+
+    if record.root.is_dir() {
+        return reconcile_present_server(registry, record, idle, report);
+    }
+
+    if record.storage.vanishing_is_expected() {
+        // The same question a client is asked: were these files moved to
+        // the persistent root rather than cleared away (ADR 0025)?
+        let moved = registry
+            .paths()
+            .server_root(StorageClass::Persistent, record.id);
+        if is_finished_server_root(&moved, record.id) {
+            record.root.clone_from(&moved);
+            record.storage = StorageClass::Persistent;
+            let _committed = registry.update_server_committed(&mut record)?;
+            tracing::info!(
+                server_id = %record.id,
+                root = %moved.display(),
+                "a server's files were found at the persistent root; the record followed them"
+            );
+            report.relocated.push(server_entry(&record));
+            return reconcile_present_server(registry, record, idle, report);
         }
 
-        if record.root.is_dir() {
-            let probe = registry.probe_host(RecordRef::Server(record.id));
-            if matches!(probe, HostProbe::Mutating) {
-                continue;
-            }
-            if matches!(probe, HostProbe::Idle(_)) {
-                recover_restore_state(&record.root, &entry, report);
-            }
-            match metadata::read_server_metadata(&record.root) {
-                Ok(mut canonical) if canonical.id == record.id => {
-                    canonical.root.clone_from(&record.root);
-                    if canonical != record {
-                        metadata::write_server_metadata(&record.root, &canonical)?;
-                        registry.synchronize_server_index(&canonical)?;
-                        report.index_repaired.push(ReconciledRecord {
-                            reference: RecordRef::Server(canonical.id),
-                            name: canonical.name.clone(),
-                            root: canonical.root.clone(),
-                            storage: canonical.storage,
-                        });
-                    }
-                    record = canonical;
-                }
-                Ok(_) | Err(_) => {
-                    tracing::warn!(
-                        server_id = %record.id,
-                        root = %record.root.display(),
-                        "server canonical metadata is unhealthy; retaining only the recovery copy"
-                    );
-                    report.persistence_unhealthy.push(entry);
-                    continue;
-                }
-            }
-            let mut changed = false;
-            if record.attention.contains(&AttentionReason::MissingRoot) {
-                record
-                    .attention
-                    .retain(|reason| reason != &AttentionReason::MissingRoot);
-                changed = true;
-                report.recovered.push(entry.clone());
-            }
-            changed |=
-                report_interrupted_state(&record.root, &mut record.attention, &entry, report);
-            if changed {
-                registry.update_server(&mut record)?;
-            }
-            continue;
+        registry.delete_server(record.id, FileDisposition::Keep)?;
+        report.removed_stale_temporary.push(entry);
+    } else {
+        if !record.attention.contains(&AttentionReason::MissingRoot) {
+            record.add_attention(AttentionReason::MissingRoot);
+            registry.update_server(&mut record)?;
         }
+        tracing::warn!(
+            server_id = %record.id,
+            root = %record.root.display(),
+            "a persistent server is missing its directory; keeping the record"
+        );
+        report.missing_persistent.push(entry);
+    }
+    Ok(())
+}
 
-        if record.storage.vanishing_is_expected() {
-            // The same question a client is asked: were these files moved to
-            // the persistent root rather than cleared away (ADR 0025)?
-            let moved = registry
-                .paths()
-                .server_root(StorageClass::Persistent, record.id);
-            if is_finished_server_root(&moved, record.id) {
-                record.root.clone_from(&moved);
-                record.storage = StorageClass::Persistent;
-                let _committed = registry.update_server_committed(&mut record)?;
-                tracing::info!(
-                    server_id = %record.id,
-                    root = %moved.display(),
-                    "a server's files were found at the persistent root; the record followed them"
-                );
-                report.relocated.push(ReconciledRecord {
-                    reference: RecordRef::Server(record.id),
-                    name: record.name.clone(),
-                    root: moved,
-                    storage: StorageClass::Persistent,
-                });
-                continue;
-            }
+/// Reconciles a server whose files are standing at `record.root`.
+fn reconcile_present_server(
+    registry: &Registry,
+    mut record: ServerRecord,
+    idle: bool,
+    report: &mut ReconciliationReport,
+) -> Result<(), RegistryError> {
+    let entry = server_entry(&record);
+    if idle {
+        let _ = recover_restore_state(&record.root, &entry, report);
+    }
 
-            registry.delete_server(record.id, FileDisposition::Keep)?;
-            report.removed_stale_temporary.push(entry);
-        } else {
-            if !record.attention.contains(&AttentionReason::MissingRoot) {
-                record.add_attention(AttentionReason::MissingRoot);
-                registry.update_server(&mut record)?;
+    match metadata::read_server_metadata(&record.root) {
+        Ok(mut canonical) if canonical.id == record.id => {
+            canonical.root.clone_from(&record.root);
+            if canonical != record {
+                metadata::write_server_metadata(&record.root, &canonical)?;
+                registry.synchronize_server_index(&canonical)?;
+                report.index_repaired.push(server_entry(&canonical));
             }
+            record = canonical;
+        }
+        Ok(_) | Err(_) => {
             tracing::warn!(
                 server_id = %record.id,
                 root = %record.root.display(),
-                "a persistent server is missing its directory; keeping the record"
+                "server canonical metadata is unhealthy; retaining only the recovery copy"
             );
-            report.missing_persistent.push(entry);
+            report.persistence_unhealthy.push(entry);
+            return Ok(());
         }
+    }
+
+    let mut changed = false;
+    if record.attention.contains(&AttentionReason::MissingRoot) {
+        record
+            .attention
+            .retain(|reason| reason != &AttentionReason::MissingRoot);
+        changed = true;
+        report.recovered.push(server_entry(&record));
+    }
+    let entry = server_entry(&record);
+    changed |= report_interrupted_state(&record.root, &mut record.attention, &entry, report);
+    if changed {
+        registry.update_server(&mut record)?;
     }
     Ok(())
 }
@@ -677,16 +819,28 @@ fn report_interrupted_state(
     }
 }
 
+/// What trying to recover a host's interrupted restore found.
+enum RestoreRecovery {
+    /// No restore was interrupted.
+    Nothing,
+    /// A restore was rolled back to the complete pre-restore state.
+    RolledBack,
+    /// A restore is interrupted and could not be rolled back.
+    Failed,
+    /// Recovery was not attempted because the host's claim was not free.
+    Unknown,
+}
+
 fn recover_restore_state(
     root: &Path,
     record: &ReconciledRecord,
     report: &mut ReconciliationReport,
-) -> bool {
+) -> RestoreRecovery {
     match crate::restore::recover_interrupted_restores(root) {
-        Ok(0) => false,
+        Ok(0) => RestoreRecovery::Nothing,
         Ok(_) => {
             report.restores_rolled_back.push(record.clone());
-            true
+            RestoreRecovery::RolledBack
         }
         Err(error) => {
             tracing::warn!(
@@ -694,7 +848,7 @@ fn recover_restore_state(
                 %error,
                 "an interrupted restore could not be reconciled automatically"
             );
-            false
+            RestoreRecovery::Failed
         }
     }
 }
@@ -703,6 +857,7 @@ fn recover_restore_state(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
+    use chrono::Utc;
     use ephervex_model::LoaderSelection;
 
     use crate::records::{NewClient, NewServer};
@@ -1307,6 +1462,365 @@ mod tests {
         let report = reconcile(&registry).expect("reconcile");
         assert_eq!(report.persistence_unhealthy.len(), 1);
         assert_eq!(registry.server(server.id).expect("recovery copy"), server);
+    }
+
+    fn fail_index_writes(registry: &Registry, failing: bool) {
+        let pragma = if failing {
+            "PRAGMA query_only = ON"
+        } else {
+            "PRAGMA query_only = OFF"
+        };
+        registry
+            .index()
+            .connection()
+            .execute_batch(pragma)
+            .expect("toggle index writes");
+    }
+
+    #[test]
+    fn canonical_client_metadata_replaces_a_disagreeing_index_copy() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let mut client = registry
+            .create_published_client(
+                NewClient::new("before", "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(StorageClass::Persistent),
+            )
+            .expect("create");
+
+        // The metadata write lands and the index write fails.
+        client.name = "after".to_owned();
+        fail_index_writes(&registry, true);
+        registry
+            .update_client(&mut client)
+            .expect_err("the index write fails");
+        fail_index_writes(&registry, false);
+        assert_eq!(registry.client(client.id).expect("read").name, "before");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.index_repaired.len(), 1);
+        assert_eq!(
+            report.index_repaired[0].reference,
+            RecordRef::Client(client.id)
+        );
+        let repaired = registry.client(client.id).expect("read");
+        assert_eq!(repaired.name, "after");
+        assert_eq!(
+            repaired.updated_at,
+            metadata::read_client_metadata(&client.root)
+                .expect("metadata")
+                .updated_at,
+            "mirroring must not restamp the record it mirrors"
+        );
+        assert!(
+            reconcile(&registry).expect("second").is_empty(),
+            "an agreeing index needs nothing"
+        );
+    }
+
+    #[test]
+    fn canonical_client_metadata_repairs_launch_history_and_settings() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let mut client = registry
+            .create_published_client(
+                NewClient::new("history", "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(StorageClass::Persistent),
+            )
+            .expect("create");
+
+        client.last_launched_at = Some(Utc::now());
+        client.allow_pack_mod_version_changes = !client.allow_pack_mod_version_changes;
+        client.add_attention(AttentionReason::InterruptedMutation);
+        fail_index_writes(&registry, true);
+        registry
+            .update_client(&mut client)
+            .expect_err("the index write fails");
+        fail_index_writes(&registry, false);
+
+        reconcile(&registry).expect("reconcile");
+
+        assert_eq!(registry.client(client.id).expect("read"), client);
+    }
+
+    #[test]
+    fn a_persistent_root_that_comes_back_still_reports_recovery_after_an_index_only_warning() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let record = registry
+            .create_published_client(
+                NewClient::new("remounted", "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(StorageClass::Persistent),
+            )
+            .expect("create");
+        let backup = environment.base().join("backup");
+        std::fs::rename(&record.root, &backup).expect("unmount");
+        reconcile(&registry).expect("reconcile");
+        std::fs::rename(&backup, &record.root).expect("remount");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.recovered.len(), 1);
+        assert!(
+            report.index_repaired.is_empty(),
+            "the warning lives in the index alone and is not a disagreement"
+        );
+    }
+
+    #[test]
+    fn a_client_edited_while_its_root_was_missing_keeps_the_edit_on_remount() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let record = registry
+            .create_published_client(
+                NewClient::new("original", "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(StorageClass::Persistent),
+            )
+            .expect("create");
+        let backup = environment.base().join("backup");
+        std::fs::rename(&record.root, &backup).expect("unmount");
+        reconcile(&registry).expect("reconcile");
+        let mut edited = registry.client(record.id).expect("kept");
+        edited.name = "renamed while unmounted".to_owned();
+        registry
+            .update_client(&mut edited)
+            .expect("index-only edit");
+        std::fs::rename(&backup, &record.root).expect("remount");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.recovered.len(), 1);
+        assert!(report.index_repaired.is_empty());
+        let after = registry.client(record.id).expect("read");
+        assert_eq!(after.name, "renamed while unmounted");
+        assert_eq!(
+            metadata::read_client_metadata(&record.root)
+                .expect("metadata")
+                .name,
+            "renamed while unmounted"
+        );
+    }
+
+    /// An interrupted restore leaves the snapshot's copy where canonical
+    /// metadata belongs, so it must not be mirrored into the index.
+    #[test]
+    fn a_client_with_an_unrecovered_restore_does_not_adopt_snapshot_metadata() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(
+                NewClient::new("promoted", "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(StorageClass::Persistent),
+            )
+            .expect("create");
+        let mut snapshot_copy = client.clone();
+        snapshot_copy.storage = StorageClass::Temporary;
+        snapshot_copy.root = registry
+            .paths()
+            .instance_root(StorageClass::Temporary, client.id);
+        metadata::write_client_metadata(&client.root, &snapshot_copy).expect("snapshot copy");
+        metadata::mark_incomplete(&client.root).expect("marker");
+        let journal = metadata::staging_dir(&client.root).join("restore-x/restore.json");
+        std::fs::create_dir_all(journal.parent().expect("parent")).expect("staging");
+        std::fs::write(&journal, "not json").expect("journal");
+
+        reconcile(&registry).expect("first");
+        reconcile(&registry).expect("second");
+
+        let kept = registry.client(client.id).expect("the record survives");
+        assert_eq!(kept.storage, StorageClass::Persistent);
+        assert_eq!(kept.root, client.root);
+    }
+
+    #[test]
+    fn canonical_client_metadata_contradicting_its_location_is_not_adopted() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(
+                NewClient::new("contradiction", "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(StorageClass::Persistent),
+            )
+            .expect("create");
+        let mut damaged = client.clone();
+        damaged.storage = StorageClass::Temporary;
+        metadata::write_client_metadata(&client.root, &damaged).expect("damage");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.persistence_unhealthy.len(), 1);
+        assert_eq!(registry.client(client.id).expect("kept"), client);
+        reconcile(&registry).expect("second");
+        assert!(registry.client(client.id).is_ok());
+    }
+
+    #[test]
+    fn corrupt_client_metadata_keeps_the_sqlite_recovery_copy_unhealthy() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(
+                NewClient::new("recoverable", "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(StorageClass::Persistent),
+            )
+            .expect("create");
+        std::fs::write(metadata::client_metadata_path(&client.root), "{broken")
+            .expect("damage metadata");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.persistence_unhealthy.len(), 1);
+        assert_eq!(registry.client(client.id).expect("recovery copy"), client);
+    }
+
+    #[test]
+    fn a_relocated_client_gets_the_interrupted_state_check_in_the_same_pass() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new(
+                "moved",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        let moved = registry
+            .paths()
+            .instance_root(StorageClass::Persistent, client.id);
+        std::fs::create_dir_all(moved.parent().expect("parent")).expect("mkdir");
+        std::fs::rename(&client.root, &moved).expect("move the files");
+        let retired_file = metadata::retired_dir(&moved).join("mods/example.jar");
+        std::fs::create_dir_all(retired_file.parent().expect("parent")).expect("create retired");
+        std::fs::write(&retired_file, b"original mod").expect("write retired file");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.relocated.len(), 1);
+        assert_eq!(report.interrupted_hosts.len(), 1);
+        assert_eq!(
+            report.interrupted_hosts[0].reference,
+            RecordRef::Client(client.id)
+        );
+        assert!(
+            registry
+                .client(client.id)
+                .expect("client")
+                .attention
+                .contains(&AttentionReason::InterruptedMutation)
+        );
+    }
+
+    #[test]
+    fn a_relocated_server_gets_the_interrupted_state_check_in_the_same_pass() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = registry
+            .create_server(NewServer::new(
+                "moved server",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        let moved = registry
+            .paths()
+            .server_root(StorageClass::Persistent, server.id);
+        std::fs::create_dir_all(moved.parent().expect("parent")).expect("mkdir");
+        std::fs::rename(&server.root, &moved).expect("move the files");
+        let staged_file = metadata::staging_dir(&moved).join("pending.jar");
+        std::fs::create_dir_all(staged_file.parent().expect("parent")).expect("create staging");
+        std::fs::write(&staged_file, b"pending mod").expect("write staged file");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.relocated.len(), 1);
+        assert_eq!(report.interrupted_hosts.len(), 1);
+        assert!(
+            registry
+                .server(server.id)
+                .expect("server")
+                .attention
+                .contains(&AttentionReason::InterruptedMutation)
+        );
+    }
+
+    /// A move that finishes between the listing and the claim has already
+    /// updated the record the listing holds.
+    #[test]
+    fn a_client_moved_after_the_listing_is_judged_by_its_current_record() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(
+                NewClient::new("moving", "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(StorageClass::Persistent),
+            )
+            .expect("create");
+        let stale_listing = registry.list_clients().expect("list");
+
+        let moved = registry
+            .paths()
+            .persistent_instances_dir()
+            .join("moved-root");
+        std::fs::rename(&client.root, &moved).expect("move");
+        let mut current = client.clone();
+        current.root.clone_from(&moved);
+        registry
+            .update_client(&mut current)
+            .expect("record the move");
+
+        let mut report = ReconciliationReport::default();
+        reconcile_listed_clients(&registry, &stale_listing, &mut report).expect("reconcile");
+
+        assert!(report.is_empty());
+        let after = registry.client(client.id).expect("read");
+        assert_eq!(after.root, moved);
+        assert!(after.attention.is_empty());
+    }
+
+    #[test]
+    fn a_server_moved_after_the_listing_is_judged_by_its_current_record() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = registry
+            .create_server(
+                NewServer::new("moving", "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(StorageClass::Persistent),
+            )
+            .expect("create");
+        let stale_listing = registry.list_servers().expect("list");
+
+        let moved = registry.paths().persistent_servers_dir().join("moved-root");
+        std::fs::rename(&server.root, &moved).expect("move");
+        let mut current = server.clone();
+        current.root.clone_from(&moved);
+        registry
+            .update_server(&mut current)
+            .expect("record the move");
+
+        let mut report = ReconciliationReport::default();
+        reconcile_listed_servers(&registry, &stale_listing, &mut report).expect("reconcile");
+
+        assert!(report.is_empty());
+        assert_eq!(registry.server(server.id).expect("read").root, moved);
+    }
+
+    #[test]
+    fn a_record_deleted_after_the_listing_is_skipped() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new("gone", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        let stale_listing = registry.list_clients().expect("list");
+        registry
+            .delete_client(client.id, FileDisposition::Keep)
+            .expect("delete");
+
+        let mut report = ReconciliationReport::default();
+        reconcile_listed_clients(&registry, &stale_listing, &mut report).expect("reconcile");
+
+        assert!(report.is_empty());
     }
 
     /// Takes the host's guard the way another process would: through its own

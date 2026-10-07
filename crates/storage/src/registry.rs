@@ -562,6 +562,21 @@ impl Registry {
             );
         }
 
+        self.update_client_row(record)
+    }
+
+    /// Replaces the SQLite recovery copy of an indexed client with its
+    /// canonical metadata, exactly as read.
+    ///
+    /// Unlike [`Self::update_client`] this neither stamps `updated_at` nor
+    /// rewrites the metadata file, so mirroring never changes the record it
+    /// mirrors. The row is updated in place: replacing it would unlink the
+    /// servers that reference it.
+    pub fn synchronize_client_index(&self, record: &ClientRecord) -> Result<(), RegistryError> {
+        self.update_client_row(record)
+    }
+
+    fn update_client_row(&self, record: &ClientRecord) -> Result<(), RegistryError> {
         let changed = self.index.connection().execute(
             "UPDATE instances SET
                 name = ?2, root = ?3, storage_class = ?4, minecraft_version = ?5,
