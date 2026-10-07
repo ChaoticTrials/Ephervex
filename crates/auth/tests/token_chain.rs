@@ -377,28 +377,40 @@ async fn the_redirect_uri_sent_to_microsoft_names_localhost_and_is_reachable() {
 }
 
 #[tokio::test]
-async fn a_redirect_carrying_a_forged_state_is_refused_without_redeeming_anything() {
+async fn a_redirect_carrying_a_forged_state_is_refused_and_the_real_login_still_completes() {
     let server = MockServer::start().await;
     mount_token(&server, 200, TOKEN).await;
     mount_chain(&server).await;
 
     let provider = provider(&server, Arc::new(MemoryStore::new()));
-    let error = drive_browser_login(&provider, |redirect, _state| {
-        format!("{redirect}/?code=STOLEN&state=forged-by-someone-else")
+    let session = drive_browser_login(&provider, |redirect, state| {
+        // A stray local process reaches the listener before the browser does.
+        let authority = redirect.trim_start_matches("http://");
+        let mut stray = std::net::TcpStream::connect(authority).expect("connect to the listener");
+        std::io::Write::write_all(
+            &mut stray,
+            b"GET /?code=STOLEN&state=forged-by-someone-else HTTP/1.1\r\nHost: x\r\n\r\n",
+        )
+        .expect("send the forged redirect");
+        format!("{redirect}/?code=REAL&state={state}")
     })
     .await
-    .expect_err("a forged state must not be redeemed");
-    assert!(matches!(error, AuthError::StateMismatch), "{error:?}");
+    .expect("a forged redirect must not end the real login");
+    drop(session);
 
-    // And the code that came with it never reached Microsoft.
+    // Only the code that carried the right state was redeemed.
+    let bodies: Vec<String> = server
+        .received_requests()
+        .await
+        .expect("requests")
+        .iter()
+        .filter(|request| request.url.path().ends_with("/token"))
+        .map(|request| String::from_utf8_lossy(&request.body).into_owned())
+        .collect();
+    assert!(!bodies.is_empty(), "the real code must be redeemed");
     assert!(
-        server
-            .received_requests()
-            .await
-            .expect("requests")
-            .iter()
-            .all(|request| !request.url.path().ends_with("/token")),
-        "a forged redirect must not trigger a redemption"
+        bodies.iter().all(|body| !body.contains("STOLEN")),
+        "the forged code must never reach the token endpoint: {bodies:?}"
     );
 }
 

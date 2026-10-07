@@ -16,7 +16,7 @@
 //! can also connect to. What is here is a request-line parser with a hard byte
 //! ceiling and a fixed response.
 //!
-//! # Four rules this module exists to enforce
+//! # Five rules this module exists to enforce
 //!
 //! * **Bind loopback only.** `127.0.0.1` and `[::1]`, never `0.0.0.0`. The
 //!   redirect carries an authorization code; nothing on the network may be able
@@ -24,18 +24,26 @@
 //! * **Bound the read.** A connection that sends megabytes without a newline
 //!   must not be able to exhaust memory, so the request line is capped.
 //! * **Ignore requests that are not the redirect.** Browsers speculatively
-//!   fetch `/favicon.ico`; answering it must not end the wait.
+//!   fetch `/favicon.ico`; answering it must not end the wait. A request whose
+//!   `state` is not this login's is refused the same way: a stray local
+//!   process must not be able to end a login that is still running.
+//! * **Keep the deadline and cancellation in force.** Every accepted
+//!   connection is served on its own task under a read timeout, so a peer that
+//!   connects and stays silent can neither stop the wait from timing out or
+//!   being canceled nor keep the real redirect from being accepted.
 //! * **Never render the code.** The page shown to the user says "you can close
 //!   this tab" and nothing else. The query string stays out of the response
 //!   body, out of the page title, and out of every log line.
 
 use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::Url;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
@@ -87,6 +95,17 @@ const MAX_REQUEST_LINE: u64 = 8 * 1024;
 /// finding their phone; short enough that a forgotten login does not leave a
 /// socket bound for the life of the process.
 pub const DEFAULT_LOGIN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+/// How long one accepted connection may take to deliver its request line
+/// before it is dropped. A real browser sends the request immediately, but
+/// speculative preconnections stay silent, so this only has to be generous
+/// enough not to cut off a slow but genuine request.
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Most connections served at once. Bounds the sockets and tasks a local
+/// process can pin; further connections wait in the kernel backlog until a
+/// slot frees up or its read timeout fires.
+const MAX_CONCURRENT_CONNECTIONS: usize = 64;
 
 /// What the browser was redirected with.
 #[derive(Debug)]
@@ -200,89 +219,114 @@ impl LoopbackReceiver {
 
     /// Waits for the redirect, checking `state` before returning anything.
     ///
-    /// Returns [`AuthError::StateMismatch`] for a redirect whose `state` is not
-    /// the one this request sent - a forged or stale redirect, whose code is
-    /// not ours to redeem.
+    /// A request whose `state` is not the one this login sent is a forged or
+    /// stale redirect whose code is not ours to redeem. It is refused and the
+    /// wait continues, still bound by `timeout` and `cancel`.
     pub async fn wait(
         self,
         expected_state: &str,
         timeout: Duration,
         cancel: &CancellationToken,
     ) -> AuthResult<Redirect> {
+        self.wait_with(expected_state, timeout, CONNECTION_TIMEOUT, cancel)
+            .await
+    }
+
+    async fn wait_with(
+        self,
+        expected_state: &str,
+        timeout: Duration,
+        connection_timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> AuthResult<Redirect> {
         let deadline = tokio::time::sleep(timeout);
         tokio::pin!(deadline);
 
+        let expected_state: Arc<str> = Arc::from(expected_state);
+        // Dropping the set on any exit aborts connections still being served.
+        let mut connections: JoinSet<Option<Redirect>> = JoinSet::new();
+
         loop {
-            let accepted = tokio::select! {
+            let has_capacity = connections.len() < MAX_CONCURRENT_CONNECTIONS;
+            tokio::select! {
                 biased;
                 () = cancel.cancelled() => return Err(AuthError::Canceled),
                 () = &mut deadline => {
                     return Err(AuthError::TimedOut { seconds: timeout.as_secs() });
                 }
-                result = self.accept() => result,
-            };
-
-            let (stream, peer) = match accepted {
-                Ok(accepted) => accepted,
-                Err(source) => return Err(AuthError::RedirectListener { source }),
-            };
-            // Belt and braces: the socket is bound to loopback, so a non-loopback
-            // peer should be impossible. If the kernel ever disagrees, the
-            // authorization code is not going to it.
-            if !peer.ip().is_loopback() {
-                warn!("refusing a non-loopback connection to the sign-in listener");
-                continue;
-            }
-
-            match self.handle(stream, expected_state).await {
-                Ok(Some(redirect)) => return Ok(redirect),
-                // `Ok(None)` is a favicon probe, a preflight, or a malformed
-                // line. The browser has not delivered the redirect yet, so the
-                // loop goes round again rather than giving up.
-                Ok(None) => {}
-                Err(error) => return Err(error),
+                Some(finished) = connections.join_next(), if !connections.is_empty() => {
+                    // `None` is a favicon probe, a refused state, a silent or
+                    // malformed peer: the browser has not delivered the
+                    // redirect yet, so keep waiting.
+                    if let Ok(Some(redirect)) = finished {
+                        return Ok(redirect);
+                    }
+                }
+                accepted = self.accept(), if has_capacity => {
+                    let (stream, peer) = accepted
+                        .map_err(|source| AuthError::RedirectListener { source })?;
+                    // Belt and braces: the socket is bound to loopback, so a
+                    // non-loopback peer should be impossible. If the kernel
+                    // ever disagrees, the authorization code is not going to it.
+                    if !peer.ip().is_loopback() {
+                        warn!("refusing a non-loopback connection to the sign-in listener");
+                        continue;
+                    }
+                    let expected_state = Arc::clone(&expected_state);
+                    connections.spawn(async move {
+                        tokio::time::timeout(connection_timeout, handle(stream, &expected_state))
+                            .await
+                            .unwrap_or_else(|_| {
+                                debug!("dropping a sign-in connection that stalled");
+                                None
+                            })
+                    });
+                }
             }
         }
     }
+}
 
-    /// Reads one request, answers it, and reports the redirect if it was one.
-    async fn handle(
-        &self,
-        stream: TcpStream,
-        expected_state: &str,
-    ) -> AuthResult<Option<Redirect>> {
-        let mut reader = BufReader::new(stream);
-        let Some(line) = read_request_line(&mut reader).await? else {
-            return Ok(None);
-        };
+/// Reads one request, answers it, and reports the redirect if it was one.
+///
+/// Nothing a single connection does is fatal to the login, so a failure here
+/// is `None` and the receiver keeps waiting.
+async fn handle(stream: TcpStream, expected_state: &str) -> Option<Redirect> {
+    let mut reader = BufReader::new(stream);
+    let line = read_request_line(&mut reader).await?;
 
-        let Some(target) = request_target(&line) else {
-            debug!("ignoring a connection that did not send a GET request line");
-            return Ok(None);
-        };
+    let Some(target) = request_target(&line) else {
+        debug!("ignoring a connection that did not send a GET request line");
+        return None;
+    };
 
-        let parsed = parse_redirect(&target, expected_state);
-        // Every request gets an answer, including the ones that are not the
-        // redirect: a browser left hanging shows an error page next to the tab
-        // the user is meant to close.
-        let page = match &parsed {
-            Ok(Some(Redirect::Code(_))) => SUCCESS_PAGE,
-            Ok(Some(Redirect::Error { .. })) => FAILURE_PAGE,
-            Ok(None) | Err(_) => IGNORED_PAGE,
-        };
-        let mut stream = reader.into_inner();
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
-             Content-Length: {}\r\nConnection: close\r\n\r\n{page}",
-            page.len()
-        );
-        // A browser that hung up before reading the page is not a reason to
-        // fail a login that already succeeded.
-        let _ = stream.write_all(response.as_bytes()).await;
-        let _ = stream.shutdown().await;
+    let redirect = match parse_redirect(&target, expected_state) {
+        Ok(redirect) => redirect,
+        Err(error) => {
+            warn!(%error, "refusing a request to the sign-in listener");
+            None
+        }
+    };
+    // Every request gets an answer, including the ones that are not the
+    // redirect: a browser left hanging shows an error page next to the tab
+    // the user is meant to close.
+    let page = match &redirect {
+        Some(Redirect::Code(_)) => SUCCESS_PAGE,
+        Some(Redirect::Error { .. }) => FAILURE_PAGE,
+        None => IGNORED_PAGE,
+    };
+    let mut stream = reader.into_inner();
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{page}",
+        page.len()
+    );
+    // A browser that hung up before reading the page is not a reason to
+    // fail a login that already succeeded.
+    let _ = stream.write_all(response.as_bytes()).await;
+    let _ = stream.shutdown().await;
 
-        parsed
-    }
+    redirect
 }
 
 /// Reads the request line, refusing one that never ends.
@@ -291,18 +335,21 @@ impl LoopbackReceiver {
 /// that connects and streams bytes without a newline would otherwise be able to
 /// grow this buffer until the launcher dies. `None` means the connection gave
 /// nothing usable, which is a reason to keep waiting rather than to fail.
-async fn read_request_line(reader: &mut BufReader<TcpStream>) -> AuthResult<Option<String>> {
+async fn read_request_line(reader: &mut BufReader<TcpStream>) -> Option<String> {
     let mut line = Vec::with_capacity(256);
     let mut byte = [0_u8; 1];
     loop {
-        let read = reader
-            .read(&mut byte)
-            .await
-            .map_err(|source| AuthError::RedirectListener { source })?;
+        let read = match reader.read(&mut byte).await {
+            Ok(read) => read,
+            Err(error) => {
+                debug!(%error, "reading a sign-in request failed");
+                return None;
+            }
+        };
         if read == 0 {
             // Connection closed. Anything already read is only usable if the
             // client sent a complete line first, which it did not.
-            return Ok(None);
+            return None;
         }
         if byte[0] == b'\n' {
             break;
@@ -310,12 +357,12 @@ async fn read_request_line(reader: &mut BufReader<TcpStream>) -> AuthResult<Opti
         line.push(byte[0]);
         if line.len() as u64 >= MAX_REQUEST_LINE {
             warn!("dropping an over-long request to the sign-in listener");
-            return Ok(None);
+            return None;
         }
     }
     // Lossy on purpose: a request line that is not UTF-8 is not the redirect,
     // and it will simply fail to parse as one.
-    Ok(Some(String::from_utf8_lossy(&line).into_owned()))
+    Some(String::from_utf8_lossy(&line).into_owned())
 }
 
 /// Extracts the request target from a request line, if it is a `GET`.
@@ -697,5 +744,185 @@ mod tests {
             Redirect::Code(code) => assert_eq!(code.expose(), "THE-CODE"),
             other @ Redirect::Error { .. } => panic!("unexpected: {other:?}"),
         }
+    }
+
+    /// Connects and sends one byte of a request line, then stays silent.
+    async fn idle_peer(uri: &str) -> TcpStream {
+        let mut peer = TcpStream::connect(uri.trim_start_matches("http://"))
+            .await
+            .expect("connect");
+        peer.write_all(b"G").await.expect("write");
+        peer
+    }
+
+    #[tokio::test]
+    async fn an_idle_peer_cannot_keep_the_wait_from_timing_out() {
+        let receiver = LoopbackReceiver::bind().await.expect("bind");
+        let _peer = idle_peer(receiver.redirect_uri()).await;
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            receiver.wait("xyz", Duration::from_millis(100), &CancellationToken::new()),
+        )
+        .await
+        .expect("the wait must end at its own deadline");
+        assert!(
+            matches!(outcome, Err(AuthError::TimedOut { .. })),
+            "{outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_idle_peer_cannot_keep_cancellation_from_ending_the_wait() {
+        let receiver = LoopbackReceiver::bind().await.expect("bind");
+        let _peer = idle_peer(receiver.redirect_uri()).await;
+        let cancel = CancellationToken::new();
+
+        let canceler = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            canceler.cancel();
+        });
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            receiver.wait("xyz", Duration::from_secs(60), &cancel),
+        )
+        .await
+        .expect("cancellation must end the wait");
+        assert!(
+            matches!(&outcome, Err(error) if error.is_cancellation()),
+            "{outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_idle_peer_does_not_stop_the_real_redirect_from_being_served() {
+        let receiver = LoopbackReceiver::bind().await.expect("bind");
+        let uri = receiver.redirect_uri().to_owned();
+        let _idle = idle_peer(&uri).await;
+
+        let waiter = tokio::spawn(async move {
+            receiver
+                .wait(
+                    "state-value",
+                    Duration::from_secs(5),
+                    &CancellationToken::new(),
+                )
+                .await
+        });
+
+        let mut browser = TcpStream::connect(uri.trim_start_matches("http://"))
+            .await
+            .expect("connect");
+        browser
+            .write_all(b"GET /?code=THE-CODE&state=state-value HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .expect("write");
+
+        match waiter.await.expect("join").expect("a redirect") {
+            Redirect::Code(code) => assert_eq!(code.expose(), "THE-CODE"),
+            other @ Redirect::Error { .. } => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_stays_silent_is_disconnected_after_the_connection_timeout() {
+        let receiver = LoopbackReceiver::bind().await.expect("bind");
+        let mut peer = idle_peer(receiver.redirect_uri()).await;
+
+        let waiter = tokio::spawn(async move {
+            receiver
+                .wait_with(
+                    "xyz",
+                    Duration::from_secs(5),
+                    Duration::from_millis(100),
+                    &CancellationToken::new(),
+                )
+                .await
+        });
+
+        // The receiver ends the connection without sending a page: the peer
+        // never produced a request line, so there is nothing to answer.
+        let mut rest = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            tokio::io::AsyncReadExt::read_to_end(&mut peer, &mut rest),
+        )
+        .await
+        .expect("the receiver must hang up on a silent peer")
+        .ok();
+        assert!(rest.is_empty(), "{rest:?}");
+        waiter.abort();
+    }
+
+    #[tokio::test]
+    async fn a_wrong_state_request_is_refused_and_the_wait_still_accepts_the_real_redirect() {
+        let receiver = LoopbackReceiver::bind().await.expect("bind");
+        let authority = receiver
+            .redirect_uri()
+            .trim_start_matches("http://")
+            .to_owned();
+
+        let waiter = tokio::spawn(async move {
+            receiver
+                .wait(
+                    "state-value",
+                    Duration::from_secs(5),
+                    &CancellationToken::new(),
+                )
+                .await
+        });
+
+        let mut stray = TcpStream::connect(&authority).await.expect("connect");
+        stray
+            .write_all(b"GET /?code=STOLEN&state=forged HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .expect("write");
+        let mut page = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut stray, &mut page)
+            .await
+            .expect("read the page");
+        let page = String::from_utf8_lossy(&page);
+        assert!(!page.contains("Signed in"), "{page}");
+        assert!(!page.contains("STOLEN"), "{page}");
+        assert!(
+            !waiter.is_finished(),
+            "a forged state must not end the wait"
+        );
+
+        let mut browser = TcpStream::connect(&authority).await.expect("connect");
+        browser
+            .write_all(b"GET /?code=THE-CODE&state=state-value HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .expect("write");
+
+        match waiter.await.expect("join").expect("a redirect") {
+            Redirect::Code(code) => assert_eq!(code.expose(), "THE-CODE"),
+            other @ Redirect::Error { .. } => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_forged_error_redirect_does_not_cancel_a_login_in_progress() {
+        let receiver = LoopbackReceiver::bind().await.expect("bind");
+        let uri = receiver.redirect_uri().to_owned();
+
+        let outcome = tokio::spawn(async move {
+            receiver
+                .wait("xyz", Duration::from_millis(500), &CancellationToken::new())
+                .await
+        });
+
+        let mut stray = TcpStream::connect(uri.trim_start_matches("http://"))
+            .await
+            .expect("connect");
+        stray
+            .write_all(b"GET /?error=access_denied&state=forged HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .expect("write");
+
+        let error = outcome.await.expect("join").expect_err("must time out");
+        assert!(matches!(error, AuthError::TimedOut { .. }), "{error:?}");
     }
 }
