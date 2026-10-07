@@ -367,10 +367,10 @@ mod tests {
         assert!(app.running_processes().expect("query").is_empty());
     }
 
-    /// The launcher's own lock is what makes an instance look busy, and a run
-    /// nobody is supervising has to be endable or the instance is stranded.
+    /// A launch that is still alive keeps its lock, because releasing it would
+    /// let a second launch start beside the first.
     #[test]
-    fn ending_a_launch_from_outside_it_releases_the_lock() {
+    fn ending_a_launch_whose_launcher_run_is_alive_keeps_the_lock() {
         let base = tempfile::tempdir().expect("temp dir");
         let app = app_rooted_at(base.path());
         let record = instance(&app, "Repro");
@@ -385,19 +385,21 @@ mod tests {
         assert_eq!(app.running_processes().expect("query").len(), 1);
 
         let outcome = app.force_stop_launch(record.id, None).expect("ended");
-        assert!(
-            outcome.released,
-            "the instance must become launchable again"
+        assert_eq!(
+            outcome.lock,
+            ephervex_storage::LockDisposition::Retained,
+            "the instance stays busy while its launcher run is alive"
         );
         assert!(
             !outcome.signaled_owner,
             "this test process owns the lock, and ending a launch must not kill the launcher"
         );
+        assert_eq!(app.running_processes().expect("query").len(), 1);
+        drop(lock);
         assert!(
             app.running_processes().expect("query").is_empty(),
-            "a released lock means the launch is over"
+            "the launch releases its own lock when it ends"
         );
-        drop(lock);
     }
 
     /// A pid alone is not safe to signal, so the lock records what proves it.
@@ -472,12 +474,16 @@ mod tests {
 
         let _first = LaunchLock::acquire(&record.root).expect("the first launch");
         let second = LaunchLock::acquire_additional(&record.root, "bob").expect("a second account");
-        std::mem::forget(second);
 
         let outcome = app
             .force_stop_launch(record.id, Some("bob"))
-            .expect("the second launch ends");
-        assert!(outcome.released);
+            .expect("the second launch is asked to end");
+        assert_eq!(
+            outcome.lock,
+            ephervex_storage::LockDisposition::Retained,
+            "its launcher run is still alive"
+        );
+        drop(second);
 
         let running = app.running_processes().expect("query");
         assert_eq!(running.len(), 1, "the first client is untouched");

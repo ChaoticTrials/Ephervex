@@ -715,6 +715,9 @@ error-launch-already-running = That instance is already being launched.
 error-launch-lock-busy = That instance is already being started or stopped.
 .action = Try again in a moment. If it keeps happening, check which process holds { $path }.
 
+error-launch-lock-lost = This launch no longer holds its instance.
+.action = Another launch or a force stop took over the instance while this one was preparing, so the game was not started. Launch again.
+
 error-launch-lock-unusable = Ephervex could not claim the instance for launching.
 .action = Check permissions on { $path }.
 
@@ -1540,6 +1543,7 @@ gui-stop-game = Stop Game
 gui-force-stop = Force Stop
 gui-force-stop-signaled = Asked the launch to stop. The instance stays locked until its game has exited.
 gui-force-stop-released = The launch was already gone. The instance is released.
+gui-force-stop-owner-running = The launcher run that owns this launch is still running. The instance stays locked until it has exited.
 gui-open-log = Open Log
 gui-open-console = Console
 crash-no-suspects = The crash report does not point at any mod.

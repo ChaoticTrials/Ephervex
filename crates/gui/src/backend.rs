@@ -3955,19 +3955,34 @@ fn run_worker(
                 )));
             }
             Command::ForceStopLaunch { instance, launch } => {
-                match app.force_stop_launch(instance, launch.as_deref()) {
-                    Ok(outcome) => {
-                        let _ = events.send(Event::Toast {
-                            message: lookup(if outcome.signaled_game || outcome.signaled_owner {
-                                "gui-force-stop-signaled"
-                            } else {
-                                "gui-force-stop-released"
-                            }),
-                            error: false,
-                        });
-                        send_snapshot(&app, &events);
+                let supervised = cancellations.lock().is_ok_and(|entries| {
+                    entries.contains_key(&launch_key(instance, launch.as_deref()))
+                });
+                if supervised {
+                    // A launch this process supervises ends through its own
+                    // cancellation, which also releases its lock on the way out.
+                    kill_instance(&cancellations, &events, instance, launch.as_deref());
+                } else {
+                    match app.force_stop_launch(instance, launch.as_deref()) {
+                        Ok(outcome) => {
+                            let _ = events.send(Event::Toast {
+                                message: lookup(
+                                    if outcome.signaled_game || outcome.signaled_owner {
+                                        "gui-force-stop-signaled"
+                                    } else if outcome.lock
+                                        == ephervex_core::LockDisposition::Retained
+                                    {
+                                        "gui-force-stop-owner-running"
+                                    } else {
+                                        "gui-force-stop-released"
+                                    },
+                                ),
+                                error: false,
+                            });
+                            send_snapshot(&app, &events);
+                        }
+                        Err(error) => send_error(&events, &error),
                     }
-                    Err(error) => send_error(&events, &error),
                 }
             }
             Command::RefreshMods(host) => {

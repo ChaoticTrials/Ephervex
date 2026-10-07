@@ -305,6 +305,9 @@ impl App {
         }
 
         let process = GameProcess::start(&outcome.command, observer)?;
+        // A lock this run no longer holds is refused here, and dropping the
+        // process on the way out ends the game rather than leaving it running
+        // beside the launch that holds the instance now.
         lock.record_game_pid(process.pid())?;
         observer.emit(LaunchEvent::Running { pid: process.pid() });
 

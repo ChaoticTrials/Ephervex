@@ -804,9 +804,14 @@ time, so no second game can share its directory; the instance is shown as
 orphaned rather than stopped. Nothing supervises such a game: its output and
 process handle went with that run, so it is not restartable and its console is
 not recovered. The force stop signals it only after proving it is that process,
-and its lock stays until it has exited. A recorded id whose start time does not
-match, or that has no recorded start time, is not believed, and a lock whose
-owner and game are both gone is cleared by the next launch.
+and its lock stays until it has exited. A force stop never releases the lock of
+a launcher run that is still alive, including one it just signaled: that run may
+still be preparing a game, so the lock stays until the run has exited. Recording
+the game's id takes the same ownership guard and is refused when the lock file
+no longer names that run, in which case the game is not left running. A recorded
+id whose start time does not match, or that has no recorded start time, is not
+believed, and a lock whose owner and game are both gone is cleared by the next
+launch.
 
 Authentication and Java failures are classified in `ephervex-core`, so a
 frontend can offer sign-in, session-only login, or managed Java without

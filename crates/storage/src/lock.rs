@@ -96,6 +96,10 @@ pub enum LockError {
     /// and kept at it for longer than this one waits.
     #[error("another launcher is claiming the instance at {path}")]
     Busy { path: PathBuf },
+    /// The lock file no longer names this launch: it was released or taken
+    /// over while the launch was still preparing.
+    #[error("the launch lock at {path} no longer belongs to this launch")]
+    Lost { path: PathBuf },
     /// The lock file could not be created, read, or removed.
     #[error("the launch lock at {path} could not be used")]
     Unusable {
@@ -114,6 +118,7 @@ impl LockError {
         match self {
             Self::AlreadyRunning { .. } => "error-launch-already-running",
             Self::Busy { .. } => "error-launch-lock-busy",
+            Self::Lost { .. } => "error-launch-lock-lost",
             Self::Unusable { .. } => "error-launch-lock-unusable",
             Self::Path(error) => error.message_id(),
         }
@@ -123,7 +128,9 @@ impl LockError {
     #[must_use]
     pub fn failing_path(&self) -> Option<PathBuf> {
         match self {
-            Self::Unusable { path, .. } | Self::Busy { path } => Some(path.clone()),
+            Self::Unusable { path, .. } | Self::Busy { path } | Self::Lost { path } => {
+                Some(path.clone())
+            }
             Self::AlreadyRunning { .. } | Self::Path(_) => None,
         }
     }
@@ -237,8 +244,21 @@ pub struct ForcedStop {
     pub signaled_game: bool,
     /// Whether the launcher run that owns the lock was signaled.
     pub signaled_owner: bool,
-    /// Whether a lock file was removed.
-    pub released: bool,
+    /// What became of the lock file.
+    pub lock: LockDisposition,
+}
+
+/// What ending a launch from outside it did to its lock file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LockDisposition {
+    /// There was no lock to act on.
+    #[default]
+    Absent,
+    /// The lock was removed: no launcher run or game held it any longer.
+    Released,
+    /// The lock was left in place because the launcher run that owns it, or
+    /// its game, is still alive.
+    Retained,
 }
 
 /// Ends a launch this process is not supervising, and releases its lock.
@@ -257,8 +277,11 @@ pub struct ForcedStop {
 ///
 /// `SIGTERM` rather than `SIGKILL`: Minecraft saves on it. A game that was
 /// signaled keeps its lock until it has exited, so an instance is never offered
-/// for a second launch while its game is still writing to it; a launch with no
-/// live game has its lock released at once.
+/// for a second launch while its game is still writing to it. The same holds
+/// for a launcher run that is still alive, whether it was just signaled or is
+/// this very process: it may be preparing a game it has yet to start, and a
+/// released lock would let a second launch begin beside it. Only a launch
+/// whose owner and game are both gone has its lock released at once.
 pub fn force_release(instance_root: &Path, launch: Option<&str>) -> Result<ForcedStop, LockError> {
     let name = match launch {
         Some(id) => additional_lock_file(id).ok_or_else(|| {
@@ -288,19 +311,22 @@ pub fn force_release(instance_root: &Path, launch: Option<&str>) -> Result<Force
     {
         outcome.signaled_game = terminate(pid);
     }
-    if state.owner_is_alive() && state.owner_pid != std::process::id() {
+    let owner_alive = state.owner_is_alive();
+    if owner_alive && state.owner_pid != std::process::id() {
         outcome.signaled_owner = terminate(state.owner_pid);
     }
 
-    // A signaled game has been asked to stop, not proven stopped, and while
-    // it runs it still writes to the instance. Its lock stays until it has
-    // exited, and is then cleared like any lock nobody holds.
-    if outcome.signaled_game {
+    // A signaled game or a live owner has been asked to stop, not proven
+    // stopped, and while either runs it may still write to the instance. The
+    // lock stays until both have exited, and is then cleared like any lock
+    // nobody holds.
+    if outcome.signaled_game || owner_alive {
+        outcome.lock = LockDisposition::Retained;
         debug!(path = %path.display(), ?outcome, "asked a launch to end; its lock stays until it exits");
         return Ok(outcome);
     }
     match std::fs::remove_file(&path) {
-        Ok(()) => outcome.released = true,
+        Ok(()) => outcome.lock = LockDisposition::Released,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(LockError::unusable(&path, error)),
     }
@@ -427,12 +453,38 @@ impl LaunchLock {
 
     /// Records the game's process id, so a frontend can show it and a stuck
     /// instance can be diagnosed without guessing.
+    ///
+    /// Refused with [`LockError::Lost`] when the file no longer names this
+    /// lock, so a run that lost its claim cannot overwrite the launch that
+    /// holds the instance now.
     pub fn record_game_pid(&mut self, pid: u32) -> Result<(), LockError> {
-        self.state.game_pid = Some(pid);
-        self.state.game_start_ticks = process_start_ticks(pid);
-        let body = serde_json::to_vec(&self.state)
+        let directory = self.path.parent().ok_or_else(|| {
+            LockError::unusable(
+                &self.path,
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "lock has no directory"),
+            )
+        })?;
+        let _ownership = OwnershipGuard::take(directory)?;
+        if !read_state(&self.path)?.is_some_and(|state| self.names(&state)) {
+            return Err(LockError::Lost {
+                path: self.path.clone(),
+            });
+        }
+        let mut recorded = self.state.clone();
+        recorded.game_pid = Some(pid);
+        recorded.game_start_ticks = process_start_ticks(pid);
+        let body = serde_json::to_vec(&recorded)
             .map_err(|error| LockError::unusable(&self.path, error.into()))?;
-        replace_file(&self.path, &body).map_err(|error| LockError::unusable(&self.path, error))
+        replace_file(&self.path, &body).map_err(|error| LockError::unusable(&self.path, error))?;
+        self.state = recorded;
+        Ok(())
+    }
+
+    /// Whether `state` is the record this lock wrote.
+    fn names(&self, state: &LaunchState) -> bool {
+        state.owner_pid == self.state.owner_pid
+            && state.owner_start_ticks == self.state.owner_start_ticks
+            && state.since == self.state.since
     }
 
     /// What this lock records.
@@ -456,11 +508,10 @@ impl Drop for LaunchLock {
         let _ownership = OwnershipGuard::take(directory)
             .inspect_err(|error| warn!(%error, "releasing the launch lock without its guard"))
             .ok();
-        let owns_path = read_state(&self.path).ok().flatten().is_some_and(|state| {
-            state.owner_pid == self.state.owner_pid
-                && state.owner_start_ticks == self.state.owner_start_ticks
-                && state.since == self.state.since
-        });
+        let owns_path = read_state(&self.path)
+            .ok()
+            .flatten()
+            .is_some_and(|state| self.names(&state));
         if !owns_path {
             return;
         }
@@ -927,7 +978,7 @@ mod tests {
             !outcome.signaled_game,
             "a process that cannot be proven is left alone"
         );
-        assert!(outcome.released);
+        assert_eq!(outcome.lock, LockDisposition::Released);
         assert!(
             stranger.try_wait().expect("status").is_none(),
             "still running"
@@ -940,13 +991,100 @@ mod tests {
         let outcome = force_release(root.path(), None).expect("signaled");
         assert!(outcome.signaled_game);
         assert!(!outcome.signaled_owner, "the dead owner is not signaled");
-        assert!(
-            !outcome.released,
+        assert_eq!(
+            outcome.lock,
+            LockDisposition::Retained,
             "asked to stop is not stopped: the lock stays while the game may still write"
         );
         game.wait().expect("the game ends on the signal");
         assert!(running_state(root.path()).is_none());
         LaunchLock::acquire(root.path()).expect("free once the game has exited");
+    }
+
+    #[test]
+    fn force_stopping_a_launch_this_process_owns_keeps_its_lock() {
+        let root = instance();
+        let held = LaunchLock::acquire(root.path()).expect("lock");
+
+        let outcome = force_release(root.path(), None).expect("force stop");
+        assert_eq!(outcome.lock, LockDisposition::Retained);
+        assert!(!outcome.signaled_owner, "this process is never signaled");
+        assert!(held.path().exists());
+        let error = LaunchLock::acquire(root.path()).expect_err("the instance is still held");
+        assert!(
+            matches!(error, LockError::AlreadyRunning { pid, .. } if pid == std::process::id())
+        );
+    }
+
+    #[test]
+    fn force_stopping_a_launch_whose_owner_is_alive_signals_it_and_keeps_the_lock() {
+        let root = instance();
+        let (mut owner, ticks) = live_game();
+        plant(
+            &metadata_dir(root.path()).join(LAUNCH_LOCK_FILE),
+            &LaunchState {
+                owner_pid: owner.id(),
+                owner_start_ticks: Some(ticks),
+                game_pid: None,
+                game_start_ticks: None,
+                since: Utc::now(),
+            },
+        );
+
+        let outcome = force_release(root.path(), None).expect("force stop");
+        assert!(outcome.signaled_owner);
+        assert_eq!(outcome.lock, LockDisposition::Retained);
+        assert!(
+            metadata_dir(root.path()).join(LAUNCH_LOCK_FILE).exists(),
+            "signaled is not exited: the lock stays while the owner may still prepare a game"
+        );
+
+        owner.wait().expect("the owner ends on the signal");
+        assert!(running_state(root.path()).is_none());
+        LaunchLock::acquire(root.path()).expect("free once the owner has exited");
+    }
+
+    #[test]
+    fn a_game_pid_is_never_recorded_over_a_lock_another_launch_took() {
+        let root = instance();
+        let mut first = LaunchLock::acquire(root.path()).expect("first launch");
+        // Stands in for the first lock having been cleared and the instance
+        // claimed again by a launch that started after it.
+        std::fs::remove_file(first.path()).expect("clear the first lock");
+        let second = LaunchLock::acquire(root.path()).expect("second launch");
+        let second_since = second.state().since;
+
+        let error = first
+            .record_game_pid(4242)
+            .expect_err("the first launch no longer holds the instance");
+        assert!(matches!(error, LockError::Lost { .. }));
+        assert_eq!(error.message_id(), "error-launch-lock-lost");
+
+        let state = running_state(root.path()).expect("the second launch is intact");
+        assert_eq!(state.game_pid, None);
+        assert_eq!(state.since, second_since);
+        assert_eq!(first.state().game_pid, None, "nothing was recorded");
+
+        drop(first);
+        assert!(
+            running_state(root.path()).is_some(),
+            "the first launch does not clear the second's lock on the way out"
+        );
+        drop(second);
+        assert!(running_state(root.path()).is_none());
+    }
+
+    #[test]
+    fn a_game_pid_is_not_recorded_once_the_lock_is_gone() {
+        let root = instance();
+        let mut held = LaunchLock::acquire(root.path()).expect("lock");
+        std::fs::remove_file(held.path()).expect("clear the lock");
+
+        assert!(matches!(
+            held.record_game_pid(4242),
+            Err(LockError::Lost { .. })
+        ));
+        assert!(!held.path().exists(), "nothing is written back");
     }
 
     #[test]
@@ -1379,7 +1517,7 @@ mod tests {
 
         let waiting = std::thread::spawn({
             let root = root.path().to_path_buf();
-            move || force_release(&root, None).map(|outcome| outcome.released)
+            move || force_release(&root, None).map(|outcome| outcome.lock)
         });
         std::thread::sleep(std::time::Duration::from_millis(200));
         assert!(
@@ -1389,7 +1527,10 @@ mod tests {
         assert!(directory.join(LAUNCH_LOCK_FILE).exists());
 
         drop(deciding);
-        assert!(waiting.join().expect("no panic").expect("released"));
+        assert_eq!(
+            waiting.join().expect("no panic").expect("released"),
+            LockDisposition::Released
+        );
         stranger.kill().expect("end");
         stranger.wait().expect("reap");
     }

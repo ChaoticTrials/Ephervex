@@ -715,6 +715,7 @@ mod tests {
             "error-launch-already-running",
             "error-launch-lock-unusable",
             "error-launch-lock-busy",
+            "error-launch-lock-lost",
             "error-launch-invalid-version-metadata",
             "error-launch-loader-not-supported",
             "error-launch-incompatible-native-library",
