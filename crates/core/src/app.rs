@@ -1402,15 +1402,21 @@ impl App {
         let setting = root
             .as_ref()
             .map(|path| path.to_string_lossy().into_owned());
-        self.mutate_config(|config| {
-            config.persistent_instance_root = setting.clone().unwrap_or_default();
-        })?;
-
         // Only this one field is overridable, so re-deriving is a replacement
         // rather than a re-resolution of the other roots (see `Paths`).
+        //
+        // The new root is created and opened before the setting is written: a
+        // root that cannot be used must never reach the file, because the next
+        // start would fail on it before any window could change it back.
         let paths = self.paths().clone().with_persistent_instance_root(root);
         paths.ensure_base_directories()?;
-        self.storage.registry = Registry::open(paths)?;
+        let registry = Registry::open(paths)?;
+
+        let updated = Config::update(self.paths(), |config| {
+            config.persistent_instance_root = setting.clone().unwrap_or_default();
+        })?;
+        self.storage.registry = registry;
+        self.adopt_config(updated);
 
         tracing::info!(
             root = %self.paths().persistent_instances_dir().display(),
@@ -2080,6 +2086,31 @@ mod tests {
         let mut app = reopened;
         app.set_persistent_instance_root(None).expect("clear");
         assert!(!app.paths().persistent_instance_root_is_overridden());
+    }
+
+    #[test]
+    fn an_instance_root_that_cannot_be_created_is_neither_saved_nor_applied() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let elsewhere = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.set_persistent_instance_root(Some(elsewhere.path()))
+            .expect("move the root");
+        let configured = app.config().persistent_instance_root.clone();
+        let in_use = app.paths().persistent_instances_dir().clone();
+
+        // A directory cannot be created below a regular file, whatever the
+        // permissions of the user running the test.
+        let file = base.path().join("not-a-directory");
+        std::fs::write(&file, b"").expect("write a regular file");
+
+        app.set_persistent_instance_root(Some(&file.join("instances")))
+            .expect_err("a root below a regular file cannot be created");
+
+        assert_eq!(app.config().persistent_instance_root, configured);
+        assert_eq!(app.paths().persistent_instances_dir(), in_use);
+        let reopened = app_rooted_at(base.path());
+        assert_eq!(reopened.config().persistent_instance_root, configured);
+        assert_eq!(reopened.paths().persistent_instances_dir(), in_use);
     }
 
     #[test]
