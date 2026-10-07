@@ -2734,6 +2734,78 @@ Details:\n\
         );
     }
 
+    /// Rewrites how the server's recipe owns the root mod, as a pack-owned mod
+    /// moved to a newer release leaves it: the pack's own origin, with the
+    /// release the pack declared remembered, beside the dependency its new
+    /// release brought in.
+    fn make_root_pack_owned(world: &World, server: ServerId, origin: ModOrigin) {
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(
+            &world.server_root(server),
+        ));
+        let mut recipe = store.read_recipe().expect("recipe");
+        let root = recipe
+            .files
+            .iter_mut()
+            .find(|file| {
+                file.identity
+                    .as_ref()
+                    .is_some_and(|identity| identity.project_id.as_deref() == Some("ROOTPROJ"))
+            })
+            .expect("the root mod is recorded");
+        root.origin = origin;
+        if origin == ModOrigin::PackDeclared {
+            root.original_identity = Some(ephervex_pack::ProviderFileIdentity {
+                provider: Some(ModProvider::Modrinth),
+                project_id: Some("ROOTPROJ".to_owned()),
+                version_id: Some("ROOTV1".to_owned()),
+                file_id: None,
+            });
+        }
+        store.write_recipe(&recipe).expect("write recipe");
+    }
+
+    #[tokio::test]
+    async fn a_dependency_a_moved_pack_mod_needs_is_kept_when_another_mod_is_removed() {
+        let world = world().await;
+        let server = world.link_server("Reproduction Server", MINECRAFT);
+        apply(&world, &install("ROOTPROJ"), &[server]).await;
+        apply(&world, &install("SECONDPROJ"), &[server]).await;
+        make_root_pack_owned(&world, server, ModOrigin::PackDeclared);
+
+        let plan = plan(&world, &remove("mods/secondproj-SECONDV1.jar")).await;
+
+        assert_eq!(
+            target(&plan, server).collected_dependencies().count(),
+            0,
+            "the pack mod's new release still needs the library"
+        );
+        apply(&world, &remove("mods/secondproj-SECONDV1.jar"), &[server]).await;
+        assert_eq!(
+            world.server_jars(server),
+            vec![
+                "libproj-LIBV1.jar".to_owned(),
+                "rootproj-ROOTV2.jar".to_owned()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dependency_an_identified_override_jar_needs_is_kept_when_another_mod_is_removed() {
+        let world = world().await;
+        let server = world.link_server("Reproduction Server", MINECRAFT);
+        apply(&world, &install("ROOTPROJ"), &[server]).await;
+        apply(&world, &install("SECONDPROJ"), &[server]).await;
+        make_root_pack_owned(&world, server, ModOrigin::PackOverride);
+
+        let plan = plan(&world, &remove("mods/secondproj-SECONDV1.jar")).await;
+
+        assert_eq!(
+            target(&plan, server).collected_dependencies().count(),
+            0,
+            "the override jar still needs the library"
+        );
+    }
+
     #[tokio::test]
     async fn a_server_already_at_the_release_is_repaired_only_when_its_jar_is_gone() {
         let world = world().await;

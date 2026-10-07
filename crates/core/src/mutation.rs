@@ -923,12 +923,14 @@ impl App {
 
     /// Every project this desired state's own roots still reach.
     ///
-    /// A root is a mod a human chose: one they picked by name, or an optional
-    /// dependency they ticked. A pack's own mods are not roots and are not
-    /// resolved — a pack import records every file it declares, and never runs
-    /// the resolver, so no `RequiredDependency` entry can belong to one. Walking
-    /// two hundred pack mods to learn that would cost two hundred lookups to
-    /// confirm something the import already guarantees.
+    /// A root is a mod whose dependencies the resolver may have installed: one
+    /// a human chose by name, an optional dependency they ticked, a pack-declared
+    /// mod that has been moved off the release its pack declared, or an
+    /// identified override jar. A pack-declared mod still at its declared
+    /// release is not a root and is not resolved, because a pack import records
+    /// every file it declares and never runs the resolver, so no
+    /// `RequiredDependency` entry can belong to it. Walking two hundred of them
+    /// would cost two hundred lookups to confirm that.
     async fn required_projects(
         &self,
         scope: &DependencyScope<'_>,
@@ -943,10 +945,15 @@ impl App {
             if entry.identity.provider() != Some(scope.provider) {
                 continue;
             }
-            if !matches!(
-                entry.origin,
-                ModOrigin::UserSelected | ModOrigin::SelectedOptionalDependency
-            ) {
+            let is_root = match entry.origin {
+                ModOrigin::UserSelected | ModOrigin::SelectedOptionalDependency => true,
+                ModOrigin::PackDeclared => entry.original_identity.is_some(),
+                // An override jar the pack shipped is only a root once it has
+                // been identified; an unidentified one cannot have been moved.
+                ModOrigin::PackOverride => entry.identity.project_id().is_some(),
+                ModOrigin::RequiredDependency | ModOrigin::HandPlaced => false,
+            };
+            if !is_root {
                 continue;
             }
             let Some(project) = entry.identity.project_id() else {
