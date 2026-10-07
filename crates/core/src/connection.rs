@@ -5,7 +5,8 @@ use std::time::Duration;
 use ephervex_minecraft::LaunchObserver;
 use ephervex_model::{ConnectionTarget, InstanceId, ServerId};
 use ephervex_server::{
-    RuntimeClassification, ServerExit, ServerObserver, classify_runtime, wait_for_server_readiness,
+    ControlAction, ControlResponse, RuntimeClassification, ServerError, ServerExit, ServerObserver,
+    classify_runtime, send_control, wait_for_server_readiness,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -38,12 +39,27 @@ pub struct LaunchAndConnectAvailability {
     pub client_running: bool,
 }
 
+/// What happens to a server this operation started once the operation returns.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StartedServerLifetime {
+    /// Supervision continues on the caller's runtime after the client exits.
+    /// The caller must keep that runtime alive for as long as the server
+    /// should run.
+    #[default]
+    Detach,
+    /// The server is stopped before the operation returns, whether the client
+    /// launch succeeded or not. For a caller whose runtime ends with the
+    /// operation.
+    StopOnReturn,
+}
+
 /// Options for one linked launch. Client options retain their normal Java,
-/// account, feature, and dry-run behavior.
+/// account, feature, and dry-run behavior. A dry run starts no server.
 #[derive(Debug, Clone)]
 pub struct LaunchAndConnectOptions {
     pub launch: LaunchOptions,
     pub readiness_timeout: Duration,
+    pub started_server: StartedServerLifetime,
 }
 
 impl Default for LaunchAndConnectOptions {
@@ -51,13 +67,15 @@ impl Default for LaunchAndConnectOptions {
         Self {
             launch: LaunchOptions::default(),
             readiness_timeout: DEFAULT_SERVER_READINESS_TIMEOUT,
+            started_server: StartedServerLifetime::default(),
         }
     }
 }
 
 /// What the combined operation produced after the client exited or a dry run
-/// completed. A server started by this operation remains supervised by the
-/// application and is not coupled to the client process lifetime.
+/// completed. Unless the options ask for [`StartedServerLifetime::StopOnReturn`],
+/// a server started by this operation remains supervised by the application and
+/// is not coupled to the client process lifetime.
 #[derive(Debug)]
 pub struct LaunchAndConnectOutcome {
     pub client: InstanceId,
@@ -261,52 +279,97 @@ impl App {
             }
             .into());
         }
+        // Read before anything starts, so stopping what was started cannot be
+        // skipped by a lookup that fails afterwards.
+        let root = self.server(server_id)?.root;
         let mut started = None;
-        match availability.server_preparation {
-            ServerPreparation::Start => {
-                observer.emit(LaunchAndConnectEvent::StartingServer { server: server_id });
-                let prepared = self
-                    .prepare_server_start(server_id, None, server_observer)
-                    .await?;
-                let server_observer = server_observer.clone();
-                started = Some(tokio::spawn(async move {
-                    App::run_prepared_server(prepared, &server_observer).await
-                }));
-            }
-            ServerPreparation::Reuse => {
-                observer.emit(LaunchAndConnectEvent::ReusingServer { server: server_id });
-            }
-        }
-        observer.emit(LaunchAndConnectEvent::WaitingForServer {
-            target: availability.target,
-        });
-        wait_for_managed_server(
-            server_id,
-            &self.server(server_id)?.root,
-            availability.target,
-            options.readiness_timeout,
-            cancel,
-            started.as_mut(),
-        )
-        .await?;
-        match classify_runtime(&self.server(server_id)?.root)? {
-            RuntimeClassification::Controlled { .. } => {}
-            RuntimeClassification::Stopped | RuntimeClassification::ProvenStale { .. } => {
-                return Err(ConnectError::ServerStoppedBeforeReady { server: server_id }.into());
-            }
-            RuntimeClassification::UnknownRunning { .. }
-            | RuntimeClassification::Orphaned { .. } => {
-                return Err(ConnectError::RuntimeUncertain { server: server_id }.into());
-            }
-        }
-        observer.emit(LaunchAndConnectEvent::ServerReady {
-            target: availability.target,
-        });
-
-        // Dropping a JoinHandle detaches its task. The existing supervisor
-        // remains the sole owner, and the server is not coupled to the client
+        let result = self
+            .connect_and_launch(
+                client_id,
+                server_id,
+                &availability,
+                options,
+                (observer, server_observer, launch_observer),
+                cancel,
+                &mut started,
+            )
+            .await;
+        // A dropped JoinHandle detaches its task. The supervisor then remains
+        // the sole owner of the server and is not coupled to the client
         // process or to a successful client spawn.
-        drop(started);
+        if let Some(supervisor) = started
+            && options.started_server == StartedServerLifetime::StopOnReturn
+        {
+            stop_started_server(&root, supervisor).await;
+        }
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn connect_and_launch(
+        &mut self,
+        client_id: InstanceId,
+        server_id: ServerId,
+        availability: &LaunchAndConnectAvailability,
+        options: &LaunchAndConnectOptions,
+        (observer, server_observer, launch_observer): (
+            &LaunchAndConnectObserver,
+            &ServerObserver,
+            &LaunchObserver,
+        ),
+        cancel: &CancellationToken,
+        started: &mut Option<JoinHandle<CoreResult<ServerExit>>>,
+    ) -> CoreResult<LaunchAndConnectOutcome> {
+        // A dry run only reports the command, so it never starts a server and
+        // has nothing to wait for.
+        let starts_server =
+            availability.server_preparation == ServerPreparation::Start && !options.launch.dry_run;
+        if starts_server {
+            observer.emit(LaunchAndConnectEvent::StartingServer { server: server_id });
+            let prepared = self
+                .prepare_server_start(server_id, None, server_observer)
+                .await?;
+            // Preparation can take long enough to be interrupted, and a server
+            // started after that would only be killed again.
+            if cancel.is_cancelled() {
+                server_observer.emit(ephervex_server::ServerEvent::Finished { exit: None });
+                return Err(ServerError::ReadinessCanceled.into());
+            }
+            let server_observer = server_observer.clone();
+            *started = Some(tokio::spawn(async move {
+                App::run_prepared_server(prepared, &server_observer).await
+            }));
+        } else if availability.server_preparation == ServerPreparation::Reuse {
+            observer.emit(LaunchAndConnectEvent::ReusingServer { server: server_id });
+        }
+        if starts_server || availability.server_preparation == ServerPreparation::Reuse {
+            observer.emit(LaunchAndConnectEvent::WaitingForServer {
+                target: availability.target,
+            });
+            wait_for_managed_server(
+                server_id,
+                &self.server(server_id)?.root,
+                availability.target,
+                options.readiness_timeout,
+                cancel,
+                started,
+            )
+            .await?;
+            match classify_runtime(&self.server(server_id)?.root)? {
+                RuntimeClassification::Controlled { .. } => {}
+                RuntimeClassification::Stopped | RuntimeClassification::ProvenStale { .. } => {
+                    return Err(ConnectError::ServerStoppedBeforeReady { server: server_id }.into());
+                }
+                RuntimeClassification::UnknownRunning { .. }
+                | RuntimeClassification::Orphaned { .. } => {
+                    return Err(ConnectError::RuntimeUncertain { server: server_id }.into());
+                }
+            }
+            observer.emit(LaunchAndConnectEvent::ServerReady {
+                target: availability.target,
+            });
+        }
+
         let launch_options = connected_launch_options(&options.launch, availability.target);
         let launch = self
             .launch(client_id, &launch_options, launch_observer, cancel)
@@ -315,11 +378,67 @@ impl App {
             client: client_id,
             server: server_id,
             target: availability.target,
-            server_started: availability.server_preparation == ServerPreparation::Start,
+            server_started: starts_server,
             launch,
         })
     }
 }
+
+/// Stops a server this operation started and waits for its supervisor to end,
+/// so the world is saved and the runtime lock is released. Only the supervisor
+/// this operation spawned is addressed: once it has ended, whatever owns the
+/// root now is not ours to stop.
+///
+/// A stop the supervisor has accepted is waited out, because killing a server
+/// mid-save is what this exists to avoid. A server that never answers, or whose
+/// control channel is not published yet, is retried briefly and then killed.
+async fn stop_started_server(
+    root: &std::path::Path,
+    mut supervisor: JoinHandle<CoreResult<ServerExit>>,
+) {
+    let publication_deadline = tokio::time::Instant::now() + STARTED_SERVER_SETTLE;
+    let mut delivered = false;
+    while !supervisor.is_finished() {
+        match send_control(root, &ControlAction::Stop).await {
+            Ok(ControlResponse::Exited(_)) => break,
+            // The supervisor wrote `stop` and the server is still saving.
+            Err(ServerError::ControlUnavailable { source, .. })
+                if source.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                delivered = true;
+                break;
+            }
+            _ if tokio::time::Instant::now() < publication_deadline => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            _ => break,
+        }
+    }
+    let grace = if delivered {
+        STARTED_SERVER_STOP_GRACE
+    } else {
+        STARTED_SERVER_SETTLE
+    };
+    if tokio::time::timeout(grace, &mut supervisor).await.is_ok() {
+        return;
+    }
+    tracing::warn!(root = %root.display(), "the server did not stop in time and was killed");
+    let _ = send_control(root, &ControlAction::Kill).await;
+    if tokio::time::timeout(STARTED_SERVER_SETTLE, &mut supervisor)
+        .await
+        .is_err()
+    {
+        supervisor.abort();
+    }
+}
+
+/// How long a stopped server's supervisor may take to release its runtime, and
+/// how long a supervisor may take to publish its control channel.
+const STARTED_SERVER_SETTLE: Duration = Duration::from_secs(10);
+
+/// How long a server that accepted `stop` may take to save and exit before it
+/// is killed.
+const STARTED_SERVER_STOP_GRACE: Duration = Duration::from_secs(300);
 
 fn connected_launch_options(options: &LaunchOptions, target: ConnectionTarget) -> LaunchOptions {
     let mut connected = options.clone();
@@ -333,18 +452,22 @@ async fn wait_for_managed_server(
     target: ConnectionTarget,
     timeout: Duration,
     cancel: &CancellationToken,
-    started: Option<&mut JoinHandle<CoreResult<ServerExit>>>,
+    started: &mut Option<JoinHandle<CoreResult<ServerExit>>>,
 ) -> CoreResult<()> {
     let readiness = wait_for_server_readiness(root, target, timeout, cancel);
     tokio::pin!(readiness);
-    if let Some(started) = started {
-        tokio::select! {
-            result = &mut readiness => Ok(result?),
-            result = started => match result {
-                Ok(Ok(_)) => Err(ConnectError::ServerStoppedBeforeReady { server }.into()),
-                Ok(Err(error)) => Err(error),
-                Err(_) => Err(ConnectError::SupervisorLost { server }.into()),
-            },
+    if let Some(supervisor) = started.as_mut() {
+        let ended = tokio::select! {
+            result = &mut readiness => return Ok(result?),
+            result = supervisor => result,
+        };
+        // A finished handle must not be awaited again when the caller stops
+        // whatever it started.
+        *started = None;
+        match ended {
+            Ok(Ok(_)) => Err(ConnectError::ServerStoppedBeforeReady { server }.into()),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(ConnectError::SupervisorLost { server }.into()),
         }
     } else {
         let stopped = wait_for_controlled_server_to_stop(server, root);
@@ -673,6 +796,9 @@ mod tests {
                         ..LaunchOptions::default()
                     },
                     readiness_timeout: Duration::from_secs(1),
+                    // A server this operation did not start is left alone even
+                    // when it is told to stop what it started.
+                    started_server: StartedServerLifetime::StopOnReturn,
                 },
                 &connect_observer,
                 &server_observer,
@@ -711,6 +837,137 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_dry_run_starts_no_server_and_still_builds_the_connected_command() {
+        let directory = tempfile::tempdir().expect("directory");
+        let mut app = app_rooted_at(directory.path());
+        let (client, server) = installed_linked_server(&app, ServerNetworkSettings::default());
+        let (connect_observer, mut connect_events) = LaunchAndConnectObserver::channel();
+        let (server_observer, mut server_events) = ServerObserver::channel();
+
+        let error = app
+            .launch_and_connect(
+                client.id,
+                server.id,
+                &LaunchAndConnectOptions {
+                    launch: LaunchOptions {
+                        dry_run: true,
+                        ..LaunchOptions::default()
+                    },
+                    ..LaunchAndConnectOptions::default()
+                },
+                &connect_observer,
+                &server_observer,
+                &LaunchObserver::silent(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("no account still means no launch");
+        assert!(
+            error.requires_interactive_login(),
+            "the client launch was reached without a server: {error}"
+        );
+        assert!(connect_events.try_recv().is_err(), "no server step ran");
+        assert!(server_events.try_recv().is_err(), "no server was prepared");
+        assert!(!server.root.join("server/eula.txt").exists());
+        assert!(matches!(
+            classify_runtime(&server.root).expect("runtime"),
+            RuntimeClassification::Stopped
+        ));
+    }
+
+    fn spawn_stand_in(root: &Path, capture: PathBuf) -> JoinHandle<CoreResult<ServerExit>> {
+        let root = root.to_owned();
+        tokio::spawn(async move {
+            Ok(ServerSupervisor::run(
+                &ServerCommand {
+                    java: std::env::current_exe().expect("test executable"),
+                    arguments: [
+                        "--exact",
+                        "connection::tests::a_supervised_stand_in_listens_until_told_to_stop",
+                        "--ignored",
+                        "--test-threads=1",
+                    ]
+                    .map(str::to_owned)
+                    .to_vec(),
+                    working_directory: root.join("server"),
+                },
+                &root,
+                &capture,
+                &ServerObserver::silent(),
+            )
+            .await?)
+        })
+    }
+
+    fn stand_in_root(base: &Path) -> PathBuf {
+        let root = base.join("root");
+        std::fs::create_dir_all(root.join("server")).expect("server directory");
+        std::fs::write(root.join("server").join(STAND_IN_MARKER), b"").expect("marker");
+        root
+    }
+
+    #[tokio::test]
+    async fn a_server_started_by_the_operation_is_stopped_gracefully_when_it_returns() {
+        let directory = tempfile::tempdir().expect("directory");
+        let root = stand_in_root(directory.path());
+        let working_directory = root.join("server");
+        let supervisor = spawn_stand_in(&root, directory.path().join("capture"));
+        wait_until_controlled(&root).await;
+        assert!(
+            stand_in_port(&working_directory).await.is_some(),
+            "the stand-in server never published its port"
+        );
+
+        stop_started_server(&root, supervisor).await;
+
+        assert!(
+            working_directory.join(STAND_IN_STOPPED_FILE).exists(),
+            "the server was asked to stop rather than killed"
+        );
+        assert!(matches!(
+            classify_runtime(&root).expect("runtime"),
+            RuntimeClassification::Stopped
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_server_that_replaced_the_one_this_operation_started_is_left_running() {
+        let directory = tempfile::tempdir().expect("directory");
+        let root = stand_in_root(directory.path());
+        let working_directory = root.join("server");
+        let replacement = spawn_stand_in(&root, directory.path().join("capture"));
+        wait_until_controlled(&root).await;
+        assert!(
+            stand_in_port(&working_directory).await.is_some(),
+            "the stand-in server never published its port"
+        );
+        let ended = tokio::spawn(async {
+            Ok(ServerExit {
+                code: Some(0),
+                signal: None,
+                finished_starting: true,
+                stop_requested: true,
+            })
+        });
+        while !ended.is_finished() {
+            tokio::task::yield_now().await;
+        }
+
+        stop_started_server(&root, ended).await;
+
+        assert!(
+            !working_directory.join(STAND_IN_STOPPED_FILE).exists(),
+            "a server this operation did not start was not told to stop"
+        );
+        assert!(matches!(
+            classify_runtime(&root).expect("runtime"),
+            RuntimeClassification::Controlled { .. }
+        ));
+        let _ = send_control(&root, &ControlAction::Stop).await;
+        let _ = replacement.await;
+    }
+
+    #[tokio::test]
     async fn readiness_propagates_start_failure_exit_and_timeout_before_client_launch() {
         let directory = tempfile::tempdir().expect("directory");
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -722,32 +979,34 @@ mod tests {
         ephervex_server::write_runtime_evidence(directory.path(), &evidence).expect("evidence");
         let address = listener.local_addr().expect("address");
         let target = local_target(address.port());
-        let mut running = tokio::spawn(std::future::pending::<CoreResult<ServerExit>>());
+        let mut running = Some(tokio::spawn(
+            std::future::pending::<CoreResult<ServerExit>>(),
+        ));
         wait_for_managed_server(
             ServerId::new(),
             directory.path(),
             target,
             Duration::from_secs(1),
             &CancellationToken::new(),
-            Some(&mut running),
+            &mut running,
         )
         .await
         .expect("listening target is ready");
-        running.abort();
+        running.expect("still running").abort();
         drop(listener);
 
         let closed = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("reserve");
         let target = local_target(closed.local_addr().expect("address").port());
         drop(closed);
         let server = ServerId::new();
-        let mut exited = tokio::spawn(async {
+        let mut exited = Some(tokio::spawn(async {
             Ok(ServerExit {
                 code: Some(1),
                 signal: None,
                 finished_starting: false,
                 stop_requested: false,
             })
-        });
+        }));
         assert!(matches!(
             wait_for_managed_server(
                 server,
@@ -755,7 +1014,7 @@ mod tests {
                 target,
                 Duration::from_secs(1),
                 &CancellationToken::new(),
-                Some(&mut exited),
+                &mut exited,
             )
             .await,
             Err(CoreError::Connect(
@@ -764,13 +1023,13 @@ mod tests {
         ));
 
         let executable = PathBuf::from("/missing/server-java");
-        let mut failed = tokio::spawn(async move {
+        let mut failed = Some(tokio::spawn(async move {
             Err(ServerError::ProcessStart {
                 executable,
                 source: std::io::Error::new(std::io::ErrorKind::NotFound, "missing"),
             }
             .into())
-        });
+        }));
         assert!(matches!(
             wait_for_managed_server(
                 server,
@@ -778,13 +1037,15 @@ mod tests {
                 target,
                 Duration::from_secs(1),
                 &CancellationToken::new(),
-                Some(&mut failed),
+                &mut failed,
             )
             .await,
             Err(CoreError::Server(ServerError::ProcessStart { .. }))
         ));
 
-        let mut pending = tokio::spawn(std::future::pending::<CoreResult<ServerExit>>());
+        let mut pending = Some(tokio::spawn(
+            std::future::pending::<CoreResult<ServerExit>>(),
+        ));
         assert!(matches!(
             wait_for_managed_server(
                 server,
@@ -792,12 +1053,12 @@ mod tests {
                 target,
                 Duration::from_millis(25),
                 &CancellationToken::new(),
-                Some(&mut pending),
+                &mut pending,
             )
             .await,
             Err(CoreError::Server(ServerError::ReadinessTimeout { .. }))
         ));
-        pending.abort();
+        pending.expect("still running").abort();
     }
 
     #[test]
@@ -830,9 +1091,12 @@ mod tests {
     /// tests by hand never starts one.
     const STAND_IN_MARKER: &str = "listening-stand-in";
     const STAND_IN_PORT_FILE: &str = "bound-port";
+    /// Written by the stand-in only after it reads `stop` or loses its input.
+    const STAND_IN_STOPPED_FILE: &str = "stopped-by-request";
 
-    /// The supervised server process for the reuse test: it holds a loopback
-    /// listener, publishes its port, and exits on `stop`.
+    /// The supervised server process for the tests that need a listening
+    /// server: it holds a loopback listener, publishes its port, and exits on
+    /// `stop`.
     #[test]
     #[ignore = "started as a server process by the reuse test"]
     fn a_supervised_stand_in_listens_until_told_to_stop() {
@@ -850,6 +1114,7 @@ mod tests {
             }
         }
         drop(listener);
+        std::fs::write(STAND_IN_STOPPED_FILE, b"").expect("record the stop");
     }
 
     async fn stand_in_port(directory: &Path) -> Option<u16> {

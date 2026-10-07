@@ -43,8 +43,9 @@ use ephervex_core::{
     SecretString, ServerCommitWarning, ServerContentSource, ServerCreateOptions, ServerEvent,
     ServerFolder, ServerNetworkChange, ServerObserver, ServerPersistenceHealth, ServerRecord,
     ServerWarning, Session, SharedArtifactReport, SideRequirement, SkipReason, SnapshotOrigin,
-    SnapshotRecord, SnapshotRestoreOptions, SuspectConfidence, SuspectReason, TextAnchor, TextView,
-    UnknownServerFiles, VerificationReport, VersionMetadata, VersionRecord, format_binary_bytes,
+    SnapshotRecord, SnapshotRestoreOptions, StartedServerLifetime, SuspectConfidence,
+    SuspectReason, TextAnchor, TextView, UnknownServerFiles, VerificationReport, VersionMetadata,
+    VersionRecord, format_binary_bytes,
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{
@@ -209,7 +210,8 @@ struct LicensesArgs {
 struct LaunchArgs {
     /// The client instance to launch.
     id: InstanceId,
-    /// Start or reuse this linked server and connect the client to it.
+    /// Start or reuse this linked server and connect the client to it. A server
+    /// this command starts is stopped when the command ends.
     #[arg(long, value_name = "SERVER")]
     server: Option<ServerId>,
     /// Use this Java runtime instead of the selected one.
@@ -2812,6 +2814,9 @@ async fn run_launch(app: &mut App, args: &LaunchArgs, json: bool) -> anyhow::Res
                 server,
                 &LaunchAndConnectOptions {
                     launch: options.clone(),
+                    // The command's runtime ends with the command, which would
+                    // kill a server left running under it.
+                    started_server: StartedServerLifetime::StopOnReturn,
                     ..LaunchAndConnectOptions::default()
                 },
                 &connect_observer,

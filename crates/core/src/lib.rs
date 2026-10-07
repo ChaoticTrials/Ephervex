@@ -81,7 +81,7 @@ pub use bundle::{BundleContents, BundlePart, BundlePartKind, BundleReport, Bundl
 pub use connection::{
     ConnectError, DEFAULT_SERVER_READINESS_TIMEOUT, LaunchAndConnectAvailability,
     LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions,
-    LaunchAndConnectOutcome, ServerPreparation,
+    LaunchAndConnectOutcome, ServerPreparation, StartedServerLifetime,
 };
 pub use crash_analysis::{
     CrashAnalysis, CrashReview, CrashSuspect, LoaderReportedDependency, SuspectConfidence,

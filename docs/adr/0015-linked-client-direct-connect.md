@@ -63,6 +63,13 @@ Client launch failure or client exit does not request server stop. As with all
 foreground-supervised servers, ending the owning Ephervex process ends that
 supervision according to ADR 0014.
 
+A caller whose runtime ends with the operation, such as the CLI, asks for the
+server it started to be stopped before the operation returns, on success and on
+failure. The stop is a normal `Stop` that falls back to `Kill`, so the world is
+saved on an ordinary return instead of the process being killed with the
+runtime. A dry run only reports the command and starts no server. A server that
+was already running is never stopped by the operation.
+
 ## Consequences
 
 CLI and GUI surfaces need only choose a valid linked pair, subscribe to
