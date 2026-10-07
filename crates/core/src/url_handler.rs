@@ -123,12 +123,142 @@ fn command_is_reachable_in(command: &str, search_path: Option<&OsStr>) -> bool {
     })
 }
 
-/// What a desktop entry runs, without its URL placeholder.
+/// The program a desktop entry runs, without its arguments or URL placeholder.
 fn read_exec(entry: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(entry).ok()?;
-    text.lines()
-        .find_map(|line| line.strip_prefix("Exec="))
-        .map(|exec| exec.trim_end_matches(" %u").to_owned())
+    exec_program(&std::fs::read_to_string(entry).ok()?)
+}
+
+/// The program named by the `Exec` key of desktop entry text.
+///
+/// Reads the value the way a desktop does, so a quoted path is the real path.
+fn exec_program(contents: &str) -> Option<String> {
+    let value = contents
+        .lines()
+        .find_map(|line| line.strip_prefix("Exec="))?;
+    first_exec_argument(&unescape_desktop_string(value))
+}
+
+/// Undoes the string escapes of the Desktop Entry Specification, "Basic format".
+fn unescape_desktop_string(value: &str) -> String {
+    let mut text = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(character) = chars.next() {
+        if character != '\\' {
+            text.push(character);
+            continue;
+        }
+        match chars.next() {
+            Some('s') => text.push(' '),
+            Some('n') => text.push('\n'),
+            Some('t') => text.push('\t'),
+            Some('r') => text.push('\r'),
+            Some('\\') | None => text.push('\\'),
+            Some(other) => {
+                text.push('\\');
+                text.push(other);
+            }
+        }
+    }
+    text
+}
+
+/// The first argument of an unescaped `Exec` value, with quoting and `%%` undone.
+///
+/// `None` for an unterminated quote or an empty program.
+fn first_exec_argument(exec: &str) -> Option<String> {
+    let mut argument = String::new();
+    let mut quoted = false;
+    let mut chars = exec.trim_start_matches([' ', '\t']).chars().peekable();
+    while let Some(character) = chars.next() {
+        match character {
+            '"' => quoted = !quoted,
+            '\\' if quoted => match chars.peek() {
+                Some(&escaped @ ('"' | '`' | '$' | '\\')) => {
+                    argument.push(escaped);
+                    chars.next();
+                }
+                _ => argument.push('\\'),
+            },
+            '%' if chars.peek() == Some(&'%') => {
+                argument.push('%');
+                chars.next();
+            }
+            ' ' | '\t' if !quoted => break,
+            _ => argument.push(character),
+        }
+    }
+    (!quoted && !argument.is_empty()).then_some(argument)
+}
+
+/// Characters an `Exec` argument may not contain unquoted.
+const EXEC_RESERVED: &[char] = &[
+    ' ', '\t', '\n', '"', '\'', '\\', '>', '<', '~', '|', '&', ';', '$', '*', '?', '#', '(', ')',
+    '`',
+];
+
+/// One `Exec` argument, quoted when it holds a reserved character.
+fn exec_argument(argument: &str) -> String {
+    let argument = argument.replace('%', "%%");
+    if !argument.contains(EXEC_RESERVED) {
+        return argument;
+    }
+    let mut quoted = String::with_capacity(argument.len() + 2);
+    quoted.push('"');
+    for character in argument.chars() {
+        if matches!(character, '"' | '`' | '$' | '\\') {
+            quoted.push('\\');
+        }
+        quoted.push(character);
+    }
+    quoted.push('"');
+    quoted
+}
+
+/// Applies the string escapes a desktop entry value needs.
+///
+/// A raw newline would end the line and let a path inject further keys.
+fn escape_desktop_string(value: &str) -> String {
+    let mut text = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' => text.push_str("\\\\"),
+            '\n' => text.push_str("\\n"),
+            '\t' => text.push_str("\\t"),
+            '\r' => text.push_str("\\r"),
+            _ => text.push(character),
+        }
+    }
+    text
+}
+
+/// The text of the entry that runs `command` with the link the desktop passes.
+///
+/// A desktop entry is UTF-8, so a path that is not is refused rather than
+/// written lossily into an entry that would run something else.
+fn entry_contents(command: &Path) -> CoreResult<String> {
+    let program = command
+        .to_str()
+        .ok_or_else(|| CoreError::UrlHandlerUnavailable {
+            detail: format!(
+                "{} is not valid UTF-8, which a desktop entry cannot hold; move the launcher to a path that is",
+                command.display()
+            ),
+        })?;
+    let exec = escape_desktop_string(&format!("{} %u", exec_argument(program)));
+    // `NoDisplay` because this entry answers a link rather than being a second
+    // Ephervex in the menu. `%u` is the one URL `startup_from` reads.
+    Ok(format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name={} link handler\n\
+         Exec={exec}\n\
+         Icon={LAUNCHER_URL_SCHEME}\n\
+         Terminal=false\n\
+         NoDisplay=true\n\
+         MimeType={};\n",
+        ephervex_model::APP_NAME,
+        scheme_mime_type(),
+    ))
 }
 
 /// Which registration is in force, given what was found.
@@ -268,23 +398,7 @@ impl crate::app::App {
         })?;
 
         let entry = entry_path(self.paths());
-        // `NoDisplay` because this entry exists to answer a link, not to be a
-        // second Ephervex in the application menu. `%u` is the single URL the
-        // desktop passes, which is what `startup_from` in the desktop binary
-        // reads.
-        let contents = format!(
-            "[Desktop Entry]\n\
-             Type=Application\n\
-             Name={} link handler\n\
-             Exec={} %u\n\
-             Icon={LAUNCHER_URL_SCHEME}\n\
-             Terminal=false\n\
-             NoDisplay=true\n\
-             MimeType={};\n",
-            ephervex_model::APP_NAME,
-            command.display(),
-            scheme_mime_type(),
-        );
+        let contents = entry_contents(&command)?;
         std::fs::write(&entry, contents).map_err(|source| CoreError::UrlHandlerUnavailable {
             detail: format!("{} could not be written: {source}", entry.display()),
         })?;
@@ -606,6 +720,130 @@ mod tests {
         assert!(
             !command_is_reachable_in(&artifact.to_string_lossy(), None),
             "a moved or deleted artifact is the failure this reports"
+        );
+    }
+
+    /// The program an entry written for `path` makes the status report.
+    fn program_written_for(path: &Path) -> Option<String> {
+        exec_program(&entry_contents(path).expect("entry text"))
+    }
+
+    #[test]
+    fn a_path_with_reserved_characters_is_written_quoted_and_read_back_unchanged() {
+        let paths = [
+            "/opt/Ephervex/ephervex-gui",
+            "/home/me/My Apps/Ephervex.AppImage",
+            "/home/me/it's/\"quoted\"/ephervex",
+            "/home/me/back\\slash/ephervex",
+            "/home/me/$HOME/`id`/ephervex",
+            "/home/me/100%/%u/ephervex",
+            "/home/me/a;b&c|d>e<f~g*h?i#j(k)/ephervex",
+            "/home/me/tab\there/ephervex",
+            "/home/me/line\nbreak/ephervex",
+            "/home/me/carriage\rreturn/ephervex",
+            "/home/me/Ephervex \u{e4}\u{f6}\u{fc}/ephervex",
+        ];
+        for path in paths {
+            assert_eq!(
+                program_written_for(Path::new(path)).as_deref(),
+                Some(path),
+                "{path:?} did not survive being written to a desktop entry"
+            );
+        }
+    }
+
+    #[test]
+    fn the_exec_value_follows_the_desktop_entry_quoting_rules() {
+        let written = |path: &str| entry_contents(Path::new(path)).expect("entry text");
+
+        assert!(written("/opt/e/ephervex-gui").contains("\nExec=/opt/e/ephervex-gui %u\n"));
+        assert!(
+            written("/home/me/My Apps/e.AppImage")
+                .contains("\nExec=\"/home/me/My Apps/e.AppImage\" %u\n")
+        );
+        // A literal `%` is `%%`; in a quoted argument `"` and `$` take a
+        // backslash, and the string level doubles every backslash again.
+        assert!(written("/a/100%/e").contains("\nExec=/a/100%%/e %u\n"));
+        assert!(written("/a b/\"$/e").contains("\nExec=\"/a b/\\\\\"\\\\$/e\" %u\n"));
+    }
+
+    #[test]
+    fn a_path_cannot_add_keys_to_the_entry() {
+        let text =
+            entry_contents(Path::new("/tmp/x\nExec=/bin/evil\nTerminal=true")).expect("text");
+
+        assert_eq!(
+            text.lines()
+                .filter(|line| line.starts_with("Exec="))
+                .count(),
+            1
+        );
+        assert_eq!(
+            text.lines()
+                .filter(|line| line.starts_with("Terminal="))
+                .count(),
+            1
+        );
+        assert!(text.lines().any(|line| line == "Terminal=false"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_is_not_utf8_is_refused_rather_than_written_lossily() {
+        use std::os::unix::ffi::OsStrExt;
+        let path = PathBuf::from(OsStr::from_bytes(b"/home/me/\xff/ephervex"));
+
+        let error = entry_contents(&path).expect_err("refused");
+
+        assert!(
+            matches!(error, CoreError::UrlHandlerUnavailable { .. }),
+            "{error:?}"
+        );
+    }
+
+    /// Entries other tools wrote are not in Ephervex's own shape.
+    #[test]
+    fn packaged_and_foreign_exec_values_name_their_program() {
+        let program = |exec: &str| exec_program(&format!("[Desktop Entry]\nExec={exec}\n"));
+
+        assert_eq!(program("ephervex-gui %u").as_deref(), Some("ephervex-gui"));
+        assert_eq!(
+            program("/usr/bin/ephervex-gui").as_deref(),
+            Some("/usr/bin/ephervex-gui")
+        );
+        assert_eq!(
+            program("\"/opt/My Apps/e\" --flag %u").as_deref(),
+            Some("/opt/My Apps/e")
+        );
+        assert_eq!(program("env FOO=1 ephervex-gui %u").as_deref(), Some("env"));
+        assert_eq!(exec_program("[Desktop Entry]\nName=x\n"), None);
+        assert_eq!(program("\"/opt/unterminated %u"), None);
+        assert_eq!(program(""), None);
+    }
+
+    /// The failure this exists for: the status check has to look at the real
+    /// file, not at the quoted text.
+    #[test]
+    fn the_status_of_an_entry_with_a_spaced_path_reports_the_real_path() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let artifact = base.path().join("My Apps").join("Ephervex.AppImage");
+        std::fs::create_dir_all(artifact.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&artifact, b"appimage").expect("artifact");
+        let user = base.path().join(URL_HANDLER_ENTRY);
+        std::fs::write(&user, entry_contents(&artifact).expect("text")).expect("entry");
+
+        let status = status_from(user, None);
+
+        assert_eq!(
+            status.command.as_deref(),
+            artifact.to_str(),
+            "the status must show the path the desktop would run"
+        );
+        assert!(status.command_exists());
+        std::fs::remove_file(&artifact).expect("remove");
+        assert!(
+            !status.command_exists(),
+            "a moved artifact is still reported"
         );
     }
 
