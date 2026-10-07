@@ -418,6 +418,10 @@ impl Registry {
     ///
     /// * **launch locks**, which describe running processes;
     /// * **`last_launched_at`**, for the same reason;
+    /// * **launcher transaction state** directly inside `.launcher/`:
+    ///   snapshots, retired and staged files, restore journals, and an active
+    ///   isolation session, which names the original host and a snapshot the
+    ///   copy does not have. Game folders with those names are copied;
     /// * **linked servers** - a server is its own entity with its own world
     ///   and its own process, and silently forking one because a client
     ///   was copied would be a surprising amount of disk to spend;
@@ -448,8 +452,7 @@ impl Registry {
         metadata::mark_incomplete(&root)?;
 
         let skip = |relative: &Path| {
-            relative.file_name() == Some(std::ffi::OsStr::new(metadata::SNAPSHOTS_DIR))
-                || crate::lock::is_launch_state(relative)
+            metadata::is_transaction_state(relative) || crate::lock::is_launch_state(relative)
         };
         let report = crate::copy::copy_tree(&original.root, &root, &skip).map_err(|source| {
             RegistryError::Io {
@@ -1700,6 +1703,75 @@ mod tests {
             "the copy has nothing of the original's to stop"
         );
         assert_eq!(crate::lock::running_launches(&original.root).len(), 2);
+    }
+
+    fn write_file(path: &Path, contents: &str) {
+        create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(path, contents).expect("write");
+    }
+
+    #[test]
+    fn a_duplicate_keeps_game_folders_named_like_launcher_state() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let original = client_with_files(&registry, "Original");
+        let game = metadata::client_game_dir(&original.root);
+        write_file(&game.join("saves/snapshots/level.dat"), "world");
+        write_file(&game.join("config/snapshots/settings.toml"), "config");
+        write_file(&game.join("staging/data.txt"), "staging");
+        write_file(&game.join("retired/data.txt"), "retired");
+        write_file(&game.join("isolation.json"), "{}");
+
+        let copy = registry
+            .duplicate_client(original.id, &DuplicateClient::default())
+            .expect("duplicate")
+            .record;
+
+        let copied = metadata::client_game_dir(&copy.root);
+        for relative in [
+            "saves/snapshots/level.dat",
+            "config/snapshots/settings.toml",
+            "staging/data.txt",
+            "retired/data.txt",
+            "isolation.json",
+        ] {
+            assert!(copied.join(relative).is_file(), "missing {relative}");
+        }
+    }
+
+    #[test]
+    fn a_duplicate_carries_no_launcher_transaction_state() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let original = client_with_files(&registry, "Original");
+        let launcher = metadata::metadata_dir(&original.root);
+        write_file(&launcher.join("snapshots/s1/minecraft/options.txt"), "x");
+        write_file(&launcher.join("retired/old.jar"), "jar");
+        write_file(&launcher.join("staging/restore-1/restore.json"), "{}");
+        write_file(&launcher.join("restore-2/restore.json"), "{}");
+        write_file(&launcher.join(metadata::ISOLATION_FILE), "{}");
+        write_file(&launcher.join("source/recipe.json"), "{}");
+
+        let copy = registry
+            .duplicate_client(original.id, &DuplicateClient::default())
+            .expect("duplicate")
+            .record;
+
+        let copied = metadata::metadata_dir(&copy.root);
+        for relative in [
+            "snapshots",
+            "retired",
+            "staging",
+            "restore-2",
+            metadata::ISOLATION_FILE,
+        ] {
+            assert!(!copied.join(relative).exists(), "copied {relative}");
+        }
+        assert!(
+            copied.join("source/recipe.json").is_file(),
+            "the recipe describes what the instance is and is carried over"
+        );
+        assert!(metadata::client_metadata_path(&copy.root).is_file());
     }
 
     #[test]

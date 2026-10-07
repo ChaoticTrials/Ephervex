@@ -10,7 +10,7 @@ use crate::metadata;
 
 const RESTORE_VERSION: u32 = 1;
 const JOURNAL_FILE: &str = "restore.json";
-const RESTORE_PREFIX: &str = "restore-";
+pub(crate) const RESTORE_PREFIX: &str = "restore-";
 
 /// A fixed host part that restoration may replace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

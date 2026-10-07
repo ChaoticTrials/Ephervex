@@ -15,7 +15,6 @@ use crate::{
 };
 
 const ISOLATION_VERSION: u32 = 1;
-const ISOLATION_FILE: &str = "isolation.json";
 
 /// A suspect the user can test, together with everything it requires.
 ///
@@ -867,7 +866,7 @@ impl App {
     fn isolation_path(&self, host: InstalledHost) -> CoreResult<PathBuf> {
         Ok(
             ephervex_storage::metadata::metadata_dir(&self.host_layout(host)?.root)
-                .join(ISOLATION_FILE),
+                .join(ephervex_storage::metadata::ISOLATION_FILE),
         )
     }
 

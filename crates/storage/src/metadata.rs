@@ -23,7 +23,7 @@
 //! leaves a directory that startup reconciliation will re-index; the reverse
 //! order would leave an index row pointing at nothing.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -73,6 +73,11 @@ pub const RETIRED_DIR: &str = "retired";
 pub const STAGING_DIR: &str = "staging";
 /// `.launcher/snapshots/`, containing user-managed local safety copies.
 pub const SNAPSHOTS_DIR: &str = "snapshots";
+/// `.launcher/isolation.json`, the active mod isolation session of a host.
+///
+/// The session names the host it began on and the safety snapshot it will
+/// restore, so it is meaningful to that host alone.
+pub const ISOLATION_FILE: &str = "isolation.json";
 /// The Minecraft game directory inside a client instance root.
 ///
 /// Kept separate from `.launcher/` so that pack extraction, which writes into
@@ -159,6 +164,28 @@ impl<T> MetadataFile<T> {
             record,
         }
     }
+}
+
+/// Whether `relative`, a path inside a host root, is launcher-owned state of
+/// that host's operations in flight or history: snapshots, retired and staged
+/// files, restore journals, or the active isolation session.
+///
+/// Only entries directly inside `.launcher/` qualify. A game directory may hold
+/// folders of the same names, and those are ordinary game content.
+pub(crate) fn is_transaction_state(relative: &Path) -> bool {
+    let mut components = relative.components();
+    if components.next() != Some(Component::Normal(LAUNCHER_METADATA_DIR.as_ref())) {
+        return false;
+    }
+    let Some(Component::Normal(name)) = components.next() else {
+        return false;
+    };
+    name.to_str().is_some_and(|name| {
+        matches!(
+            name,
+            SNAPSHOTS_DIR | RETIRED_DIR | STAGING_DIR | ISOLATION_FILE
+        ) || name.starts_with(crate::restore::RESTORE_PREFIX)
+    })
 }
 
 /// `<root>/.launcher/`.

@@ -1,11 +1,12 @@
 //! Dependency-aware isolation uses one graph and preserves complete closures.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use ephervex_core::{
-    App, CoreError, InstalledHost, IsolationConfidence, IsolationError, IsolationReport,
-    IsolationRequest, IsolationRound, IsolationRoundKind, IsolationStep, Paths, RoundAnswer,
+    App, CoreError, DuplicateClient, InstalledHost, IsolationConfidence, IsolationError,
+    IsolationReport, IsolationRequest, IsolationRound, IsolationRoundKind, IsolationStep, Paths,
+    RoundAnswer,
 };
 use ephervex_download::{ChannelSink, OperationReporter};
-use ephervex_model::LoaderSelection;
+use ephervex_model::{AbsentModPolicy, LoaderSelection};
 use ephervex_storage::{LaunchLock, NewClient, NewServer, Registry};
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -1174,4 +1175,29 @@ fn any_single_culprit_is_reported_as_the_only_remaining_candidate() {
         let report = app.finish_isolation(fixture.host).unwrap();
         assert_eq!(roots(&report), mods(&[culprit]), "culprit {culprit}");
     }
+}
+
+#[test]
+fn a_duplicate_made_during_a_session_carries_no_session_and_can_start_its_own() {
+    let fixture = Fixture::new();
+    let app = fixture.app();
+    app.begin_isolation(fixture.host, request(&["pin"]), &CancellationToken::new())
+        .unwrap();
+    let InstalledHost::Instance(source) = fixture.host else {
+        panic!("a client fixture");
+    };
+
+    let copy = app
+        .duplicate_client(source, &DuplicateClient::default(), AbsentModPolicy::Keep)
+        .unwrap()
+        .record;
+
+    assert!(
+        fixture.root.join(".launcher/isolation.json").is_file(),
+        "the original keeps its session"
+    );
+    assert!(!copy.root.join(".launcher/isolation.json").exists());
+    let copied = InstalledHost::Instance(copy.id);
+    assert!(app.isolation_state(copied).unwrap().is_none());
+    assert!(app.isolation_state(fixture.host).unwrap().is_some());
 }
