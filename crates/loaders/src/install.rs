@@ -8,7 +8,8 @@ use ephervex_download::{
     MavenCoordinate, MetadataCache, MetadataKey, OperationReporter, UrlPolicyError,
 };
 use ephervex_minecraft::{
-    Installation, Platform, RuleContext, VanillaInstaller, VersionMetadata, rules_allow,
+    Artifact, Installation, Library, Platform, RuleContext, VanillaInstaller, VersionMetadata,
+    rules_allow,
 };
 use ephervex_model::{Hash, HashAlgorithm, LoaderKind, LoaderSelection};
 use reqwest::Url;
@@ -152,33 +153,16 @@ impl InstallerEngine {
             .await?;
 
         if bundle.profile.is_processor_driven() {
-            let scratch = ScratchDirectory::create(self.workspace("client")).await?;
-            let workspace = scratch.path();
-            let processed = async {
-                self.prepare_workspace_in(workspace, &bundle.profile)
-                    .await?;
-                self.prepare_mojang_mappings(
-                    &bundle.profile,
-                    InstallSide::Client,
-                    parent,
-                    workspace,
-                    reporter,
-                    cancel,
-                )
-                .await?;
-                self.run_and_publish_processors(
-                    &bundle,
-                    InstallSide::Client,
-                    workspace,
-                    &vanilla.installation.plan.client_jar.path,
-                    java,
-                    context,
-                    cancel,
-                )
-                .await
-            }
-            .await;
-            scratch.settle(processed, None).await?;
+            self.ensure_client_processed(
+                &bundle,
+                parent,
+                &vanilla.installation.plan.client_jar.path,
+                java,
+                context,
+                reporter,
+                cancel,
+            )
+            .await?;
         }
 
         let mut metadata = VersionMetadata::inherit(parent, &bundle.child)?;
@@ -623,6 +607,160 @@ impl InstallerEngine {
         Ok(name)
     }
 
+    /// Runs the client processors unless the shared libraries store already
+    /// holds what they produce (see `processor_outputs_published`). A relaunch
+    /// then needs no processor run and no network access.
+    #[allow(clippy::too_many_arguments)]
+    async fn ensure_client_processed(
+        &self,
+        bundle: &InstallerBundle,
+        parent: &VersionMetadata,
+        minecraft_jar: &Path,
+        java: &Path,
+        context: &RuleContext,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> LoaderResult<()> {
+        if self
+            .processor_outputs_published(bundle, InstallSide::Client, minecraft_jar, context)
+            .await?
+        {
+            return Ok(());
+        }
+        let scratch = ScratchDirectory::create(self.workspace("client")).await?;
+        let workspace = scratch.path();
+        let processed = async {
+            self.prepare_workspace_in(workspace, &bundle.profile)
+                .await?;
+            self.prepare_mojang_mappings(
+                &bundle.profile,
+                InstallSide::Client,
+                parent,
+                workspace,
+                reporter,
+                cancel,
+            )
+            .await?;
+            self.run_and_publish_processors(
+                bundle,
+                InstallSide::Client,
+                workspace,
+                minecraft_jar,
+                java,
+                context,
+                cancel,
+            )
+            .await
+        }
+        .await;
+        scratch.settle(processed, None).await
+    }
+
+    /// Whether a previous install already published everything the processors
+    /// produce. A file with a declared digest must verify: each declared
+    /// output, each `<NAME>_SHA` data value, and each address-less library the
+    /// version metadata declares (digest and size). A referenced data product
+    /// with no digest, such as the remapped game jar or NeoForge's patched
+    /// game, is accepted when stored, because the store only receives files
+    /// published atomically after a completed processor run. Anything missing,
+    /// mismatched, or outside the store means the processors run again.
+    async fn processor_outputs_published(
+        &self,
+        bundle: &InstallerBundle,
+        side: InstallSide,
+        minecraft_jar: &Path,
+        context: &RuleContext,
+    ) -> LoaderResult<bool> {
+        // Resolves outputs as the processors would see them; nothing is written here.
+        let root = self.layout.root().join("published-outputs");
+        let values = processor_values(bundle, side, &root, minecraft_jar)?;
+        let libraries = root.join("libraries");
+        let store = self.layout.store_root(ContentStore::Libraries);
+        let stored = |path: &Path| -> Option<PathBuf> {
+            let relative = path.strip_prefix(&libraries).ok()?;
+            relative
+                .components()
+                .all(|part| matches!(part, std::path::Component::Normal(_)))
+                .then(|| store.join(relative))
+        };
+
+        let mut checked = 0_usize;
+        for processor in bundle
+            .profile
+            .processors
+            .iter()
+            .filter(|processor| processor.applies_to(side))
+        {
+            for (output, expected) in &processor.outputs {
+                let path = PathBuf::from(resolve_tokens(output, &values)?);
+                let digest = resolve_tokens(expected, &values)?;
+                let (Some(path), Some(digest)) = (
+                    stored(&path),
+                    Hash::new(HashAlgorithm::Sha1, digest.trim_matches('\'')),
+                ) else {
+                    return Ok(false);
+                };
+                if !stored_copy_matches(&path, &digest, None).await? {
+                    return Ok(false);
+                }
+                checked += 1;
+            }
+        }
+        // The processors also write libraries nothing declares an output for, such
+        // as the remapped game jar; the game needs them, so each must be stored.
+        // A value only the other side's processors name is never produced here.
+        // The patched game is always required; a profile that publishes no
+        // digest for it, as NeoForge's does not, is accepted on presence.
+        let referenced = referenced_tokens(&bundle.profile, side);
+        for name in bundle
+            .profile
+            .data
+            .keys()
+            .filter(|name| *name == "PATCHED" || referenced.contains(name.as_str()))
+        {
+            let raw = bundle.profile.data_value(name, side).unwrap_or_default();
+            if !(raw.starts_with('[') && raw.ends_with(']')) {
+                if name == "PATCHED" {
+                    return Ok(false);
+                }
+                continue;
+            }
+            let Some(path) = values
+                .get(name)
+                .and_then(|resolved| stored(Path::new(resolved)))
+            else {
+                return Ok(false);
+            };
+            match values.get(&format!("{name}_SHA")) {
+                Some(digest) => {
+                    let Some(digest) = Hash::new(HashAlgorithm::Sha1, digest) else {
+                        return Ok(false);
+                    };
+                    if !stored_copy_matches(&path, &digest, None).await? {
+                        return Ok(false);
+                    }
+                }
+                None => {
+                    if !fs::metadata(&path)
+                        .await
+                        .is_ok_and(|metadata| metadata.is_file())
+                    {
+                        return Ok(false);
+                    }
+                }
+            }
+            checked += 1;
+        }
+        for (library, artifact) in addressless_artifacts(&bundle.child.libraries, context) {
+            let path = self.layout.library(&library.coordinate);
+            if !stored_copy_matches(&path, &artifact.sha1, Some(artifact.size)).await? {
+                return Ok(false);
+            }
+            checked += 1;
+        }
+        Ok(checked > 0)
+    }
+
     fn workspace(&self, side: &str) -> PathBuf {
         let sequence = WORKSPACE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         self.layout
@@ -679,31 +817,7 @@ impl InstallerEngine {
     ) -> LoaderResult<KnownDigests> {
         self.extract_profile_data(bundle, workspace).await?;
         let mut verified = KnownDigests::new();
-        let mut values = BTreeMap::from([
-            ("SIDE".to_owned(), side.as_str().to_owned()),
-            ("ROOT".to_owned(), workspace.to_string_lossy().into_owned()),
-            (
-                "LIBRARY_DIR".to_owned(),
-                workspace.join("libraries").to_string_lossy().into_owned(),
-            ),
-            (
-                "INSTALLER".to_owned(),
-                bundle.installer.to_string_lossy().into_owned(),
-            ),
-            (
-                "MINECRAFT_JAR".to_owned(),
-                minecraft_jar.to_string_lossy().into_owned(),
-            ),
-            (
-                "MINECRAFT_VERSION".to_owned(),
-                bundle.profile.minecraft.clone(),
-            ),
-        ]);
-        for name in bundle.profile.data.keys() {
-            let raw = bundle.profile.data_value(name, side).unwrap_or_default();
-            let resolved = resolve_profile_value(raw, workspace, &values)?;
-            values.insert(name.clone(), resolved);
-        }
+        let values = processor_values(bundle, side, workspace, minecraft_jar)?;
 
         for processor in bundle
             .profile
@@ -914,17 +1028,7 @@ impl InstallerEngine {
     ) -> LoaderResult<()> {
         // version.json publishes digests for the files with no address, and the
         // entry an install stores is the first one the host's rules allow.
-        let mut planned = HashSet::new();
-        for library in &bundle.child.libraries {
-            let Some(artifact) = library.downloads.artifact.as_ref() else {
-                continue;
-            };
-            if !rules_allow(&library.rules, context) || !planned.insert(&library.coordinate) {
-                continue;
-            }
-            if !artifact.url.is_empty() {
-                continue;
-            }
+        for (library, artifact) in addressless_artifacts(&bundle.child.libraries, context) {
             // A processor digest from install_profile.json must agree with version.json.
             match known.entry(source.join(library.coordinate.relative_path())) {
                 std::collections::hash_map::Entry::Occupied(processed)
@@ -1183,6 +1287,61 @@ fn processor_main_class(path: &Path) -> LoaderResult<String> {
         })
 }
 
+/// The artifacts an install stores for `libraries` that carry no address, which
+/// a loader's processors produce rather than download. Only the first entry per
+/// coordinate that the host's rules allow is stored.
+fn addressless_artifacts<'a>(
+    libraries: &'a [Library],
+    context: &RuleContext,
+) -> Vec<(&'a Library, &'a Artifact)> {
+    let mut planned = HashSet::new();
+    libraries
+        .iter()
+        .filter_map(|library| {
+            let artifact = library.downloads.artifact.as_ref()?;
+            (rules_allow(&library.rules, context) && planned.insert(&library.coordinate))
+                .then_some((library, artifact))
+        })
+        .filter(|(_, artifact)| artifact.url.is_empty())
+        .collect()
+}
+
+/// The tokens a processor argument or output may name, with Maven-coordinate
+/// and installer-entry values resolved inside `workspace`.
+fn processor_values(
+    bundle: &InstallerBundle,
+    side: InstallSide,
+    workspace: &Path,
+    minecraft_jar: &Path,
+) -> LoaderResult<BTreeMap<String, String>> {
+    let mut values = BTreeMap::from([
+        ("SIDE".to_owned(), side.as_str().to_owned()),
+        ("ROOT".to_owned(), workspace.to_string_lossy().into_owned()),
+        (
+            "LIBRARY_DIR".to_owned(),
+            workspace.join("libraries").to_string_lossy().into_owned(),
+        ),
+        (
+            "INSTALLER".to_owned(),
+            bundle.installer.to_string_lossy().into_owned(),
+        ),
+        (
+            "MINECRAFT_JAR".to_owned(),
+            minecraft_jar.to_string_lossy().into_owned(),
+        ),
+        (
+            "MINECRAFT_VERSION".to_owned(),
+            bundle.profile.minecraft.clone(),
+        ),
+    ]);
+    for name in bundle.profile.data.keys() {
+        let raw = bundle.profile.data_value(name, side).unwrap_or_default();
+        let resolved = resolve_profile_value(raw, workspace, &values)?;
+        values.insert(name.clone(), resolved);
+    }
+    Ok(values)
+}
+
 fn resolve_profile_value(
     raw: &str,
     workspace: &Path,
@@ -1205,6 +1364,31 @@ fn resolve_profile_value(
     }
     let resolved = resolve_tokens(raw, values)?;
     Ok(resolved.trim_matches('\'').to_owned())
+}
+
+/// The names of the tokens the processors that run on `side` take as arguments
+/// or declare as outputs.
+fn referenced_tokens(profile: &InstallProfile, side: InstallSide) -> HashSet<&str> {
+    profile
+        .processors
+        .iter()
+        .filter(|processor| processor.applies_to(side))
+        .flat_map(|processor| {
+            let outputs = processor
+                .outputs
+                .iter()
+                .flat_map(|(key, value)| [key, value]);
+            processor.args.iter().chain(outputs)
+        })
+        .flat_map(|text| token_names(text))
+        .collect()
+}
+
+/// The names of the `{NAME}` tokens in `raw`.
+fn token_names(raw: &str) -> impl Iterator<Item = &str> {
+    raw.split('{')
+        .skip(1)
+        .filter_map(|tail| tail.split_once('}').map(|(name, _)| name))
 }
 
 fn resolve_tokens(raw: &str, values: &BTreeMap<String, String>) -> LoaderResult<String> {
@@ -3003,6 +3187,179 @@ mod tests {
             } if profile.digest() == ABC_SHA1 && version.digest() == DEF_SHA1
         ));
         assert!(!library_path(&engine, coordinate).exists());
+    }
+
+    const FORGE_CLIENT: &str = "net.minecraftforge:forge:1.20.1-47.4.10:client";
+    /// A value only the server's processors produce, so a client run never stores it.
+    const FORGE_UNPACKED: &str = "net.minecraft:client:1.20.1:unpacked";
+    const FORGE_MOJMAPS: &str = "net.minecraft:client:1.20.1:mappings@txt";
+    /// A processor product the profile declares neither an output nor a digest for.
+    const FORGE_SRG: &str = "net.minecraft:client:1.20.1:srg";
+
+    /// A processor-driven bundle whose one processor produces the patched game
+    /// and whose profile asks for Mojang mappings, so a run would need the network.
+    fn processed_bundle(root: &Path, processor_outputs: &str) -> InstallerBundle {
+        let profile = format!(
+            r#"{{"spec":1,"profile":"forge","version":"1.20.1-forge-47.4.10","minecraft":"1.20.1",
+            "libraries":[],
+            "data":{{
+                "MOJMAPS":{{"client":"[{FORGE_MOJMAPS}]","server":"[{FORGE_MOJMAPS}]"}},
+                "MC_UNPACKED":{{"client":"[{FORGE_UNPACKED}]","server":"[{FORGE_UNPACKED}]"}},
+                "MC_SRG":{{"client":"[{FORGE_SRG}]","server":"[{FORGE_SRG}]"}},
+                "PATCHED":{{"client":"[{FORGE_CLIENT}]","server":"[{FORGE_CLIENT}]"}},
+                "PATCHED_SHA":{{"client":"'{ABC_SHA1}'","server":"'{ABC_SHA1}'"}}
+            }},
+            "processors":[
+                {{"sides":["client"],"jar":"g:p:1","args":["--output","{{MOJMAPS}}"],"outputs":{processor_outputs}}},
+                {{"sides":["client"],"jar":"g:p:1","args":["--out-jar","{{MC_SRG}}"]}},
+                {{"sides":["server"],"jar":"g:p:1","args":["--output","{{MC_UNPACKED}}"]}}
+            ]}}"#
+        );
+        InstallerBundle {
+            installer: root.join("installer.jar"),
+            profile: InstallProfile::parse(&profile).expect("profile"),
+            child: VersionMetadata::parse(&version_json(&[library_json(
+                FORGE_CLIENT,
+                "",
+                ABC_SHA1,
+            )]))
+            .expect("version metadata"),
+        }
+    }
+
+    async fn published(engine: &InstallerEngine, bundle: &InstallerBundle) -> bool {
+        engine
+            .processor_outputs_published(
+                bundle,
+                InstallSide::Client,
+                Path::new("minecraft.jar"),
+                &RuleContext::new(Platform::host()),
+            )
+            .await
+            .expect("check")
+    }
+
+    #[tokio::test]
+    async fn processor_outputs_are_published_only_when_every_stored_copy_verifies() {
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+        let bundle = processed_bundle(root.path(), &format!(r#"{{"{{PATCHED}}":"'{ABC_SHA1}'"}}"#));
+
+        assert!(
+            !published(&engine, &bundle).await,
+            "nothing is stored before the first install"
+        );
+        let stored = store_library(&engine, FORGE_CLIENT, b"bad");
+        assert!(
+            !published(&engine, &bundle).await,
+            "a stored copy with the wrong digest is not trusted"
+        );
+        std::fs::write(&stored, b"abc").expect("verified copy");
+        assert!(
+            !published(&engine, &bundle).await,
+            "a processor product with no declared output is still required"
+        );
+        let srg = store_library(&engine, FORGE_SRG, b"srg");
+        assert!(
+            !published(&engine, &bundle).await,
+            "the mappings the installer fetched are stored too"
+        );
+        store_library(&engine, FORGE_MOJMAPS, b"map");
+        assert!(published(&engine, &bundle).await);
+        std::fs::remove_file(srg).expect("evicted product");
+        assert!(!published(&engine, &bundle).await);
+    }
+
+    #[tokio::test]
+    async fn a_profile_without_digests_is_published_when_its_products_are_stored() {
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+        let mut bundle = processed_bundle(root.path(), "{}");
+        bundle.profile.data.remove("PATCHED_SHA");
+        bundle.child = VersionMetadata::parse(&version_json(&[])).expect("version metadata");
+        let patched = store_library(&engine, FORGE_CLIENT, b"patched");
+        store_library(&engine, FORGE_SRG, b"srg");
+        store_library(&engine, FORGE_MOJMAPS, b"map");
+
+        assert!(published(&engine, &bundle).await);
+        std::fs::remove_file(patched).expect("evicted game");
+        assert!(
+            !published(&engine, &bundle).await,
+            "the patched game is required even with no digest to verify"
+        );
+    }
+
+    #[tokio::test]
+    async fn processors_run_when_an_output_lies_outside_the_shared_store() {
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+        store_library(&engine, FORGE_CLIENT, b"abc");
+        for output in ["{ROOT}/elsewhere.bin", "{LIBRARY_DIR}/../elsewhere.bin"] {
+            let bundle =
+                processed_bundle(root.path(), &format!(r#"{{"{output}":"'{ABC_SHA1}'"}}"#));
+
+            assert!(!published(&engine, &bundle).await, "{output}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_relaunch_with_every_output_published_runs_no_processor_and_fetches_no_mappings() {
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+        let bundle = processed_bundle(root.path(), &format!(r#"{{"{{PATCHED}}":"'{ABC_SHA1}'"}}"#));
+        store_library(&engine, FORGE_CLIENT, b"abc");
+        store_library(&engine, FORGE_SRG, b"srg");
+        store_library(&engine, FORGE_MOJMAPS, b"map");
+
+        // The parent declares no mappings download and the Java path does not exist,
+        // so any attempt to prepare mappings or run a processor fails.
+        engine
+            .ensure_client_processed(
+                &bundle,
+                &vanilla_parent(),
+                Path::new("minecraft.jar"),
+                &root.path().join("no-java"),
+                &RuleContext::new(Platform::host()),
+                &OperationReporter::silent("loader-relaunch-test"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("a published install is reused as it is");
+
+        assert!(
+            !engine
+                .layout
+                .store_root(ContentStore::InstallerCache)
+                .join("work")
+                .exists(),
+            "no workspace is created"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_relaunch_whose_stored_output_is_wrong_runs_the_processors_again() {
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+        let bundle = processed_bundle(root.path(), &format!(r#"{{"{{PATCHED}}":"'{ABC_SHA1}'"}}"#));
+        store_library(&engine, FORGE_CLIENT, b"bad");
+
+        let error = engine
+            .ensure_client_processed(
+                &bundle,
+                &vanilla_parent(),
+                Path::new("minecraft.jar"),
+                &root.path().join("no-java"),
+                &RuleContext::new(Platform::host()),
+                &OperationReporter::silent("loader-relaunch-test"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("the installer pipeline starts again");
+
+        assert!(
+            format!("{error:?}").contains("client_mappings"),
+            "the pipeline began with the mappings: {error:?}"
+        );
     }
 
     fn installing_siblings(target: &Path) -> Vec<PathBuf> {
