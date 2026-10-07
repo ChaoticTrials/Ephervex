@@ -229,7 +229,7 @@ impl App {
         // Downloads are stages of this operation and never begin it themselves.
         reporter.begin_stage("operation-stage-preparing-environment".to_owned());
 
-        let mut record = self.client(instance)?;
+        let record = self.client(instance)?;
 
         // Taken before anything writes, and held until the game exits. A
         // second launch of the same instance is refused here rather than
@@ -314,8 +314,13 @@ impl App {
         // Recorded before the wait, so a launch that never returns - a game
         // that hangs, a machine that loses power - still shows as having been
         // launched.
-        record.last_launched_at = Some(chrono::Utc::now());
-        if let Err(error) = self.update_client_record(&mut record) {
+        let launched_at = chrono::Utc::now();
+        if let Err(error) = self
+            .registry_for_services()
+            .modify_client(instance, |current| {
+                current.last_launched_at = Some(launched_at);
+            })
+        {
             tracing::warn!(%error, "could not record the launch time");
         }
 
@@ -401,11 +406,6 @@ impl App {
         Ok(ephervex_storage::running_state(
             &self.client(instance)?.root,
         ))
-    }
-
-    /// Writes an updated instance record.
-    fn update_client_record(&self, record: &mut ClientRecord) -> CoreResult<()> {
-        Ok(self.registry_for_services().update_client(record)?)
     }
 }
 

@@ -1077,10 +1077,11 @@ impl App {
             Err(error) => !error.recovery_issues().is_empty(),
         };
         if recovery_needed {
-            context
-                .record
-                .add_attention(AttentionReason::InterruptedMutation);
-            self.registry().update_client(&mut context.record)?;
+            context.record = self
+                .registry()
+                .modify_client(context.record.id, |current| {
+                    current.add_attention(AttentionReason::InterruptedMutation);
+                })?;
         }
 
         context.report = result?;

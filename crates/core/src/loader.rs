@@ -201,7 +201,7 @@ impl App {
         cancel: &CancellationToken,
     ) -> CoreResult<LoaderVersionChange> {
         let plan = self.plan_loader_version_change(instance, exact).await?;
-        let mut record = self.client(instance)?;
+        let record = self.client(instance)?;
 
         if plan.needs_confirmation() && !accept_incompatible_mods {
             return Err(CoreError::LoaderChangeBlockedByMods {
@@ -245,8 +245,9 @@ impl App {
 
         // Only now. Everything above can fail without the instance having
         // changed at all.
-        record.loader = selection.clone();
-        self.registry().update_client(&mut record)?;
+        let record = self.registry().modify_client(instance, |current| {
+            current.loader = selection.clone();
+        })?;
         Self::align_recipe_loader(&record)?;
 
         info!(

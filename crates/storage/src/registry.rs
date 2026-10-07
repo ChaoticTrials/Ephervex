@@ -565,6 +565,24 @@ impl Registry {
         self.update_client_row(record)
     }
 
+    /// Applies one change to a client's current record and persists it.
+    ///
+    /// The record is read here, immediately before the write, so only the
+    /// fields `change` touches differ from what is stored. Operations that
+    /// spend minutes downloading must use this instead of writing back the
+    /// record they read when they started: a rename, a setting, or an
+    /// attention flag stored meanwhile would be reverted.
+    pub fn modify_client(
+        &self,
+        id: InstanceId,
+        change: impl FnOnce(&mut ClientRecord),
+    ) -> Result<ClientRecord, RegistryError> {
+        let mut record = self.client(id)?;
+        change(&mut record);
+        self.update_client(&mut record)?;
+        Ok(record)
+    }
+
     /// Replaces the SQLite recovery copy of an indexed client with its
     /// canonical metadata, exactly as read.
     ///
@@ -1987,6 +2005,60 @@ mod tests {
 
         let reopened = environment.registry();
         assert_eq!(reopened.client(record.id).expect("read"), record);
+    }
+
+    #[test]
+    fn modifying_a_client_keeps_changes_stored_since_the_caller_read_it() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let stale = registry
+            .create_published_client(
+                NewClient::new("before", "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(StorageClass::Persistent),
+            )
+            .expect("create");
+
+        // Another operation stores changes while a long one is still running
+        // with the record it read first.
+        let mut edited = stale.clone();
+        edited.name = "after".to_owned();
+        edited.allow_pack_mod_version_changes = true;
+        edited.add_attention(AttentionReason::InterruptedMutation);
+        registry
+            .update_client(&mut edited)
+            .expect("concurrent edit");
+
+        let launched_at = Utc::now();
+        let written = registry
+            .modify_client(stale.id, |current| {
+                current.last_launched_at = Some(launched_at);
+            })
+            .expect("modify");
+
+        for stored in [
+            registry.client(stale.id).expect("index copy"),
+            metadata::read_client_metadata(&stale.root).expect("metadata copy"),
+        ] {
+            assert_eq!(stored.name, "after");
+            assert!(stored.allow_pack_mod_version_changes);
+            assert!(
+                stored
+                    .attention
+                    .contains(&AttentionReason::InterruptedMutation)
+            );
+            assert_eq!(stored.last_launched_at, Some(launched_at));
+        }
+        assert_eq!(written.name, "after");
+    }
+
+    #[test]
+    fn modifying_an_unknown_client_is_reported_as_unknown() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let error = registry
+            .modify_client(InstanceId::new(), |_| {})
+            .expect_err("nothing there");
+        assert!(matches!(error, RegistryError::InstanceUnknown { .. }));
     }
 
     #[test]
