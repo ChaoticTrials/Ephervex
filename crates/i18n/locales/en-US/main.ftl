@@ -86,6 +86,40 @@ reconcile-relocated = { $count ->
        *[other] Finished moving { $count } instances into your persistent instance folder.
     }
 
+reconcile-index-repaired = { $count ->
+        [one] Corrected { $count } index entry from the metadata stored with its files.
+       *[other] Corrected { $count } index entries from the metadata stored with their files.
+    }
+
+reconcile-restores-rolled-back = { $count ->
+        [one] Rolled back { $count } interrupted snapshot restore to the state it had before the restore.
+       *[other] Rolled back { $count } interrupted snapshot restores to the state they had before the restores.
+    }
+
+reconcile-interrupted-hosts = { $count ->
+        [one] { $count } instance or server has unfinished changes left in its directory.
+       *[other] { $count } instances or servers have unfinished changes left in their directories.
+    }
+.action = Ephervex left those files untouched. Check what they hold and remove them once you are sure you no longer need them.
+
+reconcile-persistence-unhealthy = { $count ->
+        [one] { $count } instance or server has metadata that cannot be read.
+       *[other] { $count } instances or servers have metadata that cannot be read.
+    }
+.action = Ephervex kept the record from its index, but will not launch or change it until its metadata is readable again. Restore it from a backup, or delete the instance or server if it is gone for good.
+
+reconcile-client-conflicts = { $count ->
+        [one] { $count } instance is claimed by more than one directory.
+       *[other] { $count } instances are claimed by more than one directory.
+    }
+.action = Ephervex did not choose between the directories. Move or delete the copies you do not want, then run reconcile again.
+
+reconcile-server-conflicts = { $count ->
+        [one] { $count } server is claimed by more than one directory.
+       *[other] { $count } servers are claimed by more than one directory.
+    }
+.action = Ephervex did not choose between the directories. Move or delete the copies you do not want, then run reconcile again.
+
 reconcile-nothing-to-do = Everything in the index matches what is on disk.
 
 # $name is user-authored, $path is a filesystem path. Untranslated.
@@ -93,6 +127,13 @@ reconcile-persistent-root-missing-detail = { $name } expected its files at { $pa
 
 # $name is user-authored, $path is a filesystem path. Untranslated.
 reconcile-unfinished-instance-detail = { $name } was never finished at { $path }.
+
+# $name is user-authored, $path is a filesystem path. Untranslated.
+reconcile-attention-detail = { $name } at { $path }
+
+# $id is an instance or server identifier, $paths is a comma-separated list of
+# filesystem paths. Untranslated.
+reconcile-conflict-detail = { $id } is claimed by { $paths }.
 
 ## Attention reasons 
 #

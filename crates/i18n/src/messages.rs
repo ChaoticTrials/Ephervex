@@ -85,6 +85,84 @@ pub fn unfinished_instances_action() -> String {
     fl!(LANGUAGE_LOADER, "reconcile-unfinished-instances", "action")
 }
 
+/// "Corrected N index entries from the metadata stored with their files."
+///
+/// Canonical metadata beside the files wins over a disagreeing index copy.
+#[must_use]
+pub fn index_repaired(count: usize) -> String {
+    fl!(LANGUAGE_LOADER, "reconcile-index-repaired", count = count)
+}
+
+/// "Rolled back N interrupted snapshot restores ..."
+#[must_use]
+pub fn restores_rolled_back(count: usize) -> String {
+    fl!(
+        LANGUAGE_LOADER,
+        "reconcile-restores-rolled-back",
+        count = count
+    )
+}
+
+/// "N instances or servers have unfinished changes left in their directories."
+#[must_use]
+pub fn interrupted_hosts(count: usize) -> String {
+    fl!(
+        LANGUAGE_LOADER,
+        "reconcile-interrupted-hosts",
+        count = count
+    )
+}
+
+/// The next step offered alongside [`interrupted_hosts`].
+#[must_use]
+pub fn interrupted_hosts_action() -> String {
+    fl!(LANGUAGE_LOADER, "reconcile-interrupted-hosts", "action")
+}
+
+/// "N instances or servers have metadata that cannot be read."
+#[must_use]
+pub fn persistence_unhealthy(count: usize) -> String {
+    fl!(
+        LANGUAGE_LOADER,
+        "reconcile-persistence-unhealthy",
+        count = count
+    )
+}
+
+/// The next step offered alongside [`persistence_unhealthy`].
+#[must_use]
+pub fn persistence_unhealthy_action() -> String {
+    fl!(LANGUAGE_LOADER, "reconcile-persistence-unhealthy", "action")
+}
+
+/// "N instances are claimed by more than one directory."
+///
+/// No directory is chosen automatically.
+#[must_use]
+pub fn client_conflicts(count: usize) -> String {
+    fl!(LANGUAGE_LOADER, "reconcile-client-conflicts", count = count)
+}
+
+/// The next step offered alongside [`client_conflicts`].
+#[must_use]
+pub fn client_conflicts_action() -> String {
+    fl!(LANGUAGE_LOADER, "reconcile-client-conflicts", "action")
+}
+
+/// "N servers are claimed by more than one directory."
+///
+/// No directory is chosen automatically.
+#[must_use]
+pub fn server_conflicts(count: usize) -> String {
+    fl!(LANGUAGE_LOADER, "reconcile-server-conflicts", count = count)
+}
+
+/// The next step offered alongside [`server_conflicts`].
+#[must_use]
+pub fn server_conflicts_action() -> String {
+    fl!(LANGUAGE_LOADER, "reconcile-server-conflicts", "action")
+}
+
 /// Shown when the index already agreed with the filesystem.
 #[must_use]
 pub fn nothing_to_reconcile() -> String {
@@ -134,6 +212,34 @@ mod tests {
         let action = missing_persistent_action();
         assert!(action.contains("kept the record"));
         assert!(!nothing_to_reconcile().is_empty());
+    }
+
+    #[test]
+    fn every_attention_state_has_a_summary_and_a_next_step() {
+        assert_eq!(
+            client_conflicts(1),
+            "1 instance is claimed by more than one directory."
+        );
+        assert_eq!(
+            server_conflicts(2),
+            "2 servers are claimed by more than one directory."
+        );
+        assert_eq!(
+            interrupted_hosts(1),
+            "1 instance or server has unfinished changes left in its directory."
+        );
+        assert_eq!(
+            persistence_unhealthy(3),
+            "3 instances or servers have metadata that cannot be read."
+        );
+        for action in [
+            client_conflicts_action(),
+            server_conflicts_action(),
+            interrupted_hosts_action(),
+            persistence_unhealthy_action(),
+        ] {
+            assert!(!action.is_empty());
+        }
     }
 
     #[test]

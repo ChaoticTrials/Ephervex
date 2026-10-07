@@ -451,3 +451,50 @@ fn deleting_an_instance_while_keeping_its_files_needs_no_confirmation() {
             .is_empty()
     );
 }
+
+#[test]
+fn reconcile_names_an_instance_claimed_by_two_directories_in_both_output_modes() {
+    let sandbox = Sandbox::new();
+    let created = sandbox.json(&[
+        "--json",
+        "instance",
+        "create",
+        "Repro",
+        "--minecraft",
+        "1.20.1",
+        "--persistent",
+    ]);
+    let id = created["id"].as_str().expect("id").to_owned();
+    let root = PathBuf::from(created["root"].as_str().expect("root"));
+    let copy = root.parent().expect("instances root").join("copy");
+    std::fs::create_dir_all(copy.join(".launcher")).expect("create copy");
+    std::fs::copy(
+        root.join(".launcher").join("instance.json"),
+        copy.join(".launcher").join("instance.json"),
+    )
+    .expect("copy metadata");
+
+    let text = sandbox.run(&["reconcile"]);
+    assert!(text.status.success());
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(
+        text.contains("claimed by more than one directory"),
+        "{text}"
+    );
+    assert!(text.contains(&id), "{text}");
+    assert!(text.contains(&copy.display().to_string()), "{text}");
+    assert!(text.contains(&root.display().to_string()), "{text}");
+
+    let report = sandbox.json(&["--json", "reconcile"]);
+    assert_eq!(report["needs_attention"], true);
+    let conflicts = report["client_conflicts"].as_array().expect("array");
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0]["id"], id);
+    assert_eq!(conflicts[0]["roots"].as_array().expect("roots").len(), 2);
+    assert!(
+        report["server_conflicts"]
+            .as_array()
+            .expect("array")
+            .is_empty()
+    );
+}

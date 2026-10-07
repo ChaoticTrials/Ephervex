@@ -69,7 +69,8 @@ pub use lock::{
 pub use metadata::{METADATA_VERSION, MetadataError};
 pub use paths::{PathError, Paths};
 pub use reconcile::{
-    ReconciledRecord, ReconciliationReport, RecordRef, ServerRootConflict, reconcile,
+    ClientRootConflict, ReconciledRecord, ReconciliationReport, RecordRef, ServerRootConflict,
+    reconcile,
 };
 pub use records::{
     ClientRecord, DUPLICATE_NAME_SUFFIX, DuplicateClient, DuplicatedClient, FileDisposition,

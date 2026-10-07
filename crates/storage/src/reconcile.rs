@@ -88,6 +88,9 @@ pub struct ReconciliationReport {
     /// Indexed recovery copies whose canonical metadata is unavailable or
     /// unusable. These remain visible but must not be launched or mutated.
     pub persistence_unhealthy: Vec<ReconciledRecord>,
+    /// Several valid roots claimed the same client identity. No root was
+    /// selected automatically.
+    pub client_conflicts: Vec<ClientRootConflict>,
     /// Several valid roots claimed the same server identity. No root was
     /// selected automatically.
     pub server_conflicts: Vec<ServerRootConflict>,
@@ -99,6 +102,12 @@ pub struct ReconciliationReport {
     /// presented as a finished one is the failure this state exists to
     /// prevent.
     pub unfinished_instances: Vec<ReconciledRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientRootConflict {
+    pub id: InstanceId,
+    pub roots: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +129,7 @@ impl ReconciliationReport {
             && self.interrupted_hosts.is_empty()
             && self.restores_rolled_back.is_empty()
             && self.persistence_unhealthy.is_empty()
+            && self.client_conflicts.is_empty()
             && self.server_conflicts.is_empty()
             && self.unfinished_instances.is_empty()
     }
@@ -132,6 +142,7 @@ impl ReconciliationReport {
         !self.missing_persistent.is_empty()
             || !self.interrupted_hosts.is_empty()
             || !self.persistence_unhealthy.is_empty()
+            || !self.client_conflicts.is_empty()
             || !self.server_conflicts.is_empty()
             || !self.unfinished_instances.is_empty()
     }
@@ -162,6 +173,7 @@ pub fn reconcile(registry: &Registry) -> Result<ReconciliationReport, RegistryEr
             interrupted_hosts = report.interrupted_hosts.len(),
             restores_rolled_back = report.restores_rolled_back.len(),
             persistence_unhealthy = report.persistence_unhealthy.len(),
+            client_conflicts = report.client_conflicts.len(),
             server_conflicts = report.server_conflicts.len(),
             "startup reconciliation complete"
         );
@@ -593,11 +605,9 @@ fn reindex_orphaned_clients(
     registry: &Registry,
     report: &mut ReconciliationReport,
 ) -> Result<(), RegistryError> {
-    let known: HashSet<InstanceId> = registry
-        .list_clients()?
-        .into_iter()
-        .map(|record| record.id)
-        .collect();
+    let indexed = registry.list_clients()?;
+    let mut discovered =
+        std::collections::BTreeMap::<InstanceId, Vec<(PathBuf, ClientRecord)>>::new();
 
     for directory in candidate_directories(&registry.paths().persistent_instances_dir()) {
         // A move's copy that was never renamed into place is part of a host at
@@ -619,7 +629,7 @@ fn reindex_orphaned_clients(
             continue;
         }
 
-        let mut record = match metadata::read_client_metadata(&directory) {
+        let record = match metadata::read_client_metadata(&directory) {
             Ok(record) => record,
             Err(error) => {
                 // A directory that looks like an instance but does not parse is
@@ -659,7 +669,39 @@ fn reindex_orphaned_clients(
             continue;
         }
 
-        if known.contains(&record.id) {
+        discovered
+            .entry(record.id)
+            .or_default()
+            .push((directory, record));
+    }
+
+    for (id, mut roots) in discovered {
+        roots.sort_by(|left, right| left.0.cmp(&right.0));
+        roots.dedup_by(|left, right| left.0 == right.0);
+        if roots.len() > 1 {
+            report.client_conflicts.push(ClientRootConflict {
+                id,
+                roots: roots.into_iter().map(|(directory, _)| directory).collect(),
+            });
+            continue;
+        }
+        let (directory, mut record) = roots.remove(0);
+
+        if let Some(entry) = indexed.iter().find(|entry| entry.id == id) {
+            // A copy cannot be told apart from an indexed original that is
+            // still in place. A held claim is a move mid-flight, not a copy.
+            if entry.root != directory
+                && entry.root.is_dir()
+                && !matches!(
+                    registry.probe_host(RecordRef::Client(id)),
+                    HostProbe::Mutating
+                )
+            {
+                report.client_conflicts.push(ClientRootConflict {
+                    id,
+                    roots: vec![entry.root.clone(), directory],
+                });
+            }
             continue;
         }
 
@@ -1562,6 +1604,165 @@ mod tests {
         assert_eq!(
             registry.server(server.id).expect("unchanged").root,
             server.root
+        );
+    }
+
+    fn copy_client_metadata_to(client: &ClientRecord, destination: &Path) {
+        std::fs::create_dir_all(metadata::metadata_dir(destination)).expect("create");
+        std::fs::copy(
+            metadata::client_metadata_path(&client.root),
+            metadata::client_metadata_path(destination),
+        )
+        .expect("copy metadata");
+    }
+
+    #[test]
+    fn duplicate_unindexed_client_roots_are_reported_without_selecting_one() {
+        let environment = TestEnvironment::new();
+        let client = {
+            let registry = environment.registry();
+            registry
+                .create_published_client(
+                    NewClient::new("original", "1.20.1", LoaderSelection::vanilla())
+                        .with_storage(StorageClass::Persistent),
+                )
+                .expect("create")
+        };
+        environment.destroy_database();
+        let registry = environment.registry();
+        let duplicate = registry
+            .paths()
+            .persistent_instances_dir()
+            .join("duplicate");
+        copy_client_metadata_to(&client, &duplicate);
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.client_conflicts.len(), 1);
+        assert_eq!(report.client_conflicts[0].id, client.id);
+        let mut expected = vec![client.root.clone(), duplicate];
+        expected.sort();
+        assert_eq!(report.client_conflicts[0].roots, expected);
+        assert!(report.reindexed.is_empty());
+        assert!(report.needs_attention());
+        assert!(registry.list_clients().expect("list").is_empty());
+    }
+
+    #[test]
+    fn a_copy_beside_an_indexed_client_with_its_files_in_place_is_reported() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(
+                NewClient::new("original", "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(StorageClass::Persistent),
+            )
+            .expect("create");
+        let duplicate = registry
+            .paths()
+            .persistent_instances_dir()
+            .join("duplicate");
+        copy_client_metadata_to(&client, &duplicate);
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.client_conflicts.len(), 1);
+        assert_eq!(report.client_conflicts[0].id, client.id);
+        assert_eq!(
+            registry.client(client.id).expect("unchanged").root,
+            client.root
+        );
+    }
+
+    #[test]
+    fn a_client_a_move_in_another_process_holds_is_not_reported_as_a_conflict() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new(
+                "original",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        let duplicate = registry
+            .paths()
+            .persistent_instances_dir()
+            .join("duplicate");
+        copy_client_metadata_to(&client, &duplicate);
+
+        let other_process = hold_as_another_process(&registry, RecordRef::Client(client.id));
+        let running = reconcile(&registry).expect("reconcile");
+        assert!(running.client_conflicts.is_empty());
+
+        drop(other_process);
+        let settled = reconcile(&registry).expect("reconcile");
+        assert_eq!(settled.client_conflicts.len(), 1);
+    }
+
+    #[test]
+    fn client_identity_conflicts_do_not_stop_orphaned_servers_from_being_reindexed() {
+        let environment = TestEnvironment::new();
+        let (client, server) = {
+            let registry = environment.registry();
+            let client = registry
+                .create_published_client(
+                    NewClient::new("original", "1.20.1", LoaderSelection::vanilla())
+                        .with_storage(StorageClass::Persistent),
+                )
+                .expect("create client");
+            let server = registry
+                .create_server(
+                    NewServer::new("orphan", "1.20.1", LoaderSelection::vanilla())
+                        .with_storage(StorageClass::Persistent),
+                )
+                .expect("create server");
+            (client, server)
+        };
+        environment.destroy_database();
+        let registry = environment.registry();
+        let duplicate = registry
+            .paths()
+            .persistent_instances_dir()
+            .join("duplicate");
+        copy_client_metadata_to(&client, &duplicate);
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.client_conflicts.len(), 1);
+        assert_eq!(report.reindexed.len(), 1);
+        assert_eq!(report.reindexed[0].reference, RecordRef::Server(server.id));
+        assert!(registry.server(server.id).is_ok());
+    }
+
+    #[test]
+    fn a_complete_persistent_client_next_to_unfinished_directories_is_still_indexed() {
+        let environment = TestEnvironment::new();
+        let client = {
+            let registry = environment.registry();
+            registry
+                .create_published_client(
+                    NewClient::new("original", "1.20.1", LoaderSelection::vanilla())
+                        .with_storage(StorageClass::Persistent),
+                )
+                .expect("create")
+        };
+        environment.destroy_database();
+        let registry = environment.registry();
+        let unfinished = registry
+            .paths()
+            .persistent_instances_dir()
+            .join("unfinished");
+        copy_client_metadata_to(&client, &unfinished);
+        std::fs::write(metadata::incomplete_marker_path(&unfinished), "").expect("marker");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert!(report.client_conflicts.is_empty());
+        assert_eq!(report.unfinished_instances.len(), 1);
+        assert_eq!(
+            registry.client(client.id).expect("indexed").root,
+            client.root
         );
     }
 

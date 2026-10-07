@@ -6236,6 +6236,16 @@ fn show_reconciliation(report: &ReconciliationReport, json: bool) {
             "recovered": reconciled_json(&report.recovered),
             "relocated": reconciled_json(&report.relocated),
             "unfinished_instances": reconciled_json(&report.unfinished_instances),
+            "index_repaired": reconciled_json(&report.index_repaired),
+            "interrupted_hosts": reconciled_json(&report.interrupted_hosts),
+            "restores_rolled_back": reconciled_json(&report.restores_rolled_back),
+            "persistence_unhealthy": reconciled_json(&report.persistence_unhealthy),
+            "client_conflicts": conflicts_json(
+                report.client_conflicts.iter().map(|c| (c.id.to_string(), &c.roots)),
+            ),
+            "server_conflicts": conflicts_json(
+                report.server_conflicts.iter().map(|c| (c.id.to_string(), &c.roots)),
+            ),
             "needs_attention": report.needs_attention(),
         }));
         return;
@@ -6302,6 +6312,95 @@ fn show_reconciliation(report: &ReconciliationReport, json: bool) {
         }
         outln!("{}", ephervex_i18n::messages::unfinished_instances_action());
     }
+    show_reconciliation_warnings(report);
+}
+
+/// The states that change what the user may do next, after the routine summaries.
+fn show_reconciliation_warnings(report: &ReconciliationReport) {
+    if !report.index_repaired.is_empty() {
+        outln!(
+            "{}",
+            ephervex_i18n::messages::index_repaired(report.index_repaired.len())
+        );
+    }
+    if !report.restores_rolled_back.is_empty() {
+        outln!(
+            "{}",
+            ephervex_i18n::messages::restores_rolled_back(report.restores_rolled_back.len())
+        );
+    }
+    if !report.interrupted_hosts.is_empty() {
+        outln!(
+            "{}",
+            ephervex_i18n::messages::interrupted_hosts(report.interrupted_hosts.len())
+        );
+        show_attention_details(&report.interrupted_hosts);
+        outln!("{}", ephervex_i18n::messages::interrupted_hosts_action());
+    }
+    if !report.persistence_unhealthy.is_empty() {
+        outln!(
+            "{}",
+            ephervex_i18n::messages::persistence_unhealthy(report.persistence_unhealthy.len())
+        );
+        show_attention_details(&report.persistence_unhealthy);
+        outln!(
+            "{}",
+            ephervex_i18n::messages::persistence_unhealthy_action()
+        );
+    }
+    if !report.client_conflicts.is_empty() {
+        outln!(
+            "{}",
+            ephervex_i18n::messages::client_conflicts(report.client_conflicts.len())
+        );
+        for conflict in &report.client_conflicts {
+            show_conflict_detail(&conflict.id.to_string(), &conflict.roots);
+        }
+        outln!("{}", ephervex_i18n::messages::client_conflicts_action());
+    }
+    if !report.server_conflicts.is_empty() {
+        outln!(
+            "{}",
+            ephervex_i18n::messages::server_conflicts(report.server_conflicts.len())
+        );
+        for conflict in &report.server_conflicts {
+            show_conflict_detail(&conflict.id.to_string(), &conflict.roots);
+        }
+        outln!("{}", ephervex_i18n::messages::server_conflicts_action());
+    }
+}
+
+fn show_attention_details(entries: &[ephervex_core::ReconciledRecord]) {
+    for entry in entries {
+        outln!(
+            "  {}",
+            ephervex_i18n::lookup_args(
+                "reconcile-attention-detail",
+                [
+                    ("name", MessageArg::from(entry.name.as_str())),
+                    ("path", MessageArg::from(entry.root.as_path())),
+                ]
+            )
+        );
+    }
+}
+
+fn show_conflict_detail(id: &str, roots: &[PathBuf]) {
+    let paths = roots
+        .iter()
+        .map(|root| root.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    outln!(
+        "  {}",
+        ephervex_i18n::lookup_args(
+            "reconcile-conflict-detail",
+            [
+                ("id", MessageArg::from(id)),
+                ("paths", MessageArg::from(paths)),
+            ]
+        )
+    );
 }
 
 // -------------------------------------------------------------------- output
@@ -7541,6 +7640,16 @@ fn format_uptime(seconds: Option<i64>) -> String {
     } else {
         format!("{}h{}m", seconds / 3_600, (seconds % 3_600) / 60)
     }
+}
+
+fn conflicts_json<'a>(
+    conflicts: impl Iterator<Item = (String, &'a Vec<PathBuf>)>,
+) -> serde_json::Value {
+    serde_json::Value::Array(
+        conflicts
+            .map(|(id, roots)| serde_json::json!({ "id": id, "roots": roots }))
+            .collect(),
+    )
 }
 
 fn reconciled_json(records: &[ephervex_core::ReconciledRecord]) -> serde_json::Value {
