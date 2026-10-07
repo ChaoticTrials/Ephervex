@@ -43,12 +43,18 @@
 //! ```text
 //! $XDG_CACHE_HOME/ephervex/metadata/
 //! ├── mojang-version-manifest.json         the envelope below
-//! ├── mojang-version-manifest.fetch.json   staging, only while a refresh runs
+//! ├── mojang-version-manifest.fetch.json.part.<id>   one refresh's private staging
 //! └── modrinth/
 //!     └── 7a/
 //!         ├── 7a...<64 hex characters>.json
-//!         └── 7a...<64 hex characters>.fetch.json
+//!         └── 7a...<64 hex characters>.json.part.<id>   an envelope being published
 //! ```
+//!
+//! Every refresh stages into a file of its own and every envelope is published
+//! from a temporary file of its own, each named with a fresh identifier, so
+//! concurrent refreshes of one document, in one process or several, never
+//! read, delete, or publish one another's files. A file a crash left behind is
+//! removed by a later refresh of the same document once it is a day old.
 //!
 //! ```json
 //! {
@@ -107,6 +113,10 @@ pub const DEFAULT_METADATA_TTL: Duration = Duration::from_secs(15 * 60);
 /// wide margin, and a loader install profile is capped separately at 16 MiB --
 /// so it bounds the damage without being near anything legitimate.
 pub const MAX_METADATA_BYTES: u64 = 64 * 1024 * 1024;
+
+/// How old a staging or temporary file must be before a refresh treats it as
+/// left behind by a crashed process rather than owned by a live one.
+const ABANDONED_STAGING_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Where a document came from and how old it is.
 ///
@@ -422,11 +432,12 @@ impl MetadataCache {
         self.entry_path(key, "json")
     }
 
-    /// Where a refresh writes before it is known to have succeeded.
+    /// The name a refresh's private staging file is derived from.
     ///
     /// Distinct from the envelope path so that a failed refresh cannot destroy
     /// the copy the launcher is currently able to serve. A sibling of it, so
-    /// that publishing stays a rename inside one directory.
+    /// that publishing stays a rename inside one directory. Never used as is:
+    /// each refresh makes it unique with [`crate::manager::staging_path`].
     fn staging_path(&self, key: &MetadataKey) -> PathBuf {
         self.entry_path(key, "fetch.json")
     }
@@ -570,30 +581,9 @@ impl MetadataCache {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> Result<CachedMetadata, MetadataCacheError> {
-        let staging = self.staging_path(key);
-        // The manager treats an existing destination as a finished download, so
-        // yesterday's staging file would be served as today's refresh.
-        remove_if_present(&staging).await;
-
-        let request = DownloadRequest::new(url.clone(), &staging)
-            .labeled(key.to_string())
-            .bounded_by(MAX_METADATA_BYTES);
-        let outcome = manager.download(&request, reporter, cancel).await;
-        let read = match outcome {
-            Ok(_) => fs::read(&staging)
-                .await
-                .map_err(|source| MetadataCacheError::Io {
-                    path: staging.clone(),
-                    source,
-                }),
-            Err(source) => Err(MetadataCacheError::Fetch {
-                key: key.to_string(),
-                source: Box::new(source),
-            }),
-        };
-        remove_if_present(&staging).await;
-        let bytes = read?;
-
+        let bytes = self
+            .download_document(manager, key, url, reporter, cancel)
+            .await?;
         let payload: Box<RawValue> =
             serde_json::from_slice(&bytes).map_err(|source| MetadataCacheError::NotJson {
                 key: key.to_string(),
@@ -611,9 +601,43 @@ impl MetadataCache {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> Result<CachedMetadata, MetadataCacheError> {
-        let staging = self.staging_path(key);
-        remove_if_present(&staging).await;
+        let bytes = self
+            .download_document(manager, key, url, reporter, cancel)
+            .await?;
+        let text = String::from_utf8(bytes).map_err(|source| MetadataCacheError::NotUtf8 {
+            key: key.to_string(),
+            source,
+        })?;
+        let payload = serde_json::value::to_raw_value(&text).map_err(|source| {
+            MetadataCacheError::NotJson {
+                key: key.to_string(),
+                source,
+            }
+        })?;
+        self.store(key, url, payload).await
+    }
 
+    /// Downloads `url` bounded by [`MAX_METADATA_BYTES`] and returns its bytes,
+    /// without touching the cached entry.
+    ///
+    /// The response is staged in a file only this call knows about, and that
+    /// file is removed before returning. Concurrent calls for one `key` from any
+    /// number of threads or processes therefore each read the response they
+    /// asked for, and none can delete another's staging file. For a caller that
+    /// post-processes a document before caching it with [`Self::store`].
+    pub async fn download_document(
+        &self,
+        manager: &DownloadManager,
+        key: &MetadataKey,
+        url: &Url,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<u8>, MetadataCacheError> {
+        self.remove_abandoned_staging(key).await;
+
+        // The manager treats an existing destination as a finished download, so
+        // the destination must be a name nothing has ever used.
+        let staging = crate::manager::staging_path(&self.staging_path(key));
         let request = DownloadRequest::new(url.clone(), &staging)
             .labeled(key.to_string())
             .bounded_by(MAX_METADATA_BYTES);
@@ -631,17 +655,48 @@ impl MetadataCache {
             }),
         };
         remove_if_present(&staging).await;
-        let text = String::from_utf8(read?).map_err(|source| MetadataCacheError::NotUtf8 {
-            key: key.to_string(),
-            source,
-        })?;
-        let payload = serde_json::value::to_raw_value(&text).map_err(|source| {
-            MetadataCacheError::NotJson {
-                key: key.to_string(),
-                source,
+        read
+    }
+
+    /// Removes staging and temporary files for `key` that a crashed process
+    /// left behind.
+    ///
+    /// Age is the ownership test: nothing live keeps one of these files for a
+    /// day, so a file that old belongs to no refresh.
+    async fn remove_abandoned_staging(&self, key: &MetadataKey) {
+        let envelope = self.path(key);
+        let Some(directory) = envelope.parent() else {
+            return;
+        };
+        let staging = self.staging_path(key);
+        let Ok(mut entries) = fs::read_dir(directory).await else {
+            return;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let file_name = entry.file_name();
+            let Some(file_name) = file_name.to_str() else {
+                continue;
+            };
+            if !crate::manager::is_partial_of(file_name, &envelope)
+                && !crate::manager::is_partial_of(file_name, &staging)
+            {
+                continue;
             }
-        })?;
-        self.store(key, url, payload).await
+            let abandoned = match entry.metadata().await {
+                Ok(metadata) => {
+                    metadata.is_file()
+                        && metadata
+                            .modified()
+                            .ok()
+                            .and_then(|modified| modified.elapsed().ok())
+                            .is_some_and(|age| age >= ABANDONED_STAGING_AGE)
+                }
+                Err(_) => false,
+            };
+            if abandoned {
+                remove_if_present(&entry.path()).await;
+            }
+        }
     }
 
     /// Writes a document into the cache, stamped with the current time.
@@ -712,22 +767,18 @@ impl MetadataCache {
 
         // Same atomicity rule as the download manager's: a reader must never
         // see a half-written envelope, and a rename within one directory is the
-        // cheapest way to guarantee that. The suffix is a fixed eight bytes on
-        // top of a key that [`MetadataKey`] already bounds, so the sibling is
-        // creatable wherever the entry itself is.
-        let temporary = path.with_extension("json.writing");
-        fs::write(&temporary, &encoded)
-            .await
-            .map_err(|source| MetadataCacheError::Io {
-                path: temporary.clone(),
-                source,
-            })?;
-        fs::rename(&temporary, &path)
-            .await
-            .map_err(|source| MetadataCacheError::Io {
-                path: path.clone(),
-                source,
-            })?;
+        // cheapest way to guarantee that. The temporary file is unique to this
+        // write, so concurrent writers of one entry each publish a complete
+        // envelope and the last rename wins.
+        let temporary = crate::manager::staging_path(&path);
+        let published = match fs::write(&temporary, &encoded).await {
+            Ok(()) => crate::manager::publish_staged(&temporary, &path).await,
+            Err(error) => Err(error),
+        };
+        if let Err(source) = published {
+            remove_if_present(&temporary).await;
+            return Err(MetadataCacheError::Io { path, source });
+        }
         Ok(())
     }
 }
@@ -880,7 +931,7 @@ mod tests {
         let parent = path.parent().expect("an entry has a directory");
         assert_eq!(cache.staging_path(&key).parent(), Some(parent));
         assert_eq!(
-            path.with_extension("json.writing").parent(),
+            crate::manager::staging_path(&path).parent(),
             Some(parent),
             "the envelope's temporary file must not leave the shard"
         );
@@ -1017,6 +1068,311 @@ mod tests {
             ..DownloaderConfig::default()
         };
         DownloadManager::new(config).expect("client")
+    }
+
+    fn files_in(directory: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(directory)
+            .expect("read dir")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn loopback_manager() -> DownloadManager {
+        DownloadManager::new(DownloaderConfig {
+            http: crate::client::HttpConfig::for_loopback_tests(),
+            retry: RetryPolicy::none(),
+            ..DownloaderConfig::default()
+        })
+        .expect("client")
+    }
+
+    #[tokio::test]
+    async fn concurrent_refreshes_of_one_key_each_publish_their_own_complete_response() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/index.json"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"versions":[1,2,3]}"#)
+                    .set_delay(Duration::from_millis(20)),
+            )
+            .mount(&server)
+            .await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let cache = MetadataCache::new(CacheLayout::new(base.path()));
+        let key = MetadataKey::new("provider-index").expect("safe key");
+        let url = Url::parse(&format!("{}/index.json", server.uri())).expect("url");
+        let manager = loopback_manager();
+
+        let refreshes = (0..40).map(|index| {
+            let (cache, manager, key, url) =
+                (cache.clone(), manager.clone(), key.clone(), url.clone());
+            tokio::spawn(async move {
+                let reporter = OperationReporter::silent("metadata");
+                let cancel = CancellationToken::new();
+                if index % 2 == 0 {
+                    cache
+                        .refresh(&manager, &key, &url, &reporter, &cancel)
+                        .await
+                } else {
+                    cache
+                        .refresh_text(&manager, &key, &url, &reporter, &cancel)
+                        .await
+                }
+            })
+        });
+        for refresh in futures_util::future::join_all(refreshes).await {
+            refresh
+                .expect("task")
+                .expect("a healthy provider never fails a refresh");
+        }
+
+        let published = cache.peek(&key).await.expect("an envelope was published");
+        assert!(
+            published.json() == r#"{"versions":[1,2,3]}"#
+                || published
+                    .text()
+                    .is_ok_and(|text| text == r#"{"versions":[1,2,3]}"#),
+            "published a torn or foreign document: {}",
+            published.json()
+        );
+        assert_eq!(
+            files_in(&base.path().join("metadata")),
+            ["provider-index.json"],
+            "no staging or temporary file may outlive its refresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refresh_never_adopts_a_file_another_refresh_left_at_a_staging_name() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/index.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"own":true}"#))
+            .mount(&server)
+            .await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let cache = MetadataCache::new(CacheLayout::new(base.path()));
+        let key = MetadataKey::new("provider-index").expect("safe key");
+        let root = base.path().join("metadata");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let foreign = root.join("provider-index.fetch.json");
+        std::fs::write(&foreign, br#"{"own":false}"#).expect("write");
+        let url = Url::parse(&format!("{}/index.json", server.uri())).expect("url");
+
+        let refreshed = cache
+            .refresh(
+                &loopback_manager(),
+                &key,
+                &url,
+                &OperationReporter::silent("metadata"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("refresh");
+
+        assert_eq!(refreshed.json(), r#"{"own":true}"#);
+        assert_eq!(
+            std::fs::read(&foreign).expect("another refresh's file is untouched"),
+            br#"{"own":false}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_stores_of_one_key_always_leave_a_complete_envelope() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let cache = MetadataCache::new(CacheLayout::new(base.path()));
+        let key = MetadataKey::new("provider-index").expect("safe key");
+
+        let writes = (0..40).map(|index| {
+            let (cache, key) = (cache.clone(), key.clone());
+            tokio::spawn(async move {
+                cache
+                    .write_envelope(
+                        &key,
+                        &CachedMetadata {
+                            payload: raw(&format!(r#"{{"writer":{index}}}"#)),
+                            fetched_at: Utc::now(),
+                            source: url().to_string(),
+                            freshness: Freshness::Fetched,
+                        },
+                    )
+                    .await
+            })
+        });
+        for write in futures_util::future::join_all(writes).await {
+            write.expect("task").expect("every write publishes");
+        }
+
+        cache.peek(&key).await.expect("a complete envelope");
+        assert_eq!(
+            files_in(&base.path().join("metadata")),
+            ["provider-index.json"]
+        );
+    }
+
+    #[tokio::test]
+    async fn only_abandoned_staging_for_the_same_document_is_removed_by_a_refresh() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/index.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&server)
+            .await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let cache = MetadataCache::new(CacheLayout::new(base.path()));
+        let key = MetadataKey::new("provider-index").expect("safe key");
+        let root = base.path().join("metadata");
+        std::fs::create_dir_all(&root).expect("mkdir");
+
+        let old = root.join(format!("provider-index.fetch.json.part.{}", "a".repeat(32)));
+        let recent = root.join(format!("provider-index.json.part.{}", "b".repeat(32)));
+        let other = root.join(format!("other-index.fetch.json.part.{}", "c".repeat(32)));
+        for file in [&old, &recent, &other] {
+            std::fs::write(file, b"x").expect("write");
+        }
+        let long_ago = std::time::SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60);
+        for file in [&old, &other] {
+            std::fs::File::options()
+                .write(true)
+                .open(file)
+                .expect("open")
+                .set_modified(long_ago)
+                .expect("set mtime");
+        }
+
+        let url = Url::parse(&format!("{}/index.json", server.uri())).expect("url");
+        cache
+            .refresh(
+                &loopback_manager(),
+                &key,
+                &url,
+                &OperationReporter::silent("metadata"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("refresh");
+
+        assert!(!old.exists(), "a day-old staging file is abandoned");
+        assert!(recent.exists(), "a recent file may belong to a live writer");
+        assert!(
+            other.exists(),
+            "another document's staging is not this refresh's to remove"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refresh_leaves_other_documents_whose_names_extend_its_own() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/index.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&server)
+            .await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let cache = MetadataCache::new(CacheLayout::new(base.path()));
+        let root = base.path().join("metadata");
+        let lookalike = MetadataKey::new("provider-index.json.part.x").expect("safe key");
+        cache
+            .store(&lookalike, &url(), raw("{}"))
+            .await
+            .expect("store");
+        let long_ago = std::time::SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60);
+        std::fs::File::options()
+            .write(true)
+            .open(cache.path(&lookalike))
+            .expect("open")
+            .set_modified(long_ago)
+            .expect("set mtime");
+
+        let key = MetadataKey::new("provider-index").expect("safe key");
+        let url = Url::parse(&format!("{}/index.json", server.uri())).expect("url");
+        cache
+            .refresh(
+                &loopback_manager(),
+                &key,
+                &url,
+                &OperationReporter::silent("metadata"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("refresh");
+
+        assert!(
+            cache.peek(&lookalike).await.is_some(),
+            "a refresh removed another document's envelope; the store holds {:?}",
+            files_in(&root)
+        );
+    }
+
+    #[tokio::test]
+    async fn abandoned_staging_of_a_long_key_is_removed_despite_name_truncation() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/index.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&server)
+            .await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let cache = MetadataCache::new(CacheLayout::new(base.path()));
+        let key = MetadataKey::new(&"k".repeat(100)).expect("safe key");
+        let root = base.path().join("metadata");
+        std::fs::create_dir_all(&root).expect("mkdir");
+
+        let staging = cache.staging_path(&key);
+        let outer = crate::manager::staging_path(&staging);
+        let nested = crate::manager::staging_path(&outer);
+        let envelope = crate::manager::staging_path(&cache.path(&key));
+        let abandoned = [outer, nested, envelope];
+        let long_ago = std::time::SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60);
+        for file in &abandoned {
+            std::fs::write(file, b"x").expect("write");
+            std::fs::File::options()
+                .write(true)
+                .open(file)
+                .expect("open")
+                .set_modified(long_ago)
+                .expect("set mtime");
+        }
+
+        let url = Url::parse(&format!("{}/index.json", server.uri())).expect("url");
+        cache
+            .refresh(
+                &loopback_manager(),
+                &key,
+                &url,
+                &OperationReporter::silent("metadata"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("refresh");
+
+        for file in &abandoned {
+            assert!(!file.exists(), "{} was never collected", file.display());
+        }
     }
 
     #[tokio::test]

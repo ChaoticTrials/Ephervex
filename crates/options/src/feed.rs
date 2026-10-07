@@ -31,12 +31,11 @@
 //! No credentials are involved: this is a public read-only document.
 
 use ephervex_download::{
-    CacheLayout, DomainAllowlist, DownloadManager, DownloadRequest, MetadataCache,
-    MetadataCacheError, MetadataKey, OperationReporter, UrlPolicyError,
+    CacheLayout, DomainAllowlist, DownloadManager, MetadataCache, MetadataCacheError, MetadataKey,
+    OperationReporter, UrlPolicyError,
 };
 use reqwest::Url;
 use serde::Deserialize;
-use tokio::fs;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tokio_util::sync::CancellationToken as Cancel;
@@ -204,7 +203,6 @@ struct GistFile {
 #[derive(Debug, Clone)]
 pub struct OptionsFeed {
     manager: DownloadManager,
-    layout: CacheLayout,
     cache: MetadataCache,
     source: FeedSource,
     allowlist: DomainAllowlist,
@@ -238,7 +236,7 @@ impl OptionsFeed {
             }
         };
         Ok(Self {
-            cache: MetadataCache::new(layout.clone()),
+            cache: MetadataCache::new(layout),
             key: MetadataKey::new(OPTIONS_FEED_CACHE_KEY).map_err(|_| {
                 UrlPolicyError::Malformed {
                     url: OPTIONS_FEED_CACHE_KEY.to_owned(),
@@ -246,7 +244,6 @@ impl OptionsFeed {
             })?,
             allowlist,
             manager,
-            layout,
             source,
             refresh_lock: std::sync::Arc::new(Mutex::new(())),
         })
@@ -320,7 +317,7 @@ impl OptionsFeed {
         let entry = self.source.entry_url()?;
         self.allowlist.validate_url(&entry)?;
 
-        let body = self.read(&entry, "entry", reporter, cancel).await?;
+        let body = self.read(&entry, reporter, cancel).await?;
         let text = match &self.source {
             FeedSource::Document { .. } => body,
             FeedSource::Gist { file, .. } => self.gist_body(&body, file, reporter, cancel).await?,
@@ -397,62 +394,29 @@ impl OptionsFeed {
         // The URL came out of a remote document, so it is checked against the
         // allowlist exactly like any other untrusted location.
         let url = self.allowlist.validate(raw)?;
-        self.read(&url, "raw", reporter, cancel).await
+        self.read(&url, reporter, cancel).await
     }
 
-    /// Fetches one document into a staging path and reads it back.
+    /// Fetches one document through staging private to this call and reads it
+    /// back.
     ///
     /// Staging rather than the cache path: nothing that has not been validated
-    /// may sit where a reader would find it.
+    /// may sit where a reader would find it. The staging file is this call's
+    /// alone, so feeds that share a cache, in one process or several, never
+    /// consume or delete one another's responses.
     async fn read(
         &self,
         url: &Url,
-        stage: &str,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> Result<String, FeedError> {
-        let staging = self
-            .layout
-            .store_root(ephervex_download::ContentStore::Metadata)
-            .join(format!("{OPTIONS_FEED_CACHE_KEY}.{stage}.fetch"));
-        if let Some(parent) = staging.parent() {
-            fs::create_dir_all(parent)
-                .await
-                .map_err(|source| FeedError::Unreachable {
-                    source: Box::new(MetadataCacheError::Io {
-                        path: parent.to_path_buf(),
-                        source,
-                    }),
-                })?;
-        }
-        // The download manager treats an existing destination as a finished
-        // download, so a leftover staging file would be served as this refresh.
-        let _ = fs::remove_file(&staging).await;
-
-        // Bounded like every other metadata fetch: the feed is a document with
-        // no published size and no hash, so nothing but this stops a hostile or
-        // broken host from streaming until the disk is full.
-        let request = DownloadRequest::new(url.clone(), &staging)
-            .labeled(OPTIONS_FEED_CACHE_KEY)
-            .bounded_by(ephervex_download::MAX_METADATA_BYTES);
-        let outcome = self.manager.download(&request, reporter, cancel).await;
-        let read = match outcome {
-            Ok(_) => fs::read(&staging)
-                .await
-                .map_err(|source| MetadataCacheError::Io {
-                    path: staging.clone(),
-                    source,
-                }),
-            Err(source) => Err(MetadataCacheError::Fetch {
-                key: OPTIONS_FEED_CACHE_KEY.to_owned(),
+        let bytes = self
+            .cache
+            .download_document(&self.manager, &self.key, url, reporter, cancel)
+            .await
+            .map_err(|source| FeedError::Unreachable {
                 source: Box::new(source),
-            }),
-        };
-        let _ = fs::remove_file(&staging).await;
-
-        let bytes = read.map_err(|source| FeedError::Unreachable {
-            source: Box::new(source),
-        })?;
+            })?;
         String::from_utf8(bytes).map_err(|source| FeedError::Unreachable {
             source: Box::new(MetadataCacheError::NotUtf8 {
                 key: OPTIONS_FEED_CACHE_KEY.to_owned(),

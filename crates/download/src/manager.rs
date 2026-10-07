@@ -1265,6 +1265,55 @@ fn part_path(destination: &Path, id: uuid::Uuid) -> PathBuf {
         .join(format!("{kept}{suffix}"))
 }
 
+/// Whether `candidate` is exactly a name [`part_path`] can produce for
+/// `destination`: its partial file, or the manager's own partial file of that
+/// partial.
+///
+/// Matching the generated shape rather than a name prefix keeps a stale-file
+/// sweep from claiming a different document whose name merely begins with the
+/// same text, and follows the truncation [`part_path`] applies to long names.
+pub(crate) fn is_partial_of(candidate: &str, destination: &Path) -> bool {
+    let marker = format!(".{PART_SUFFIX}.");
+    let Some(readable) = without_partial_suffix(candidate, &marker) else {
+        return false;
+    };
+    let name = destination
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy();
+    let own = bounded(
+        &name,
+        MAX_TEMPORARY_NAME_BYTES.saturating_sub(marker.len() + PARTIAL_ID_LEN),
+    );
+    if readable == own {
+        return true;
+    }
+    // The partial file of a partial keeps as much of `own + marker + id` as
+    // the name bound allows, so what follows `own` is a leading piece of that.
+    let Some(tail) = readable.strip_prefix(own) else {
+        return false;
+    };
+    match tail.strip_prefix(marker.as_str()) {
+        Some(id) => id.len() <= PARTIAL_ID_LEN && id.bytes().all(is_partial_id_byte),
+        None => !tail.is_empty() && marker.starts_with(tail),
+    }
+}
+
+/// The length of the identifier [`part_path`] appends: a simple-form UUID.
+const PARTIAL_ID_LEN: usize = 32;
+
+fn is_partial_id_byte(byte: u8) -> bool {
+    byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+}
+
+/// `name` without its trailing `.part.<identifier>`, if it ends that way.
+fn without_partial_suffix<'a>(name: &'a str, marker: &str) -> Option<&'a str> {
+    let split = name.len().checked_sub(marker.len() + PARTIAL_ID_LEN)?;
+    let (readable, suffix) = (name.get(..split)?, name.get(split..)?);
+    let id = suffix.strip_prefix(marker)?;
+    id.bytes().all(is_partial_id_byte).then_some(readable)
+}
+
 /// The longest prefix of `name` that fits `max_bytes` without splitting a
 /// character.
 fn bounded(name: &str, max_bytes: usize) -> &str {

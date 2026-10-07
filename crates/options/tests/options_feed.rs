@@ -16,7 +16,7 @@ use ephervex_download::{
     CacheLayout, DomainAllowlist, DownloadManager, DownloaderConfig, HttpConfig, OperationReporter,
 };
 use ephervex_options::{
-    CompatibilitySource, FeedSource, OptionsCompatibility, OptionsDataset, OptionsFeed,
+    CompatibilitySource, FeedError, FeedSource, OptionsCompatibility, OptionsDataset, OptionsFeed,
 };
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path};
@@ -453,5 +453,71 @@ async fn a_newer_remote_revision_replaces_the_cached_dataset() {
             .expect("cached")
             .revision,
         4
+    );
+}
+
+#[tokio::test]
+async fn feeds_sharing_a_cache_each_adopt_only_the_response_of_their_own_source() {
+    let slow = MockServer::start().await;
+    let fast = MockServer::start().await;
+    let slow_revision = OptionsDataset::bundled().revision + 1;
+    let fast_revision = OptionsDataset::bundled().revision + 2;
+    Mock::given(method("GET"))
+        .and(path(RAW_PATH))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(published_revision(slow_revision))
+                .set_delay(std::time::Duration::from_millis(150)),
+        )
+        .mount(&slow)
+        .await;
+    mount(&fast, RAW_PATH, published_revision(fast_revision)).await;
+
+    let cache = tempfile::tempdir().expect("temp dir");
+    let document_feed = |server: &MockServer| {
+        OptionsFeed::from_source(
+            manager(),
+            CacheLayout::new(cache.path()),
+            FeedSource::Document {
+                url: format!("{}{RAW_PATH}", server.uri()),
+            },
+        )
+        .expect("document feed builds")
+        .with_allowlist(DomainAllowlist::for_loopback_tests("127.0.0.1"))
+    };
+    let (slow_feed, fast_feed) = (document_feed(&slow), document_feed(&fast));
+    let cancel = CancellationToken::new();
+    let reporter = reporter();
+
+    let (slow_result, fast_result) = tokio::join!(slow_feed.refresh(&reporter, &cancel), async {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        fast_feed.refresh(&reporter, &cancel).await
+    });
+
+    assert_eq!(
+        fast_result
+            .expect("the fast source's own response")
+            .revision,
+        fast_revision
+    );
+    // The slow feed finishes after the newer revision is cached, so refusing
+    // it as a rollback is correct. Adopting the other source's response, or
+    // failing because it vanished, is not.
+    match slow_result {
+        Ok(dataset) => assert_eq!(dataset.revision, slow_revision),
+        Err(error) => assert!(
+            matches!(error, FeedError::Rollback { .. }),
+            "unexpected failure: {error}"
+        ),
+    }
+    let staging_leftovers: Vec<_> = std::fs::read_dir(cache.path().join("metadata"))
+        .expect("metadata store")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".part.") || name.contains(".fetch"))
+        .collect();
+    assert!(
+        staging_leftovers.is_empty(),
+        "staging outlived its refresh: {staging_leftovers:?}"
     );
 }
