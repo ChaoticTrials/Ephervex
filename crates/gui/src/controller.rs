@@ -4070,8 +4070,8 @@ fn register_mod_state_actions(
 /// Its own registration because it is a whole conversation rather than one
 /// more toggle: what the dialog is holding decides which question was asked.
 fn register_dependency_actions(ui: &AppWindow, commands: &Sender<Command>) {
-    // Applying what the dialog asked about. The lists it is holding say which
-    // question was answered, so one callback serves both directions.
+    // Applying what the dialog asked about. The dialog carries the direction,
+    // so one callback serves both questions.
     let sender = commands.clone();
     let handle = ui.as_weak();
     ui.on_apply_mod_impact(move |cascade| {
@@ -4102,8 +4102,7 @@ fn register_dependency_actions(ui: &AppWindow, commands: &Sender<Command>) {
             paths.push(target.clone());
             send(&sender, Command::DeleteModFiles { host, paths });
         } else {
-            let enabling = ui.get_mod_requires_disabled().row_count() > 0
-                || ui.get_mod_impact_breaks().row_count() == 0;
+            let enabling = ui.get_mod_impact_enabling();
             let mut changes: Vec<(PathBuf, bool)> = Vec::new();
             if cascade {
                 let others = if enabling {
@@ -4148,6 +4147,7 @@ fn apply_mod_impact(ui: &AppWindow, impact: &ModImpactPresentation) {
     ui.set_mod_impact_path(impact.path.as_str().into());
     ui.set_mod_impact_name(impact.name.as_str().into());
     ui.set_mod_impact_deleting(impact.deleting);
+    ui.set_mod_impact_enabling(false);
     ui.set_mod_impact_breaks(impact_rows(&impact.breaks));
     ui.set_mod_impact_degrades(impact_rows(&impact.degrades));
     ui.set_mod_impact_unknown(impact_rows(&impact.unknown));
@@ -4170,6 +4170,7 @@ fn apply_mod_requirements(ui: &AppWindow, needs: &ModRequirementPresentation) {
     ui.set_mod_impact_path(needs.path.as_str().into());
     ui.set_mod_impact_name(needs.name.as_str().into());
     ui.set_mod_impact_deleting(false);
+    ui.set_mod_impact_enabling(true);
     ui.set_mod_impact_breaks(impact_rows(&[]));
     ui.set_mod_impact_degrades(impact_rows(&[]));
     ui.set_mod_impact_unknown(impact_rows(&[]));
@@ -15067,5 +15068,127 @@ mod tests {
             "a resolution for an abandoned attempt must not apply"
         );
         assert_eq!(flow.phase, ImportPhase::Idle);
+    }
+
+    fn impact_row(name: &str) -> crate::presentation::ImpactRowPresentation {
+        crate::presentation::ImpactRowPresentation {
+            name: name.to_owned(),
+            logical_path: format!("mods/{name}.jar"),
+            distance: 1,
+        }
+    }
+
+    fn turn_off_impact(
+        host: &str,
+        unknown: Vec<crate::presentation::ImpactRowPresentation>,
+    ) -> ModImpactPresentation {
+        ModImpactPresentation {
+            host_kind: "client".to_owned(),
+            host_id: host.to_owned(),
+            path: "mods/LibX.jar".to_owned(),
+            name: "LibX".to_owned(),
+            deleting: false,
+            breaks: Vec::new(),
+            degrades: Vec::new(),
+            unknown,
+            unidentifiable: Vec::new(),
+        }
+    }
+
+    /// Applies the open dialog and returns the command the controller sent.
+    fn apply_open_dialog(ui: &AppWindow, cascade: bool) -> Command {
+        let (sender, commands) = std::sync::mpsc::channel();
+        register_dependency_actions(ui, &sender);
+        ui.invoke_apply_mod_impact(cascade);
+        commands.try_recv().expect("the dialog sends one command")
+    }
+
+    /// The turn-off dialog opens whenever a dependent is merely unknown, and
+    /// nothing in its lists then says which way the user is going.
+    #[test]
+    fn confirming_a_turn_off_with_nothing_proven_broken_turns_the_mod_off() {
+        let ui = test_window();
+        let host = ephervex_model::InstanceId::new().to_string();
+        apply_mod_impact(&ui, &turn_off_impact(&host, vec![impact_row("Mystery")]));
+
+        assert!(!ui.get_mod_impact_enabling());
+        let Command::SetModsEnabled { changes, .. } = apply_open_dialog(&ui, true) else {
+            panic!("a turn-off sends the enable change");
+        };
+        assert_eq!(changes, vec![(PathBuf::from("mods/LibX.jar"), false)]);
+    }
+
+    #[test]
+    fn confirming_a_turn_off_with_proven_dependents_turns_them_off_too() {
+        let ui = test_window();
+        let host = ephervex_model::InstanceId::new().to_string();
+        let mut impact = turn_off_impact(&host, Vec::new());
+        impact.breaks = vec![impact_row("Sky GUIs")];
+        apply_mod_impact(&ui, &impact);
+
+        let Command::SetModsEnabled { changes, .. } = apply_open_dialog(&ui, true) else {
+            panic!("a turn-off sends the enable change");
+        };
+        assert_eq!(
+            changes,
+            vec![
+                (PathBuf::from("mods/Sky GUIs.jar"), false),
+                (PathBuf::from("mods/LibX.jar"), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn confirming_a_turn_on_enables_the_mod_and_what_it_needs() {
+        let ui = test_window();
+        let host = ephervex_model::InstanceId::new().to_string();
+        apply_mod_requirements(
+            &ui,
+            &ModRequirementPresentation {
+                host_kind: "client".to_owned(),
+                host_id: host,
+                path: "mods/Addon.jar".to_owned(),
+                name: "Addon".to_owned(),
+                disabled: vec![impact_row("LibX")],
+                absent: Vec::new(),
+                incompatible: Vec::new(),
+            },
+        );
+
+        assert!(ui.get_mod_impact_enabling());
+        let Command::SetModsEnabled { changes, .. } = apply_open_dialog(&ui, true) else {
+            panic!("a turn-on sends the enable change");
+        };
+        assert_eq!(
+            changes,
+            vec![
+                (PathBuf::from("mods/LibX.jar"), true),
+                (PathBuf::from("mods/Addon.jar"), true),
+            ]
+        );
+    }
+
+    /// Absent mods are only reported, so the lists that can be cascaded are empty.
+    #[test]
+    fn confirming_a_turn_on_that_only_reports_absent_mods_still_turns_the_mod_on() {
+        let ui = test_window();
+        let host = ephervex_model::InstanceId::new().to_string();
+        apply_mod_requirements(
+            &ui,
+            &ModRequirementPresentation {
+                host_kind: "client".to_owned(),
+                host_id: host,
+                path: "mods/Addon.jar".to_owned(),
+                name: "Addon".to_owned(),
+                disabled: Vec::new(),
+                absent: vec![impact_row("Missing")],
+                incompatible: Vec::new(),
+            },
+        );
+
+        let Command::SetModsEnabled { changes, .. } = apply_open_dialog(&ui, true) else {
+            panic!("a turn-on sends the enable change");
+        };
+        assert_eq!(changes, vec![(PathBuf::from("mods/Addon.jar"), true)]);
     }
 }

@@ -91,6 +91,35 @@ fn the_cascade_offer_appears_only_when_something_is_proven() {
 }
 
 #[test]
+fn a_turn_off_with_nothing_proven_broken_is_confirmed_with_turn_off() {
+    let ui = window();
+    disabling_a_library(&ui);
+    ui.set_mod_impact_breaks(rows(&[]));
+    ui.set_mod_impact_unknown(rows(&[row("Mystery", 1)]));
+
+    assert!(
+        visible(&ui, &lookup("gui-mod-impact-turn-off")),
+        "the button says what the user opened the dialog to do"
+    );
+    assert!(
+        !visible(&ui, &lookup("gui-mod-impact-turn-on")),
+        "a turn-off dialog never offers to turn the mod on"
+    );
+}
+
+#[test]
+fn a_turn_on_dialog_is_confirmed_with_turn_on() {
+    let ui = window();
+    disabling_a_library(&ui);
+    ui.set_mod_impact_breaks(rows(&[]));
+    ui.set_mod_impact_enabling(true);
+    ui.set_mod_requires_absent(rows(&[row("Missing", 1)]));
+
+    assert!(visible(&ui, &lookup("gui-mod-impact-turn-on")));
+    assert!(!visible(&ui, &lookup("gui-mod-impact-turn-off")));
+}
+
+#[test]
 fn the_dialog_always_offers_to_stop_asking() {
     let ui = window();
     disabling_a_library(&ui);
