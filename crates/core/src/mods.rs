@@ -222,16 +222,27 @@ fn may_be_identified(entry: &ManagedModEntry) -> bool {
 /// A refusal from `record_managed` is left alone on purpose: it means this
 /// project is already recorded at another version, which is two jars for one
 /// mod and a thing to tell somebody about rather than to overwrite.
-fn record_identified(layout: &HostLayout, adopted: &[ManagedModEntry]) {
+///
+/// The recipe is read here, not taken from the caller, because the lookups that
+/// produced `adopted` ran over the network. An install, a removal or a restored
+/// snapshot that landed meanwhile must survive; only the identities are added.
+fn record_identified(root: &Path, adopted: &[ManagedModEntry]) {
     if adopted.is_empty() {
         return;
     }
-    let store = SourceStore::new(ephervex_storage::metadata::source_dir(&layout.root));
+    let store = SourceStore::new(ephervex_storage::metadata::source_dir(root));
     // A host with no recipe has nothing to record into. An instance acquires
     // one the first time something is installed into it, and finding a jar is
     // not installing one.
-    let Some(mut recipe) = layout.recipe.clone() else {
+    if !store.has_recipe() {
         return;
+    }
+    let mut recipe = match store.read_recipe() {
+        Ok(recipe) => recipe,
+        Err(error) => {
+            warn!(%error, "identified mods could not be recorded");
+            return;
+        }
     };
 
     let mut changed = false;
@@ -1574,7 +1585,7 @@ impl App {
             };
             adopted.push(entry.clone());
         }
-        record_identified(&layout, &adopted);
+        record_identified(&layout.root, &adopted);
     }
 
     /// Whatever Modrinth did not recognize, asked of CurseForge by fingerprint.
@@ -3004,6 +3015,75 @@ mod tests {
         let shown = reconciled(vec![found], vec![unidentified(11, ModPresence::Installed)]);
         assert!(!shown[0].3, "a jar of another size is another jar");
         assert_eq!(shown[0].4, ModIdentity::Unresolved);
+    }
+
+    fn recipe_with_one_mod(root: &Path) -> SourceStore {
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(root));
+        let mut recipe = PackRecipe::for_manual_instance(
+            "Identified",
+            "1.21.1",
+            ephervex_model::LoaderSelection::exact(ephervex_model::LoaderKind::NeoForge, "21.1.77"),
+        );
+        recipe.files.push(pack_mod("kept.jar", "KEPT", "KEPT-1"));
+        store.write_recipe(&recipe).expect("write the recipe");
+        store
+    }
+
+    /// The lookups run over the network, so what the host recorded while they
+    /// ran is what the identities are merged into, not what it held before.
+    #[test]
+    fn identifying_a_jar_keeps_the_recipe_changes_made_while_the_lookup_ran() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let store = recipe_with_one_mod(root.path());
+
+        // An install lands, and an earlier record is removed, after the
+        // lookups started.
+        let mut concurrent = store.read_recipe().expect("recipe");
+        concurrent.files.clear();
+        concurrent
+            .files
+            .push(pack_mod("installed.jar", "NEW", "NEW-1"));
+        store.write_recipe(&concurrent).expect("write the recipe");
+
+        let adopted = ManagedModEntry {
+            origin: ModOrigin::HandPlaced,
+            identity: version_identity("FOUND", "FOUND-1"),
+            hashes: vec![sha1('d')],
+            size: Some(10),
+            ..listed_entry("mods/hand.jar", "hand.jar", ModPresence::Installed)
+        };
+        record_identified(root.path(), &[adopted]);
+
+        let recipe = store.read_recipe().expect("recipe");
+        let paths: Vec<_> = recipe
+            .files
+            .iter()
+            .map(|file| file.logical_path.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(paths, ["mods/installed.jar", "mods/hand.jar"]);
+        let hand = &recipe.files[1];
+        assert_eq!(hand.origin, ModOrigin::HandPlaced);
+        assert_eq!(
+            hand.identity
+                .as_ref()
+                .and_then(|id| id.project_id.as_deref()),
+            Some("FOUND")
+        );
+    }
+
+    /// A host without a recipe is never given one by a lookup.
+    #[test]
+    fn identifying_a_jar_does_not_create_a_recipe() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let adopted = ManagedModEntry {
+            origin: ModOrigin::HandPlaced,
+            identity: version_identity("FOUND", "FOUND-1"),
+            ..listed_entry("mods/hand.jar", "hand.jar", ModPresence::Installed)
+        };
+        record_identified(root.path(), &[adopted]);
+        assert!(
+            !SourceStore::new(ephervex_storage::metadata::source_dir(root.path())).has_recipe()
+        );
     }
 
     /// What is remembered is split by what each field is a fact about, because
