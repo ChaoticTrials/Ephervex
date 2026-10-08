@@ -70,6 +70,10 @@ unknown-running. Evidence is stale only after both recorded processes are
 proven dead or the boot ID changed. Ephervex never adopts, writes stdin to, or
 signals an orphan. Recovery clears evidence only when it is proven stale.
 
+The `server stop`, `server restart`, `server kill`, and `server console`
+commands print the supervisor's response and exit with a non-zero status when
+it refused the request or a restart left the server stopped.
+
 The foreground `server start` command reports the supervised run's result in
 its exit status. A stop asked for through the control channel, Ctrl-C, a
 terminal hangup, or a termination request is success. Otherwise the status is

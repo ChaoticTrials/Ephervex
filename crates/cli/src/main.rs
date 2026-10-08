@@ -1285,12 +1285,21 @@ enum ServerCommand {
         java: Option<PathBuf>,
     },
     /// Request a graceful stop and wait up to 30 seconds.
+    ///
+    /// Exits with a non-zero status when the running server refused the request.
     Stop { id: ServerId },
     /// Gracefully stop and respawn through the live supervisor.
+    ///
+    /// Exits with a non-zero status when the request was refused or the server
+    /// stopped but could not be started again.
     Restart { id: ServerId },
     /// Force termination through the live owner channel.
+    ///
+    /// Exits with a non-zero status when the running server refused the request.
     Kill { id: ServerId },
     /// Send one line to the live server console.
+    ///
+    /// Exits with a non-zero status when the server did not accept the line.
     Console { id: ServerId, command: String },
     /// Show retained combined launcher output.
     Output {
@@ -2457,16 +2466,24 @@ async fn run_server_command(
             run_server_foreground(app, *id, java.clone(), json).await?;
         }
         ServerCommand::Stop { id } => {
-            print_control_response(app.stop_server(*id).await?, json);
+            let response = app.stop_server(*id).await?;
+            print_control_response(&response, json);
+            control_response_result(&response)?;
         }
         ServerCommand::Restart { id } => {
-            print_control_response(app.restart_server(*id).await?, json);
+            let response = app.restart_server(*id).await?;
+            print_control_response(&response, json);
+            control_response_result(&response)?;
         }
         ServerCommand::Kill { id } => {
-            print_control_response(app.kill_server(*id).await?, json);
+            let response = app.kill_server(*id).await?;
+            print_control_response(&response, json);
+            control_response_result(&response)?;
         }
         ServerCommand::Console { id, command } => {
-            print_control_response(app.send_server_console(*id, command.clone()).await?, json);
+            let response = app.send_server_console(*id, command.clone()).await?;
+            print_control_response(&response, json);
+            control_response_result(&response)?;
         }
         ServerCommand::Output { id, lines } => {
             let snapshot = app.server_output(*id, *lines)?;
@@ -7811,7 +7828,26 @@ fn print_eula_status(status: &EulaStatus, json: bool) {
     }
 }
 
-fn print_control_response(response: ControlResponse, json: bool) {
+/// Whether the supervisor performed the requested control action.
+///
+/// A refusal means nothing was done, and a failed restart leaves the server
+/// stopped, so neither may look like success to a script.
+fn control_response_result(response: &ControlResponse) -> anyhow::Result<()> {
+    match response {
+        ControlResponse::Refused(detail) => {
+            anyhow::bail!("the server refused the request: {detail}")
+        }
+        ControlResponse::StartFailed(detail) => {
+            anyhow::bail!("the server stopped but could not be started again: {detail}")
+        }
+        ControlResponse::Running
+        | ControlResponse::Accepted
+        | ControlResponse::Exited(_)
+        | ControlResponse::Restarted { .. } => Ok(()),
+    }
+}
+
+fn print_control_response(response: &ControlResponse, json: bool) {
     if json {
         print_json(
             &serde_json::to_value(response)
@@ -8379,6 +8415,32 @@ mod tests {
             server_exit(None, Some(11), true, false),
         ] {
             assert!(server_exit_result(&exit).is_err(), "{exit:?}");
+        }
+    }
+
+    #[test]
+    fn a_refused_or_failed_server_control_request_fails_the_command() {
+        let refused = control_response_result(&ControlResponse::Refused(
+            "server input is unavailable".to_owned(),
+        ))
+        .expect_err("a refusal performed nothing");
+        assert!(refused.to_string().contains("server input is unavailable"));
+
+        let failed =
+            control_response_result(&ControlResponse::StartFailed("no such file".to_owned()))
+                .expect_err("a failed restart leaves the server stopped");
+        assert!(failed.to_string().contains("no such file"));
+    }
+
+    #[test]
+    fn a_performed_server_control_request_succeeds() {
+        for response in [
+            ControlResponse::Running,
+            ControlResponse::Accepted,
+            ControlResponse::Exited(server_exit(Some(0), None, true, true)),
+            ControlResponse::Restarted { pid: 7 },
+        ] {
+            control_response_result(&response).expect("performed");
         }
     }
 
