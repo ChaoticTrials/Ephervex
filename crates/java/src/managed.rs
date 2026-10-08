@@ -37,8 +37,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ephervex_download::{
-    CacheLayout, ContentStore, DownloadError, DownloadManager, DownloadRequest, FileExtension,
-    OperationReporter, redacted,
+    CacheLayout, ContentStore, DownloadManager, DownloadRequest, FileExtension, OperationReporter,
 };
 use tempfile::TempDir;
 use tokio::fs;
@@ -46,7 +45,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 
 use crate::adoptium::{AdoptiumArchitecture, AdoptiumClient, ManagedRelease};
-use crate::archive::{ExtractionLimits, extract_tar_gz};
+use crate::archive::{ArchiveError, ExtractionLimits, extract_tar_gz_until_canceled};
 use crate::discovery::{JavaOrigin, JavaRuntime, JavaSourceKind};
 use crate::error::{JavaError, ProbeError};
 use crate::install_lock::InstallLock;
@@ -250,13 +249,7 @@ impl ManagedJavaProvider {
         }
 
         let Some(lock) = lock_release(&major_directory, &name, cancel).await? else {
-            return Err(JavaError::ManagedDownloadFailed {
-                major,
-                release: release.release_name.clone(),
-                source: Box::new(DownloadError::Canceled {
-                    url: redacted(&release.url),
-                }),
-            });
+            return Err(JavaError::Canceled);
         };
         let lock = Arc::new(lock);
         // Decided again under the lock: another install may have finished
@@ -279,15 +272,28 @@ impl ManagedJavaProvider {
         };
         remove_abandoned_staging(&major_directory, &name, &lock).await;
 
+        // Cancellation is checked between the steps as well as inside them, so
+        // a cached archive or index cannot carry a canceled install through to
+        // publication.
+        ensure_not_canceled(cancel)?;
         let archive = self.download(&release, reporter, cancel).await?;
+        ensure_not_canceled(cancel)?;
         let staging = self
-            .unpack(&archive, &major_directory, &name, Arc::clone(&lock))
+            .unpack(&archive, &major_directory, &name, Arc::clone(&lock), cancel)
             .await?;
         // Before publication, so a runtime that fails it is never installed.
         let staged = staging.path().join("bin").join("java");
-        if let Err(error) = probe_requested(&staged, &executable, major).await {
+        let probed = tokio::select! {
+            probed = probe_requested(&staged, &executable, major) => probed,
+            () = cancel.cancelled() => Err(JavaError::Canceled),
+        };
+        if let Err(error) = probed {
             discard(staging).await;
             return Err(error);
+        }
+        if cancel.is_cancelled() {
+            discard(staging).await;
+            return Err(JavaError::Canceled);
         }
         publish(staging, &major_directory, &name, replace, Arc::clone(&lock)).await?;
 
@@ -381,11 +387,13 @@ impl ManagedJavaProvider {
         major_directory: &Path,
         name: &str,
         lock: Arc<InstallLock>,
+        cancel: &CancellationToken,
     ) -> Result<TempDir, JavaError> {
         let staging = new_staging(major_directory, name)?;
 
         let archive = archive.to_path_buf();
         let limits = self.limits;
+        let cancel = cancel.clone();
         // `flate2` and `tar` block; a 200 MB JDK would stall the runtime's
         // worker for the duration.
         // Returned in this order so that, for a dropped install, the staging
@@ -394,7 +402,8 @@ impl ManagedJavaProvider {
             // Temurin archives wrap everything in one `jdk-<version>/`
             // directory, which is stripped so `bin/java` lands at the root of
             // the install and the layout is the same for every vendor.
-            let extraction = extract_tar_gz(&archive, staging.path(), 1, &limits);
+            let extraction =
+                extract_tar_gz_until_canceled(&archive, staging.path(), 1, &limits, &cancel);
             (staging, extraction, lock)
         })
         .await
@@ -408,6 +417,10 @@ impl ManagedJavaProvider {
                     "unpacked a managed java runtime"
                 );
                 Ok(staging)
+            }
+            Err(ArchiveError::Canceled) => {
+                discard(staging).await;
+                Err(JavaError::Canceled)
             }
             Err(source) => {
                 discard(staging).await;
@@ -460,6 +473,14 @@ async fn probe_requested(
         });
     }
     Ok(report)
+}
+
+fn ensure_not_canceled(cancel: &CancellationToken) -> Result<(), JavaError> {
+    if cancel.is_cancelled() {
+        Err(JavaError::Canceled)
+    } else {
+        Ok(())
+    }
 }
 
 async fn is_empty(directory: &Path) -> Result<bool, JavaError> {
@@ -725,6 +746,49 @@ mod tests {
             let entry = staging.path().file_name().unwrap().to_str().unwrap();
             assert!(is_staging_of(entry, NAME), "{entry}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_canceled_extraction_removes_its_staging_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let major = temp.path().join("21");
+        let archive = temp.path().join("jdk.tar.gz");
+        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+            std::fs::File::create(&archive).unwrap(),
+            flate2::Compression::fast(),
+        ));
+        let mut header = tar::Header::new_gnu();
+        header.set_size(0);
+        header.set_mode(0o755);
+        builder
+            .append_data(&mut header, "jdk/bin/java", std::io::empty())
+            .unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+        let provider = ManagedJavaProvider::new(
+            DownloadManager::new(ephervex_download::DownloaderConfig::default()).unwrap(),
+            CacheLayout::new(temp.path().join("cache")),
+            temp.path(),
+        )
+        .unwrap();
+        let cancel = CancellationToken::new();
+        let lock = lock_release(&major, NAME, &cancel)
+            .await
+            .unwrap()
+            .expect("an uncontended release lock");
+        cancel.cancel();
+
+        let error = provider
+            .unpack(&archive, &major, NAME, Arc::new(lock), &cancel)
+            .await
+            .expect_err("a canceled extraction must not produce a staging tree");
+
+        assert!(matches!(error, JavaError::Canceled), "{error:?}");
+        let left: Vec<_> = std::fs::read_dir(&major)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| is_staging_of(name, NAME))
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
     }
 
     #[test]

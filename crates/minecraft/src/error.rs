@@ -145,6 +145,17 @@ impl MinecraftError {
         }
     }
 
+    /// Whether the caller canceled rather than the provider failing, as
+    /// carried by the metadata or download failure it surfaced as.
+    #[must_use]
+    pub fn is_cancellation(&self) -> bool {
+        match self {
+            Self::ManifestUnavailable { source } => source.is_cancellation(),
+            Self::VersionMetadataUnavailable { source, .. } => source.is_cancellation(),
+            _ => false,
+        }
+    }
+
     /// Builds the "too old" refusal with the floor filled in.
     #[must_use]
     pub fn unsupported(id: impl Into<String>) -> Self {
@@ -352,6 +363,34 @@ mod tests {
             }
         ));
         assert_eq!(error.message_id(), "error-minecraft-version-unsupported");
+    }
+
+    fn canceled_download() -> ephervex_download::DownloadError {
+        ephervex_download::DownloadError::Canceled {
+            url: ephervex_download::redacted(&"https://example.invalid/manifest".parse().unwrap()),
+        }
+    }
+
+    #[test]
+    fn a_canceled_manifest_or_version_lookup_is_a_cancellation() {
+        let manifest = MinecraftError::ManifestUnavailable {
+            source: MetadataCacheError::Unavailable {
+                key: "minecraft-version-manifest".to_owned(),
+                source: Box::new(canceled_download()),
+            },
+        };
+        let version = MinecraftError::VersionMetadataUnavailable {
+            id: "1.21.1".to_owned(),
+            source: Box::new(canceled_download()),
+        };
+        assert!(manifest.is_cancellation());
+        assert!(version.is_cancellation());
+    }
+
+    #[test]
+    fn an_unreachable_provider_is_not_a_cancellation() {
+        let error = MinecraftError::unsupported("1.7.10");
+        assert!(!error.is_cancellation());
     }
 
     #[test]

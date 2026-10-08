@@ -629,6 +629,8 @@ impl CoreError {
             Self::Auth(error) => error.is_cancellation(),
             Self::Loader(error) => error.is_cancellation(),
             Self::Launch(error) => error.is_cancellation(),
+            Self::Minecraft(error) => error.is_cancellation(),
+            Self::Java(error) => error.is_cancellation(),
             Self::Pack(error) => error.is_cancellation(),
             Self::Snapshot(error) => error.is_cancellation(),
             Self::Isolation(error) => error.is_cancellation(),
@@ -986,6 +988,36 @@ pub type CoreResult<T> = Result<T, CoreError>;
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
+
+    #[test]
+    fn a_canceled_metadata_lookup_is_classified_as_cancellation() {
+        let canceled = || ephervex_download::DownloadError::Canceled {
+            url: ephervex_download::redacted(&"https://example.invalid/index".parse().unwrap()),
+        };
+        let minecraft = CoreError::from(MinecraftError::ManifestUnavailable {
+            source: ephervex_download::MetadataCacheError::Unavailable {
+                key: "minecraft-version-manifest".to_owned(),
+                source: Box::new(canceled()),
+            },
+        });
+        let java = CoreError::from(JavaError::ManagedIndexUnavailable {
+            major: 21,
+            source: Box::new(ephervex_download::MetadataCacheError::Unavailable {
+                key: "adoptium-21".to_owned(),
+                source: Box::new(canceled()),
+            }),
+        });
+        let canceled_install = CoreError::from(JavaError::Canceled);
+        let failed = CoreError::from(JavaError::ManagedArchUnsupported {
+            arch: "sparcv9".to_owned(),
+        });
+
+        assert!(minecraft.is_cancellation());
+        assert!(java.is_cancellation());
+        assert!(canceled_install.is_cancellation());
+        assert!(!failed.is_cancellation());
+        assert!(!canceled_install.managed_java_would_help());
+    }
 
     #[test]
     fn a_wrapped_storage_error_keeps_the_message_id_storage_gave_it() {

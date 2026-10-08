@@ -859,6 +859,7 @@ impl App {
                     target: java_target(host),
                     explicit_path: None,
                     install_if_missing: false,
+                    ..JavaPlanRequest::default()
                 },
             )
             .await;
@@ -939,6 +940,7 @@ impl App {
                     target: java_target(host),
                     explicit_path: None,
                     install_if_missing: false,
+                    ..JavaPlanRequest::default()
                 },
             )
             .await;

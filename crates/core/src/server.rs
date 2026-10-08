@@ -238,6 +238,8 @@ impl App {
                     target: JavaTarget::VersionOnly,
                     explicit_path: options.java_path.clone(),
                     install_if_missing: options.install_java_if_missing,
+                    cancel: cancel.clone(),
+                    reporter: options.reporter.clone(),
                 },
             )
             .await?;
@@ -345,6 +347,8 @@ impl App {
                     target: JavaTarget::Server(id),
                     explicit_path: options.java_path.clone(),
                     install_if_missing: options.install_java_if_missing,
+                    cancel: cancel.clone(),
+                    reporter: options.reporter.clone(),
                 },
             )
             .await?;
@@ -691,7 +695,7 @@ impl App {
         observer: &ServerObserver,
     ) -> CoreResult<ephervex_server::ServerExit> {
         let prepared = self
-            .prepare_server_start(id, explicit_java, observer)
+            .prepare_server_start(id, explicit_java, observer, &CancellationToken::new())
             .await?;
         Self::run_prepared_server(prepared, observer).await
     }
@@ -711,7 +715,7 @@ impl App {
         cancel: &CancellationToken,
     ) -> CoreResult<ephervex_server::ServerExit> {
         let prepared = Self::unless_canceled(
-            self.prepare_server_start(id, explicit_java, observer),
+            self.prepare_server_start(id, explicit_java, observer, cancel),
             observer,
             cancel,
         )
@@ -767,6 +771,7 @@ impl App {
         id: ServerId,
         explicit_java: Option<PathBuf>,
         observer: &ServerObserver,
+        cancel: &CancellationToken,
     ) -> CoreResult<PreparedServerStart> {
         // Silent because a server start reports through `ServerObserver` rather
         // than through a progress bar; the reporter is here for its id, which
@@ -774,7 +779,7 @@ impl App {
         // span so every line the preparation logs carries it.
         let operation = OperationReporter::silent("operation-starting-server").id();
         let result = self
-            .prepare_server_start_operation(id, explicit_java, observer, operation)
+            .prepare_server_start_operation(id, explicit_java, observer, cancel, operation)
             .await;
         if result.is_err() {
             observer.emit(ephervex_server::ServerEvent::Finished { exit: None });
@@ -784,7 +789,7 @@ impl App {
 
     #[tracing::instrument(
         name = "prepare_server_start",
-        skip(self, explicit_java, observer),
+        skip(self, explicit_java, observer, cancel),
         fields(server = %id, operation = %operation)
     )]
     async fn prepare_server_start_operation(
@@ -792,6 +797,7 @@ impl App {
         id: ServerId,
         explicit_java: Option<PathBuf>,
         observer: &ServerObserver,
+        cancel: &CancellationToken,
         operation: OperationId,
     ) -> CoreResult<PreparedServerStart> {
         observer.emit(ephervex_server::ServerEvent::Preparing { operation });
@@ -838,6 +844,8 @@ impl App {
                     target: JavaTarget::Server(id),
                     explicit_path: explicit_java,
                     install_if_missing: true,
+                    cancel: cancel.clone(),
+                    reporter: None,
                 },
             )
             .await?;

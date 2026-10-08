@@ -413,6 +413,62 @@ async fn concurrent_installs_of_one_release_publish_one_complete_runtime() {
 }
 
 #[tokio::test]
+async fn a_canceled_install_with_cold_caches_is_reported_as_canceled() {
+    let server = MockServer::start().await;
+    let archive = temurin_archive();
+    let checksum = sha256(&archive);
+    mount(&server, archive, &checksum).await;
+
+    let temp = tempfile::tempdir().expect("temp");
+    let java_dir = temp.path().join("data/java");
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    let error = provider(&server, &temp.path().join("cache"), &java_dir)
+        .install(21, &reporter(), &cancel)
+        .await
+        .expect_err("a canceled install must not succeed");
+
+    assert!(error.is_cancellation(), "{error:?}");
+    assert!(!java_dir.join("21/eclipse-jdk-21.0.12+8").exists());
+    assert!(staging_left_in(&java_dir.join("21")).is_empty());
+}
+
+#[tokio::test]
+async fn a_canceled_install_with_warm_caches_publishes_nothing() {
+    let server = MockServer::start().await;
+    let archive = temurin_archive();
+    let checksum = sha256(&archive);
+    mount(&server, archive, &checksum).await;
+
+    let temp = tempfile::tempdir().expect("temp");
+    let java_dir = temp.path().join("data/java");
+    let provider = provider(&server, &temp.path().join("cache"), &java_dir);
+    let installed = provider
+        .install(21, &reporter(), &CancellationToken::new())
+        .await
+        .expect("the first install warms the index and archive caches");
+    std::fs::remove_dir_all(&installed.directory).expect("remove the install");
+
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let error = provider
+        .install(21, &reporter(), &cancel)
+        .await
+        .expect_err("a canceled install must not succeed");
+
+    assert!(error.is_cancellation(), "{error:?}");
+    assert!(!installed.directory.exists(), "nothing may be published");
+    assert!(staging_left_in(&java_dir.join("21")).is_empty());
+
+    let retried = provider
+        .install(21, &reporter(), &CancellationToken::new())
+        .await
+        .expect("a later install is not poisoned by the canceled one");
+    assert!(retried.newly_installed);
+}
+
+#[tokio::test]
 async fn an_archive_whose_checksum_does_not_match_is_never_extracted() {
     let server = MockServer::start().await;
     let archive = temurin_archive();

@@ -114,6 +114,10 @@ pub enum JavaError {
     #[error("unpacking the managed java runtime did not finish")]
     ManagedExtractionPanicked,
 
+    /// The caller canceled a managed install, and nothing was published.
+    #[error("the managed java install was canceled")]
+    Canceled,
+
     /// The runtime installed but could not be identified.
     #[error("the managed java runtime at {path} could not be identified")]
     ManagedRuntimeUnusable {
@@ -180,6 +184,7 @@ impl JavaError {
             Self::ManagedDownloadFailed { .. } => "error-java-managed-download-failed",
             Self::ManagedArchiveRejected { source } => source.message_id(),
             Self::ManagedExtractionPanicked => "error-java-managed-extraction-failed",
+            Self::Canceled => "error-java-managed-canceled",
             Self::ManagedRuntimeUnusable { .. } | Self::ManagedRuntimeWrongMajor { .. } => {
                 "error-java-managed-runtime-unusable"
             }
@@ -225,6 +230,19 @@ impl JavaError {
             | Self::ManagedDownloadFailed { major, .. } => Some(*major),
             Self::ManagedRuntimeWrongMajor { requested, .. } => Some(*requested),
             _ => None,
+        }
+    }
+
+    /// Whether the caller canceled rather than something failing, including a
+    /// cancellation carried by the index or download failure it surfaced as.
+    #[must_use]
+    pub fn is_cancellation(&self) -> bool {
+        match self {
+            Self::Canceled => true,
+            Self::ManagedIndexUnavailable { source, .. } => source.is_cancellation(),
+            Self::ManagedDownloadFailed { source, .. } => source.is_cancellation(),
+            Self::ManagedArchiveRejected { source } => matches!(**source, ArchiveError::Canceled),
+            _ => false,
         }
     }
 
@@ -334,6 +352,33 @@ mod tests {
     }
 
     #[test]
+    fn a_cancellation_carried_by_a_wrapped_source_is_a_cancellation() {
+        let canceled = || ephervex_download::DownloadError::Canceled {
+            url: ephervex_download::redacted(&"https://example.invalid/a".parse().unwrap()),
+        };
+        let download = JavaError::ManagedDownloadFailed {
+            major: 21,
+            release: "jdk-21".to_owned(),
+            source: Box::new(canceled()),
+        };
+        let index = JavaError::ManagedIndexUnavailable {
+            major: 21,
+            source: Box::new(ephervex_download::MetadataCacheError::Unavailable {
+                key: "adoptium-21".to_owned(),
+                source: Box::new(canceled()),
+            }),
+        };
+        let extraction = JavaError::ManagedArchiveRejected {
+            source: Box::new(ArchiveError::Canceled),
+        };
+        assert!(JavaError::Canceled.is_cancellation());
+        assert!(download.is_cancellation());
+        assert!(index.is_cancellation());
+        assert!(extraction.is_cancellation());
+        assert!(!JavaError::ManagedExtractionPanicked.is_cancellation());
+    }
+
+    #[test]
     fn no_two_variants_share_a_message_id_by_accident() {
         let ids = [
             JavaError::NoCompatibleRuntime {
@@ -349,6 +394,7 @@ mod tests {
             }
             .message_id(),
             JavaError::ManagedExtractionPanicked.message_id(),
+            JavaError::Canceled.message_id(),
         ];
         let mut sorted = ids.to_vec();
         sorted.sort_unstable();

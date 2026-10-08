@@ -327,7 +327,7 @@ impl App {
         if starts_server {
             observer.emit(LaunchAndConnectEvent::StartingServer { server: server_id });
             let prepared = self
-                .prepare_server_start(server_id, None, server_observer)
+                .prepare_server_start(server_id, None, server_observer, cancel)
                 .await?;
             // Preparation can take long enough to be interrupted, and a server
             // started after that would only be killed again.

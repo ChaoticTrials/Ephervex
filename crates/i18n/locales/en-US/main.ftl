@@ -470,6 +470,7 @@ error-java-archive-unwritable = A file could not be written while unpacking the 
 error-java-archive-empty = The downloaded Java archive contained nothing Ephervex could install.
 
 error-java-managed-extraction-failed = Unpacking the Java runtime did not finish.
+error-java-managed-canceled = Installing the Java runtime was canceled.
 
 error-java-managed-runtime-unusable = The downloaded Java runtime could not be started.
 .action = Ephervex did not use it. Try again, or install a Java runtime through your distribution's package manager.

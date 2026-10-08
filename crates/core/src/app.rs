@@ -66,6 +66,11 @@ pub struct JavaPlanRequest {
     /// Whether to download a managed runtime when nothing installed qualifies.
     /// Still subject to the global "Auto-download compatible Java" setting.
     pub install_if_missing: bool,
+    /// Ends a managed runtime install this plan triggers. Never fires by default.
+    pub cancel: CancellationToken,
+    /// Receives the progress of a managed runtime install this plan triggers.
+    /// The install is silent when absent.
+    pub reporter: Option<OperationReporter>,
 }
 
 /// Which runtime would run one Minecraft version, and how that was decided.
@@ -1118,7 +1123,12 @@ impl App {
                     .into());
                 }
                 let installed = self
-                    .install_java_with_maximum_update(required.major, maximum_update)
+                    .install_java_with_maximum_update(
+                        required.major,
+                        maximum_update,
+                        request.reporter.as_ref(),
+                        &request.cancel,
+                    )
                     .await?;
                 let inventory = RuntimeInventory {
                     runtimes: vec![installed.runtime.clone()],
@@ -1148,19 +1158,25 @@ impl App {
     /// so the new runtime is visible without an explicit Refresh.
     #[instrument(skip(self))]
     pub async fn install_java(&self, major: u32) -> CoreResult<ManagedInstallation> {
-        self.install_java_with_maximum_update(major, None).await
+        self.install_java_with_maximum_update(major, None, None, &CancellationToken::new())
+            .await
     }
 
     async fn install_java_with_maximum_update(
         &self,
         major: u32,
         maximum_update: Option<u32>,
+        reporter: Option<&OperationReporter>,
+        cancel: &CancellationToken,
     ) -> CoreResult<ManagedInstallation> {
         // The archive lands in the shared cache and is unpacked into the data
         // root, so the lease has to outlive the unpack rather than the download.
-        self.with_artifact_cache(Box::pin(
-            self.install_java_holding_the_cache(major, maximum_update),
-        ))
+        self.with_artifact_cache(Box::pin(self.install_java_holding_the_cache(
+            major,
+            maximum_update,
+            reporter,
+            cancel,
+        )))
         .await
     }
 
@@ -1168,6 +1184,8 @@ impl App {
         &self,
         major: u32,
         maximum_update: Option<u32>,
+        reporter: Option<&OperationReporter>,
+        cancel: &CancellationToken,
     ) -> CoreResult<ManagedInstallation> {
         let manager = DownloadManager::new(DownloaderConfig::default()).map_err(|source| {
             JavaError::ManagedDownloadFailed {
@@ -1182,15 +1200,16 @@ impl App {
             self.paths().java_dir(),
         )?;
 
-        let reporter = OperationReporter::silent("managed-java");
-        let cancel = CancellationToken::new();
+        let reporter = reporter
+            .cloned()
+            .unwrap_or_else(|| OperationReporter::silent("managed-java"));
         let installed = match maximum_update {
             Some(maximum) => {
                 provider
-                    .install_at_most_update(major, maximum, &reporter, &cancel)
+                    .install_at_most_update(major, maximum, &reporter, cancel)
                     .await?
             }
-            None => provider.install(major, &reporter, &cancel).await?,
+            None => provider.install(major, &reporter, cancel).await?,
         };
         if let Ok(mut cache) = self.java.write() {
             *cache = None;
@@ -1565,6 +1584,48 @@ mod tests {
 
     fn app_rooted_at(base: &std::path::Path) -> App {
         App::open_at(Paths::rooted_at(base)).expect("app should open against a temporary root")
+    }
+
+    #[tokio::test]
+    async fn a_managed_java_install_observes_the_cancellation_of_the_operation_that_planned_it() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        // Nothing installed qualifies, so the plan has to install a runtime.
+        *app.java.write().expect("inventory cache") = Some(Arc::new(RuntimeInventory {
+            runtimes: Vec::new(),
+            failures: Vec::new(),
+            probed: 0,
+            candidates: 0,
+            scanned_at: chrono::Utc::now(),
+        }));
+        let required =
+            RequiredJava::from_table(&ephervex_minecraft::MinecraftVersionId::parse("1.21.1"));
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let error = app
+            .plan_java_for_selection(
+                "1.21.1",
+                required,
+                &LoaderSelection::vanilla(),
+                None,
+                None,
+                &JavaPlanRequest {
+                    install_if_missing: true,
+                    cancel,
+                    ..JavaPlanRequest::default()
+                },
+            )
+            .await
+            .expect_err("a canceled operation must not install a runtime");
+
+        assert!(error.is_cancellation(), "{error:?}");
+        assert!(
+            !app.paths().java_dir().exists()
+                || std::fs::read_dir(app.paths().java_dir())
+                    .is_ok_and(|mut entries| entries.next().is_none()),
+            "nothing may be installed"
+        );
     }
 
     #[test]

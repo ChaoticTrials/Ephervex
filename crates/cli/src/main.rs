@@ -5305,6 +5305,7 @@ async fn run_java_command(app: &App, command: &JavaCommand, json: bool) -> anyho
                         target: instance.map_or(JavaTarget::VersionOnly, JavaTarget::Client),
                         explicit_path: java_path.clone(),
                         install_if_missing: *install,
+                        ..JavaPlanRequest::default()
                     },
                 )
                 .await?;

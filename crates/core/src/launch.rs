@@ -253,6 +253,8 @@ impl App {
                     target: JavaTarget::Client(instance),
                     explicit_path: options.java_path.clone(),
                     install_if_missing: options.install_java_if_missing,
+                    cancel: cancel.clone(),
+                    reporter: Some(reporter.clone()),
                 },
             )
             .await?;

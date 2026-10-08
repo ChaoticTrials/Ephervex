@@ -609,6 +609,7 @@ mod tests {
             "error-java-managed-release-malformed",
             "error-java-managed-download-failed",
             "error-java-managed-extraction-failed",
+            "error-java-managed-canceled",
             "error-java-managed-runtime-unusable",
             "error-java-managed-install-blocked",
             "error-java-managed-cache-key-invalid",

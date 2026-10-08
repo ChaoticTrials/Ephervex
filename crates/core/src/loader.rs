@@ -224,6 +224,8 @@ impl App {
                     target: JavaTarget::Client(instance),
                     explicit_path: None,
                     install_if_missing: true,
+                    cancel: cancel.clone(),
+                    reporter: Some(reporter.clone()),
                 },
             )
             .await?;

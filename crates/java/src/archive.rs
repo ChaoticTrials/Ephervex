@@ -53,6 +53,7 @@ use std::path::{Path, PathBuf};
 use ephervex_pack::path::{safe_link_target, safe_relative_path};
 use flate2::read::GzDecoder;
 use tar::{Archive, EntryType};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument};
 
 /// Bounds on what an archive may expand into.
@@ -122,6 +123,10 @@ pub enum ArchiveError {
     /// shape rather than an empty archive.
     #[error("the archive produced no files")]
     Empty,
+
+    /// The extraction was canceled before it finished.
+    #[error("the extraction was canceled")]
+    Canceled,
 }
 
 impl ArchiveError {
@@ -134,6 +139,7 @@ impl ArchiveError {
             Self::LimitExceeded { .. } => "error-java-archive-too-large",
             Self::Unwritable { .. } => "error-java-archive-unwritable",
             Self::Empty => "error-java-archive-empty",
+            Self::Canceled => "error-java-managed-canceled",
         }
     }
 }
@@ -158,12 +164,33 @@ pub struct ExtractionReport {
 /// Synchronous: `flate2` and `tar` are blocking, and wrapping them in
 /// `spawn_blocking` is the caller's decision because only the caller knows
 /// whether it is on a runtime.
-#[instrument(skip(limits), fields(archive = %archive.display(), destination = %destination.display()))]
 pub fn extract_tar_gz(
     archive: &Path,
     destination: &Path,
     strip_components: usize,
     limits: &ExtractionLimits,
+) -> Result<ExtractionReport, ArchiveError> {
+    extract_tar_gz_until_canceled(
+        archive,
+        destination,
+        strip_components,
+        limits,
+        &CancellationToken::new(),
+    )
+}
+
+/// [`extract_tar_gz`] that stops with [`ArchiveError::Canceled`] once `cancel`
+/// fires, between entries and between the reads of a large one.
+///
+/// What was written before the stop stays in `destination`; the caller owns
+/// that directory and removes it.
+#[instrument(skip(limits, cancel), fields(archive = %archive.display(), destination = %destination.display()))]
+pub(crate) fn extract_tar_gz_until_canceled(
+    archive: &Path,
+    destination: &Path,
+    strip_components: usize,
+    limits: &ExtractionLimits,
+    cancel: &CancellationToken,
 ) -> Result<ExtractionReport, ArchiveError> {
     let file = File::open(archive).map_err(|source| ArchiveError::Unreadable {
         path: archive.to_path_buf(),
@@ -201,6 +228,9 @@ pub fn extract_tar_gz(
     let mut pending_links = Vec::new();
 
     for entry in entries {
+        if cancel.is_cancelled() {
+            return Err(ArchiveError::Canceled);
+        }
         let mut entry = entry.map_err(|source| ArchiveError::Unreadable {
             path: archive.to_path_buf(),
             source,
@@ -238,12 +268,15 @@ pub fn extract_tar_gz(
             continue;
         }
 
-        report.bytes = extract_file(&mut entry, &resolved.target, report.bytes, limits)?;
+        report.bytes = extract_file(&mut entry, &resolved.target, report.bytes, limits, cancel)?;
         report.files += 1;
     }
 
     validate_link_graph(&pending_links)?;
     for link in pending_links {
+        if cancel.is_cancelled() {
+            return Err(ArchiveError::Canceled);
+        }
         create_symlink(&link.resolved, &link.target)?;
         report.symlinks += 1;
     }
@@ -487,6 +520,7 @@ fn extract_file<R: Read>(
     target: &Path,
     written_so_far: u64,
     limits: &ExtractionLimits,
+    cancel: &CancellationToken,
 ) -> Result<u64, ArchiveError> {
     let declared = entry.header().size().unwrap_or(0);
     check_size(declared, written_so_far.saturating_add(declared), limits)?;
@@ -503,7 +537,7 @@ fn extract_file<R: Read>(
     // header may claim less than the stream delivers, and the declared figure
     // is attacker-controlled.
     let mut limited = entry.take(limits.max_entry_bytes.saturating_add(1));
-    let written = write_file(target, &mut limited, mode)?;
+    let written = write_file(target, &mut limited, mode, cancel)?;
 
     let total = written_so_far.saturating_add(written);
     check_size(written, total, limits)?;
@@ -530,13 +564,25 @@ const fn check_size(entry: u64, total: u64, limits: &ExtractionLimits) -> Result
 }
 
 /// Writes one entry, preserving only its permission bits.
-fn write_file(target: &Path, source: &mut impl Read, mode: u32) -> Result<u64, ArchiveError> {
+fn write_file(
+    target: &Path,
+    source: &mut impl Read,
+    mode: u32,
+    cancel: &CancellationToken,
+) -> Result<u64, ArchiveError> {
     let unwritable = |source: io::Error| ArchiveError::Unwritable {
         path: target.to_path_buf(),
         source,
     };
     let mut file = File::create(target).map_err(unwritable)?;
-    let written = io::copy(source, &mut file).map_err(unwritable)?;
+    let mut source = CancelableRead { source, cancel };
+    let written = io::copy(&mut source, &mut file).map_err(|error| {
+        if cancel.is_cancelled() {
+            ArchiveError::Canceled
+        } else {
+            unwritable(error)
+        }
+    })?;
 
     // Without this, `bin/java` arrives at 0644 and the entire install is inert.
     #[cfg(unix)]
@@ -551,6 +597,21 @@ fn write_file(target: &Path, source: &mut impl Read, mode: u32) -> Result<u64, A
     let _ = mode;
 
     Ok(written)
+}
+
+/// A reader that fails once `cancel` fires, so a large entry stops mid-copy.
+struct CancelableRead<'a, R> {
+    source: R,
+    cancel: &'a CancellationToken,
+}
+
+impl<R: Read> Read for CancelableRead<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.cancel.is_cancelled() {
+            return Err(io::Error::other("canceled"));
+        }
+        self.source.read(buffer)
+    }
 }
 
 /// Entry types that are never extracted, with the name to report.
@@ -794,6 +855,49 @@ mod tests {
                 "the nested link must not be created at its effective path"
             );
         }
+    }
+
+    #[test]
+    fn a_canceled_extraction_writes_nothing() {
+        let base = temp();
+        let archive = base.path().join("jdk.tar.gz");
+        let root = base.path().join("root");
+        tar_gz(&archive, &[("jdk/bin/java", 0o755, b"#!/bin/sh\n")]);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let error = extract_tar_gz_until_canceled(
+            &archive,
+            &root,
+            1,
+            &ExtractionLimits::default(),
+            &cancel,
+        )
+        .expect_err("a canceled extraction must stop");
+
+        assert!(matches!(error, ArchiveError::Canceled), "{error:?}");
+        assert!(!root.join("bin/java").exists());
+    }
+
+    #[test]
+    fn a_large_entry_stops_copying_when_cancellation_arrives_mid_entry() {
+        struct CancelsAfterFirstRead<'a>(&'a CancellationToken);
+        impl Read for CancelsAfterFirstRead<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                self.0.cancel();
+                buffer.fill(0);
+                Ok(buffer.len())
+            }
+        }
+
+        let base = temp();
+        let target = base.path().join("big");
+        let cancel = CancellationToken::new();
+
+        let error = write_file(&target, &mut CancelsAfterFirstRead(&cancel), 0o644, &cancel)
+            .expect_err("the copy must stop once canceled");
+
+        assert!(matches!(error, ArchiveError::Canceled), "{error:?}");
     }
 
     #[test]
