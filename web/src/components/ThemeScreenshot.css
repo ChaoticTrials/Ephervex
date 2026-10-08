@@ -1,0 +1,15 @@
+.themeScreenshot,
+.themeScreenshot picture,
+.themeScreenshot img {
+  display: block;
+}
+
+.themeScreenshot {
+  width: 100%;
+  background: var(--ifm-background-surface-color);
+}
+
+.themeScreenshot img {
+  max-width: 100%;
+  height: auto;
+}
