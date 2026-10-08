@@ -111,7 +111,8 @@ pub const DEFAULT_METADATA_TTL: Duration = Duration::from_secs(15 * 60);
 /// chosen against the largest documents Ephervex actually reads -- Mojang's
 /// version manifest and the per-release language catalogs are the biggest by a
 /// wide margin, and a loader install profile is capped separately at 16 MiB --
-/// so it bounds the damage without being near anything legitimate.
+/// so it bounds the damage without being near anything legitimate. An opaque
+/// text document is also held to it once escaped as a JSON string.
 pub const MAX_METADATA_BYTES: u64 = 64 * 1024 * 1024;
 
 /// How old a staging or temporary file must be before a refresh treats it as
@@ -233,12 +234,22 @@ impl std::fmt::Display for MetadataKey {
 }
 
 /// The on-disk envelope. Private: callers see [`CachedMetadata`].
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 struct Envelope {
     schema: u32,
     source: String,
     fetched_at: DateTime<Utc>,
     payload: Box<RawValue>,
+}
+
+/// The envelope as written, borrowing the payload so that publishing an entry
+/// never copies the document.
+#[derive(Serialize)]
+struct EnvelopeRef<'a> {
+    schema: u32,
+    source: &'a str,
+    fetched_at: DateTime<Utc>,
+    payload: &'a RawValue,
 }
 
 /// One provider document, with the provenance a caller needs to decide whether
@@ -355,6 +366,12 @@ pub enum MetadataCacheError {
         #[source]
         source: std::string::FromUtf8Error,
     },
+
+    /// An opaque provider document is larger than [`MAX_METADATA_BYTES`] once
+    /// encoded for the cache. Treated as a provider fault, so a stale copy is
+    /// preferred over it where one exists.
+    #[error("`{key}` is larger than {limit} bytes once encoded for the cache")]
+    EncodedTooLarge { key: String, limit: u64 },
 
     /// Filesystem failure against a specific path.
     #[error("io failure at {path}")]
@@ -608,12 +625,7 @@ impl MetadataCache {
             key: key.to_string(),
             source,
         })?;
-        let payload = serde_json::value::to_raw_value(&text).map_err(|source| {
-            MetadataCacheError::NotJson {
-                key: key.to_string(),
-                source,
-            }
-        })?;
+        let payload = encode_text(key, &text)?;
         self.store(key, url, payload).await
     }
 
@@ -751,11 +763,11 @@ impl MetadataCache {
                 source,
             })?;
 
-        let envelope = Envelope {
+        let envelope = EnvelopeRef {
             schema: METADATA_ENVELOPE_VERSION,
-            source: entry.source.clone(),
+            source: &entry.source,
             fetched_at: entry.fetched_at,
-            payload: entry.payload.clone(),
+            payload: &entry.payload,
         };
         // Serializing an envelope whose payload is already-valid JSON cannot
         // fail, so a failure here means the document was not what it claimed;
@@ -779,6 +791,62 @@ impl MetadataCache {
             remove_if_present(&temporary).await;
             return Err(MetadataCacheError::Io { path, source });
         }
+        Ok(())
+    }
+}
+
+/// Encodes a text document as the JSON string the envelope stores.
+///
+/// JSON escaping can grow control characters sixfold, so the response limit
+/// alone does not bound the stored payload. The encoder stops as soon as the
+/// output would pass [`MAX_METADATA_BYTES`] instead of building it first.
+fn encode_text(key: &MetadataKey, text: &str) -> Result<Box<RawValue>, MetadataCacheError> {
+    let too_large = || MetadataCacheError::EncodedTooLarge {
+        key: key.to_string(),
+        limit: MAX_METADATA_BYTES,
+    };
+    let limit = usize::try_from(MAX_METADATA_BYTES).unwrap_or(usize::MAX);
+    let mut writer = BoundedWriter {
+        bytes: Vec::with_capacity(text.len().saturating_add(2).min(limit)),
+        limit,
+    };
+    serde_json::to_writer(&mut writer, text).map_err(|error| {
+        if error.is_io() {
+            too_large()
+        } else {
+            MetadataCacheError::NotJson {
+                key: key.to_string(),
+                source: error,
+            }
+        }
+    })?;
+    let encoded =
+        String::from_utf8(writer.bytes).map_err(|source| MetadataCacheError::NotUtf8 {
+            key: key.to_string(),
+            source,
+        })?;
+    RawValue::from_string(encoded).map_err(|source| MetadataCacheError::NotJson {
+        key: key.to_string(),
+        source,
+    })
+}
+
+/// A byte sink that refuses to grow past `limit`.
+struct BoundedWriter {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+
+impl std::io::Write for BoundedWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if buf.len() > self.limit - self.bytes.len() {
+            return Err(std::io::Error::other("encoded document exceeds its limit"));
+        }
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
 }
@@ -1152,6 +1220,118 @@ mod tests {
             ["provider-index.json"],
             "no staging or temporary file may outlive its refresh"
         );
+    }
+
+    #[tokio::test]
+    async fn text_whose_escaped_form_passes_the_limit_is_refused_and_not_cached() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Each control character escapes to six bytes, so this body is inside
+        // the response limit and its encoded form is not.
+        let hostile = vec![0x01_u8; 12 * 1024 * 1024];
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/maven-metadata.xml"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(hostile))
+            .mount(&server)
+            .await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let cache = MetadataCache::new(CacheLayout::new(base.path()));
+        let key = MetadataKey::new("maven-metadata").expect("safe key");
+        let url = Url::parse(&format!("{}/maven-metadata.xml", server.uri())).expect("url");
+
+        let error = cache
+            .refresh_text(
+                &loopback_manager(),
+                &key,
+                &url,
+                &OperationReporter::silent("metadata"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("an oversized encoded document is refused");
+
+        assert!(
+            matches!(error, MetadataCacheError::EncodedTooLarge { .. }),
+            "got {error:?}"
+        );
+        assert!(!error.is_cancellation());
+        assert!(
+            files_in(&base.path().join("metadata")).is_empty(),
+            "a refused document leaves nothing in the cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_oversized_refresh_text_leaves_the_previous_entry_servable() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/maven-metadata.xml"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_bytes(vec![0x01_u8; 12 * 1024 * 1024]),
+            )
+            .mount(&server)
+            .await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let layout = CacheLayout::new(base.path());
+        let key = MetadataKey::new("maven-metadata").expect("safe key");
+        let url = Url::parse(&format!("{}/maven-metadata.xml", server.uri())).expect("url");
+        MetadataCache::new(layout.clone())
+            .store(&key, &url, raw(r#""<metadata/>""#))
+            .await
+            .expect("store");
+
+        let entry = MetadataCache::with_ttl(layout, Duration::ZERO)
+            .fetch_text(
+                &loopback_manager(),
+                &key,
+                &url,
+                &OperationReporter::silent("metadata"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("the earlier copy is served");
+
+        assert!(entry.freshness().is_stale());
+        assert_eq!(entry.text().expect("text"), "<metadata/>");
+    }
+
+    #[tokio::test]
+    async fn text_with_quotes_newlines_and_unicode_round_trips_through_refresh_text() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let document =
+            "<?xml version=\"1.0\"?>\n<metadata>\t<v>1.0</v> \u{e9}\u{1f600}</metadata>\n";
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/maven-metadata.xml"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(document))
+            .mount(&server)
+            .await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let cache = MetadataCache::new(CacheLayout::new(base.path()));
+        let key = MetadataKey::new("maven-metadata").expect("safe key");
+        let url = Url::parse(&format!("{}/maven-metadata.xml", server.uri())).expect("url");
+
+        let fetched = cache
+            .refresh_text(
+                &loopback_manager(),
+                &key,
+                &url,
+                &OperationReporter::silent("metadata"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("refresh_text");
+
+        assert_eq!(fetched.text().expect("text"), document);
+        let cached = cache.peek(&key).await.expect("cached");
+        assert_eq!(cached.text().expect("text"), document);
     }
 
     #[tokio::test]
