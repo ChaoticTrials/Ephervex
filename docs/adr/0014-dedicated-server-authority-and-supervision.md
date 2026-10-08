@@ -93,8 +93,15 @@ canceled before the game started is a failure.
 
 `Stop` writes `stop\n` and waits at most 30 seconds without escalation.
 `Restart` respawns only after graceful termination. `Kill` is available only
-through the live owner channel. Abrupt supervisor termination can leave an
-orphan despite best-effort child cleanup.
+through the live owner channel and ends every process in the server's process
+group, so a wrapper's own children go with it. Abrupt supervisor termination
+can leave an orphan despite best-effort child cleanup.
+
+A run ends when the server process exits. Output that a descendant still holds
+open is read for a short while longer and then dropped, so a lingering
+descendant never holds back the exit, a restart, or control answers. A console
+line is written without pausing supervision, so a server that does not read its
+input cannot delay a Kill or the detection of its exit.
 
 However supervision returns, including a failed start or a supervision error, the
 supervisor ends any child it started, removes its socket, withdraws its runtime

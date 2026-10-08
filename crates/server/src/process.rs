@@ -1,5 +1,6 @@
 //! Foreground server supervision and the permission-restricted control channel.
 
+use std::collections::VecDeque;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -35,6 +36,8 @@ const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 const EXITING_CHILD_GRACE: Duration = Duration::from_secs(5);
 /// How long a write to the server's input may take before the input is treated as unavailable.
 const STDIN_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long output a descendant still holds open is read after the server exits.
+const OUTPUT_DRAIN_GRACE: Duration = Duration::from_millis(200);
 /// How long a failed stop write waits for the child to report that it was already exiting.
 const STOP_WRITE_EXIT_GRACE: Duration = Duration::from_millis(500);
 /// How long a child whose supervision failed may take to be killed and reaped.
@@ -375,9 +378,11 @@ async fn supervise_commands(
             }
             Err(error) => return Err(error),
         };
+        // Declared after the child, so a dropped run kills the group before the child is reaped.
+        let mut group = ServerGroup::new(pid);
         outstanding.live_child.store(pid, Ordering::Release);
         if let Err(error) = record_spawned_child(&mut child, pid, server_root, evidence).await {
-            abandon_child(&mut child, readers, outstanding).await;
+            abandon_child(&mut child, &mut group, readers, outstanding).await;
             return Err(error);
         }
         observer.emit(ServerEvent::Started { pid });
@@ -389,14 +394,13 @@ async fn supervise_commands(
             match supervise_child(&mut child, stdin, requests, &mut outstanding.waiters).await {
                 Ok(supervised) => supervised,
                 Err(error) => {
-                    abandon_child(&mut child, readers, outstanding).await;
+                    abandon_child(&mut child, &mut group, readers, outstanding).await;
                     return Err(error);
                 }
             };
+        group.disarm();
         outstanding.live_child.store(NO_CHILD, Ordering::Release);
-        for reader in readers {
-            let _ = reader.await;
-        }
+        drain_output(readers).await;
         exit.finished_starting = finished_starting.load(Ordering::Relaxed);
         observer.emit(ServerEvent::Exited(exit));
         last_exit = Some(exit);
@@ -418,9 +422,76 @@ async fn record_spawned_child(
     write_runtime_evidence(server_root, evidence)
 }
 
+/// Reads what the exited server left buffered, without waiting for a descendant that holds the pipes open.
+async fn drain_output(readers: Vec<ReaderTask>) {
+    let deadline = tokio::time::Instant::now() + OUTPUT_DRAIN_GRACE;
+    for mut reader in readers {
+        if tokio::time::timeout_at(deadline, &mut reader)
+            .await
+            .is_err()
+        {
+            reader.abort();
+            let _ = reader.await;
+        }
+    }
+}
+
+/// The process group the server leads, killed with it while the server is still unreaped.
+struct ServerGroup {
+    pid: u32,
+    armed: bool,
+}
+
+impl ServerGroup {
+    const fn new(pid: u32) -> Self {
+        Self { pid, armed: true }
+    }
+
+    /// Kills every process in the group. Valid only until the server is reaped.
+    fn kill(&mut self) -> bool {
+        self.armed = false;
+        kill_server_group(self.pid)
+    }
+
+    /// Leaves the group alone once the server is reaped, when its id may be reused.
+    const fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ServerGroup {
+    fn drop(&mut self) {
+        if self.armed {
+            self.kill();
+        }
+    }
+}
+
+/// Kills the process group `pid` leads. False when there is no such group to signal.
+fn kill_server_group(pid: u32) -> bool {
+    use rustix::process::{Pid, Signal, kill_process_group};
+
+    let Some(group) = i32::try_from(pid).ok().and_then(Pid::from_raw) else {
+        return false;
+    };
+    match kill_process_group(group, Signal::KILL) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::debug!(pid, %error, "could not signal the server's process group");
+            false
+        }
+    }
+}
+
 /// Ends a child whose supervision failed, so the evidence withdrawn afterwards names nothing alive.
-async fn abandon_child(child: &mut Child, readers: Vec<ReaderTask>, outstanding: &mut Outstanding) {
+async fn abandon_child(
+    child: &mut Child,
+    group: &mut ServerGroup,
+    readers: Vec<ReaderTask>,
+    outstanding: &mut Outstanding,
+) {
     let pid = child.id();
+    group.kill();
     let _ = tokio::time::timeout(ABANDONED_CHILD_REAP_TIMEOUT, child.kill()).await;
     // A child reaped or signaled by someone else can no longer be waited on,
     // so its absence from the process table is what shows it is gone.
@@ -530,14 +601,14 @@ fn spawn_child(
     Ok((child, stdin, readers, pid))
 }
 
-/// A `stop` line being delivered while supervision keeps polling the child and serving requests.
-type PendingStopWrite =
+/// A line being delivered to the server's input while supervision keeps polling the child and serving requests.
+type PendingStdinWrite =
     std::pin::Pin<Box<dyn std::future::Future<Output = (ChildStdin, std::io::Result<()>)> + Send>>;
 
-fn begin_stop_write(mut stdin: ChildStdin) -> PendingStopWrite {
+fn begin_write(mut stdin: ChildStdin, line: Vec<u8>) -> PendingStdinWrite {
     Box::pin(async move {
         let delivery = tokio::time::timeout(STDIN_WRITE_TIMEOUT, async {
-            stdin.write_all(b"stop\n").await?;
+            stdin.write_all(&line).await?;
             stdin.flush().await
         })
         .await;
@@ -551,42 +622,20 @@ fn begin_stop_write(mut stdin: ChildStdin) -> PendingStopWrite {
     })
 }
 
-/// Writes one console line to the server's input.
-///
-/// The flag is `false` when the input could not be written to, which ends
-/// further input without ending supervision.
-async fn deliver_console_line(
-    stdin: Option<&mut ChildStdin>,
-    command: &str,
-) -> (ControlResponse, bool) {
-    if command.trim().is_empty() || command.contains(['\0', '\n', '\r']) {
-        return (
-            ControlResponse::Refused("console command must be one line".to_owned()),
-            true,
-        );
-    }
-    let Some(input) = stdin else {
-        return (
-            ControlResponse::Refused("server input is unavailable".to_owned()),
-            false,
-        );
-    };
-    let result = tokio::time::timeout(STDIN_WRITE_TIMEOUT, async {
-        input.write_all(command.as_bytes()).await?;
-        input.write_all(b"\n").await?;
-        input.flush().await
-    })
-    .await;
-    if matches!(result, Ok(Ok(()))) {
-        (ControlResponse::Accepted, true)
-    } else {
-        (
-            ControlResponse::Refused(
-                "server input is unavailable; command delivery was not confirmed".to_owned(),
-            ),
-            false,
-        )
-    }
+/// Why the input is being written to.
+enum WriteKind {
+    Stop,
+    /// A console line, answered once the write settles.
+    Console(oneshot::Sender<ControlResponse>),
+}
+
+struct PendingWrite {
+    delivery: PendingStdinWrite,
+    kind: WriteKind,
+}
+
+fn is_one_console_line(command: &str) -> bool {
+    !command.trim().is_empty() && !command.contains(['\0', '\n', '\r'])
 }
 
 fn refuse_unavailable_input(waiters: &mut Vec<oneshot::Sender<ControlResponse>>) {
@@ -611,6 +660,223 @@ async fn exit_of_closed_input(
         .ok()
 }
 
+/// How the child has been asked to end.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    Running,
+    /// A stop already asked for. A restart cannot turn it back into a start.
+    Stopping,
+    Killed,
+}
+
+/// What supervision has been asked to do with one child and what it has done so far.
+struct ChildControl {
+    restart: bool,
+    ending: Ending,
+    input_available: bool,
+    /// Held by the pending write while one is in flight.
+    stdin: Option<ChildStdin>,
+    pending_write: Option<PendingWrite>,
+    /// Requests that need the input while a console line is being written, kept in arrival order.
+    deferred: VecDeque<ControlRequest>,
+}
+
+impl ChildControl {
+    const fn new(stdin: ChildStdin) -> Self {
+        Self {
+            restart: false,
+            ending: Ending::Running,
+            input_available: true,
+            stdin: Some(stdin),
+            pending_write: None,
+            deferred: VecDeque::new(),
+        }
+    }
+
+    fn stopping(&self) -> bool {
+        self.ending != Ending::Running
+    }
+
+    fn console_write_pending(&self) -> bool {
+        matches!(
+            self.pending_write,
+            Some(PendingWrite {
+                kind: WriteKind::Console(_),
+                ..
+            })
+        )
+    }
+
+    /// The next request that waited behind a console write, once none is in flight.
+    fn next_deferred(&mut self) -> Option<ControlRequest> {
+        if self.console_write_pending() {
+            return None;
+        }
+        self.deferred.pop_front()
+    }
+
+    fn exit(&self, status: std::process::ExitStatus) -> ServerExit {
+        let mut exit = exit_from_status(status);
+        exit.stop_requested = self.stopping() && !self.restart;
+        exit
+    }
+
+    /// Answers what can no longer be served once the child has exited.
+    fn conclude(
+        &mut self,
+        status: std::process::ExitStatus,
+        completion_waiters: &mut Vec<oneshot::Sender<ControlResponse>>,
+    ) -> (ServerExit, bool) {
+        if let Some(PendingWrite {
+            kind: WriteKind::Console(response),
+            ..
+        }) = self.pending_write.take()
+        {
+            let _ = response.send(ControlResponse::Refused(
+                "the server exited before the command was delivered".to_owned(),
+            ));
+        }
+        for request in self.deferred.drain(..) {
+            if request.action == ControlAction::Stop {
+                completion_waiters.push(request.response);
+            } else {
+                let _ = request.response.send(server_has_stopped());
+            }
+        }
+        (self.exit(status), self.restart)
+    }
+
+    /// Settles a finished input write. Returns the exit when the write failed because the child was exiting.
+    async fn write_finished(
+        &mut self,
+        child: &mut Child,
+        completion_waiters: &mut Vec<oneshot::Sender<ControlResponse>>,
+        stdin: ChildStdin,
+        result: std::io::Result<()>,
+    ) -> Option<std::process::ExitStatus> {
+        let pending = self.pending_write.take()?;
+        self.stdin = Some(stdin);
+        match pending.kind {
+            WriteKind::Console(response) => {
+                // A closed input pipe does not transfer process ownership
+                // or stop output capture. Keep supervising the child.
+                self.input_available &= result.is_ok();
+                let _ = response.send(if result.is_ok() {
+                    ControlResponse::Accepted
+                } else {
+                    ControlResponse::Refused(
+                        "server input is unavailable; command delivery was not confirmed"
+                            .to_owned(),
+                    )
+                });
+                None
+            }
+            WriteKind::Stop => {
+                // After a kill the write failing is expected and the exit settles the waiters.
+                let Err(error) = result else { return None };
+                if self.ending == Ending::Killed {
+                    return None;
+                }
+                if let Some(status) = exit_of_closed_input(child, &error).await {
+                    return Some(status);
+                }
+                // The child is alive and cannot be asked to stop, which leaves it
+                // running and supervised like a failed console write does.
+                self.input_available = false;
+                self.ending = Ending::Running;
+                self.restart = false;
+                refuse_unavailable_input(completion_waiters);
+                None
+            }
+        }
+    }
+
+    fn handle_request(
+        &mut self,
+        child: &mut Child,
+        completion_waiters: &mut Vec<oneshot::Sender<ControlResponse>>,
+        request: ControlRequest,
+    ) -> ServerResult<()> {
+        match request.action {
+            ControlAction::Status => {
+                let _ = request.response.send(ControlResponse::Running);
+            }
+            ControlAction::Console(_) if self.stopping() || !self.input_available => {
+                let _ = request.response.send(ControlResponse::Refused(
+                    if self.stopping() {
+                        "the server is stopping or restarting"
+                    } else {
+                        "server input is unavailable"
+                    }
+                    .to_owned(),
+                ));
+            }
+            ControlAction::Console(command) if !is_one_console_line(&command) => {
+                let _ = request.response.send(ControlResponse::Refused(
+                    "console command must be one line".to_owned(),
+                ));
+            }
+            ControlAction::Console(_) | ControlAction::Stop | ControlAction::Restart
+                if self.console_write_pending() =>
+            {
+                self.deferred.push_back(request);
+            }
+            ControlAction::Console(command) => {
+                let Some(input) = self.stdin.take() else {
+                    let _ = request.response.send(ControlResponse::Refused(
+                        "server input is unavailable".to_owned(),
+                    ));
+                    self.input_available = false;
+                    return Ok(());
+                };
+                let mut line = command.into_bytes();
+                line.push(b'\n');
+                self.pending_write = Some(PendingWrite {
+                    delivery: begin_write(input, line),
+                    kind: WriteKind::Console(request.response),
+                });
+            }
+            ControlAction::Stop | ControlAction::Restart if !self.input_available => {
+                refuse_unavailable_input(&mut vec![request.response]);
+            }
+            ControlAction::Restart if self.stopping() && !self.restart => {
+                let _ = request.response.send(ControlResponse::Refused(
+                    "the server is already stopping".to_owned(),
+                ));
+            }
+            // An explicit stop is the last word: a restart still waiting
+            // for the old child ends with it stopped. A second restart
+            // joins the first, so one stop is followed by exactly one start.
+            ControlAction::Stop | ControlAction::Restart => {
+                if !self.stopping() {
+                    let Some(input) = self.stdin.take() else {
+                        refuse_unavailable_input(&mut vec![request.response]);
+                        return Ok(());
+                    };
+                    self.ending = Ending::Stopping;
+                    self.pending_write = Some(PendingWrite {
+                        delivery: begin_write(input, b"stop\n".to_vec()),
+                        kind: WriteKind::Stop,
+                    });
+                }
+                self.restart = matches!(request.action, ControlAction::Restart);
+                completion_waiters.push(request.response);
+            }
+            ControlAction::Kill => {
+                self.restart = false;
+                self.ending = Ending::Killed;
+                completion_waiters.push(request.response);
+                // The whole group, so a wrapper's own children go with it.
+                if let Some(pid) = child.id() {
+                    kill_server_group(pid);
+                }
+                child.start_kill().map_err(ServerError::ProcessIo)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 async fn supervise_child(
     child: &mut Child,
     stdin: ChildStdin,
@@ -618,109 +884,40 @@ async fn supervise_child(
     completion_waiters: &mut Vec<oneshot::Sender<ControlResponse>>,
 ) -> ServerResult<(ServerExit, bool)> {
     let mut interval = tokio::time::interval(EXIT_POLL_INTERVAL);
-    let mut restart = false;
-    // A stop already asked for. A restart cannot turn it back into a start.
-    let mut stopping = false;
-    let mut killed = false;
-    let mut input_available = true;
+    let mut control = ChildControl::new(stdin);
     // Every sender is gone once the control service has ended, which a closed
     // channel reports on every receive. It is not polled again after that.
     let mut requests_open = true;
-    // Held by the pending stop write while one is in flight.
-    let mut stdin = Some(stdin);
-    let mut pending_stop: Option<PendingStopWrite> = None;
     loop {
+        if let Some(request) = control.next_deferred() {
+            control.handle_request(child, completion_waiters, request)?;
+            continue;
+        }
         tokio::select! {
             _ = interval.tick() => {
                 if let Some(status) = child.try_wait().map_err(ServerError::ProcessIo)? {
-                    let mut exit = exit_from_status(status);
-                    exit.stop_requested = stopping && !restart;
-                    return Ok((exit, restart));
+                    return Ok(control.conclude(status, completion_waiters));
                 }
             }
             (returned, result) = async {
-                match pending_stop.as_mut() {
-                    Some(write) => write.await,
+                match control.pending_write.as_mut() {
+                    Some(write) => (&mut write.delivery).await,
                     None => std::future::pending().await,
                 }
-            }, if pending_stop.is_some() => {
-                pending_stop = None;
-                stdin = Some(returned);
-                // After a kill the write failing is expected and the exit settles the waiters.
-                let Err(error) = result else { continue };
-                if killed {
-                    continue;
+            }, if control.pending_write.is_some() => {
+                if let Some(status) = control
+                    .write_finished(child, completion_waiters, returned, result)
+                    .await
+                {
+                    return Ok(control.conclude(status, completion_waiters));
                 }
-                if let Some(status) = exit_of_closed_input(child, &error).await {
-                    let mut exit = exit_from_status(status);
-                    exit.stop_requested = stopping && !restart;
-                    return Ok((exit, restart));
-                }
-                // The child is alive and cannot be asked to stop, which leaves it
-                // running and supervised like a failed console write does.
-                input_available = false;
-                stopping = false;
-                restart = false;
-                refuse_unavailable_input(completion_waiters);
             }
             request = requests.recv(), if requests_open => {
                 let Some(request) = request else {
                     requests_open = false;
                     continue;
                 };
-                match request.action {
-                    ControlAction::Status => {
-                        let _ = request.response.send(ControlResponse::Running);
-                    }
-                    ControlAction::Console(_) if stopping || !input_available => {
-                        let _ = request.response.send(ControlResponse::Refused(
-                            if stopping {
-                                "the server is stopping or restarting"
-                            } else {
-                                "server input is unavailable"
-                            }
-                            .to_owned(),
-                        ));
-                    }
-                    ControlAction::Console(command) => {
-                        let (response, delivered) =
-                            deliver_console_line(stdin.as_mut(), &command).await;
-                        // A closed input pipe does not transfer process ownership
-                        // or stop output capture. Keep supervising the child.
-                        input_available &= delivered;
-                        let _ = request.response.send(response);
-                    }
-                    ControlAction::Stop | ControlAction::Restart if !input_available => {
-                        refuse_unavailable_input(&mut vec![request.response]);
-                    }
-                    ControlAction::Restart if stopping && !restart => {
-                        let _ = request.response.send(ControlResponse::Refused(
-                            "the server is already stopping".to_owned(),
-                        ));
-                    }
-                    // An explicit stop is the last word: a restart still waiting
-                    // for the old child ends with it stopped. A second restart
-                    // joins the first, so one stop is followed by exactly one start.
-                    ControlAction::Stop | ControlAction::Restart => {
-                        if !stopping {
-                            let Some(input) = stdin.take() else {
-                                refuse_unavailable_input(&mut vec![request.response]);
-                                continue;
-                            };
-                            stopping = true;
-                            pending_stop = Some(begin_stop_write(input));
-                        }
-                        restart = matches!(request.action, ControlAction::Restart);
-                        completion_waiters.push(request.response);
-                    }
-                    ControlAction::Kill => {
-                        restart = false;
-                        stopping = true;
-                        killed = true;
-                        completion_waiters.push(request.response);
-                        child.start_kill().map_err(ServerError::ProcessIo)?;
-                    }
-                }
+                control.handle_request(child, completion_waiters, request)?;
             }
         }
     }
@@ -1740,46 +1937,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_canceled_run_stuck_draining_output_of_a_killed_child_leaves_the_server_startable() {
-        let root = tempfile::tempdir().expect("root");
-        std::fs::create_dir_all(root.path().join(".launcher")).expect("launcher");
-        let capture = tempfile::tempdir().expect("capture");
-        // The descendant keeps the pipes open after the child is killed.
-        let command = ServerCommand {
-            java: PathBuf::from("/bin/sh"),
-            arguments: vec!["-c".to_owned(), "sleep 5 & wait".to_owned()],
-            working_directory: root.path().join("server"),
-        };
-        let (observer, mut events) = ServerObserver::channel();
-        let server_root = root.path().to_path_buf();
-        let capture_path = capture.path().to_path_buf();
-        let task = tokio::spawn(async move {
-            ServerSupervisor::run(&command, &server_root, &capture_path, &observer).await
-        });
-        while let Some(event) = events.recv().await {
-            if matches!(event, ServerEvent::Started { .. }) {
-                break;
-            }
-        }
-        let child = read_runtime_evidence(root.path())
-            .expect("read")
-            .and_then(|evidence| evidence.child)
-            .expect("the child is recorded")
-            .pid;
-        let kill = tokio::spawn({
-            let root = root.path().to_path_buf();
-            async move { send_control(&root, &ControlAction::Kill).await }
-        });
-        while process_is_running(child) {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(!task.is_finished(), "the run is still draining output");
+    async fn a_canceled_run_kills_everything_the_server_started() {
+        let (root, _capture, mut events, task) = supervise_script(
+            "sleep 1000 & p=$!; echo ready; echo \"descendant:$p\"; wait",
+            "ready",
+        )
+        .await;
+        let descendant = announced_descendant(&mut events).await;
 
         task.abort();
         assert!(task.await.expect_err("canceled").is_cancelled());
-        kill.abort();
 
+        wait_until_not_running(descendant).await;
         assert_released(root.path());
     }
 
@@ -1892,7 +2061,13 @@ mod tests {
         let pid = child.id().expect("pid");
         let mut outstanding = Outstanding::default();
 
-        abandon_child(&mut child, Vec::new(), &mut outstanding).await;
+        abandon_child(
+            &mut child,
+            &mut ServerGroup::new(pid),
+            Vec::new(),
+            &mut outstanding,
+        )
+        .await;
 
         assert!(!outstanding.child_unconfirmed);
         assert!(!Path::new(&format!("/proc/{pid}")).exists());
@@ -1907,43 +2082,198 @@ mod tests {
         assert!(!process_is_running(pid));
     }
 
+    /// The pid a script announced as `descendant:<pid>`.
+    async fn announced_descendant(events: &mut mpsc::UnboundedReceiver<ServerEvent>) -> u32 {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(ServerEvent::Output(line)) = events.recv().await
+                    && let Some(pid) = line.text.strip_prefix("descendant:")
+                {
+                    return pid.parse().expect("pid");
+                }
+            }
+        })
+        .await
+        .expect("the descendant was announced")
+    }
+
+    async fn wait_until_not_running(pid: u32) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while process_is_running(pid) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the process ended");
+    }
+
     #[tokio::test]
-    async fn requests_that_arrive_while_output_drains_are_answered_when_the_run_ends() {
-        // A descendant keeps the output pipes open after the server exits.
-        let (root, _capture, _events, task) = supervise_script(
-            "(sleep 1.5 &) ; echo ready; while IFS= read -r line; do [ \"$line\" = stop ] && exit 0; done",
+    async fn a_descendant_holding_the_output_pipes_does_not_delay_the_exit() {
+        let (root, _capture, mut events, task) = supervise_script(
+            "sleep 3 & echo ready; while IFS= read -r line; do [ \"$line\" = stop ] && exit 0; done",
             "ready",
         )
         .await;
-        let stop = tokio::spawn({
-            let root = root.path().to_path_buf();
-            async move { send_control(&root, &ControlAction::Stop).await }
-        });
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        assert!(!task.is_finished(), "output is still draining");
+        let started = std::time::Instant::now();
 
-        let list = ControlAction::Console("list".to_owned());
-        let (kill, restart, console) = tokio::join!(
-            send_control(root.path(), &ControlAction::Kill),
-            send_control(root.path(), &ControlAction::Restart),
-            send_control(root.path(), &list),
+        let stop = send_control(root.path(), &ControlAction::Stop)
+            .await
+            .expect("stop answered");
+
+        let ControlResponse::Exited(exit) = stop else {
+            panic!("the stop settles with the exit: {stop:?}");
+        };
+        assert!(exit.stop_requested);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the run waited for the descendant: {:?}",
+            started.elapsed()
         );
+        assert_eq!(task.await.expect("join").expect("supervise"), exit);
+        let mut finished = false;
+        while let Ok(event) = events.try_recv() {
+            finished |= matches!(event, ServerEvent::Finished { .. } | ServerEvent::Exited(_));
+        }
+        assert!(finished, "the exit is reported");
+    }
+
+    #[tokio::test]
+    async fn a_restart_is_not_held_behind_a_descendant_holding_the_output_pipes() {
+        let (root, _capture, _events, task) = supervise_script(
+            "(sleep 3 &); echo ready; while IFS= read -r line; do [ \"$line\" = stop ] && exit 0; done",
+            "ready",
+        )
+        .await;
+
+        let restart = tokio::time::timeout(
+            Duration::from_secs(2),
+            send_control(root.path(), &ControlAction::Restart),
+        )
+        .await
+        .expect("the replacement started while the descendant lingered")
+        .expect("restart answered");
+
+        assert!(
+            matches!(restart, ControlResponse::Restarted { .. }),
+            "{restart:?}"
+        );
+        assert_eq!(
+            send_control(root.path(), &ControlAction::Status)
+                .await
+                .expect("status"),
+            ControlResponse::Running
+        );
+        send_control(root.path(), &ControlAction::Kill)
+            .await
+            .expect("kill");
+        task.await.expect("join").expect("supervise");
+    }
+
+    #[tokio::test]
+    async fn a_kill_ends_everything_the_server_started() {
+        let (root, _capture, mut events, task) = supervise_script(
+            "sleep 1000 & p=$!; echo ready; echo \"descendant:$p\"; wait",
+            "ready",
+        )
+        .await;
+        let descendant = announced_descendant(&mut events).await;
+        assert!(process_is_running(descendant));
+
+        let kill = send_control(root.path(), &ControlAction::Kill)
+            .await
+            .expect("kill answered");
+
+        assert!(matches!(kill, ControlResponse::Exited(_)), "{kill:?}");
+        wait_until_not_running(descendant).await;
+        task.await.expect("join").expect("supervise");
+    }
+
+    #[tokio::test]
+    async fn a_kill_is_answered_promptly_while_a_console_line_cannot_be_written() {
+        let (root, _capture, _events, task) =
+            supervise_script("echo ready; exec sleep 1000", "ready").await;
+        // The child never reads its input, so this write cannot complete.
+        let console = tokio::spawn({
+            let root = root.path().to_path_buf();
+            let line = "a".repeat(512 * 1024);
+            async move { send_control(&root, &ControlAction::Console(line)).await }
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let kill = tokio::time::timeout(
+            Duration::from_secs(2),
+            send_control(root.path(), &ControlAction::Kill),
+        )
+        .await
+        .expect("the kill is not queued behind the stuck write")
+        .expect("kill answered");
+
+        assert!(matches!(kill, ControlResponse::Exited(_)), "{kill:?}");
+        assert!(matches!(
+            console.await.expect("join").expect("console answered"),
+            ControlResponse::Refused(_)
+        ));
+        task.await.expect("join").expect("supervise");
+    }
+
+    #[tokio::test]
+    async fn a_child_that_exits_during_a_stuck_console_write_is_noticed_at_once() {
+        let (root, _capture, _events, task) = supervise_script(
+            // A descendant keeps the input pipe open, so the write does not fail on its own.
+            "exec 3<&0; (sleep 4 <&3 3<&- &); echo ready; sleep 0.5; exit 4",
+            "ready",
+        )
+        .await;
+        let started = std::time::Instant::now();
+        let console = tokio::spawn({
+            let root = root.path().to_path_buf();
+            let line = "a".repeat(512 * 1024);
+            async move { send_control(&root, &ControlAction::Console(line)).await }
+        });
 
         let exit = task.await.expect("join").expect("supervise");
-        assert!(exit.stop_requested);
-        assert_eq!(kill.expect("kill answered"), ControlResponse::Exited(exit));
-        assert!(matches!(
-            restart.expect("restart answered"),
-            ControlResponse::Refused(_)
-        ));
-        assert!(matches!(
-            console.expect("console answered"),
-            ControlResponse::Refused(_)
-        ));
-        assert_eq!(
-            stop.await.expect("join").expect("stop answered"),
-            ControlResponse::Exited(exit)
+
+        assert_eq!(exit.code, Some(4));
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the exit waited for the write timeout: {:?}",
+            started.elapsed()
         );
+        assert!(matches!(
+            console.await.expect("join").expect("console answered"),
+            ControlResponse::Refused(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_stop_sent_during_a_console_write_is_carried_out_after_it() {
+        // The shell reads nothing for a while, so the console line is still being written.
+        let (root, _capture, _events, task) = supervise_script(
+            "echo ready; sleep 0.6; while IFS= read -r line; do [ \"$line\" = stop ] && exit 0; done",
+            "ready",
+        )
+        .await;
+        let console = tokio::spawn({
+            let root = root.path().to_path_buf();
+            let line = "a".repeat(512 * 1024);
+            async move { send_control(&root, &ControlAction::Console(line)).await }
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let stop = send_control(root.path(), &ControlAction::Stop)
+            .await
+            .expect("stop answered");
+
+        let ControlResponse::Exited(exit) = stop else {
+            panic!("the stop settles with the exit: {stop:?}");
+        };
+        assert_eq!(exit.code, Some(0));
+        assert!(exit.stop_requested);
+        assert_eq!(
+            console.await.expect("join").expect("console answered"),
+            ControlResponse::Accepted
+        );
+        task.await.expect("join").expect("supervise");
     }
 
     #[tokio::test]

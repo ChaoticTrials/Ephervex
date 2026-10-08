@@ -1944,6 +1944,7 @@ dependencies = [
  "ephervex-loaders",
  "ephervex-minecraft",
  "ephervex-model",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "tempfile",
