@@ -22,3 +22,7 @@
 # cargo-deny binaries. What they produce is committed; they are not.
 /license-tools/
 __pycache__/
+
+# todo remove before merge into main
+tools/auto-screenshot-tool/screenshots
+/web/static/img/ephervex/

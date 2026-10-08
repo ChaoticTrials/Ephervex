@@ -1,0 +1,418 @@
+//! Headless snapshots of the compiled desktop component.
+
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail, ensure};
+use ephervex_gui::ui::{AppWindow, BuiltInPalettes, GuiI18n, Theme};
+use ephervex_i18n::{Arg, lookup, lookup_args};
+use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
+use image::{ImageBuffer, RgbaImage, imageops::FilterType};
+use slint::{ComponentHandle, PhysicalSize};
+
+use crate::catalog::{Region, State};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ThemeName {
+    Light,
+    Dark,
+}
+
+impl ThemeName {
+    pub(crate) const ALL: [Self; 2] = [Self::Light, Self::Dark];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+}
+
+impl std::str::FromStr for ThemeName {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "light" => Ok(Self::Light),
+            "dark" => Ok(Self::Dark),
+            _ => Err(format!("unknown theme {value:?}; use light or dark")),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Dimensions {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+}
+
+impl Dimensions {
+    pub(crate) const HD: Self = Self {
+        width: 1920,
+        height: 1080,
+    };
+    pub(crate) const QHD: Self = Self {
+        width: 2560,
+        height: 1440,
+    };
+    pub(crate) const ALL: [Self; 2] = [Self::HD, Self::QHD];
+
+    pub(crate) fn label(self) -> String {
+        format!("{}x{}", self.width, self.height)
+    }
+}
+
+impl std::str::FromStr for Dimensions {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (width, height) = value
+            .split_once('x')
+            .ok_or_else(|| "size must be WIDTHxHEIGHT".to_owned())?;
+        let width: u32 = width.parse().map_err(|_| "invalid width".to_owned())?;
+        let height: u32 = height.parse().map_err(|_| "invalid height".to_owned())?;
+        if !(980..=3840).contains(&width) || !(680..=2160).contains(&height) {
+            return Err("size must be within 980x680 and 3840x2160".to_owned());
+        }
+        Ok(Self { width, height })
+    }
+}
+
+pub(crate) struct CaptureOptions<'a> {
+    pub(crate) states: &'a [State],
+    pub(crate) themes: &'a [ThemeName],
+    pub(crate) sizes: &'a [Dimensions],
+    pub(crate) output: &'a Path,
+    pub(crate) derive_1080: bool,
+}
+
+pub(crate) fn initialize() -> Result<()> {
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        renderer_name: Some("software".into()),
+        mock_time: true,
+        threading: false,
+    })))
+    .context("initialize Slint's headless software renderer")
+}
+
+pub(crate) fn generate(options: &CaptureOptions<'_>) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    for state in options.states {
+        let ui = AppWindow::new().context("create the Ephervex window")?;
+        if let Some(family) = ephervex_gui::monospace::resolve_monospace_family() {
+            ui.global::<Theme>().set_mono_family(family.into());
+        }
+        install_i18n(&ui);
+        fixtures_for_state(&ui, state);
+
+        for size in options.sizes {
+            let derive_full =
+                options.derive_1080 && state.same_layout_at_both_sizes && *size == Dimensions::HD;
+            if derive_full && state.regions.iter().all(|region| region.name == "full") {
+                continue;
+            }
+            // The testing backend converts this to logical coordinates at a
+            // fixed 1.0 scale factor. No desktop compositor is involved.
+            ui.window()
+                .set_size(PhysicalSize::new(size.width, size.height));
+            ui.show().context("show the headless Ephervex window")?;
+
+            for theme in options.themes {
+                let palettes = ui.global::<BuiltInPalettes>();
+                let palette = match theme {
+                    ThemeName::Light => palettes.get_light(),
+                    ThemeName::Dark => palettes.get_dark(),
+                };
+                ui.global::<Theme>().set_palette(palette);
+                ui.set_application_theme(theme.name().into());
+                ui.set_theme_index(i32::from(*theme == ThemeName::Light));
+                slint::platform::update_timers_and_animations();
+                let buffer = ui
+                    .window()
+                    .take_snapshot()
+                    .context("render the Ephervex window")?;
+                ensure!(
+                    buffer.width() == size.width && buffer.height() == size.height,
+                    "renderer produced {}x{} for a requested {}",
+                    buffer.width(),
+                    buffer.height(),
+                    size.label()
+                );
+                let image =
+                    ImageBuffer::from_raw(size.width, size.height, buffer.as_bytes().to_vec())
+                        .context("convert Slint's RGBA snapshot")?;
+                for region in state.regions {
+                    if derive_full && region.name == "full" {
+                        continue;
+                    }
+                    let image = crop_region(&ui, &image, region)?;
+                    let path = output_path(options.output, state, region, *theme, *size);
+                    write_png(&path, &image)?;
+                    files.push(path);
+                }
+            }
+        }
+        if options.derive_1080 && state.same_layout_at_both_sizes {
+            let region = state
+                .regions
+                .iter()
+                .find(|region| region.name == "full")
+                .context("a documented state needs a full-window region")?;
+            for theme in options.themes {
+                let source = output_path(options.output, state, region, *theme, Dimensions::QHD);
+                let source = image::open(&source)
+                    .with_context(|| format!("open 1440p source {}", source.display()))?
+                    .into_rgba8();
+                let derivative = derive_1080(&source, state)?;
+                let path = output_path(options.output, state, region, *theme, Dimensions::HD);
+                write_png(&path, &derivative)?;
+                files.push(path);
+            }
+        }
+    }
+    Ok(files)
+}
+
+fn fixtures_for_state(ui: &AppWindow, state: &State) {
+    crate::fixtures::install_base(ui);
+    (state.show)(ui);
+}
+
+fn install_i18n(ui: &AppWindow) {
+    let i18n = ui.global::<GuiI18n>();
+    i18n.on_text(|id| lookup(id.as_str()).into());
+    i18n.on_count(|id, count| {
+        lookup_args(id.as_str(), [("count", Arg::Count(i64::from(count)))]).into()
+    });
+    i18n.on_value(|id, value| {
+        lookup_args(id.as_str(), [("value", Arg::from(value.to_string()))]).into()
+    });
+    i18n.on_values(|id, first, second| {
+        lookup_args(
+            id.as_str(),
+            [
+                ("first", Arg::from(first.to_string())),
+                ("second", Arg::from(second.to_string())),
+            ],
+        )
+        .into()
+    });
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn crop_region(ui: &AppWindow, image: &RgbaImage, region: &Region) -> Result<RgbaImage> {
+    let Some(label) = region.accessible_label else {
+        return Ok(image.clone());
+    };
+    let element = ElementHandle::find_by_accessible_label(ui, label)
+        .filter(|element| element.size().width > 0.0 && element.size().height > 0.0)
+        .max_by(|left, right| {
+            let left_area = left.size().width * left.size().height;
+            let right_area = right.size().width * right.size().height;
+            left_area.total_cmp(&right_area)
+        })
+        .with_context(|| format!("find visible UI region {label:?}"))?;
+    let position = element.absolute_position();
+    let size = element.size();
+    ensure!(
+        position.x.is_finite()
+            && position.y.is_finite()
+            && size.width.is_finite()
+            && size.height.is_finite(),
+        "UI region {label:?} has invalid geometry"
+    );
+    // The checked window is at most 3840x2160. Converting its logical
+    // coordinates to integer pixel bounds intentionally drops fractions.
+    let padding = 12.0;
+    let x = (position.x - padding).max(0.0).floor() as u32;
+    let y = (position.y - padding).max(0.0).floor() as u32;
+    let right = (position.x + size.width + padding).ceil() as u32;
+    let bottom = (position.y + size.height + padding).ceil() as u32;
+    ensure!(
+        right <= image.width() && bottom <= image.height(),
+        "UI region {label:?} exceeds the window"
+    );
+    ensure!(right > x && bottom > y, "UI region {label:?} has no area");
+    Ok(image::imageops::crop_imm(image, x, y, right - x, bottom - y).to_image())
+}
+
+fn output_path(
+    output: &Path,
+    state: &State,
+    region: &Region,
+    theme: ThemeName,
+    size: Dimensions,
+) -> PathBuf {
+    output
+        .join(state.name)
+        .join(region.name)
+        .join(format!("{}-{}.png", theme.name(), size.label()))
+}
+
+fn write_png(path: &Path, image: &RgbaImage) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("screenshot has no output directory")?;
+    std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    image
+        .save_with_format(path, image::ImageFormat::Png)
+        .with_context(|| format!("write {}", path.display()))
+}
+
+/// Resizing is reserved for states explicitly marked as layout-identical.
+pub(crate) fn derive_1080(source: &RgbaImage, state: &State) -> Result<RgbaImage> {
+    if !state.same_layout_at_both_sizes {
+        bail!("{} changes layout between 1440p and 1080p", state.name);
+    }
+    ensure!(
+        source.width() == 2560 && source.height() == 1440,
+        "a derivative needs a 2560x1440 source"
+    );
+    Ok(image::imageops::resize(
+        source,
+        1920,
+        1080,
+        FilterType::Lanczos3,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+
+    use super::*;
+
+    #[test]
+    fn dimensions_reject_unbounded_and_malformed_sizes() {
+        assert!("1920x1080".parse::<Dimensions>().is_ok());
+        assert!("10000x10000".parse::<Dimensions>().is_err());
+        assert!("1920".parse::<Dimensions>().is_err());
+    }
+
+    #[test]
+    fn derivative_requires_an_explicitly_identical_layout() {
+        let source = RgbaImage::new(2560, 1440);
+        assert!(derive_1080(&source, &crate::catalog::STATES[0]).is_err());
+        let identical = State {
+            same_layout_at_both_sizes: true,
+            ..crate::catalog::STATES[0]
+        };
+        let derivative = derive_1080(&source, &identical).expect("explicitly identical layout");
+        assert_eq!(derivative.dimensions(), (1920, 1080));
+    }
+
+    #[test]
+    fn actual_window_captures_both_themes_and_a_ui_region() {
+        initialize().expect("headless renderer");
+        ephervex_i18n::select_language("en-US").expect("bundled locale");
+        let output = tempfile::tempdir().expect("temporary output");
+        let files = generate(&CaptureOptions {
+            states: &crate::catalog::STATES[..1],
+            themes: &ThemeName::ALL,
+            sizes: &[Dimensions::HD],
+            output: output.path(),
+            derive_1080: false,
+        })
+        .expect("capture the real component");
+
+        assert_eq!(files.len(), 4);
+        let full = crate::catalog::STATES[0].regions[0];
+        let light = image::open(output_path(
+            output.path(),
+            &crate::catalog::STATES[0],
+            &full,
+            ThemeName::Light,
+            Dimensions::HD,
+        ))
+        .expect("light PNG")
+        .into_rgba8();
+        let dark = image::open(output_path(
+            output.path(),
+            &crate::catalog::STATES[0],
+            &full,
+            ThemeName::Dark,
+            Dimensions::HD,
+        ))
+        .expect("dark PNG")
+        .into_rgba8();
+        assert_eq!(light.dimensions(), (1920, 1080));
+        assert_eq!(dark.dimensions(), (1920, 1080));
+        assert_ne!(light.get_pixel(300, 600), dark.get_pixel(300, 600));
+
+        let crop = image::open(output_path(
+            output.path(),
+            &crate::catalog::STATES[0],
+            &crate::catalog::STATES[0].regions[1],
+            ThemeName::Light,
+            Dimensions::HD,
+        ))
+        .expect("selected client crop");
+        assert!(crop.width() > 300 && crop.height() > 100);
+        assert!(crop.width() < light.width() && crop.height() < light.height());
+    }
+
+    #[test]
+    fn derived_1080_full_window_is_not_rendered_natively() {
+        initialize().expect("headless renderer");
+        ephervex_i18n::select_language("en-US").expect("bundled locale");
+        let derived_output = tempfile::tempdir().expect("temporary derivative output");
+        let state = State {
+            same_layout_at_both_sizes: true,
+            ..crate::catalog::STATES[0]
+        };
+        let files = generate(&CaptureOptions {
+            states: &[state],
+            themes: &[ThemeName::Light],
+            sizes: &[Dimensions::HD, Dimensions::QHD],
+            output: derived_output.path(),
+            derive_1080: true,
+        })
+        .expect("capture and derive images");
+        assert_eq!(files.len(), 4);
+        let full = &state.regions[0];
+        let qhd = image::open(output_path(
+            derived_output.path(),
+            &state,
+            full,
+            ThemeName::Light,
+            Dimensions::QHD,
+        ))
+        .expect("native 1440p image")
+        .into_rgba8();
+        let hd = image::open(output_path(
+            derived_output.path(),
+            &state,
+            full,
+            ThemeName::Light,
+            Dimensions::HD,
+        ))
+        .expect("derived 1080p image")
+        .into_rgba8();
+        assert_eq!(hd, derive_1080(&qhd, &state).expect("resize source"));
+        let crop = image::open(output_path(
+            derived_output.path(),
+            &state,
+            &state.regions[1],
+            ThemeName::Light,
+            Dimensions::HD,
+        ))
+        .expect("native 1080p crop");
+        assert!(crop.width() < hd.width());
+
+        let full_only_output = tempfile::tempdir().expect("temporary full-window output");
+        let full_only = State {
+            same_layout_at_both_sizes: true,
+            ..crate::catalog::STATES[3]
+        };
+        let files = generate(&CaptureOptions {
+            states: &[full_only],
+            themes: &[ThemeName::Light],
+            sizes: &[Dimensions::HD, Dimensions::QHD],
+            output: full_only_output.path(),
+            derive_1080: true,
+        })
+        .expect("derive a state with no native 1080p regions");
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().all(|path| path.is_file()));
+    }
+}

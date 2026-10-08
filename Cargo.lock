@@ -1946,6 +1946,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ephervex-screenshots"
+version = "0.10.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ephervex-gui",
+ "ephervex-i18n",
+ "i-slint-backend-testing",
+ "image",
+ "slint",
+ "tempfile",
+]
+
+[[package]]
 name = "ephervex-server"
 version = "0.12.0"
 dependencies = [
