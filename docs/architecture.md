@@ -614,9 +614,11 @@ and a mode-0600 Unix socket in a short, mode-0700 per-user runtime directory.
 The runtime record's generation selects the socket without embedding the
 potentially long server root in its path. Stop is graceful and never
 escalates; kill is explicit and available only through the owner channel.
-Linux boot ID, PID start ticks, canonical executable, and executable identity
-distinguish a controlled process, an orphan, an unverifiable process, and
-proven-stale state. An orphan is reported but never adopted or signaled.
+Linux boot ID, PID, and start ticks identify a process; the recorded
+executable is informational, so a replaced or exec'd binary never counts as an
+exit. They distinguish a controlled process, an orphan, an unverifiable
+process, and proven-stale state. An orphan is reported but never adopted or
+signaled.
 
 Launcher capture is separate from Minecraft's own `server/logs/` and
 `server/crash-reports/`. A bounded memory ring feeds frontends while rotated

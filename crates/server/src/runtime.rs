@@ -453,7 +453,8 @@ fn capture_process(pid: u32, role: ProcessRole) -> ServerResult<ProcessEvidence>
             path: state_path.join("exe"),
             source,
         })?;
-    let metadata = std::fs::metadata(&executable).ok();
+    // The process image, which still resolves after the file is replaced.
+    let metadata = std::fs::metadata(state_path.join("exe")).ok();
     Ok(ProcessEvidence {
         role,
         pid,
@@ -471,36 +472,20 @@ pub fn capture_java_child(pid: u32) -> ServerResult<ProcessEvidence> {
     capture_process(pid, ProcessRole::JavaChild)
 }
 
+/// Boot, PID, and start ticks identify the process. The recorded executable
+/// is not compared: an upgrade that replaces the file, or an `exec` after the
+/// evidence was captured, leaves the same process alive.
 fn verify_process(evidence: &ProcessEvidence) -> IdentityState {
     match verify_process_instance(evidence) {
         IdentityState::VerifiedAlive => {}
         other => return other,
     }
-    let executable = match std::fs::read_link(format!("/proc/{}/exe", evidence.pid)) {
-        Ok(path) => path,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return IdentityState::ProvenDead;
-        }
-        Err(_) => return IdentityState::Unverifiable,
-    };
-    if executable != evidence.executable {
-        return IdentityState::ProvenDead;
+    // An exited process that has not been reaped yet has no executable.
+    match std::fs::read_link(format!("/proc/{}/exe", evidence.pid)) {
+        Ok(_) => IdentityState::VerifiedAlive,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => IdentityState::ProvenDead,
+        Err(_) => IdentityState::Unverifiable,
     }
-    if evidence.executable_device.is_some() || evidence.executable_inode.is_some() {
-        let Ok(metadata) = std::fs::metadata(&executable) else {
-            return IdentityState::Unverifiable;
-        };
-        if evidence
-            .executable_device
-            .is_some_and(|value| value != metadata.dev())
-            || evidence
-                .executable_inode
-                .is_some_and(|value| value != metadata.ino())
-        {
-            return IdentityState::ProvenDead;
-        }
-    }
-    IdentityState::VerifiedAlive
 }
 
 /// Whether the pid still names the process that was recorded, by boot and
@@ -872,6 +857,103 @@ mod tests {
             classify_runtime(root.path()).expect("classify"),
             RuntimeClassification::Stopped
         ));
+    }
+
+    struct KillOnDrop(std::process::Child);
+
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// Records `child` under a supervisor that is already gone.
+    fn record_orphan(root: &Path, child: &KillOnDrop) {
+        let mut evidence = RuntimeEvidence::for_current_supervisor().expect("capture");
+        evidence.supervisor.start_ticks = 0;
+        evidence.child = Some(capture_java_child(child.0.id()).expect("child evidence"));
+        write_runtime_evidence(root, &evidence).expect("write");
+    }
+
+    fn assert_orphaned_and_not_clearable(root: &Path) {
+        assert!(matches!(
+            classify_runtime(root).expect("classify"),
+            RuntimeClassification::Orphaned { .. }
+        ));
+        assert!(matches!(
+            clear_stale_runtime(root),
+            Err(ServerError::RuntimeMayBeAlive)
+        ));
+        assert!(runtime_path(root).exists());
+    }
+
+    #[test]
+    fn a_live_orphan_whose_executable_was_replaced_is_not_proven_dead() {
+        let root = root();
+        let bin = tempfile::tempdir().expect("bin dir");
+        let java = bin.path().join("java");
+        std::fs::copy("/bin/sleep", &java).expect("copy sleep");
+        let child = KillOnDrop(
+            std::process::Command::new(&java)
+                .arg("60")
+                .spawn()
+                .expect("spawn"),
+        );
+        record_orphan(root.path(), &child);
+        assert_orphaned_and_not_clearable(root.path());
+
+        let replacement = bin.path().join("java.new");
+        std::fs::copy("/bin/sleep", &replacement).expect("copy replacement");
+        std::fs::rename(&replacement, &java).expect("replace by rename");
+        assert_orphaned_and_not_clearable(root.path());
+    }
+
+    #[test]
+    fn a_live_orphan_that_executed_another_program_is_not_proven_dead() {
+        let root = root();
+        let child = KillOnDrop(
+            std::process::Command::new("sh")
+                .args(["-c", "sleep 0.3; exec sleep 60"])
+                .spawn()
+                .expect("spawn"),
+        );
+        record_orphan(root.path(), &child);
+        assert_orphaned_and_not_clearable(root.path());
+
+        std::thread::sleep(Duration::from_millis(800));
+        assert_orphaned_and_not_clearable(root.path());
+    }
+
+    #[test]
+    fn a_supervisor_whose_executable_was_replaced_stays_controlled() {
+        let root = root();
+        let bin = tempfile::tempdir().expect("bin dir");
+        let launcher = bin.path().join("launcher");
+        std::fs::copy("/bin/sleep", &launcher).expect("copy sleep");
+        let supervisor = KillOnDrop(
+            std::process::Command::new(&launcher)
+                .arg("60")
+                .spawn()
+                .expect("spawn"),
+        );
+        let mut evidence = RuntimeEvidence::for_current_supervisor().expect("capture");
+        evidence.supervisor = capture_process(supervisor.0.id(), ProcessRole::Supervisor)
+            .expect("supervisor evidence");
+        write_runtime_evidence(root.path(), &evidence).expect("write");
+        let socket = prepare_control_socket_path(root.path(), evidence.generation).expect("path");
+        let listener = UnixListener::bind(&socket).expect("bind");
+
+        let replacement = bin.path().join("launcher.new");
+        std::fs::copy("/bin/sleep", &replacement).expect("copy replacement");
+        std::fs::rename(&replacement, &launcher).expect("replace by rename");
+
+        assert!(matches!(
+            classify_runtime(root.path()).expect("classify"),
+            RuntimeClassification::Controlled { .. }
+        ));
+        drop(listener);
+        std::fs::remove_file(socket).expect("remove socket");
     }
 
     #[test]

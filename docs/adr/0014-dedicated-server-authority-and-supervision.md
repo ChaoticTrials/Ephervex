@@ -57,8 +57,11 @@ root cannot exceed Linux's Unix-socket path limit. Its name is keyed by the
 server root's filesystem identity and the supervisor generation recorded in
 `.launcher/server-runtime.json`. Runtime evidence also records separate
 supervisor and Java-child roles, Linux boot ID, PID, `/proc` start ticks,
-canonical executable, and device/inode identity where available. PID alone is
-never sufficient.
+canonical executable, and the device/inode of the process image where
+available. Boot ID, PID, and start ticks identify a process. The executable is
+informational: a file replaced by an upgrade, or a process that executed
+another program, is still the same live process. PID alone is never
+sufficient.
 
 A verified supervisor with a reachable socket is controlled. A verified
 supervisor without a reachable socket is unknown-running. A dead supervisor
