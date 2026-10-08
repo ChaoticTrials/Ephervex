@@ -420,13 +420,19 @@ fn spawn_child(
         path: command.working_directory.clone(),
         source,
     })?;
-    let mut child = Command::new(&command.java)
+    let mut process = Command::new(&command.java);
+    process
         .args(&command.arguments)
         .current_dir(&command.working_directory)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    // A group of its own, so a Ctrl-C or hangup aimed at the supervisor's
+    // terminal reaches the server only through the supervisor's graceful stop.
+    #[cfg(unix)]
+    process.process_group(0);
+    let mut child = process
         .spawn()
         .map_err(|source| ServerError::ProcessStart {
             executable: command.java.clone(),
@@ -933,6 +939,46 @@ mod tests {
 
     use super::*;
     use crate::runtime::control_socket_path;
+
+    /// The process group a process belongs to, from `/proc/<pid>/stat`.
+    fn process_group_of(pid: u32) -> String {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).expect("stat");
+        let (_, rest) = stat.rsplit_once(") ").expect("stat format");
+        // Fields after the command name: state, parent, process group.
+        rest.split(' ').nth(2).expect("process group").to_owned()
+    }
+
+    #[tokio::test]
+    async fn the_server_child_runs_in_a_process_group_of_its_own() {
+        let directory = tempfile::tempdir().expect("directory");
+        let command = ServerCommand {
+            java: PathBuf::from("/bin/sh"),
+            arguments: vec!["-c".to_owned(), "exec sleep 30".to_owned()],
+            working_directory: directory.path().join("server"),
+        };
+        let capture = Arc::new(Mutex::new(OutputCapture::new(directory.path())));
+        let (mut child, _stdin, readers, pid) = spawn_child(
+            &command,
+            &ServerObserver::silent(),
+            &capture,
+            &Arc::new(AtomicBool::new(false)),
+        )
+        .expect("spawn");
+
+        let group = process_group_of(pid);
+        let own_group = process_group_of(std::process::id());
+        child.kill().await.expect("kill");
+        for reader in readers {
+            let _ = reader.await;
+        }
+
+        assert_eq!(
+            group,
+            pid.to_string(),
+            "the child leads its own group, so a terminal signal for the supervisor does not reach it"
+        );
+        assert_ne!(group, own_group);
+    }
 
     #[tokio::test]
     async fn a_child_that_exits_before_its_identity_is_read_is_reported_as_an_exit() {

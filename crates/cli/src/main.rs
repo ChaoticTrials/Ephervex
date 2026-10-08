@@ -171,7 +171,9 @@ enum Command {
     /// Install and launch a client instance, streaming its log to the terminal.
     ///
     /// Exits with a non-zero status when the game exits with an error or from a
-    /// signal, unless the launch was ended with Ctrl-C. A dry run exits with 0.
+    /// signal, unless the launch was ended with Ctrl-C, a terminal hangup, a
+    /// termination signal, or output that is no longer being read. A dry run
+    /// exits with 0.
     Launch(LaunchArgs),
     /// List everything Ephervex is currently running.
     ///
@@ -1267,8 +1269,9 @@ enum ServerCommand {
     },
     /// Start in the foreground and stream server output.
     ///
-    /// Ctrl-C stops the server gracefully; press it again to kill the server.
-    /// Exits with a non-zero status when the server exits before it finished
+    /// Ctrl-C, a terminal hangup, a termination signal, or output that is no
+    /// longer being read stops the server gracefully; Ctrl-C or a signal again
+    /// kills the server. Exits with a non-zero status when the server exits before it finished
     /// starting or ends with an error without having been asked to stop.
     Start {
         id: ServerId,
@@ -1646,22 +1649,110 @@ fn main() -> ExitCode {
 /// call and this workspace denies unsafe code in handwritten Rust. Handling the
 /// error where the writing happens costs one function and does not weaken that
 /// rule.
+///
+/// A command that supervises a child (`launch`, `server start`) registers
+/// itself with [`watch_stdout`]. Ending the process here would skip the
+/// destructors that stop the child, so for those commands a failed write
+/// cancels the command and later output is dropped instead.
 fn write_out(data: &[u8]) {
     use std::io::Write as _;
 
+    let watch = STREAMING_STDOUT.get();
+    if watch.is_some_and(StdoutWatch::is_closed) {
+        return;
+    }
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     match handle.write_all(data).and_then(|()| handle.flush()) {
         Ok(()) => {}
-        // Whoever was reading has gone. There is nobody left to report to, and
-        // the work this command was asked for is done as far as anyone can
-        // tell.
-        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => std::process::exit(0),
         Err(error) => {
+            if let Some(watch) = watch {
+                watch.record(&error);
+                return;
+            }
+            // Whoever was reading has gone. There is nobody left to report to,
+            // and the work this command was asked for is done as far as anyone
+            // can tell.
+            if error.kind() == std::io::ErrorKind::BrokenPipe {
+                std::process::exit(0);
+            }
             tracing::error!(%error, "could not write to standard output");
             std::process::exit(1);
         }
     }
+}
+
+/// The standard output of a command that keeps a child running while it prints.
+static STREAMING_STDOUT: std::sync::OnceLock<StdoutWatch> = std::sync::OnceLock::new();
+
+/// What a streaming command learns when its standard output stops working.
+struct StdoutWatch {
+    /// Canceled by the first failed write, so the command stops its child
+    /// through the same path as a termination request.
+    cancel: CancellationToken,
+    failure: std::sync::Mutex<Option<WriteFailure>>,
+}
+
+#[derive(Clone, Copy)]
+struct WriteFailure {
+    kind: std::io::ErrorKind,
+    /// Whoever was reading has gone: a closed pipe, or a terminal that hung up.
+    reader_gone: bool,
+}
+
+/// `EIO`, which is what a write to a terminal that hung up fails with.
+const TERMINAL_HUNG_UP: i32 = 5;
+
+impl StdoutWatch {
+    fn new(cancel: CancellationToken) -> Self {
+        Self {
+            cancel,
+            failure: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn record(&self, error: &std::io::Error) {
+        let failure = WriteFailure {
+            kind: error.kind(),
+            reader_gone: error.kind() == std::io::ErrorKind::BrokenPipe
+                || error.raw_os_error() == Some(TERMINAL_HUNG_UP),
+        };
+        if let Ok(mut recorded) = self.failure.lock() {
+            recorded.get_or_insert(failure);
+        }
+        self.cancel.cancel();
+    }
+
+    fn failure(&self) -> Option<WriteFailure> {
+        self.failure.lock().ok().and_then(|failure| *failure)
+    }
+
+    fn is_closed(&self) -> bool {
+        self.failure().is_some()
+    }
+
+    /// A reader that went away is an ordinary end; any other write error is a
+    /// failure the exit status has to show.
+    fn result(&self) -> anyhow::Result<()> {
+        match self.failure() {
+            Some(WriteFailure {
+                kind,
+                reader_gone: false,
+            }) => anyhow::bail!("could not write to standard output: {kind}"),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Makes a failed write to standard output cancel `cancel` instead of ending
+/// the process. Meant for commands that must stop a child on every way out.
+fn watch_stdout(cancel: &CancellationToken) {
+    let _ = STREAMING_STDOUT.set(StdoutWatch::new(cancel.clone()));
+}
+
+/// The exit status contribution of the output stream, once the child is gone.
+fn stdout_result() -> anyhow::Result<()> {
+    STREAMING_STDOUT.get().map_or(Ok(()), StdoutWatch::result)
 }
 
 fn generate_completions(shell: Shell) {
@@ -2856,6 +2947,9 @@ async fn run_launch(app: &mut App, args: &LaunchArgs, json: bool) -> anyhow::Res
 
     let (observer, mut events) = LaunchObserver::channel();
     let cancel = CancellationToken::new();
+    // Output the reader no longer takes stops the game like a termination
+    // request does; exiting on the failed write would leave it running.
+    watch_stdout(&cancel);
 
     // Ending the launcher stops the game rather than orphaning it. The game
     // runs in its own process group, so none of these reach it from the
@@ -2918,6 +3012,9 @@ async fn run_launch(app: &mut App, args: &LaunchArgs, json: bool) -> anyhow::Res
             .await
             .map(ConnectedLaunch::Client),
     };
+    // Read before the printer drains: a reader that leaves while the last lines
+    // of a game that already ended are printed did not stop the game.
+    let stop_requested = cancel.is_cancelled();
     // The printer ends when every sender is gone, so this drop is what lets it
     // finish rather than hang.
     drop(observer);
@@ -2933,7 +3030,7 @@ async fn run_launch(app: &mut App, args: &LaunchArgs, json: bool) -> anyhow::Res
             outcome.launch.exit
         }
     };
-    game_exit_result(exit, cancel.is_cancelled())
+    game_exit_result(exit, stop_requested).and(stdout_result())
 }
 
 /// Whether the game's end means the command did its job.
@@ -3100,29 +3197,103 @@ impl LaunchProgressPrinter {
     }
 }
 
+/// Ctrl-C and, on Unix, the terminal closing or a termination request.
+///
+/// The signals stay registered for as long as this value lives, so a request
+/// that arrives between two waits is not lost.
+struct TerminationRequests {
+    #[cfg(unix)]
+    interrupt: tokio::signal::unix::Signal,
+    /// Absent when the process started with hangups ignored, as under
+    /// `nohup`: registering would replace that choice with a stop.
+    #[cfg(unix)]
+    hangup: Option<tokio::signal::unix::Signal>,
+    #[cfg(unix)]
+    terminate: tokio::signal::unix::Signal,
+}
+
+impl TerminationRequests {
+    fn watch() -> std::io::Result<Self> {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+
+            Ok(Self {
+                interrupt: signal(SignalKind::interrupt())?,
+                hangup: if hangup_ignored() {
+                    None
+                } else {
+                    Some(signal(SignalKind::hangup())?)
+                },
+                terminate: signal(SignalKind::terminate())?,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(Self {})
+        }
+    }
+}
+
+/// Whether the process was started with `SIGHUP` ignored.
+///
+/// Must be asked before anything registers the signal, because registering
+/// replaces the disposition. Reads the process's own signal mask, which needs
+/// no unsafe code.
+#[cfg(unix)]
+fn hangup_ignored() -> bool {
+    std::fs::read_to_string("/proc/self/status").is_ok_and(|status| signal_ignored(&status, 1))
+}
+
+/// Whether `signal` is set in the `SigIgn` mask of a `/proc/<pid>/status` text.
+#[cfg(unix)]
+fn signal_ignored(status: &str, signal: u32) -> bool {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("SigIgn:"))
+        .and_then(|mask| u64::from_str_radix(mask.trim(), 16).ok())
+        .is_some_and(|mask| {
+            signal
+                .checked_sub(1)
+                .is_some_and(|bit| mask >> bit & 1 == 1)
+        })
+}
+
+/// Where a foreground command hears that it was asked to end.
+trait StopRequests {
+    /// Resolves once per request.
+    async fn next(&mut self);
+}
+
+impl StopRequests for TerminationRequests {
+    async fn next(&mut self) {
+        #[cfg(unix)]
+        tokio::select! {
+            Some(()) = self.interrupt.recv() => {}
+            Some(()) = async {
+                match self.hangup.as_mut() {
+                    Some(hangup) => hangup.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {}
+            Some(()) = self.terminate.recv() => {}
+            else => std::future::pending().await,
+        }
+        #[cfg(not(unix))]
+        if tokio::signal::ctrl_c().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
 /// Waits for Ctrl-C or, on Unix, for the terminal closing or a termination
 /// request. Returns `false` if the signals cannot be watched.
 async fn wait_for_termination_request() -> bool {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-
-        let (Ok(mut hangup), Ok(mut terminate)) = (
-            signal(SignalKind::hangup()),
-            signal(SignalKind::terminate()),
-        ) else {
-            return tokio::signal::ctrl_c().await.is_ok();
-        };
-        tokio::select! {
-            result = tokio::signal::ctrl_c() => result.is_ok(),
-            _ = hangup.recv() => true,
-            _ = terminate.recv() => true,
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        tokio::signal::ctrl_c().await.is_ok()
-    }
+    let Ok(mut requests) = TerminationRequests::watch() else {
+        return false;
+    };
+    requests.next().await;
+    true
 }
 
 /// One line of the game's output.
@@ -7309,30 +7480,22 @@ async fn run_server_foreground(
     });
 
     let cancel = CancellationToken::new();
-    let outcome = {
-        let start = app.start_server_until_canceled(id, java, &observer, &cancel);
-        tokio::pin!(start);
-        tokio::select! {
-            result = &mut start => result,
-            signal = tokio::signal::ctrl_c() => {
-                signal?;
-                // The start keeps being polled: the supervisor inside it is what
-                // answers the stop.
-                cancel.cancel();
-                eprintln!("stopping the server... press Ctrl-C again to kill it");
-                tokio::select! {
-                    result = &mut start => result,
-                    signal = tokio::signal::ctrl_c() => {
-                        signal?;
-                        if let Err(error) = app.kill_server(id).await {
-                            eprintln!("the server could not be killed: {error}");
-                        }
-                        start.await
-                    }
-                }
+    // Output the reader no longer takes stops the server like a termination
+    // request does; exiting on the failed write would orphan it.
+    watch_stdout(&cancel);
+    let mut requests = TerminationRequests::watch()
+        .map_err(|error| anyhow::anyhow!("could not watch for termination requests: {error}"))?;
+    let outcome = supervise_foreground(
+        Box::pin(app.start_server_until_canceled(id, java, &observer, &cancel)),
+        &cancel,
+        &mut requests,
+        || async {
+            if let Err(error) = app.kill_server(id).await {
+                note(&format!("the server could not be killed: {error}"));
             }
-        }
-    };
+        },
+    )
+    .await;
     // The printer ends when every sender is gone, so this drop is what lets it
     // finish the last lines and the exited event rather than hang.
     drop(observer);
@@ -7340,8 +7503,8 @@ async fn run_server_foreground(
     let exit = match outcome {
         Ok(exit) => exit,
         Err(error) if error.is_cancellation() => {
-            eprintln!("{}", localized_failure(&error).0);
-            return Ok(());
+            note(&localized_failure(&error).0);
+            return stdout_result();
         }
         Err(error) => return Err(error.into()),
     };
@@ -7352,7 +7515,54 @@ async fn run_server_foreground(
             _ => outln!("server exited"),
         }
     }
-    server_exit_result(&exit)
+    server_exit_result(&exit).and(stdout_result())
+}
+
+/// Tells the user something while a child may still be running.
+///
+/// `eprintln!` panics when the write fails, and after a terminal hangup it
+/// does: the panic would unwind past the supervisor and kill the child it was
+/// stopping.
+fn note(message: &str) {
+    let _ = writeln!(std::io::stderr(), "{message}");
+}
+
+/// Drives a foreground command that supervises a child until the child ends.
+///
+/// The first stop request, or a canceled `cancel` from elsewhere such as a
+/// closed standard output, asks the child to stop; `start` keeps being polled
+/// because the supervisor inside it is what answers. A further request calls
+/// `kill`. Ending the command any other way would drop `start` and orphan the
+/// child.
+async fn supervise_foreground<T, K, KF>(
+    start: impl std::future::Future<Output = T>,
+    cancel: &CancellationToken,
+    requests: &mut impl StopRequests,
+    kill: K,
+) -> T
+where
+    K: FnOnce() -> KF,
+    KF: std::future::Future<Output = ()>,
+{
+    tokio::pin!(start);
+    let mut kill = Some(kill);
+    let mut announced = false;
+    loop {
+        tokio::select! {
+            result = &mut start => return result,
+            () = requests.next() => {
+                if !cancel.is_cancelled() {
+                    cancel.cancel();
+                } else if let Some(kill) = kill.take() {
+                    kill().await;
+                }
+            }
+            () = cancel.cancelled(), if !announced => {
+                announced = true;
+                note("stopping the server... press Ctrl-C again to kill it");
+            }
+        }
+    }
 }
 
 /// Whether a foreground server's end means the command did its job.
@@ -7865,6 +8075,156 @@ fn localized_failure(error: &CoreError) -> (String, Option<String>) {
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// Stop requests delivered by hand instead of by signals.
+    struct ScriptedRequests(tokio::sync::mpsc::UnboundedReceiver<()>);
+
+    impl StopRequests for ScriptedRequests {
+        async fn next(&mut self) {
+            if self.0.recv().await.is_none() {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+
+    fn scripted_requests() -> (tokio::sync::mpsc::UnboundedSender<()>, ScriptedRequests) {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        (sender, ScriptedRequests(receiver))
+    }
+
+    /// A supervised child that stops only when asked, the way a server answers
+    /// the supervisor's graceful stop.
+    async fn stops_when_canceled(cancel: CancellationToken) -> &'static str {
+        cancel.cancelled().await;
+        "stopped"
+    }
+
+    #[tokio::test]
+    async fn a_termination_request_stops_the_child_gracefully_instead_of_killing_it() {
+        let cancel = CancellationToken::new();
+        let (sender, mut requests) = scripted_requests();
+        let killed = std::sync::atomic::AtomicBool::new(false);
+        sender.send(()).expect("request");
+
+        let result = supervise_foreground(
+            stops_when_canceled(cancel.clone()),
+            &cancel,
+            &mut requests,
+            || async { killed.store(true, std::sync::atomic::Ordering::SeqCst) },
+        )
+        .await;
+
+        assert_eq!(result, "stopped");
+        assert!(cancel.is_cancelled());
+        assert!(!killed.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn a_second_termination_request_kills_a_child_that_will_not_stop() {
+        let cancel = CancellationToken::new();
+        let (sender, mut requests) = scripted_requests();
+        let killed = std::sync::Arc::new(tokio::sync::Notify::new());
+        sender.send(()).expect("first");
+        sender.send(()).expect("second");
+
+        let result = supervise_foreground(
+            {
+                let killed = std::sync::Arc::clone(&killed);
+                async move {
+                    killed.notified().await;
+                    "killed"
+                }
+            },
+            &cancel,
+            &mut requests,
+            || async { killed.notify_one() },
+        )
+        .await;
+
+        assert_eq!(result, "killed");
+        assert!(cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn a_cancel_from_elsewhere_stops_the_child_and_the_next_request_kills_it() {
+        let cancel = CancellationToken::new();
+        let (sender, mut requests) = scripted_requests();
+        let killed = std::sync::Arc::new(tokio::sync::Notify::new());
+        // What a closed standard output does.
+        cancel.cancel();
+        let quiet = supervise_foreground(
+            stops_when_canceled(cancel.clone()),
+            &cancel,
+            &mut requests,
+            || async { panic!("nothing asked for a kill") },
+        )
+        .await;
+        assert_eq!(quiet, "stopped");
+
+        sender.send(()).expect("request");
+        let result = supervise_foreground(
+            {
+                let killed = std::sync::Arc::clone(&killed);
+                async move {
+                    killed.notified().await;
+                    "killed"
+                }
+            },
+            &cancel,
+            &mut requests,
+            || async { killed.notify_one() },
+        )
+        .await;
+        assert_eq!(result, "killed");
+    }
+
+    #[test]
+    fn a_closed_reader_cancels_the_command_without_failing_it() {
+        let cancel = CancellationToken::new();
+        let watch = StdoutWatch::new(cancel.clone());
+        assert!(!watch.is_closed());
+
+        watch.record(&std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+
+        assert!(cancel.is_cancelled());
+        assert!(watch.is_closed());
+        assert!(watch.result().is_ok());
+    }
+
+    #[test]
+    fn a_terminal_that_hung_up_is_a_reader_that_went_away() {
+        let cancel = CancellationToken::new();
+        let watch = StdoutWatch::new(cancel.clone());
+
+        watch.record(&std::io::Error::from_raw_os_error(TERMINAL_HUNG_UP));
+
+        assert!(cancel.is_cancelled());
+        assert!(watch.result().is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_signal_started_as_ignored_is_found_in_the_process_mask() {
+        let status = "Name:\tephervex\nSigBlk:\t0000000000000000\nSigIgn:\t0000000000000001\nSigCgt:\t0000000000004002\n";
+
+        assert!(signal_ignored(status, 1));
+        assert!(!signal_ignored(status, 2));
+        assert!(!signal_ignored(status, 15));
+        assert!(!signal_ignored("Name:\tephervex\n", 1));
+    }
+
+    #[test]
+    fn a_write_error_other_than_a_closed_reader_fails_the_command() {
+        let cancel = CancellationToken::new();
+        let watch = StdoutWatch::new(cancel.clone());
+
+        watch.record(&std::io::Error::from(std::io::ErrorKind::StorageFull));
+        watch.record(&std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+
+        assert!(cancel.is_cancelled());
+        let error = watch.result().expect_err("a real write failure");
+        assert!(error.to_string().contains("standard output"), "{error}");
+    }
 
     const INSTANCE_ID: &str = "11111111-1111-4111-8111-111111111111";
     const SNAPSHOT_ID: &str = "22222222-2222-4222-8222-222222222222";
