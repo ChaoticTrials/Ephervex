@@ -449,6 +449,9 @@ pub fn build_command(
     for value in expand(metadata.arguments.group(&ArgumentGroup::Game), &context) {
         arguments.push(argument(&substitute(&value, &values)?, &values));
     }
+    if metadata.arguments.form() == ArgumentForm::Legacy {
+        append_legacy_window_arguments(&mut arguments, jvm_argument_count + 1, &settings.features);
+    }
     if let Some(target) = settings.features.direct_connect
         && !arguments
             .iter()
@@ -478,6 +481,41 @@ pub fn build_command(
         arguments,
         jvm_argument_count,
     })
+}
+
+/// Adds the demo and window-size arguments that legacy `minecraftArguments`
+/// cannot express as feature rules.
+///
+/// An argument the metadata already supplied is left alone, so merged loader
+/// metadata never repeats one. `game_start` is the index of the first game
+/// argument.
+fn append_legacy_window_arguments(
+    arguments: &mut Vec<Argument>,
+    game_start: usize,
+    features: &LaunchFeatures,
+) {
+    let present = |arguments: &[Argument], name: &str| {
+        arguments
+            .iter()
+            .skip(game_start)
+            .any(|argument| argument.value == name)
+    };
+    if features.is_enabled("is_demo_user") && !present(arguments, "--demo") {
+        arguments.push(plain("--demo".to_owned()));
+    }
+    if features.is_enabled("has_custom_resolution") {
+        for (flag, key) in [
+            ("--width", "resolution_width"),
+            ("--height", "resolution_height"),
+        ] {
+            if let Some(value) = features.values.get(key)
+                && !present(arguments, flag)
+            {
+                arguments.push(plain(flag.to_owned()));
+                arguments.push(plain(value.clone()));
+            }
+        }
+    }
 }
 
 /// Mojang's `default-user-jvm` group, filtered to what the user has not
@@ -927,6 +965,43 @@ mod tests {
         assert!(game.contains(&"--demo".to_owned()));
         assert_eq!(pair(&game, "--width"), Some("1280".to_owned()));
         assert_eq!(pair(&game, "--height"), Some("720".to_owned()));
+    }
+
+    #[test]
+    fn legacy_metadata_receives_the_demo_and_window_size_arguments_once() {
+        let ordinary = command("1.12.2.json", &settings(offline()));
+        let ordinary_game: Vec<String> = ordinary.game_arguments().map(str::to_owned).collect();
+        for name in ["--demo", "--width", "--height"] {
+            assert!(!ordinary_game.iter().any(|argument| argument == name));
+        }
+
+        let mut custom = settings(offline());
+        custom.features = LaunchFeatures::none().demo().custom_resolution(800, 600);
+        let command = command("1.12.2.json", &custom);
+        let game: Vec<String> = command.game_arguments().map(str::to_owned).collect();
+
+        for name in ["--demo", "--width", "--height"] {
+            assert_eq!(game.iter().filter(|argument| *argument == name).count(), 1);
+        }
+        assert_eq!(pair(&game, "--width"), Some("800".to_owned()));
+        assert_eq!(pair(&game, "--height"), Some("600".to_owned()));
+        assert!(
+            command
+                .jvm_arguments()
+                .all(|argument| !matches!(argument, "--demo" | "--width" | "--height"))
+        );
+    }
+
+    #[test]
+    fn modern_metadata_does_not_repeat_the_demo_and_window_size_arguments() {
+        let mut custom = settings(offline());
+        custom.features = LaunchFeatures::none().demo().custom_resolution(1280, 720);
+        let command = command("1.20.1.json", &custom);
+        let game: Vec<String> = command.game_arguments().map(str::to_owned).collect();
+
+        for name in ["--demo", "--width", "--height"] {
+            assert_eq!(game.iter().filter(|argument| *argument == name).count(), 1);
+        }
     }
 
     #[test]
