@@ -34,6 +34,8 @@ const EXITING_CHILD_GRACE: Duration = Duration::from_secs(5);
 const STDIN_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a failed stop write waits for the child to report that it was already exiting.
 const STOP_WRITE_EXIT_GRACE: Duration = Duration::from_millis(500);
+/// How long a child whose supervision failed may take to be killed and reaped.
+const ABANDONED_CHILD_REAP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A redaction-safe command for a server JVM.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,54 +174,110 @@ impl ServerSupervisor {
     ) -> ServerResult<ServerExit> {
         let guard = RuntimeGuard::acquire(server_root)?;
         let mut evidence = RuntimeEvidence::for_current_supervisor()?;
-        let socket_path = prepare_control_socket_path(server_root, evidence.generation)?;
-        if let Err(error) = std::fs::remove_file(&socket_path)
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            return Err(ServerError::ControlUnavailable {
-                path: socket_path,
-                source: error,
-            });
-        }
-        let listener =
-            UnixListener::bind(&socket_path).map_err(|source| ServerError::ControlUnavailable {
-                path: socket_path.clone(),
-                source,
-            })?;
-        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600)).map_err(
-            |source| ServerError::ControlUnavailable {
-                path: socket_path.clone(),
-                source,
-            },
-        )?;
-
         let (requests, mut request_receiver) = mpsc::unbounded_channel();
-        let control_task = tokio::spawn(serve_control(listener, requests));
+        let socket = ControlSocket::open(server_root, evidence.generation, requests)?;
         let capture = Arc::new(Mutex::new(OutputCapture::new(capture_directory)));
-        write_runtime_evidence(server_root, &evidence)?;
+        let mut outstanding = Outstanding::default();
 
-        let result = supervise_commands(
-            command,
-            server_root,
-            observer,
-            &capture,
-            &mut evidence,
-            &mut request_receiver,
-        )
-        .await;
+        let result = match write_runtime_evidence(server_root, &evidence) {
+            Ok(()) => {
+                supervise_commands(
+                    command,
+                    server_root,
+                    observer,
+                    &capture,
+                    &mut evidence,
+                    &mut request_receiver,
+                    &mut outstanding,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
 
-        control_task.abort();
-        let _ = std::fs::remove_file(&socket_path);
-        if result.is_ok() {
+        // Every path out of supervision releases what the run owns. The
+        // evidence stays only when a child the run started may still be alive.
+        drop(socket);
+        request_receiver.close();
+        if !outstanding.child_unconfirmed {
             let _ = std::fs::remove_file(runtime_path(server_root));
         }
         drop(guard);
         // Answered once the server is released, so an answered stop means nothing writes into it.
-        let (exit, waiters) = result?;
-        for waiter in waiters {
-            let _ = waiter.send(ControlResponse::Exited(exit));
+        let final_response = |request: Option<&ControlAction>| match (&result, request) {
+            (
+                Ok(exit),
+                None | Some(ControlAction::Status | ControlAction::Stop | ControlAction::Kill),
+            ) => ControlResponse::Exited(*exit),
+            (Ok(_), Some(_)) => server_has_stopped(),
+            (Err(error), _) => {
+                ControlResponse::Refused(format!("the server could not be supervised: {error}"))
+            }
+        };
+        for waiter in outstanding.waiters {
+            let _ = waiter.send(final_response(None));
         }
-        Ok(exit)
+        while let Ok(request) = request_receiver.try_recv() {
+            let _ = request.response.send(final_response(Some(&request.action)));
+        }
+        result
+    }
+}
+
+/// What a run still owes answers for or must report once supervision ends.
+#[derive(Debug, Default)]
+struct Outstanding {
+    /// Requests waiting for a stop, a kill, or a restart to settle.
+    waiters: Vec<oneshot::Sender<ControlResponse>>,
+    /// A child the run started could not be confirmed gone after supervision failed.
+    child_unconfirmed: bool,
+}
+
+/// The control socket and the task accepting on it, removed together on every path.
+#[derive(Debug)]
+struct ControlSocket {
+    path: PathBuf,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl ControlSocket {
+    fn open(
+        server_root: &Path,
+        generation: uuid::Uuid,
+        requests: mpsc::UnboundedSender<ControlRequest>,
+    ) -> ServerResult<Self> {
+        let path = prepare_control_socket_path(server_root, generation)?;
+        if let Err(error) = std::fs::remove_file(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(ServerError::ControlUnavailable {
+                path,
+                source: error,
+            });
+        }
+        let listener =
+            UnixListener::bind(&path).map_err(|source| ServerError::ControlUnavailable {
+                path: path.clone(),
+                source,
+            })?;
+        let mut socket = Self { path, task: None };
+        std::fs::set_permissions(&socket.path, std::fs::Permissions::from_mode(0o600)).map_err(
+            |source| ServerError::ControlUnavailable {
+                path: socket.path.clone(),
+                source,
+            },
+        )?;
+        socket.task = Some(tokio::spawn(serve_control(listener, requests)));
+        Ok(socket)
+    }
+}
+
+impl Drop for ControlSocket {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -230,8 +288,8 @@ async fn supervise_commands(
     capture: &Arc<Mutex<OutputCapture>>,
     evidence: &mut RuntimeEvidence,
     requests: &mut mpsc::UnboundedReceiver<ControlRequest>,
-) -> ServerResult<(ServerExit, Vec<oneshot::Sender<ControlResponse>>)> {
-    let mut restart_waiters: Vec<oneshot::Sender<ControlResponse>> = Vec::new();
+    outstanding: &mut Outstanding,
+) -> ServerResult<ServerExit> {
     let mut last_exit = None;
     loop {
         let finished_starting = Arc::new(AtomicBool::new(false));
@@ -241,29 +299,37 @@ async fn supervise_commands(
             // The old child is gone, which is what the runtime evidence has to
             // say: the server is stopped, and whoever asked for the restart is
             // told that its second half failed rather than left waiting.
-            Err(error) if !restart_waiters.is_empty() => {
+            Err(error) if !outstanding.waiters.is_empty() => {
                 let detail = error.to_string();
-                for waiter in restart_waiters.drain(..) {
+                for waiter in outstanding.waiters.drain(..) {
                     let _ = waiter.send(ControlResponse::StartFailed(detail.clone()));
                 }
-                let exit = last_exit.unwrap_or(ServerExit {
+                return Ok(last_exit.unwrap_or(ServerExit {
                     code: None,
                     signal: None,
                     finished_starting: false,
                     stop_requested: false,
-                });
-                return Ok((exit, Vec::new()));
+                }));
             }
             Err(error) => return Err(error),
         };
-        evidence.child = capture_spawned_child(&mut child, pid).await?;
-        write_runtime_evidence(server_root, evidence)?;
+        if let Err(error) = record_spawned_child(&mut child, pid, server_root, evidence).await {
+            abandon_child(&mut child, readers, outstanding).await;
+            return Err(error);
+        }
         observer.emit(ServerEvent::Started { pid });
-        for waiter in restart_waiters.drain(..) {
+        for waiter in outstanding.waiters.drain(..) {
             let _ = waiter.send(ControlResponse::Restarted { pid });
         }
 
-        let (mut exit, restart, waiters) = supervise_child(&mut child, stdin, requests).await?;
+        let (mut exit, restart) =
+            match supervise_child(&mut child, stdin, requests, &mut outstanding.waiters).await {
+                Ok(supervised) => supervised,
+                Err(error) => {
+                    abandon_child(&mut child, readers, outstanding).await;
+                    return Err(error);
+                }
+            };
         for reader in readers {
             let _ = reader.await;
         }
@@ -272,11 +338,45 @@ async fn supervise_commands(
         last_exit = Some(exit);
         if restart {
             observer.emit(ServerEvent::Restarting);
-            restart_waiters = waiters;
             continue;
         }
-        return Ok((exit, waiters));
+        return Ok(exit);
     }
+}
+
+async fn record_spawned_child(
+    child: &mut Child,
+    pid: u32,
+    server_root: &Path,
+    evidence: &mut RuntimeEvidence,
+) -> ServerResult<()> {
+    evidence.child = capture_spawned_child(child, pid).await?;
+    write_runtime_evidence(server_root, evidence)
+}
+
+/// Ends a child whose supervision failed, so the evidence withdrawn afterwards names nothing alive.
+async fn abandon_child(child: &mut Child, readers: Vec<ReaderTask>, outstanding: &mut Outstanding) {
+    let pid = child.id();
+    let _ = tokio::time::timeout(ABANDONED_CHILD_REAP_TIMEOUT, child.kill()).await;
+    // A child reaped or signaled by someone else can no longer be waited on,
+    // so its absence from the process table is what shows it is gone.
+    let gone =
+        matches!(child.try_wait(), Ok(Some(_))) || pid.is_none_or(|pid| !process_is_running(pid));
+    outstanding.child_unconfirmed |= !gone;
+    for reader in readers {
+        reader.abort();
+    }
+}
+
+/// Whether `pid` names a process that has not yet exited. A zombie has.
+fn process_is_running(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).map_or_else(
+        |error| error.kind() != std::io::ErrorKind::NotFound,
+        |stat| {
+            stat.rsplit_once(") ")
+                .is_none_or(|(_, rest)| !rest.starts_with(['Z', 'X']))
+        },
+    )
 }
 
 type ReaderTask = tokio::task::JoinHandle<()>;
@@ -445,7 +545,8 @@ async fn supervise_child(
     child: &mut Child,
     stdin: ChildStdin,
     requests: &mut mpsc::UnboundedReceiver<ControlRequest>,
-) -> ServerResult<(ServerExit, bool, Vec<oneshot::Sender<ControlResponse>>)> {
+    completion_waiters: &mut Vec<oneshot::Sender<ControlResponse>>,
+) -> ServerResult<(ServerExit, bool)> {
     let mut interval = tokio::time::interval(EXIT_POLL_INTERVAL);
     let mut restart = false;
     // A stop already asked for. A restart cannot turn it back into a start.
@@ -455,14 +556,13 @@ async fn supervise_child(
     // Held by the pending stop write while one is in flight.
     let mut stdin = Some(stdin);
     let mut pending_stop: Option<PendingStopWrite> = None;
-    let mut completion_waiters = Vec::new();
     loop {
         tokio::select! {
             _ = interval.tick() => {
                 if let Some(status) = child.try_wait().map_err(ServerError::ProcessIo)? {
                     let mut exit = exit_from_status(status);
                     exit.stop_requested = stopping && !restart;
-                    return Ok((exit, restart, completion_waiters));
+                    return Ok((exit, restart));
                 }
             }
             (returned, result) = async {
@@ -481,14 +581,14 @@ async fn supervise_child(
                 if let Some(status) = exit_of_closed_input(child, &error).await {
                     let mut exit = exit_from_status(status);
                     exit.stop_requested = stopping && !restart;
-                    return Ok((exit, restart, completion_waiters));
+                    return Ok((exit, restart));
                 }
                 // The child is alive and cannot be asked to stop, which leaves it
                 // running and supervised like a failed console write does.
                 input_available = false;
                 stopping = false;
                 restart = false;
-                refuse_unavailable_input(&mut completion_waiters);
+                refuse_unavailable_input(completion_waiters);
             }
             request = requests.recv() => {
                 let Some(request) = request else {
@@ -543,8 +643,8 @@ async fn supervise_child(
                         restart = false;
                         stopping = true;
                         killed = true;
-                        child.start_kill().map_err(ServerError::ProcessIo)?;
                         completion_waiters.push(request.response);
+                        child.start_kill().map_err(ServerError::ProcessIo)?;
                     }
                 }
             }
@@ -670,15 +770,15 @@ async fn handle_connection(
     let action: ControlAction =
         serde_json::from_slice(&body).map_err(|_| ServerError::InvalidControlResponse)?;
     let (sender, receiver) = oneshot::channel();
-    requests
-        .send(ControlRequest {
-            action,
-            response: sender,
-        })
-        .map_err(|_| ServerError::InvalidControlResponse)?;
-    let response = receiver
-        .await
-        .map_err(|_| ServerError::InvalidControlResponse)?;
+    // A request that reaches a run which has already ended is refused rather
+    // than left to a closed connection.
+    let response = match requests.send(ControlRequest {
+        action,
+        response: sender,
+    }) {
+        Ok(()) => receiver.await.unwrap_or_else(|_| server_has_stopped()),
+        Err(_) => server_has_stopped(),
+    };
     let mut response =
         serde_json::to_vec(&response).map_err(|_| ServerError::InvalidControlResponse)?;
     response.push(b'\n');
@@ -686,6 +786,10 @@ async fn handle_connection(
         .write_all(&response)
         .await
         .map_err(ServerError::ProcessIo)
+}
+
+fn server_has_stopped() -> ControlResponse {
+    ControlResponse::Refused("the server has stopped".to_owned())
 }
 
 /// Sends a lifecycle or console request through the live owner channel.
@@ -828,6 +932,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+    use crate::runtime::control_socket_path;
 
     #[tokio::test]
     async fn a_child_that_exits_before_its_identity_is_read_is_reported_as_an_exit() {
@@ -1422,6 +1527,213 @@ mod tests {
         assert_eq!(stopped.code, Some(0));
         assert!(stopped.finished_starting);
         assert!(!stopped.stop_requested);
+    }
+
+    /// The control sockets a run for `root` left in the shared socket directory.
+    fn control_sockets_of(root: &Path) -> Vec<PathBuf> {
+        let sample = control_socket_path(root, uuid::Uuid::nil()).expect("socket path");
+        let name = sample
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("name");
+        let prefix = name.trim_end_matches("00000000000000000000000000000000.sock");
+        std::fs::read_dir(sample.parent().expect("directory"))
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| entry.file_name().to_string_lossy().starts_with(prefix))
+                    .map(|entry| entry.path())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn assert_released(root: &Path) {
+        assert!(
+            !runtime_path(root).exists(),
+            "runtime evidence is withdrawn"
+        );
+        assert!(!runtime_lock_path(root).exists(), "the lock is released");
+        assert!(control_sockets_of(root).is_empty(), "the socket is removed");
+        assert!(matches!(
+            classify_runtime(root).expect("classify"),
+            RuntimeClassification::Stopped
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_start_that_fails_leaves_the_server_stopped_and_startable() {
+        let root = tempfile::tempdir().expect("root");
+        std::fs::create_dir_all(root.path().join(".launcher")).expect("launcher");
+        let capture = tempfile::tempdir().expect("capture");
+        let mut command = ServerCommand {
+            java: PathBuf::from("/nonexistent/java"),
+            arguments: Vec::new(),
+            working_directory: root.path().join("server"),
+        };
+
+        let failed = ServerSupervisor::run(
+            &command,
+            root.path(),
+            capture.path(),
+            &ServerObserver::silent(),
+        )
+        .await;
+
+        assert!(matches!(failed, Err(ServerError::ProcessStart { .. })));
+        assert_released(root.path());
+
+        command.java = PathBuf::from("/bin/true");
+        ServerSupervisor::run(
+            &command,
+            root.path(),
+            capture.path(),
+            &ServerObserver::silent(),
+        )
+        .await
+        .expect("a later start in the same process succeeds");
+    }
+
+    #[tokio::test]
+    async fn a_run_whose_first_evidence_cannot_be_written_releases_the_control_socket() {
+        let root = tempfile::tempdir().expect("root");
+        let launcher = root.path().join(".launcher");
+        std::fs::create_dir_all(launcher.join("server-runtime.json.tmp")).expect("blocker");
+        let capture = tempfile::tempdir().expect("capture");
+        let command = ServerCommand {
+            java: PathBuf::from("/bin/true"),
+            arguments: Vec::new(),
+            working_directory: root.path().join("server"),
+        };
+
+        let failed = ServerSupervisor::run(
+            &command,
+            root.path(),
+            capture.path(),
+            &ServerObserver::silent(),
+        )
+        .await;
+
+        assert!(matches!(failed, Err(ServerError::RuntimeState { .. })));
+        std::fs::remove_dir(launcher.join("server-runtime.json.tmp")).expect("unblock");
+        assert_released(root.path());
+    }
+
+    #[tokio::test]
+    async fn a_replacement_whose_evidence_cannot_be_written_is_killed_and_answers_the_restart() {
+        let server = supervise_journaled(None).await;
+        let restart = tokio::spawn({
+            let root = server.root.path().to_path_buf();
+            async move { send_control(&root, &ControlAction::Restart).await }
+        });
+        // The old child is still saving its world, so the replacement's
+        // evidence is the next thing written.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        std::fs::create_dir(server.root.path().join(".launcher/server-runtime.json.tmp"))
+            .expect("blocker");
+
+        let answer = restart.await.expect("join").expect("answered");
+        let ControlResponse::Refused(detail) = answer else {
+            panic!("the restart cannot report a start: {answer:?}");
+        };
+        assert!(detail.contains("could not be supervised"), "{detail}");
+        assert!(matches!(
+            server.task.await.expect("join"),
+            Err(ServerError::RuntimeState { .. })
+        ));
+        std::fs::remove_dir(server.root.path().join(".launcher/server-runtime.json.tmp"))
+            .expect("unblock");
+        assert_released(server.root.path());
+        assert_eq!(
+            journal(&server.journal)[..2],
+            ["start", "stop"],
+            "the old child stopped first"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_child_is_gone_before_its_run_reports_it() {
+        let mut child = Command::new("sleep")
+            .arg("1000")
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn");
+        let pid = child.id().expect("pid");
+        let mut outstanding = Outstanding::default();
+
+        abandon_child(&mut child, Vec::new(), &mut outstanding).await;
+
+        assert!(!outstanding.child_unconfirmed);
+        assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    }
+
+    #[tokio::test]
+    async fn a_reaped_process_is_not_running_and_a_live_one_is() {
+        assert!(process_is_running(std::process::id()));
+        let mut child = Command::new("true").spawn().expect("spawn");
+        let pid = child.id().expect("pid");
+        child.wait().await.expect("reaped");
+        assert!(!process_is_running(pid));
+    }
+
+    #[tokio::test]
+    async fn requests_that_arrive_while_output_drains_are_answered_when_the_run_ends() {
+        // A descendant keeps the output pipes open after the server exits.
+        let (root, _capture, _events, task) = supervise_script(
+            "(sleep 1.5 &) ; echo ready; while IFS= read -r line; do [ \"$line\" = stop ] && exit 0; done",
+            "ready",
+        )
+        .await;
+        let stop = tokio::spawn({
+            let root = root.path().to_path_buf();
+            async move { send_control(&root, &ControlAction::Stop).await }
+        });
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!task.is_finished(), "output is still draining");
+
+        let list = ControlAction::Console("list".to_owned());
+        let (kill, restart, console) = tokio::join!(
+            send_control(root.path(), &ControlAction::Kill),
+            send_control(root.path(), &ControlAction::Restart),
+            send_control(root.path(), &list),
+        );
+
+        let exit = task.await.expect("join").expect("supervise");
+        assert!(exit.stop_requested);
+        assert_eq!(kill.expect("kill answered"), ControlResponse::Exited(exit));
+        assert!(matches!(
+            restart.expect("restart answered"),
+            ControlResponse::Refused(_)
+        ));
+        assert!(matches!(
+            console.expect("console answered"),
+            ControlResponse::Refused(_)
+        ));
+        assert_eq!(
+            stop.await.expect("join").expect("stop answered"),
+            ControlResponse::Exited(exit)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_that_reaches_a_finished_run_is_refused_not_dropped() {
+        let (client, server) = UnixStream::pair().expect("pair");
+        let (requests, receiver) = mpsc::unbounded_channel();
+        drop(receiver);
+        let connection = tokio::spawn(handle_connection(server, requests));
+
+        let mut client = BufReader::new(client);
+        let mut request = serde_json::to_vec(&ControlAction::Stop).expect("request");
+        request.push(b'\n');
+        client.get_mut().write_all(&request).await.expect("send");
+        let mut response = Vec::new();
+        client.read_until(b'\n', &mut response).await.expect("read");
+
+        assert!(matches!(
+            serde_json::from_slice(&response).expect("a response"),
+            ControlResponse::Refused(_)
+        ));
+        connection.await.expect("join").expect("handled");
     }
 
     #[test]

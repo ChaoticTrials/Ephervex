@@ -72,6 +72,14 @@ signals an orphan. Recovery clears evidence only when it is proven stale.
 through the live owner channel. Abrupt supervisor termination can leave an
 orphan despite best-effort child cleanup.
 
+However supervision returns, including a failed start or a supervision error, the
+supervisor ends any child it started, removes its socket, withdraws its runtime
+evidence, and releases the lock, so the server classifies as stopped and can be
+started again. Evidence is kept only when a child it started may still be
+alive. Every control request accepted before the lock is released gets
+an answer: the final exit, or a refusal saying the server has stopped or could
+not be supervised.
+
 Combined launcher capture is timestamped JSON Lines. The in-memory ring is
 bounded to 2,000 lines and 2 MiB, individual records to 64 KiB, segments to
 8 MiB, and retained segments to 256 MiB per server. Pruning updates an atomic
