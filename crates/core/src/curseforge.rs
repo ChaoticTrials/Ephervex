@@ -72,11 +72,29 @@ impl fmt::Debug for StoredApiKey {
 
 impl CurseForgeCredentialSource for StoredApiKey {
     fn api_key(&self) -> ModPlatformResult<Option<SecretString>> {
-        let store: Arc<dyn CredentialStore> = match &self.0 {
-            Source::Keyring => credential_store().map_err(|error| unreadable(&error))?,
-            Source::Explicit(store) => Arc::clone(store),
-        };
-        ephervex_auth::curseforge_api_key(store.as_ref()).map_err(|error| unreadable(&error))
+        resolve_key(match &self.0 {
+            Source::Keyring => credential_store(),
+            Source::Explicit(store) => Ok(Arc::clone(store)),
+        })
+    }
+}
+
+/// The key in effect for the outcome of opening a credential store.
+///
+/// A machine with no secret storage has no user key, so the build's own key
+/// applies (ADR 0030). A store that exists but fails is unreadable instead:
+/// it may hold a user key that must not be silently replaced.
+fn resolve_key(
+    store: Result<Arc<dyn CredentialStore>, AuthError>,
+) -> ModPlatformResult<Option<SecretString>> {
+    match store {
+        Ok(store) => {
+            ephervex_auth::curseforge_api_key(store.as_ref()).map_err(|error| unreadable(&error))
+        }
+        Err(AuthError::SecretStorageUnavailable { .. }) => {
+            Ok(ephervex_auth::curseforge_api_key_without_store())
+        }
+        Err(error) => Err(unreadable(&error)),
     }
 }
 
@@ -180,6 +198,54 @@ mod tests {
             detail: "no secret service".to_owned(),
         });
         assert!(error.is_credential_problem());
+        assert!(matches!(
+            error,
+            ModPlatformError::CredentialUnreadable { .. }
+        ));
+    }
+
+    #[test]
+    fn a_machine_without_secret_storage_uses_the_build_key_when_there_is_one() {
+        let key = resolve_key(Err(AuthError::SecretStorageUnavailable {
+            detail: "no secret service".to_owned(),
+        }))
+        .expect("no storage is not a credential failure");
+        let expected = ephervex_auth::DEFAULT_CURSEFORGE_API_KEY;
+        match key {
+            Some(key) => assert_eq!(key.expose(), expected),
+            None => assert!(expected.is_empty(), "the build key was dropped"),
+        }
+    }
+
+    #[test]
+    fn a_store_that_fails_to_read_stays_unreadable_instead_of_using_the_build_key() {
+        #[derive(Debug)]
+        struct UnreadableStore;
+        impl CredentialStore for UnreadableStore {
+            fn store(
+                &self,
+                _: &ephervex_auth::CredentialKey,
+                _: &SecretString,
+            ) -> ephervex_auth::AuthResult<()> {
+                Ok(())
+            }
+            fn load(
+                &self,
+                _: &ephervex_auth::CredentialKey,
+            ) -> ephervex_auth::AuthResult<Option<SecretString>> {
+                Err(AuthError::SecretStorageUnavailable {
+                    detail: "locked".to_owned(),
+                })
+            }
+            fn delete(&self, _: &ephervex_auth::CredentialKey) -> ephervex_auth::AuthResult<()> {
+                Ok(())
+            }
+            fn storage(&self) -> ephervex_auth::CredentialStorage {
+                ephervex_auth::CredentialStorage::Keyring
+            }
+        }
+
+        let error = resolve_key(Ok(Arc::new(UnreadableStore))).expect_err("a locked store");
         assert!(matches!(
             error,
             ModPlatformError::CredentialUnreadable { .. }

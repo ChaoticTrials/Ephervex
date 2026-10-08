@@ -33,8 +33,10 @@ working without a first-run detour through settings.
 **A build-time default key is used only when the user has not configured
 one.** `ephervex_auth::curseforge_api_key` falls back to
 `DEFAULT_CURSEFORGE_API_KEY` (`crates/auth/src/chain.rs`) exactly when the
-credential store holds nothing; a key saved through settings always wins,
-unchanged from ADR 0022.
+credential store holds nothing, which includes a machine with no secret
+storage at all; a key saved through settings always wins, unchanged from
+ADR 0022. A store that exists but cannot be read is still reported as
+unreadable, since it may hold a user key.
 
 **The default is never a literal in source.** Unlike a client ID, an API key
 is a real bearer secret, so it is picked up only from the

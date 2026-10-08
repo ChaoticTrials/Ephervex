@@ -446,6 +446,17 @@ pub fn curseforge_api_key(store: &dyn CredentialStore) -> AuthResult<Option<Secr
     ))
 }
 
+/// The CurseForge API key in effect on a machine with no credential store at
+/// all.
+///
+/// With no store there is no user key to prefer, so the answer is the build's
+/// own key or none (ADR 0030). A store that exists but cannot be read is a
+/// different failure and must not come through here: a user key may be in it.
+#[must_use]
+pub fn curseforge_api_key_without_store() -> Option<SecretString> {
+    resolve_curseforge_api_key(None, DEFAULT_CURSEFORGE_API_KEY)
+}
+
 /// The stored key wins; an empty build default means there is none to fall
 /// back to. Split out from [`curseforge_api_key`] so the ordering is testable
 /// against an arbitrary default, since [`DEFAULT_CURSEFORGE_API_KEY`] itself

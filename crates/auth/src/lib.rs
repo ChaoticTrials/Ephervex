@@ -133,7 +133,8 @@ pub mod xbox;
 
 pub use chain::{
     DEFAULT_CURSEFORGE_API_KEY, MicrosoftAccountProvider, clear_curseforge_api_key,
-    curseforge_api_key, curseforge_api_key_configured, delete_credential, set_curseforge_api_key,
+    curseforge_api_key, curseforge_api_key_configured, curseforge_api_key_without_store,
+    delete_credential, set_curseforge_api_key,
 };
 pub use endpoints::{Endpoints, SCOPE, TENANT};
 pub use error::{

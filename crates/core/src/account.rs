@@ -198,7 +198,7 @@ impl App {
     pub fn api_settings(&self) -> CoreResult<ApiSettings> {
         let api = &self.config().api;
         let configured = api.microsoft_client_id().unwrap_or_default();
-        let storage = credential_store().ok();
+        let storage = self.keyring().ok();
         Ok(ApiSettings {
             microsoft_client_id: configured.to_owned(),
             effective_microsoft_client_id: ephervex_auth::resolve_client_id(configured).to_owned(),
@@ -214,6 +214,9 @@ impl App {
                     } else {
                         CurseForgeKeyState::Missing
                     }
+                }
+                None if ephervex_auth::curseforge_api_key_without_store().is_some() => {
+                    CurseForgeKeyState::BuildDefault
                 }
                 None => CurseForgeKeyState::Missing,
             },
@@ -1221,6 +1224,25 @@ mod tests {
         worker
             .set_default_account("Alice")
             .expect("rereads what another App wrote");
+    }
+
+    #[test]
+    fn the_api_settings_report_the_build_key_on_a_machine_without_secret_storage() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.test_keyring = Some(TestKeyring::Unreachable);
+
+        let settings = app.api_settings().expect("settings");
+
+        assert!(settings.credential_storage.is_none());
+        assert_eq!(
+            settings.curseforge_key,
+            if ephervex_auth::DEFAULT_CURSEFORGE_API_KEY.is_empty() {
+                CurseForgeKeyState::Missing
+            } else {
+                CurseForgeKeyState::BuildDefault
+            }
+        );
     }
 
     #[test]
