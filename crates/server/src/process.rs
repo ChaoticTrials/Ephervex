@@ -29,6 +29,8 @@ const CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
 /// the answer only comes once the replacement has been spawned.
 const RESTART_TIMEOUT: Duration = Duration::from_secs(300);
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// Pause after an accept failure that can persist, such as descriptor exhaustion.
+const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 /// How long a child that has lost its executable link may take to finish exiting.
 const EXITING_CHILD_GRACE: Duration = Duration::from_secs(5);
 /// How long a write to the server's input may take before the input is treated as unavailable.
@@ -621,6 +623,9 @@ async fn supervise_child(
     let mut stopping = false;
     let mut killed = false;
     let mut input_available = true;
+    // Every sender is gone once the control service has ended, which a closed
+    // channel reports on every receive. It is not polled again after that.
+    let mut requests_open = true;
     // Held by the pending stop write while one is in flight.
     let mut stdin = Some(stdin);
     let mut pending_stop: Option<PendingStopWrite> = None;
@@ -658,8 +663,9 @@ async fn supervise_child(
                 restart = false;
                 refuse_unavailable_input(completion_waiters);
             }
-            request = requests.recv() => {
+            request = requests.recv(), if requests_open => {
                 let Some(request) = request else {
+                    requests_open = false;
                     continue;
                 };
                 match request.action {
@@ -812,10 +818,30 @@ where
     }
 }
 
+/// How long to wait before accepting again after a failed accept, or `None`
+/// when the failure belongs to one connection and the next accept is
+/// unaffected.
+fn accept_retry_delay(error: &std::io::Error) -> Option<Duration> {
+    use std::io::ErrorKind;
+    match error.kind() {
+        ErrorKind::ConnectionAborted | ErrorKind::ConnectionReset | ErrorKind::Interrupted => None,
+        _ => Some(ACCEPT_RETRY_DELAY),
+    }
+}
+
+/// Serves control connections until the task is aborted. A failed accept never
+/// ends the service, because the supervised child would then be left running
+/// with no way to stop it.
 async fn serve_control(listener: UnixListener, requests: mpsc::UnboundedSender<ControlRequest>) {
     loop {
-        let Ok((stream, _)) = listener.accept().await else {
-            return;
+        let stream = match listener.accept().await {
+            Ok((stream, _)) => stream,
+            Err(error) => {
+                if let Some(delay) = accept_retry_delay(&error) {
+                    tokio::time::sleep(delay).await;
+                }
+                continue;
+            }
         };
         let requests = requests.clone();
         tokio::spawn(async move {
@@ -1939,6 +1965,56 @@ mod tests {
             ControlResponse::Refused(_)
         ));
         connection.await.expect("join").expect("handled");
+    }
+
+    #[test]
+    fn an_accept_failure_that_can_persist_is_retried_after_a_pause() {
+        use std::io::{Error, ErrorKind};
+        for kind in [ErrorKind::ConnectionAborted, ErrorKind::ConnectionReset] {
+            assert_eq!(accept_retry_delay(&Error::from(kind)), None, "{kind:?}");
+        }
+        // EMFILE and ENFILE on Linux must not turn the retry into a busy loop.
+        for code in [24, 23] {
+            assert_eq!(
+                accept_retry_delay(&Error::from_raw_os_error(code)),
+                Some(ACCEPT_RETRY_DELAY),
+                "os error {code}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_closed_request_channel_does_not_spin_supervision_and_the_exit_is_still_seen() {
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 0.6"])
+            .stdin(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn");
+        let stdin = child.stdin.take().expect("stdin");
+        let (requests, mut receiver) = mpsc::unbounded_channel();
+        drop(requests);
+        let mut waiters = Vec::new();
+        let mut polls = 0_u32;
+        let mut supervision = std::pin::pin!(supervise_child(
+            &mut child,
+            stdin,
+            &mut receiver,
+            &mut waiters
+        ));
+
+        let (exit, restart) = std::future::poll_fn(|context| {
+            polls += 1;
+            supervision.as_mut().poll(context)
+        })
+        .await
+        .expect("supervised");
+
+        assert!(!restart);
+        assert!(!exit.stop_requested);
+        // Waking only for the exit poll takes a handful of polls. A spinning
+        // loop takes many thousands in the same time.
+        assert!(polls < 200, "supervision polled {polls} times");
     }
 
     #[test]
