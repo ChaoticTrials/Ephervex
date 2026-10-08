@@ -359,10 +359,13 @@ pub enum Command {
         version: String,
         servers: Vec<ServerId>,
     },
-    /// Abandons a version change that is waiting on a release the user has to
-    /// fetch themselves. Nothing has been written by the time that wait
-    /// starts, so this simply stops watching.
-    CancelModAcquisition,
+    /// Abandons one wait for a release the user has to fetch themselves.
+    /// Nothing has been written by the time that wait starts, so this simply
+    /// stops watching. `id` is the one the prompt carried, so closing a prompt
+    /// never ends another operation's wait.
+    CancelModAcquisition {
+        id: u64,
+    },
     UpdateMod {
         instance: InstanceId,
         path: PathBuf,
@@ -1066,6 +1069,8 @@ pub struct ModVersionData {
 /// the same situation and the same folder watcher resolves it.
 #[derive(Debug, Clone, Default)]
 pub struct ModAcquisitionData {
+    /// Names this wait, so the prompt can end it and nothing else.
+    pub id: u64,
     pub instance: String,
     pub logical_path: String,
     /// The mod the user acted on, by name.
@@ -1723,6 +1728,11 @@ pub enum Event {
     /// these files, and the requested change is applied by itself once one is
     /// found and verified.
     ModAcquisitionRequired(ModAcquisitionData),
+    /// The wait behind a manual-download prompt is over, whether the files
+    /// arrived, the user left the prompt, or the operation was stopped.
+    ModAcquisitionEnded {
+        id: u64,
+    },
     /// A folder watcher found and verified a hand-placed copy of one blocked
     /// file's bytes while the import modal was open on it.
     ///
@@ -2071,10 +2081,9 @@ fn run_worker(
     let launches: RunningLaunches = Arc::new(Mutex::new(HashMap::new()));
     // Kept between polls, because CPU is a rate rather than a reading.
     let mut process_monitor = ProcessMonitor::new();
-    // A version change waiting on a release the user has to fetch, so closing
-    // the dialog (or starting another one) stops the folder watcher it left
-    // running.
-    let mut acquisition_cancel: Option<CancellationToken> = None;
+    // Every wait on a release the user has to fetch, so closing its dialog
+    // stops the folder watcher it left running and nothing else.
+    let acquisition_waits = AcquisitionWaits::default();
     // The still-running resolution's own cancellation, so a superseding pick
     // or a closed modal can stop wasting a network request on an answer
     // nothing will read. The attempt identity itself belongs to the
@@ -2822,10 +2831,10 @@ fn run_worker(
                 version,
                 servers,
             } => {
-                acquisition_cancel = Some(apply_mod_operation(
+                apply_mod_operation(
                     app.paths().clone(),
                     &events,
-                    acquisition_cancel.take(),
+                    &acquisition_waits,
                     ModOperation {
                         instance,
                         path,
@@ -2833,17 +2842,17 @@ fn run_worker(
                         servers,
                         operation: "changing-mod-version",
                     },
-                ));
+                );
             }
             Command::UpdateMod {
                 instance,
                 path,
                 servers,
             } => {
-                acquisition_cancel = Some(apply_mod_operation(
+                apply_mod_operation(
                     app.paths().clone(),
                     &events,
-                    acquisition_cancel.take(),
+                    &acquisition_waits,
                     ModOperation {
                         instance,
                         path,
@@ -2851,13 +2860,9 @@ fn run_worker(
                         servers,
                         operation: "updating-mod",
                     },
-                ));
+                );
             }
-            Command::CancelModAcquisition => {
-                if let Some(cancel) = acquisition_cancel.take() {
-                    cancel.cancel();
-                }
-            }
+            Command::CancelModAcquisition { id } => acquisition_waits.cancel(id),
             Command::PlanModRemoval { instance, path } => {
                 let paths = app.paths().clone();
                 spawn_detached(paths, events.clone(), move |app, events, runtime| {
@@ -3607,14 +3612,8 @@ fn run_worker(
             } => {
                 let paths = app.paths().clone();
                 let reports = events.clone();
-                // A release the provider will not let this launcher download
-                // stops the install and asks the user for it instead, so the
-                // dialog that does the asking needs a way to be left.
-                let waiting = CancellationToken::new();
-                if let Some(previous) = acquisition_cancel.replace(waiting.clone()) {
-                    previous.cancel();
-                }
                 let acquisition_events = events.clone();
+                let waits = acquisition_waits.clone();
                 spawn_async_operation(
                     paths,
                     &events,
@@ -3638,16 +3637,6 @@ fn run_worker(
                             // place here or on any selected server.
                             version: (!version.is_empty()).then_some(version),
                         };
-                        // Ending the operation from the progress list ends the
-                        // wait too, so there is no dialog left over a job the
-                        // user already stopped.
-                        let stopped = waiting.clone();
-                        let operation_cancel = cancel.clone();
-                        tokio::spawn(async move {
-                            operation_cancel.cancelled().await;
-                            stopped.cancel();
-                        });
-
                         let mut result = app
                             .apply_linked_mod_operation(
                                 instance, &request, &servers, &reporter, &cancel,
@@ -3656,9 +3645,10 @@ fn run_worker(
                         match await_manual_acquisition(
                             &app,
                             &acquisition_events,
+                            &waits,
                             &instance.to_string(),
                             &result,
-                            &waiting,
+                            &cancel,
                         )
                         .await
                         {
@@ -3741,13 +3731,8 @@ fn run_worker(
                             request = request.with_network(network);
                         }
                         let paths = app.paths().clone();
-                        let waiting = acquisition_host.as_ref().map(|_| CancellationToken::new());
-                        if let Some(waiting) = waiting.as_ref()
-                            && let Some(previous) = acquisition_cancel.replace(waiting.clone())
-                        {
-                            previous.cancel();
-                        }
                         let acquisition_events = events.clone();
+                        let waits = acquisition_waits.clone();
                         spawn_creation_operation(
                             paths,
                             &events,
@@ -3768,14 +3753,6 @@ fn run_worker(
                                     reporter: Some(reporter),
                                     ..ServerCreateOptions::default()
                                 };
-                                if let Some(waiting) = waiting.as_ref() {
-                                    let stopped = waiting.clone();
-                                    let operation_cancel = cancel.clone();
-                                    tokio::spawn(async move {
-                                        operation_cancel.cancelled().await;
-                                        stopped.cancel();
-                                    });
-                                }
                                 let completed = |result: CoreResult<ServerCommit<ServerRecord>>| {
                                     result.map(|commit| {
                                         CreationOutcome::Created(localized_value(
@@ -3787,17 +3764,16 @@ fn run_worker(
                                 loop {
                                     let result =
                                         app.create_server(request.clone(), &options, &cancel).await;
-                                    let Some((host, waiting)) =
-                                        acquisition_host.as_deref().zip(waiting.as_ref())
-                                    else {
+                                    let Some(host) = acquisition_host.as_deref() else {
                                         break completed(result);
                                     };
                                     match await_manual_acquisition(
                                         &app,
                                         &acquisition_events,
+                                        &waits,
                                         host,
                                         &result,
-                                        waiting,
+                                        &cancel,
                                     )
                                     .await
                                     {
@@ -4029,17 +4005,17 @@ fn run_worker(
                     // back, so the user is asked for it instead. The wait runs
                     // off the command loop, which has other work to do.
                     Err(error @ CoreError::ModAcquisitionRestricted { .. }) => {
-                        acquisition_cancel = Some(restore_after_acquisition(
+                        restore_after_acquisition(
                             app.paths().clone(),
                             &events,
-                            acquisition_cancel.take(),
+                            &acquisition_waits,
                             RestoreRequest {
                                 host,
                                 path,
                                 refusal: error,
                                 refreshed: Arc::clone(&refreshed_mods),
                             },
-                        ));
+                        );
                     }
                     Err(error) => send_error(&events, &error),
                 }
@@ -7645,14 +7621,6 @@ impl ModOperation {
     }
 }
 
-/// Carries out one mod operation, offering the user-assisted acquisition path
-/// when a release's provider does not permit this launcher to download it.
-///
-/// The second attempt is the same operation rather than a second install
-/// path: once the folder watcher has adopted the copy the user fetched, the
-/// ordinary mutation finds it in the shared cache and proceeds. Returns the
-/// token that stops the wait, which the caller keeps so closing the dialog
-/// (or starting another operation) ends it.
 /// One restore that is waiting on a release the user has to fetch.
 struct RestoreRequest {
     host: InstalledHost,
@@ -7665,19 +7633,15 @@ struct RestoreRequest {
 
 /// Asks the user for the jar a restore could not fetch, then puts it back.
 ///
-/// Returns the token that stops the wait, exactly as
-/// [`apply_mod_operation`] does, so leaving the dialog ends it.
+/// The wait is registered under its own id, so leaving the dialog ends this
+/// restore and no other operation.
 fn restore_after_acquisition(
     paths: Paths,
     events: &Sender<Event>,
-    previous: Option<CancellationToken>,
+    waits: &AcquisitionWaits,
     request: RestoreRequest,
-) -> CancellationToken {
-    if let Some(previous) = previous {
-        previous.cancel();
-    }
-    let cancel = CancellationToken::new();
-    let watching = cancel.clone();
+) {
+    let waits = waits.clone();
     spawn_detached(paths, events.clone(), move |app, events, runtime| {
         let RestoreRequest {
             host,
@@ -7687,7 +7651,8 @@ fn restore_after_acquisition(
         } = request;
         let refusal: Result<(), CoreError> = Err(refusal);
         runtime.block_on(async {
-            if await_manual_acquisition(&app, &events, &host.id(), &refusal, &watching).await
+            let cancel = CancellationToken::new();
+            if await_manual_acquisition(&app, &events, &waits, &host.id(), &refusal, &cancel).await
                 != Acquisition::Acquired
             {
                 return;
@@ -7708,35 +7673,45 @@ fn restore_after_acquisition(
             }
         });
     });
-    cancel
 }
 
+/// Carries out one mod operation, offering the user-assisted acquisition path
+/// when a release's provider does not permit this launcher to download it.
+///
+/// The second attempt is the same operation rather than a second install
+/// path: once the folder watcher has adopted the copy the user fetched, the
+/// ordinary mutation finds it in the shared cache and proceeds. The wait is
+/// registered under its own id, so closing its dialog ends it and nothing else.
 fn apply_mod_operation(
     paths: Paths,
     events: &Sender<Event>,
-    previous: Option<CancellationToken>,
+    waits: &AcquisitionWaits,
     operation: ModOperation,
-) -> CancellationToken {
-    if let Some(previous) = previous {
-        previous.cancel();
-    }
-    let cancel = CancellationToken::new();
-    let watching = cancel.clone();
+) {
+    let waits = waits.clone();
     spawn_detached(paths, events.clone(), move |app, events, runtime| {
         let reporter = OperationReporter::silent(operation.operation);
         let instance = operation.instance;
         runtime.block_on(async {
+            let cancel = CancellationToken::new();
             let result = app
                 .apply_linked_mod_operation(
                     instance,
                     &operation.request(),
                     &operation.servers,
                     &reporter,
-                    &watching,
+                    &cancel,
                 )
                 .await;
-            match await_manual_acquisition(&app, &events, &instance.to_string(), &result, &watching)
-                .await
+            match await_manual_acquisition(
+                &app,
+                &events,
+                &waits,
+                &instance.to_string(),
+                &result,
+                &cancel,
+            )
+            .await
             {
                 Acquisition::Acquired => {}
                 Acquisition::NotNeeded => {
@@ -7761,7 +7736,6 @@ fn apply_mod_operation(
             finish_linked(&app, &events, instance, result);
         });
     });
-    cancel
 }
 
 /// Offers the user-assisted acquisition path for a failed operation, and
@@ -7775,14 +7749,20 @@ fn apply_mod_operation(
 async fn await_manual_acquisition(
     app: &App,
     events: &Sender<Event>,
+    waits: &AcquisitionWaits,
     host: &str,
     result: &Result<impl Sized, CoreError>,
-    cancel: &CancellationToken,
+    operation_cancel: &CancellationToken,
 ) -> Acquisition {
     let Err(CoreError::ModAcquisitionRestricted { path, blocked }) = result else {
         return Acquisition::NotNeeded;
     };
+    // The wait ends when the operation does, but leaving the prompt ends only
+    // the wait: the operation token is never canceled from here.
+    let wait = waits.begin(operation_cancel);
+    let cancel = wait.token();
     let _ = events.send(Event::ModAcquisitionRequired(ModAcquisitionData {
+        id: wait.id(),
         instance: host.to_owned(),
         logical_path: path.display().to_string(),
         name: blocked
@@ -7797,22 +7777,83 @@ async fn await_manual_acquisition(
 
     let targets = blocked.iter().map(WatchTarget::from_blocked).collect();
     let mut watcher = app.download_watcher(targets);
-    while !watcher.is_finished() {
-        if cancel.is_cancelled() {
-            return Acquisition::Abandoned;
-        }
+    while !watcher.is_finished() && !cancel.is_cancelled() {
         if watcher.scan_once().await.is_none() {
             tokio::time::sleep(ephervex_core::RESCAN_INTERVAL).await;
         }
     }
-    if cancel.is_cancelled() {
-        return Acquisition::Abandoned;
-    }
     // The dialog asked for exactly these files and has them, so it is done
     // whatever the retry goes on to do: a failure after this is an ordinary
-    // failure, reported the ordinary way.
-    let _ = events.send(Event::CloseModal);
-    Acquisition::Acquired
+    // failure, reported the ordinary way. Only this prompt is closed, never
+    // whatever else the window has shown since.
+    let abandoned = cancel.is_cancelled();
+    let _ = events.send(Event::ModAcquisitionEnded { id: wait.id() });
+    if abandoned {
+        Acquisition::Abandoned
+    } else {
+        Acquisition::Acquired
+    }
+}
+
+/// The waits on releases the user has to fetch, by the id each prompt carries.
+#[derive(Clone, Default)]
+struct AcquisitionWaits {
+    next: Arc<AtomicU64>,
+    running: Arc<Mutex<HashMap<u64, CancellationToken>>>,
+}
+
+impl AcquisitionWaits {
+    /// Registers a wait that also ends when `operation` is canceled.
+    fn begin(&self, operation: &CancellationToken) -> AcquisitionWait {
+        let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
+        let token = operation.child_token();
+        if let Ok(mut running) = self.running.lock() {
+            running.insert(id, token.clone());
+        }
+        AcquisitionWait {
+            id,
+            token,
+            waits: self.clone(),
+        }
+    }
+
+    /// Ends the one wait the prompt named. An id that is already over is
+    /// ignored.
+    fn cancel(&self, id: u64) {
+        let token = self
+            .running
+            .lock()
+            .ok()
+            .and_then(|running| running.get(&id).cloned());
+        if let Some(token) = token {
+            token.cancel();
+        }
+    }
+}
+
+/// One registered wait, removed again when it ends.
+struct AcquisitionWait {
+    id: u64,
+    token: CancellationToken,
+    waits: AcquisitionWaits,
+}
+
+impl AcquisitionWait {
+    fn id(&self) -> u64 {
+        self.id
+    }
+
+    fn token(&self) -> CancellationToken {
+        self.token.clone()
+    }
+}
+
+impl Drop for AcquisitionWait {
+    fn drop(&mut self) {
+        if let Ok(mut running) = self.waits.running.lock() {
+            running.remove(&self.id);
+        }
+    }
 }
 
 /// What [`await_manual_acquisition`] did about one failure.
@@ -9477,6 +9518,52 @@ mod tests {
 
     fn logical(paths: &[&str]) -> Vec<PathBuf> {
         paths.iter().map(PathBuf::from).collect()
+    }
+
+    #[test]
+    fn canceling_one_manual_download_wait_leaves_every_other_operation_running() {
+        let waits = AcquisitionWaits::default();
+        let (first_operation, second_operation) =
+            (CancellationToken::new(), CancellationToken::new());
+        let first = waits.begin(&first_operation);
+        let second = waits.begin(&second_operation);
+        assert_ne!(first.id(), second.id());
+
+        waits.cancel(second.id());
+
+        assert!(second.token().is_cancelled());
+        assert!(!first.token().is_cancelled());
+        assert!(!first_operation.is_cancelled());
+        assert!(
+            !second_operation.is_cancelled(),
+            "leaving a prompt ends the wait, not the operation behind it"
+        );
+    }
+
+    #[test]
+    fn stopping_an_operation_ends_its_manual_download_wait() {
+        let waits = AcquisitionWaits::default();
+        let operation = CancellationToken::new();
+        let wait = waits.begin(&operation);
+
+        operation.cancel();
+
+        assert!(wait.token().is_cancelled());
+    }
+
+    #[test]
+    fn canceling_a_manual_download_wait_that_is_over_is_ignored() {
+        let waits = AcquisitionWaits::default();
+        let operation = CancellationToken::new();
+        let finished = waits.begin(&operation);
+        let id = finished.id();
+        drop(finished);
+        let later = waits.begin(&operation);
+
+        waits.cancel(id);
+
+        assert!(!later.token().is_cancelled());
+        assert!(!operation.is_cancelled());
     }
 
     #[test]

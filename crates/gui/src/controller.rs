@@ -2233,6 +2233,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         browser: Rc::clone(&browser),
         isolation: Rc::clone(&isolation_flow),
         diagnosis: Rc::clone(&diagnosis_flow),
+        acquisition_prompts: Rc::default(),
         commands: backend.commands.clone(),
     };
     register_i18n(ui);
@@ -3811,8 +3812,10 @@ fn register_mod_mutations(ui: &AppWindow, commands: &Sender<Command>) {
     });
 
     let sender = commands.clone();
-    ui.on_cancel_mod_acquisition(move || {
-        send(&sender, Command::CancelModAcquisition);
+    ui.on_cancel_mod_acquisition(move |id| {
+        if let Ok(id) = id.parse() {
+            send(&sender, Command::CancelModAcquisition { id });
+        }
     });
 
     let sender = commands.clone();
@@ -4438,6 +4441,8 @@ struct Workspace {
     /// Each shown host's Diagnostics surface, and the one diagnosis or fix
     /// in flight.
     diagnosis: Rc<RefCell<DiagnosisFlowState>>,
+    /// Manual-download prompts waiting behind the one on screen.
+    acquisition_prompts: Rc<RefCell<std::collections::VecDeque<backend::ModAcquisitionData>>>,
     /// What a surface asks the worker for when a pane opens it.
     commands: Sender<Command>,
 }
@@ -7019,7 +7024,8 @@ fn apply_event(
             )));
         }
         Event::ModVersions(data) => apply_mod_versions(ui, data),
-        Event::ModAcquisitionRequired(data) => apply_mod_acquisition(ui, &data, workspace),
+        Event::ModAcquisitionRequired(data) => apply_mod_acquisition(ui, data, workspace),
+        Event::ModAcquisitionEnded { id } => end_mod_acquisition(ui, id, workspace),
         Event::ModRelations(data) => apply_mod_relations(ui, &data),
         Event::ModRemovalPlan(data) => apply_mod_removal_plan(ui, data),
         Event::ModResults(results) => apply_mod_results(workspace, results, commands),
@@ -8355,26 +8361,33 @@ fn apply_mod_versions(ui: &AppWindow, data: backend::ModVersionsData) {
 /// and the same folder watcher is already running over it in the backend, so
 /// nothing here has to poll or retry: the finished change arrives as an
 /// ordinary result.
-fn apply_mod_acquisition(
-    ui: &AppWindow,
-    data: &backend::ModAcquisitionData,
-    workspace: &Workspace,
-) {
-    // Addressed to the instance rather than to one open mod: installing a mod
-    // from the browser reaches this with no mod open at all, so the install the
-    // queue is running counts as the operation the user started.
-    let installing = workspace
-        .browser
-        .installs
-        .borrow()
-        .active
-        .as_ref()
-        .is_some_and(|active| active.instance == data.instance);
-    if !installing && !presentation::result_is_current(&data.instance, &ui.get_mod_action_host()) {
+///
+/// Every operation that waits on a release gets its prompt, whichever dialog
+/// the window showed before, because the wait has no other way to be seen or
+/// ended. A prompt that arrives while another one is on screen waits its turn
+/// instead of replacing it, since replacing would leave its wait with no
+/// dialog to cancel it from.
+fn apply_mod_acquisition(ui: &AppWindow, data: backend::ModAcquisitionData, workspace: &Workspace) {
+    let on_screen = ui.get_modal() == "mod-acquire" && !ui.get_mod_acquisition_id().is_empty();
+    if on_screen && ui.get_mod_acquisition_id() != data.id.to_string() {
+        workspace.acquisition_prompts.borrow_mut().push_back(data);
         return;
+    }
+    show_mod_acquisition(ui, &data);
+}
+
+fn show_mod_acquisition(ui: &AppWindow, data: &backend::ModAcquisitionData) {
+    // The dialog this replaces is closed the way its own close button would,
+    // so an install confirmation still gives its place in the queue back and
+    // an import still stops its analysis.
+    match ui.get_modal().as_str() {
+        "mod-plan" => ui.invoke_abandon_browser_install(),
+        "import" => ui.invoke_close_import_modal(),
+        _ => {}
     }
     ui.set_mod_action_pending(false);
     ui.set_modal_error(SharedString::default());
+    ui.set_mod_acquisition_id(data.id.to_string().into());
     ui.set_mod_acquisition_name(data.name.as_str().into());
     ui.set_mod_acquisition_items(model(
         data.items
@@ -8388,6 +8401,28 @@ fn apply_mod_acquisition(
             .collect::<Vec<_>>(),
     ));
     ui.set_modal("mod-acquire".into());
+}
+
+/// Closes the prompt whose wait is over, and only that one: a dialog the user
+/// has opened since is not the finished wait's to close.
+fn end_mod_acquisition(ui: &AppWindow, id: u64, workspace: &Workspace) {
+    workspace
+        .acquisition_prompts
+        .borrow_mut()
+        .retain(|queued| queued.id != id);
+    if ui.get_mod_acquisition_id() != id.to_string() {
+        return;
+    }
+    ui.set_mod_acquisition_id(SharedString::default());
+    if ui.get_modal() == "mod-acquire" {
+        ui.set_modal(SharedString::default());
+        ui.set_modal_error(SharedString::default());
+        ui.set_mod_action_pending(false);
+    }
+    let next = workspace.acquisition_prompts.borrow_mut().pop_front();
+    if let Some(next) = next {
+        show_mod_acquisition(ui, &next);
+    }
 }
 
 /// Fills in what the open mod declares and what declares it.
@@ -10534,6 +10569,7 @@ mod tests {
             browser: Rc::default(),
             isolation: Rc::default(),
             diagnosis: Rc::default(),
+            acquisition_prompts: Rc::default(),
             commands: sender,
         };
         register_workspace(ui, &workspace);
@@ -13191,28 +13227,114 @@ mod tests {
         assert_eq!(commands.try_iter().count(), 0);
     }
 
-    /// A release that must be fetched by hand is asked for even though the
-    /// install was started without any dialog naming its instance.
-    #[test]
-    fn a_manual_download_prompt_for_the_running_install_is_shown() {
-        let ui = test_window();
-        let (workspace, _commands) = test_workspace_sending(&ui);
-        register_browser_install(&ui, &workspace.commands, &workspace);
-        let queued = ephervex_model::InstanceId::new().to_string();
-        let other = ephervex_model::InstanceId::new().to_string();
-        let prompt = |instance: &str| backend::ModAcquisitionData {
+    fn acquisition_prompt(id: u64, instance: &str) -> backend::ModAcquisitionData {
+        backend::ModAcquisitionData {
+            id,
             instance: instance.to_owned(),
             logical_path: String::new(),
             name: "UtilitiX".to_owned(),
             items: Vec::new(),
-        };
-        ui.invoke_install_from_browser(queued.as_str().into(), "modrinth".into(), "first".into());
+        }
+    }
 
-        apply_mod_acquisition(&ui, &prompt(&other), &workspace);
-        assert_eq!(ui.get_modal(), "", "another instance's prompt stays hidden");
+    /// A release that must be fetched by hand is asked for whichever dialog
+    /// the window showed before, because the wait has no other way to be seen.
+    #[test]
+    fn a_manual_download_prompt_is_shown_without_any_mod_dialog_open() {
+        let ui = test_window();
+        let (workspace, _commands) = test_workspace_sending(&ui);
+        let server = ephervex_model::ServerId::new().to_string();
 
-        apply_mod_acquisition(&ui, &prompt(&queued), &workspace);
+        apply_mod_acquisition(&ui, acquisition_prompt(1, &server), &workspace);
+
         assert_eq!(ui.get_modal(), "mod-acquire");
+        assert_eq!(ui.get_mod_acquisition_id(), "1");
+    }
+
+    #[test]
+    fn a_manual_download_prompt_over_an_install_confirmation_releases_the_install_queue() {
+        let ui = test_window();
+        let (workspace, _commands) = test_workspace_sending(&ui);
+        register_browser_install(&ui, &workspace.commands, &workspace);
+        let queued = ephervex_model::InstanceId::new().to_string();
+        ui.invoke_install_from_browser(queued.as_str().into(), "modrinth".into(), "first".into());
+        ui.set_modal("mod-plan".into());
+        assert!(workspace.browser.installs.borrow().active.is_some());
+        let other = ephervex_model::InstanceId::new().to_string();
+
+        apply_mod_acquisition(&ui, acquisition_prompt(1, &other), &workspace);
+        assert_eq!(ui.get_modal(), "mod-acquire");
+        end_mod_acquisition(&ui, 1, &workspace);
+
+        assert!(
+            workspace.browser.installs.borrow().active.is_none(),
+            "the replaced confirmation no longer holds the queue's running request"
+        );
+    }
+
+    #[test]
+    fn a_second_manual_download_prompt_waits_behind_the_one_on_screen() {
+        let ui = test_window();
+        let (workspace, _commands) = test_workspace_sending(&ui);
+        let host = ephervex_model::InstanceId::new().to_string();
+        apply_mod_acquisition(&ui, acquisition_prompt(1, &host), &workspace);
+
+        apply_mod_acquisition(&ui, acquisition_prompt(2, &host), &workspace);
+        assert_eq!(
+            ui.get_mod_acquisition_id(),
+            "1",
+            "the prompt on screen keeps the cancel button its wait needs"
+        );
+
+        end_mod_acquisition(&ui, 1, &workspace);
+        assert_eq!(ui.get_modal(), "mod-acquire");
+        assert_eq!(ui.get_mod_acquisition_id(), "2");
+
+        end_mod_acquisition(&ui, 2, &workspace);
+        assert_eq!(ui.get_modal(), "");
+    }
+
+    #[test]
+    fn a_queued_manual_download_prompt_that_ends_is_never_shown() {
+        let ui = test_window();
+        let (workspace, _commands) = test_workspace_sending(&ui);
+        let host = ephervex_model::InstanceId::new().to_string();
+        apply_mod_acquisition(&ui, acquisition_prompt(1, &host), &workspace);
+        apply_mod_acquisition(&ui, acquisition_prompt(2, &host), &workspace);
+
+        end_mod_acquisition(&ui, 2, &workspace);
+        end_mod_acquisition(&ui, 1, &workspace);
+
+        assert_eq!(ui.get_modal(), "");
+    }
+
+    #[test]
+    fn a_finished_manual_download_wait_leaves_an_unrelated_dialog_open() {
+        let ui = test_window();
+        let (workspace, _commands) = test_workspace_sending(&ui);
+        let host = ephervex_model::InstanceId::new().to_string();
+        apply_mod_acquisition(&ui, acquisition_prompt(1, &host), &workspace);
+        ui.set_modal("rename".into());
+
+        end_mod_acquisition(&ui, 1, &workspace);
+
+        assert_eq!(ui.get_modal(), "rename");
+    }
+
+    #[test]
+    fn leaving_a_manual_download_prompt_cancels_the_wait_it_names() {
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        register_mod_actions(&ui, &workspace.commands, &workspace);
+        let host = ephervex_model::InstanceId::new().to_string();
+        apply_mod_acquisition(&ui, acquisition_prompt(7, &host), &workspace);
+
+        ui.invoke_cancel_mod_acquisition(ui.get_mod_acquisition_id());
+
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::CancelModAcquisition { id: 7 })
+        ));
     }
 
     #[test]

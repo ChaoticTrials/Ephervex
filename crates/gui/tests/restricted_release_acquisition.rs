@@ -63,9 +63,9 @@ fn a_file_with_no_page_still_names_itself() {
 #[test]
 fn leaving_the_dialog_stops_the_wait() {
     let ui = window();
-    let canceled = Rc::new(RefCell::new(0_u32));
-    let counter = Rc::clone(&canceled);
-    ui.on_cancel_mod_acquisition(move || *counter.borrow_mut() += 1);
+    let canceled: Rc<RefCell<Vec<String>>> = Rc::default();
+    let recorder = Rc::clone(&canceled);
+    ui.on_cancel_mod_acquisition(move |id| recorder.borrow_mut().push(id.to_string()));
     acquisition(&ui, &[blocked(FILE_PAGE)]);
 
     ElementHandle::find_by_accessible_label(&ui, &lookup("gui-cancel"))
@@ -74,9 +74,9 @@ fn leaving_the_dialog_stops_the_wait() {
         .mock_single_click(PointerEventButton::Left);
 
     assert_eq!(
-        *canceled.borrow(),
-        1,
-        "the folder watcher has to be stopped"
+        canceled.borrow().as_slice(),
+        ["42".to_owned()],
+        "the folder watcher this prompt belongs to has to be stopped"
     );
     assert_eq!(ui.get_modal().as_str(), "");
 }
@@ -92,6 +92,7 @@ fn blocked(browser_url: &str) -> BlockedFileRow {
 
 fn acquisition(ui: &AppWindow, rows: &[BlockedFileRow]) {
     ui.set_loading(false);
+    ui.set_mod_acquisition_id("42".into());
     ui.set_mod_acquisition_name("Repro Mod".into());
     ui.set_mod_acquisition_items(ModelRc::new(VecModel::from(rows.to_vec())));
     ui.set_modal("mod-acquire".into());
