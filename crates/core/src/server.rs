@@ -583,7 +583,7 @@ impl App {
         futures_util::future::join_all(
             running
                 .iter()
-                .map(|record| stop_for_deletion(record, files)),
+                .map(|record| stop_then_kill(record, files == FileDisposition::Keep)),
         )
         .await
         .into_iter()
@@ -894,6 +894,13 @@ impl App {
     pub async fn restart_server(&self, id: ServerId) -> CoreResult<ControlResponse> {
         let record = self.server(id)?;
         Ok(send_control(&record.root, &ControlAction::Restart).await?)
+    }
+
+    /// Stops a server through its supervisor and kills it when it will not
+    /// stop, for a caller whose own runtime is about to end.
+    pub async fn stop_server_or_kill(&self, id: ServerId) -> CoreResult<()> {
+        let record = self.server(id)?;
+        stop_then_kill(&record, true).await
     }
 
     pub async fn kill_server(&self, id: ServerId) -> CoreResult<ControlResponse> {
@@ -1327,10 +1334,10 @@ pub(crate) fn settled_runtime(root: &Path) -> CoreResult<RuntimeClassification> 
     }
 }
 
-/// Stops one server whose client is being deleted. The server goes away either
-/// way, so a clean stop that is refused or runs out of time becomes a kill.
-async fn stop_for_deletion(record: &ServerRecord, files: FileDisposition) -> CoreResult<()> {
-    if files == FileDisposition::Keep
+/// Stops one server that has to go away. A clean stop is tried when `graceful`,
+/// and one that is refused or runs out of time becomes a kill.
+async fn stop_then_kill(record: &ServerRecord, graceful: bool) -> CoreResult<()> {
+    if graceful
         && matches!(
             send_control(&record.root, &ControlAction::Stop).await,
             Ok(ControlResponse::Exited(_))

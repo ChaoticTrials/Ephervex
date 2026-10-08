@@ -95,7 +95,10 @@ canceled before the game started is a failure.
 `Restart` respawns only after graceful termination. `Kill` is available only
 through the live owner channel and ends every process in the server's process
 group, so a wrapper's own children go with it. Abrupt supervisor termination
-can leave an orphan despite best-effort child cleanup.
+can leave an orphan despite best-effort child cleanup. The desktop application
+supervises the servers it starts on threads of its own process, so quitting
+stops each of them first (`Stop`, then `Kill` when it does not exit) and waits
+for the supervisors to finish before the process exits.
 
 A run ends when the server process exits. Output that a descendant still holds
 open is read for a short while longer and then dropped, so a lingering

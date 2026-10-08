@@ -1845,6 +1845,145 @@ pub struct ActivityData {
 pub struct BackendHandle {
     pub commands: Sender<Command>,
     pub events: Receiver<Event>,
+    pub supervised: SupervisedServers,
+}
+
+/// How long quitting waits for the supervisors of the servers it stopped to
+/// release their runtime state, once the servers themselves are gone.
+const QUIT_SUPERVISOR_SETTLE: Duration = Duration::from_secs(10);
+
+/// The servers this process runs the supervisor of.
+///
+/// A supervisor lives on a thread of this process, so a server whose supervisor
+/// is not stopped before the process exits keeps running with nobody holding
+/// its input or output. Entries come and go with the server's own events.
+#[derive(Debug, Clone, Default)]
+pub struct SupervisedServers(Arc<Mutex<HashSet<ServerId>>>);
+
+impl SupervisedServers {
+    fn note(&self, server: ServerId, event: &ServerEvent) {
+        let Ok(mut servers) = self.0.lock() else {
+            return;
+        };
+        match event {
+            ServerEvent::Started { .. } => {
+                servers.insert(server);
+            }
+            ServerEvent::Finished { .. } => {
+                servers.remove(&server);
+            }
+            _ => {}
+        }
+    }
+
+    fn running(&self) -> Vec<ServerId> {
+        self.0
+            .lock()
+            .map_or_else(|_| Vec::new(), |servers| servers.iter().copied().collect())
+    }
+
+    /// Stops every server this process supervises, gracefully and then by force,
+    /// and waits for their supervisors to finish. Blocks until then.
+    pub fn stop_all(&self) {
+        // A server that registers while others are being stopped is stopped in
+        // its turn, so one that finished preparing in the meantime is not left.
+        let mut asked = HashSet::new();
+        let mut settle_deadline = None;
+        loop {
+            let fresh: Vec<ServerId> = self
+                .running()
+                .into_iter()
+                .filter(|server| asked.insert(*server))
+                .collect();
+            if !fresh.is_empty() {
+                tracing::info!(count = fresh.len(), "stopping the supervised servers");
+                thread::scope(|scope| {
+                    for server in fresh {
+                        let spawned = thread::Builder::new()
+                            .name("ephervex-quit-stop".to_owned())
+                            .spawn_scoped(scope, move || stop_supervised_server(server));
+                        if let Err(error) = spawned {
+                            tracing::warn!(%server, %error, "could not stop a server on quit");
+                        }
+                    }
+                });
+                settle_deadline = None;
+                continue;
+            }
+            if self.running().is_empty() {
+                break;
+            }
+            // Asked to stop and still registered: its supervisor is given a
+            // moment to finish, but not forever.
+            let deadline = *settle_deadline
+                .get_or_insert_with(|| std::time::Instant::now() + QUIT_SUPERVISOR_SETTLE);
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+/// A server's events as a forwarder reads them, each one recorded in the
+/// registry as it is taken off the channel.
+///
+/// Recording belongs to reading rather than to the forwarder's own branches,
+/// because a forwarder takes a burst of output and any other event that lands
+/// in it together, and a `Started` or `Finished` taken that way must count too.
+struct ObservedServerEvents {
+    events: tokio::sync::mpsc::UnboundedReceiver<ServerEvent>,
+    supervised: SupervisedServers,
+    server: ServerId,
+}
+
+impl ObservedServerEvents {
+    const fn new(
+        events: tokio::sync::mpsc::UnboundedReceiver<ServerEvent>,
+        supervised: SupervisedServers,
+        server: ServerId,
+    ) -> Self {
+        Self {
+            events,
+            supervised,
+            server,
+        }
+    }
+
+    async fn recv(&mut self) -> Option<ServerEvent> {
+        let event = self.events.recv().await?;
+        self.supervised.note(self.server, &event);
+        Some(event)
+    }
+
+    fn try_recv(&mut self) -> Result<ServerEvent, tokio::sync::mpsc::error::TryRecvError> {
+        let event = self.events.try_recv()?;
+        self.supervised.note(self.server, &event);
+        Ok(event)
+    }
+}
+
+fn stop_supervised_server(server: ServerId) {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            tracing::warn!(%server, %error, "could not stop a server on quit");
+            return;
+        }
+    };
+    let outcome = App::open()
+        .map_err(|error| error.to_string())
+        .and_then(|app| {
+            runtime
+                .block_on(app.stop_server_or_kill(server))
+                .map_err(|error| ErrorChain(&error).to_string())
+        });
+    if let Err(error) = outcome {
+        tracing::warn!(%server, %error, "a server was not stopped on quit");
+    }
 }
 
 impl std::fmt::Debug for BackendHandle {
@@ -2144,11 +2283,20 @@ pub fn spawn() -> BackendHandle {
     let (command_tx, command_rx) = mpsc::channel();
     let (event_tx, event_rx) = mpsc::channel();
     let cancellations = Arc::new(Mutex::new(HashMap::new()));
+    let supervised = SupervisedServers::default();
     let worker_events = event_tx.clone();
     let worker_cancellations = Arc::clone(&cancellations);
+    let worker_supervised = supervised.clone();
     if let Err(error) = thread::Builder::new()
         .name("ephervex-core-worker".to_owned())
-        .spawn(move || run_worker(command_rx, worker_events, worker_cancellations))
+        .spawn(move || {
+            run_worker(
+                command_rx,
+                worker_events,
+                worker_cancellations,
+                worker_supervised,
+            );
+        })
     {
         tracing::error!(%error, "could not start the GUI core worker");
         let _ = event_tx.send(Event::ModalError {
@@ -2159,6 +2307,7 @@ pub fn spawn() -> BackendHandle {
     BackendHandle {
         commands: command_tx,
         events: event_rx,
+        supervised,
     }
 }
 
@@ -2167,6 +2316,7 @@ fn run_worker(
     commands: Receiver<Command>,
     events: Sender<Event>,
     cancellations: CancellationRegistry,
+    supervised: SupervisedServers,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -2593,6 +2743,7 @@ fn run_worker(
                             LaunchTracking {
                                 cancellations: Arc::clone(&cancellations),
                                 launches: Arc::clone(&launches),
+                                supervised: supervised.clone(),
                             },
                             ConnectRun {
                                 client,
@@ -2619,7 +2770,7 @@ fn run_worker(
                         ),
                         InstalledHost::Server(server) => {
                             settled.server_completion_owned = true;
-                            start_server(&app, &events, &changing, server);
+                            start_server(&app, &events, &changing, &supervised, server);
                         }
                     },
                     Err(error) => send_error(&events, &error),
@@ -2653,6 +2804,7 @@ fn run_worker(
                     LaunchTracking {
                         cancellations: Arc::clone(&cancellations),
                         launches: Arc::clone(&launches),
+                        supervised: supervised.clone(),
                     },
                     ConnectRun {
                         client,
@@ -4034,7 +4186,9 @@ fn run_worker(
                     }
                 }
             }
-            Command::StartServer(server) => start_server(&app, &events, &changing, server),
+            Command::StartServer(server) => {
+                start_server(&app, &events, &changing, &supervised, server);
+            }
             Command::StopServer(server) => {
                 spawn_server_control(app.paths().clone(), &events, server, ServerControl::Stop);
             }
@@ -4084,6 +4238,7 @@ fn run_worker(
                             LaunchTracking {
                                 cancellations: Arc::clone(&cancellations),
                                 launches: Arc::clone(&launches),
+                                supervised: supervised.clone(),
                             },
                             ClientRestart {
                                 instance,
@@ -6377,7 +6532,13 @@ fn launch_client(
 }
 
 /// Starts a server on its own, as its Start button does.
-fn start_server(app: &App, events: &Sender<Event>, changing: &ChangingHosts, server: ServerId) {
+fn start_server(
+    app: &App,
+    events: &Sender<Event>,
+    changing: &ChangingHosts,
+    supervised: &SupervisedServers,
+    server: ServerId,
+) {
     if refuse_while_changing(changing, InstalledHost::Server(server), events) {
         let _ = events.send(Event::ServerTool {
             server,
@@ -6388,7 +6549,13 @@ fn start_server(app: &App, events: &Sender<Event>, changing: &ChangingHosts, ser
     let entity = app
         .server(server)
         .map_or_else(|_| server.to_string(), |record| record.name);
-    spawn_server(app.paths().clone(), events, server, entity);
+    spawn_server(
+        app.paths().clone(),
+        events,
+        supervised.clone(),
+        server,
+        entity,
+    );
 }
 
 /// Settles one pair start when dropped, so a refusal, a failure, a
@@ -6706,6 +6873,7 @@ fn recorded_game_is(paths: &Paths, instance: InstanceId, pid: u32) -> bool {
 struct LaunchTracking {
     cancellations: CancellationRegistry,
     launches: RunningLaunches,
+    supervised: SupervisedServers,
 }
 
 /// One client restart, as its thread needs it.
@@ -7010,7 +7178,13 @@ fn forward_launch_event(
     }
 }
 
-fn spawn_server(paths: Paths, events: &Sender<Event>, server: ServerId, entity: String) {
+fn spawn_server(
+    paths: Paths,
+    events: &Sender<Event>,
+    supervised: SupervisedServers,
+    server: ServerId,
+    entity: String,
+) {
     spawn_detached_with_setup_failure(
         paths.clone(),
         events.clone(),
@@ -7023,13 +7197,14 @@ fn spawn_server(paths: Paths, events: &Sender<Event>, server: ServerId, entity: 
             });
         },
         move |app, events, runtime| {
-            let (observer, mut receiver) = ServerObserver::channel();
+            let (observer, receiver) = ServerObserver::channel();
             let event_sender = events.clone();
             let entity_for_events = entity.clone();
             let paths_for_events = paths.clone();
             let observed_operation = Arc::new(Mutex::new(None::<String>));
             let forwarded_operation = Arc::clone(&observed_operation);
             runtime.block_on(async move {
+                let mut receiver = ObservedServerEvents::new(receiver, supervised, server);
                 let forward = tokio::spawn(async move {
                     while let Some(event) = receiver.recv().await {
                         if let ServerEvent::Output(line) = event {
@@ -7235,6 +7410,7 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
     let LaunchTracking {
         cancellations,
         launches,
+        supervised,
     } = tracking;
     let ConnectRun {
         client,
@@ -7262,7 +7438,7 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
         move |mut app, events, runtime| {
             runtime.block_on(async move {
                 let (connect_observer, mut connect_events) = LaunchAndConnectObserver::channel();
-                let (server_observer, mut server_events) = ServerObserver::channel();
+                let (server_observer, server_events) = ServerObserver::channel();
                 let (launch_observer, mut launch_events) = LaunchObserver::channel();
                 let cancel = CancellationToken::new();
                 // A client started this way is running just as much as one
@@ -7311,6 +7487,8 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
                 let server_entity = entity.clone();
                 let observed_operation = Arc::new(Mutex::new(None::<String>));
                 let forwarded_operation = Arc::clone(&observed_operation);
+                let mut server_events =
+                    ObservedServerEvents::new(server_events, supervised, server);
                 let server_forward = tokio::spawn(async move {
                     while let Some(event) = server_events.recv().await {
                         if let ServerEvent::Output(line) = event {
@@ -10932,6 +11110,73 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Quitting stops what this process supervises and nothing else, so a run
+    /// has to be known from the moment its server starts until it is over.
+    #[test]
+    fn a_server_is_supervised_from_its_start_to_the_end_of_its_run() {
+        let supervised = SupervisedServers::default();
+        let server = ServerId::new();
+        let other = ServerId::new();
+
+        supervised.note(server, &ServerEvent::Restarting);
+        assert!(supervised.running().is_empty(), "nothing started yet");
+
+        supervised.note(server, &ServerEvent::Started { pid: 1 });
+        supervised.note(other, &ServerEvent::Started { pid: 2 });
+        supervised.note(server, &ServerEvent::Restarting);
+        assert_eq!(
+            supervised.running().len(),
+            2,
+            "a restart keeps the run supervised"
+        );
+
+        supervised.note(server, &ServerEvent::Finished { exit: None });
+        assert_eq!(supervised.running(), vec![other]);
+    }
+
+    /// A burst of output takes whatever lands with it off the channel in one
+    /// read, and those events are the run's start and end as much as any.
+    #[tokio::test]
+    async fn events_taken_with_a_burst_of_output_still_count() {
+        fn captured_line(text: &str) -> ephervex_core::CapturedLine {
+            ephervex_server::CapturedLine::from_bytes(
+                ephervex_server::CaptureStream::Stdout,
+                text.as_bytes(),
+            )
+        }
+
+        let supervised = SupervisedServers::default();
+        let server = ServerId::new();
+        let (observer, events) = ServerObserver::channel();
+        let mut events = ObservedServerEvents::new(events, supervised.clone(), server);
+
+        observer.emit(ServerEvent::Output(captured_line("loading")));
+        observer.emit(ServerEvent::Started { pid: 1 });
+        observer.emit(ServerEvent::Output(captured_line("saving")));
+        observer.emit(ServerEvent::Finished { exit: None });
+
+        events.recv().await.expect("the first event");
+        assert!(matches!(
+            events.try_recv().expect("started"),
+            ServerEvent::Started { .. }
+        ));
+        assert_eq!(
+            supervised.running(),
+            vec![server],
+            "a start taken in a burst"
+        );
+        events.try_recv().expect("output");
+        events.try_recv().expect("finished");
+        assert!(supervised.running().is_empty(), "an end taken in a burst");
+    }
+
+    /// With nothing supervised there is nothing to wait for, so quitting
+    /// returns at once rather than opening the launcher's data.
+    #[test]
+    fn quitting_with_no_supervised_server_stops_nothing() {
+        SupervisedServers::default().stop_all();
     }
 
     /// Runs a supervised child that never logs that it finished starting and

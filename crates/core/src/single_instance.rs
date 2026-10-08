@@ -44,7 +44,7 @@ const MAX_UNIX_SOCKET_PATH_BYTES: usize = 107;
 #[derive(Debug)]
 pub enum Startup {
     /// Nobody else was running. This process owns the name until the returned
-    /// value is dropped.
+    /// value is dropped, or until [`ListeningInstance::release`] gives it up.
     Primary(Box<PrimaryInstance>),
     /// A launcher was already running and has been handed the message. This
     /// process has nothing left to do and should exit successfully.
@@ -62,6 +62,25 @@ pub struct PrimaryInstance {
     path: PathBuf,
 }
 
+/// The launcher name a listening instance still holds.
+#[derive(Debug)]
+pub struct ListeningInstance {
+    path: PathBuf,
+}
+
+impl ListeningInstance {
+    /// Gives the name up, so a launch from now on starts a launcher of its own
+    /// instead of handing over to this one. For a launcher that is quitting but
+    /// has no window to show for the time that takes.
+    pub fn release(self) {
+        if let Err(error) = std::fs::remove_file(&self.path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            warn!(path = %self.path.display(), %error, "could not release the launcher socket");
+        }
+    }
+}
+
 impl PrimaryInstance {
     /// Where the socket is, for logs and tests.
     #[must_use]
@@ -71,11 +90,19 @@ impl PrimaryInstance {
 
     /// Answers later arrivals, calling `deliver` for each message.
     ///
-    /// Runs on a thread of its own and never returns, because a launcher that
-    /// stopped listening would silently start opening second windows again.
-    /// The callback is invoked off the UI thread, so a frontend hands the
-    /// message to its event loop rather than touching widgets here.
-    pub fn listen(self, deliver: impl Fn(String) + Send + 'static) {
+    /// Runs on a thread of its own that keeps answering until the process ends,
+    /// because a launcher that stopped listening would silently start opening
+    /// second windows again. The callback is invoked off the UI thread, so a
+    /// frontend hands the message to its event loop rather than touching
+    /// widgets here.
+    ///
+    /// Returns the means of giving the name up, or `None` when the thread could
+    /// not start: the name is then already released, and is no longer ours to
+    /// give up.
+    pub fn listen(self, deliver: impl Fn(String) + Send + 'static) -> Option<ListeningInstance> {
+        let listening = ListeningInstance {
+            path: self.path.clone(),
+        };
         std::thread::Builder::new()
             .name("ephervex-single-instance".to_owned())
             .spawn(move || {
@@ -93,10 +120,9 @@ impl PrimaryInstance {
                     }
                 }
             })
-            .map_or_else(
-                |error| warn!(%error, "could not answer later launches"),
-                |_handle| (),
-            );
+            .map_err(|error| warn!(%error, "could not answer later launches"))
+            .ok()
+            .map(|_handle| listening)
     }
 }
 
@@ -384,6 +410,27 @@ mod tests {
                 .expect("the running launcher is handed the link"),
             link
         );
+    }
+
+    /// A launcher that is quitting gives the name up, so the next launch opens a
+    /// window instead of handing over to a process that has none to raise.
+    #[test]
+    fn a_released_name_is_taken_by_the_next_launch() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let path = base.path().join("ephervex.sock");
+        let primary = PrimaryInstance {
+            listener: claim(&path).expect("bind"),
+            path: path.clone(),
+        };
+
+        let listening = primary.listen(|_| {}).expect("the listener starts");
+        assert_eq!(
+            claim(&path).expect_err("taken while listening").kind(),
+            std::io::ErrorKind::AddrInUse
+        );
+        listening.release();
+
+        assert!(claim(&path).is_ok(), "the name is free for the next launch");
     }
 
     /// A second launch with no link still hands over, so it raises the existing

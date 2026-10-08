@@ -2028,6 +2028,30 @@ mod tests {
         assert!(server.root.exists());
     }
 
+    /// A caller whose runtime is ending saves the world rather than killing it.
+    #[tokio::test]
+    async fn stopping_or_killing_a_supervised_server_stops_it_cleanly_first() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let client = repro_client(&app);
+        let server = linked_server(&app, base.path(), client.id, "Repro Server");
+        let supervisor = supervise(
+            &server,
+            "while IFS= read -r line; do [ \"$line\" = stop ] && exit 0; done",
+        )
+        .await;
+
+        app.stop_server_or_kill(server.id).await.expect("stopped");
+
+        let exit = supervisor.await.expect("join").expect("supervised");
+        assert_eq!(
+            exit.code,
+            Some(0),
+            "the server stopped itself, got {exit:?}"
+        );
+        assert!(exit.stop_requested, "the exit records the stop");
+    }
+
     /// A deletion that is refused anyway has no reason to take the server down.
     #[tokio::test]
     async fn a_running_client_refuses_before_any_linked_server_is_stopped() {

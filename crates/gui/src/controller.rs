@@ -66,8 +66,21 @@ pub struct Controller {
     /// Kept so a later hook, such as [`accept_file_drops`], can send the same
     /// commands the callbacks registered here do.
     commands: Sender<Command>,
+    /// The servers this application supervises, which quitting has to stop.
+    supervised: backend::SupervisedServers,
     import_flow: Rc<RefCell<ImportFlowState>>,
     workspace: Rc<RefCell<WorkspaceState>>,
+}
+
+impl Controller {
+    /// Stops every server this application supervises and waits for them.
+    ///
+    /// Called once the window is gone: a server's supervisor lives in this
+    /// process, so one left running past its exit has no stdin, no output and
+    /// no owner, and the next launch can only report it as orphaned.
+    pub fn stop_supervised_servers(&self) {
+        self.supervised.stop_all();
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -2322,6 +2335,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         _poll_timer: poll_timer,
         _running_timer: running_timer,
         commands: backend.commands,
+        supervised: backend.supervised,
         import_flow,
         workspace: workspace.state,
     }

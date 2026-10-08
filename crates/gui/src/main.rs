@@ -146,7 +146,7 @@ fn main() -> Result<(), slint::PlatformError> {
         tracing::info!("opening a modpack a link named");
         ephervex_gui::controller::open_pack_link(&ui, url);
     }
-    if let Some(primary) = primary {
+    let launcher_name = primary.and_then(|primary| {
         // Delivered onto the event loop: the listener runs on a thread of its
         // own, and a frontend does not touch widgets from one.
         let weak = ui.as_weak();
@@ -162,15 +162,23 @@ fn main() -> Result<(), slint::PlatformError> {
                     }
                 }
             });
-        });
-    }
+        })
+    });
 
     tracing::info!(
         "starting {} {} desktop interface",
         ephervex_model::APP_NAME,
         ephervex_model::APP_VERSION
     );
-    ui.run()
+    let outcome = ui.run();
+    // Stopping servers takes a while with no window, and a launch in that time
+    // has to open one rather than hand over to this process.
+    if let Some(launcher_name) = launcher_name {
+        launcher_name.release();
+    }
+    // Closing the window is quitting: the servers it started go with it.
+    controller.stop_supervised_servers();
+    outcome
 }
 
 #[cfg(test)]
