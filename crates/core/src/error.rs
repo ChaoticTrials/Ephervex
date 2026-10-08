@@ -331,6 +331,13 @@ pub enum CoreError {
         source: std::io::Error,
     },
 
+    /// The name a toggle would move a mod's jar to is already taken.
+    ///
+    /// Both `<name>.jar` and `<name>.jar.disabled` exist, so either rename
+    /// would destroy one of two files the user may want. Neither is touched.
+    #[error("both `{}` and its disabled twin exist", path.display())]
+    ModSpellingOccupied { path: PathBuf },
+
     /// Asked to delete a jar the launcher installed and records.
     ///
     /// Deleting a file is only ever offered for a jar somebody put in `mods/`
@@ -507,6 +514,7 @@ impl CoreError {
             Self::ServerNotLinkedToInstance { .. } => "error-server-not-linked",
             Self::ModFileMissing { .. } => "error-mod-file-missing",
             Self::ModFileNotToggled { .. } => "error-mod-file-not-toggled",
+            Self::ModSpellingOccupied { .. } => "error-mod-spelling-occupied",
             Self::ModNotHandPlaced { .. } => "error-mod-not-hand-placed",
             Self::ModFileNotDeleted { .. } => "error-mod-file-not-deleted",
             Self::DiagnosticBundleNotWritten { .. } => "error-diagnostic-bundle-not-written",
@@ -721,6 +729,7 @@ impl CoreError {
             | Self::ModIdentityIncomplete { .. }
             | Self::ModFileMissing { .. }
             | Self::ModFileNotToggled { .. }
+            | Self::ModSpellingOccupied { .. }
             | Self::InstanceAlreadyPersistent { .. }
             | Self::InstanceRunning { .. }
             | Self::LinkedServerRunning { .. }
@@ -783,6 +792,7 @@ impl CoreError {
             | Self::ModMutationRestricted { path, .. }
             | Self::ModFileMissing { path }
             | Self::ModFileNotToggled { path, .. }
+            | Self::ModSpellingOccupied { path }
             | Self::ModNotHandPlaced { path }
             | Self::ModFileNotDeleted { path, .. }
             | Self::ModFileNotAdded { path, .. }

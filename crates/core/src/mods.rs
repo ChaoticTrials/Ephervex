@@ -186,6 +186,27 @@ impl ModPresence {
     }
 }
 
+/// Renames `from` to `to`, failing with `AlreadyExists` instead of replacing.
+///
+/// `rename(2)` silently replaces its destination, which for a mod toggle would
+/// destroy the user's other copy. `RENAME_NOREPLACE` makes the check atomic;
+/// where the filesystem or a sandbox lacks it, an existence check stands in.
+fn rename_without_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+    use rustix::io::Errno;
+
+    match renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE) {
+        Ok(()) => Ok(()),
+        Err(Errno::INVAL | Errno::NOSYS | Errno::OPNOTSUPP | Errno::PERM) => {
+            if std::fs::symlink_metadata(to).is_ok() {
+                return Err(std::io::ErrorKind::AlreadyExists.into());
+            }
+            std::fs::rename(from, to)
+        }
+        Err(errno) => Err(errno.into()),
+    }
+}
+
 /// Whether a digest lookup could still say something about this mod.
 ///
 /// Two jars arrive without an identity: one somebody copied into `mods/`
@@ -1227,6 +1248,10 @@ impl App {
     /// touched, and the mod's provider identity, version and origin survive
     /// untouched so re-enabling it needs nothing from a catalog.
     ///
+    /// When both spellings exist the toggle is refused with
+    /// [`CoreError::ModSpellingOccupied`] and neither file changes: a plain
+    /// rename would silently replace the other file.
+    ///
     /// Asking for the state a mod is already in succeeds and does nothing, so a
     /// frontend that toggles the same row twice, or a retried command, cannot
     /// produce a half-renamed pair. A mod whose file is missing altogether is a
@@ -1261,9 +1286,17 @@ impl App {
                 path: logical_path.to_path_buf(),
             });
         }
-        std::fs::rename(from, to).map_err(|source| CoreError::ModFileNotToggled {
-            path: logical_path.to_path_buf(),
-            source,
+        rename_without_replacing(from, to).map_err(|source| {
+            if source.kind() == std::io::ErrorKind::AlreadyExists {
+                CoreError::ModSpellingOccupied {
+                    path: logical_path.to_path_buf(),
+                }
+            } else {
+                CoreError::ModFileNotToggled {
+                    path: logical_path.to_path_buf(),
+                    source,
+                }
+            }
         })?;
         info!(
             host = %host.id(),
@@ -2816,6 +2849,33 @@ mod tests {
             app.set_mod_enabled(host, &path, false).expect("still off"),
             ModPresence::Disabled
         );
+    }
+
+    /// A plain rename would silently replace the other spelling, destroying
+    /// whichever version the user kept there.
+    #[tokio::test]
+    async fn toggling_a_mod_whose_other_spelling_exists_changes_neither_file() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, instance) = imported_instance(base.path(), &["journeymap.jar"]).await;
+        let host = InstalledHost::Instance(instance);
+        let path = PathBuf::from("mods/journeymap.jar");
+        let mods_dir =
+            ephervex_storage::metadata::client_game_dir(&app.client(instance).unwrap().root)
+                .join("mods");
+        let enabled = mods_dir.join("journeymap.jar");
+        let disabled = mods_dir.join("journeymap.jar.disabled");
+        std::fs::write(&enabled, b"version 2").expect("write enabled");
+        std::fs::write(&disabled, b"version 1").expect("write disabled");
+
+        for wanted in [false, true] {
+            let error = app
+                .set_mod_enabled(host, &path, wanted)
+                .expect_err("either direction would replace the other file");
+            assert!(matches!(error, CoreError::ModSpellingOccupied { .. }));
+            assert_eq!(error.failing_path().as_deref(), Some(path.as_path()));
+            assert_eq!(std::fs::read(&enabled).unwrap(), b"version 2");
+            assert_eq!(std::fs::read(&disabled).unwrap(), b"version 1");
+        }
     }
 
     /// Enabling something that is not on disk would report a lie.
