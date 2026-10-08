@@ -1276,9 +1276,9 @@ failure. Atomic publication ensures another operation cannot mistake partial or
 unverified bytes for a cached artifact.
 
 A download whose address came from remote input, such as a pack file, a managed
-mod's artifact, or a pack archive behind a link, carries a host scope. The
-address is checked against the scope's hosts again when it is sent, and a
-redirect may reach only those hosts and the short list of delivery hosts they
+mod's artifact, a project icon, or a pack archive behind a link, carries a host
+scope. The address is checked against the scope's hosts again when it is sent,
+and a redirect may reach only those hosts and the short list of delivery hosts they
 are known to redirect to (the storage hosts behind GitHub release assets for
 Modrinth packs). Any other redirect is not followed and fails naming the host,
 so a host the launcher was allowed to contact cannot send it to one it was not

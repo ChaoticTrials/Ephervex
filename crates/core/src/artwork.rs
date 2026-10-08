@@ -40,9 +40,10 @@
 //! where it was in the list.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ephervex_download::{
-    CacheLayout, DomainAllowlist, DownloadManager, DownloadRequest, OperationReporter,
+    CacheLayout, DownloadManager, DownloadRequest, HostScope, OperationReporter,
 };
 use ephervex_mod_platform::ModProject;
 use ephervex_pack::PackError;
@@ -86,17 +87,18 @@ const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
 /// An icon has no published hash, so there is nothing to verify it against and
 /// nothing that would make re-fetching it more correct. What protects the
 /// launcher is the same transport and host policy an untrusted pack's downloads
-/// are held to, a ceiling on the response, and the decode bounds below.
+/// are held to, including a redirect that may not leave the provider's hosts, a
+/// ceiling on the response, and the decode bounds below.
 pub(crate) async fn cache_project_artwork(
     manager: &DownloadManager,
     cache: &CacheLayout,
-    allowlist: &DomainAllowlist,
+    hosts: &Arc<HostScope>,
     project: &ModProject,
     icon_url: &str,
     reporter: &OperationReporter,
     cancel: &CancellationToken,
 ) -> CoreResult<PathBuf> {
-    let url = allowlist
+    let url = hosts
         .validate(icon_url)
         .map_err(|source| PackError::DownloadUrlRejected {
             path: project.id.clone(),
@@ -118,7 +120,9 @@ pub(crate) async fn cache_project_artwork(
     let staging = staging_path(&destination);
     let fetched = manager
         .download(
-            &DownloadRequest::new(url, staging.clone()).labeled(project.id.clone()),
+            &DownloadRequest::new(url, staging.clone())
+                .labeled(project.id.clone())
+                .within(Arc::clone(hosts)),
             reporter,
             cancel,
         )
@@ -489,7 +493,9 @@ mod tests {
 
     // -- the cache, end to end ---------------------------------------------
 
-    use ephervex_download::{DownloaderConfig, HttpConfig, RetryPolicy};
+    use ephervex_download::{
+        DomainAllowlist, DownloadError, DownloaderConfig, HttpConfig, RetryPolicy,
+    };
     use ephervex_mod_platform::SideSupport;
     use ephervex_model::ModProvider;
     use wiremock::matchers::{method, path as route};
@@ -528,6 +534,10 @@ mod tests {
             .await;
     }
 
+    fn scope(allowlist: DomainAllowlist) -> Arc<HostScope> {
+        Arc::new(HostScope::new(allowlist, &HttpConfig::for_loopback_tests()).expect("scope"))
+    }
+
     async fn fetch(
         server: &MockServer,
         cache: &CacheLayout,
@@ -537,7 +547,7 @@ mod tests {
         cache_project_artwork(
             &manager(),
             cache,
-            &DomainAllowlist::for_loopback_tests("127.0.0.1"),
+            &scope(DomainAllowlist::for_loopback_tests("127.0.0.1")),
             project,
             &format!("{}{path}", server.uri()),
             &OperationReporter::silent("test-artwork"),
@@ -659,7 +669,7 @@ mod tests {
         let error = cache_project_artwork(
             &manager(),
             &cache,
-            &DomainAllowlist::modrinth_pack_defaults(),
+            &scope(DomainAllowlist::modrinth_pack_defaults()),
             &project("LOpKHB2A"),
             "https://evil.example/icon.png",
             &OperationReporter::silent("test-artwork"),
@@ -668,5 +678,82 @@ mod tests {
         .await
         .expect_err("must refuse");
         assert_eq!(error.message_id(), "error-pack-download-url-rejected");
+    }
+
+    #[tokio::test]
+    async fn an_icon_redirect_off_the_provider_hosts_is_refused_and_caches_nothing() {
+        // `localhost` is a different host from the approved `127.0.0.1`, so a
+        // redirect to it leaves the list.
+        let approved = MockServer::start().await;
+        let elsewhere = MockServer::start().await;
+        serve(&elsewhere, "/icon.png", encoded(16, 16, ImageFormat::Png)).await;
+        let off_list = format!("http://localhost:{}/icon.png", elsewhere.address().port());
+        Mock::given(method("GET"))
+            .and(route("/icon.png"))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", off_list.as_str()))
+            .mount(&approved)
+            .await;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = CacheLayout::new(dir.path());
+        let project = project("LOpKHB2A");
+
+        let error = fetch(&approved, &cache, &project, "/icon.png")
+            .await
+            .expect_err("must refuse");
+
+        let CoreError::Pack(PackError::DownloadFailed { source, .. }) = &error else {
+            panic!("expected a download failure, got {error:?}");
+        };
+        assert!(
+            matches!(**source, DownloadError::RedirectRefused { ref host, .. } if host == "localhost"),
+            "the refusal names the host the redirect led to: {source:?}"
+        );
+        assert!(
+            elsewhere
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "the off-list host is never contacted"
+        );
+        let canonical = cache
+            .project_artwork(project.provider.as_str(), &project.id)
+            .expect("a cache path");
+        assert!(!canonical.exists(), "nothing was published");
+        assert!(
+            !staging_path(&canonical).exists(),
+            "and no scratch was kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_icon_redirect_to_an_approved_redirect_host_is_followed() {
+        let approved = MockServer::start().await;
+        let delivery = MockServer::start().await;
+        serve(&delivery, "/icon.png", encoded(16, 16, ImageFormat::Png)).await;
+        let target = format!("http://localhost:{}/icon.png", delivery.address().port());
+        Mock::given(method("GET"))
+            .and(route("/icon.png"))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", target.as_str()))
+            .mount(&approved)
+            .await;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = CacheLayout::new(dir.path());
+
+        let cached = cache_project_artwork(
+            &manager(),
+            &cache,
+            &scope(
+                DomainAllowlist::for_loopback_tests("127.0.0.1").allowing_redirects_to("localhost"),
+            ),
+            &project("LOpKHB2A"),
+            &format!("{}/icon.png", approved.uri()),
+            &OperationReporter::silent("test-artwork"),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("artwork");
+
+        assert!(is_normalized(&cached));
     }
 }

@@ -31,9 +31,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ephervex_download::{
-    CacheLayout, DomainAllowlist, DownloadManager, DownloaderConfig, OperationReporter, hash_file,
+    CacheLayout, DomainAllowlist, DownloadManager, DownloaderConfig, HostScope, OperationReporter,
+    hash_file,
 };
 use ephervex_mod_platform::{
     AnnotatedVersion, InstallSelection, InstalledPolicy, InstalledProject, InstanceTarget,
@@ -1743,8 +1745,9 @@ impl App {
             return BTreeMap::new();
         }
 
+        let http = self.http_config();
         let manager = match DownloadManager::new(DownloaderConfig {
-            http: self.http_config(),
+            http: http.clone(),
             // Artwork is untrusted content off a CDN and nothing verifies it,
             // so what it may cost is capped rather than trusted.
             max_bytes: Some(MAX_ARTWORK_BYTES),
@@ -1762,11 +1765,21 @@ impl App {
         // archive, but it is still remote input naming a machine to talk to,
         // and one provider's list does not vouch for another's hosts.
         let allowlist = match catalog {
-            ModProvider::Modrinth => DomainAllowlist::modrinth_pack_defaults(),
+            ModProvider::Modrinth => self.modrinth_artifact_hosts(),
             ModProvider::CurseForge => self.curseforge_artifact_hosts(),
             // A catalog with no list of its own vouches for no host, so its
             // artwork is simply not fetched.
             _ => DomainAllowlist::empty(),
+        };
+
+        // A redirect from an approved icon address is held to the same list,
+        // and an icon is never fetched without that confinement.
+        let hosts = match HostScope::new(allowlist, &http) {
+            Ok(scope) => Arc::new(scope),
+            Err(error) => {
+                warn!(%error, "mod artwork could not be fetched");
+                return BTreeMap::new();
+            }
         };
 
         let mut cached = BTreeMap::new();
@@ -1775,7 +1788,7 @@ impl App {
                 break;
             }
             match crate::artwork::cache_project_artwork(
-                &manager, &cache, &allowlist, project, url, reporter, cancel,
+                &manager, &cache, &hosts, project, url, reporter, cancel,
             )
             .await
             {

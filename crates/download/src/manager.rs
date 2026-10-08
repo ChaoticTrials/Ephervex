@@ -205,6 +205,12 @@ impl HostScope {
         self.hosts.validate_url(url).is_ok()
     }
 
+    /// Parses `raw` and checks it against this scope's hosts under the same
+    /// rules a request to it is held to.
+    pub fn validate(&self, raw: &str) -> Result<Url, UrlPolicyError> {
+        self.hosts.validate(raw)
+    }
+
     /// Why the confining client stopped at a redirect to `target`.
     ///
     /// Only a host the scope does not permit is a refused redirect a caller can
