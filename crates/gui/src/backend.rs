@@ -2033,6 +2033,33 @@ impl HostChangeInFlight {
             key,
         }
     }
+
+    /// Marks every host in `targets`, or none of them and the refusal of the
+    /// change already rewriting one of them. Checking and marking happen under
+    /// one lock, so two changes that start together cannot both get in.
+    fn try_mark(
+        hosts: &ChangingHosts,
+        targets: &[InstalledHost],
+        refusal: &'static str,
+    ) -> Result<Vec<Self>, &'static str> {
+        let Ok(mut marked) = hosts.lock() else {
+            return Ok(Vec::new());
+        };
+        let keys: Vec<String> = targets.iter().map(|host| host_key(*host)).collect();
+        if let Some(existing) = keys.iter().find_map(|key| marked.get(key).copied()) {
+            return Err(existing);
+        }
+        let mut guards = Vec::with_capacity(keys.len());
+        for key in keys {
+            if marked.insert(key.clone(), refusal).is_none() {
+                guards.push(Self {
+                    hosts: Arc::clone(hosts),
+                    key,
+                });
+            }
+        }
+        Ok(guards)
+    }
 }
 
 impl Drop for HostChangeInFlight {
@@ -2066,6 +2093,51 @@ fn refuse_while_changing(
         });
     }
     refusal.is_some()
+}
+
+/// Claims `targets` for a change that runs beside the command loop, or tells
+/// the dialogs in `dialogs` (a toast when none is open) why it cannot start.
+/// The claim lasts until the returned marks are dropped.
+fn claim_hosts_for_change(
+    hosts: &ChangingHosts,
+    targets: &[InstalledHost],
+    refusal: &'static str,
+    dialogs: ModalScope,
+    events: &Sender<Event>,
+) -> Option<Vec<HostChangeInFlight>> {
+    match HostChangeInFlight::try_mark(hosts, targets, refusal) {
+        Ok(marks) => Some(marks),
+        Err(existing) => {
+            let _ = events.send(Event::ModalError {
+                scope: dialogs,
+                message: lookup(existing),
+            });
+            None
+        }
+    }
+}
+
+/// The instance and the linked servers a mod operation rewrites.
+fn mod_operation_hosts(instance: InstanceId, servers: &[ServerId]) -> Vec<InstalledHost> {
+    std::iter::once(InstalledHost::Instance(instance))
+        .chain(servers.iter().copied().map(InstalledHost::Server))
+        .collect()
+}
+
+/// Refuses a change to a host's mods while another change is rewriting it, and
+/// re-sends the durable mods so a toggle the panel already flipped goes back.
+fn refuse_mod_change_while_changing(
+    app: &App,
+    changing: &ChangingHosts,
+    host: InstalledHost,
+    events: &Sender<Event>,
+    refreshed: &RefreshedHosts,
+) -> bool {
+    let refused = refuse_while_changing(changing, host, events);
+    if refused {
+        send_host_mods(app, host, events, refreshed, false);
+    }
+    refused
 }
 
 pub fn spawn() -> BackendHandle {
@@ -2793,6 +2865,13 @@ fn run_worker(
                 }
             }
             Command::DeleteServer { id, files } => {
+                if let Some(refusal) = change_in_flight(&changing, InstalledHost::Server(id)) {
+                    let _ = events.send(Event::ModalError {
+                        scope: ModalScope::DELETE_SERVER,
+                        message: lookup(refusal),
+                    });
+                    continue;
+                }
                 let disposition = if files {
                     ephervex_core::FileDisposition::Remove
                 } else {
@@ -2811,8 +2890,18 @@ fn run_worker(
                 }
             }
             Command::ChangeLoaderVersion { instance, version } => {
+                let Some(in_flight) = claim_hosts_for_change(
+                    &changing,
+                    &[InstalledHost::Instance(instance)],
+                    "gui-loader-change-busy",
+                    ModalScope::LOADER_CHANGE,
+                    &events,
+                ) else {
+                    continue;
+                };
                 let paths = app.paths().clone();
                 spawn_detached(paths, events.clone(), move |app, events, runtime| {
+                    let _in_flight = in_flight;
                     let result = runtime.block_on(app.change_loader_version(
                         instance,
                         &version,
@@ -2850,6 +2939,18 @@ fn run_worker(
                 path,
                 version,
             } => {
+                // Claimed here, on the command loop, so no other change can slip
+                // in between the check and the mark. Planning may end in a
+                // confirmation instead of a change, which gives the host back.
+                let Some(in_flight) = claim_hosts_for_change(
+                    &changing,
+                    &[InstalledHost::Instance(instance)],
+                    "gui-mod-change-busy",
+                    ModalScope::MOD_MANAGE,
+                    &events,
+                ) else {
+                    continue;
+                };
                 let paths = app.paths().clone();
                 spawn_detached(paths, events.clone(), move |app, events, runtime| {
                     let request = version_change_request(&path, &version);
@@ -2870,8 +2971,10 @@ fn run_worker(
                                 &cancel,
                             ));
                             finish_linked(&app, &events, instance, ModalScope::MOD_MANAGE, result);
+                            drop(in_flight);
                         }
                         Ok(plan) => {
+                            drop(in_flight);
                             let _ = events.send(Event::LinkedApply(linked_section(&plan)));
                         }
                         Err(error) => {
@@ -2890,6 +2993,7 @@ fn run_worker(
                     app.paths().clone(),
                     &events,
                     &acquisition_waits,
+                    &changing,
                     ModOperation {
                         instance,
                         path,
@@ -2908,6 +3012,7 @@ fn run_worker(
                     app.paths().clone(),
                     &events,
                     &acquisition_waits,
+                    &changing,
                     ModOperation {
                         instance,
                         path,
@@ -2942,8 +3047,18 @@ fn run_worker(
                 path,
                 servers,
             } => {
+                let Some(in_flight) = claim_hosts_for_change(
+                    &changing,
+                    &mod_operation_hosts(instance, &servers),
+                    "gui-mod-change-busy",
+                    ModalScope::MOD_MANAGE,
+                    &events,
+                ) else {
+                    continue;
+                };
                 let paths = app.paths().clone();
                 spawn_detached(paths, events.clone(), move |app, events, runtime| {
+                    let _in_flight = in_flight;
                     let result = runtime.block_on(app.apply_linked_mod_operation(
                         instance,
                         &LinkedModRequest::Remove { target: path },
@@ -2984,6 +3099,7 @@ fn run_worker(
                     InstalledHost::Instance(instance),
                     0,
                     false,
+                    Some(&changing),
                     &events,
                     &refreshed_mods,
                 );
@@ -3065,7 +3181,7 @@ fn run_worker(
                         // An isolation setup was planned from the mods the
                         // restore replaced. Reading the durable state back
                         // retires that plan, and shows a real session as is.
-                        send_isolation_state(&app, host, 0, false, &reports, &refreshed);
+                        send_isolation_state(&app, host, 0, false, None, &reports, &refreshed);
                         // It replaces the host's own metadata as well, which is
                         // where a client keeps its Java and JVM overrides and a
                         // server its network settings, and `server.properties`
@@ -3115,6 +3231,10 @@ fn run_worker(
                 );
             }
             Command::DeleteSnapshot { host, snapshot } => {
+                if refuse_while_changing(&changing, host, &events) {
+                    continue;
+                }
+                let in_flight = HostChangeInFlight::mark(&changing, host, "gui-snapshot-busy");
                 let paths = app.paths().clone();
                 let reports = events.clone();
                 spawn_async_operation(
@@ -3129,6 +3249,7 @@ fn run_worker(
                         finished: None,
                     },
                     move |app, _reporter, cancel| async move {
+                        let _in_flight = in_flight;
                         if cancel.is_cancelled() {
                             return Err(CoreError::from(ephervex_core::SnapshotError::Canceled));
                         }
@@ -3140,10 +3261,26 @@ fn run_worker(
                 );
             }
             Command::OpenIsolation { host, generation } => {
-                send_isolation_state(&app, host, generation, true, &events, &refreshed_mods);
+                send_isolation_state(
+                    &app,
+                    host,
+                    generation,
+                    true,
+                    Some(&changing),
+                    &events,
+                    &refreshed_mods,
+                );
             }
             Command::LoadIsolation(host) => {
-                send_isolation_state(&app, host, 0, false, &events, &refreshed_mods);
+                send_isolation_state(
+                    &app,
+                    host,
+                    0,
+                    false,
+                    Some(&changing),
+                    &events,
+                    &refreshed_mods,
+                );
             }
             Command::RecoverIsolation {
                 host,
@@ -3154,7 +3291,15 @@ fn run_worker(
                     let _ = events.send(Event::IsolationSettled { request });
                     continue;
                 }
-                send_isolation_state(&app, host, generation, false, &events, &refreshed_mods);
+                send_isolation_state(
+                    &app,
+                    host,
+                    generation,
+                    false,
+                    Some(&changing),
+                    &events,
+                    &refreshed_mods,
+                );
                 let _ = events.send(Event::IsolationSettled { request });
             }
             Command::BeginIsolation {
@@ -3203,7 +3348,9 @@ fn run_worker(
                             let _ = reports.send(Event::HostSnapshots(data));
                         }
                         begun?;
-                        send_isolation_state(&app, host, generation, true, &reports, &refreshed);
+                        send_isolation_state(
+                            &app, host, generation, true, None, &reports, &refreshed,
+                        );
                         send_host_mods(&app, host, &reports, &refreshed, false);
                         Ok(OperationReport::Reported)
                     },
@@ -3226,6 +3373,7 @@ fn run_worker(
                             host,
                             generation,
                             true,
+                            Some(&changing),
                             &events,
                             &refreshed_mods,
                         );
@@ -3239,6 +3387,7 @@ fn run_worker(
                             host,
                             generation,
                             true,
+                            Some(&changing),
                             &events,
                             &refreshed_mods,
                         );
@@ -3263,6 +3412,7 @@ fn run_worker(
                             host,
                             generation,
                             true,
+                            Some(&changing),
                             &events,
                             &refreshed_mods,
                         );
@@ -3677,6 +3827,23 @@ fn run_worker(
                 servers,
                 confirmed,
             } => {
+                // Refused like any other start, and still announced as ended:
+                // an install queued behind this one is waiting to hear that it
+                // is over.
+                let Some(in_flight) = claim_hosts_for_change(
+                    &changing,
+                    &mod_operation_hosts(instance, &servers),
+                    "gui-mod-change-busy",
+                    ModalScope::NONE,
+                    &events,
+                ) else {
+                    let _ = events.send(Event::ModInstallFinished {
+                        instance: instance.to_string(),
+                        provider: provider.as_str().to_owned(),
+                        project,
+                    });
+                    continue;
+                };
                 let paths = app.paths().clone();
                 let reports = events.clone();
                 let acquisition_events = events.clone();
@@ -3697,6 +3864,7 @@ fn run_worker(
                         }),
                     },
                     move |app, reporter, cancel| async move {
+                        let _in_flight = in_flight;
                         let request = LinkedModRequest::Install {
                             provider,
                             project,
@@ -3980,6 +4148,7 @@ fn run_worker(
                     InstalledHost::Server(server),
                     0,
                     false,
+                    Some(&changing),
                     &events,
                     &refreshed_mods,
                 );
@@ -4044,19 +4213,27 @@ fn run_worker(
                 host,
                 sources,
                 skipped,
-            } => match app.add_local_mods(host, &sources) {
-                Ok(report) => {
-                    let _ = events.send(Event::Toast {
-                        message: local_mods_added_message(&report, skipped),
-                        error: !report.refused.is_empty(),
-                    });
-                    // What the Refresh button does, so the jars just added are
-                    // identified without the user asking a second time.
-                    send_host_mods(&app, host, &events, &refreshed_mods, true);
+            } => {
+                if refuse_while_changing(&changing, host, &events) {
+                    continue;
                 }
-                Err(error) => send_error(&events, &error),
-            },
+                match app.add_local_mods(host, &sources) {
+                    Ok(report) => {
+                        let _ = events.send(Event::Toast {
+                            message: local_mods_added_message(&report, skipped),
+                            error: !report.refused.is_empty(),
+                        });
+                        // What the Refresh button does, so the jars just added are
+                        // identified without the user asking a second time.
+                        send_host_mods(&app, host, &events, &refreshed_mods, true);
+                    }
+                    Err(error) => send_error(&events, &error),
+                }
+            }
             Command::RestoreModFile { host, path } => {
+                if refuse_while_changing(&changing, host, &events) {
+                    continue;
+                }
                 let reporter = OperationReporter::silent("operation-restoring-mod");
                 let restored = runtime.block_on(app.restore_mod_file(
                     host,
@@ -4076,6 +4253,15 @@ fn run_worker(
                     // back, so the user is asked for it instead. The wait runs
                     // off the command loop, which has other work to do.
                     Err(error @ CoreError::ModAcquisitionRestricted { .. }) => {
+                        let Some(in_flight) = claim_hosts_for_change(
+                            &changing,
+                            &[host],
+                            "gui-mod-change-busy",
+                            ModalScope::NONE,
+                            &events,
+                        ) else {
+                            continue;
+                        };
                         restore_after_acquisition(
                             app.paths().clone(),
                             &events,
@@ -4085,29 +4271,39 @@ fn run_worker(
                                 path,
                                 refusal: error,
                                 refreshed: Arc::clone(&refreshed_mods),
+                                in_flight,
                             },
                         );
                     }
                     Err(error) => send_error(&events, &error),
                 }
             }
-            Command::DeleteHandPlacedMod { host, path } => match app.delete_mod_file(host, &path) {
-                Ok(()) => {
-                    let _ = events.send(Event::CloseModal(ModalScope::DELETE_MOD));
-                    let _ = events.send(Event::Toast {
-                        message: localized_value(
-                            "gui-mod-deleted",
-                            &path
-                                .file_name()
-                                .unwrap_or(path.as_os_str())
-                                .to_string_lossy(),
-                        ),
-                        error: false,
+            Command::DeleteHandPlacedMod { host, path } => {
+                if let Some(refusal) = change_in_flight(&changing, host) {
+                    let _ = events.send(Event::ModalError {
+                        scope: ModalScope::DELETE_MOD,
+                        message: lookup(refusal),
                     });
-                    send_host_mods(&app, host, &events, &refreshed_mods, false);
+                    continue;
                 }
-                Err(error) => send_scoped_modal_error(&events, ModalScope::DELETE_MOD, &error),
-            },
+                match app.delete_mod_file(host, &path) {
+                    Ok(()) => {
+                        let _ = events.send(Event::CloseModal(ModalScope::DELETE_MOD));
+                        let _ = events.send(Event::Toast {
+                            message: localized_value(
+                                "gui-mod-deleted",
+                                &path
+                                    .file_name()
+                                    .unwrap_or(path.as_os_str())
+                                    .to_string_lossy(),
+                            ),
+                            error: false,
+                        });
+                        send_host_mods(&app, host, &events, &refreshed_mods, false);
+                    }
+                    Err(error) => send_scoped_modal_error(&events, ModalScope::DELETE_MOD, &error),
+                }
+            }
             Command::RenameClient { id, name } => match app.rename_client(id, &name) {
                 Ok(record) => {
                     let _ = events.send(Event::CloseModal(ModalScope::RENAME));
@@ -4131,6 +4327,15 @@ fn run_worker(
                 Err(error) => send_modal_error(&events, &error),
             },
             Command::DisableSuggestedMods(server) => {
+                if refuse_mod_change_while_changing(
+                    &app,
+                    &changing,
+                    InstalledHost::Server(server),
+                    &events,
+                    &refreshed_mods,
+                ) {
+                    continue;
+                }
                 disable_suggested_mods(&app, server, &events, &refreshed_mods);
             }
             Command::SetModEnabled {
@@ -4138,6 +4343,10 @@ fn run_worker(
                 path,
                 enabled,
             } => {
+                if refuse_mod_change_while_changing(&app, &changing, host, &events, &refreshed_mods)
+                {
+                    continue;
+                }
                 set_mod_enabled(&app, host, &path, enabled, &events, &refreshed_mods);
             }
             Command::SaveDependencyWarning(warn) => {
@@ -4161,6 +4370,9 @@ fn run_worker(
                 resolve_declared_relations(&app, &runtime, host, &path, &events);
             }
             Command::RefreshModDependencies { host, reload } => {
+                if refuse_while_changing(&changing, host, &events) {
+                    continue;
+                }
                 let reporter = OperationReporter::silent("refreshing-mod-dependencies");
                 match runtime.block_on(app.refresh_mod_dependencies(
                     host,
@@ -4187,18 +4399,36 @@ fn run_worker(
                     Err(error) => send_error(&events, &error),
                 }
             }
-            Command::DeleteModFiles { host, paths } => match app.delete_mod_files(host, &paths) {
-                Ok(_) => send_host_mods(&app, host, &events, &refreshed_mods, false),
-                Err(error) => send_error(&events, &error),
-            },
-            Command::SetModsEnabled { host, changes } => match app.set_mods_enabled(host, &changes)
-            {
-                // Re-read rather than patched in place: the durable state is
-                // what the panel shows, and it has just changed.
-                Ok(_) => send_host_mods(&app, host, &events, &refreshed_mods, false),
-                Err(error) => send_error(&events, &error),
-            },
+            Command::DeleteModFiles { host, paths } => {
+                if refuse_mod_change_while_changing(&app, &changing, host, &events, &refreshed_mods)
+                {
+                    continue;
+                }
+                match app.delete_mod_files(host, &paths) {
+                    Ok(_) => send_host_mods(&app, host, &events, &refreshed_mods, false),
+                    Err(error) => send_error(&events, &error),
+                }
+            }
+            Command::SetModsEnabled { host, changes } => {
+                if refuse_mod_change_while_changing(&app, &changing, host, &events, &refreshed_mods)
+                {
+                    continue;
+                }
+                match app.set_mods_enabled(host, &changes) {
+                    // Re-read rather than patched in place: the durable state is
+                    // what the panel shows, and it has just changed.
+                    Ok(_) => send_host_mods(&app, host, &events, &refreshed_mods, false),
+                    Err(error) => send_error(&events, &error),
+                }
+            }
             Command::QueryDeleteImpact { host, path, name } => {
+                if let Some(refusal) = change_in_flight(&changing, host) {
+                    let _ = events.send(Event::ModalError {
+                        scope: ModalScope::DELETE_MOD,
+                        message: lookup(refusal),
+                    });
+                    continue;
+                }
                 delete_mod(&app, host, &path, name, &events, &refreshed_mods);
             }
             Command::OpenLiveLog(source) => {
@@ -5498,11 +5728,15 @@ fn host_snapshots_data(app: &App, host: InstalledHost) -> CoreResult<HostSnapsho
 ///
 /// Every read of an active session goes through here, so a round interrupted
 /// by a crash or an outside change is reapplied before it can be answered.
+/// `changing` is given by a caller that does not itself hold the host's change
+/// mark, and a session's round is then not reapplied while another change is
+/// rewriting the host. A caller running inside the change passes `None`.
 fn send_isolation_state(
     app: &App,
     host: InstalledHost,
     generation: u64,
     open: bool,
+    changing: Option<&ChangingHosts>,
     events: &Sender<Event>,
     refreshed: &RefreshedHosts,
 ) {
@@ -5510,7 +5744,7 @@ fn send_isolation_state(
         Ok(Some(session)) => {
             let mut data = isolation_session_data(&session);
             (data.recovery, data.recovery_detail) =
-                reconcile_isolation(app, host, events, refreshed);
+                reconcile_isolation(app, host, changing, events, refreshed);
             data
         }
         Ok(None) if open => match app.plan_isolation(host, &[]) {
@@ -5538,9 +5772,15 @@ fn send_isolation_state(
 fn reconcile_isolation(
     app: &App,
     host: InstalledHost,
+    changing: Option<&ChangingHosts>,
     events: &Sender<Event>,
     refreshed: &RefreshedHosts,
 ) -> (String, String) {
+    // Reapplying the round writes the host's mods and its isolation state, so
+    // it waits for a change that is doing the same. The panel offers a retry.
+    if let Some(refusal) = changing.and_then(|hosts| change_in_flight(hosts, host)) {
+        return ("failed".to_owned(), lookup(refusal));
+    }
     match app.reconcile_isolation(host) {
         Ok(IsolationReconciliation::AlreadyApplied) => (String::new(), String::new()),
         Ok(IsolationReconciliation::Reapplied) => {
@@ -7704,6 +7944,8 @@ struct RestoreRequest {
     /// for.
     refusal: CoreError,
     refreshed: RefreshedHosts,
+    /// Held until the restore ends, whichever way it does.
+    in_flight: Vec<HostChangeInFlight>,
 }
 
 /// Asks the user for the jar a restore could not fetch, then puts it back.
@@ -7723,6 +7965,7 @@ fn restore_after_acquisition(
             path,
             refusal,
             refreshed,
+            in_flight: _in_flight,
         } = request;
         let refusal: Result<(), CoreError> = Err(refusal);
         runtime.block_on(async {
@@ -7761,10 +8004,21 @@ fn apply_mod_operation(
     paths: Paths,
     events: &Sender<Event>,
     waits: &AcquisitionWaits,
+    changing: &ChangingHosts,
     operation: ModOperation,
 ) {
+    let Some(in_flight) = claim_hosts_for_change(
+        changing,
+        &mod_operation_hosts(operation.instance, &operation.servers),
+        "gui-mod-change-busy",
+        ModalScope::MOD_MANAGE,
+        events,
+    ) else {
+        return;
+    };
     let waits = waits.clone();
     spawn_detached(paths, events.clone(), move |app, events, runtime| {
+        let _in_flight = in_flight;
         let reporter = OperationReporter::silent(operation.operation);
         let instance = operation.instance;
         runtime.block_on(async {
@@ -10516,6 +10770,92 @@ mod tests {
         drop(in_flight);
         assert!(!refuse_while_changing(&hosts, host, &events));
         assert!(received.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_second_change_to_a_host_is_refused_and_marks_nothing() {
+        let hosts: ChangingHosts = Arc::new(Mutex::new(HashMap::new()));
+        let instance = InstalledHost::Instance(ephervex_model::InstanceId::new());
+        let server = InstalledHost::Server(ephervex_model::ServerId::new());
+
+        let first = HostChangeInFlight::try_mark(&hosts, &[instance], "gui-mod-change-busy")
+            .expect("an idle host can be claimed");
+        assert_eq!(first.len(), 1);
+
+        let refused = HostChangeInFlight::try_mark(&hosts, &[server, instance], "gui-fix-busy");
+        assert_eq!(refused.err(), Some("gui-mod-change-busy"));
+        assert!(
+            change_in_flight(&hosts, server).is_none(),
+            "a refused claim must not leave its other hosts marked"
+        );
+
+        drop(first);
+        let second = HostChangeInFlight::try_mark(&hosts, &[server, instance], "gui-fix-busy")
+            .expect("released hosts can be claimed again");
+        assert_eq!(second.len(), 2);
+        assert_eq!(change_in_flight(&hosts, server), Some("gui-fix-busy"));
+        drop(second);
+        assert!(change_in_flight(&hosts, instance).is_none());
+        assert!(change_in_flight(&hosts, server).is_none());
+    }
+
+    #[test]
+    fn an_isolation_round_is_not_reapplied_while_another_change_rewrites_the_host() {
+        let root = tempfile::tempdir().expect("root");
+        let app = App::open_at(Paths::rooted_at(root.path())).expect("app");
+        let hosts: ChangingHosts = Arc::new(Mutex::new(HashMap::new()));
+        let (events, received) = mpsc::channel();
+        let refreshed: RefreshedHosts = Arc::new(Mutex::new(HashSet::new()));
+        let host = InstalledHost::Instance(ephervex_model::InstanceId::new());
+
+        let in_flight = HostChangeInFlight::mark(&hosts, host, "gui-mod-change-busy");
+        let (recovery, detail) = reconcile_isolation(&app, host, Some(&hosts), &events, &refreshed);
+        assert_eq!(recovery, "failed");
+        assert_eq!(detail, lookup("gui-mod-change-busy"));
+        assert!(
+            received.try_recv().is_err(),
+            "nothing was reapplied or announced"
+        );
+        drop(in_flight);
+    }
+
+    #[test]
+    fn a_refused_mod_change_tells_the_dialog_that_asked() {
+        let hosts: ChangingHosts = Arc::new(Mutex::new(HashMap::new()));
+        let (events, received) = mpsc::channel();
+        let instance = ephervex_model::InstanceId::new();
+        let host = InstalledHost::Instance(instance);
+
+        let in_flight = claim_hosts_for_change(
+            &hosts,
+            &mod_operation_hosts(instance, &[]),
+            "gui-snapshot-busy",
+            ModalScope::MOD_MANAGE,
+            &events,
+        )
+        .expect("an idle host can be claimed");
+        assert!(received.try_recv().is_err());
+
+        assert!(
+            claim_hosts_for_change(
+                &hosts,
+                &[host],
+                "gui-mod-change-busy",
+                ModalScope::MOD_MANAGE,
+                &events,
+            )
+            .is_none()
+        );
+        let refusal = received.try_recv().expect("a refusal");
+        assert!(
+            matches!(
+                &refusal,
+                Event::ModalError { scope, message }
+                    if scope.covers("mod-manage") && *message == lookup("gui-snapshot-busy")
+            ),
+            "the change in flight is named to the dialog: {refusal:?}"
+        );
+        drop(in_flight);
     }
     #[test]
     fn linked_server_completion_targets_the_server_without_waiting_for_the_client() {
