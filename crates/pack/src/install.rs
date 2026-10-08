@@ -71,6 +71,7 @@ use tracing::{debug, info, instrument, warn};
 use crate::archive::{EntryDecision, ExtractionLimits, ExtractionReport, PackArchive};
 use crate::credentials::ArtifactCredentials;
 use crate::error::{PackError, PackResult};
+use crate::mutate::{MutationRecoveryAction, MutationRecoveryIssue};
 use crate::path::{DestinationLinks, contained_join, is_reserved, safe_relative_path};
 use crate::recipe::{
     OptionalSelection, OverrideLayer, PackFileRecipe, PackRecipe, PackSide,
@@ -831,6 +832,11 @@ fn refused_with(error: &DownloadError) -> Option<u16> {
 /// a link, fails the copy instead of being followed or overwritten. Callers
 /// have already decided the destination is free, so this only holds if that
 /// answer changed in between.
+///
+/// A copy that fails after creating the destination removes it again, so a
+/// truncated jar is never left where the loader reads it and a retry finds the
+/// destination free. If that removal fails too, the error is a
+/// [`PackError::RollbackIncomplete`] naming the leftover file.
 pub(crate) fn copy_into_instance(source: &Path, destination: &Path) -> PackResult<()> {
     let unwritable = |error| PackError::Unwritable {
         path: destination.to_path_buf(),
@@ -849,9 +855,32 @@ pub(crate) fn copy_into_instance(source: &Path, destination: &Path) -> PackResul
         .create_new(true)
         .open(destination)
         .map_err(unwritable)?;
-    std::io::copy(&mut reader, &mut writer).map_err(unwritable)?;
-    writer.set_permissions(permissions).map_err(unwritable)?;
-    Ok(())
+    // The file exists from here on and this call created it, so this call
+    // owns removing it when the copy does not finish.
+    let copied = std::io::copy(&mut reader, &mut writer)
+        .map(drop)
+        .and_then(|()| writer.set_permissions(permissions));
+    let Err(error) = copied else {
+        return Ok(());
+    };
+    drop(writer);
+    let failure = unwritable(error);
+    match std::fs::remove_file(destination) {
+        Ok(()) => Err(failure),
+        Err(removal) if removal.kind() == std::io::ErrorKind::NotFound => Err(failure),
+        Err(removal) => {
+            warn!(
+                path = %destination.display(),
+                error = %removal,
+                "could not remove a file left behind by a failed copy"
+            );
+            Err(failure.with_recovery_issues(vec![MutationRecoveryIssue {
+                action: MutationRecoveryAction::RemoveCreated,
+                path: destination.to_path_buf(),
+                error_kind: removal.kind(),
+            }]))
+        }
+    }
 }
 
 /// One override layer that was applied to the game directory.
@@ -1774,5 +1803,37 @@ mod tests {
             .map(|layer| layer.archive_prefix.as_str())
             .collect();
         assert_eq!(ordered, vec!["overrides", "client-overrides"]);
+    }
+
+    #[test]
+    fn a_copy_that_fails_partway_removes_the_file_it_created() {
+        // A directory opens for reading but cannot be read, so the failure
+        // comes after the destination already exists.
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source-dir");
+        std::fs::create_dir(&source).unwrap();
+        let destination = root.path().join("mods").join("a.jar");
+
+        let error = copy_into_instance(&source, &destination).unwrap_err();
+
+        assert!(matches!(error, PackError::Unwritable { .. }), "{error:?}");
+        assert!(error.recovery_issues().is_empty());
+        assert!(
+            !destination.exists(),
+            "a truncated jar must not stay where the loader reads it"
+        );
+    }
+
+    #[test]
+    fn a_copy_into_an_occupied_destination_leaves_the_existing_entry_alone() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.jar");
+        std::fs::write(&source, b"new").unwrap();
+        let destination = root.path().join("a.jar");
+        std::fs::write(&destination, b"theirs").unwrap();
+
+        copy_into_instance(&source, &destination).unwrap_err();
+
+        assert_eq!(std::fs::read(&destination).unwrap(), b"theirs");
     }
 }

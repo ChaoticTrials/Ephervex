@@ -42,8 +42,8 @@ use ephervex_mod_platform::{
     SideSupport, annotate, curseforge_fingerprint, newest_compatible,
 };
 use ephervex_model::{
-    DefaultModCatalog, Hash, HashAlgorithm, ImportSourceKind, InstanceId, ModOrigin, ModProvider,
-    ServerId,
+    AttentionReason, DefaultModCatalog, Hash, HashAlgorithm, ImportSourceKind, InstanceId,
+    ModOrigin, ModProvider, ServerId,
 };
 use ephervex_pack::{
     ArtifactFetch, MODS_DIR, ManagedMod, ManagedModInstall, ManagedModInstallation, ModIdentity,
@@ -1176,6 +1176,11 @@ impl App {
         {
             Ok(installation) => installation,
             Err(error) => {
+                if !error.recovery_issues().is_empty() {
+                    self.registry().modify_client(record.id, |current| {
+                        current.add_attention(AttentionReason::InterruptedMutation);
+                    })?;
+                }
                 let destination = PathBuf::from(ephervex_pack::MODS_DIR).join(
                     ephervex_pack::safe_file_name(&plan.root.version.file.file_name)
                         .unwrap_or_else(|| PathBuf::from(&plan.root.version.id)),

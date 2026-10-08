@@ -582,6 +582,28 @@ impl PackError {
         matches!(self, Self::Canceled)
     }
 
+    /// Adds artifacts that a rollback could not clean up to this failure.
+    ///
+    /// The original failure stays the cause. An error that already reports
+    /// leftovers gains these beside them rather than being wrapped a second
+    /// time, so [`Self::recovery_issues`] always lists all of them.
+    #[must_use]
+    pub fn with_recovery_issues(self, extra: Vec<MutationRecoveryIssue>) -> Self {
+        if extra.is_empty() {
+            return self;
+        }
+        match self {
+            Self::RollbackIncomplete { source, mut issues } => {
+                issues.extend(extra);
+                Self::RollbackIncomplete { source, issues }
+            }
+            other => Self::RollbackIncomplete {
+                source: Box::new(other),
+                issues: extra,
+            },
+        }
+    }
+
     /// Filesystem artifacts left by an incomplete rollback, if any.
     #[must_use]
     pub fn recovery_issues(&self) -> &[MutationRecoveryIssue] {
@@ -837,5 +859,49 @@ mod tests {
         assert_eq!(error.unsupported_loader(), Some("quilt-loader"));
         assert_eq!(PackError::Canceled.unsupported_loader(), None);
         assert!(PackError::Canceled.is_cancellation());
+    }
+
+    fn leftover(path: &str) -> MutationRecoveryIssue {
+        MutationRecoveryIssue {
+            action: crate::mutate::MutationRecoveryAction::RemoveCreated,
+            path: PathBuf::from(path),
+            error_kind: std::io::ErrorKind::PermissionDenied,
+        }
+    }
+
+    #[test]
+    fn leftovers_attach_to_a_plain_failure_without_changing_its_cause() {
+        let error = PackError::Canceled.with_recovery_issues(vec![leftover("/a.jar")]);
+
+        assert_eq!(error.recovery_issues(), [leftover("/a.jar")]);
+        assert!(matches!(
+            error,
+            PackError::RollbackIncomplete { ref source, .. }
+                if matches!(**source, PackError::Canceled)
+        ));
+    }
+
+    #[test]
+    fn leftovers_join_an_error_that_already_reports_some_instead_of_nesting() {
+        let error = PackError::Canceled
+            .with_recovery_issues(vec![leftover("/a.jar")])
+            .with_recovery_issues(vec![leftover("/b.jar")]);
+
+        assert_eq!(
+            error.recovery_issues(),
+            [leftover("/a.jar"), leftover("/b.jar")]
+        );
+        assert!(matches!(
+            error,
+            PackError::RollbackIncomplete { ref source, .. }
+                if matches!(**source, PackError::Canceled)
+        ));
+    }
+
+    #[test]
+    fn no_leftovers_leave_the_failure_untouched() {
+        let error = PackError::Canceled.with_recovery_issues(Vec::new());
+
+        assert!(matches!(error, PackError::Canceled));
     }
 }

@@ -275,15 +275,7 @@ pub async fn mutate_managed(request: ManagedMutation<'_>) -> PackResult<ManagedM
         .and_then(|()| publish(recipe, upserts, &actions, removals, store));
 
     if let Err(error) = outcome {
-        let issues = journal.undo();
-        return if issues.is_empty() {
-            Err(error)
-        } else {
-            Err(PackError::RollbackIncomplete {
-                source: Box::new(error),
-                issues,
-            })
-        };
+        return Err(error.with_recovery_issues(journal.undo()));
     }
 
     for retirement in &retirements {

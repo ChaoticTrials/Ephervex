@@ -38,6 +38,7 @@ use tracing::{info, instrument, warn};
 
 use crate::error::{PackError, PackResult};
 use crate::install::{ArtifactFetch, copy_into_instance, fetch_all};
+use crate::mutate::{MutationRecoveryAction, MutationRecoveryIssue};
 use crate::path::{DestinationLinks, contained_join, is_reserved, safe_relative_path};
 use crate::recipe::{PackFileRecipe, PackRecipe, ProviderFileIdentity};
 use crate::store::SourceStore;
@@ -300,8 +301,7 @@ pub async fn install_managed(request: ManagedModInstall<'_>) -> PackResult<Manag
     .and_then(|()| commit(recipe, additions, &dispositions, store));
 
     if let Err(error) = outcome {
-        roll_back(&created);
-        return Err(error);
+        return Err(error.with_recovery_issues(roll_back(&created)));
     }
 
     info!(
@@ -528,17 +528,57 @@ fn commit(
 }
 
 /// Removes the files this operation created, and nothing else.
-fn roll_back(created: &[PathBuf]) {
+///
+/// Returns the files that could not be removed, so the caller can report them
+/// beside the failure that made the rollback necessary.
+fn roll_back(created: &[PathBuf]) -> Vec<MutationRecoveryIssue> {
+    let mut issues = Vec::new();
     for path in created {
         if let Err(error) = std::fs::remove_file(path) {
-            // Reported rather than propagated: the failure that triggered the
-            // rollback is the one worth returning, and a leftover jar is a
-            // smaller problem than replacing that error with this one.
             warn!(
                 path = %path.display(),
                 %error,
                 "could not remove a file left behind by a failed mod installation"
             );
+            issues.push(MutationRecoveryIssue {
+                action: MutationRecoveryAction::RemoveCreated,
+                path: path.clone(),
+                error_kind: error.kind(),
+            });
         }
+    }
+    issues
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+
+    #[test]
+    fn rolling_back_reports_a_file_it_cannot_remove_and_still_removes_the_rest() {
+        let root = tempfile::tempdir().unwrap();
+        // A directory where a created jar should be: `remove_file` refuses it.
+        let stuck = root.path().join("stuck.jar");
+        std::fs::create_dir(&stuck).unwrap();
+        let removable = root.path().join("removable.jar");
+        std::fs::write(&removable, b"jar").unwrap();
+
+        let issues = roll_back(&[stuck.clone(), removable.clone()]);
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].path, stuck);
+        assert_eq!(issues[0].action, MutationRecoveryAction::RemoveCreated);
+        assert!(!removable.exists());
+    }
+
+    #[test]
+    fn rolling_back_files_that_are_all_removable_reports_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let jar = root.path().join("a.jar");
+        std::fs::write(&jar, b"jar").unwrap();
+
+        assert!(roll_back(std::slice::from_ref(&jar)).is_empty());
+        assert!(!jar.exists());
     }
 }
