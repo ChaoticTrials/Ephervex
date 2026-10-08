@@ -26,7 +26,9 @@ use ephervex_model::{AttentionReason, InstanceId, ServerId, StorageClass};
 
 use crate::metadata;
 use crate::records::{ClientRecord, FileDisposition, ServerRecord};
-use crate::registry::{HostProbe, Registry, RegistryError};
+use crate::registry::{
+    HostProbe, Registry, RegistryError, canonical_client_at, canonical_server_at,
+};
 
 /// Which record a reconciliation entry refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,6 +276,9 @@ fn reconcile_client(
             .paths()
             .instance_root(StorageClass::Persistent, record.id);
         if is_finished_client_root(&moved, record.id) {
+            // The index row can be older than the files; the moved metadata
+            // is the host's current state.
+            record = canonical_client_at(&moved, record.id)?;
             record.root.clone_from(&moved);
             record.storage = StorageClass::Persistent;
             registry.update_client(&mut record)?;
@@ -472,6 +477,7 @@ fn reconcile_server(
             .paths()
             .server_root(StorageClass::Persistent, record.id);
         if is_finished_server_root(&moved, record.id) {
+            record = canonical_server_at(&moved, record.id)?;
             record.root.clone_from(&moved);
             record.storage = StorageClass::Persistent;
             let _committed = registry.update_server_committed(&mut record)?;
@@ -1225,6 +1231,74 @@ mod tests {
         let followed = registry.server(server.id).expect("the record survives");
         assert_eq!(followed.storage, StorageClass::Persistent);
         assert_eq!(followed.root, moved);
+    }
+
+    #[test]
+    fn a_relocated_client_keeps_the_canonical_metadata_the_index_row_lags_behind() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new(
+                "indexed",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        let mut canonical = client.clone();
+        canonical.name = "canonical".to_owned();
+        metadata::write_client_metadata(&client.root, &canonical).expect("canonical write");
+        let moved = registry
+            .paths()
+            .instance_root(StorageClass::Persistent, client.id);
+        std::fs::create_dir_all(moved.parent().expect("parent")).expect("mkdir");
+        std::fs::rename(&client.root, &moved).expect("move the files");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.relocated.len(), 1);
+        let followed = registry.client(client.id).expect("record");
+        assert_eq!(followed.name, "canonical");
+        assert_eq!(followed.root, moved);
+        let on_disk = metadata::read_client_metadata(&moved).expect("metadata");
+        assert_eq!(on_disk.name, "canonical");
+        assert_eq!(on_disk.storage, StorageClass::Persistent);
+    }
+
+    #[test]
+    fn a_relocated_server_keeps_the_canonical_metadata_the_index_row_lags_behind() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = registry
+            .create_server(NewServer::new(
+                "indexed",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        let mut canonical = server.clone();
+        canonical.name = "canonical".to_owned();
+        canonical.add_attention(AttentionReason::BestEffortServerConversion);
+        metadata::write_server_metadata(&server.root, &canonical).expect("canonical write");
+        let moved = registry
+            .paths()
+            .server_root(StorageClass::Persistent, server.id);
+        std::fs::create_dir_all(moved.parent().expect("parent")).expect("mkdir");
+        std::fs::rename(&server.root, &moved).expect("move the files");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.relocated.len(), 1);
+        let followed = registry.server(server.id).expect("record");
+        assert_eq!(followed.name, "canonical");
+        assert_eq!(followed.root, moved);
+        let on_disk = metadata::read_server_metadata(&moved).expect("metadata");
+        assert_eq!(on_disk.name, "canonical");
+        assert!(
+            on_disk
+                .attention
+                .contains(&AttentionReason::BestEffortServerConversion)
+        );
+        assert_eq!(on_disk.storage, StorageClass::Persistent);
     }
 
     #[test]

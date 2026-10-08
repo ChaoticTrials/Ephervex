@@ -325,7 +325,7 @@ impl Registry {
 
         let _claim = claim_host(&self.paths, RecordRef::Client(id), &record.root)?;
         // Another move may have finished while this one was starting.
-        let mut record = self.client(id)?;
+        let record = self.client(id)?;
         if record.storage == storage {
             return Ok(record);
         }
@@ -334,12 +334,18 @@ impl Registry {
         let names_this_instance =
             |root: &Path| metadata::read_client_metadata(root).is_ok_and(|found| found.id == id);
         let source = record.root.clone();
+        refuse_unhealthy_source(&source, &destination, |root| {
+            canonical_client_at(root, id).map(drop)
+        })?;
         let (record, report) =
             move_host(&source, &destination, names_this_instance, progress, || {
-                record.root.clone_from(&destination);
-                record.storage = storage;
-                self.update_client(&mut record)?;
-                Ok(record)
+                // Edits stored while the files moved are in the metadata, not
+                // in the record read before the move.
+                let mut current = canonical_client_at(host_files_root(&source, &destination), id)?;
+                current.root.clone_from(&destination);
+                current.storage = storage;
+                self.update_client(&mut current)?;
+                Ok(current)
             })?;
 
         tracing::info!(
@@ -373,7 +379,7 @@ impl Registry {
         }
 
         let _claim = claim_host(&self.paths, RecordRef::Server(id), &record.root)?;
-        let mut record = self.server(id)?;
+        let record = self.server(id)?;
         if record.storage == storage {
             return Ok(ServerCommit {
                 record,
@@ -386,13 +392,19 @@ impl Registry {
             |root: &Path| metadata::read_server_metadata(root).is_ok_and(|found| found.id == id);
 
         let source = record.root.clone();
+        refuse_unhealthy_source(&source, &destination, |root| {
+            canonical_server_at(root, id).map(drop)
+        })?;
         // `server.json` is the commit point: an index failure after it is a
         // warning on a recorded move, not a failed one.
         let (commit, report) =
             move_host(&source, &destination, names_this_server, progress, || {
-                record.root.clone_from(&destination);
-                record.storage = storage;
-                self.update_server_committed(&mut record)
+                // The canonical file wins over the index row, which can lag it
+                // (ADR 0002).
+                let mut current = canonical_server_at(host_files_root(&source, &destination), id)?;
+                current.root.clone_from(&destination);
+                current.storage = storage;
+                self.update_server_committed(&mut current)
             })?;
 
         tracing::info!(
@@ -1245,6 +1257,60 @@ fn ensure_free_root(root: &Path) -> Result<(), RegistryError> {
             source,
         }),
     }
+}
+
+/// A client's record as its canonical metadata at `root` holds it, refusing
+/// metadata that is unreadable or names another instance (ADR 0002).
+///
+/// The stored root and storage class are whatever the file last said; the
+/// caller sets the ones it is changing.
+pub(crate) fn canonical_client_at(
+    root: &Path,
+    id: InstanceId,
+) -> Result<ClientRecord, RegistryError> {
+    let found = metadata::read_client_metadata(root)?;
+    if found.id != id {
+        return Err(RegistryError::InstanceUnknown { id });
+    }
+    Ok(found)
+}
+
+/// The same for a dedicated server (ADR 0014).
+pub(crate) fn canonical_server_at(
+    root: &Path,
+    id: ServerId,
+) -> Result<ServerRecord, RegistryError> {
+    let found = metadata::read_server_metadata(root)?;
+    if found.id != id {
+        return Err(RegistryError::ServerUnknown { id });
+    }
+    Ok(found)
+}
+
+/// Where a host's current files stand when a move records itself.
+///
+/// A copy leaves the source in place until the move is recorded, and edits
+/// stored while it ran went there. A rename, a recovered rename, and a record
+/// that already named the destination have no source left.
+fn host_files_root<'a>(source: &'a Path, destination: &'a Path) -> &'a Path {
+    if source != destination && source.is_dir() {
+        source
+    } else {
+        destination
+    }
+}
+
+/// Refuses a move whose source metadata could not be recorded afterwards, so
+/// the refusal comes before a long copy rather than after it.
+fn refuse_unhealthy_source(
+    source: &Path,
+    destination: &Path,
+    read: impl FnOnce(&Path) -> Result<(), RegistryError>,
+) -> Result<(), RegistryError> {
+    if source != destination && source.is_dir() {
+        read(source)?;
+    }
+    Ok(())
 }
 
 /// The move both host kinds share: move the tree, record the move, then remove
@@ -2208,6 +2274,137 @@ mod tests {
         assert_eq!(promoted.root, destination);
         assert_payload(&metadata::server_game_dir(&destination));
         assert!(!server.root.exists());
+    }
+
+    #[test]
+    fn a_client_edit_stored_while_its_files_copy_survives_the_move() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new("x", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        write_payload(&metadata::client_game_dir(&client.root));
+
+        let mut edited = false;
+        crate::relocate::force_copy(true);
+        let promoted = registry
+            .relocate_client(client.id, StorageClass::Persistent, &mut |_| {
+                if !edited {
+                    edited = true;
+                    registry
+                        .modify_client(client.id, |record| {
+                            record.name = "renamed meanwhile".to_owned();
+                            record.add_attention(AttentionReason::MissingRoot);
+                        })
+                        .expect("an edit while the files copy");
+                }
+            })
+            .expect("move");
+        crate::relocate::force_copy(false);
+
+        assert!(edited, "the edit ran while the copy was in progress");
+        assert_eq!(promoted.name, "renamed meanwhile");
+        assert_eq!(promoted.storage, StorageClass::Persistent);
+        let indexed = registry.client(client.id).expect("indexed");
+        let canonical = metadata::read_client_metadata(&promoted.root).expect("metadata");
+        for record in [&indexed, &canonical] {
+            assert_eq!(record.name, "renamed meanwhile");
+            assert_eq!(record.root, promoted.root);
+            assert_eq!(record.storage, StorageClass::Persistent);
+            assert!(record.attention.contains(&AttentionReason::MissingRoot));
+        }
+    }
+
+    #[test]
+    fn a_server_edit_stored_while_its_files_copy_survives_the_move() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = registry
+            .create_server(NewServer::new("x", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        write_payload(&metadata::server_game_dir(&server.root));
+
+        let mut edited = false;
+        crate::relocate::force_copy(true);
+        let promoted = registry
+            .relocate_server(server.id, StorageClass::Persistent, &mut |_| {
+                if !edited {
+                    edited = true;
+                    let mut record = registry.server(server.id).expect("server");
+                    record.name = "renamed meanwhile".to_owned();
+                    registry.update_server(&mut record).expect("edit");
+                }
+            })
+            .expect("move")
+            .record;
+        crate::relocate::force_copy(false);
+
+        assert!(edited, "the edit ran while the copy was in progress");
+        assert_eq!(promoted.name, "renamed meanwhile");
+        let indexed = registry.server(server.id).expect("indexed");
+        let canonical = metadata::read_server_metadata(&promoted.root).expect("metadata");
+        for record in [&indexed, &canonical] {
+            assert_eq!(record.name, "renamed meanwhile");
+            assert_eq!(record.root, promoted.root);
+            assert_eq!(record.storage, StorageClass::Persistent);
+        }
+    }
+
+    #[test]
+    fn a_server_move_keeps_canonical_fields_the_index_row_lags_behind() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = registry
+            .create_server(NewServer::new(
+                "indexed",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        let mut canonical = server.clone();
+        canonical.name = "canonical".to_owned();
+        canonical.add_attention(AttentionReason::MissingRoot);
+        metadata::write_server_metadata(&server.root, &canonical).expect("canonical write");
+        assert_eq!(registry.server(server.id).expect("row").name, "indexed");
+
+        let promoted = registry
+            .relocate_server(server.id, StorageClass::Persistent, &mut |_| {})
+            .expect("move")
+            .record;
+
+        assert_eq!(promoted.name, "canonical");
+        let on_disk = metadata::read_server_metadata(&promoted.root).expect("metadata");
+        assert_eq!(on_disk.name, "canonical");
+        assert!(on_disk.attention.contains(&AttentionReason::MissingRoot));
+        assert_eq!(on_disk.root, promoted.root);
+        assert_eq!(
+            registry.server(server.id).expect("row").name,
+            "canonical",
+            "the index follows the canonical file"
+        );
+    }
+
+    #[test]
+    fn a_move_refuses_unhealthy_source_metadata_before_copying() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = registry
+            .create_server(NewServer::new("x", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        let destination = registry
+            .paths()
+            .server_root(StorageClass::Persistent, server.id);
+        std::fs::write(metadata::server_metadata_path(&server.root), "not json").expect("damage");
+
+        crate::relocate::force_copy(true);
+        let error = registry
+            .relocate_server(server.id, StorageClass::Persistent, &mut |_| {})
+            .expect_err("unreadable metadata is not moved");
+        crate::relocate::force_copy(false);
+
+        assert!(matches!(error, RegistryError::Metadata(_)));
+        assert!(!destination.exists(), "nothing was copied");
+        assert!(server.root.is_dir());
     }
 
     #[test]
