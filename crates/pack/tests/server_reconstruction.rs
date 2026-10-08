@@ -596,6 +596,128 @@ async fn an_addressless_file_the_client_does_not_have_either_still_fails() {
     );
 }
 
+/// Sets up a client holding `client_bytes` at the path of an addressless entry
+/// that records the digests of `recorded`, and returns what is needed to
+/// reconstruct a server from it.
+fn addressless_entry_with_client_copy(
+    temp: &tempfile::TempDir,
+    recorded: &[u8],
+    client_bytes: &[u8],
+) -> (PackRecipe, PathBuf, CacheLayout) {
+    let (mut recipe, bodies) = recipe();
+    let client_source = temp.path().join("client/.launcher/source");
+    let client_game = temp.path().join("client/minecraft");
+    let cache = CacheLayout::new(temp.path().join("cache"));
+    write(
+        &client_source.join("modrinth/modrinth.index.json"),
+        b"manifest",
+    );
+    write(&client_source.join("modrinth/overrides/empty"), b"");
+    write(&client_source.join("modrinth/server-overrides/empty"), b"");
+    for (entry, body) in recipe.files.iter().zip(&bodies) {
+        cache_file(&cache, entry, body);
+    }
+    let mut entry = file(
+        "mods/a.jar",
+        recorded,
+        SideRequirement::Required,
+        SideRequirement::Required,
+        None,
+    );
+    entry.downloads.clear();
+    entry.origin = ModOrigin::HandPlaced;
+    recipe.files.push(entry);
+    write(&client_game.join("mods/a.jar"), client_bytes);
+    (recipe, client_source, cache)
+}
+
+/// The client's copy is mutable and the server recipe keeps the recorded
+/// digests, so bytes that no longer match them must not be installed under
+/// that identity.
+#[tokio::test]
+async fn a_changed_client_copy_of_an_addressless_file_is_not_installed() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (recipe, client_source, cache) =
+        addressless_entry_with_client_copy(&temp, b"abc", b"changed");
+    let game = temp.path().join("server/minecraft");
+
+    let error = reconstruct(
+        &recipe,
+        &UnknownServerFiles::default(),
+        &game,
+        &client_source,
+        &temp.path().join("server/.launcher/source"),
+        &cache,
+    )
+    .await
+    .expect_err("the client bytes do not match the recorded digests");
+
+    assert!(
+        matches!(error, PackError::FileDownloadsMissing { .. }),
+        "{error:?}"
+    );
+    assert!(
+        !game.join("mods/a.jar").exists(),
+        "the mismatching bytes must not stay installed"
+    );
+}
+
+/// A verified shared-cache copy is the recorded artifact, so it stands in for a
+/// client file that has since changed.
+#[tokio::test]
+async fn a_verified_cache_copy_replaces_a_changed_client_copy() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (recipe, client_source, cache) =
+        addressless_entry_with_client_copy(&temp, b"abc", b"changed");
+    let recorded = recipe.files.last().expect("addressless entry");
+    cache_file(&cache, recorded, b"abc");
+    let game = temp.path().join("server/minecraft");
+
+    reconstruct(
+        &recipe,
+        &UnknownServerFiles::default(),
+        &game,
+        &client_source,
+        &temp.path().join("server/.launcher/source"),
+        &cache,
+    )
+    .await
+    .expect("the cache holds the recorded bytes");
+
+    assert_eq!(
+        std::fs::read(game.join("mods/a.jar")).expect("installed"),
+        b"abc"
+    );
+}
+
+/// An entry that records no digest cannot vouch for any bytes, so the client's
+/// copy is not trusted for it either.
+#[tokio::test]
+async fn an_addressless_file_without_digests_is_not_copied_from_the_client() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (mut recipe, client_source, cache) =
+        addressless_entry_with_client_copy(&temp, b"abc", b"abc");
+    recipe.files.last_mut().expect("entry").hashes.clear();
+    let game = temp.path().join("server/minecraft");
+
+    let error = reconstruct(
+        &recipe,
+        &UnknownServerFiles::default(),
+        &game,
+        &client_source,
+        &temp.path().join("server/.launcher/source"),
+        &cache,
+    )
+    .await
+    .expect_err("nothing identifies the bytes");
+
+    assert!(
+        matches!(error, PackError::FileDownloadsMissing { .. }),
+        "{error:?}"
+    );
+    assert!(!game.join("mods/a.jar").exists());
+}
+
 /// A loader installation replaces `<server>/libraries` with a link into the
 /// shared libraries store, and reconstruction runs after it. Retained pack
 /// content must not be written through that link into storage every other

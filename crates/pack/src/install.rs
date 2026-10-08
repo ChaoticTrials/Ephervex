@@ -211,9 +211,9 @@ pub async fn restore_file(
 }
 
 /// Reconstructs server-applicable content without reading the source archive.
-/// An addressless entry may be copied from the mutable client game directory;
-/// every other artifact comes from the verified shared cache or its recorded
-/// source.
+/// An addressless entry may be copied from the mutable client game directory
+/// when its bytes match the recorded digests; every other artifact comes from
+/// the verified shared cache or its recorded source.
 ///
 /// The caller must supply a staging game directory. This function writes
 /// several ordered layers and intentionally relies on the owning server-create
@@ -343,28 +343,41 @@ async fn install_selected_files(
 
     // A jar the user put in the client themselves is recorded with no address
     // to fetch it from, because there is none: the digest lookup that named it
-    // learned what it is, not where it came from. Prefer that installed copy.
-    // If it is absent, leave the entry for `fetch_all`: that shared path can
-    // still use a verified cache copy without an address, and reports the
-    // ordinary missing-source failure only when neither copy exists.
-    let mut downloadable: Vec<&PackFileRecipe> = wanted.to_vec();
-    if let Some(client_game_dir) = client_game_dir {
-        let local: Vec<&PackFileRecipe>;
-        (local, downloadable) = wanted.iter().partition(|file| {
-            file.downloads.is_empty() && client_game_dir.join(&file.logical_path).is_file()
-        });
-        for file in local {
-            if cancel.is_cancelled() {
-                return Err(PackError::Canceled);
-            }
-            let source = client_game_dir.join(&file.logical_path);
-            let destination = game_dir.join(&file.logical_path);
-            copy_into_instance(&source, &destination)?;
-            report.bytes = report
-                .bytes
-                .saturating_add(std::fs::metadata(&destination).map_or(0, |data| data.len()));
-            report.installed.push(file.logical_path.clone());
+    // learned what it is, not where it came from. Prefer that installed copy,
+    // but only when its bytes still are the recorded artifact: the client file
+    // is mutable, and a server recipe keeps the recorded digests. Anything else
+    // is left for `fetch_all`: that shared path can still use a verified cache
+    // copy without an address, and reports the ordinary missing-source failure
+    // only when neither copy exists.
+    let mut downloadable: Vec<&PackFileRecipe> = Vec::new();
+    for file in wanted.iter().copied() {
+        let source = client_game_dir
+            .filter(|_| file.downloads.is_empty())
+            .map(|dir| dir.join(&file.logical_path))
+            .filter(|source| source.is_file());
+        let Some(source) = source else {
+            downloadable.push(file);
+            continue;
+        };
+        if cancel.is_cancelled() {
+            return Err(PackError::Canceled);
         }
+        let destination = game_dir.join(&file.logical_path);
+        copy_into_instance(&source, &destination)?;
+        // Hash the staged copy rather than the client file, so the bytes
+        // checked are the bytes installed even if the client file changes.
+        if !staged_copy_matches(file, &destination).await? {
+            std::fs::remove_file(&destination).map_err(|source| PackError::Unwritable {
+                path: destination.clone(),
+                source,
+            })?;
+            downloadable.push(file);
+            continue;
+        }
+        report.bytes = report
+            .bytes
+            .saturating_add(std::fs::metadata(&destination).map_or(0, |data| data.len()));
+        report.installed.push(file.logical_path.clone());
     }
     if downloadable.is_empty() {
         return Ok(report);
@@ -393,6 +406,22 @@ async fn install_selected_files(
         "installed the pack's files"
     );
     Ok(report)
+}
+
+/// Whether an installed copy holds the bytes `file` records.
+///
+/// An entry that records no digest cannot vouch for any bytes, so it never
+/// matches; the same rule [`probe_cache_without_url`] applies to the cache.
+async fn staged_copy_matches(file: &PackFileRecipe, staged: &Path) -> PackResult<bool> {
+    if file.hashes.is_empty() {
+        return Ok(false);
+    }
+    file_matches_hashes(staged, &file.hashes)
+        .await
+        .map_err(|error| PackError::DownloadFailed {
+            path: file.display_name(),
+            source: Box::new(error),
+        })
 }
 
 fn preflight_destinations(wanted: &[&PackFileRecipe], game_dir: &Path) -> PackResult<()> {
