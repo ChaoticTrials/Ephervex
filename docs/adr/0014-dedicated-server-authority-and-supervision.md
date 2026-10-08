@@ -104,6 +104,11 @@ alive. Every control request accepted before the lock is released gets
 an answer: the final exit, or a refusal saying the server has stopped or could
 not be supervised.
 
+A supervision that is canceled before it finishes, as when the launcher gives up
+waiting for it, withdraws its evidence the same way once its killed child has
+left the process table. If the child is still listed after a short bounded wait,
+the evidence stays.
+
 Combined launcher capture is timestamped JSON Lines. The in-memory ring is
 bounded to 2,000 lines and 2 MiB, individual records to 64 KiB, segments to
 8 MiB, and retained segments to 256 MiB per server. Pruning updates an atomic

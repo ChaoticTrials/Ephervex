@@ -4,7 +4,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use ephervex_model::OperationId;
@@ -18,7 +18,8 @@ use crate::capture::{CaptureStream, CapturedLine, OutputCapture, ServerOutputEve
 use crate::runtime::{
     ProcessEvidence, RuntimeClassification, RuntimeEvidence, active_control_socket_path,
     capture_java_child, classify_runtime, clear_stale_runtime, create_runtime_lock,
-    prepare_control_socket_path, runtime_lock_path, runtime_path, write_runtime_evidence,
+    prepare_control_socket_path, read_runtime_evidence, runtime_lock_path, runtime_path,
+    write_runtime_evidence,
 };
 use crate::{ServerError, ServerResult};
 
@@ -36,6 +37,8 @@ const STDIN_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_WRITE_EXIT_GRACE: Duration = Duration::from_millis(500);
 /// How long a child whose supervision failed may take to be killed and reaped.
 const ABANDONED_CHILD_REAP_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a canceled run waits for its killed child to leave the process table.
+const CANCELED_CHILD_EXIT_WAIT: Duration = Duration::from_secs(2);
 
 /// A redaction-safe command for a server JVM.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,6 +181,14 @@ impl ServerSupervisor {
         let socket = ControlSocket::open(server_root, evidence.generation, requests)?;
         let capture = Arc::new(Mutex::new(OutputCapture::new(capture_directory)));
         let mut outstanding = Outstanding::default();
+        // Declared last so a canceled run withdraws its evidence before the lock is released.
+        let mut cancellation = CanceledRunEvidence {
+            server_root: server_root.to_path_buf(),
+            generation: evidence.generation,
+            live_child: Arc::clone(&outstanding.live_child),
+            exit_wait: CANCELED_CHILD_EXIT_WAIT,
+            armed: true,
+        };
 
         let result = match write_runtime_evidence(server_root, &evidence) {
             Ok(()) => {
@@ -194,6 +205,7 @@ impl ServerSupervisor {
             }
             Err(error) => Err(error),
         };
+        cancellation.armed = false;
 
         // Every path out of supervision releases what the run owns. The
         // evidence stays only when a child the run started may still be alive.
@@ -224,6 +236,52 @@ impl ServerSupervisor {
     }
 }
 
+/// Marks that no child of the run is alive.
+const NO_CHILD: u32 = 0;
+
+/// Withdraws a run's runtime evidence when the run is dropped before it finishes.
+///
+/// The child is killed when the supervision future drops. The evidence stays
+/// when that child is not gone after a short wait, because it may still be alive.
+struct CanceledRunEvidence {
+    server_root: PathBuf,
+    generation: uuid::Uuid,
+    live_child: Arc<AtomicU32>,
+    exit_wait: Duration,
+    armed: bool,
+}
+
+impl Drop for CanceledRunEvidence {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let pid = self.live_child.load(Ordering::Acquire);
+        if pid != NO_CHILD && !wait_until_gone(pid, self.exit_wait) {
+            return;
+        }
+        // Only this run's own evidence is withdrawn.
+        if matches!(
+            read_runtime_evidence(&self.server_root),
+            Ok(Some(evidence)) if evidence.generation == self.generation
+        ) {
+            let _ = std::fs::remove_file(runtime_path(&self.server_root));
+        }
+    }
+}
+
+/// Polls for `pid` to leave the process table. Bounded, for use where awaiting is impossible.
+fn wait_until_gone(pid: u32, limit: Duration) -> bool {
+    let deadline = std::time::Instant::now() + limit;
+    while process_is_running(pid) {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    true
+}
+
 /// What a run still owes answers for or must report once supervision ends.
 #[derive(Debug, Default)]
 struct Outstanding {
@@ -231,6 +289,8 @@ struct Outstanding {
     waiters: Vec<oneshot::Sender<ControlResponse>>,
     /// A child the run started could not be confirmed gone after supervision failed.
     child_unconfirmed: bool,
+    /// The pid of the child the run has started and not yet reaped, or `NO_CHILD`.
+    live_child: Arc<AtomicU32>,
 }
 
 /// The control socket and the task accepting on it, removed together on every path.
@@ -313,6 +373,7 @@ async fn supervise_commands(
             }
             Err(error) => return Err(error),
         };
+        outstanding.live_child.store(pid, Ordering::Release);
         if let Err(error) = record_spawned_child(&mut child, pid, server_root, evidence).await {
             abandon_child(&mut child, readers, outstanding).await;
             return Err(error);
@@ -330,6 +391,7 @@ async fn supervise_commands(
                     return Err(error);
                 }
             };
+        outstanding.live_child.store(NO_CHILD, Ordering::Release);
         for reader in readers {
             let _ = reader.await;
         }
@@ -1638,6 +1700,103 @@ mod tests {
         )
         .await
         .expect("a later start in the same process succeeds");
+    }
+
+    #[tokio::test]
+    async fn a_canceled_run_withdraws_its_evidence_and_leaves_the_server_startable() {
+        let server = supervise_journaled(None).await;
+
+        server.task.abort();
+        assert!(server.task.await.expect_err("canceled").is_cancelled());
+
+        assert_released(server.root.path());
+        drop(RuntimeGuard::acquire(server.root.path()).expect("a later start is not refused"));
+    }
+
+    #[tokio::test]
+    async fn a_canceled_run_stuck_draining_output_of_a_killed_child_leaves_the_server_startable() {
+        let root = tempfile::tempdir().expect("root");
+        std::fs::create_dir_all(root.path().join(".launcher")).expect("launcher");
+        let capture = tempfile::tempdir().expect("capture");
+        // The descendant keeps the pipes open after the child is killed.
+        let command = ServerCommand {
+            java: PathBuf::from("/bin/sh"),
+            arguments: vec!["-c".to_owned(), "sleep 5 & wait".to_owned()],
+            working_directory: root.path().join("server"),
+        };
+        let (observer, mut events) = ServerObserver::channel();
+        let server_root = root.path().to_path_buf();
+        let capture_path = capture.path().to_path_buf();
+        let task = tokio::spawn(async move {
+            ServerSupervisor::run(&command, &server_root, &capture_path, &observer).await
+        });
+        while let Some(event) = events.recv().await {
+            if matches!(event, ServerEvent::Started { .. }) {
+                break;
+            }
+        }
+        let child = read_runtime_evidence(root.path())
+            .expect("read")
+            .and_then(|evidence| evidence.child)
+            .expect("the child is recorded")
+            .pid;
+        let kill = tokio::spawn({
+            let root = root.path().to_path_buf();
+            async move { send_control(&root, &ControlAction::Kill).await }
+        });
+        while process_is_running(child) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!task.is_finished(), "the run is still draining output");
+
+        task.abort();
+        assert!(task.await.expect_err("canceled").is_cancelled());
+        kill.abort();
+
+        assert_released(root.path());
+    }
+
+    #[test]
+    fn a_canceled_run_keeps_its_evidence_while_its_child_is_still_alive() {
+        let root = tempfile::tempdir().expect("root");
+        std::fs::create_dir_all(root.path().join(".launcher")).expect("launcher");
+        let evidence = RuntimeEvidence::for_current_supervisor().expect("evidence");
+        write_runtime_evidence(root.path(), &evidence).expect("write");
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn");
+
+        drop(CanceledRunEvidence {
+            server_root: root.path().to_path_buf(),
+            generation: evidence.generation,
+            live_child: Arc::new(AtomicU32::new(child.id())),
+            exit_wait: Duration::from_millis(50),
+            armed: true,
+        });
+
+        assert!(runtime_path(root.path()).exists());
+        child.kill().expect("kill");
+        child.wait().expect("reap");
+    }
+
+    #[test]
+    fn a_canceled_run_never_withdraws_evidence_written_by_another_run() {
+        let root = tempfile::tempdir().expect("root");
+        std::fs::create_dir_all(root.path().join(".launcher")).expect("launcher");
+        let other = RuntimeEvidence::for_current_supervisor().expect("evidence");
+        write_runtime_evidence(root.path(), &other).expect("write");
+
+        drop(CanceledRunEvidence {
+            server_root: root.path().to_path_buf(),
+            generation: uuid::Uuid::new_v4(),
+            live_child: Arc::new(AtomicU32::new(NO_CHILD)),
+            exit_wait: Duration::from_millis(50),
+            armed: true,
+        });
+
+        assert!(runtime_path(root.path()).exists());
     }
 
     #[tokio::test]
