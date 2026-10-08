@@ -1,7 +1,7 @@
 //! Bounded in-memory output and rotated JSON Lines diagnostic capture.
 
 use std::collections::VecDeque;
-use std::io::Write as _;
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -214,12 +214,39 @@ impl Default for CaptureLimits {
     }
 }
 
+/// A capture segment as the writer accounts for it. `lines` is unknown for
+/// segments left by earlier runs until retention needs to report them.
+#[derive(Debug)]
+struct TrackedSegment {
+    path: PathBuf,
+    bytes: u64,
+    lines: Option<u64>,
+    started_at: Option<DateTime<Utc>>,
+}
+
+impl TrackedSegment {
+    fn empty(path: PathBuf) -> Self {
+        Self {
+            path,
+            bytes: 0,
+            lines: Some(0),
+            started_at: None,
+        }
+    }
+}
+
+/// Upper bound on bytes read to find a segment's first line.
+const SEGMENT_START_PROBE_BYTES: u64 = 1024 * 1024;
+
 #[derive(Debug)]
 struct CaptureWriter {
     directory: PathBuf,
-    current_path: PathBuf,
     current: std::fs::File,
-    current_bytes: u64,
+    current_segment: TrackedSegment,
+    /// Older segments, oldest first.
+    retained: VecDeque<TrackedSegment>,
+    /// Bytes across `retained` and `current_segment`, kept up to date so a write never rescans the directory.
+    total_bytes: u64,
     limits: CaptureLimits,
     retention: CaptureRetention,
 }
@@ -228,12 +255,15 @@ impl CaptureWriter {
     fn open(directory: &Path, limits: CaptureLimits) -> std::io::Result<Self> {
         std::fs::create_dir_all(directory)?;
         let retention = read_retention(directory).unwrap_or_default();
-        let (current_path, current) = create_segment(directory)?;
+        let retained: VecDeque<TrackedSegment> = existing_segments(directory)?.into();
+        let (path, current) = create_segment(directory)?;
+        let total_bytes = retained.iter().map(|segment| segment.bytes).sum();
         Ok(Self {
             directory: directory.to_path_buf(),
-            current_path,
             current,
-            current_bytes: 0,
+            current_segment: TrackedSegment::empty(path),
+            retained,
+            total_bytes,
             limits,
             retention,
         })
@@ -242,51 +272,69 @@ impl CaptureWriter {
     fn write(&mut self, line: &CapturedLine) -> std::io::Result<Option<CaptureRetention>> {
         let mut body = serde_json::to_vec(line).map_err(std::io::Error::other)?;
         body.push(b'\n');
-        if self.current_bytes > 0
-            && self.current_bytes + u64::try_from(body.len()).unwrap_or(u64::MAX)
-                > self.limits.segment_bytes
+        let length = u64::try_from(body.len()).unwrap_or(u64::MAX);
+        if self.current_segment.bytes > 0
+            && self.current_segment.bytes.saturating_add(length) > self.limits.segment_bytes
         {
             self.rotate()?;
         }
         self.current.write_all(&body)?;
         self.current.flush()?;
-        self.current_bytes += u64::try_from(body.len()).unwrap_or(u64::MAX);
+        self.record_current(length, Some(line.timestamp));
         self.enforce_budget()
+    }
+
+    fn record_current(&mut self, length: u64, timestamp: Option<DateTime<Utc>>) {
+        let segment = &mut self.current_segment;
+        segment.bytes = segment.bytes.saturating_add(length);
+        segment.lines = segment.lines.map(|lines| lines.saturating_add(1));
+        if segment.started_at.is_none() {
+            segment.started_at = timestamp;
+        }
+        self.total_bytes = self.total_bytes.saturating_add(length);
     }
 
     fn rotate(&mut self) -> std::io::Result<()> {
         self.current.sync_all()?;
         let (path, file) = create_segment(&self.directory)?;
-        self.current_path = path;
         self.current = file;
-        self.current_bytes = 0;
+        let finished = std::mem::replace(&mut self.current_segment, TrackedSegment::empty(path));
+        self.retained.push_back(finished);
         Ok(())
     }
 
     fn enforce_budget(&mut self) -> std::io::Result<Option<CaptureRetention>> {
-        let mut segments = segment_files(&self.directory)?;
-        let mut total: u64 = segments.iter().map(|segment| segment.bytes).sum();
         let mut changed = false;
-        while total > self.limits.budget_bytes {
-            let Some(index) = segments
-                .iter()
-                .position(|segment| segment.path != self.current_path)
-            else {
+        while self.total_bytes > self.limits.budget_bytes {
+            let Some(segment) = self.retained.pop_front() else {
                 break;
             };
-            let segment = segments.remove(index);
-            std::fs::remove_file(&segment.path)?;
-            total = total.saturating_sub(segment.bytes);
+            let lines = match segment.lines {
+                Some(lines) => lines,
+                None => match count_lines(&segment.path) {
+                    Ok(lines) => lines,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+                    Err(error) => return Err(error),
+                },
+            };
+            match std::fs::remove_file(&segment.path) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+                _ => {}
+            }
+            self.total_bytes = self.total_bytes.saturating_sub(segment.bytes);
             self.retention.removed_segments += 1;
             self.retention.removed_bytes += segment.bytes;
-            self.retention.removed_lines += segment.lines;
+            self.retention.removed_lines += lines;
             changed = true;
         }
         if !changed {
             return Ok(None);
         }
-        self.retention.earliest_retained_at =
-            segments.first().and_then(|segment| segment.started_at);
+        self.retention.earliest_retained_at = self
+            .retained
+            .front()
+            .unwrap_or(&self.current_segment)
+            .started_at;
         write_retention(&self.directory, &self.retention)?;
         let marker = CapturedLine {
             timestamp: Utc::now(),
@@ -304,17 +352,9 @@ impl CaptureWriter {
         body.push(b'\n');
         self.current.write_all(&body)?;
         self.current.flush()?;
-        self.current_bytes += u64::try_from(body.len()).unwrap_or(0);
+        self.record_current(u64::try_from(body.len()).unwrap_or(0), None);
         Ok(Some(self.retention.clone()))
     }
-}
-
-#[derive(Debug)]
-struct SegmentInfo {
-    path: PathBuf,
-    bytes: u64,
-    lines: u64,
-    started_at: Option<DateTime<Utc>>,
 }
 
 fn create_segment(directory: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
@@ -331,7 +371,9 @@ fn create_segment(directory: &Path) -> std::io::Result<(PathBuf, std::fs::File)>
     Ok((path, file))
 }
 
-fn segment_files(directory: &Path) -> std::io::Result<Vec<SegmentInfo>> {
+/// Lists segments left by earlier runs, oldest first. Only sizes and each
+/// segment's first timestamp are read, so opening does not scan retained output.
+fn existing_segments(directory: &Path) -> std::io::Result<Vec<TrackedSegment>> {
     let mut segments = Vec::new();
     for entry in std::fs::read_dir(directory)? {
         let entry = entry?;
@@ -346,24 +388,53 @@ fn segment_files(directory: &Path) -> std::io::Result<Vec<SegmentInfo>> {
         {
             continue;
         }
-        let bytes = entry.metadata()?.len();
-        let body = std::fs::read(&path)?;
-        let lines = u64::try_from(body.split(|byte| *byte == b'\n').count().saturating_sub(1))
-            .unwrap_or(u64::MAX);
-        let started_at = body
-            .split(|byte| *byte == b'\n')
-            .find(|line| !line.is_empty())
-            .and_then(|line| serde_json::from_slice::<CapturedLine>(line).ok())
-            .map(|line| line.timestamp);
-        segments.push(SegmentInfo {
+        let metadata = entry.metadata()?;
+        if !metadata.is_file() {
+            continue;
+        }
+        let started_at = first_timestamp(&path);
+        segments.push(TrackedSegment {
             path,
-            bytes,
-            lines,
+            bytes: metadata.len(),
+            lines: None,
             started_at,
         });
     }
     segments.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(segments)
+}
+
+fn first_timestamp(path: &Path) -> Option<DateTime<Utc>> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = BufReader::new(file.take(SEGMENT_START_PROBE_BYTES));
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line).ok()? == 0 {
+            return None;
+        }
+        if line.iter().any(|byte| !byte.is_ascii_whitespace()) {
+            return serde_json::from_slice::<CapturedLine>(&line)
+                .ok()
+                .map(|line| line.timestamp);
+        }
+    }
+}
+
+/// Counts newline-terminated lines, matching how segments are written.
+fn count_lines(path: &Path) -> std::io::Result<u64> {
+    let mut reader = BufReader::new(std::fs::File::open(path)?);
+    let mut line = Vec::new();
+    let mut lines = 0_u64;
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 {
+            return Ok(lines);
+        }
+        if line.last() == Some(&b'\n') {
+            lines += 1;
+        }
+    }
 }
 
 fn truncate_bytes(bytes: &[u8], limit: usize) -> (&[u8], usize) {
@@ -451,6 +522,106 @@ mod tests {
         let retention = pruned.expect("old segments should be pruned");
         assert!(retention.removed_segments > 0);
         assert!(directory.path().join(CAPTURE_INDEX_FILE).is_file());
+    }
+
+    fn timestamp(text: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(text)
+            .expect("timestamp")
+            .with_timezone(&Utc)
+    }
+
+    fn write_prior_segment(directory: &Path, name: &str, start: &str, lines: usize) -> u64 {
+        let start = timestamp(start);
+        let mut body = Vec::new();
+        for index in 0..lines {
+            let line = CapturedLine {
+                timestamp: start + chrono::Duration::seconds(i64::try_from(index).unwrap()),
+                stream: CaptureStream::Stdout,
+                text: format!("prior-{index}-{}", "x".repeat(200)),
+                truncated: false,
+                omitted_bytes: 0,
+            };
+            body.extend(serde_json::to_vec(&line).unwrap());
+            body.push(b'\n');
+        }
+        std::fs::write(directory.join(name), &body).unwrap();
+        u64::try_from(body.len()).unwrap()
+    }
+
+    #[test]
+    fn writes_within_budget_never_read_retained_segments() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        write_prior_segment(
+            directory.path(),
+            "capture-20200101T000000.000Z-a.jsonl",
+            "2020-01-01T00:00:00Z",
+            3,
+        );
+        let mut writer =
+            CaptureWriter::open(directory.path(), CaptureLimits::default()).expect("writer");
+
+        // A directory cannot be read as a file, so any per-write rescan would fail.
+        let retained = directory
+            .path()
+            .join("capture-20200101T000000.000Z-a.jsonl");
+        std::fs::remove_file(&retained).unwrap();
+        std::fs::create_dir(&retained).unwrap();
+
+        for index in 0..50 {
+            let line =
+                CapturedLine::from_bytes(CaptureStream::Stdout, format!("{index}").as_bytes());
+            assert!(writer.write(&line).expect("write").is_none());
+        }
+    }
+
+    #[test]
+    fn pruning_reports_segments_from_earlier_runs_and_survives_reopen() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let oldest = write_prior_segment(
+            directory.path(),
+            "capture-20200101T000000.000Z-a.jsonl",
+            "2020-01-01T00:00:00Z",
+            3,
+        );
+        let newer = write_prior_segment(
+            directory.path(),
+            "capture-20200102T000000.000Z-b.jsonl",
+            "2020-01-02T00:00:00Z",
+            2,
+        );
+        let line = CapturedLine::from_bytes(CaptureStream::Stdout, b"fresh");
+        let line_bytes = u64::try_from(serde_json::to_vec(&line).unwrap().len() + 1).unwrap();
+        let limits = CaptureLimits {
+            segment_bytes: CAPTURE_SEGMENT_BYTES,
+            budget_bytes: oldest + newer + line_bytes - 1,
+        };
+
+        let mut writer = CaptureWriter::open(directory.path(), limits).expect("writer");
+        let retention = writer.write(&line).expect("write").expect("pruned");
+
+        assert_eq!(retention.removed_segments, 1);
+        assert_eq!(retention.removed_bytes, oldest);
+        assert_eq!(retention.removed_lines, 3);
+        assert_eq!(
+            retention.earliest_retained_at,
+            Some(timestamp("2020-01-02T00:00:00Z"))
+        );
+        assert!(
+            !directory
+                .path()
+                .join("capture-20200101T000000.000Z-a.jsonl")
+                .exists()
+        );
+        assert!(
+            directory
+                .path()
+                .join("capture-20200102T000000.000Z-b.jsonl")
+                .exists()
+        );
+        assert_eq!(read_retention(directory.path()).expect("index"), retention);
+
+        let reopened = CaptureWriter::open(directory.path(), limits).expect("reopen");
+        assert_eq!(reopened.retention, retention);
     }
 
     #[test]
