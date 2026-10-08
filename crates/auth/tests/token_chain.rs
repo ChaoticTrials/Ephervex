@@ -779,6 +779,96 @@ async fn a_logout_during_the_later_legs_leaves_no_credential_and_no_session() {
     assert!(store.load(&key).expect("load").is_none());
 }
 
+/// A store that holds the first `store` call until released, so a test can act
+/// while a resume is part-way through publishing its replacement.
+#[derive(Debug)]
+struct StoreHeldOpen {
+    inner: MemoryStore,
+    entered: std::sync::Mutex<std::sync::mpsc::Sender<()>>,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl CredentialStore for StoreHeldOpen {
+    fn store(&self, key: &CredentialKey, secret: &SecretString) -> Result<(), AuthError> {
+        self.entered.lock().unwrap().send(()).unwrap();
+        self.release.lock().unwrap().recv().unwrap();
+        self.inner.store(key, secret)
+    }
+
+    fn load(&self, key: &CredentialKey) -> Result<Option<SecretString>, AuthError> {
+        self.inner.load(key)
+    }
+
+    fn delete(&self, key: &CredentialKey) -> Result<(), AuthError> {
+        self.inner.delete(key)
+    }
+
+    fn storage(&self) -> CredentialStorage {
+        self.inner.storage()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_removal_made_outside_the_provider_waits_for_a_resume_that_is_publishing() {
+    let server = MockServer::start().await;
+    mount_token(&server, 200, TOKEN_ROTATED).await;
+    mount_chain(&server).await;
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let store = Arc::new(StoreHeldOpen {
+        inner: MemoryStore::new(),
+        entered: std::sync::Mutex::new(entered_tx),
+        release: std::sync::Mutex::new(release_rx),
+    });
+    let key = CredentialKey::MicrosoftRefreshToken(account());
+    store
+        .inner
+        .store(&key, &SecretString::new("FAKE-MICROSOFT-REFRESH-TOKEN"))
+        .expect("seed");
+    let provider = provider(&server, store.clone());
+
+    let resume = tokio::spawn(async move {
+        provider
+            .resume(
+                account(),
+                &AuthObserver::silent(),
+                &CancellationToken::new(),
+            )
+            .await
+    });
+    tokio::task::spawn_blocking(move || entered_rx.recv().expect("the resume reaches the store"))
+        .await
+        .expect("task");
+
+    // What account removal does: a deletion that is not the provider's own.
+    let removal = {
+        let store = store.clone();
+        let key = key.clone();
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = done.clone();
+        let handle = std::thread::spawn(move || {
+            ephervex_auth::delete_credential(store.as_ref(), &key).expect("delete");
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        (handle, done)
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !removal.1.load(std::sync::atomic::Ordering::SeqCst),
+        "the removal must not land between the resume's check and its store"
+    );
+
+    release_tx.send(()).expect("release");
+    removal.0.join().expect("removal");
+    let _ = resume.await.expect("task");
+
+    assert!(
+        store.load(&key).expect("load").is_none(),
+        "a resume that was publishing must not bring the removed credential back"
+    );
+}
+
 #[tokio::test]
 async fn a_rejected_credential_is_not_removed_once_a_newer_one_replaced_it() {
     let server = MockServer::start().await;

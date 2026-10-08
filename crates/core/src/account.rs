@@ -659,7 +659,10 @@ impl App {
         if kind.has_stored_credential() {
             match self.keyring() {
                 Ok(store) => {
-                    store.delete(&ephervex_auth::CredentialKey::MicrosoftRefreshToken(id))?;
+                    ephervex_auth::delete_credential(
+                        store.as_ref(),
+                        &ephervex_auth::CredentialKey::MicrosoftRefreshToken(id),
+                    )?;
                     keyring = Some(store);
                 }
                 // The keyring may only be locked or briefly gone, so the
@@ -802,9 +805,10 @@ impl App {
         let mut done = Vec::new();
         for pending in &self.config().keyring_cleanup {
             let deleted = Uuid::parse_str(pending).map_or(Ok(()), |account| {
-                store.delete(&ephervex_auth::CredentialKey::MicrosoftRefreshToken(
-                    account,
-                ))
+                ephervex_auth::delete_credential(
+                    store,
+                    &ephervex_auth::CredentialKey::MicrosoftRefreshToken(account),
+                )
             });
             match deleted {
                 Ok(()) => done.push(pending.clone()),
@@ -835,9 +839,12 @@ impl App {
         Uuid::parse_str(id).map_err(|_| CoreError::Auth(AuthError::NotSignedIn))
     }
 
-    /// Records a completed session: metadata to the file, token to memory.
+    /// Records a resumed session: metadata to the file, token to memory.
+    ///
+    /// Only an account the configuration still names is updated. One removed
+    /// while the resume ran stays removed, and the resume fails as signed out.
     fn adopt(&mut self, session: Session) -> CoreResult<&Session> {
-        self.record_account(&session)?;
+        self.refresh_recorded_account(&session)?;
         self.hold_session(session)
     }
 
@@ -869,7 +876,10 @@ impl App {
             }
         }
         let deleted = self.keyring().and_then(|store| {
-            store.delete(&ephervex_auth::CredentialKey::MicrosoftRefreshToken(id))
+            ephervex_auth::delete_credential(
+                store.as_ref(),
+                &ephervex_auth::CredentialKey::MicrosoftRefreshToken(id),
+            )
         });
         if let Err(error) = deleted {
             warn!(%error, account = %id, "could not remove the credential of a login that was not recorded");
@@ -878,6 +888,28 @@ impl App {
 
     /// Writes a completed session's account metadata to the configuration.
     fn record_account(&mut self, session: &Session) -> CoreResult<()> {
+        self.write_account_metadata(session, |config, id, name, at| {
+            config.remember_account(id, name, session.account.kind, at);
+            true
+        })
+    }
+
+    /// [`Self::record_account`] for a resume: refuses to bring back an
+    /// account that is no longer recorded.
+    fn refresh_recorded_account(&mut self, session: &Session) -> CoreResult<()> {
+        self.write_account_metadata(session, |config, id, name, at| {
+            config.refresh_account(id, name, session.account.kind, at)
+        })
+    }
+
+    /// Applies `write` to the configuration under its lock, for a session that
+    /// will still be here next time. `write` returns whether the account is
+    /// recorded afterwards; when it is not, the session is signed out.
+    fn write_account_metadata(
+        &mut self,
+        session: &Session,
+        write: impl FnOnce(&mut ephervex_storage::Config, &str, &str, &str) -> bool,
+    ) -> CoreResult<()> {
         let id = session.account.id.to_string();
         let name = session.account.name.clone();
         let at = session
@@ -892,9 +924,11 @@ impl App {
             .storage()
             .is_some_and(CredentialStorage::is_persistent)
         {
-            self.mutate_config(|config| {
-                config.remember_account(&id, &name, session.account.kind, &at);
-            })?;
+            let mut recorded = false;
+            self.mutate_config(|config| recorded = write(config, &id, &name, &at))?;
+            if !recorded {
+                return Err(CoreError::Auth(AuthError::NotSignedIn));
+            }
         } else {
             debug!(account = %id, "session-only login; nothing written to the configuration");
         }
@@ -1041,6 +1075,48 @@ mod tests {
             store.load(&key).expect("load").is_some(),
             "it may record the account"
         );
+    }
+
+    #[test]
+    fn a_resume_finishing_after_the_account_was_removed_does_not_record_it_again() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut resuming = app_rooted_at(base.path());
+        let id = Uuid::new_v4();
+        remember_microsoft_account(&mut resuming, id);
+        let store = keyring_holding(id);
+        resuming.test_keyring = Some(TestKeyring::Store(store.clone()));
+
+        // The removal runs in another `App` after the resume's last check.
+        let mut removing = app_rooted_at(base.path());
+        removing.test_keyring = Some(TestKeyring::Store(store.clone()));
+        removing.remove_account(&id.to_string()).expect("removed");
+
+        let error = resuming
+            .adopt(microsoft_session(id))
+            .expect_err("the account is gone");
+
+        assert!(
+            matches!(error, CoreError::Auth(AuthError::NotSignedIn)),
+            "{error:?}"
+        );
+        let config = app_rooted_at(base.path()).config().clone();
+        assert!(!config.accounts.contains_key(&id.to_string()));
+        assert!(config.active_account().is_none());
+        assert!(resuming.session().is_none());
+    }
+
+    #[test]
+    fn a_resume_keeps_the_pending_cleanup_of_the_account_it_updates() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let id = Uuid::new_v4();
+        remember_microsoft_account(&mut app, id);
+        app.mutate_config(|config| config.record_keyring_cleanup(&id.to_string()))
+            .expect("record");
+
+        app.adopt(microsoft_session(id)).expect("adopted");
+
+        assert_eq!(app.config().keyring_cleanup, [id.to_string()]);
     }
 
     #[test]

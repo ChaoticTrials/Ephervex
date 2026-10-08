@@ -1249,6 +1249,22 @@ impl Config {
         }
     }
 
+    /// Updates the metadata of an account that is still recorded.
+    ///
+    /// Returns `false`, changing nothing, for an id this installation does not
+    /// have. A resume uses this instead of [`Self::remember_account`] so an
+    /// account removed while the resume ran stays removed. Unlike a sign-in it
+    /// leaves the default account and any pending keyring cleanup alone.
+    pub fn refresh_account(&mut self, id: &str, name: &str, kind: AccountKind, at: &str) -> bool {
+        let Some(entry) = self.accounts.get_mut(id) else {
+            return false;
+        };
+        name.clone_into(&mut entry.name);
+        entry.kind = kind;
+        at.clone_into(&mut entry.last_authenticated_at);
+        true
+    }
+
     /// Makes an account the default.
     ///
     /// Returns `false` for an id this installation does not have, so a caller
@@ -3060,6 +3076,31 @@ reference = ""
             config.find_account("8667ba71-b85a-4004-af54-457a9734eed7"),
             Ok("8667ba71b85a4004af54457a9734eed7")
         );
+    }
+
+    #[test]
+    fn refreshing_an_account_that_is_not_recorded_changes_nothing() {
+        let mut config = Config::default();
+
+        assert!(!config.refresh_account("gone", "Steve", AccountKind::Microsoft, "t"));
+
+        assert!(config.accounts.is_empty());
+        assert!(config.active_account().is_none());
+    }
+
+    #[test]
+    fn refreshing_a_recorded_account_updates_it_without_touching_the_default() {
+        let mut config = Config::default();
+        config.remember_account("a", "Old", AccountKind::Microsoft, "t1");
+        config.remember_account("b", "Other", AccountKind::Microsoft, "t1");
+
+        assert!(config.refresh_account("b", "New", AccountKind::Microsoft, "t2"));
+
+        let account = &config.accounts["b"];
+        assert_eq!(account.name, "New");
+        assert_eq!(account.added_at, "t1");
+        assert_eq!(account.last_authenticated_at, "t2");
+        assert_eq!(config.active_account(), Some("a"));
     }
 
     #[test]

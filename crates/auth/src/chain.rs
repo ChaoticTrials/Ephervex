@@ -65,9 +65,32 @@ pub struct MicrosoftAccountProvider {
     xbox: XboxClient,
     minecraft: MinecraftServicesClient,
     credentials: Arc<dyn CredentialStore>,
-    /// Orders every credential change that follows a wait on the network
-    /// against logout. Shared by clones of the provider.
-    credential_changes: Arc<Mutex<()>>,
+}
+
+/// Orders every credential change that follows a wait on the network against
+/// the removal of that credential.
+///
+/// Process-wide rather than per provider: a launch builds its own provider,
+/// and the account removal that races it runs in another `App`.
+static CREDENTIAL_CHANGES: Mutex<()> = Mutex::new(());
+
+fn lock_credential_changes() -> MutexGuard<'static, ()> {
+    // The guard protects ordering, not data, so a panic elsewhere leaves
+    // nothing to distrust.
+    CREDENTIAL_CHANGES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Deletes a stored credential in order with every resume in this process.
+///
+/// A resume that is publishing or checking the same credential finishes
+/// before the deletion starts, and one that starts afterwards finds it gone.
+/// Anything that removes an account's credential outside a provider uses this
+/// so a resume in flight cannot store it again.
+pub fn delete_credential(store: &dyn CredentialStore, key: &CredentialKey) -> AuthResult<()> {
+    let _ordered = lock_credential_changes();
+    store.delete(key)
 }
 
 impl MicrosoftAccountProvider {
@@ -97,7 +120,6 @@ impl MicrosoftAccountProvider {
             xbox: XboxClient::new(client.clone(), endpoints.clone()),
             minecraft: MinecraftServicesClient::new(client, endpoints, client_id),
             credentials,
-            credential_changes: Arc::new(Mutex::new(())),
         })
     }
 
@@ -268,14 +290,6 @@ impl MicrosoftAccountProvider {
         Ok(session)
     }
 
-    fn lock_credential_changes(&self) -> MutexGuard<'_, ()> {
-        // The guard protects ordering, not data, so a panic elsewhere leaves
-        // nothing to distrust.
-        self.credential_changes
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-    }
-
     /// Stores the refresh token a resume was issued in place of `loaded`.
     ///
     /// A credential that is gone means the account signed out while the
@@ -288,7 +302,7 @@ impl MicrosoftAccountProvider {
         loaded: &SecretString,
         replacement: &SecretString,
     ) -> AuthResult<()> {
-        let _ordered = self.lock_credential_changes();
+        let _ordered = lock_credential_changes();
         match self.credentials.load(key)? {
             None => Err(AuthError::NotSignedIn),
             Some(current) if current == *loaded => self.credentials.store(key, replacement),
@@ -299,7 +313,7 @@ impl MicrosoftAccountProvider {
     /// Removes the credential Microsoft rejected, unless it has changed since
     /// it was read.
     fn discard_rejected(&self, key: &CredentialKey, rejected: &SecretString) {
-        let _ordered = self.lock_credential_changes();
+        let _ordered = lock_credential_changes();
         match self.credentials.load(key) {
             Ok(Some(current)) if current == *rejected => {
                 if let Err(removal) = self.credentials.delete(key) {
@@ -313,7 +327,7 @@ impl MicrosoftAccountProvider {
 
     /// Fails when the account signed out while a resume was running.
     fn ensure_signed_in(&self, key: &CredentialKey) -> AuthResult<()> {
-        let _ordered = self.lock_credential_changes();
+        let _ordered = lock_credential_changes();
         match self.credentials.load(key)? {
             Some(_) => Ok(()),
             None => Err(AuthError::NotSignedIn),
@@ -383,9 +397,10 @@ impl AccountProvider for MicrosoftAccountProvider {
     }
 
     fn logout(&self, account: Uuid) -> AuthResult<()> {
-        let _ordered = self.lock_credential_changes();
-        self.credentials
-            .delete(&CredentialKey::MicrosoftRefreshToken(account))
+        delete_credential(
+            self.credentials.as_ref(),
+            &CredentialKey::MicrosoftRefreshToken(account),
+        )
     }
 
     fn has_stored_credential(&self, account: Uuid) -> AuthResult<bool> {
