@@ -1172,6 +1172,9 @@ pub struct LinkedSectionData {
 /// The per-target result of one finished linked operation.
 #[derive(Debug, Clone)]
 pub struct LinkedResultData {
+    /// The dialogs the operation could have been confirmed from. The report
+    /// opens over none of the others.
+    pub scope: ModalScope,
     pub title: String,
     pub summary: String,
     pub rows: Vec<LinkedTargetData>,
@@ -1439,6 +1442,43 @@ pub enum ServerToolEvent {
     ConsoleFinished { outcome: ConsoleOutcome },
 }
 
+/// The dialogs one operation's outcome is about.
+///
+/// An outcome arrives in a window the user has kept using since the operation
+/// started, so it may act only on a dialog the operation itself could have left
+/// open. Whatever else is on screen belongs to the user, or to another
+/// operation's wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModalScope {
+    /// Whatever is showing, for a failure that is not about any one dialog.
+    Anywhere,
+    /// The named dialogs only. None at all when the operation's own dialog
+    /// closes as it is confirmed.
+    Dialogs(&'static [&'static str]),
+}
+
+impl ModalScope {
+    pub const NONE: Self = Self::Dialogs(&[]);
+    pub const ABSENT_MODS: Self = Self::Dialogs(&["absent-mods"]);
+    pub const DELETE_INSTANCE: Self = Self::Dialogs(&["delete-instance"]);
+    pub const DELETE_SERVER: Self = Self::Dialogs(&["delete-server"]);
+    pub const DELETE_MOD: Self = Self::Dialogs(&["delete-mod", "mod-impact"]);
+    pub const EULA: Self = Self::Dialogs(&["eula"]);
+    pub const LOADER_CHANGE: Self = Self::Dialogs(&["loader-change"]);
+    pub const MAKE_PERSISTENT: Self = Self::Dialogs(&["make-persistent"]);
+    pub const MOD_MANAGE: Self = Self::Dialogs(&["mod-manage"]);
+    pub const RENAME: Self = Self::Dialogs(&["rename"]);
+
+    /// Whether `modal`, the dialog on screen, is one this scope speaks for.
+    #[must_use]
+    pub fn covers(self, modal: &str) -> bool {
+        match self {
+            Self::Anywhere => true,
+            Self::Dialogs(names) => names.contains(&modal),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Event {
     ServerTool {
@@ -1664,8 +1704,15 @@ pub enum Event {
     ModImpact(Box<ModImpactPresentation>),
     /// What turning a mod on needs first.
     ModRequirements(Box<ModRequirementPresentation>),
-    ModalError(String),
-    CloseModal,
+    /// A failure to put where the user can read it: in the dialog it is about
+    /// when that is still open, as a toast otherwise.
+    ModalError {
+        scope: ModalScope,
+        message: String,
+    },
+    /// An operation's dialog is done with. Closes the dialog on screen only
+    /// when `ModalScope` names it.
+    CloseModal(ModalScope),
     CreationFinished {
         request_id: String,
     },
@@ -2032,10 +2079,10 @@ pub fn spawn() -> BackendHandle {
         .spawn(move || run_worker(command_rx, worker_events, worker_cancellations))
     {
         tracing::error!(%error, "could not start the GUI core worker");
-        let _ = event_tx.send(Event::ModalError(localized_value(
-            "gui-background-service-failed",
-            &error.to_string(),
-        )));
+        let _ = event_tx.send(Event::ModalError {
+            scope: ModalScope::Anywhere,
+            message: localized_value("gui-background-service-failed", &error.to_string()),
+        });
     }
     BackendHandle {
         commands: command_tx,
@@ -2055,17 +2102,20 @@ fn run_worker(
     {
         Ok(runtime) => runtime,
         Err(error) => {
-            let _ = events.send(Event::ModalError(localized_value(
-                "gui-background-runtime-failed",
-                &error.to_string(),
-            )));
+            let _ = events.send(Event::ModalError {
+                scope: ModalScope::Anywhere,
+                message: localized_value("gui-background-runtime-failed", &error.to_string()),
+            });
             return;
         }
     };
     let mut app = match App::open() {
         Ok(app) => app,
         Err(error) => {
-            let _ = events.send(Event::ModalError(localized_error(&error)));
+            let _ = events.send(Event::ModalError {
+                scope: ModalScope::Anywhere,
+                message: localized_error(&error),
+            });
             return;
         }
     };
@@ -2652,7 +2702,7 @@ fn run_worker(
                         // Before the toast: the dialog that asked the question
                         // has its answer, and leaving it open invites the same
                         // answer again and a second copy nobody asked for.
-                        let _ = events.send(Event::CloseModal);
+                        let _ = events.send(Event::CloseModal(ModalScope::ABSENT_MODS));
                         let _ = events.send(Event::Toast {
                             message: localized_value("gui-created-entity", &copy.record.name),
                             error: false,
@@ -2703,7 +2753,10 @@ fn run_worker(
                             ),
                             InstalledHost::Instance(_) => lookup(refusal),
                         };
-                    let _ = events.send(Event::ModalError(message));
+                    let _ = events.send(Event::ModalError {
+                        scope: ModalScope::DELETE_INSTANCE,
+                        message,
+                    });
                     continue;
                 }
                 if stop_linked_servers {
@@ -2729,7 +2782,7 @@ fn run_worker(
                 }
                 match app.delete_client(id, disposition) {
                     Ok(_) => {
-                        let _ = events.send(Event::CloseModal);
+                        let _ = events.send(Event::CloseModal(ModalScope::DELETE_INSTANCE));
                         let _ = events.send(Event::Toast {
                             message: lookup("gui-instance-deleted"),
                             error: false,
@@ -2747,7 +2800,7 @@ fn run_worker(
                 };
                 match app.delete_server(id, disposition) {
                     Ok(()) => {
-                        let _ = events.send(Event::CloseModal);
+                        let _ = events.send(Event::CloseModal(ModalScope::DELETE_SERVER));
                         let _ = events.send(Event::Toast {
                             message: lookup("gui-server-deleted"),
                             error: false,
@@ -2771,7 +2824,7 @@ fn run_worker(
                     ));
                     match result {
                         Ok(change) => {
-                            let _ = events.send(Event::CloseModal);
+                            let _ = events.send(Event::CloseModal(ModalScope::LOADER_CHANGE));
                             let _ = events.send(Event::Toast {
                                 message: localized_value(
                                     "gui-loader-changed",
@@ -2816,12 +2869,14 @@ fn run_worker(
                                 &reporter,
                                 &cancel,
                             ));
-                            finish_linked(&app, &events, instance, result);
+                            finish_linked(&app, &events, instance, ModalScope::MOD_MANAGE, result);
                         }
                         Ok(plan) => {
                             let _ = events.send(Event::LinkedApply(linked_section(&plan)));
                         }
-                        Err(error) => send_modal_error(&events, &error),
+                        Err(error) => {
+                            send_scoped_modal_error(&events, ModalScope::MOD_MANAGE, &error);
+                        }
                     }
                 });
             }
@@ -2876,7 +2931,9 @@ fn run_worker(
                         Ok(plan) => {
                             let _ = events.send(Event::ModRemovalPlan(removal_plan_data(&plan)));
                         }
-                        Err(error) => send_modal_error(&events, &error),
+                        Err(error) => {
+                            send_scoped_modal_error(&events, ModalScope::MOD_MANAGE, &error);
+                        }
                     }
                 });
             }
@@ -2894,7 +2951,7 @@ fn run_worker(
                         &OperationReporter::silent("removing-mod"),
                         &CancellationToken::new(),
                     ));
-                    finish_linked(&app, &events, instance, result);
+                    finish_linked(&app, &events, instance, ModalScope::NONE, result);
                 });
             }
             Command::LoadInstanceWorkspace(instance) => {
@@ -2953,6 +3010,7 @@ fn run_worker(
                         title: "operation-creating-snapshot",
                         entity: label.clone(),
                         allow_cancel: true,
+                        dialogs: ModalScope::NONE,
                         finished: None,
                     },
                     move |app, _reporter, cancel| async move {
@@ -2985,6 +3043,7 @@ fn run_worker(
                         title: "operation-restoring-snapshot",
                         entity: snapshot.to_string(),
                         allow_cancel: true,
+                        dialogs: ModalScope::NONE,
                         finished: None,
                     },
                     move |app, _reporter, cancel| async move {
@@ -3040,6 +3099,7 @@ fn run_worker(
                         title: "operation-renaming-snapshot",
                         entity: label.clone(),
                         allow_cancel: false,
+                        dialogs: ModalScope::NONE,
                         finished: None,
                     },
                     move |app, _reporter, cancel| async move {
@@ -3065,6 +3125,7 @@ fn run_worker(
                         title: "operation-deleting-snapshot",
                         entity: snapshot.to_string(),
                         allow_cancel: false,
+                        dialogs: ModalScope::NONE,
                         finished: None,
                     },
                     move |app, _reporter, cancel| async move {
@@ -3120,6 +3181,7 @@ fn run_worker(
                         title: "operation-starting-isolation",
                         entity: host.id(),
                         allow_cancel: true,
+                        dialogs: ModalScope::NONE,
                         finished: Some(Event::IsolationSettled { request }),
                     },
                     move |app, reporter, cancel| async move {
@@ -3253,6 +3315,7 @@ fn run_worker(
                         title: "operation-canceling-isolation",
                         entity: host.id(),
                         allow_cancel: true,
+                        dialogs: ModalScope::NONE,
                         finished: Some(Event::IsolationSettled { request }),
                     },
                     move |app, _reporter, cancel| async move {
@@ -3283,6 +3346,7 @@ fn run_worker(
                         title: "operation-diagnosing-host",
                         entity: host.id(),
                         allow_cancel: true,
+                        dialogs: ModalScope::NONE,
                         finished: Some(Event::DiagnosisSettled { request }),
                     },
                     move |app, reporter, cancel| async move {
@@ -3333,6 +3397,7 @@ fn run_worker(
                         title: "operation-applying-fix",
                         entity: host.id(),
                         allow_cancel: true,
+                        dialogs: ModalScope::NONE,
                         finished: Some(Event::DiagnosisSettled { request }),
                     },
                     move |app, reporter, cancel| async move {
@@ -3388,6 +3453,7 @@ fn run_worker(
                         title: "operation-measuring-disk-usage",
                         entity: lookup("gui-settings-disk-usage"),
                         allow_cancel: true,
+                        dialogs: ModalScope::NONE,
                         finished: Some(Event::DiskUsageSettled { request }),
                     },
                     move |app, reporter, cancel| async move {
@@ -3451,6 +3517,7 @@ fn run_worker(
                         title: "operation-exporting-diagnostic-bundle",
                         entity: host.id(),
                         allow_cancel: false,
+                        dialogs: ModalScope::NONE,
                         finished: Some(Event::BundleSettled { request }),
                     },
                     move |app, _reporter, _cancel| async move {
@@ -3622,6 +3689,7 @@ fn run_worker(
                         title: "operation-installing-mods",
                         entity: project.clone(),
                         allow_cancel: true,
+                        dialogs: ModalScope::NONE,
                         finished: Some(Event::ModInstallFinished {
                             instance: instance.to_string(),
                             provider: provider.as_str().to_owned(),
@@ -3697,8 +3765,11 @@ fn run_worker(
                         }
                         // Several targets took part, so several results have to
                         // be shown. One toast could only be right about one.
-                        let _ = reports.send(Event::CloseModal);
-                        let _ = reports.send(Event::LinkedResult(linked_result_data(&outcome)));
+                        let _ = reports.send(Event::CloseModal(ModalScope::NONE));
+                        let _ = reports.send(Event::LinkedResult(linked_result_data(
+                            &outcome,
+                            ModalScope::NONE,
+                        )));
                         Ok(OperationReport::Reported)
                     },
                 );
@@ -4022,7 +4093,7 @@ fn run_worker(
             }
             Command::DeleteHandPlacedMod { host, path } => match app.delete_mod_file(host, &path) {
                 Ok(()) => {
-                    let _ = events.send(Event::CloseModal);
+                    let _ = events.send(Event::CloseModal(ModalScope::DELETE_MOD));
                     let _ = events.send(Event::Toast {
                         message: localized_value(
                             "gui-mod-deleted",
@@ -4035,11 +4106,11 @@ fn run_worker(
                     });
                     send_host_mods(&app, host, &events, &refreshed_mods, false);
                 }
-                Err(error) => send_modal_error(&events, &error),
+                Err(error) => send_scoped_modal_error(&events, ModalScope::DELETE_MOD, &error),
             },
             Command::RenameClient { id, name } => match app.rename_client(id, &name) {
                 Ok(record) => {
-                    let _ = events.send(Event::CloseModal);
+                    let _ = events.send(Event::CloseModal(ModalScope::RENAME));
                     let _ = events.send(Event::Toast {
                         message: localized_value("gui-renamed", &record.name),
                         error: false,
@@ -4050,7 +4121,7 @@ fn run_worker(
             },
             Command::RenameServer { id, name } => match app.rename_server(id, &name) {
                 Ok(committed) => {
-                    let _ = events.send(Event::CloseModal);
+                    let _ = events.send(Event::CloseModal(ModalScope::RENAME));
                     let _ = events.send(Event::Toast {
                         message: localized_value("gui-renamed", &committed.record.name),
                         error: false,
@@ -4165,7 +4236,7 @@ fn run_worker(
             }
             Command::AcceptEula => match app.accept_server_eula() {
                 Ok(_) => {
-                    let _ = events.send(Event::CloseModal);
+                    let _ = events.send(Event::CloseModal(ModalScope::EULA));
                     let _ = events.send(Event::Toast {
                         message: lookup("gui-eula-consent-recorded"),
                         error: false,
@@ -4176,7 +4247,7 @@ fn run_worker(
             },
             Command::RevokeEula => match app.revoke_server_eula() {
                 Ok(()) => {
-                    let _ = events.send(Event::CloseModal);
+                    let _ = events.send(Event::CloseModal(ModalScope::EULA));
                     let _ = events.send(Event::Toast {
                         message: lookup("gui-eula-consent-revoked"),
                         error: false,
@@ -5101,7 +5172,7 @@ fn promote_instance(
         Ok(outcome) => {
             // Before the toast, so the dialog that asked cannot be answered a
             // second time while the first answer is still being applied.
-            let _ = events.send(Event::CloseModal);
+            let _ = events.send(Event::CloseModal(ModalScope::MAKE_PERSISTENT));
             let _ = events.send(Event::Toast {
                 message: localized_value(
                     "gui-made-persistent",
@@ -7263,6 +7334,9 @@ struct AsyncOperationRequest {
     title: &'static str,
     entity: String,
     allow_cancel: bool,
+    /// The dialogs the operation was started from, which its completion may
+    /// close. None when the operation's dialog closed as it was confirmed.
+    dialogs: ModalScope,
     finished: Option<Event>,
 }
 
@@ -7289,6 +7363,7 @@ fn spawn_async_operation<F, Fut>(
         title,
         entity,
         allow_cancel,
+        dialogs,
         finished,
     } = request;
     let announcement = finished.clone();
@@ -7316,7 +7391,7 @@ fn spawn_async_operation<F, Fut>(
             match result {
                 Ok(OperationReport::Toast(message)) => {
                     reporter.finish(OperationStatus::Completed);
-                    let _ = events.send(Event::CloseModal);
+                    let _ = events.send(Event::CloseModal(dialogs));
                     let _ = events.send(Event::Toast {
                         message,
                         error: false,
@@ -7715,7 +7790,7 @@ fn apply_mod_operation(
             {
                 Acquisition::Acquired => {}
                 Acquisition::NotNeeded => {
-                    finish_linked(&app, &events, instance, result);
+                    finish_linked(&app, &events, instance, ModalScope::NONE, result);
                     return;
                 }
                 Acquisition::Abandoned => return,
@@ -7733,7 +7808,7 @@ fn apply_mod_operation(
                     &CancellationToken::new(),
                 )
                 .await;
-            finish_linked(&app, &events, instance, result);
+            finish_linked(&app, &events, instance, ModalScope::NONE, result);
         });
     });
 }
@@ -8260,7 +8335,7 @@ fn spawn_client_deletion_stopping_servers(
     files: ephervex_core::FileDisposition,
     in_flight: Vec<HostChangeInFlight>,
 ) {
-    let _ = events.send(Event::CloseModal);
+    let _ = events.send(Event::CloseModal(ModalScope::DELETE_INSTANCE));
     let _ = events.send(Event::Toast {
         message: lookup("gui-instance-stopping-servers"),
         error: false,
@@ -8818,22 +8893,27 @@ fn refresh_enriched_host_mods(paths: Paths, events: &Sender<Event>, host: Instal
     });
 }
 
+/// `dialogs` are the ones the operation could still be answering: the planning
+/// dialog of an operation that needed no confirmation, and none for one whose
+/// confirmation closed as it was given. Its result and its failure then reach
+/// the user without touching whatever else the window shows.
 fn finish_linked(
     app: &App,
     events: &Sender<Event>,
     instance: InstanceId,
+    dialogs: ModalScope,
     result: CoreResult<LinkedModOutcome>,
 ) {
     match result {
         Ok(outcome) => {
-            let _ = events.send(Event::CloseModal);
+            let _ = events.send(Event::CloseModal(dialogs));
             if outcome.targets.is_empty() {
                 let _ = events.send(Event::Toast {
                     message: client_outcome_message(&outcome),
                     error: false,
                 });
             } else {
-                let _ = events.send(Event::LinkedResult(linked_result_data(&outcome)));
+                let _ = events.send(Event::LinkedResult(linked_result_data(&outcome, dialogs)));
             }
             send_isolation_basis(app, InstalledHost::Instance(instance), events);
             for target in &outcome.targets {
@@ -8852,7 +8932,7 @@ fn finish_linked(
             }
             send_snapshot(app, events);
         }
-        Err(error) => send_modal_error(events, &error),
+        Err(error) => send_scoped_modal_error(events, dialogs, &error),
     }
 }
 
@@ -8868,7 +8948,7 @@ fn client_outcome_message(outcome: &LinkedModOutcome) -> String {
 }
 
 /// Every target's own result, so a partial success is visibly partial.
-fn linked_result_data(outcome: &LinkedModOutcome) -> LinkedResultData {
+fn linked_result_data(outcome: &LinkedModOutcome, scope: ModalScope) -> LinkedResultData {
     let mut rows = vec![LinkedTargetData {
         name: lookup("gui-linked-result-client"),
         state: lookup("gui-linked-applied"),
@@ -8879,6 +8959,7 @@ fn linked_result_data(outcome: &LinkedModOutcome) -> LinkedResultData {
     rows.extend(outcome.targets.iter().map(linked_result_row));
 
     LinkedResultData {
+        scope,
         title: outcome.root.name.clone(),
         summary: lookup(if outcome.unfinished().count() == 0 {
             "gui-linked-all-applied"
@@ -9196,8 +9277,17 @@ fn error_toast(error: &CoreError) -> Event {
 }
 
 fn send_modal_error(events: &Sender<Event>, error: &CoreError) {
+    send_scoped_modal_error(events, ModalScope::Anywhere, error);
+}
+
+/// Reports a failed submission to the dialogs in `scope`, or as a toast once
+/// none of them is on screen.
+fn send_scoped_modal_error(events: &Sender<Event>, scope: ModalScope, error: &CoreError) {
     tracing::warn!(message_id = error.message_id(), detail = %ErrorChain(error), "GUI form submission failed");
-    let _ = events.send(Event::ModalError(localized_error(error)));
+    let _ = events.send(Event::ModalError {
+        scope,
+        message: localized_error(error),
+    });
 }
 
 fn storage_class(persistent: bool) -> StorageClass {
@@ -9457,7 +9547,7 @@ fn delete_mod(
     };
     match app.delete_mod_files(host, &paths) {
         Ok(_) => {
-            let _ = events.send(Event::CloseModal);
+            let _ = events.send(Event::CloseModal(ModalScope::DELETE_MOD));
             let file = path
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
@@ -9478,7 +9568,7 @@ fn delete_mod(
             });
             send_host_mods(app, host, events, refreshed, false);
         }
-        Err(error) => send_modal_error(events, &error),
+        Err(error) => send_scoped_modal_error(events, ModalScope::DELETE_MOD, &error),
     }
 }
 

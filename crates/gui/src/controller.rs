@@ -4145,6 +4145,9 @@ fn register_dependency_actions(ui: &AppWindow, commands: &Sender<Command>) {
 
 /// Shows what turning a mod off, or deleting its jar, would do to the rest.
 fn apply_mod_impact(ui: &AppWindow, impact: &ModImpactPresentation) {
+    if !make_room_for_dialog(ui) {
+        return;
+    }
     ui.set_mod_impact_kind(impact.host_kind.as_str().into());
     ui.set_mod_impact_host(impact.host_id.as_str().into());
     ui.set_mod_impact_path(impact.path.as_str().into());
@@ -4168,6 +4171,9 @@ fn apply_mod_impact(ui: &AppWindow, impact: &ModImpactPresentation) {
 
 /// Shows what turning a mod on needs first.
 fn apply_mod_requirements(ui: &AppWindow, needs: &ModRequirementPresentation) {
+    if !make_room_for_dialog(ui) {
+        return;
+    }
     ui.set_mod_impact_kind(needs.host_kind.as_str().into());
     ui.set_mod_impact_host(needs.host_id.as_str().into());
     ui.set_mod_impact_path(needs.path.as_str().into());
@@ -6795,6 +6801,9 @@ fn apply_local_mod_plan(
         return;
     }
 
+    if !make_room_for_dialog(ui) {
+        return;
+    }
     ui.set_mod_clashes(
         plan.clashing
             .iter()
@@ -6840,6 +6849,9 @@ fn apply_absent_mods(ui: &AppWindow, absent: &backend::AbsentModsData, commands:
         );
         return;
     }
+    if !make_room_for_dialog(ui) {
+        return;
+    }
     ui.set_absent_mods(
         absent
             .names
@@ -6859,6 +6871,9 @@ fn apply_absent_mods(ui: &AppWindow, absent: &backend::AbsentModsData, commands:
 /// disappears on the next reboot is the surprise this dialog exists to prevent,
 /// so the safe answer is the default and unticking one is deliberate.
 fn apply_promotion_plan(ui: &AppWindow, plan: &backend::PromotionPlanData) {
+    if !make_room_for_dialog(ui) {
+        return;
+    }
     ui.set_promote_instance_name(plan.name.as_str().into());
     ui.set_promote_destination(plan.destination.as_str().into());
     ui.set_promote_servers(ModelRc::new(VecModel::from(
@@ -6902,6 +6917,9 @@ fn apply_event(
             host,
             redirected,
         } => {
+            if !make_room_for_dialog(ui) {
+                return;
+            }
             ui.set_pack_link_url(url.as_str().into());
             ui.set_pack_link_display(display.as_str().into());
             ui.set_pack_link_host(host.as_str().into());
@@ -6910,7 +6928,11 @@ fn apply_event(
             ui.set_modal_error(SharedString::default());
             ui.set_modal("open-pack-link".into());
         }
-        Event::PackDownloaded { archive } => begin_import(ui, import_flow, commands, archive),
+        Event::PackDownloaded { archive } => {
+            if make_room_for_dialog(ui) {
+                begin_import(ui, import_flow, commands, archive);
+            }
+        }
         Event::LinkSettings(settings) => {
             ui.set_trusted_pack_hosts(
                 settings
@@ -7293,18 +7315,8 @@ fn apply_event(
         }
         Event::ModImpact(impact) => apply_mod_impact(ui, &impact),
         Event::ModRequirements(needs) => apply_mod_requirements(ui, &needs),
-        Event::ModalError(message) => {
-            ui.set_modal_error(message.into());
-            // A refused mutation leaves its buttons usable again. Without this
-            // the modal would show the reason and offer no way to act on it.
-            ui.set_mod_action_pending(false);
-        }
-        Event::CloseModal => {
-            ui.set_modal(SharedString::default());
-            ui.set_modal_error(SharedString::default());
-            // The operation that disabled the modal's actions has answered.
-            ui.set_mod_action_pending(false);
-        }
+        Event::ModalError { scope, message } => apply_modal_error(ui, scope, message),
+        Event::CloseModal(scope) => close_modal_for(ui, scope),
         // A new instance is what the user was just looking at the dialog for,
         // so it is what they are looking at now. The snapshot that follows this
         // keeps the selection, because it keeps whatever was selected.
@@ -8377,14 +8389,7 @@ fn apply_mod_acquisition(ui: &AppWindow, data: backend::ModAcquisitionData, work
 }
 
 fn show_mod_acquisition(ui: &AppWindow, data: &backend::ModAcquisitionData) {
-    // The dialog this replaces is closed the way its own close button would,
-    // so an install confirmation still gives its place in the queue back and
-    // an import still stops its analysis.
-    match ui.get_modal().as_str() {
-        "mod-plan" => ui.invoke_abandon_browser_install(),
-        "import" => ui.invoke_close_import_modal(),
-        _ => {}
-    }
+    leave_modal(ui);
     ui.set_mod_action_pending(false);
     ui.set_modal_error(SharedString::default());
     ui.set_mod_acquisition_id(data.id.to_string().into());
@@ -8401,6 +8406,66 @@ fn show_mod_acquisition(ui: &AppWindow, data: &backend::ModAcquisitionData) {
             .collect::<Vec<_>>(),
     ));
     ui.set_modal("mod-acquire".into());
+}
+
+/// Lets go of the dialog on screen the way its own close button would, before
+/// something else takes its place: an install confirmation gives its place in
+/// the browser's queue back, and an import stops reading its archive. Without
+/// this the queue would hold the abandoned request until the app restarts and
+/// the import would keep running with nothing to show it.
+fn leave_modal(ui: &AppWindow) {
+    match ui.get_modal().as_str() {
+        "mod-plan" => ui.invoke_abandon_browser_install(),
+        "import" => ui.invoke_close_import_modal(),
+        _ => {}
+    }
+}
+
+/// Whether a dialog an event asks for may take the window's place.
+///
+/// Another operation's wait for a manual download is the one thing on screen
+/// that cannot be replaced, because its prompt is the only way to end it. What
+/// was asked for cannot wait for it, so it is dropped with a notice and asked
+/// for again once the prompt is gone. Anything else on screen is let go of the
+/// way its own close button would.
+fn make_room_for_dialog(ui: &AppWindow) -> bool {
+    if ui.get_modal() == "mod-acquire" {
+        ui.invoke_present_toast(lookup("gui-dialog-not-shown").into(), true);
+        return false;
+    }
+    leave_modal(ui);
+    true
+}
+
+/// Puts a failure where the user can read it: in the dialog it is about while
+/// that is still open, as a toast once it is gone.
+fn apply_modal_error(ui: &AppWindow, scope: backend::ModalScope, message: String) {
+    // A refused mutation leaves its buttons usable again. Without this the
+    // modal would show the reason and offer no way to act on it.
+    ui.set_mod_action_pending(false);
+    if scope.covers(ui.get_modal().as_str()) {
+        ui.set_modal_error(message.into());
+    } else {
+        // What is open now is not the failed operation's to write into.
+        ui.invoke_present_toast(message.into(), true);
+    }
+}
+
+/// Finishes an operation's dialog: closes the one on screen when the operation
+/// owns it, and leaves any other alone.
+///
+/// A dialog the operation does not own was opened by the user since, or is
+/// another operation's live wait, and is not the completion's to close.
+fn close_modal_for(ui: &AppWindow, scope: backend::ModalScope) {
+    // The operation that disabled the modal's actions has answered.
+    ui.set_mod_action_pending(false);
+    let modal = ui.get_modal();
+    if !modal.is_empty() && !scope.covers(modal.as_str()) {
+        return;
+    }
+    leave_modal(ui);
+    ui.set_modal(SharedString::default());
+    ui.set_modal_error(SharedString::default());
 }
 
 /// Closes the prompt whose wait is over, and only that one: a dialog the user
@@ -8614,17 +8679,28 @@ fn apply_mod_install_plan(
 
 /// Shows what one finished operation did to each target that took part.
 fn apply_linked_result(ui: &AppWindow, result: backend::LinkedResultData) {
+    let owns_modal = {
+        let modal = ui.get_modal();
+        modal.is_empty() || result.scope.covers(modal.as_str())
+    };
     let needs_review =
         presentation::linked_result_needs_review(result.rows.iter().map(|row| row.tone.as_str()));
     let summary = result.summary.clone();
+    ui.set_mod_action_pending(false);
+    if !owns_modal {
+        // The dialog on screen is not this operation's to replace, so the
+        // outcome is said in one line instead of the per-target report.
+        ui.invoke_present_toast(summary.into(), needs_review);
+        return;
+    }
     ui.set_linked_result_title(result.title.into());
     ui.set_linked_result_summary(result.summary.into());
     ui.set_linked_results(model(linked_target_rows(result.rows)));
-    ui.set_mod_action_pending(false);
     ui.set_modal_error(SharedString::default());
     // An operation that reached every target it was asked to says so in one
     // line. The per-target report is opened only when a target did not take
     // it, which is the case a reader has to act on.
+    leave_modal(ui);
     if needs_review {
         ui.set_modal("mod-result".into());
     } else {
@@ -8635,7 +8711,7 @@ fn apply_linked_result(ui: &AppWindow, result: backend::LinkedResultData) {
 
 /// Shows what a removal would take with it, here and on each linked server.
 fn apply_mod_removal_plan(ui: &AppWindow, data: backend::ModRemovalPlanData) {
-    if !addresses_open_mod(ui, &data.instance, &data.logical_path) {
+    if !addresses_open_mod(ui, &data.instance, &data.logical_path) || !make_room_for_dialog(ui) {
         return;
     }
     ui.set_mod_action_name(data.name.into());
@@ -8654,7 +8730,7 @@ fn apply_mod_removal_plan(ui: &AppWindow, data: backend::ModRemovalPlanData) {
 /// Shows the exact release a change or update settled on, and which linked
 /// servers can take it.
 fn apply_linked_confirmation(ui: &AppWindow, section: backend::LinkedSectionData) {
-    if !addresses_open_mod(ui, &section.instance, &section.path) {
+    if !addresses_open_mod(ui, &section.instance, &section.path) || !make_room_for_dialog(ui) {
         return;
     }
     apply_linked_section(ui, section);
@@ -13319,6 +13395,313 @@ mod tests {
         end_mod_acquisition(&ui, 1, &workspace);
 
         assert_eq!(ui.get_modal(), "rename");
+    }
+
+    /// Opens the install confirmation the browser's queue is waiting on.
+    fn open_install_confirmation(ui: &AppWindow, workspace: &Workspace) {
+        register_browser_install(ui, &workspace.commands, workspace);
+        let queued = ephervex_model::InstanceId::new().to_string();
+        ui.invoke_install_from_browser(queued.as_str().into(), "modrinth".into(), "first".into());
+        ui.set_modal("mod-plan".into());
+        assert!(workspace.browser.installs.borrow().active.is_some());
+    }
+
+    fn linked_result(scope: backend::ModalScope, tone: &str) -> backend::LinkedResultData {
+        backend::LinkedResultData {
+            scope,
+            title: "UtilitiX".to_owned(),
+            summary: "Applied to every server.".to_owned(),
+            rows: vec![backend::LinkedTargetData {
+                name: "Server".to_owned(),
+                tone: tone.to_owned(),
+                ..backend::LinkedTargetData::default()
+            }],
+        }
+    }
+
+    #[test]
+    fn another_operations_completion_leaves_an_install_confirmation_open() {
+        let ui = test_window();
+        let (workspace, _commands) = test_workspace_sending(&ui);
+        open_install_confirmation(&ui, &workspace);
+
+        close_modal_for(&ui, backend::ModalScope::Dialogs(&["snapshot-create"]));
+
+        assert_eq!(ui.get_modal(), "mod-plan");
+        assert!(workspace.browser.installs.borrow().active.is_some());
+    }
+
+    #[test]
+    fn a_completion_closes_the_dialog_it_owns_and_clears_its_pending_state() {
+        let ui = test_window();
+        let (workspace, _commands) = test_workspace_sending(&ui);
+        let _ = workspace;
+        ui.set_modal("rename".into());
+        ui.set_modal_error("Name taken".into());
+        ui.set_mod_action_pending(true);
+
+        close_modal_for(&ui, backend::ModalScope::RENAME);
+
+        assert_eq!(ui.get_modal(), "");
+        assert_eq!(ui.get_modal_error(), "");
+        assert!(!ui.get_mod_action_pending());
+    }
+
+    #[test]
+    fn a_completion_whose_dialog_already_closed_still_releases_the_pending_state() {
+        let ui = test_window();
+        ui.set_mod_action_pending(true);
+
+        close_modal_for(&ui, backend::ModalScope::NONE);
+
+        assert_eq!(ui.get_modal(), "");
+        assert!(!ui.get_mod_action_pending());
+    }
+
+    #[test]
+    fn a_completion_that_closes_an_install_confirmation_releases_the_install_queue() {
+        let ui = test_window();
+        let (workspace, _commands) = test_workspace_sending(&ui);
+        open_install_confirmation(&ui, &workspace);
+
+        close_modal_for(&ui, backend::ModalScope::Dialogs(&["mod-plan"]));
+
+        assert_eq!(ui.get_modal(), "");
+        assert!(workspace.browser.installs.borrow().active.is_none());
+    }
+
+    #[test]
+    fn another_operations_completion_leaves_a_manual_download_prompt_and_its_queue() {
+        let ui = test_window();
+        let (workspace, _commands) = test_workspace_sending(&ui);
+        let host = ephervex_model::InstanceId::new().to_string();
+        apply_mod_acquisition(&ui, acquisition_prompt(1, &host), &workspace);
+        apply_mod_acquisition(&ui, acquisition_prompt(2, &host), &workspace);
+
+        close_modal_for(&ui, backend::ModalScope::MOD_MANAGE);
+        apply_linked_result(&ui, linked_result(backend::ModalScope::NONE, "error"));
+
+        assert_eq!(ui.get_modal(), "mod-acquire");
+        assert_eq!(ui.get_mod_acquisition_id(), "1");
+        end_mod_acquisition(&ui, 1, &workspace);
+        assert_eq!(
+            ui.get_mod_acquisition_id(),
+            "2",
+            "the queued prompt is still there to be shown"
+        );
+    }
+
+    #[test]
+    fn a_linked_report_is_a_toast_when_another_dialog_is_open() {
+        let ui = test_window();
+        let toasts = toasts(&ui);
+        ui.set_modal("rename".into());
+
+        apply_linked_result(&ui, linked_result(backend::ModalScope::NONE, "error"));
+
+        assert_eq!(ui.get_modal(), "rename");
+        assert_eq!(
+            toasts.borrow().as_slice(),
+            [("Applied to every server.".to_owned(), true)]
+        );
+    }
+
+    #[test]
+    fn an_unowned_linked_report_leaves_an_open_report_as_it_was() {
+        let ui = test_window();
+        apply_linked_result(&ui, linked_result(backend::ModalScope::NONE, "error"));
+        assert_eq!(ui.get_modal(), "mod-result");
+        let mut other = linked_result(backend::ModalScope::NONE, "error");
+        other.title = "Another mod".to_owned();
+        other.rows.clear();
+
+        apply_linked_result(&ui, other);
+
+        assert_eq!(ui.get_linked_result_title(), "UtilitiX");
+        assert_eq!(ui.get_linked_results().row_count(), 1);
+    }
+
+    #[test]
+    fn a_linked_report_opens_when_no_dialog_is_in_the_way() {
+        let ui = test_window();
+
+        apply_linked_result(&ui, linked_result(backend::ModalScope::NONE, "error"));
+
+        assert_eq!(ui.get_modal(), "mod-result");
+    }
+
+    #[test]
+    fn a_linked_report_replacing_an_install_confirmation_releases_the_install_queue() {
+        let ui = test_window();
+        let (workspace, _commands) = test_workspace_sending(&ui);
+        open_install_confirmation(&ui, &workspace);
+
+        apply_linked_result(
+            &ui,
+            linked_result(backend::ModalScope::Dialogs(&["mod-plan"]), "error"),
+        );
+
+        assert_eq!(ui.get_modal(), "mod-result");
+        assert!(workspace.browser.installs.borrow().active.is_none());
+    }
+
+    #[test]
+    fn a_failure_goes_to_the_dialog_it_is_about_while_that_is_open() {
+        let ui = test_window();
+        let toasts = toasts(&ui);
+        ui.set_modal("mod-manage".into());
+        ui.set_mod_action_pending(true);
+
+        apply_modal_error(
+            &ui,
+            backend::ModalScope::MOD_MANAGE,
+            "Download failed".into(),
+        );
+
+        assert_eq!(ui.get_modal_error(), "Download failed");
+        assert!(!ui.get_mod_action_pending());
+        assert!(toasts.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_failure_after_its_dialog_closed_is_a_toast_and_leaves_no_stray_error() {
+        let ui = test_window();
+        let toasts = toasts(&ui);
+
+        apply_modal_error(&ui, backend::ModalScope::NONE, "Download failed".into());
+        ui.set_modal("rename".into());
+        apply_modal_error(&ui, backend::ModalScope::NONE, "Download failed".into());
+
+        assert_eq!(ui.get_modal_error(), "");
+        assert_eq!(
+            toasts.borrow().as_slice(),
+            [
+                ("Download failed".to_owned(), true),
+                ("Download failed".to_owned(), true)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failure_that_is_not_about_a_dialog_still_shows_where_forms_read_it() {
+        let ui = test_window();
+        let toasts = toasts(&ui);
+
+        apply_modal_error(&ui, backend::ModalScope::Anywhere, "Not saved".into());
+
+        assert_eq!(ui.get_modal_error(), "Not saved");
+        assert!(toasts.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_requested_dialog_over_an_install_confirmation_or_import_lets_go_of_it() {
+        let ui = test_window();
+        let (workspace, _commands) = test_workspace_sending(&ui);
+        open_install_confirmation(&ui, &workspace);
+
+        assert!(make_room_for_dialog(&ui));
+        assert!(workspace.browser.installs.borrow().active.is_none());
+
+        let closed = Rc::new(Cell::new(false));
+        let seen = Rc::clone(&closed);
+        ui.on_close_import_modal(move || seen.set(true));
+        ui.set_modal("import".into());
+        assert!(make_room_for_dialog(&ui));
+        assert!(closed.get(), "the import stops reading its archive");
+    }
+
+    #[test]
+    fn a_requested_dialog_never_replaces_a_manual_download_prompt() {
+        let ui = test_window();
+        let (workspace, _commands) = test_workspace_sending(&ui);
+        let toasts = toasts(&ui);
+        let host = ephervex_model::InstanceId::new().to_string();
+        apply_mod_acquisition(&ui, acquisition_prompt(1, &host), &workspace);
+
+        assert!(!make_room_for_dialog(&ui));
+
+        assert_eq!(ui.get_modal(), "mod-acquire");
+        assert_eq!(
+            toasts.borrow().as_slice(),
+            [(lookup("gui-dialog-not-shown"), true)]
+        );
+    }
+
+    #[test]
+    fn a_confirmed_operations_completion_leaves_a_dialog_opened_since() {
+        let ui = test_window();
+        ui.set_modal("snapshot-create".into());
+
+        close_modal_for(&ui, backend::ModalScope::NONE);
+
+        assert_eq!(ui.get_modal(), "snapshot-create");
+    }
+
+    #[test]
+    fn a_mod_impact_question_never_replaces_a_manual_download_prompt() {
+        let ui = test_window();
+        let (workspace, _commands) = test_workspace_sending(&ui);
+        let toasts = toasts(&ui);
+        let host = ephervex_model::InstanceId::new().to_string();
+        apply_mod_acquisition(&ui, acquisition_prompt(1, &host), &workspace);
+
+        apply_mod_impact(&ui, &ModImpactPresentation::default());
+
+        assert_eq!(ui.get_modal(), "mod-acquire");
+        assert_eq!(
+            toasts.borrow().as_slice(),
+            [(lookup("gui-dialog-not-shown"), true)]
+        );
+    }
+
+    #[test]
+    fn a_mod_impact_question_over_an_install_confirmation_releases_the_install_queue() {
+        let ui = test_window();
+        let (workspace, _commands) = test_workspace_sending(&ui);
+        open_install_confirmation(&ui, &workspace);
+
+        apply_mod_impact(&ui, &ModImpactPresentation::default());
+
+        assert_eq!(ui.get_modal(), "mod-impact");
+        assert!(workspace.browser.installs.borrow().active.is_none());
+    }
+
+    #[test]
+    fn a_late_mod_plan_never_replaces_a_manual_download_prompt() {
+        let ui = test_window();
+        let toasts = toasts(&ui);
+        let (workspace, _commands) = test_workspace_sending(&ui);
+        let host = ephervex_model::InstanceId::new().to_string();
+        apply_mod_acquisition(&ui, acquisition_prompt(1, &host), &workspace);
+        ui.set_mod_action_host(host.as_str().into());
+        ui.set_mod_action_path("mods/m.jar".into());
+
+        apply_mod_removal_plan(
+            &ui,
+            backend::ModRemovalPlanData {
+                instance: host.clone(),
+                logical_path: "mods/m.jar".to_owned(),
+                ..backend::ModRemovalPlanData::default()
+            },
+        );
+        apply_linked_confirmation(
+            &ui,
+            backend::LinkedSectionData {
+                instance: host.clone(),
+                path: "mods/m.jar".to_owned(),
+                ..backend::LinkedSectionData::default()
+            },
+        );
+
+        assert_eq!(ui.get_modal(), "mod-acquire");
+        assert_eq!(
+            toasts.borrow().as_slice(),
+            [
+                (lookup("gui-dialog-not-shown"), true),
+                (lookup("gui-dialog-not-shown"), true)
+            ],
+            "the user is told each request was not shown"
+        );
     }
 
     #[test]
