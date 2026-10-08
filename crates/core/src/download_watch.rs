@@ -15,7 +15,10 @@
 
 use std::path::{Path, PathBuf};
 
-use ephervex_download::{CacheLayout, ContentStore, FileExtension, file_matches_hashes};
+use ephervex_download::{
+    CacheLayout, ContentStore, FileExtension, file_matches_hashes, publish_staged, staging_path,
+    stored_file_matches,
+};
 use ephervex_model::Hash;
 use ephervex_pack::{BlockedProviderFile, ProviderFileIdentity};
 use tracing::{debug, warn};
@@ -158,9 +161,15 @@ impl DownloadWatcher {
 }
 
 /// Copies a verified candidate into the shared cache at its content-addressed
-/// path, publishing it the same way a completed download is: written to a
-/// temporary sibling first, then renamed into place, so a reader can never
-/// observe a partially copied file at the final path.
+/// path, publishing it the way a completed download is: staged beside the
+/// destination, made durable, then renamed into place under the directory's
+/// publication lock, so a reader never observes a partial file and a discard
+/// of the same path cannot interleave with the rename.
+///
+/// An existing destination is kept only when it verifies against the target's
+/// hashes. A truncated, empty or otherwise mismatching file there counts as
+/// absent and is replaced, so a bad entry cannot outlive the correct copy the
+/// user supplied.
 ///
 /// The candidate itself is left exactly where the user put it - this adopts
 /// a copy, never a move, so a folder the user is still watching in a file
@@ -183,7 +192,10 @@ async fn adopt_into_cache(
         .and_then(|extension| extension.to_str())
         .and_then(|extension| FileExtension::new(extension).ok());
     let destination = cache.content(ContentStore::Downloads, hash, extension.as_ref());
-    if destination.exists() {
+    if stored_file_matches(&destination, None, &target.hashes)
+        .await
+        .unwrap_or(false)
+    {
         // Another import, or an earlier pass over the same folder, already
         // adopted an identical copy.
         return Ok(());
@@ -192,10 +204,34 @@ async fn adopt_into_cache(
         return Ok(());
     };
     tokio::fs::create_dir_all(parent).await?;
-    let temp = parent.join(format!(".part-adopt-{}", uuid::Uuid::new_v4().simple()));
-    tokio::fs::copy(source, &temp).await?;
-    tokio::fs::rename(&temp, &destination).await?;
-    Ok(())
+    let staged = staging_path(&destination);
+    let published = stage_and_publish(source, &staged, &destination, &target.hashes).await;
+    if published.is_err() {
+        let _ = tokio::fs::remove_file(&staged).await;
+    }
+    published
+}
+
+/// Copies `source` to `staged`, re-checks the copy against `hashes`, and
+/// publishes it at `destination`. The candidate was hashed before this copy,
+/// so the copy is verified again rather than trusting the earlier read.
+async fn stage_and_publish(
+    source: &Path,
+    staged: &Path,
+    destination: &Path,
+    hashes: &[Hash],
+) -> std::io::Result<()> {
+    tokio::fs::copy(source, staged).await?;
+    if !file_matches_hashes(staged, hashes)
+        .await
+        .map_err(std::io::Error::other)?
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the file changed while it was being copied into the cache",
+        ));
+    }
+    publish_staged(staged, destination).await
 }
 
 #[cfg(test)]
@@ -307,6 +343,95 @@ mod tests {
         };
 
         assert!(watcher.scan_once().await.is_some());
+    }
+
+    fn adoption_fixture(
+        body: &[u8],
+    ) -> (
+        tempfile::TempDir,
+        App,
+        tempfile::TempDir,
+        DownloadWatcher,
+        PathBuf,
+    ) {
+        let base = tempfile::tempdir().expect("tempdir");
+        let app = app_rooted_at(base.path());
+        let folder = tempfile::tempdir().expect("watched folder");
+        std::fs::write(folder.path().join("mod.jar"), body).expect("write fixture");
+        let hash = Hash::new(HashAlgorithm::Sha1, &sha1_of(body)).expect("sha1");
+        let extension = FileExtension::new("jar").expect("jar");
+        let cache_path =
+            app.artifact_cache()
+                .layout()
+                .content(ContentStore::Downloads, &hash, Some(&extension));
+        let watcher = DownloadWatcher {
+            folders: vec![folder.path().to_path_buf()],
+            targets: vec![WatchTarget {
+                identity: identity("238222", "4593548"),
+                file_name: Some("mod.jar".to_owned()),
+                hashes: vec![hash],
+            }],
+            cache: app.artifact_cache().layout().clone(),
+        };
+        (base, app, folder, watcher, cache_path)
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_cache_entry_is_replaced_by_the_verified_copy() {
+        let body = b"the correct bytes for the blocked file";
+        for corrupt in [&b""[..], &b"the correct"[..], &b"entirely different"[..]] {
+            let (_base, app, _folder, mut watcher, cache_path) = adoption_fixture(body);
+            std::fs::create_dir_all(cache_path.parent().expect("parent")).expect("cache dir");
+            std::fs::write(&cache_path, corrupt).expect("pre-place a bad entry");
+
+            assert!(watcher.scan_once().await.is_some());
+
+            assert_eq!(std::fs::read(&cache_path).expect("cache entry"), body);
+            let hash = Hash::new(HashAlgorithm::Sha1, &sha1_of(body)).expect("sha1");
+            assert!(
+                app.cached_artifact_bytes(&[hash], Some("mod.jar"))
+                    .await
+                    .expect("probe")
+                    .is_some(),
+                "the retry sees the artifact as cached"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_verified_cache_entry_is_left_untouched_by_adoption() {
+        let body = b"already adopted earlier";
+        let (_base, _app, _folder, mut watcher, cache_path) = adoption_fixture(body);
+        std::fs::create_dir_all(cache_path.parent().expect("parent")).expect("cache dir");
+        std::fs::write(&cache_path, body).expect("pre-place a good entry");
+        let before = std::fs::metadata(&cache_path).expect("metadata");
+
+        assert!(watcher.scan_once().await.is_some());
+
+        let after = std::fs::metadata(&cache_path).expect("metadata");
+        assert_eq!(
+            std::os::unix::fs::MetadataExt::ino(&before),
+            std::os::unix::fs::MetadataExt::ino(&after),
+            "a verified entry is not republished"
+        );
+        assert_eq!(std::fs::read(&cache_path).expect("cache entry"), body);
+    }
+
+    #[tokio::test]
+    async fn adoption_leaves_no_staging_file_behind() {
+        let (_base, _app, _folder, mut watcher, cache_path) =
+            adoption_fixture(b"a copy the user placed by hand");
+
+        assert!(watcher.scan_once().await.is_some());
+
+        let leftovers: Vec<_> = std::fs::read_dir(cache_path.parent().expect("parent"))
+            .expect("cache dir")
+            .flatten()
+            .map(|entry| entry.file_name())
+            .filter(|name| name != cache_path.file_name().expect("file name"))
+            .collect();
+        assert!(leftovers.is_empty(), "unexpected files: {leftovers:?}");
     }
 
     fn sha1_of(bytes: &[u8]) -> String {
