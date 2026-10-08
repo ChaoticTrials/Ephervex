@@ -81,3 +81,6 @@ allow = ["LicenseRef-Slint-Royalty-free-2.0"]
 [[licenses.exceptions]]
 name = "i-slint-renderer-software"
 allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+[[licenses.exceptions]]
+name = "i-slint-backend-testing"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]

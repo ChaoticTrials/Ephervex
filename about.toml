@@ -170,3 +170,13 @@ license = "LicenseRef-Slint-Royalty-free-2.0"
 [[i-slint-renderer-software.clarify.files]]
 path = "LICENSES/LicenseRef-Slint-Royalty-free-2.0.md"
 checksum = "5167f5056e850419106ab6265efbdca7cba4d99c849d1445ca0bbf6a1e2315fe"
+
+[i-slint-backend-testing]
+accepted = ["LicenseRef-Slint-Royalty-free-2.0"]
+
+[i-slint-backend-testing.clarify]
+license = "LicenseRef-Slint-Royalty-free-2.0"
+
+[[i-slint-backend-testing.clarify.files]]
+path = "LICENSES/LicenseRef-Slint-Royalty-free-2.0.md"
+checksum = "5167f5056e850419106ab6265efbdca7cba4d99c849d1445ca0bbf6a1e2315fe"
