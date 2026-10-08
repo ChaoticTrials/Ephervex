@@ -6,9 +6,10 @@
 //! Both flows and the refresh path converge after one step. The browser flow
 //! and the device flow differ only in *how* a Microsoft access token is
 //! obtained; a refresh differs only in that it obtains one without the user
-//! present. Everything after that is identical, which is why [`Self::finish`]
+//! present. Everything after that is identical, which is why [`Self::establish`]
 //! exists and why there is exactly one implementation of the four Minecraft
-//! legs rather than three near-copies that drift.
+//! legs rather than three near-copies that drift. A login then stores its
+//! refresh token in [`Self::finish`]; a resume stores its own as it is issued.
 //!
 //! # Rotation is not optional
 //!
@@ -16,8 +17,23 @@
 //! the client is expected to discard the old one. So every path that produces
 //! tokens re-stores whatever refresh token came back, and a resume that
 //! forgot to would work for weeks and then strand the user.
+//!
+//! A resume stores the replacement as soon as Microsoft issues it, before the
+//! Xbox, Minecraft, and profile legs run. The replacement is the token the
+//! client is expected to keep, so an outage further down the chain must not
+//! cost the user the credential they were issued. A login has no earlier
+//! credential to protect and stores only once the account is known to own the
+//! game.
+//!
+//! # Resume and logout are ordered
+//!
+//! A resume reads a credential, spends time on the network, and writes a
+//! replacement. Every write after that wait, and every removal of a rejected
+//! credential, happens under one lock that [`AccountProvider::logout`] also
+//! takes, and only if the store still holds the credential the resume started
+//! from. A logout that completed in between therefore stays complete.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -49,6 +65,9 @@ pub struct MicrosoftAccountProvider {
     xbox: XboxClient,
     minecraft: MinecraftServicesClient,
     credentials: Arc<dyn CredentialStore>,
+    /// Orders every credential change that follows a wait on the network
+    /// against logout. Shared by clones of the provider.
+    credential_changes: Arc<Mutex<()>>,
 }
 
 impl MicrosoftAccountProvider {
@@ -78,6 +97,7 @@ impl MicrosoftAccountProvider {
             xbox: XboxClient::new(client.clone(), endpoints.clone()),
             minecraft: MinecraftServicesClient::new(client, endpoints, client_id),
             credentials,
+            credential_changes: Arc::new(Mutex::new(())),
         })
     }
 
@@ -147,14 +167,14 @@ impl MicrosoftAccountProvider {
     /// "verify ownership before allowing launch" a property of the type rather
     /// than a step someone has to remember.
     #[instrument(skip_all)]
-    async fn finish(
+    async fn establish(
         &self,
-        tokens: MicrosoftTokens,
+        access: &SecretString,
         observer: &AuthObserver,
         cancel: &CancellationToken,
     ) -> AuthResult<Session> {
         observer.stage(AuthStage::XboxLive);
-        let user_token = self.xbox.authenticate(&tokens.access, cancel).await?;
+        let user_token = self.xbox.authenticate(access, cancel).await?;
 
         observer.stage(AuthStage::Xsts);
         let xsts = self.xbox.authorize(&user_token, cancel).await?;
@@ -199,22 +219,6 @@ impl MicrosoftAccountProvider {
             authenticated_at: Utc::now(),
         };
 
-        // Store the refresh token *after* the chain has succeeded. Persisting
-        // one for an account that cannot play would leave a credential behind
-        // that every later resume fails on.
-        if let Some(refresh) = &tokens.refresh {
-            self.credentials
-                .store(&CredentialKey::MicrosoftRefreshToken(account.id), refresh)?;
-        } else {
-            // Microsoft always issues one for `offline_access`, so this means
-            // the scope was dropped somewhere. Worth saying: the symptom is a
-            // login that mysteriously does not survive a restart.
-            warn!(
-                account = %account.id,
-                "no refresh token was issued; this login will not survive a restart"
-            );
-        }
-
         debug!(
             account = %account.id,
             entitlements = ?entitlements.items,
@@ -232,6 +236,88 @@ impl MicrosoftAccountProvider {
                 storage: self.credentials.storage(),
             },
         })
+    }
+
+    /// Completes a login: runs the chain, then keeps the refresh token.
+    ///
+    /// The token is stored *after* the chain has succeeded. Persisting one for
+    /// an account that cannot play would leave a credential behind that every
+    /// later resume fails on.
+    async fn finish(
+        &self,
+        tokens: MicrosoftTokens,
+        observer: &AuthObserver,
+        cancel: &CancellationToken,
+    ) -> AuthResult<Session> {
+        let session = self.establish(&tokens.access, observer, cancel).await?;
+
+        if let Some(refresh) = &tokens.refresh {
+            self.credentials.store(
+                &CredentialKey::MicrosoftRefreshToken(session.account.id),
+                refresh,
+            )?;
+        } else {
+            // Microsoft always issues one for `offline_access`, so this means
+            // the scope was dropped somewhere. Worth saying: the symptom is a
+            // login that mysteriously does not survive a restart.
+            warn!(
+                account = %session.account.id,
+                "no refresh token was issued; this login will not survive a restart"
+            );
+        }
+        Ok(session)
+    }
+
+    fn lock_credential_changes(&self) -> MutexGuard<'_, ()> {
+        // The guard protects ordering, not data, so a panic elsewhere leaves
+        // nothing to distrust.
+        self.credential_changes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Stores the refresh token a resume was issued in place of `loaded`.
+    ///
+    /// A credential that is gone means the account signed out while the
+    /// refresh ran, and the replacement must not bring it back. One that
+    /// differs from `loaded` was already replaced by a newer login or resume,
+    /// which this one must not overwrite.
+    fn publish_replacement(
+        &self,
+        key: &CredentialKey,
+        loaded: &SecretString,
+        replacement: &SecretString,
+    ) -> AuthResult<()> {
+        let _ordered = self.lock_credential_changes();
+        match self.credentials.load(key)? {
+            None => Err(AuthError::NotSignedIn),
+            Some(current) if current == *loaded => self.credentials.store(key, replacement),
+            Some(_) => Ok(()),
+        }
+    }
+
+    /// Removes the credential Microsoft rejected, unless it has changed since
+    /// it was read.
+    fn discard_rejected(&self, key: &CredentialKey, rejected: &SecretString) {
+        let _ordered = self.lock_credential_changes();
+        match self.credentials.load(key) {
+            Ok(Some(current)) if current == *rejected => {
+                if let Err(removal) = self.credentials.delete(key) {
+                    warn!(%removal, "could not remove the rejected credential");
+                }
+            }
+            Ok(_) => {}
+            Err(error) => warn!(%error, "could not remove the rejected credential"),
+        }
+    }
+
+    /// Fails when the account signed out while a resume was running.
+    fn ensure_signed_in(&self, key: &CredentialKey) -> AuthResult<()> {
+        let _ordered = self.lock_credential_changes();
+        match self.credentials.load(key)? {
+            Some(_) => Ok(()),
+            None => Err(AuthError::NotSignedIn),
+        }
     }
 }
 
@@ -271,18 +357,33 @@ impl AccountProvider for MicrosoftAccountProvider {
                 // The credential is dead. Leaving it in the keyring would make
                 // every later resume fail the same way while `account status`
                 // insisted a credential existed.
-                if let Err(removal) = self.credentials.delete(&key) {
-                    warn!(%removal, "could not remove the rejected credential");
-                }
+                self.discard_rejected(&key, &refresh);
                 return Err(error);
             }
             Err(error) => return Err(error),
         };
 
-        self.finish(tokens, observer, cancel).await
+        // Kept under the account that was asked for, before the later legs can
+        // fail: the token it replaces is no longer the one to rely on.
+        if let Some(replacement) = &tokens.refresh {
+            self.publish_replacement(&key, &refresh, replacement)?;
+        }
+
+        let session = self.establish(&tokens.access, observer, cancel).await?;
+        if session.account.id != account {
+            // The stored credential belongs to someone else. Adopting the
+            // session would bind this account's record to another identity.
+            return Err(AuthError::AccountMismatch {
+                requested: account,
+                found: session.account.id,
+            });
+        }
+        self.ensure_signed_in(&key)?;
+        Ok(session)
     }
 
     fn logout(&self, account: Uuid) -> AuthResult<()> {
+        let _ordered = self.lock_credential_changes();
         self.credentials
             .delete(&CredentialKey::MicrosoftRefreshToken(account))
     }

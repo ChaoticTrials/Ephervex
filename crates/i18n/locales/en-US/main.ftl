@@ -612,6 +612,9 @@ error-auth-credential-blank = No value was entered.
 error-auth-not-signed-in = No Microsoft account is signed in.
 .action = Sign in with your Microsoft account before launching Minecraft.
 
+error-auth-account-mismatch = The saved Microsoft sign-in belongs to a different account.
+.action = Sign in again to replace it.
+
 error-auth-reauthentication-required = Your saved Microsoft sign-in is no longer valid.
 .action = Sign in again. This happens when a sign-in expires or is revoked.
 

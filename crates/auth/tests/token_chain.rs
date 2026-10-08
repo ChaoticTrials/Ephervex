@@ -610,6 +610,215 @@ async fn resuming_refreshes_the_token_and_stores_the_rotated_credential() {
 }
 
 #[tokio::test]
+async fn a_rotated_refresh_token_survives_a_failure_further_down_the_chain() {
+    let server = MockServer::start().await;
+    mount_token(&server, 200, TOKEN_ROTATED).await;
+    mount_xbox(&server, 503, "").await;
+
+    let store = Arc::new(MemoryStore::new());
+    let key = CredentialKey::MicrosoftRefreshToken(account());
+    store
+        .store(&key, &SecretString::new("FAKE-MICROSOFT-REFRESH-TOKEN"))
+        .expect("seed");
+
+    let error = provider(&server, store.clone())
+        .resume(
+            account(),
+            &AuthObserver::silent(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("xbox live is down");
+
+    assert!(error.is_transient(), "{error:?}");
+    assert_eq!(
+        store.load(&key).expect("load").expect("present").expose(),
+        "FAKE-MICROSOFT-REFRESH-TOKEN-ROTATED",
+        "the replacement is the credential to keep once Microsoft issued it"
+    );
+}
+
+#[tokio::test]
+async fn a_resume_that_signs_in_as_another_account_is_refused_and_stores_nothing_for_it() {
+    let server = MockServer::start().await;
+    mount_token(&server, 200, TOKEN_ROTATED).await;
+    mount_xbox(&server, 200, XBOX).await;
+    mount_xsts(&server, 200, XSTS).await;
+    mount_minecraft_login(&server, 200, MC_LOGIN).await;
+    mount_entitlements(&server, 200, ENTITLEMENTS).await;
+    let other = "0f1e2d3c4b5a69788796a5b4c3d2e1f0";
+    mount_profile(
+        &server,
+        200,
+        &PROFILE.replace("069a79f444e94726a5befca90e38aaf5", other),
+    )
+    .await;
+
+    let store = Arc::new(MemoryStore::new());
+    let key = CredentialKey::MicrosoftRefreshToken(account());
+    store
+        .store(&key, &SecretString::new("FAKE-MICROSOFT-REFRESH-TOKEN"))
+        .expect("seed");
+
+    let error = provider(&server, store.clone())
+        .resume(
+            account(),
+            &AuthObserver::silent(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("the credential belongs to someone else");
+
+    let other = Uuid::parse_str(other).expect("uuid");
+    assert!(
+        matches!(
+            error,
+            AuthError::AccountMismatch { requested, found }
+                if requested == account() && found == other
+        ),
+        "{error:?}"
+    );
+    assert!(error.requires_interactive_login());
+    assert!(
+        store
+            .load(&CredentialKey::MicrosoftRefreshToken(other))
+            .expect("load")
+            .is_none(),
+        "nothing is stored under the identity the profile claimed"
+    );
+}
+
+/// Starts a resume on its own task and returns once it reports `stage`.
+///
+/// The token endpoint answers slowly enough that the caller acts while the
+/// resume is still waiting on Microsoft.
+async fn resume_until(
+    provider: &MicrosoftAccountProvider,
+    stage: ephervex_auth::AuthStage,
+) -> tokio::task::JoinHandle<Result<ephervex_auth::Session, AuthError>> {
+    let (observer, mut events) = AuthObserver::channel();
+    let provider = provider.clone();
+    let task = tokio::spawn(async move {
+        provider
+            .resume(account(), &observer, &CancellationToken::new())
+            .await
+    });
+    while let Some(event) = events.recv().await {
+        if matches!(event, AuthEvent::Stage(reached) if reached == stage) {
+            break;
+        }
+    }
+    task
+}
+
+#[tokio::test]
+async fn a_logout_during_the_token_refresh_is_not_undone_by_the_replacement() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/consumers/oauth2/v2.0/token"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(TOKEN_ROTATED)
+                .set_delay(Duration::from_millis(400)),
+        )
+        .mount(&server)
+        .await;
+    mount_chain(&server).await;
+
+    let store = Arc::new(MemoryStore::new());
+    let key = CredentialKey::MicrosoftRefreshToken(account());
+    store
+        .store(&key, &SecretString::new("FAKE-MICROSOFT-REFRESH-TOKEN"))
+        .expect("seed");
+    let provider = provider(&server, store.clone());
+
+    let resume = resume_until(&provider, ephervex_auth::AuthStage::Microsoft).await;
+    provider.logout(account()).expect("logout");
+    let error = resume
+        .await
+        .expect("task")
+        .expect_err("the account signed out meanwhile");
+
+    assert!(matches!(error, AuthError::NotSignedIn), "{error:?}");
+    assert!(store.load(&key).expect("load").is_none());
+}
+
+#[tokio::test]
+async fn a_logout_during_the_later_legs_leaves_no_credential_and_no_session() {
+    let server = MockServer::start().await;
+    mount_token(&server, 200, TOKEN_ROTATED).await;
+    mount_xbox(&server, 200, XBOX).await;
+    mount_xsts(&server, 200, XSTS).await;
+    mount_minecraft_login(&server, 200, MC_LOGIN).await;
+    mount_entitlements(&server, 200, ENTITLEMENTS).await;
+    Mock::given(method("GET"))
+        .and(path("/minecraft/profile"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(PROFILE)
+                .set_delay(Duration::from_millis(400)),
+        )
+        .mount(&server)
+        .await;
+
+    let store = Arc::new(MemoryStore::new());
+    let key = CredentialKey::MicrosoftRefreshToken(account());
+    store
+        .store(&key, &SecretString::new("FAKE-MICROSOFT-REFRESH-TOKEN"))
+        .expect("seed");
+    let provider = provider(&server, store.clone());
+
+    let resume = resume_until(&provider, ephervex_auth::AuthStage::Profile).await;
+    provider.logout(account()).expect("logout");
+    let error = resume
+        .await
+        .expect("task")
+        .expect_err("the account signed out meanwhile");
+
+    assert!(matches!(error, AuthError::NotSignedIn), "{error:?}");
+    assert!(store.load(&key).expect("load").is_none());
+}
+
+#[tokio::test]
+async fn a_rejected_credential_is_not_removed_once_a_newer_one_replaced_it() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/consumers/oauth2/v2.0/token"))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .set_body_string(INVALID_GRANT)
+                .set_delay(Duration::from_millis(400)),
+        )
+        .mount(&server)
+        .await;
+
+    let store = Arc::new(MemoryStore::new());
+    let key = CredentialKey::MicrosoftRefreshToken(account());
+    store
+        .store(&key, &SecretString::new("FAKE-EXPIRED-REFRESH-TOKEN"))
+        .expect("seed");
+    let provider = provider(&server, store.clone());
+
+    let resume = resume_until(&provider, ephervex_auth::AuthStage::Microsoft).await;
+    store
+        .store(&key, &SecretString::new("FAKE-NEWER-REFRESH-TOKEN"))
+        .expect("a newer sign-in");
+    let error = resume
+        .await
+        .expect("task")
+        .expect_err("the old credential is dead");
+
+    assert!(
+        matches!(error, AuthError::ReauthenticationRequired { .. }),
+        "{error:?}"
+    );
+    assert_eq!(
+        store.load(&key).expect("load").expect("kept").expose(),
+        "FAKE-NEWER-REFRESH-TOKEN"
+    );
+}
+
+#[tokio::test]
 async fn an_expired_refresh_token_asks_for_a_login_and_clears_the_dead_credential() {
     let server = MockServer::start().await;
     mount_token(&server, 400, INVALID_GRANT).await;

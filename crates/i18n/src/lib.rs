@@ -670,6 +670,7 @@ mod tests {
             "error-auth-credential-store-failed",
             "error-auth-credential-blank",
             "error-auth-not-signed-in",
+            "error-auth-account-mismatch",
             "error-auth-reauthentication-required",
             "auth-stage-microsoft",
             "auth-stage-xbox-live",

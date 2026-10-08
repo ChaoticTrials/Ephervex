@@ -313,6 +313,11 @@ pub trait AccountProvider: std::fmt::Debug + Send + Sync {
     ///
     /// This is both "app restart preserves login" and "refresh before
     /// launch": one operation, because they are the same operation.
+    ///
+    /// A replacement refresh token is stored as soon as it is issued, so a
+    /// failure further down the chain keeps it. A session for any account other
+    /// than `account` is refused, and a logout that completes while this runs
+    /// is never undone: the resume then fails as not signed in.
     async fn resume(
         &self,
         account: Uuid,

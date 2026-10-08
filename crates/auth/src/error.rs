@@ -237,6 +237,18 @@ pub enum AuthError {
     #[error("no account is signed in")]
     NotSignedIn,
 
+    /// A stored credential signed in as a different account than the one it
+    /// is kept for.
+    ///
+    /// Not recoverable by retrying: the session is refused rather than
+    /// recorded under the wrong identity, and signing in again replaces the
+    /// credential.
+    #[error("the stored credential for account {requested} signed in as account {found}")]
+    AccountMismatch {
+        requested: uuid::Uuid,
+        found: uuid::Uuid,
+    },
+
     /// The stored refresh token is gone, revoked, or expired.
     ///
     /// the expired-token case once refreshing itself has failed: the
@@ -403,6 +415,7 @@ impl AuthError {
             Self::AccountAmbiguous { .. } => "error-auth-account-ambiguous",
             Self::OfflineAccountExists { .. } => "error-auth-offline-account-exists",
             Self::NotSignedIn => "error-auth-not-signed-in",
+            Self::AccountMismatch { .. } => "error-auth-account-mismatch",
             Self::ReauthenticationRequired { .. } => "error-auth-reauthentication-required",
         }
     }
@@ -472,7 +485,10 @@ impl AuthError {
     pub const fn requires_interactive_login(&self) -> bool {
         matches!(
             self,
-            Self::NotSignedIn | Self::ReauthenticationRequired { .. } | Self::ClientIdMissing
+            Self::NotSignedIn
+                | Self::AccountMismatch { .. }
+                | Self::ReauthenticationRequired { .. }
+                | Self::ClientIdMissing
         )
     }
 
