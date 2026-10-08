@@ -17,28 +17,29 @@ the README disagrees (see "Known stale sources").
       homepage features, and `docs/intro.mdx`.
 - [ ] Decide hosting, the production URL, and whether docs are versioned.
       `DOCUSAURUS_BASE_URL` already supports a subpath.
-- [ ] Add a notice that Ephervex is not affiliated with or endorsed by Mojang
-      or Microsoft.
+- [x] Add a notice that Ephervex is not affiliated with or endorsed by Mojang
+      or Microsoft (interface tour; add it to the site footer too).
 
 ## 2. Fixture corrections (`tools/auto-screenshot-tool/src/fixtures.rs`)
 
-- [ ] `InstanceRow.source` must use the strings the app produces: `Manual`,
+- [x] `InstanceRow.source` must use the strings the app produces: `Manual`,
       `Modrinth`, `CurseForge`, `Prism`, `Server pack`. The current values
       render as "Modrinth pack 1.1.0 instance".
-- [ ] Set `HostView.browser_next_offset` to -1 in `client_mods`. It removes
+- [x] Set `HostView.browser_next_offset` to -1 in `client_mods`. It removes
       the stray "Load More" button.
-- [ ] Set `browser_provider`, browser results, `storage_root`, `mods_query`
+- [x] Set `browser_provider`, browser results, `storage_root`, `mods_query`
       and `allow_pack_mod_changes` so the Mods surface looks populated.
-- [ ] Replace the account names `_jeb` and `Dinnerbone`, which are real
+- [x] Replace the account names `_jeb` and `Dinnerbone`, which are real
       developer handles, with synthetic names. Keep names to 3-16 characters
       from `[A-Za-z0-9_]`.
-- [ ] Check the capitalization of `AccountRow.kind` and `credential_state`
+- [x] Check the capitalization of `AccountRow.kind` and `credential_state`
       against a live run (the app uses lower-case kinds and the credential
       strings "No credential", "Credential stored securely" and "Sign-in
       required").
-- [ ] Check the toggle knob rendering at 2560x1440. If it is missing, step the
-      mocked animation clock before the snapshot.
-- [ ] Fixture `loader` is hardcoded to Forge. Derive it from the loader kind.
+- [x] Check the toggle knob rendering. In the light theme an enabled toggle
+      has no visible knob at either size, so it is the app palette, not the
+      capture.
+- [x] Fixture `loader` is hardcoded to Forge. Derive it from the loader kind.
 
 ## 3. Fixture breadth
 
@@ -49,27 +50,27 @@ Minecraft-flavored text. Do not use Mojang or Minecraft logos, textures, skins
 or other artwork. Pack content beyond the documented CaveStone pack is
 synthetic and recorded as such in `SOURCES.md`.
 
-- [ ] Instances (6-8): Ready, Starting, Running (with Kill), needs attention,
+- [x] Instances (6-8): Ready, Starting, Running (with Kill), needs attention,
       creating a linked server, restarting. Sources: Manual, Modrinth,
       CurseForge, Server pack. Include a 1.12.2 and a 26.x instance.
-- [ ] Servers (4): stopped, starting, running, failed. Optionally one linked
+- [x] Servers (4): stopped, starting, running, failed. Optionally one linked
       server with the linked-servers setting on.
-- [ ] Accounts (4): two offline, one Microsoft with a stored credential, one
+- [x] Accounts (4): two offline, one Microsoft with a stored credential, one
       "Sign-in required".
-- [ ] Mods (8-10): mixed origin (pack, added, dependency, hand-placed), mixed
+- [x] Mods (8-10): mixed origin (pack, added, dependency, hand-placed), mixed
       provider, one disabled, one deleted, one crash suspect, one with an
       unknown version.
-- [ ] Catalog browser results (4): one installed, one queued.
-- [ ] Java runtimes: 8, 17, 21 and 25, one of them managed.
-- [ ] Activity: running, queued, completed, failed and canceled rows.
-- [ ] Running page: one client, one server.
-- [ ] Easter eggs (names and text only): "Creeper Containment Lab", "Herobrine
+- [x] Catalog browser results (4): one installed, one queued.
+- [x] Java runtimes: 8, 17, 21 and 25, one of them managed.
+- [x] Activity: running, queued, completed, failed and canceled rows.
+- [x] Running page: one client, one server.
+- [x] Easter eggs (names and text only): "Creeper Containment Lab", "Herobrine
       Sighting #1337" (needs attention), "Redstone Clock Debugging", "Spawn
       Chunks Server", "Totem of Undying QA", accounts `Steve`, `Alex`,
       `Herobrine`, `Enderman_QA`, snapshot "Before the Wither", crash text
       "Creeper Confetti tried to explode confetti twice". Mod names must not
       imitate real projects.
-- [ ] Update the account test in `fixtures.rs` for the new rows.
+- [x] Update the account test in `fixtures.rs` for the new rows.
 
 ## 4. New screenshot states (`catalog.rs`)
 
@@ -78,55 +79,71 @@ cards and toasts need either an `accessible-label` on that element or a
 geometry-based crop in the tool.
 
 Getting started:
-- [ ] `instances-empty` (no instances, New Instance and Import Modpack)
-- [ ] `create-instance-dialog`
-- [ ] `import-modpack-ready` (pack card, optional files, blocked files,
+- [x] `instances-empty` (no instances, New Instance and Import Modpack)
+- [x] `create-instance-dialog`
+- [x] `import-modpack-ready` (pack card, optional files, blocked files,
       duplicates)
-- [ ] `import-modpack-blocked-files`
-- [ ] `import-modpack-credential-missing` (error plus Providers & APIs link)
-- [ ] `import-modpack-resolving` (frozen spinner)
+- [x] `import-modpack-blocked-files`
+- [x] `import-modpack-credential-missing` (error plus Providers & APIs link)
+- [x] `import-modpack-resolving` (frozen spinner)
 
 In-progress work (the headless renderer uses mock time, so spinners and bars
 are deterministic):
-- [ ] `import-modpack-running` (pending card, 57% bar, stage and item count)
-- [ ] `activity-import-in-progress`
-- [ ] `instance-launching` (Starting state plus a Launching Minecraft row)
-- [ ] `server-starting`, `server-running`
-- [ ] `diagnostics-working`
-- [ ] `accounts-device-code` (the only place the sign-in code is shown is a
+- [x] `import-modpack-running` (pending card, 57% bar, stage and item count)
+- [x] `activity-import-in-progress`
+- [x] `instance-launching` (Starting state plus a Launching Minecraft row)
+- [x] `server-starting`, `server-running`
+- [x] `diagnostics-working`
+- [x] `accounts-device-code` (the only place the sign-in code is shown is a
       toast)
-- [ ] `toasts-success-and-error`
+- [x] `toasts-success-and-error`
 
 Mods:
-- [ ] `client-mods` rebuilt per section 2
-- [ ] `mod-manager` (versions with Installed and Newest pills, Requires and
+- [x] `client-mods` rebuilt per section 2
+- [x] `mod-manager` (versions with Installed and Newest pills, Requires and
       Required by)
-- [ ] `mod-impact` (breaks, needs, cascade)
-- [ ] `mod-install-plan` (with linked servers)
-- [ ] `mod-isolation-setup`, `mod-isolation-round`
+- [x] `mod-impact` (breaks, needs, cascade)
+- [x] `mod-install-plan` (with linked servers)
+- [x] `mod-isolation-setup`, `mod-isolation-round`
 
 Hosts:
-- [ ] `client-overview-linked-server` (Paired pill, Start together)
-- [ ] `client-settings`, `snapshots`, `snapshot-restore-dialog`
-- [ ] `client-logs-live`, `client-crash-reports`
-- [ ] `client-diagnostics-result`, `client-diagnostics-fix-preview`
-- [ ] `client-run-failure-notice`
-- [ ] `server-console`, `server-properties` (EULA card), `server-crash-notice`
-- [ ] `split-workspace` (client logs beside server console)
+- [x] `client-overview-linked-server` (Paired pill, Start together)
+- [x] `client-settings`, `snapshots`, `snapshot-restore-dialog`
+- [x] `client-logs-live`, `client-crash-reports`
+- [x] `client-diagnostics-result`, `client-diagnostics-fix-preview`
+- [x] `client-run-failure-notice`
+- [x] `server-console`, `server-properties` (EULA card), `server-crash-notice`
+- [x] `split-workspace` (client logs beside server console)
 - [ ] `running-page`, `activity-page`
 
 Settings:
-- [ ] `settings-general` (theme, text sizes, trusted hosts)
-- [ ] `settings-minecraft-defaults`
-- [ ] `settings-java`
-- [ ] `settings-providers` (catalog, CurseForge key states)
-- [ ] `settings-storage`, `settings-disk-usage`
-- [ ] `about-licenses`
+- [x] `settings-general` (theme, text sizes, trusted hosts)
+- [x] `settings-minecraft-defaults`
+- [x] `settings-java`
+- [x] `settings-providers` (catalog, CurseForge key states)
+- [x] `settings-storage`, `settings-disk-usage`
+- [x] `about-licenses`
 
 Not capturable without extending the tool (an interaction step): hover
 tooltips and disabled-button reasons, context menus, open dropdowns, the
 workspace "More" popup, the diagnostic bundle panel (folded by default),
 `WindowSizePreview`. Do not add product UI just to make a screenshot.
+
+Limits of the captured states (the tool renders one frame and cannot scroll or
+interact):
+- Tall dialogs and pages show only their top: `import-modpack-blocked-files`,
+  `import-modpack-duplicates` and the lower part of
+  `client-diagnostics-result` at 1080p (all of it fits at 1440p).
+- `mod-impact` shows only the breaks group, and `mod-manager` shows Reset to
+  pack version but no Update button, because the app's dialog layout cannot
+  hold the other variants.
+- `settings-general` lists one favorite version, and `settings-minecraft-defaults`
+  shows four rows on the Video tab, so they fit at 1080p.
+- The live log follows its newest line through a one-shot timer, so it holds
+  for the first rendered size of a run only.
+- In the light theme an enabled toggle has no visible knob (app palette).
+- Add an `accessible-label` to dialogs, pending cards and toasts if crops of
+  them are wanted.
 
 ## 5. Documentation pages
 
