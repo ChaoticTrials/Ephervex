@@ -696,6 +696,72 @@ impl App {
         Self::run_prepared_server(prepared, observer).await
     }
 
+    /// Starts in the foreground like [`App::start_server`], and ends the start
+    /// when `cancel` fires.
+    ///
+    /// Canceled while preparing, nothing was started and the start fails with a
+    /// cancellation. Canceled once the server runs, the server is stopped
+    /// gracefully (killed only if it will not stop) and the result describes how
+    /// it ended, with `stop_requested` set.
+    pub async fn start_server_until_canceled(
+        &self,
+        id: ServerId,
+        explicit_java: Option<PathBuf>,
+        observer: &ServerObserver,
+        cancel: &CancellationToken,
+    ) -> CoreResult<ephervex_server::ServerExit> {
+        let prepared = Self::unless_canceled(
+            self.prepare_server_start(id, explicit_java, observer),
+            observer,
+            cancel,
+        )
+        .await?;
+        Self::supervise_until_canceled(id, prepared, observer, cancel).await
+    }
+
+    /// Drops an unfinished preparation when `cancel` fires, so nothing starts.
+    async fn unless_canceled(
+        preparation: impl std::future::Future<Output = CoreResult<PreparedServerStart>>,
+        observer: &ServerObserver,
+        cancel: &CancellationToken,
+    ) -> CoreResult<PreparedServerStart> {
+        tokio::select! {
+            prepared = preparation => prepared,
+            () = cancel.cancelled() => {
+                observer.emit(ephervex_server::ServerEvent::Finished { exit: None });
+                Err(ephervex_server::ServerError::StartCanceled.into())
+            }
+        }
+    }
+
+    async fn supervise_until_canceled(
+        id: ServerId,
+        prepared: PreparedServerStart,
+        observer: &ServerObserver,
+        cancel: &CancellationToken,
+    ) -> CoreResult<ephervex_server::ServerExit> {
+        let root = prepared.root.clone();
+        let supervised_observer = observer.clone();
+        let mut supervisor =
+            tokio::spawn(
+                async move { Self::run_prepared_server(prepared, &supervised_observer).await },
+            );
+        let ended = tokio::select! {
+            ended = &mut supervisor => Some(ended),
+            () = cancel.cancelled() => None,
+        };
+        let ended = match ended {
+            Some(ended) => Some(ended),
+            None => crate::connection::stop_started_server(&root, supervisor).await,
+        };
+        match ended {
+            Some(Ok(exit)) => exit,
+            Some(Err(_)) | None => {
+                Err(crate::connection::ConnectError::SupervisorLost { server: id }.into())
+            }
+        }
+    }
+
     pub(super) async fn prepare_server_start(
         &self,
         id: ServerId,
@@ -1569,6 +1635,91 @@ mod tests {
                 1
             );
         }
+    }
+
+    fn stand_in_prepared(root: &Path, script: &str) -> PreparedServerStart {
+        PreparedServerStart {
+            command: ephervex_server::ServerCommand {
+                java: PathBuf::from("/bin/sh"),
+                arguments: vec!["-c".to_owned(), script.to_owned()],
+                working_directory: root.join("server"),
+            },
+            root: root.to_path_buf(),
+            capture: root.join("capture"),
+            operation: OperationReporter::silent("test-server-cancel").id(),
+        }
+    }
+
+    #[tokio::test]
+    async fn canceling_a_preparation_that_has_not_finished_starts_nothing() {
+        let (observer, mut events) = ServerObserver::channel();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let result = App::unless_canceled(std::future::pending(), &observer, &cancel).await;
+
+        let error = result.err().expect("canceled");
+        assert!(error.is_cancellation(), "{error}");
+        assert!(matches!(
+            events.try_recv(),
+            Ok(ephervex_server::ServerEvent::Finished { exit: None })
+        ));
+    }
+
+    #[tokio::test]
+    async fn canceling_a_running_server_start_stops_it_gracefully_and_reports_a_requested_stop() {
+        let root = tempfile::tempdir().expect("root");
+        let (observer, mut events) = ServerObserver::channel();
+        let cancel = CancellationToken::new();
+        let prepared = stand_in_prepared(
+            root.path(),
+            "echo 'Done (1s)!'; while read -r line; do [ \"$line\" = stop ] && exit 0; done",
+        );
+        let run = tokio::spawn({
+            let cancel = cancel.clone();
+            async move {
+                App::supervise_until_canceled(ServerId::new(), prepared, &observer, &cancel).await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(event) = events.recv().await {
+                if matches!(event, ephervex_server::ServerEvent::Started { .. }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("started");
+
+        cancel.cancel();
+        let exit = tokio::time::timeout(std::time::Duration::from_secs(20), run)
+            .await
+            .expect("the stop was answered without waiting for the control timeout")
+            .expect("join")
+            .expect("exit");
+
+        assert!(exit.stop_requested);
+        assert_eq!(exit.code, Some(0));
+    }
+
+    #[tokio::test]
+    async fn a_server_start_that_ends_on_its_own_reports_its_own_exit() {
+        let root = tempfile::tempdir().expect("root");
+        let (observer, _events) = ServerObserver::channel();
+        let prepared = stand_in_prepared(root.path(), "exit 3");
+
+        let exit = App::supervise_until_canceled(
+            ServerId::new(),
+            prepared,
+            &observer,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("exit");
+
+        assert_eq!(exit.code, Some(3));
+        assert!(!exit.stop_requested);
+        assert!(!exit.finished_starting);
     }
 
     #[tokio::test]

@@ -620,7 +620,7 @@ impl CoreError {
             Self::Snapshot(error) => error.is_cancellation(),
             Self::Isolation(error) => error.is_cancellation(),
             Self::ModPlatform(error) => error.is_cancellation(),
-            Self::Server(ServerError::ReadinessCanceled) => true,
+            Self::Server(ServerError::ReadinessCanceled | ServerError::StartCanceled) => true,
             _ => false,
         }
     }
@@ -1041,6 +1041,7 @@ mod tests {
             }
             .message_id(),
             ServerError::ReadinessCanceled.message_id(),
+            ServerError::StartCanceled.message_id(),
             ConnectError::ServerNotLinked {
                 server: ephervex_model::ServerId::new(),
             }

@@ -392,10 +392,12 @@ impl App {
 /// A stop the supervisor has accepted is waited out, because killing a server
 /// mid-save is what this exists to avoid. A server that never answers, or whose
 /// control channel is not published yet, is retried briefly and then killed.
-async fn stop_started_server(
+///
+/// Returns how the supervisor finished, or `None` when it had to be abandoned.
+pub(super) async fn stop_started_server(
     root: &std::path::Path,
     mut supervisor: JoinHandle<CoreResult<ServerExit>>,
-) {
+) -> Option<Result<CoreResult<ServerExit>, tokio::task::JoinError>> {
     let publication_deadline = tokio::time::Instant::now() + STARTED_SERVER_SETTLE;
     let mut delivered = false;
     while !supervisor.is_finished() {
@@ -419,17 +421,16 @@ async fn stop_started_server(
     } else {
         STARTED_SERVER_SETTLE
     };
-    if tokio::time::timeout(grace, &mut supervisor).await.is_ok() {
-        return;
+    if let Ok(ended) = tokio::time::timeout(grace, &mut supervisor).await {
+        return Some(ended);
     }
     tracing::warn!(root = %root.display(), "the server did not stop in time and was killed");
     let _ = send_control(root, &ControlAction::Kill).await;
-    if tokio::time::timeout(STARTED_SERVER_SETTLE, &mut supervisor)
-        .await
-        .is_err()
-    {
-        supervisor.abort();
+    if let Ok(ended) = tokio::time::timeout(STARTED_SERVER_SETTLE, &mut supervisor).await {
+        return Some(ended);
     }
+    supervisor.abort();
+    None
 }
 
 /// How long a stopped server's supervisor may take to release its runtime, and

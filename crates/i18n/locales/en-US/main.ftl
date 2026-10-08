@@ -1739,6 +1739,8 @@ error-server-readiness-timeout = The server did not accept connections at { $tar
 .action = Inspect the server output and network settings, then try again when the server can finish starting.
 error-server-readiness-canceled = Waiting for the server was canceled.
 .action = Start the operation again when you are ready.
+error-server-start-canceled = Starting the server was canceled before it began.
+.action = Start the server again when you are ready.
 error-server-persistence-unhealthy = This server's canonical metadata is unhealthy or conflicted.
 .action = Inspect server status and resolve missing, corrupt, unsupported, or duplicate metadata before changing or starting it.
 

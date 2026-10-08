@@ -67,6 +67,16 @@ unknown-running. Evidence is stale only after both recorded processes are
 proven dead or the boot ID changed. Ephervex never adopts, writes stdin to, or
 signals an orphan. Recovery clears evidence only when it is proven stale.
 
+The foreground `server start` command reports the supervised run's result in
+its exit status. A stop asked for through the control channel or Ctrl-C is
+success. Otherwise the status is success only for a server that finished
+starting and exited with status 0; exiting before startup finished, a non-zero
+status, or a signal is a failure. Ctrl-C while the server is still being
+prepared cancels the start before anything runs, and a second Ctrl-C kills a
+server that is slow to stop. `ephervex launch` applies the same rule to the
+game: a dry run, a clean exit, or a game ended with Ctrl-C is success. A launch
+canceled before the game started is a failure.
+
 `Stop` writes `stop\n` and waits at most 30 seconds without escalation.
 `Restart` respawns only after graceful termination. `Kill` is available only
 through the live owner channel. Abrupt supervisor termination can leave an

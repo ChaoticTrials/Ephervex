@@ -28,10 +28,10 @@ use ephervex_core::{
     DEFAULT_SEARCH_LIMIT, DependencyKnowledge, DependencyRefreshReport, DependentMods,
     DiagnosticEntry, DiagnosticKind, DiagnosticRequest, DiagnosticScope, DiagnosticSearch,
     DirectoryState, DuplicateClient, EULA_CONFIRMATION_PHRASE, Entitlements, EulaStatus,
-    FileDisposition, Freshness, ImpactedMod, ImportRequest, ImportedPack, IncompatibilityReason,
-    InstallationHealth, InstalledHost, InstalledMods, IsolationRequest, IsolationRound,
-    IsolationSession, IsolationStep, JavaHealth, JavaPathChoice, JavaPlan, JavaPlanRequest,
-    JavaRuntime, JavaTarget, LaunchAndConnectEvent, LaunchAndConnectObserver,
+    FileDisposition, Freshness, GameExit, ImpactedMod, ImportRequest, ImportedPack,
+    IncompatibilityReason, InstallationHealth, InstalledHost, InstalledMods, IsolationRequest,
+    IsolationRound, IsolationSession, IsolationStep, JavaHealth, JavaPathChoice, JavaPlan,
+    JavaPlanRequest, JavaRuntime, JavaTarget, LaunchAndConnectEvent, LaunchAndConnectObserver,
     LaunchAndConnectOptions, LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver,
     LaunchOptions, LaunchOutcome, LaunchState, LoginFlow, LoginOptions, LoginRequest,
     MAX_SEARCH_MATCHES, MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod,
@@ -42,11 +42,11 @@ use ephervex_core::{
     PromotionRequest, ReconciliationReport, RelatedMod, ReleaseListing, RequiredMods,
     RequirementBasis, RoundAnswer, RuntimeClassification, RuntimeInventory, SearchOptions,
     SecretString, ServerCommitWarning, ServerContentSource, ServerCreateOptions, ServerEvent,
-    ServerFolder, ServerNetworkChange, ServerObserver, ServerPersistenceHealth, ServerRecord,
-    ServerWarning, Session, SharedArtifactReport, SideRequirement, SkipReason, SnapshotOrigin,
-    SnapshotRecord, SnapshotRestoreOptions, StartedServerLifetime, SuspectConfidence,
-    SuspectReason, TextAnchor, TextView, UnknownServerFiles, VerificationReport, VersionMetadata,
-    VersionRecord, format_binary_bytes,
+    ServerExit, ServerFolder, ServerNetworkChange, ServerObserver, ServerPersistenceHealth,
+    ServerRecord, ServerWarning, Session, SharedArtifactReport, SideRequirement, SkipReason,
+    SnapshotOrigin, SnapshotRecord, SnapshotRestoreOptions, StartedServerLifetime,
+    SuspectConfidence, SuspectReason, TextAnchor, TextView, UnknownServerFiles, VerificationReport,
+    VersionMetadata, VersionRecord, format_binary_bytes,
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{
@@ -169,6 +169,9 @@ enum Command {
     /// Import a modpack into a client instance, from a file or an address.
     Import(ImportArgs),
     /// Install and launch a client instance, streaming its log to the terminal.
+    ///
+    /// Exits with a non-zero status when the game exits with an error or from a
+    /// signal, unless the launch was ended with Ctrl-C. A dry run exits with 0.
     Launch(LaunchArgs),
     /// List everything Ephervex is currently running.
     ///
@@ -1263,6 +1266,10 @@ enum ServerCommand {
         command: ServerEulaCommand,
     },
     /// Start in the foreground and stream server output.
+    ///
+    /// Ctrl-C stops the server gracefully; press it again to kill the server.
+    /// Exits with a non-zero status when the server exits before it finished
+    /// starting or ends with an error without having been asked to stop.
     Start {
         id: ServerId,
         #[arg(long)]
@@ -2916,11 +2923,30 @@ async fn run_launch(app: &mut App, args: &LaunchArgs, json: bool) -> anyhow::Res
     drop(observer);
     let _ = printer.await;
 
-    match outcome? {
-        ConnectedLaunch::Client(outcome) => report_launch(&outcome, json),
-        ConnectedLaunch::Linked(outcome) => report_connected_launch(&outcome, json),
+    let exit = match outcome? {
+        ConnectedLaunch::Client(outcome) => {
+            report_launch(&outcome, json);
+            outcome.exit
+        }
+        ConnectedLaunch::Linked(outcome) => {
+            report_connected_launch(&outcome, json);
+            outcome.launch.exit
+        }
+    };
+    game_exit_result(exit, cancel.is_cancelled())
+}
+
+/// Whether the game's end means the command did its job.
+///
+/// A dry run never ran the game. A game stopped because the launcher was told
+/// to end is a stop that was asked for, whatever status the game left with.
+fn game_exit_result(exit: Option<GameExit>, stop_requested: bool) -> anyhow::Result<()> {
+    match exit {
+        Some(exit) if !exit.is_success() && !stop_requested => {
+            anyhow::bail!("Minecraft did not exit normally")
+        }
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 enum ConnectedLaunch {
@@ -7201,6 +7227,72 @@ fn print_server(record: &ServerRecord, json: bool) {
     }
 }
 
+fn print_server_event(event: ServerEvent, json: bool) {
+    match event {
+        ServerEvent::Preparing { operation } => {
+            if json {
+                print_json(&serde_json::json!({
+                    "event": "preparing",
+                    "operation": operation.to_string(),
+                }));
+            } else {
+                print_operation_id(operation);
+            }
+        }
+        ServerEvent::Started { pid } => {
+            if json {
+                print_json(&serde_json::json!({ "event": "started", "pid": pid }));
+            } else {
+                eprintln!("server started as pid {pid}");
+            }
+        }
+        ServerEvent::Output(line) => {
+            if json {
+                print_json(&serde_json::json!({
+                    "event": "output",
+                    "line": captured_line_json(&line),
+                }));
+            } else {
+                print_captured_line(&line);
+            }
+        }
+        ServerEvent::Warning(warning) => print_server_warning(&warning, json),
+        ServerEvent::CapturePruned(retention) => {
+            if json {
+                print_json(&serde_json::json!({
+                    "event": "capture_pruned",
+                    "removed_segments": retention.removed_segments,
+                    "removed_bytes": retention.removed_bytes,
+                    "removed_lines": retention.removed_lines,
+                }));
+            } else {
+                eprintln!(
+                    "capture pruned {} segments ({} bytes)",
+                    retention.removed_segments, retention.removed_bytes
+                );
+            }
+        }
+        ServerEvent::CaptureUnavailable { detail } => {
+            if json {
+                print_json(&serde_json::json!({
+                    "event": "capture_unavailable",
+                    "detail": detail,
+                }));
+            } else {
+                eprintln!("durable capture unavailable: {detail}");
+            }
+        }
+        ServerEvent::Exited(exit) if json => {
+            print_json(&serde_json::json!({
+                "event": "exited",
+                "code": exit.code,
+                "signal": exit.signal,
+            }));
+        }
+        _ => {}
+    }
+}
+
 async fn run_server_foreground(
     app: &App,
     id: ServerId,
@@ -7211,93 +7303,71 @@ async fn run_server_foreground(
     let mut events = events;
     let printer = tokio::spawn(async move {
         while let Some(event) = events.recv().await {
-            match event {
-                ServerEvent::Preparing { operation } => {
-                    if json {
-                        print_json(&serde_json::json!({
-                            "event": "preparing",
-                            "operation": operation.to_string(),
-                        }));
-                    } else {
-                        print_operation_id(operation);
-                    }
-                }
-                ServerEvent::Started { pid } => {
-                    if json {
-                        print_json(&serde_json::json!({ "event": "started", "pid": pid }));
-                    } else {
-                        eprintln!("server started as pid {pid}");
-                    }
-                }
-                ServerEvent::Output(line) => {
-                    if json {
-                        print_json(&serde_json::json!({
-                            "event": "output",
-                            "line": captured_line_json(&line),
-                        }));
-                    } else {
-                        print_captured_line(&line);
-                    }
-                }
-                ServerEvent::Warning(warning) => print_server_warning(&warning, json),
-                ServerEvent::CapturePruned(retention) => {
-                    if json {
-                        print_json(&serde_json::json!({
-                            "event": "capture_pruned",
-                            "removed_segments": retention.removed_segments,
-                            "removed_bytes": retention.removed_bytes,
-                            "removed_lines": retention.removed_lines,
-                        }));
-                    } else {
-                        eprintln!(
-                            "capture pruned {} segments ({} bytes)",
-                            retention.removed_segments, retention.removed_bytes
-                        );
-                    }
-                }
-                ServerEvent::CaptureUnavailable { detail } => {
-                    if json {
-                        print_json(&serde_json::json!({
-                            "event": "capture_unavailable",
-                            "detail": detail,
-                        }));
-                    } else {
-                        eprintln!("durable capture unavailable: {detail}");
-                    }
-                }
-                ServerEvent::Exited(exit) if json => {
-                    print_json(&serde_json::json!({
-                        "event": "exited",
-                        "code": exit.code,
-                        "signal": exit.signal,
-                    }));
-                }
-                _ => {}
-            }
+            print_server_event(event, json);
         }
     });
 
-    let start = app.start_server(id, java, &observer);
-    tokio::pin!(start);
-    let outcome = tokio::select! {
-        result = &mut start => result,
-        signal = tokio::signal::ctrl_c() => {
-            signal?;
-            if let Err(error) = app.stop_server(id).await {
-                eprintln!("graceful stop was not confirmed: {error}");
+    let cancel = CancellationToken::new();
+    let outcome = {
+        let start = app.start_server_until_canceled(id, java, &observer, &cancel);
+        tokio::pin!(start);
+        tokio::select! {
+            result = &mut start => result,
+            signal = tokio::signal::ctrl_c() => {
+                signal?;
+                // The start keeps being polled: the supervisor inside it is what
+                // answers the stop.
+                cancel.cancel();
+                eprintln!("stopping the server... press Ctrl-C again to kill it");
+                tokio::select! {
+                    result = &mut start => result,
+                    signal = tokio::signal::ctrl_c() => {
+                        signal?;
+                        if let Err(error) = app.kill_server(id).await {
+                            eprintln!("the server could not be killed: {error}");
+                        }
+                        start.await
+                    }
+                }
             }
-            start.await
         }
     };
-    tokio::task::yield_now().await;
-    printer.abort();
-    let exit = outcome?;
+    // The printer ends when every sender is gone, so this drop is what lets it
+    // finish the last lines and the exited event rather than hang.
+    drop(observer);
+    let _ = printer.await;
+    let exit = match outcome {
+        Ok(exit) => exit,
+        Err(error) if error.is_cancellation() => {
+            eprintln!("{}", localized_failure(&error).0);
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
     if !json {
         match (exit.code, exit.signal) {
             (Some(code), _) => outln!("server exited with code {code}"),
             (_, Some(signal)) => outln!("server exited from signal {signal}"),
             _ => outln!("server exited"),
         }
+    }
+    server_exit_result(&exit)
+}
+
+/// Whether a foreground server's end means the command did its job.
+///
+/// A stop asked for through the control channel or Ctrl-C always does. Without
+/// one, only a server that finished starting and then exited with status 0
+/// does: a server that dies while starting can still exit with 0.
+fn server_exit_result(exit: &ServerExit) -> anyhow::Result<()> {
+    if exit.stop_requested {
+        return Ok(());
+    }
+    if !exit.finished_starting {
+        anyhow::bail!("the server exited before it finished starting");
+    }
+    if exit.code != Some(0) {
+        anyhow::bail!("the server exited without being asked to stop");
     }
     Ok(())
 }
@@ -7819,6 +7889,90 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("not been agreed to"), "{message}");
+    }
+
+    fn server_exit(
+        code: Option<i32>,
+        signal: Option<i32>,
+        finished_starting: bool,
+        stop_requested: bool,
+    ) -> ServerExit {
+        ServerExit {
+            code,
+            signal,
+            finished_starting,
+            stop_requested,
+        }
+    }
+
+    #[test]
+    fn a_requested_server_stop_succeeds_whatever_status_the_server_left_with() {
+        for exit in [
+            server_exit(Some(0), None, true, true),
+            server_exit(Some(143), None, true, true),
+            server_exit(None, Some(9), false, true),
+        ] {
+            server_exit_result(&exit).expect("a requested stop is not a failure");
+        }
+    }
+
+    #[test]
+    fn a_server_that_finished_starting_and_exited_cleanly_succeeds() {
+        server_exit_result(&server_exit(Some(0), None, true, false)).expect("clean exit");
+    }
+
+    #[test]
+    fn a_server_that_exited_before_finishing_startup_fails_even_with_status_zero() {
+        let error = server_exit_result(&server_exit(Some(0), None, false, false))
+            .expect_err("startup never finished");
+        assert!(error.to_string().contains("before it finished starting"));
+    }
+
+    #[test]
+    fn an_unrequested_server_crash_or_signal_fails() {
+        for exit in [
+            server_exit(Some(1), None, true, false),
+            server_exit(None, Some(11), true, false),
+        ] {
+            assert!(server_exit_result(&exit).is_err(), "{exit:?}");
+        }
+    }
+
+    #[test]
+    fn a_game_that_crashed_or_was_signaled_fails_the_launch() {
+        for exit in [
+            GameExit {
+                code: Some(1),
+                signal: None,
+            },
+            GameExit {
+                code: None,
+                signal: Some(11),
+            },
+        ] {
+            assert!(game_exit_result(Some(exit), false).is_err(), "{exit:?}");
+        }
+    }
+
+    #[test]
+    fn a_clean_game_exit_a_dry_run_and_a_requested_stop_succeed() {
+        game_exit_result(
+            Some(GameExit {
+                code: Some(0),
+                signal: None,
+            }),
+            false,
+        )
+        .expect("clean exit");
+        game_exit_result(None, false).expect("a dry run never ran the game");
+        game_exit_result(
+            Some(GameExit {
+                code: None,
+                signal: Some(15),
+            }),
+            true,
+        )
+        .expect("a requested stop");
     }
 
     #[test]

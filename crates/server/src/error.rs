@@ -55,6 +55,8 @@ pub enum ServerError {
     },
     #[error("waiting for the server was canceled")]
     ReadinessCanceled,
+    #[error("starting the server was canceled")]
+    StartCanceled,
     #[error("canonical server persistence is unhealthy: {reason}")]
     PersistenceUnhealthy { reason: &'static str },
 }
@@ -79,6 +81,7 @@ impl ServerError {
             Self::NotInstalled => "error-server-not-installed",
             Self::ReadinessTimeout { .. } => "error-server-readiness-timeout",
             Self::ReadinessCanceled => "error-server-readiness-canceled",
+            Self::StartCanceled => "error-server-start-canceled",
             Self::PersistenceUnhealthy { .. } => "error-server-persistence-unhealthy",
         }
     }
