@@ -521,8 +521,10 @@ enum ModCommand {
     ///
     /// If other mods need this one, their jars go too, because leaving them
     /// installed and unable to load is the state worth avoiding. Ephervex names
-    /// them and stops; `--with-dependents` takes them as well, and
-    /// `--only-this` takes just the jar you named.
+    /// them and stops, and it also stops for mods that use this one optionally
+    /// or whose requirements are not recorded, since it cannot tell whether
+    /// they need it. `--with-dependents` takes the mods that need it as well,
+    /// and `--only-this` takes just the jar you named.
     Delete {
         #[command(flatten)]
         host: HostArgs,
@@ -538,8 +540,10 @@ enum ModCommand {
     /// Let a mod load again after it was disabled.
     ///
     /// A mod that needs others usually cannot load alone. Ephervex says which
-    /// of them are turned off and stops; `--with-dependencies` turns those on
-    /// too, and `--only-this` turns on just the mod you named.
+    /// of them are turned off or not installed, and which installed mods it
+    /// is declared incompatible with, and stops; `--with-dependencies` turns
+    /// the ones that are turned off on too, and `--only-this` turns on just
+    /// the mod you named.
     Enable {
         #[command(flatten)]
         host: HostArgs,
@@ -559,9 +563,11 @@ enum ModCommand {
     /// version and provider, and enabling it again needs no download.
     ///
     /// If other mods need this one, they stop loading too. Ephervex names them
-    /// and stops without changing anything; `--with-dependents` turns those off
-    /// as well, and `--only-this` turns off just the mod you named, which
-    /// leaves the others installed but unable to load.
+    /// and stops without changing anything, and it also stops for mods that use
+    /// this one optionally or whose requirements are not recorded, since it
+    /// cannot tell whether they need it. `--with-dependents` turns off the mods
+    /// that need it as well, and `--only-this` turns off just the mod you
+    /// named, which leaves the others installed but possibly unable to load.
     Disable {
         #[command(flatten)]
         host: HostArgs,
@@ -4396,12 +4402,16 @@ fn run_mod_delete(
     let policy = app.dependency_policy();
     let impact = app.dependents_of(host, path)?;
     let cascade = !only_this && (with_dependents || (policy.cascades() && !policy.asks()));
-    if policy.asks() && !only_this && !cascade && !impact.breaks.is_empty() {
+    if policy.asks() && !only_this && !cascade && !impact.is_silent() {
         print_dependency_impact(&impact, json);
         anyhow::bail!(
-            "{} other mods need this one. Pass --with-dependents to delete their jars too, \
-             or --only-this to delete just this one.",
-            impact.breaks.len()
+            "{}",
+            impact_refusal(
+                &impact,
+                "Pass --with-dependents to delete the jars of the mods that need it too, or \
+                 --only-this to delete just this one.",
+                "Pass --only-this to delete this one."
+            )
         );
     }
 
@@ -4429,7 +4439,7 @@ fn print_deleted_mods(deleted: &[PathBuf], json: bool) {
     }
 }
 
-/// Turns a mod off, saying first what else stops loading.
+/// Turns a mod off, saying first what else stops loading or may.
 ///
 /// Refusing by default is what a command with no prompt can do instead of
 /// asking. It is not a warning that scrolled past: nothing is changed, and the
@@ -4450,12 +4460,16 @@ fn run_mod_disable(
     let policy = app.dependency_policy();
     let impact = app.dependents_of(host, path)?;
     let cascade = !only_this && (with_dependents || (policy.cascades() && !policy.asks()));
-    if policy.asks() && !only_this && !cascade && !impact.breaks.is_empty() {
+    if policy.asks() && !only_this && !cascade && !impact.is_silent() {
         print_dependency_impact(&impact, json);
         anyhow::bail!(
-            "{} other mods need this one. Pass --with-dependents to turn them off too, \
-             or --only-this to turn off just this mod.",
-            impact.breaks.len()
+            "{}",
+            impact_refusal(
+                &impact,
+                "Pass --with-dependents to turn off the mods that need it too, or --only-this \
+                 to turn off just this mod.",
+                "Pass --only-this to turn off this mod."
+            )
         );
     }
 
@@ -4473,11 +4487,14 @@ fn run_mod_disable(
     Ok(())
 }
 
-/// Turns a mod on, saying first what it needs that is turned off.
+/// Turns a mod on, saying first what it needs that is turned off or missing.
 ///
 /// Enabling breaks nothing, so this refuses for a different reason than
 /// disabling does: a mod turned on without what it needs does not load, and
 /// reporting that after the fact would be a worse answer than not doing it.
+/// What counts as worth stopping for is the core's own rule, the one the
+/// desktop application follows: required mods that are turned off or not
+/// installed, and installed mods the target declares itself incompatible with.
 fn run_mod_enable(
     app: &App,
     host: InstalledHost,
@@ -4489,13 +4506,9 @@ fn run_mod_enable(
     let policy = app.dependency_policy();
     let needs = app.dependencies_of(host, path)?;
     let cascade = !only_this && (with_dependencies || (policy.cascades() && !policy.asks()));
-    if policy.asks() && !only_this && !cascade && !needs.disabled.is_empty() {
+    if policy.asks() && !only_this && !cascade && !needs.is_silent() {
         print_required_mods(&needs, json);
-        anyhow::bail!(
-            "this mod needs {} others that are turned off. Pass --with-dependencies to turn \
-             them on too, or --only-this to turn on just this mod.",
-            needs.disabled.len()
-        );
+        anyhow::bail!("{}", requirement_refusal(&needs));
     }
 
     let mut changes: Vec<(PathBuf, bool)> = Vec::new();
@@ -4513,8 +4526,78 @@ fn run_mod_enable(
         for entry in &needs.absent {
             eprintln!("still missing: {} is not installed here", entry.name);
         }
+        for entry in &needs.incompatible {
+            eprintln!("conflicts with {}, which is also loaded", entry.name);
+        }
     }
     Ok(())
+}
+
+/// Why turning a mod off, or deleting it, stopped.
+///
+/// Mods that need the target, mods that merely use it optionally, and mods
+/// whose requirements are not known all stop the command, but they are not the
+/// same claim, so each is counted on its own. `with_dependents` is the advice
+/// when proven dependents exist and `only_this` when there are none to carry
+/// along.
+fn impact_refusal(impact: &DependentMods, with_dependents: &str, only_this: &str) -> String {
+    let mut sentences: Vec<String> = Vec::new();
+    if !impact.breaks.is_empty() {
+        sentences.push(format!("Mods that need this one: {}.", impact.breaks.len()));
+    }
+    if !impact.degrades.is_empty() {
+        sentences.push(format!(
+            "Mods that use it optionally: {}.",
+            impact.degrades.len()
+        ));
+    }
+    let unanswered = impact.unknown.len() + impact.unidentifiable.len();
+    if unanswered > 0 {
+        sentences.push(format!(
+            "Mods with no recorded requirements, so it is not known whether they need it: \
+             {unanswered}."
+        ));
+    }
+    sentences.push(
+        if impact.breaks.is_empty() {
+            only_this
+        } else {
+            with_dependents
+        }
+        .to_owned(),
+    );
+    sentences.join(" ")
+}
+
+/// Why turning a mod on stopped.
+fn requirement_refusal(needs: &RequiredMods) -> String {
+    let mut sentences: Vec<String> = Vec::new();
+    if !needs.disabled.is_empty() {
+        sentences.push(format!(
+            "Required mods that are turned off: {}.",
+            needs.disabled.len()
+        ));
+    }
+    if !needs.absent.is_empty() {
+        sentences.push(format!(
+            "Required mods that are not installed here: {}.",
+            needs.absent.len()
+        ));
+    }
+    if !needs.incompatible.is_empty() {
+        sentences.push(format!(
+            "Installed mods it is declared incompatible with: {}.",
+            needs.incompatible.len()
+        ));
+    }
+    sentences.push(if needs.disabled.is_empty() {
+        "Pass --only-this to turn on this mod.".to_owned()
+    } else {
+        "Pass --with-dependencies to turn on the required mods that are turned off, or \
+         --only-this to turn on just this mod."
+            .to_owned()
+    });
+    sentences.join(" ")
 }
 
 /// What turning one mod off would do to the rest.

@@ -599,6 +599,264 @@ fn the_json_form_carries_every_relation_with_its_kind_and_state() {
     );
 }
 
+/// Adds a recorded mod to the instance, leaving its jar turned on.
+fn add_recorded_mod(mods: &Path, name: &str, project: &str, relations: &[(&str, &str)]) {
+    let recipe_path = mods
+        .parent()
+        .and_then(Path::parent)
+        .expect("instance root")
+        .join(".launcher")
+        .join("source")
+        .join("recipe.json");
+    let mut recipe: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&recipe_path).expect("recipe")).expect("json");
+    recipe["files"]
+        .as_array_mut()
+        .expect("files")
+        .push(entry(name, project, relations));
+    std::fs::write(
+        &recipe_path,
+        serde_json::to_vec(&recipe).expect("serialize"),
+    )
+    .expect("write recipe");
+    std::fs::write(mods.join(name), b"jar").expect("write jar");
+}
+
+fn stderr_of(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[test]
+fn disabling_a_mod_others_only_use_optionally_refuses_and_changes_nothing() {
+    let sandbox = Sandbox::new();
+    let (id, mods) = sandbox.instance_with_a_shared_library();
+    let before = jars(&mods);
+
+    let output = sandbox.run(&["mod", "disable", "--instance", &id, "mods/SkyGUIs.jar"]);
+    assert!(!output.status.success(), "an optional user is still a user");
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("SkyblockBuilder.jar"), "{stderr}");
+    assert!(
+        !stderr.contains("need this one"),
+        "nothing was proven to need it: {stderr}"
+    );
+    assert_eq!(jars(&mods), before, "nothing on disk may change");
+
+    for flag in ["--only-this", "--with-dependents"] {
+        let allowed = sandbox.run(&[
+            "mod",
+            "disable",
+            "--instance",
+            &id,
+            flag,
+            "mods/SkyGUIs.jar",
+        ]);
+        assert!(allowed.status.success(), "{flag}: {}", stderr_of(&allowed));
+        assert!(
+            jars(&mods).contains(&"SkyGUIs.jar.disabled".to_owned()),
+            "{flag} is the instruction to go ahead"
+        );
+        assert!(
+            jars(&mods).contains(&"SkyblockBuilder.jar".to_owned()),
+            "an optional user is never carried along"
+        );
+        std::fs::rename(mods.join("SkyGUIs.jar.disabled"), mods.join("SkyGUIs.jar"))
+            .expect("restore");
+    }
+}
+
+#[test]
+fn disabling_a_mod_while_a_jar_nothing_records_is_installed_refuses() {
+    let sandbox = Sandbox::new();
+    let (id, mods) = sandbox.instance_with_a_shared_library();
+    std::fs::write(mods.join("HandPlaced.jar"), b"jar").expect("write jar");
+    let before = jars(&mods);
+
+    let output = sandbox.run(&[
+        "--json",
+        "mod",
+        "disable",
+        "--instance",
+        &id,
+        "mods/UtilitiX.jar",
+    ]);
+    assert!(
+        !output.status.success(),
+        "whether the unrecorded jar needs it is not known"
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("impact json");
+    assert!(value["breaks"].as_array().expect("breaks").is_empty());
+    let unanswered: Vec<&str> = ["unknown", "unidentifiable"]
+        .iter()
+        .flat_map(|key| value[key].as_array().expect("a list"))
+        .map(|entry| entry["name"].as_str().expect("a name"))
+        .collect();
+    assert_eq!(unanswered, ["HandPlaced.jar"]);
+    assert!(!value["complete"].as_bool().expect("complete"));
+    assert_eq!(jars(&mods), before, "nothing on disk may change");
+
+    let allowed = sandbox.run(&[
+        "mod",
+        "disable",
+        "--instance",
+        &id,
+        "--only-this",
+        "mods/UtilitiX.jar",
+    ]);
+    assert!(allowed.status.success(), "{}", stderr_of(&allowed));
+}
+
+#[test]
+fn the_refusal_advice_carries_only_the_mods_that_need_the_target() {
+    let sandbox = Sandbox::new();
+    let (id, mods) = sandbox.instance_with_a_shared_library();
+    std::fs::write(mods.join("HandPlaced.jar"), b"jar").expect("write jar");
+
+    for verb in ["disable", "delete"] {
+        let output = sandbox.run(&["mod", verb, "--instance", &id, "mods/LibX.jar"]);
+        assert!(!output.status.success());
+        let stderr = stderr_of(&output);
+        assert!(stderr.contains("Mods that need this one: 3."), "{stderr}");
+        assert!(stderr.contains("no recorded requirements"), "{stderr}");
+        assert!(
+            stderr.contains("the mods that need it too"),
+            "the flag is described by what it takes along: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn deleting_a_mod_while_a_jar_nothing_records_is_installed_refuses() {
+    let sandbox = Sandbox::new();
+    let (id, mods) = sandbox.instance_with_a_shared_library();
+    std::fs::write(mods.join("HandPlaced.jar"), b"jar").expect("write jar");
+    let before = jars(&mods);
+
+    let output = sandbox.run(&["mod", "delete", "--instance", &id, "mods/UtilitiX.jar"]);
+    assert!(!output.status.success());
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("HandPlaced.jar"), "{stderr}");
+    assert_eq!(jars(&mods), before, "nothing on disk may change");
+
+    let allowed = sandbox.run(&[
+        "mod",
+        "delete",
+        "--instance",
+        &id,
+        "--only-this",
+        "mods/UtilitiX.jar",
+    ]);
+    assert!(allowed.status.success(), "{}", stderr_of(&allowed));
+    assert!(!jars(&mods).contains(&"UtilitiX.jar".to_owned()));
+}
+
+#[test]
+fn enabling_a_mod_whose_requirement_is_not_installed_refuses() {
+    let sandbox = Sandbox::new();
+    let (id, mods) = sandbox.instance_with_a_shared_library();
+    add_recorded_mod(
+        &mods,
+        "NeedsMissing.jar",
+        "zzMissing1",
+        &[("zzAbsent01", "required")],
+    );
+    let disabled = sandbox.run(&[
+        "mod",
+        "disable",
+        "--instance",
+        &id,
+        "--only-this",
+        "mods/NeedsMissing.jar",
+    ]);
+    assert!(disabled.status.success(), "{}", stderr_of(&disabled));
+    let before = jars(&mods);
+
+    let output = sandbox.run(&["mod", "enable", "--instance", &id, "mods/NeedsMissing.jar"]);
+    assert!(
+        !output.status.success(),
+        "a mod enabled without what it needs does not load"
+    );
+    assert!(
+        stderr_of(&output).contains("zzAbsent01"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert_eq!(jars(&mods), before, "nothing on disk may change");
+
+    let allowed = sandbox.run(&[
+        "mod",
+        "enable",
+        "--instance",
+        &id,
+        "--only-this",
+        "mods/NeedsMissing.jar",
+    ]);
+    assert!(allowed.status.success(), "{}", stderr_of(&allowed));
+    assert!(
+        stderr_of(&allowed).contains("zzAbsent01"),
+        "the missing mod is still reported: {}",
+        stderr_of(&allowed)
+    );
+    assert!(jars(&mods).contains(&"NeedsMissing.jar".to_owned()));
+}
+
+#[test]
+fn enabling_a_mod_declared_incompatible_with_a_loaded_one_refuses() {
+    let sandbox = Sandbox::new();
+    let (id, mods) = sandbox.instance_with_a_shared_library();
+    add_recorded_mod(
+        &mods,
+        "Clashing.jar",
+        "zzClash001",
+        &[(LIBRARY, "incompatible")],
+    );
+    let disabled = sandbox.run(&[
+        "mod",
+        "disable",
+        "--instance",
+        &id,
+        "--only-this",
+        "mods/Clashing.jar",
+    ]);
+    assert!(disabled.status.success(), "{}", stderr_of(&disabled));
+    let before = jars(&mods);
+
+    let output = sandbox.run(&[
+        "--json",
+        "mod",
+        "enable",
+        "--instance",
+        &id,
+        "mods/Clashing.jar",
+    ]);
+    assert!(!output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("needs json");
+    let incompatible: Vec<&str> = value["incompatible"]
+        .as_array()
+        .expect("incompatible")
+        .iter()
+        .map(|entry| entry["name"].as_str().expect("a name"))
+        .collect();
+    assert_eq!(incompatible, ["LibX.jar"]);
+    assert_eq!(jars(&mods), before, "nothing on disk may change");
+
+    let allowed = sandbox.run(&[
+        "mod",
+        "enable",
+        "--instance",
+        &id,
+        "--only-this",
+        "mods/Clashing.jar",
+    ]);
+    assert!(allowed.status.success(), "{}", stderr_of(&allowed));
+    assert!(
+        stderr_of(&allowed).contains("LibX.jar"),
+        "the conflict is still reported: {}",
+        stderr_of(&allowed)
+    );
+    assert!(jars(&mods).contains(&"Clashing.jar".to_owned()));
+}
+
 /// Rewrites one recorded setting, through a save the launcher itself made.
 ///
 /// Reading a configuration never writes one, so a setting change is what puts

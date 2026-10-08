@@ -1132,8 +1132,13 @@ each mod requires stays recorded and stays on display either way - this decides
 whether a change follows those relations, not whether they are known. With it
 off there is nothing for a confirmation to be about, so the confirmation is not
 asked and its switch says it cannot be answered from there. On the command line
-the same rule holds, with one exception: `--with-dependents` and
-`--with-dependencies` are instructions for that run and carry the other mods
+the same rule holds: while the change is confirmed, a command stops whenever the
+core's answer is not silent. Turning a mod off or deleting it stops for mods
+that need it, mods that use it optionally, and mods whose requirements are
+unrecorded; turning one on stops for required mods that are turned off or not
+installed and for installed mods it is declared incompatible with. The one
+exception is that `--with-dependents` and `--with-dependencies` are
+instructions for that run and carry the other mods
 whatever is recorded.
 
 Deleting a jar is offered whatever owns it, and takes the jars that needed it.
