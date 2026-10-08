@@ -200,6 +200,9 @@ impl App {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<LoaderVersionChange> {
+        // What a running game was started with cannot be changed underneath
+        // it, and the record would then misdescribe the reproduction.
+        self.refuse_while_running(instance)?;
         let plan = self.plan_loader_version_change(instance, exact).await?;
         let record = self.client(instance)?;
 
@@ -210,11 +213,7 @@ impl App {
         }
         let selection = LoaderSelection::exact(plan.loader, plan.candidate_version.clone());
         if !plan.changes_anything() {
-            info!("the instance already runs this loader build");
-            return Ok(LoaderVersionChange {
-                plan,
-                loader: selection,
-            });
+            return Self::settle_unchanged_build(&record, plan, selection);
         }
 
         let metadata = self.minecraft_version(&record.minecraft_version).await?;
@@ -243,6 +242,9 @@ impl App {
             })
             .await?;
 
+        // The installation can take long enough for a launch to begin.
+        self.refuse_while_running(instance)?;
+
         // Only now. Everything above can fail without the instance having
         // changed at all.
         let record = self.registry().modify_client(instance, |current| {
@@ -256,6 +258,25 @@ impl App {
             to = %plan.candidate_version,
             "changed a client instance's loader build"
         );
+        Ok(LoaderVersionChange {
+            plan,
+            loader: selection,
+        })
+    }
+
+    /// Completes a request for the build the instance already records.
+    ///
+    /// The recipe is re-aligned even though nothing else changes: the record is
+    /// committed before the recipe, so an earlier attempt whose recipe write
+    /// failed leaves exactly this state, and repeating the request is how the
+    /// user repairs it.
+    fn settle_unchanged_build(
+        record: &ephervex_storage::ClientRecord,
+        plan: LoaderVersionPlan,
+        selection: LoaderSelection,
+    ) -> CoreResult<LoaderVersionChange> {
+        info!("the instance already runs this loader build");
+        Self::align_recipe_loader(record)?;
         Ok(LoaderVersionChange {
             plan,
             loader: selection,
@@ -450,6 +471,74 @@ mod tests {
             app.client(record.id).expect("record").loader,
             LoaderSelection::exact(LoaderKind::Forge, "47.1.106"),
             "the instance still runs what it ran before"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_running_instance_refuses_a_loader_build_change() {
+        // Refused before the catalog is consulted, so the refusal names the
+        // running game rather than whatever planning would have reported.
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let record = app
+            .create_client_for_test(NewClient::new(
+                "Forge repro",
+                "1.20.1",
+                LoaderSelection::exact(LoaderKind::Forge, "47.1.106"),
+            ))
+            .expect("create");
+        let _lock = ephervex_storage::LaunchLock::acquire(&record.root).expect("hold the lock");
+
+        let result = app
+            .change_loader_version(
+                record.id,
+                "47.1.107",
+                true,
+                &OperationReporter::silent("test"),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(
+            matches!(result, Err(CoreError::InstanceRunning { .. })),
+            "expected a running-instance refusal: {result:?}"
+        );
+        assert_eq!(
+            app.client(record.id).expect("record").loader,
+            LoaderSelection::exact(LoaderKind::Forge, "47.1.106"),
+            "the record still describes what the running game uses"
+        );
+    }
+
+    #[test]
+    fn repeating_a_change_to_the_recorded_build_realigns_a_recipe_left_behind() {
+        // A recipe write that failed after the record moved leaves the recipe
+        // on the old build; asking for the recorded build again must repair it
+        // instead of reporting that there is nothing to do.
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let old = LoaderSelection::exact(LoaderKind::Forge, "47.1.106");
+        let new = LoaderSelection::exact(LoaderKind::Forge, "47.1.107");
+        let record = app
+            .create_client_for_test(NewClient::new("Forge repro", "1.20.1", new.clone()))
+            .expect("create");
+        let store =
+            ephervex_pack::SourceStore::new(ephervex_storage::metadata::source_dir(&record.root));
+        store
+            .write_recipe(&ephervex_pack::PackRecipe::for_manual_instance(
+                "Repro", "1.20.1", old,
+            ))
+            .expect("write the recipe");
+
+        let mut unchanged = plan(LoaderKind::Forge, Some("47.1.107"), "47.1.107");
+        unchanged.instance = record.id;
+        let change = App::settle_unchanged_build(&record, unchanged, new.clone())
+            .expect("the request completes");
+
+        assert_eq!(change.loader, new);
+        assert_eq!(
+            store.read_recipe().expect("recipe").loader,
+            new,
+            "the recipe follows the record"
         );
     }
 
