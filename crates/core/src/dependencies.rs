@@ -501,9 +501,11 @@ impl App {
     /// A requirement names a project in its own catalog. Every jar here not
     /// identified in that catalog is identified there by its bytes: Modrinth
     /// by SHA-1, CurseForge by fingerprint. A jar that turns out to be the
-    /// project settles the requirement, or makes it a turned-off one; none
-    /// being it proves the absence. A catalog that cannot answer leaves the
-    /// requirement unproven. Titles are fetched for proven absences that only
+    /// project settles the requirement, or makes it a turned-off one. The
+    /// absence is proven only when the catalog identified every one of those
+    /// jars as some other project: a jar it does not recognize may be the
+    /// required project. A catalog that cannot answer leaves the requirement
+    /// unproven. Titles are fetched for proven absences that only
     /// have an id to show. Nothing learned is recorded (ADR 0037).
     pub(crate) async fn confirm_unmet_requirements(
         &self,
@@ -528,7 +530,7 @@ impl App {
             return;
         };
         for catalog in unproven {
-            let Some(found) = self
+            let Some(recognition) = self
                 .recognize_in(catalog, &graph, &layout.game_dir, cancel)
                 .await
             else {
@@ -547,9 +549,9 @@ impl App {
                 if *provider != catalog {
                     return true;
                 }
-                match found.get(project.as_str()) {
+                match recognition.projects.get(project.as_str()) {
                     None => {
-                        *proven = true;
+                        *proven = recognition.complete;
                         true
                     }
                     Some(present) if present.presence == ModPresence::Disabled => {
@@ -565,14 +567,15 @@ impl App {
     }
 
     /// Which project each jar not identified in `catalog` is there, keyed by
-    /// project id. `None` when the catalog could not be asked about all of them.
+    /// project id, and whether the catalog recognized all of them. `None` when
+    /// the catalog could not be asked about all of them.
     async fn recognize_in(
         &self,
         catalog: ModProvider,
         graph: &ModGraph,
         game_dir: &Path,
         cancel: &CancellationToken,
-    ) -> Option<BTreeMap<String, ImpactedMod>> {
+    ) -> Option<CatalogRecognition> {
         let mut candidates: Vec<(Hash, u32, &ImpactedMod)> = Vec::new();
         for entry in graph.entries.iter().filter(|entry| {
             entry.mod_entry.presence != ModPresence::Missing && entry.provider != Some(catalog)
@@ -588,7 +591,10 @@ impl App {
             candidates.push((digest, curseforge_fingerprint(&bytes), &entry.mod_entry));
         }
         if candidates.is_empty() {
-            return Some(BTreeMap::new());
+            return Some(CatalogRecognition {
+                projects: BTreeMap::new(),
+                complete: true,
+            });
         }
         let recognized = match catalog {
             ModProvider::Modrinth => {
@@ -625,15 +631,21 @@ impl App {
                 return None;
             }
         };
-        Some(
-            candidates
-                .into_iter()
-                .filter_map(|(digest, _, entry)| {
-                    let file = recognized.get(digest.digest())?;
-                    (file.provider == catalog).then(|| (file.project_id.clone(), entry.clone()))
-                })
-                .collect(),
-        )
+        let mut recognition = CatalogRecognition {
+            projects: BTreeMap::new(),
+            complete: true,
+        };
+        for (digest, _, entry) in candidates {
+            match recognized.get(digest.digest()) {
+                Some(file) if file.provider == catalog => {
+                    recognition
+                        .projects
+                        .insert(file.project_id.clone(), entry.clone());
+                }
+                _ => recognition.complete = false,
+            }
+        }
+        Some(recognition)
     }
 
     /// Replaces a bare project id with the catalog's title, where it has one.
@@ -1434,6 +1446,16 @@ fn exact_versions(recipe: &PackRecipe, catalog: ModProvider) -> Vec<String> {
     versions.sort_unstable();
     versions.dedup();
     versions
+}
+
+/// What a catalog said about the jars it does not already own.
+struct CatalogRecognition {
+    /// The jar the catalog identified as each project, keyed by project id.
+    projects: BTreeMap<String, ImpactedMod>,
+    /// Whether the catalog identified every jar asked about. A jar it does
+    /// not recognize may be any project, so only a complete answer can prove
+    /// a project absent.
+    complete: bool,
 }
 
 #[cfg(test)]
@@ -3206,5 +3228,39 @@ mod tests {
             })
             .collect();
         assert_eq!(disabled, [Path::new("mods/JEI.jar")]);
+    }
+
+    #[tokio::test]
+    async fn a_jar_the_catalog_does_not_recognize_keeps_an_absence_unproven() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, host, _server) = mixed_catalog_host(base.path()).await;
+        let root = app
+            .client(match host {
+                InstalledHost::Instance(id) => id,
+                InstalledHost::Server(_) => unreachable!("a client fixture"),
+            })
+            .expect("record")
+            .root;
+        let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+        std::fs::write(
+            mods.join("LocalBuild.jar"),
+            b"a hand-placed development build",
+        )
+        .expect("write jar");
+        let mut problems = app.requirement_problems(host).expect("problems");
+
+        app.confirm_unmet_requirements(
+            host,
+            &mut problems,
+            &OperationReporter::silent("test-confirm"),
+            &CancellationToken::new(),
+        )
+        .await;
+
+        assert_eq!(
+            missing(&problems),
+            [(BIOMES_O_PLENTY.to_owned(), false)],
+            "an unrecognized jar may be the required project, so its absence is not proven"
+        );
     }
 }
