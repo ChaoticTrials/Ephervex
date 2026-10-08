@@ -69,6 +69,10 @@ the round cannot be answered, undone, or finished until **Try again** succeeds;
 stop the host or correct the problem first. The session and its safety snapshot
 are kept either way.
 
+The safety snapshot cannot be deleted while its session is active. If it is
+already missing, finishing still completes, and canceling re-enables the mods
+that were enabled when the session started before ending the session.
+
 ## Command-line workflow
 
 The same durable workflow is scriptable. Name exactly one host with

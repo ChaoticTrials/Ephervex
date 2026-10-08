@@ -3066,8 +3066,7 @@ fn run_worker(
                         if cancel.is_cancelled() {
                             return Err(CoreError::from(ephervex_core::SnapshotError::Canceled));
                         }
-                        app.delete_snapshot(host, snapshot)
-                            .map_err(CoreError::from)?;
+                        app.delete_snapshot(host, snapshot)?;
                         let data = host_snapshots_data(&app, host)?;
                         let _ = reports.send(Event::HostSnapshots(data));
                         Ok(OperationReport::Toast(lookup("gui-snapshot-deleted")))

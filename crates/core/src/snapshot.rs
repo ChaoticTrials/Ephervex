@@ -12,7 +12,7 @@ use ephervex_storage::{CloneMethod, clone_file};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio_util::sync::CancellationToken;
 
-use crate::{App, InstalledHost, ModPresence};
+use crate::{App, CoreResult, InstalledHost, IsolationError, ModPresence};
 
 const SNAPSHOT_VERSION: u32 = 1;
 const SNAPSHOT_MANIFEST: &str = "snapshot.json";
@@ -365,14 +365,16 @@ impl App {
         Ok(record)
     }
 
-    /// Deletes one explicitly selected snapshot.
-    pub fn delete_snapshot(
-        &self,
-        host: InstalledHost,
-        id: SnapshotId,
-    ) -> Result<(), SnapshotError> {
+    /// Deletes one explicitly selected snapshot. The safety snapshot of an
+    /// active isolation session is refused, since cancel restores from it.
+    pub fn delete_snapshot(&self, host: InstalledHost, id: SnapshotId) -> CoreResult<()> {
         let directory = self.snapshot_directory(host, id)?;
         read_manifest(&directory)?;
+        if let Some(session) = self.isolation_state(host)?
+            && session.safety_snapshot == id
+        {
+            return Err(IsolationError::SafetySnapshotInUse { snapshot: id }.into());
+        }
         std::fs::remove_dir_all(&directory).map_err(|source| SnapshotError::Unwritable {
             path: directory.clone(),
             source,
@@ -380,7 +382,8 @@ impl App {
         ephervex_storage::sync_parent(&directory).map_err(|source| SnapshotError::Unwritable {
             path: directory,
             source,
-        })
+        })?;
+        Ok(())
     }
 
     /// Replaces the live host parts with a captured snapshot.

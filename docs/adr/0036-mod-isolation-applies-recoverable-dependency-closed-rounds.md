@@ -95,6 +95,10 @@ that no other remaining candidate requires, and separates them from the files
 they require, from pinned roots, and from the files pinned roots require. The
 last two were never tested for removal.
 
+Deleting the safety snapshot is refused while its session is active. A session
+whose snapshot is already missing still ends: finish skips the dated label, and
+cancel re-enables the mods the plan recorded as initially enabled.
+
 ## Consequences
 
 - A round may enable more than half of the jar files because required

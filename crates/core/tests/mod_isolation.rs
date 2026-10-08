@@ -794,6 +794,116 @@ fn finish_keeps_the_minimized_configuration_and_safety_snapshot() {
     assert!(!fixture.root.join(".launcher/isolation.json").exists());
 }
 
+/// Removes a session's safety snapshot behind the core's back, as a session
+/// written before its deletion was refused would find it.
+fn remove_safety_snapshot_directory(app: &App, fixture: &Fixture) {
+    let session = app.isolation_state(fixture.host).unwrap().unwrap();
+    std::fs::remove_dir_all(
+        ephervex_storage::metadata::snapshots_dir(&fixture.root)
+            .join(session.safety_snapshot.to_string()),
+    )
+    .unwrap();
+}
+
+#[test]
+fn the_safety_snapshot_of_an_active_session_cannot_be_deleted() {
+    let fixture = Fixture::new();
+    let app = fixture.app();
+    app.begin_isolation(fixture.host, request(&["pin"]), &CancellationToken::new())
+        .unwrap();
+    let snapshot = app
+        .isolation_state(fixture.host)
+        .unwrap()
+        .unwrap()
+        .safety_snapshot;
+
+    let error = app.delete_snapshot(fixture.host, snapshot).unwrap_err();
+
+    assert!(matches!(
+        error,
+        CoreError::Isolation(IsolationError::SafetySnapshotInUse { snapshot: held }) if held == snapshot
+    ));
+    assert_eq!(app.snapshots(fixture.host).unwrap().len(), 1);
+    app.cancel_isolation(fixture.host, &CancellationToken::new())
+        .unwrap();
+}
+
+#[test]
+fn the_safety_snapshot_can_be_deleted_once_the_session_has_finished() {
+    let fixture = Fixture::new();
+    let app = fixture.app();
+    let first = app
+        .begin_isolation(fixture.host, request(&["pin"]), &CancellationToken::new())
+        .unwrap();
+    let snapshot = app
+        .isolation_state(fixture.host)
+        .unwrap()
+        .unwrap()
+        .safety_snapshot;
+    drive(&app, fixture.host, first, enables(&["e"]));
+    app.finish_isolation(fixture.host).unwrap();
+
+    app.delete_snapshot(fixture.host, snapshot).unwrap();
+
+    assert!(app.snapshots(fixture.host).unwrap().is_empty());
+}
+
+#[test]
+fn another_snapshot_can_be_deleted_during_an_active_session() {
+    let fixture = Fixture::new();
+    let app = fixture.app();
+    let other = app
+        .create_snapshot(
+            fixture.host,
+            "extra",
+            ephervex_core::SnapshotOrigin::Manual,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    app.begin_isolation(fixture.host, request(&["pin"]), &CancellationToken::new())
+        .unwrap();
+
+    app.delete_snapshot(fixture.host, other.id).unwrap();
+
+    assert_eq!(app.snapshots(fixture.host).unwrap().len(), 1);
+}
+
+#[test]
+fn finish_completes_when_the_safety_snapshot_is_already_gone() {
+    let fixture = Fixture::new();
+    let app = fixture.app();
+    let first = app
+        .begin_isolation(fixture.host, request(&["pin"]), &CancellationToken::new())
+        .unwrap();
+    drive(&app, fixture.host, first, enables(&["e"]));
+    remove_safety_snapshot_directory(&app, &fixture);
+
+    let report = app.finish_isolation(fixture.host).unwrap();
+
+    assert_eq!(roots(&report), mods(&["e"]));
+    assert_eq!(enabled_files(&fixture), ["base.jar", "e.jar", "pin.jar"]);
+    assert!(!fixture.root.join(".launcher/isolation.json").exists());
+}
+
+#[test]
+fn cancel_ends_the_session_and_re_enables_the_starting_mods_when_the_safety_snapshot_is_gone() {
+    let fixture = Fixture::new();
+    let before = enabled_files(&fixture);
+    let app = fixture.app();
+    app.begin_isolation(fixture.host, request(&["pin"]), &CancellationToken::new())
+        .unwrap();
+    app.answer_isolation_round(fixture.host, RoundAnswer::DidNotReproduce)
+        .unwrap();
+    assert_ne!(enabled_files(&fixture), before);
+    remove_safety_snapshot_directory(&app, &fixture);
+
+    app.cancel_isolation(fixture.host, &CancellationToken::new())
+        .unwrap();
+
+    assert_eq!(enabled_files(&fixture), before);
+    assert!(!fixture.root.join(".launcher/isolation.json").exists());
+}
+
 #[test]
 fn finish_separates_remaining_candidates_pins_and_required_dependencies() {
     let fixture = Fixture::new();

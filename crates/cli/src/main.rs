@@ -1877,8 +1877,7 @@ fn run_snapshot_command(app: &App, command: &SnapshotCommand, json: bool) -> any
                 *yes,
                 "snapshot deletion requires --yes because it cannot be undone",
             )?;
-            app.delete_snapshot(host.host()?, *id)
-                .map_err(CoreError::from)?;
+            app.delete_snapshot(host.host()?, *id)?;
             if json {
                 print_json(&serde_json::json!({ "deleted": id }));
             } else {

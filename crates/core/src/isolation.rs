@@ -411,6 +411,8 @@ pub enum IsolationError {
     NotFinished,
     #[error("the isolation session has no current round, contradiction, or result")]
     InconsistentState,
+    #[error("snapshot {snapshot} is the safety snapshot of an active isolation session")]
+    SafetySnapshotInUse { snapshot: SnapshotId },
     #[error("the isolation session belongs to {found}, not {expected}")]
     HostMismatch { expected: String, found: String },
     #[error("isolation state at {path} could not be read")]
@@ -453,6 +455,7 @@ impl IsolationError {
             Self::NotAwaitingAnswer => "error-isolation-not-awaiting-answer",
             Self::NotApplied { .. } => "error-isolation-not-applied",
             Self::NotFinished => "error-isolation-not-finished",
+            Self::SafetySnapshotInUse { .. } => "error-isolation-snapshot-in-use",
             Self::HostMismatch { .. } => "error-isolation-host-mismatch",
             Self::Unreadable { .. } => "error-isolation-unreadable",
             Self::Unwritable { .. } => "error-isolation-unwritable",
@@ -469,6 +472,9 @@ impl IsolationError {
             | Self::AlreadyActive { host }
             | Self::NotActive { host }
             | Self::NotApplied { host } => vec![("host", host.clone())],
+            Self::SafetySnapshotInUse { snapshot } => {
+                vec![("snapshot", snapshot.to_string())]
+            }
             Self::UnrecordedDependencies { paths } => {
                 vec![("count", paths.len().to_string())]
             }
@@ -821,14 +827,19 @@ impl App {
         let session = self.read_required_session(host)?;
         let outcome = session.outcome.clone().ok_or(IsolationError::NotFinished)?;
         self.apply_isolation_configuration(host, &session, &outcome.enabled)?;
-        self.rename_snapshot(
+        // A session from before deletion was refused may have lost its snapshot;
+        // the outcome is already applied, so there is nothing left to label.
+        match self.rename_snapshot(
             host,
             session.safety_snapshot,
             &format!(
                 "Before mod isolation, {}",
                 session.started_at.format("%Y-%m-%d")
             ),
-        )?;
+        ) {
+            Ok(_) | Err(SnapshotError::NotFound { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
         let report = report_for(&session, &outcome);
         remove_session(&path)?;
         Ok(report)
@@ -843,14 +854,26 @@ impl App {
         self.refuse_isolation_while_running(host)?;
         let path = self.isolation_path(host)?;
         let session = self.read_required_session(host)?;
-        self.restore_snapshot(
+        match self.restore_snapshot(
             host,
             session.safety_snapshot,
             SnapshotRestoreOptions {
                 safety_snapshot: false,
             },
             cancel,
-        )?;
+        ) {
+            Ok(_) => {}
+            // The snapshot was deleted before deletion was refused. Re-enabling
+            // the recorded starting mods is the closest remaining restore.
+            Err(SnapshotError::NotFound { .. }) => {
+                self.apply_isolation_configuration(
+                    host,
+                    &session,
+                    &session.plan.initially_enabled,
+                )?;
+            }
+            Err(error) => return Err(error.into()),
+        }
         remove_session(&path)?;
         Ok(())
     }

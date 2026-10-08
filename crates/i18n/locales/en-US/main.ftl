@@ -1143,6 +1143,7 @@ error-isolation-missing-dependencies = { $count } required dependencies are miss
 error-isolation-not-awaiting-answer = This isolation session is not waiting for a round answer.
 error-isolation-not-applied = The mods of { $host } no longer match the current isolation round. Resume the session to reapply the round, then test it again.
 error-isolation-not-finished = The isolation search has not reached a result yet.
+error-isolation-snapshot-in-use = Snapshot { $snapshot } is the safety snapshot of an active isolation session. Finish or cancel the session before deleting it.
 error-isolation-host-mismatch = This isolation session belongs to { $found }, not { $expected }.
 error-isolation-unreadable = Isolation state could not be read.
 error-isolation-unwritable = Isolation state could not be written.
