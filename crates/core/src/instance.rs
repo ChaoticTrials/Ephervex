@@ -520,6 +520,10 @@ impl App {
     /// but no longer has on disk. The caller has to say, because only the user
     /// knows which kind of copy this is: one made to carry on bisecting wants
     /// them gone, one made to get back to a working state wants them.
+    ///
+    /// Refuses while the original is launching or running: the game keeps
+    /// writing its world and configuration, so a copy would mix files from
+    /// different moments.
     #[instrument(skip(self, request))]
     pub fn duplicate_client(
         &self,
@@ -527,6 +531,7 @@ impl App {
         request: &DuplicateClient,
         absent_mods: AbsentModPolicy,
     ) -> CoreResult<DuplicatedClient> {
+        self.refuse_while_running(source)?;
         let copy = self
             .registry_for_services()
             .duplicate_client(source, request)?;

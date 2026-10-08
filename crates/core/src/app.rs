@@ -1841,6 +1841,47 @@ mod tests {
         assert!(app.launch_state(client.id).expect("state").is_some());
     }
 
+    /// A copy taken while the game writes its world would mix files from
+    /// different moments, so a launching or running original is not copied,
+    /// whether the lock is the first launch or an additional one.
+    #[test]
+    fn a_running_client_refuses_duplication_and_creates_no_copy() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let client = repro_client(&app);
+        let roots_before = std::fs::read_dir(client.root.parent().expect("instances dir"))
+            .expect("list instances dir")
+            .count();
+
+        let first = ephervex_storage::LaunchLock::acquire(&client.root).expect("acquire lock");
+        let additional = ephervex_storage::LaunchLock::acquire_additional(&client.root, "bob")
+            .expect("a second account");
+        let refuse = || {
+            let error = app
+                .duplicate_client(
+                    client.id,
+                    &ephervex_storage::DuplicateClient::default(),
+                    ephervex_model::AbsentModPolicy::Keep,
+                )
+                .expect_err("a running instance cannot be duplicated");
+            assert!(
+                matches!(error, crate::CoreError::InstanceRunning { .. }),
+                "expected an already-running refusal, got {error}"
+            );
+        };
+        refuse();
+        drop(first);
+        refuse();
+        drop(additional);
+
+        assert_eq!(app.list_clients().expect("clients").len(), 1);
+        let roots_after = std::fs::read_dir(client.root.parent().expect("instances dir"))
+            .expect("list instances dir")
+            .count();
+        assert_eq!(roots_before, roots_after, "no copy directory was created");
+        assert!(client.root.exists(), "the original is untouched");
+    }
+
     /// One running linked server keeps every other one, not only itself. One
     /// without a supervisor to stop it refuses even a deletion that stops servers.
     #[tokio::test]

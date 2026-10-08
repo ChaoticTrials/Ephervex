@@ -173,7 +173,7 @@ export component InstanceCard inherits Rectangle {
             // A menu entry has nowhere to put a hint, so a disabled one
             // says why in its own title rather than greying out silently.
             if item.storage-kind == "temporary" : MenuItem { title: item.can-kill ? GuiI18n.text("gui-make-persistent-while-running") : GuiI18n.text("gui-make-persistent"); enabled: !item.can-kill; activated => { root.make-persistent(item.id); } }
-            MenuItem { title: GuiI18n.text("gui-duplicate-instance"); activated => { root.duplicate(item.id); } }
+            MenuItem { title: item.can-kill ? GuiI18n.text("gui-duplicate-instance-while-running") : GuiI18n.text("gui-duplicate-instance"); enabled: !item.can-kill; activated => { root.duplicate(item.id); } }
             MenuItem { title: item.can-kill ? GuiI18n.text("gui-delete-instance-while-running") : GuiI18n.text("gui-delete-instance"); enabled: !item.can-kill; activated => { root.delete(item.id, item.name); } }
         }
     }

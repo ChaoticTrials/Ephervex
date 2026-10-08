@@ -1835,6 +1835,9 @@ gui-open-workspace = Open Workspace
 gui-create-linked-server = Create Linked Server
 gui-open-folder = Open Folder
 gui-duplicate-instance = Duplicate
+# Shown in place of the action while the game is running. A copy taken then
+# would mix files the game is still writing.
+gui-duplicate-instance-while-running = Duplicate (stop the game first)
 gui-make-persistent = Make Persistent
 # Shown in place of the action while the game is running, and as the hover
 # explanation on the button. Moving an instance underneath a running game would
