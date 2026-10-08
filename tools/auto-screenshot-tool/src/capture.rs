@@ -95,6 +95,19 @@ pub(crate) fn initialize() -> Result<()> {
     .context("initialize Slint's headless software renderer")
 }
 
+/// Holds the process-wide locale and the thread's headless platform for one test.
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+pub(crate) fn render_session() -> std::sync::MutexGuard<'static, ()> {
+    static RENDERING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let guard = RENDERING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    initialize().expect("headless renderer");
+    ephervex_i18n::select_language("en-US").expect("bundled locale");
+    guard
+}
+
 pub(crate) fn generate(options: &CaptureOptions<'_>) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     for state in options.states {
@@ -303,8 +316,7 @@ mod tests {
 
     #[test]
     fn actual_window_captures_both_themes_and_a_ui_region() {
-        initialize().expect("headless renderer");
-        ephervex_i18n::select_language("en-US").expect("bundled locale");
+        let _session = crate::capture::render_session();
         let output = tempfile::tempdir().expect("temporary output");
         let files = generate(&CaptureOptions {
             states: &crate::catalog::STATES[..1],
@@ -353,8 +365,7 @@ mod tests {
 
     #[test]
     fn derived_1080_full_window_is_not_rendered_natively() {
-        initialize().expect("headless renderer");
-        ephervex_i18n::select_language("en-US").expect("bundled locale");
+        let _session = crate::capture::render_session();
         let derived_output = tempfile::tempdir().expect("temporary derivative output");
         let state = State {
             same_layout_at_both_sizes: true,
