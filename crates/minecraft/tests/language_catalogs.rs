@@ -16,7 +16,7 @@ use std::time::Duration;
 use ephervex_download::{
     CacheLayout, DownloadManager, DownloaderConfig, HttpConfig, MetadataCache, OperationReporter,
 };
-use ephervex_minecraft::{LanguageCatalogs, VersionCatalog};
+use ephervex_minecraft::{LanguageCatalogs, MinecraftError, VersionCatalog};
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -54,10 +54,10 @@ fn sha1(body: &str) -> String {
 
 /// The asset index for the version document, naming one object: the resource
 /// pack metadata whose `language` section is the catalog.
-fn asset_index(body: &str) -> String {
+fn asset_index(body: &str, declared_size: usize) -> String {
     serde_json::json!({
         "objects": {
-            "pack.mcmeta": {"hash": sha1(body), "size": body.len()},
+            "pack.mcmeta": {"hash": sha1(body), "size": declared_size},
             "minecraft/sounds/ambient.ogg": {"hash": sha1("unrelated"), "size": 9},
         }
     })
@@ -67,7 +67,19 @@ fn asset_index(body: &str) -> String {
 /// Serves a manifest, the 1.20.1 version document rewritten to name this
 /// server's asset index, that index, and the object it points at.
 async fn mount(server: &MockServer, pack_metadata: &str) {
-    let index = asset_index(pack_metadata);
+    mount_declaring(server, pack_metadata, 0, 0).await;
+}
+
+/// Like [`mount`], but the version document and the asset index each declare a
+/// size that many bytes short of what is served. The digests still match the
+/// served bytes, so only the declared size can tell the difference.
+async fn mount_declaring(
+    server: &MockServer,
+    pack_metadata: &str,
+    index_shortfall: usize,
+    object_shortfall: usize,
+) {
+    let index = asset_index(pack_metadata, pack_metadata.len() - object_shortfall);
     let index_sha1 = sha1(&index);
     let index_path = format!("/assets/{index_sha1}.json");
 
@@ -75,7 +87,7 @@ async fn mount(server: &MockServer, pack_metadata: &str) {
         &V1_20_1.replace(PISTON_META, &server.uri()),
         &format!("{}{index_path}", server.uri()),
         &index_sha1,
-        index.len(),
+        index.len() - index_shortfall,
     );
 
     Mock::given(method("GET"))
@@ -247,6 +259,42 @@ async fn a_pack_metadata_object_that_is_not_a_catalog_leaves_the_release_unresol
         );
         assert!(catalogs(&server, &cache).cached("1.20.1").await.is_none());
     }
+}
+
+#[tokio::test]
+async fn an_asset_index_longer_than_its_published_size_is_refused() {
+    let server = MockServer::start().await;
+    mount_declaring(&server, PACK_METADATA, 1, 0).await;
+    let cache = tempfile::tempdir().expect("temp dir");
+
+    let error = catalogs(&server, &cache)
+        .resolve("1.20.1", &reporter(), &CancellationToken::new())
+        .await
+        .expect_err("an index that overruns its published size must not be accepted");
+
+    assert!(matches!(
+        error,
+        MinecraftError::VersionMetadataUnavailable { .. }
+    ));
+    assert!(catalogs(&server, &cache).cached("1.20.1").await.is_none());
+}
+
+#[tokio::test]
+async fn a_pack_metadata_object_longer_than_its_published_size_is_refused() {
+    let server = MockServer::start().await;
+    mount_declaring(&server, PACK_METADATA, 0, 1).await;
+    let cache = tempfile::tempdir().expect("temp dir");
+
+    let error = catalogs(&server, &cache)
+        .resolve("1.20.1", &reporter(), &CancellationToken::new())
+        .await
+        .expect_err("an object that overruns its published size must not be accepted");
+
+    assert!(matches!(
+        error,
+        MinecraftError::VersionMetadataUnavailable { .. }
+    ));
+    assert!(catalogs(&server, &cache).cached("1.20.1").await.is_none());
 }
 
 #[tokio::test]

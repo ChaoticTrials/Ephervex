@@ -33,14 +33,13 @@ use ephervex_download::{
     CacheLayout, ContentStore, DownloadManager, DownloadRequest, MetadataCache, MetadataKey,
     OperationReporter,
 };
-use ephervex_model::Hash;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument};
 
-use crate::assets::AssetIndex;
+use crate::assets::{AssetIndex, AssetObject};
 use crate::catalog::VersionCatalog;
 use crate::error::{MinecraftError, MinecraftResult};
 use crate::install::ASSET_RESOURCE_BASE;
@@ -221,9 +220,7 @@ impl LanguageCatalogs {
                 id: minecraft_version.to_owned(),
             }
         })?;
-        let document = self
-            .read_asset_object(&object.hash, reporter, cancel)
-            .await?;
+        let document = self.read_asset_object(object, reporter, cancel).await?;
 
         let catalog =
             parse_catalog(minecraft_version, &index_ref.id, &document).ok_or_else(|| {
@@ -275,6 +272,7 @@ impl LanguageCatalogs {
                 .content(ContentStore::Metadata, &artifact.sha1, Some(&extension));
         let request = DownloadRequest::new(url.clone(), &destination)
             .verifying(artifact.sha1.clone())
+            .sized(artifact.size)
             .labeled(format!("assets/{id}"));
         self.manager
             .download(&request, reporter, cancel)
@@ -296,10 +294,11 @@ impl LanguageCatalogs {
     /// Fetches and verifies one asset object, then reads it back as text.
     async fn read_asset_object(
         &self,
-        sha1: &Hash,
+        object: &AssetObject,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> MinecraftResult<String> {
+        let sha1 = &object.hash;
         let digest = sha1.digest();
         let prefix = digest.get(..2).unwrap_or(digest);
         let url = Url::parse(&format!("{}/{prefix}/{digest}", self.assets_base)).map_err(|_| {
@@ -310,6 +309,7 @@ impl LanguageCatalogs {
         let destination = self.layout.asset_object(sha1)?;
         let request = DownloadRequest::new(url, &destination)
             .verifying(sha1.clone())
+            .sized(object.size)
             .labeled(LANGUAGE_METADATA_OBJECT);
         self.manager
             .download(&request, reporter, cancel)

@@ -52,6 +52,13 @@ use crate::manifest::{
 use crate::version::VersionMetadata;
 use crate::version_id::MINIMUM_SUPPORTED_VERSION;
 
+/// The largest version document that will be streamed to disk.
+///
+/// Mojang publishes only a digest for these, so no declared length can stop an
+/// oversized body before the hash rejects it. Real documents are a few hundred
+/// KiB; this is well clear of them and far below the generic metadata ceiling.
+const MAX_VERSION_DOCUMENT_BYTES: u64 = 8 * 1024 * 1024;
+
 /// A manifest, plus how much the caller should trust its age.
 #[derive(Debug, Clone)]
 pub struct CachedManifest {
@@ -298,6 +305,7 @@ impl VersionCatalog {
 
         let request = DownloadRequest::new(url, &destination)
             .verifying(record.sha1.clone())
+            .bounded_by(MAX_VERSION_DOCUMENT_BYTES)
             .labeled(record.id.clone());
         let outcome = self
             .manager

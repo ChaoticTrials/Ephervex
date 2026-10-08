@@ -291,6 +291,54 @@ async fn a_version_document_that_fails_its_digest_is_refused_rather_than_used() 
 }
 
 #[tokio::test]
+async fn an_oversized_version_document_is_abandoned_before_it_is_stored() {
+    let server = MockServer::start().await;
+    mount_manifest(&server).await;
+    let (id, route, _) = version_documents()[1];
+    // Far past any real version document, and not the bytes the manifest's
+    // digest names: the size ceiling has to fire before the digest can.
+    let oversized = vec![b' '; 9 * 1024 * 1024];
+    Mock::given(method("GET"))
+        .and(path(route))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(oversized))
+        .mount(&server)
+        .await;
+    let cache = tempfile::tempdir().expect("temp dir");
+
+    let error = catalog(&server, &cache)
+        .resolve(id, &reporter(), &CancellationToken::new())
+        .await
+        .expect_err("a body past the ceiling must not be accepted");
+
+    assert!(
+        matches!(error, MinecraftError::VersionMetadataUnavailable { .. }),
+        "the ceiling must reject the body, not the digest check: {error:?}"
+    );
+    let digest = "c2f76c955503c7143424b51e21eea87bbe5c6547";
+    assert!(
+        !files_under(cache.path()).any(|file| file.to_string_lossy().contains(digest)),
+        "nothing may be published under the document's digest"
+    );
+}
+
+/// Every regular file below `root`.
+fn files_under(root: &std::path::Path) -> impl Iterator<Item = std::path::PathBuf> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory).expect("readable directory") {
+            let path = entry.expect("directory entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    files.into_iter()
+}
+
+#[tokio::test]
 async fn resolving_something_outside_the_supported_set_fails_clearly() {
     let server = MockServer::start().await;
     mount_manifest(&server).await;
