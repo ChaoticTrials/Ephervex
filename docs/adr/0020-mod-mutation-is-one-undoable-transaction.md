@@ -69,6 +69,14 @@ must refuse to move a mod that is already there; changing a version is a request
 to do exactly that. `InstalledPolicy` chooses between them, and the plan reports
 replacements separately so a caller knows what to retire.
 
+Replacing moves the mod being changed and nothing else on its own account. An
+installed dependency that nothing pins stays at its release while that release
+still fits; only a pin, or a release that no longer fits, moves one. Such a move
+is refused when the dependency is not an automatic one (a mod a pack declared or
+a person chose) or when another installed mod requires the release it has, and
+is otherwise shown in the plan with the release it replaces. A linked server
+applies the same rule to its own mods.
+
 **Ownership is the policy.**
 
 Deleting the jar is not in this table and never was one of these operations;

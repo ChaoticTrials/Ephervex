@@ -395,6 +395,18 @@ pub enum CoreError {
     /// still needs.
     #[error("`{path}` has no provider identity, so the instance's dependencies cannot be proven")]
     ModIdentityIncomplete { path: std::path::PathBuf },
+
+    /// A version change would have to move another mod that it must not.
+    ///
+    /// Refused because only a dependency's own dependents decide its release,
+    /// and only while nothing else installed needs the release it has. A mod a
+    /// pack declared or a person chose is never moved as a side effect of
+    /// changing something else.
+    #[error("changing the release of `{target}` would also move `{path}`")]
+    ModDependencyNotMovable {
+        target: std::path::PathBuf,
+        path: std::path::PathBuf,
+    },
 }
 
 /// Lifts a pack failure into the error frontends see.
@@ -498,6 +510,7 @@ impl CoreError {
             Self::ModAcquisitionRestricted { .. } => "error-mod-acquisition-restricted",
             Self::ModMutationRestricted { restriction, .. } => restriction.message_id(),
             Self::ModIdentityIncomplete { .. } => "error-mod-identity-incomplete",
+            Self::ModDependencyNotMovable { .. } => "error-mod-dependency-not-movable",
             Self::ModCatalogPreferenceUnrecognized { .. } => {
                 "error-mod-catalog-preference-unrecognized"
             }
@@ -727,6 +740,7 @@ impl CoreError {
             | Self::ModAcquisitionRestricted { .. }
             | Self::ModMutationRestricted { .. }
             | Self::ModIdentityIncomplete { .. }
+            | Self::ModDependencyNotMovable { .. }
             | Self::ModFileMissing { .. }
             | Self::ModFileNotToggled { .. }
             | Self::ModSpellingOccupied { .. }
@@ -797,6 +811,7 @@ impl CoreError {
             | Self::ModFileNotDeleted { path, .. }
             | Self::ModFileNotAdded { path, .. }
             | Self::ModIdentityIncomplete { path }
+            | Self::ModDependencyNotMovable { path, .. }
             | Self::DiagnosticBundleNotWritten { path, .. }
             | Self::DiagnosticBundleOverwritesSource { path } => Some(path.clone()),
             Self::ArtifactCache(error) => error.failing_path(),

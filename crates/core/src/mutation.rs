@@ -52,12 +52,12 @@ use std::path::{Path, PathBuf};
 use ephervex_download::{CacheLayout, OperationReporter};
 use ephervex_mod_platform::{
     AnnotatedVersion, InstalledPolicy, InstanceTarget, ModInstallPlan, ModProject, PlanWarning,
-    PlannedMod, annotate, newest_compatible,
+    PlannedMod, ProjectReplacement, annotate, newest_compatible,
 };
-use ephervex_model::{AttentionReason, InstanceId, ModOrigin, ModProvider};
+use ephervex_model::{AttentionReason, InstanceId, ModOrigin, ModProvider, ModRelationKind};
 use ephervex_pack::{
     ArtifactFetch, ManagedMutation, ManagedProject, ModIdentity, PackError, PackFileRecipe,
-    PackRecipe, RecordedMod, SourceStore,
+    PackRecipe, ProviderFileIdentity, RecordedMod, RelationTarget, SourceStore,
 };
 use ephervex_storage::ClientRecord;
 use tokio_util::sync::CancellationToken;
@@ -405,6 +405,9 @@ pub struct PlannedFile {
     pub name: String,
     pub project_id: Option<String>,
     pub version_id: Option<String>,
+    /// The release this file takes the place of, when the project is already
+    /// installed at a different one.
+    pub replaces_version_id: Option<String>,
     pub origin: ModOrigin,
 }
 
@@ -751,6 +754,8 @@ impl App {
             .resolve_replacement(&context.record, &request, reporter)
             .await?;
 
+        refuse_to_move_other_mods(context, &resolved)?;
+
         let candidate = resolved.root.version.id.clone();
         let outcome = if candidate == installed_version {
             // The recorded release is already the right one. Whether that is a
@@ -1032,8 +1037,9 @@ impl App {
             .resolve_replacement(&context.record, &request, reporter)
             .await?;
 
-        let upserts = resolved
-            .all_mods()
+        refuse_to_move_other_mods(context, &resolved)?;
+
+        let upserts = written_mods(&resolved)
             .into_iter()
             .map(|planned| crate::mods::recipe_entry(planned, resolved.provider))
             .collect::<CoreResult<Vec<_>>>()?;
@@ -1171,16 +1177,121 @@ fn removals_for(plan: &ModMutationPlan) -> Vec<ManagedProject> {
         .collect()
 }
 
+/// The mods a version change writes: the one being changed, which is also
+/// rewritten to repair a missing jar, and every dependency the instance does
+/// not already have at that release.
+///
+/// One list for the preview and for the writes, so what is shown is what is
+/// applied. A dependency left where it is keeps the ownership and release it
+/// has.
+pub(crate) fn written_mods(plan: &ModInstallPlan) -> Vec<&PlannedMod> {
+    let present: BTreeSet<&str> = plan
+        .already_installed
+        .iter()
+        .map(|installed| installed.project_id.as_str())
+        .collect();
+    std::iter::once(&plan.root)
+        .chain(
+            plan.dependencies
+                .iter()
+                .filter(|planned| !present.contains(planned.version.project_id.as_str())),
+        )
+        .collect()
+}
+
+/// An installed mod a plan would move that nothing but a person or a pack may
+/// move.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UnmovableReplacement {
+    pub path: PathBuf,
+}
+
+/// The first mod, other than the one being acted on, that a plan would move and
+/// must not.
+///
+/// An automatic dependency follows what requires it, so another release of it
+/// may be installed when nothing else installed needs the release it has now.
+/// A mod a pack declared or a person chose is never moved as a side effect of
+/// changing something else.
+pub(crate) fn unmovable_replacement(
+    recipe: &PackRecipe,
+    plan: &ModInstallPlan,
+    acted_on: &str,
+) -> Option<UnmovableReplacement> {
+    plan.replacements
+        .iter()
+        .filter(|replacement| replacement.project_id != acted_on)
+        .find_map(|replacement| {
+            let recorded = recipe.managed_project(plan.provider, &replacement.project_id)?;
+            let movable = recorded.origin == ModOrigin::RequiredDependency
+                && !needed_at_its_release(recipe, plan.provider, acted_on, replacement);
+            (!movable).then(|| UnmovableReplacement {
+                path: recorded.logical_path.clone(),
+            })
+        })
+}
+
+/// Whether an installed mod other than the one being changed requires the
+/// release a plan would replace.
+fn needed_at_its_release(
+    recipe: &PackRecipe,
+    provider: ModProvider,
+    acted_on: &str,
+    replacement: &ProjectReplacement,
+) -> bool {
+    recipe
+        .files
+        .iter()
+        .filter(|file| {
+            file.identity
+                .as_ref()
+                .and_then(ProviderFileIdentity::project)
+                .is_some_and(|(kind, id)| {
+                    kind == provider && id != acted_on && id != replacement.project_id
+                })
+        })
+        .filter_map(|file| file.relations.as_deref())
+        .flatten()
+        .any(|relation| {
+            relation.kind == ModRelationKind::Required
+                && matches!(
+                    &relation.target,
+                    RelationTarget::Project { project_id, version_id: Some(version_id) }
+                        if *project_id == replacement.project_id && *version_id == replacement.from
+                )
+        })
+}
+
+/// Refuses a version change that would also move a mod it must not.
+fn refuse_to_move_other_mods(
+    context: &MutationContext,
+    resolved: &ModInstallPlan,
+) -> CoreResult<()> {
+    let acted_on = context.entry.identity.project_id().unwrap_or_default();
+    match unmovable_replacement(&context.recipe, resolved, acted_on) {
+        Some(unmovable) => Err(CoreError::ModDependencyNotMovable {
+            target: context.entry.logical_path.clone(),
+            path: unmovable.path,
+        }),
+        None => Ok(()),
+    }
+}
+
 /// A resolved plan's mods as something to show, carrying the ownership each one
 /// will end up with.
 fn planned_files(plan: &ModInstallPlan, recipe: &PackRecipe) -> Vec<PlannedFile> {
-    plan.all_mods()
+    written_mods(plan)
         .into_iter()
         .map(|planned| PlannedFile {
             logical_path: planned_path(planned),
             name: planned.project.title.clone(),
             project_id: Some(planned.version.project_id.clone()),
             version_id: Some(planned.version.id.clone()),
+            replaces_version_id: plan
+                .replacements
+                .iter()
+                .find(|replacement| replacement.project_id == planned.version.project_id)
+                .map(|replacement| replacement.from.clone()),
             // A mod that is already recorded keeps the ownership it has. A
             // dependency does not become a root because an unrelated update
             // resolved it again.
@@ -1212,6 +1323,7 @@ fn planned_from_entry(entry: &ManagedModEntry) -> PlannedFile {
         name: entry.display_name().to_owned(),
         project_id: entry.identity.project_id().map(ToOwned::to_owned),
         version_id: entry.identity.version_id().map(ToOwned::to_owned),
+        replaces_version_id: None,
         origin: entry.origin,
     }
 }
@@ -1227,6 +1339,7 @@ pub(crate) fn planned_from_recorded(entry: &RecordedMod) -> PlannedFile {
         name: entry.file_name.clone(),
         project_id: entry.identity.project_id().map(ToOwned::to_owned),
         version_id: entry.identity.version_id().map(ToOwned::to_owned),
+        replaces_version_id: None,
         origin: entry.origin,
     }
 }
@@ -1587,6 +1700,7 @@ mod tests {
                     name: "Root".to_owned(),
                     project_id: Some("ROOTPROJ".to_owned()),
                     version_id: Some("ROOTV1".to_owned()),
+                    replaces_version_id: None,
                     origin: ModOrigin::UserSelected,
                 },
                 PlannedFile {
@@ -1594,6 +1708,7 @@ mod tests {
                     name: "Library".to_owned(),
                     project_id: Some("LIBPROJ".to_owned()),
                     version_id: Some("LIBV1".to_owned()),
+                    replaces_version_id: None,
                     origin: ModOrigin::RequiredDependency,
                 },
             ],

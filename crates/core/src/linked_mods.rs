@@ -183,6 +183,10 @@ pub enum LinkedTargetBlock {
     /// Another of this server's mods requires this one, so its release follows
     /// what needs it and its lifetime is not this operation's to end.
     ServerDependency,
+    /// Syncing this release would also move another of this server's mods,
+    /// which its pack declared, a person chose, or something else needs at its
+    /// current release.
+    MovesAnotherMod,
 }
 
 impl LinkedTargetBlock {
@@ -200,6 +204,7 @@ impl LinkedTargetBlock {
             Self::StateUnavailable => "linked-target-state-unavailable",
             Self::PackOwned => "linked-target-pack-owned",
             Self::ServerDependency => "linked-target-server-dependency",
+            Self::MovesAnotherMod => "linked-target-moves-another-mod",
         }
     }
 
@@ -217,6 +222,7 @@ impl LinkedTargetBlock {
             Self::StateUnavailable => "state-unavailable",
             Self::PackOwned => "pack-owned",
             Self::ServerDependency => "server-dependency",
+            Self::MovesAnotherMod => "moves-another-mod",
         }
     }
 }
@@ -964,6 +970,10 @@ impl App {
             Err(error) => return blocked(record, root, resolution_block(&error)),
         };
 
+        if let Some(block) = unmovable_mod_block(&recipe, &resolved, &root.project_id) {
+            return blocked(record, root, block);
+        }
+
         let game_dir = ephervex_storage::metadata::server_game_dir(&record.root);
         let state = installing_state(existing.as_ref(), root, &game_dir);
 
@@ -1278,12 +1288,15 @@ fn installing_state(
 
 /// The planned mods a server may actually take.
 ///
+/// A dependency the server already holds at the resolved release is left as it
+/// is, so the preview lists only what is written.
+///
 /// A dependency the project declares `unsupported` on servers is left out —
 /// that is the author saying it cannot run there. `unknown` is not: an
 /// undeclared side is not a statement that the mod is client-only, and a
 /// required dependency of something the server is running is needed by it.
 fn server_applicable(plan: &ModInstallPlan) -> Vec<&PlannedMod> {
-    plan.all_mods()
+    crate::mutation::written_mods(plan)
         .into_iter()
         .filter(|planned| planned.project.server_side != SideSupport::Unsupported)
         .collect()
@@ -1320,6 +1333,20 @@ fn resolution_block(error: &CoreError) -> LinkedTargetBlock {
     }
 }
 
+/// Why a server cannot take a resolution that would move one of its other mods.
+///
+/// The client's own rule, applied to what this server holds: a mod the server's
+/// pack declared or a person chose is not moved because the release being
+/// synced pins a different one.
+fn unmovable_mod_block(
+    recipe: &PackRecipe,
+    resolved: &ModInstallPlan,
+    root_project: &str,
+) -> Option<LinkedTargetBlock> {
+    crate::mutation::unmovable_replacement(recipe, resolved, root_project)
+        .map(|_| LinkedTargetBlock::MovesAnotherMod)
+}
+
 /// The projects a set of planned removals names.
 fn removals_of(provider: ModProvider, removes: &[PlannedFile]) -> Vec<ManagedProject> {
     removes
@@ -1343,6 +1370,11 @@ fn planned_from_entry(entry: &PackFileRecipe, plan: &ModInstallPlan) -> PlannedF
                 .map(|planned| planned.project.title.clone())
         })
         .unwrap_or_else(|| entry.display_name());
+    let replaces_version_id = plan
+        .replacements
+        .iter()
+        .find(|replacement| Some(replacement.project_id.as_str()) == project_id.as_deref())
+        .map(|replacement| replacement.from.clone());
     PlannedFile {
         logical_path: entry.logical_path.clone(),
         name,
@@ -1351,6 +1383,7 @@ fn planned_from_entry(entry: &PackFileRecipe, plan: &ModInstallPlan) -> PlannedF
             .identity
             .as_ref()
             .and_then(|identity| identity.version_id.clone()),
+        replaces_version_id,
         origin: entry.origin,
     }
 }
@@ -1505,6 +1538,19 @@ mod tests {
         })
     }
 
+    /// Adds a requirement on one exact release of a project.
+    fn pinning(mut version: Value, project: &str, release: &str) -> Value {
+        version["dependencies"]
+            .as_array_mut()
+            .expect("a dependency list")
+            .push(json!({
+                "project_id": project,
+                "version_id": release,
+                "dependency_type": "required",
+            }));
+        version
+    }
+
     /// Every project and release the tests below draw on.
     ///
     /// `ROOTV3` exists only on the other Minecraft release and is the newest of
@@ -1519,6 +1565,9 @@ mod tests {
             project_json("OPTPROJ", "Optional Server Mod", "required", "optional"),
             project_json("UNKPROJ", "Undeclared Mod", "required", "unknown"),
             project_json("SECONDPROJ", "Second Root", "required", "required"),
+            project_json("MOVEPROJ", "Moving Mod", "required", "required"),
+            project_json("NEWLIB", "Moving Library", "required", "required"),
+            project_json("PINNER", "Release Pinner", "required", "required"),
         ];
         let versions = vec![
             version_json(base, "ROOTV1", "ROOTPROJ", &[MINECRAFT], &["CLIENTLIB"], 0),
@@ -1543,6 +1592,20 @@ mod tests {
                 &[MINECRAFT],
                 &["LIBPROJ"],
                 0,
+            ),
+            version_json(base, "MOVEV1", "MOVEPROJ", &[MINECRAFT], &[], 0),
+            version_json(base, "MOVEV2", "MOVEPROJ", &[MINECRAFT], &["NEWLIB"], 10),
+            pinning(
+                version_json(base, "MOVEV3", "MOVEPROJ", &[MINECRAFT], &[], 30),
+                "NEWLIB",
+                "NEWV2",
+            ),
+            version_json(base, "NEWV1", "NEWLIB", &[MINECRAFT], &[], 0),
+            version_json(base, "NEWV2", "NEWLIB", &[MINECRAFT], &[], 20),
+            pinning(
+                version_json(base, "PINNERV1", "PINNER", &[MINECRAFT], &[], 0),
+                "NEWLIB",
+                "NEWV1",
             ),
         ];
         (projects, versions)
@@ -2913,6 +2976,277 @@ Details:\n\
             blocks
                 .iter()
                 .all(|block| !LinkedTargetState::Blocked(block.clone()).is_actionable())
+        );
+    }
+
+    // -- changing one client mod while its dependencies are installed -------
+
+    const MOVE_V1: &str = "mods/moveproj-MOVEV1.jar";
+
+    /// Installs the moving mod and its library at their older releases.
+    async fn client_with_the_older_moving_mod_and_library(
+        world: &World,
+        library_origin: ModOrigin,
+    ) {
+        for (project, version) in [("MOVEPROJ", "MOVEV1"), ("NEWLIB", "NEWV1")] {
+            world
+                .app
+                .install_mods(
+                    world.client,
+                    &ModInstallRequest::new(project)
+                        .from_provider(ModProvider::Modrinth)
+                        .at_version(version),
+                    &silent(),
+                    &CancellationToken::new(),
+                )
+                .await
+                .expect("the older release installs");
+        }
+        let root = world.app.client(world.client).expect("client").root;
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(&root));
+        let mut recipe = store.read_recipe().expect("recipe");
+        recipe
+            .files
+            .iter_mut()
+            .find(|file| {
+                file.identity
+                    .as_ref()
+                    .is_some_and(|identity| identity.project_id.as_deref() == Some("NEWLIB"))
+            })
+            .expect("the library is recorded")
+            .origin = library_origin;
+        store.write_recipe(&recipe).expect("write recipe");
+    }
+
+    fn client_recorded(world: &World, project: &str) -> (String, ModOrigin) {
+        let recipe = world
+            .app
+            .pack_recipe(world.client)
+            .expect("recipe")
+            .expect("one was written");
+        let entry = recipe
+            .managed_project(ModProvider::Modrinth, project)
+            .expect("the project is recorded");
+        (
+            entry
+                .identity
+                .as_ref()
+                .and_then(|identity| identity.version_id.clone())
+                .expect("a release"),
+            entry.origin,
+        )
+    }
+
+    fn written_projects(files: &[crate::mutation::PlannedFile]) -> Vec<&str> {
+        files
+            .iter()
+            .filter_map(|file| file.project_id.as_deref())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn changing_a_mod_keeps_a_pack_declared_dependency_at_its_declared_release() {
+        let world = world().await;
+        client_with_the_older_moving_mod_and_library(&world, ModOrigin::PackDeclared).await;
+        let choice = crate::mutation::ModVersionChoice::Exact("MOVEV2".to_owned());
+        let target = Path::new(MOVE_V1);
+
+        let preview = world
+            .app
+            .plan_mod_version_change(
+                world.client,
+                target,
+                &choice,
+                &silent(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("a plan");
+        assert_eq!(
+            written_projects(&preview.installs),
+            vec!["MOVEPROJ"],
+            "the preview shows only what is written, and the library is not moved"
+        );
+
+        let mutation = world
+            .app
+            .change_managed_mod_version(
+                world.client,
+                target,
+                &choice,
+                &silent(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("the change applies");
+
+        assert_eq!(written_projects(&mutation.plan.installs), vec!["MOVEPROJ"]);
+        assert_eq!(
+            client_recorded(&world, "NEWLIB"),
+            ("NEWV1".to_owned(), ModOrigin::PackDeclared),
+            "the pack's library keeps its release and its ownership"
+        );
+        assert_eq!(client_recorded(&world, "MOVEPROJ").0, "MOVEV2");
+        assert_eq!(
+            world.client_jars(),
+            vec![
+                "moveproj-MOVEV2.jar".to_owned(),
+                "newlib-NEWV1.jar".to_owned()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_release_pinning_a_pack_declared_dependency_elsewhere_is_refused() {
+        let world = world().await;
+        client_with_the_older_moving_mod_and_library(&world, ModOrigin::PackDeclared).await;
+        let choice = crate::mutation::ModVersionChoice::Exact("MOVEV3".to_owned());
+
+        let error = world
+            .app
+            .change_managed_mod_version(
+                world.client,
+                Path::new(MOVE_V1),
+                &choice,
+                &silent(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("moving the pack's library as a side effect is refused");
+
+        assert!(matches!(error, CoreError::ModDependencyNotMovable { .. }));
+        assert_eq!(
+            world.client_jars(),
+            vec![
+                "moveproj-MOVEV1.jar".to_owned(),
+                "newlib-NEWV1.jar".to_owned()
+            ],
+            "a refused change leaves the instance as it was"
+        );
+        assert_eq!(client_recorded(&world, "NEWLIB").0, "NEWV1");
+    }
+
+    #[tokio::test]
+    async fn a_release_pinning_an_automatic_dependency_elsewhere_moves_it() {
+        let world = world().await;
+        client_with_the_older_moving_mod_and_library(&world, ModOrigin::RequiredDependency).await;
+        let choice = crate::mutation::ModVersionChoice::Exact("MOVEV3".to_owned());
+
+        let mutation = world
+            .app
+            .change_managed_mod_version(
+                world.client,
+                Path::new(MOVE_V1),
+                &choice,
+                &silent(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("an automatic dependency follows what requires it");
+
+        let mut written = written_projects(&mutation.plan.installs);
+        written.sort_unstable();
+        assert_eq!(written, vec!["MOVEPROJ", "NEWLIB"]);
+        assert_eq!(
+            mutation
+                .plan
+                .installs
+                .iter()
+                .find(|file| file.project_id.as_deref() == Some("NEWLIB"))
+                .and_then(|file| file.replaces_version_id.as_deref()),
+            Some("NEWV1"),
+            "the plan says which release the library replaces"
+        );
+        assert_eq!(client_recorded(&world, "NEWLIB").0, "NEWV2");
+        assert_eq!(
+            world.client_jars(),
+            vec![
+                "moveproj-MOVEV3.jar".to_owned(),
+                "newlib-NEWV2.jar".to_owned()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_release_pinning_a_dependency_another_installed_mod_needs_is_refused() {
+        let world = world().await;
+        client_with_the_older_moving_mod_and_library(&world, ModOrigin::RequiredDependency).await;
+        world
+            .app
+            .install_mods(
+                world.client,
+                &ModInstallRequest::new("PINNER")
+                    .from_provider(ModProvider::Modrinth)
+                    .at_version("PINNERV1"),
+                &silent(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("a mod that needs the older library release installs");
+
+        let error = world
+            .app
+            .change_managed_mod_version(
+                world.client,
+                Path::new(MOVE_V1),
+                &crate::mutation::ModVersionChoice::Exact("MOVEV3".to_owned()),
+                &silent(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("moving the library would break the mod that needs it");
+
+        assert!(matches!(error, CoreError::ModDependencyNotMovable { .. }));
+        assert_eq!(client_recorded(&world, "NEWLIB").0, "NEWV1");
+    }
+
+    /// Rewrites how a server's recipe owns one project.
+    fn set_server_origin(world: &World, server: ServerId, project: &str, origin: ModOrigin) {
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(
+            &world.server_root(server),
+        ));
+        let mut recipe = store.read_recipe().expect("recipe");
+        recipe
+            .files
+            .iter_mut()
+            .find(|file| {
+                file.identity
+                    .as_ref()
+                    .is_some_and(|identity| identity.project_id.as_deref() == Some(project))
+            })
+            .expect("the project is recorded")
+            .origin = origin;
+        store.write_recipe(&recipe).expect("write recipe");
+    }
+
+    #[tokio::test]
+    async fn a_server_does_not_move_a_pack_declared_mod_because_a_synced_release_pins_another() {
+        let world = world().await;
+        client_with_the_older_moving_mod_and_library(&world, ModOrigin::RequiredDependency).await;
+        let server = world.link_server("Reproduction Server", MINECRAFT);
+        set_server_origin(&world, server, "NEWLIB", ModOrigin::PackDeclared);
+
+        let plan = plan(&world, &change(MOVE_V1, "MOVEV3")).await;
+
+        assert_eq!(
+            target(&plan, server).state.block(),
+            Some(&LinkedTargetBlock::MovesAnotherMod),
+            "the server's pack mod stays where its pack put it, and the reason names the move"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_server_target_lists_only_what_it_would_write() {
+        let world = world().await;
+        client_with_the_older_moving_mod_and_library(&world, ModOrigin::RequiredDependency).await;
+        let server = world.link_server("Reproduction Server", MINECRAFT);
+
+        let plan = plan(&world, &change(MOVE_V1, "MOVEV2")).await;
+
+        assert_eq!(
+            written_projects(&target(&plan, server).installs),
+            vec!["MOVEPROJ"],
+            "a library the server already holds at the right release is not an install"
         );
     }
 }

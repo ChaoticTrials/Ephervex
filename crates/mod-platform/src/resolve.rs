@@ -112,6 +112,10 @@ pub struct InstalledProject {
 ///
 /// Making it a parameter rather than a second resolver keeps one implementation
 /// of "what does this mod need", which is the part that is hard to get right.
+///
+/// `Replace` moves the root and nothing else on its own account: an installed
+/// dependency that nothing pins stays at its release while that release still
+/// fits. Only a pin, or a release that no longer fits, moves one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InstalledPolicy {
     /// Refuse to plan anything that would change an installed project.
@@ -681,7 +685,7 @@ impl<'a> Resolver<'a> {
     /// 0. a project pinned by a release that is not itself superseded, since
     ///    that choice is forced;
     /// 1. a project nothing pins, reached the same way, which takes its newest
-    ///    release;
+    ///    release (or, under `Replace`, the one it already has);
     /// 2. a project pinned only through superseded releases;
     /// 3. a project whose pin has gone, which keeps its release in the graph
     ///    until nothing else can still be explored through it;
@@ -748,16 +752,77 @@ impl<'a> Resolver<'a> {
             return Ok(version);
         }
 
-        newest_compatible(
-            &self.versions(project_id).await?,
-            target,
-            self.request.loader_name,
-        )
-        .ok_or_else(|| ModPlatformError::NoCompatibleVersion {
-            project_id: project_id.to_owned(),
-            minecraft: target.minecraft_version.clone(),
-            loader: target.loader,
+        let versions = self.versions(project_id).await?;
+        if let Some(kept) = self
+            .installed_release_to_keep(project_id, &versions)
+            .await?
+        {
+            return Ok(kept);
+        }
+
+        newest_compatible(&versions, target, self.request.loader_name).ok_or_else(|| {
+            ModPlatformError::NoCompatibleVersion {
+                project_id: project_id.to_owned(),
+                minecraft: target.minecraft_version.clone(),
+                loader: target.loader,
+            }
         })
+    }
+
+    /// The release a non-root project already has, when nothing asks it to move.
+    ///
+    /// Under [`InstalledPolicy::Replace`] only the root is being changed on
+    /// purpose. An unpinned dependency has no opinion about its release, so
+    /// moving it to the newest one would be a side effect nobody asked for.
+    ///
+    /// A provider's listing can leave out a release that is still installed
+    /// (unlisted, or beyond the pages read), so one missing from it is looked up
+    /// by id before it is treated as gone.
+    async fn installed_release_to_keep(
+        &self,
+        project_id: &str,
+        versions: &[ModVersionInfo],
+    ) -> ModPlatformResult<Option<ModVersionInfo>> {
+        if self.request.installed_policy != InstalledPolicy::Replace
+            || project_id == self.request.selection.project_id
+        {
+            return Ok(None);
+        }
+        let Some(installed) = self
+            .request
+            .installed
+            .iter()
+            .find(|entry| entry.project_id == project_id)
+        else {
+            return Ok(None);
+        };
+        let release = match versions
+            .iter()
+            .find(|version| version.id == installed.version_id)
+        {
+            Some(listed) => listed.clone(),
+            None => match self.fetch_version(&installed.version_id).await {
+                Ok(fetched) if fetched.project_id == project_id => fetched,
+                Ok(_) => return Ok(None),
+                // The provider describing the release as unusable is an answer
+                // about the release, not a failure to ask.
+                Err(error)
+                    if is_graph_refusal(&error)
+                        || matches!(
+                            error,
+                            ModPlatformError::FileUnavailable { .. }
+                                | ModPlatformError::HashesMissing { .. }
+                        ) =>
+                {
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            },
+        };
+        Ok(release
+            .compatibility(self.request.target, self.request.loader_name)
+            .is_compatible()
+            .then_some(release))
     }
 
     /// Turns one version's raw relations into a single shape.
@@ -3594,6 +3659,207 @@ mod tests {
             ids(plan.to_install()),
             vec!["ROOTPROJ".to_owned()],
             "so only the mod that actually moved is fetched"
+        );
+    }
+
+    /// A root at two releases and a library at two, where only the newer root
+    /// release needs the library.
+    fn root_needing_a_library_with_a_newer_release() -> Catalog {
+        Catalog::default()
+            .with(
+                "ROOTPROJ",
+                vec![
+                    at(compatible("ROOTV1", "ROOTPROJ"), 0),
+                    at(
+                        needs(
+                            compatible("ROOTV2", "ROOTPROJ"),
+                            ModRelationKind::Required,
+                            "LIBPROJ",
+                        ),
+                        10,
+                    ),
+                ],
+            )
+            .with(
+                "LIBPROJ",
+                vec![
+                    at(compatible("LIBV1", "LIBPROJ"), 0),
+                    at(compatible("LIBV2", "LIBPROJ"), 20),
+                ],
+            )
+    }
+
+    #[tokio::test]
+    async fn an_unpinned_installed_dependency_stays_at_its_release_when_the_root_moves() {
+        let plan = plan_under(
+            &root_needing_a_library_with_a_newer_release(),
+            InstallSelection::new("ROOTPROJ"),
+            &[
+                installed("ROOTPROJ", "ROOTV1"),
+                installed("LIBPROJ", "LIBV1"),
+            ],
+            InstalledPolicy::Replace,
+        )
+        .await
+        .expect("a plan");
+
+        assert_eq!(plan.root.version.id, "ROOTV2");
+        assert_eq!(
+            chosen_versions(&plan),
+            pairs([("LIBPROJ", "LIBV1"), ("ROOTPROJ", "ROOTV2")])
+        );
+        assert_eq!(
+            plan.replacements
+                .iter()
+                .map(|replacement| replacement.project_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ROOTPROJ"],
+            "only the mod that was asked to move is reported as moving"
+        );
+        assert_eq!(plan.already_installed, vec![installed("LIBPROJ", "LIBV1")]);
+        assert_eq!(ids(plan.to_install()), vec!["ROOTPROJ".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn an_installed_dependency_that_no_longer_fits_moves_to_one_that_does() {
+        let catalog = Catalog::default()
+            .with(
+                "ROOTPROJ",
+                vec![at(
+                    needs(
+                        compatible("ROOTV2", "ROOTPROJ"),
+                        ModRelationKind::Required,
+                        "LIBPROJ",
+                    ),
+                    10,
+                )],
+            )
+            .with(
+                "LIBPROJ",
+                vec![
+                    at(version("LIBV1", "LIBPROJ", &["1.21.4"], &["neoforge"]), 0),
+                    at(compatible("LIBV2", "LIBPROJ"), 20),
+                ],
+            );
+
+        let plan = plan_under(
+            &catalog,
+            InstallSelection::new("ROOTPROJ"),
+            &[installed("LIBPROJ", "LIBV1")],
+            InstalledPolicy::Replace,
+        )
+        .await
+        .expect("a plan");
+
+        assert_eq!(
+            plan.replacements,
+            vec![ProjectReplacement {
+                project_id: "LIBPROJ".to_owned(),
+                from: "LIBV1".to_owned(),
+                to: "LIBV2".to_owned(),
+            }],
+            "keeping it would leave a release the instance cannot run, and the move is reported"
+        );
+    }
+
+    fn root_needing_a_library_the_listing_omits() -> Catalog {
+        Catalog::default()
+            .with(
+                "ROOTPROJ",
+                vec![at(
+                    needs(
+                        compatible("ROOTV2", "ROOTPROJ"),
+                        ModRelationKind::Required,
+                        "LIBPROJ",
+                    ),
+                    10,
+                )],
+            )
+            .with("LIBPROJ", vec![at(compatible("LIBV2", "LIBPROJ"), 20)])
+    }
+
+    #[tokio::test]
+    async fn an_installed_dependency_the_listing_omits_is_kept_when_it_still_fits() {
+        let catalog = root_needing_a_library_the_listing_omits()
+            .answering_by_id_with(vec![at(compatible("LIBV1", "LIBPROJ"), 0)]);
+
+        let plan = plan_under(
+            &catalog,
+            InstallSelection::new("ROOTPROJ"),
+            &[installed("LIBPROJ", "LIBV1")],
+            InstalledPolicy::Replace,
+        )
+        .await
+        .expect("a plan");
+
+        assert!(
+            plan.replacements.is_empty(),
+            "a release missing from a listing is not a release that is gone"
+        );
+        assert_eq!(plan.already_installed, vec![installed("LIBPROJ", "LIBV1")]);
+    }
+
+    #[tokio::test]
+    async fn an_installed_dependency_the_provider_no_longer_knows_moves_and_is_reported() {
+        let catalog = root_needing_a_library_the_listing_omits().answering_by_id_with(Vec::new());
+
+        let plan = plan_under(
+            &catalog,
+            InstallSelection::new("ROOTPROJ"),
+            &[installed("LIBPROJ", "LIBV1")],
+            InstalledPolicy::Replace,
+        )
+        .await
+        .expect("a plan");
+
+        assert_eq!(
+            plan.replacements,
+            vec![ProjectReplacement {
+                project_id: "LIBPROJ".to_owned(),
+                from: "LIBV1".to_owned(),
+                to: "LIBV2".to_owned(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dependency_pinned_to_another_release_is_moved_and_reported() {
+        let catalog = Catalog::default()
+            .with(
+                "ROOTPROJ",
+                vec![at(
+                    pins(
+                        compatible("ROOTV2", "ROOTPROJ"),
+                        ModRelationKind::Required,
+                        "LIBV2",
+                    ),
+                    10,
+                )],
+            )
+            .with(
+                "LIBPROJ",
+                vec![
+                    at(compatible("LIBV1", "LIBPROJ"), 0),
+                    at(compatible("LIBV2", "LIBPROJ"), 20),
+                ],
+            );
+
+        let plan = plan_under(
+            &catalog,
+            InstallSelection::new("ROOTPROJ"),
+            &[installed("LIBPROJ", "LIBV1")],
+            InstalledPolicy::Replace,
+        )
+        .await
+        .expect("a plan");
+
+        assert_eq!(
+            plan.replacements,
+            vec![ProjectReplacement {
+                project_id: "LIBPROJ".to_owned(),
+                from: "LIBV1".to_owned(),
+                to: "LIBV2".to_owned(),
+            }]
         );
     }
 

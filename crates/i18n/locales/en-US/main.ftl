@@ -904,6 +904,7 @@ linked-target-provider-unavailable = The mod catalog could not be reached, so th
 linked-target-state-unavailable = This server's recorded mods could not be read.
 linked-target-pack-owned = This server's pack declares this mod.
 linked-target-server-dependency = Another mod on this server requires this one.
+linked-target-moves-another-mod = This release would also move another mod on this server that its pack declares, that was chosen directly, or that another mod needs at its current release.
 
 error-artwork-unusable = A mod's icon could not be shown.
 .action = The mod itself is unaffected; a generic icon is used instead.
@@ -918,6 +919,7 @@ error-loader-change-blocked-by-mods = { $count ->
 error-mod-not-managed = That mod is no longer part of this instance.
 .action = Reopen the instance to see its current mods.
 error-mod-identity-incomplete = One of this instance's mods has no provider identity, so its dependencies cannot be worked out.
+error-mod-dependency-not-movable = That change would also move a mod that the pack declared, that you chose, or that another mod needs at its current release. Change that mod's version first.
 # $value is a URL with its query and fragment removed, because a confirmation
 # prompt is not the place to print an identifier or a token.
 error-single-instance-unavailable = Ephervex could not reach the launcher that is already running.
