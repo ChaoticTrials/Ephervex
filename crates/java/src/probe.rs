@@ -26,13 +26,22 @@
 //! deduplicates *before* probing and why the result is cached
 //! ([`crate::discovery`]). A JVM that hangs is bounded by [`PROBE_TIMEOUT`]:
 //! discovery must not be able to wedge the launcher's startup.
+//!
+//! The probe is finished when the probed process exits, not when its output
+//! pipes close: a descendant that inherited them can hold them open for as long
+//! as it lives. Output still pending at the exit is drained for a short, fixed
+//! time. The executable is untrusted, so what it prints is capped at
+//! [`MAX_OUTPUT_BYTES`]; a process that prints more is killed and is not a JVM.
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::process::{Output, Stdio};
+use std::pin::pin;
+use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
-use tokio::process::Command;
+use tokio::io::AsyncReadExt;
+use tokio::process::{Child, Command};
+use tokio::time::Instant;
 use tracing::{debug, trace};
 
 use crate::error::ProbeError;
@@ -43,6 +52,17 @@ use crate::version::JavaVersion;
 /// Generous: a cold JDK on a spinning disk can take a second or two. The point
 /// is only that a broken runtime cannot block discovery forever.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The most a probed process may print across stdout and stderr.
+///
+/// A JVM's property listing is a few kilobytes. Anything near this is not one.
+const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+
+/// How long output still pending after the probed process exits is read for.
+const OUTPUT_DRAIN_GRACE: Duration = Duration::from_millis(200);
+
+/// How many bytes are read from a pipe at a time.
+const READ_CHUNK_BYTES: usize = 8 * 1024;
 
 /// How many times a busy executable is retried before the probe gives up.
 const BUSY_RETRIES: u32 = 6;
@@ -84,19 +104,33 @@ pub struct ProbeReport {
 /// imported archive, a `PATH` entry, or a user's settings field is just a path
 /// until a JVM at the other end answers.
 pub async fn probe(executable: &Path) -> Result<ProbeReport, ProbeError> {
-    let properties = run(executable, &PROPERTY_ARGS).await?;
-    if let Some(report) = from_properties(executable, &properties) {
-        trace!(path = %executable.display(), version = %report.version, "probed a java runtime");
-        return Ok(report);
+    match run(executable, &PROPERTY_ARGS).await {
+        Ok(properties) => {
+            if let Some(report) = from_properties(executable, &properties) {
+                trace!(path = %executable.display(), version = %report.version, "probed a java runtime");
+                return Ok(report);
+            }
+            debug!(
+                path = %executable.display(),
+                "the properties flag produced nothing usable; falling back to the version banner"
+            );
+        }
+        // A JVM that predates the flag rejects it and exits non-zero. Any other
+        // outcome says something about the executable itself, which a second
+        // run would not change.
+        Err(error @ ProbeError::Failed { .. }) => {
+            debug!(
+                path = %executable.display(),
+                %error,
+                "the properties flag was rejected; falling back to the version banner"
+            );
+        }
+        Err(error) => return Err(error),
     }
 
     // Either the flag is unsupported or the output was not properties. The
     // banner is far less informative, but a Java 6-era JVM that only manages
     // that is still better identified than skipped.
-    debug!(
-        path = %executable.display(),
-        "the properties flag produced nothing usable; falling back to the version banner"
-    );
     let banner = run(executable, &["-version"]).await?;
     from_banner(executable, &banner).ok_or_else(|| ProbeError::Unintelligible {
         path: executable.to_path_buf(),
@@ -120,39 +154,37 @@ async fn run(executable: &Path, args: &[&str]) -> Result<String, ProbeError> {
         .env_remove("JDK_JAVA_OPTIONS")
         .kill_on_drop(true);
 
-    let output = tokio::time::timeout(PROBE_TIMEOUT, output_once_not_busy(&mut command))
-        .await
-        .map_err(|_| ProbeError::TimedOut {
-            path: executable.to_path_buf(),
-            seconds: PROBE_TIMEOUT.as_secs(),
-        })?
-        .map_err(|source| ProbeError::NotExecutable {
-            path: executable.to_path_buf(),
-            source,
-        })?;
+    let mut child =
+        spawn_once_not_busy(&mut command)
+            .await
+            .map_err(|source| ProbeError::NotExecutable {
+                path: executable.to_path_buf(),
+                source,
+            })?;
+    let captured = capture(&mut child, executable).await?;
 
-    if !output.status.success() {
+    if !captured.status.success() {
         return Err(ProbeError::Failed {
             path: executable.to_path_buf(),
-            status: output.status.code(),
+            status: captured.status.code(),
         });
     }
 
-    let mut text = String::from_utf8_lossy(&output.stderr).into_owned();
+    let mut text = String::from_utf8_lossy(&captured.stderr).into_owned();
     text.push('\n');
-    text.push_str(&String::from_utf8_lossy(&output.stdout));
+    text.push_str(&String::from_utf8_lossy(&captured.stdout));
     Ok(text)
 }
 
-/// Runs the command, retrying while the executable is busy.
+/// Spawns the command, retrying while the executable is busy.
 ///
 /// `ETXTBSY` is transient: a just-written executable, such as a fresh managed
 /// install, stays busy until every process forked during the write has exec'd
 /// and dropped its inherited copy of the write descriptor.
-async fn output_once_not_busy(command: &mut Command) -> std::io::Result<Output> {
+async fn spawn_once_not_busy(command: &mut Command) -> std::io::Result<Child> {
     let mut backoff = BUSY_BACKOFF;
     for _ in 0..BUSY_RETRIES {
-        match command.output().await {
+        match command.spawn() {
             Err(error) if error.kind() == ErrorKind::ExecutableFileBusy => {
                 trace!(?backoff, "java executable is busy; retrying");
                 tokio::time::sleep(backoff).await;
@@ -161,7 +193,88 @@ async fn output_once_not_busy(command: &mut Command) -> std::io::Result<Output> 
             result => return result,
         }
     }
-    command.output().await
+    command.spawn()
+}
+
+/// What a probed process printed and how it ended.
+struct Captured {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// Reads a probed process's output until it exits.
+///
+/// The process ending is the signal, not the pipes closing, so a descendant
+/// that holds them open cannot stall the probe. The time limit covers the
+/// process running; after it exits only [`OUTPUT_DRAIN_GRACE`] is spent on
+/// output still in flight. A process that is killed here, for running too long
+/// or printing too much, is reaped by `kill_on_drop`.
+async fn capture(child: &mut Child, executable: &Path) -> Result<Captured, ProbeError> {
+    let (Some(mut stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        return Err(ProbeError::NotExecutable {
+            path: executable.to_path_buf(),
+            source: std::io::Error::other("the output pipes of the probe were not created"),
+        });
+    };
+    let not_executable = |source| ProbeError::NotExecutable {
+        path: executable.to_path_buf(),
+        source,
+    };
+
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    // On the heap: two inline chunks would make every caller's future large.
+    let mut out_chunk = vec![0_u8; READ_CHUNK_BYTES];
+    let mut err_chunk = vec![0_u8; READ_CHUNK_BYTES];
+    let (mut out_open, mut err_open) = (true, true);
+    let mut exited = None;
+    // The probe's deadline until the process exits, then the drain's.
+    let mut timer = pin!(tokio::time::sleep(PROBE_TIMEOUT));
+
+    let status = loop {
+        if let Some(status) = exited
+            && !out_open
+            && !err_open
+        {
+            break status;
+        }
+        tokio::select! {
+            read = stdout.read(&mut out_chunk), if out_open => match read {
+                Ok(count) if count > 0 => out.extend_from_slice(&out_chunk[..count]),
+                _ => out_open = false,
+            },
+            read = stderr.read(&mut err_chunk), if err_open => match read {
+                Ok(count) if count > 0 => err.extend_from_slice(&err_chunk[..count]),
+                _ => err_open = false,
+            },
+            waited = child.wait(), if exited.is_none() => {
+                exited = Some(waited.map_err(not_executable)?);
+                timer.as_mut().reset(Instant::now() + OUTPUT_DRAIN_GRACE);
+            },
+            () = &mut timer => match exited {
+                Some(status) => break status,
+                None => {
+                    return Err(ProbeError::TimedOut {
+                        path: executable.to_path_buf(),
+                        seconds: PROBE_TIMEOUT.as_secs(),
+                    });
+                }
+            },
+        }
+        if out.len() + err.len() > MAX_OUTPUT_BYTES {
+            debug!(path = %executable.display(), "a probed process printed more than a JVM does");
+            return Err(ProbeError::Unintelligible {
+                path: executable.to_path_buf(),
+            });
+        }
+    };
+
+    Ok(Captured {
+        status,
+        stdout: out,
+        stderr: err,
+    })
 }
 
 /// Builds a report from `-XshowSettings:properties` output.
@@ -353,5 +466,128 @@ openjdk version "1.8.0_492"
         release.await.expect("release writer");
 
         assert_eq!(report.version.major, 21);
+    }
+
+    /// Writes an executable `java` that runs `script` and returns its path.
+    #[cfg(unix)]
+    fn fake_java(directory: &Path, script: &str) -> PathBuf {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let executable = directory.join("java");
+        let mut file = std::fs::File::create(&executable).expect("create java");
+        write!(file, "#!/bin/sh\n{script}\n").expect("write java");
+        file.set_permissions(std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+        executable
+    }
+
+    #[cfg(unix)]
+    const FAKE_PROPERTIES: &str =
+        "printf 'Property settings:\\n    java.version = 21.0.12\\n    os.arch = amd64\\n' >&2";
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn output_beyond_the_cap_ends_the_probe_as_unintelligible() {
+        let temp = tempfile::tempdir().expect("temp");
+        // Never exits on its own, so only the cap can end it.
+        let executable = fake_java(temp.path(), "exec yes >&2");
+
+        let started = Instant::now();
+        let error = probe(&executable).await.expect_err("endless output");
+
+        assert!(
+            matches!(error, ProbeError::Unintelligible { .. }),
+            "{error:?}"
+        );
+        assert!(started.elapsed() < PROBE_TIMEOUT / 2);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_process_that_prints_more_than_the_cap_and_exits_is_unintelligible() {
+        let temp = tempfile::tempdir().expect("temp");
+        let executable = fake_java(
+            temp.path(),
+            &format!("{FAKE_PROPERTIES}\nhead -c 3000000 /dev/zero"),
+        );
+
+        let error = probe(&executable).await.expect_err("oversized output");
+
+        assert!(
+            matches!(error, ProbeError::Unintelligible { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_descendant_holding_the_output_pipes_does_not_delay_the_report() {
+        let temp = tempfile::tempdir().expect("temp");
+        let executable = fake_java(temp.path(), &format!("{FAKE_PROPERTIES}\n(sleep 10 &)"));
+
+        let started = Instant::now();
+        let report = probe(&executable).await.expect("probe");
+
+        assert_eq!(report.version.major, 21);
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_rejected_properties_flag_falls_back_to_the_version_banner() {
+        let temp = tempfile::tempdir().expect("temp");
+        let executable = fake_java(
+            temp.path(),
+            r#"case "$1" in
+-XshowSettings:properties) echo "Unrecognized option: $1" >&2; exit 1 ;;
+esac
+echo 'java version "1.6.0_45"' >&2"#,
+        );
+
+        let report = probe(&executable).await.expect("banner fallback");
+
+        assert!(!report.used_property_flag);
+        assert_eq!(report.version.major, 6);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_executable_that_fails_both_attempts_reports_the_failure() {
+        let temp = tempfile::tempdir().expect("temp");
+        let executable = fake_java(temp.path(), "exit 3");
+
+        let error = probe(&executable).await.expect_err("both fail");
+
+        assert!(
+            matches!(
+                error,
+                ProbeError::Failed {
+                    status: Some(3),
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unintelligible_banner_after_a_rejected_flag_is_unintelligible() {
+        let temp = tempfile::tempdir().expect("temp");
+        let executable = fake_java(
+            temp.path(),
+            r#"case "$1" in
+-XshowSettings:properties) exit 1 ;;
+esac
+echo 'not a jvm' >&2"#,
+        );
+
+        let error = probe(&executable).await.expect_err("not a jvm");
+
+        assert!(
+            matches!(error, ProbeError::Unintelligible { .. }),
+            "{error:?}"
+        );
     }
 }
