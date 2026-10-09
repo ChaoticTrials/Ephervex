@@ -812,7 +812,10 @@ process handle went with that run, so it is not restartable and its console is
 not recovered. The force stop signals it only after proving it is that process,
 and its lock stays until it has exited. A force stop never releases the lock of
 a launcher run that is still alive, including one it just signaled: that run may
-still be preparing a game, so the lock stays until the run has exited. Recording
+still be preparing a game, so the lock stays until the run has exited. A run is
+signaled only when its recorded start time proves it is the process that took the
+lock; a lock with no recorded start time, or one read while `/proc` is
+unavailable, is kept and nothing is signaled. Recording
 the game's id takes the same ownership guard and is refused when the lock file
 no longer names that run, in which case the game is not left running. A recorded
 id whose start time does not match, or that has no recorded start time, is not

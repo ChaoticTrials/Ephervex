@@ -409,6 +409,20 @@ impl App {
             &self.client(instance)?.root,
         ))
     }
+
+    /// Every launch an instance currently holds, first one first.
+    ///
+    /// Unlike [`Self::launch_state`], this names each launch by its own id, so
+    /// a caller acting on one launch can address the one that holds the
+    /// instance rather than assuming it is the first.
+    pub fn running_launches(
+        &self,
+        instance: InstanceId,
+    ) -> CoreResult<Vec<ephervex_storage::RunningLaunch>> {
+        Ok(ephervex_storage::running_launches(
+            &self.client(instance)?.root,
+        ))
+    }
 }
 
 /// The player identity one session presents.

@@ -30,7 +30,9 @@
 //!
 //! Where `/proc` is not available the lock is treated as held. That is the
 //! conservative direction - refusing a launch is recoverable, corrupting a
-//! world is not - and Ephervex targets Linux (ADR 0003).
+//! world is not - and Ephervex targets Linux (ADR 0003). Holding is never
+//! enough to signal: a process is signaled only when its recorded start time
+//! proves it is the one the lock names.
 
 use std::path::{Path, PathBuf};
 
@@ -235,6 +237,18 @@ impl LaunchState {
             None => false,
         }
     }
+
+    /// Whether the owner is proven to be the process that took this lock.
+    ///
+    /// Stricter than [`Self::owner_is_alive`], which errs toward holding the
+    /// instance: a pid with no recorded start time, or any pid while `/proc`
+    /// cannot be read, may be alive but is not proven to be the owner. Only a
+    /// proven owner is safe to signal.
+    pub(crate) fn owner_is_proven(&self) -> bool {
+        self.owner_start_ticks.is_some_and(|recorded| {
+            proc_filesystem_available() && process_start_ticks(self.owner_pid) == Some(recorded)
+        })
+    }
 }
 
 /// What ending a launch from outside it actually did.
@@ -244,6 +258,9 @@ pub struct ForcedStop {
     pub signaled_game: bool,
     /// Whether the launcher run that owns the lock was signaled.
     pub signaled_owner: bool,
+    /// Whether the owner may still be running but could not be proven to be the
+    /// process that took the lock, so it was not signaled.
+    pub owner_unproven: bool,
     /// What became of the lock file.
     pub lock: LockDisposition,
 }
@@ -273,7 +290,9 @@ pub enum LockDisposition {
 /// Process ids are reused. Signaling a number read out of a file could reach
 /// something else entirely, so nothing here is signaled without first proving
 /// the pid is still the process the lock describes, by the start time recorded
-/// beside it. A pid that cannot be proven is skipped rather than signaled.
+/// beside it. A pid that cannot be proven is skipped rather than signaled,
+/// including an owner whose lock records no start time or whose start time
+/// cannot be read; such a lock is kept, because the owner may still be alive.
 ///
 /// `SIGTERM` rather than `SIGKILL`: Minecraft saves on it. A game that was
 /// signaled keeps its lock until it has exited, so an instance is never offered
@@ -313,7 +332,11 @@ pub fn force_release(instance_root: &Path, launch: Option<&str>) -> Result<Force
     }
     let owner_alive = state.owner_is_alive();
     if owner_alive && state.owner_pid != std::process::id() {
-        outcome.signaled_owner = terminate(state.owner_pid);
+        if state.owner_is_proven() {
+            outcome.signaled_owner = terminate(state.owner_pid);
+        } else {
+            outcome.owner_unproven = true;
+        }
     }
 
     // A signaled game or a live owner has been asked to stop, not proven
@@ -1042,6 +1065,35 @@ mod tests {
         owner.wait().expect("the owner ends on the signal");
         assert!(running_state(root.path()).is_none());
         LaunchLock::acquire(root.path()).expect("free once the owner has exited");
+    }
+
+    #[test]
+    fn force_stopping_a_launch_whose_owner_has_no_recorded_start_time_signals_nothing() {
+        let root = instance();
+        let (mut stranger, _) = live_game();
+        let path = metadata_dir(root.path()).join(LAUNCH_LOCK_FILE);
+        plant(
+            &path,
+            &LaunchState {
+                owner_pid: stranger.id(),
+                owner_start_ticks: None,
+                game_pid: None,
+                game_start_ticks: None,
+                since: Utc::now(),
+            },
+        );
+
+        let outcome = force_release(root.path(), None).expect("force stop");
+        assert!(!outcome.signaled_owner, "an unproven pid is never signaled");
+        assert!(outcome.owner_unproven);
+        assert_eq!(outcome.lock, LockDisposition::Retained);
+        assert!(path.exists(), "the owner may still be running");
+        assert!(
+            stranger.try_wait().expect("status").is_none(),
+            "the process was left running"
+        );
+        stranger.kill().expect("end");
+        stranger.wait().expect("reap");
     }
 
     #[test]

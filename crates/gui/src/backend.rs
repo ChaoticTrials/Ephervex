@@ -2508,29 +2508,22 @@ fn run_worker(
             }
             Command::CancelOperation(id) => cancel_operation(&cancellations, &events, &id),
             Command::KillInstance { instance, launch } => {
-                let supervised = cancellations.lock().is_ok_and(|entries| {
-                    entries.contains_key(&launch_key(instance, launch.as_deref()))
+                let launches = app.running_launches(instance).unwrap_or_default();
+                let target = kill_target(launch.as_deref(), &launches, |candidate| {
+                    cancellations
+                        .lock()
+                        .is_ok_and(|entries| entries.contains_key(&launch_key(instance, candidate)))
                 });
-                // A game whose launcher run is gone has no supervisor to cancel.
-                // The proven force stop is the one way to end it, and it
-                // signals nothing it cannot prove is that game.
-                let orphaned = launch.is_none()
-                    && app
-                        .launch_state(instance)
-                        .is_ok_and(|state| state.is_some_and(|state| state.is_orphaned()));
-                if !supervised && orphaned {
-                    match app.force_stop_launch(instance, None) {
-                        Ok(_) => {
-                            let _ = events.send(Event::Toast {
-                                message: lookup("gui-force-stop-signaled"),
-                                error: false,
-                            });
-                            send_snapshot(&app, &events);
-                        }
-                        Err(error) => send_error(&events, &error),
+                match target {
+                    KillTarget::Cancel(launch) => {
+                        kill_instance(&cancellations, &events, instance, launch.as_deref());
                     }
-                } else {
-                    kill_instance(&cancellations, &events, instance, launch.as_deref());
+                    // A game whose launcher run is gone has no supervisor to
+                    // cancel. The proven force stop is the one way to end it,
+                    // and it signals nothing it cannot prove is that game.
+                    KillTarget::ForceStop(launch) => {
+                        force_stop_launch(&app, &events, instance, launch.as_deref());
+                    }
                 }
             }
             Command::SaveInstanceRuntime {
@@ -4414,26 +4407,7 @@ fn run_worker(
                     // cancellation, which also releases its lock on the way out.
                     kill_instance(&cancellations, &events, instance, launch.as_deref());
                 } else {
-                    match app.force_stop_launch(instance, launch.as_deref()) {
-                        Ok(outcome) => {
-                            let _ = events.send(Event::Toast {
-                                message: lookup(
-                                    if outcome.signaled_game || outcome.signaled_owner {
-                                        "gui-force-stop-signaled"
-                                    } else if outcome.lock
-                                        == ephervex_core::LockDisposition::Retained
-                                    {
-                                        "gui-force-stop-owner-running"
-                                    } else {
-                                        "gui-force-stop-released"
-                                    },
-                                ),
-                                error: false,
-                            });
-                            send_snapshot(&app, &events);
-                        }
-                        Err(error) => send_error(&events, &error),
-                    }
+                    force_stop_launch(&app, &events, instance, launch.as_deref());
                 }
             }
             Command::RefreshMods(host) => {
@@ -8408,6 +8382,86 @@ fn cancel_operation(cancellations: &CancellationRegistry, events: &Sender<Event>
     }
 }
 
+/// What a request to stop an instance's launch should act on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum KillTarget {
+    /// A launch this process supervises: its own cancellation ends it.
+    Cancel(Option<String>),
+    /// A launch left behind by a launcher run that is gone.
+    ForceStop(Option<String>),
+}
+
+/// Picks the launch a stop request acts on.
+///
+/// A request that names a launch acts on that one. One that does not, as the
+/// instance card's does, acts on the first launch that actually holds the
+/// instance: the instance may hold only an additional launch, whose id is the
+/// one the force stop has to be given.
+fn kill_target(
+    requested: Option<&str>,
+    launches: &[ephervex_core::RunningLaunch],
+    supervised: impl Fn(Option<&str>) -> bool,
+) -> KillTarget {
+    if supervised(requested) {
+        return KillTarget::Cancel(requested.map(str::to_owned));
+    }
+    let named = |launch: &&ephervex_core::RunningLaunch| {
+        requested.is_none_or(|id| launch.id.as_deref() == Some(id))
+    };
+    // A launch this process supervises is ended by its own cancellation, which
+    // is preferred to forcing a stop on a different launch.
+    if let Some(launch) = launches
+        .iter()
+        .filter(named)
+        .find(|launch| supervised(launch.id.as_deref()))
+    {
+        return KillTarget::Cancel(launch.id.clone());
+    }
+    match launches
+        .iter()
+        .filter(named)
+        .find(|launch| launch.state.is_orphaned())
+    {
+        Some(launch) => KillTarget::ForceStop(launch.id.clone()),
+        None => KillTarget::Cancel(requested.map(str::to_owned)),
+    }
+}
+
+/// The message that says what a force stop did, and whether it stopped nothing.
+fn force_stop_message(outcome: ephervex_core::ForcedStop) -> (&'static str, bool) {
+    if outcome.signaled_game || outcome.signaled_owner {
+        ("gui-force-stop-signaled", false)
+    } else if outcome.owner_unproven {
+        ("gui-force-stop-owner-unproven", true)
+    } else {
+        match outcome.lock {
+            ephervex_core::LockDisposition::Retained => ("gui-force-stop-owner-running", false),
+            ephervex_core::LockDisposition::Released => ("gui-force-stop-released", false),
+            ephervex_core::LockDisposition::Absent => ("gui-force-stop-nothing", true),
+        }
+    }
+}
+
+/// Ends a launch this process is not supervising and reports what happened.
+fn force_stop_launch(
+    app: &App,
+    events: &Sender<Event>,
+    instance: InstanceId,
+    launch: Option<&str>,
+) {
+    match app.force_stop_launch(instance, launch) {
+        Ok(outcome) => {
+            let (id, error) = force_stop_message(outcome);
+            let _ = events.send(Event::Toast {
+                message: lookup(id),
+                error,
+            });
+            send_snapshot(app, events);
+        }
+        Err(error) => send_error(events, &error),
+    }
+}
+
 /// Stops the game this launcher started for one instance.
 ///
 /// Canceling the launch is what stops it: the supervising task kills the child
@@ -10401,6 +10455,102 @@ mod tests {
 
     fn logical(paths: &[&str]) -> Vec<PathBuf> {
         paths.iter().map(PathBuf::from).collect()
+    }
+
+    /// This process's kernel start time, so it can stand in for a live game.
+    fn own_start_ticks() -> u64 {
+        let stat = std::fs::read_to_string("/proc/self/stat").expect("own stat");
+        let after_name = stat.rsplit_once(')').expect("comm field").1;
+        after_name
+            .split_whitespace()
+            .nth(19)
+            .and_then(|field| field.parse().ok())
+            .expect("start time")
+    }
+
+    /// A launch whose launcher run is gone and whose game (this process) is alive.
+    fn orphaned_launch(id: Option<&str>) -> ephervex_core::RunningLaunch {
+        ephervex_core::RunningLaunch {
+            id: id.map(str::to_owned),
+            state: ephervex_core::LaunchState {
+                owner_pid: std::process::id(),
+                owner_start_ticks: Some(own_start_ticks().wrapping_add(1)),
+                game_pid: Some(std::process::id()),
+                game_start_ticks: Some(own_start_ticks()),
+                since: chrono::Utc::now(),
+            },
+        }
+    }
+
+    #[test]
+    fn the_instance_card_kill_targets_the_additional_launch_that_holds_the_instance() {
+        let launches = [orphaned_launch(Some("bob"))];
+        assert_eq!(
+            kill_target(None, &launches, |_| false),
+            KillTarget::ForceStop(Some("bob".to_owned())),
+            "the force stop is given the launch that holds the instance, not the unnamed one"
+        );
+        assert_eq!(
+            kill_target(Some("bob"), &launches, |_| false),
+            KillTarget::ForceStop(Some("bob".to_owned()))
+        );
+        assert_eq!(
+            kill_target(Some("alice"), &launches, |_| false),
+            KillTarget::Cancel(Some("alice".to_owned())),
+            "a launch that does not hold the instance is not force stopped"
+        );
+    }
+
+    #[test]
+    fn a_kill_request_cancels_a_launch_this_process_supervises() {
+        let launches = [orphaned_launch(None), orphaned_launch(Some("bob"))];
+        assert_eq!(
+            kill_target(None, &launches, |launch| launch.is_none()),
+            KillTarget::Cancel(None)
+        );
+        assert_eq!(
+            kill_target(None, &launches, |launch| launch == Some("bob")),
+            KillTarget::Cancel(Some("bob".to_owned())),
+            "a supervised launch is canceled in preference to forcing a stop on another"
+        );
+        assert_eq!(
+            kill_target(None, &[], |_| false),
+            KillTarget::Cancel(None),
+            "nothing running leaves the request to report that it is unavailable"
+        );
+    }
+
+    #[test]
+    fn a_force_stop_that_stopped_nothing_is_not_reported_as_success() {
+        use ephervex_core::{ForcedStop, LockDisposition};
+
+        assert_eq!(
+            force_stop_message(ForcedStop::default()),
+            ("gui-force-stop-nothing", true)
+        );
+        assert_eq!(
+            force_stop_message(ForcedStop {
+                owner_unproven: true,
+                lock: LockDisposition::Retained,
+                ..ForcedStop::default()
+            }),
+            ("gui-force-stop-owner-unproven", true)
+        );
+        assert_eq!(
+            force_stop_message(ForcedStop {
+                signaled_game: true,
+                lock: LockDisposition::Retained,
+                ..ForcedStop::default()
+            }),
+            ("gui-force-stop-signaled", false)
+        );
+        assert_eq!(
+            force_stop_message(ForcedStop {
+                lock: LockDisposition::Released,
+                ..ForcedStop::default()
+            }),
+            ("gui-force-stop-released", false)
+        );
     }
 
     #[test]
