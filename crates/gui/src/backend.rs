@@ -1776,6 +1776,13 @@ pub enum Event {
         provider: String,
         requested: String,
     },
+    /// The native file dialog for [`Command::PickImport`] returned an archive.
+    /// A receiver asks for its analysis with [`Command::AnalyzeImport`] only
+    /// if `generation` still names the attempt it is tracking.
+    ImportArchivePicked {
+        generation: u64,
+        archive: PathBuf,
+    },
     /// The native file dialog for [`Command::PickImport`] closed without a
     /// choice. A receiver must discard this unless `generation` still names
     /// the attempt it is tracking, exactly like [`Event::ImportAnalyzed`].
@@ -2451,6 +2458,19 @@ fn run_worker(
     // download's thread, which clears it.
     let pack_link_download: RunningPackLink = Arc::new(Mutex::new(None));
 
+    // The command loop never waits on a native dialog, a catalog or a probe,
+    // so a stop, a kill or a cancel is handled the moment it arrives. Dialogs
+    // open one at a time, as they did when the loop ran them itself, and the
+    // cache and Java work each keep their order for the same reason.
+    let dialogs = DialogGate::default();
+    let cache_lane = SerialLane::start("ephervex-artifact-cache");
+    let java_lane = SerialLane::start("ephervex-java-inventory");
+    let catalog_lane = SerialLane::start("ephervex-version-catalog");
+    // Set when a detached task has refreshed the published options data on
+    // disk, so the loop's own `App` rereads it before its next command.
+    let options_refreshed = Arc::new(AtomicBool::new(false));
+    let java_inventory: JavaInventorySlot = Arc::new(Mutex::new(None));
+
     // Sign-in and other detached operations write the configuration through an
     // `App` of their own, so it is reread whenever the file has changed.
     let config_file = app.paths().config_file();
@@ -2463,19 +2483,37 @@ fn run_worker(
                 tracing::warn!(%error, "kept the configuration read earlier");
             }
         }
+        if options_refreshed.swap(false, Ordering::AcqRel) {
+            runtime.block_on(app.reload_cached_minecraft_options());
+        }
         match command {
             Command::Refresh => send_snapshot(&app, &events),
-            Command::LoadMinecraftReleases => match runtime.block_on(app.minecraft_releases()) {
-                Ok(listing) => {
-                    let versions = listing
-                        .releases
-                        .into_iter()
-                        .map(|release| release.id)
-                        .collect();
-                    let _ = events.send(Event::MinecraftReleases(versions));
-                }
-                Err(error) => send_modal_error(&events, &error),
-            },
+            Command::LoadMinecraftReleases => {
+                let refreshed = Arc::clone(&options_refreshed);
+                spawn_in_lane(
+                    &catalog_lane,
+                    app.paths().clone(),
+                    events.clone(),
+                    move |app, events, runtime| {
+                        let listing = runtime.block_on(app.minecraft_releases());
+                        // Listing the releases also refreshes the published
+                        // options data, which the loop's own `App` keeps using
+                        // until it rereads it.
+                        refreshed.store(true, Ordering::Release);
+                        match listing {
+                            Ok(listing) => {
+                                let versions = listing
+                                    .releases
+                                    .into_iter()
+                                    .map(|release| release.id)
+                                    .collect();
+                                let _ = events.send(Event::MinecraftReleases(versions));
+                            }
+                            Err(error) => send_modal_error(&events, &error),
+                        }
+                    },
+                );
+            }
             Command::WarmLanguageCatalog(minecraft) => {
                 warm_language_catalog(app.paths().clone(), &minecraft);
             }
@@ -2483,22 +2521,33 @@ fn run_worker(
                 form,
                 loader,
                 minecraft,
-            } => match runtime.block_on(app.loader_versions(loader, &minecraft)) {
-                Ok(listing) => {
-                    let versions = listing
-                        .builds
-                        .into_iter()
-                        .map(|build| build.version)
-                        .collect();
-                    let _ = events.send(Event::LoaderVersions {
-                        form,
-                        loader,
-                        minecraft,
-                        versions,
-                    });
-                }
-                Err(error) => send_modal_error(&events, &error),
-            },
+            } => {
+                // In request order with the release listing, because the
+                // loader-change dialog applies whichever answer arrives last.
+                spawn_in_lane(
+                    &catalog_lane,
+                    app.paths().clone(),
+                    events.clone(),
+                    move |app, events, runtime| match runtime
+                        .block_on(app.loader_versions(loader, &minecraft))
+                    {
+                        Ok(listing) => {
+                            let versions = listing
+                                .builds
+                                .into_iter()
+                                .map(|build| build.version)
+                                .collect();
+                            let _ = events.send(Event::LoaderVersions {
+                                form,
+                                loader,
+                                minecraft,
+                                versions,
+                            });
+                        }
+                        Err(error) => send_modal_error(&events, &error),
+                    },
+                );
+            }
             Command::SetFavoriteMinecraftVersions(versions) => {
                 // No toast. A star is toggled while looking straight at the
                 // list it reorders, so the list itself is the confirmation, and
@@ -2633,18 +2682,24 @@ fn run_worker(
                 if let Some(previous) = import_resolve_cancel.take() {
                     previous.cancel();
                 }
-                match rfd::FileDialog::new()
-                    .set_title(lookup("gui-choose-modpack-archive"))
-                    .add_filter(lookup("gui-modpack-archives"), &["mrpack", "zip"])
-                    .pick_file()
-                {
-                    Some(path) => {
-                        import_resolve_cancel = analyze_import(&app, &events, generation, &path);
-                    }
-                    None => {
-                        let _ = events.send(Event::ImportPickCanceled { generation });
-                    }
-                }
+                // The choice comes back as an event, and the controller asks
+                // for the analysis only if this attempt is still the one it
+                // tracks: a stale pick must not cancel the current attempt's
+                // resolution.
+                let events = events.clone();
+                spawn_dialog(&dialogs, move || {
+                    let picked = rfd::FileDialog::new()
+                        .set_title(lookup("gui-choose-modpack-archive"))
+                        .add_filter(lookup("gui-modpack-archives"), &["mrpack", "zip"])
+                        .pick_file();
+                    let _ = events.send(match picked {
+                        Some(archive) => Event::ImportArchivePicked {
+                            generation,
+                            archive,
+                        },
+                        None => Event::ImportPickCanceled { generation },
+                    });
+                });
             }
             Command::AnalyzeImport {
                 generation,
@@ -2661,44 +2716,51 @@ fn run_worker(
                 }
             }
             Command::PickStorageRoot => {
-                if let Some(path) = rfd::FileDialog::new()
-                    .set_title(lookup("gui-choose-persistent-root"))
-                    .pick_folder()
-                {
-                    let _ = events.send(Event::StorageRootPicked(path));
-                }
+                let events = events.clone();
+                spawn_dialog(&dialogs, move || {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_title(lookup("gui-choose-persistent-root"))
+                        .pick_folder()
+                    {
+                        let _ = events.send(Event::StorageRootPicked(path));
+                    }
+                });
             }
             Command::PickServerPack { target } => {
-                if let Some(path) = rfd::FileDialog::new()
-                    .set_title(lookup("gui-choose-server-pack"))
-                    .add_filter(lookup("gui-server-pack-archives"), &["zip"])
-                    .pick_file()
-                {
-                    let _ = events.send(Event::ServerPackPicked { target, path });
-                }
+                let events = events.clone();
+                spawn_dialog(&dialogs, move || {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_title(lookup("gui-choose-server-pack"))
+                        .add_filter(lookup("gui-server-pack-archives"), &["zip"])
+                        .pick_file()
+                    {
+                        let _ = events.send(Event::ServerPackPicked { target, path });
+                    }
+                });
             }
             Command::PickLocalMods(host) => {
-                if let Some(paths) = rfd::FileDialog::new()
-                    .set_title(lookup("gui-choose-mods"))
-                    .add_filter(lookup("gui-mod-jars"), &["jar"])
-                    .pick_files()
-                {
-                    match app.plan_local_mods(host, &paths) {
-                        Ok(plan) => {
-                            let _ =
-                                events.send(Event::LocalModPlan(local_mod_plan_data(host, &plan)));
-                        }
-                        Err(error) => send_error(&events, &error),
+                let app_paths = app.paths().clone();
+                let events = events.clone();
+                spawn_dialog(&dialogs, move || {
+                    if let Some(sources) = rfd::FileDialog::new()
+                        .set_title(lookup("gui-choose-mods"))
+                        .add_filter(lookup("gui-mod-jars"), &["jar"])
+                        .pick_files()
+                    {
+                        spawn_local_mod_plan(app_paths, events, host, sources);
                     }
-                }
+                });
             }
             Command::PickWatchedFolder => {
-                if let Some(path) = rfd::FileDialog::new()
-                    .set_title(lookup("gui-choose-watched-folder"))
-                    .pick_folder()
-                {
-                    let _ = events.send(Event::WatchedFolderPicked(path));
-                }
+                let events = events.clone();
+                spawn_dialog(&dialogs, move || {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_title(lookup("gui-choose-watched-folder"))
+                        .pick_folder()
+                    {
+                        let _ = events.send(Event::WatchedFolderPicked(path));
+                    }
+                });
             }
             Command::CreateClient {
                 request_id,
@@ -3877,59 +3939,63 @@ fn run_worker(
                 request,
                 names,
             } => {
-                let Some(destination) = rfd::FileDialog::new()
-                    .set_title(lookup("gui-bundle-save-title"))
-                    .add_filter(lookup("gui-bundle-archives"), &["zip"])
-                    .set_file_name(bundle_file_name(host))
-                    .save_file()
-                else {
-                    let _ = events.send(Event::BundleSettled { request });
-                    continue;
-                };
                 let paths = app.paths().clone();
-                let reports = events.clone();
-                spawn_async_operation(
-                    paths,
-                    &events,
-                    Arc::clone(&cancellations),
-                    AsyncOperationRequest {
-                        title: "operation-exporting-diagnostic-bundle",
-                        entity: host.id(),
-                        allow_cancel: false,
-                        dialogs: ModalScope::NONE,
-                        finished: Some(Event::BundleSettled { request }),
-                    },
-                    move |app, _reporter, _cancel| async move {
-                        let exported = app.export_diagnostic_bundle(
-                            diagnostic_scope(host),
-                            &ephervex_core::BundleSelection { names },
-                            &destination,
-                        );
-                        match exported {
-                            Ok(report) => {
-                                let _ = reports.send(Event::BundleExported {
-                                    host,
-                                    request,
-                                    report: BundleExportData {
-                                        path: report.path,
-                                        included: report.included.len(),
-                                        unreadable: report.unreadable,
-                                        bytes: report.bytes,
-                                    },
-                                });
-                                Ok(OperationReport::Reported)
+                let events = events.clone();
+                let cancellations = Arc::clone(&cancellations);
+                spawn_dialog(&dialogs, move || {
+                    let Some(destination) = rfd::FileDialog::new()
+                        .set_title(lookup("gui-bundle-save-title"))
+                        .add_filter(lookup("gui-bundle-archives"), &["zip"])
+                        .set_file_name(bundle_file_name(host))
+                        .save_file()
+                    else {
+                        let _ = events.send(Event::BundleSettled { request });
+                        return;
+                    };
+                    let reports = events.clone();
+                    spawn_async_operation(
+                        paths,
+                        &events,
+                        cancellations,
+                        AsyncOperationRequest {
+                            title: "operation-exporting-diagnostic-bundle",
+                            entity: host.id(),
+                            allow_cancel: false,
+                            dialogs: ModalScope::NONE,
+                            finished: Some(Event::BundleSettled { request }),
+                        },
+                        move |app, _reporter, _cancel| async move {
+                            let exported = app.export_diagnostic_bundle(
+                                diagnostic_scope(host),
+                                &ephervex_core::BundleSelection { names },
+                                &destination,
+                            );
+                            match exported {
+                                Ok(report) => {
+                                    let _ = reports.send(Event::BundleExported {
+                                        host,
+                                        request,
+                                        report: BundleExportData {
+                                            path: report.path,
+                                            included: report.included.len(),
+                                            unreadable: report.unreadable,
+                                            bytes: report.bytes,
+                                        },
+                                    });
+                                    Ok(OperationReport::Reported)
+                                }
+                                Err(error) => {
+                                    let _ = reports.send(Event::BundleExportFailed {
+                                        host,
+                                        request,
+                                        message: localized_error(&error),
+                                    });
+                                    Err(error)
+                                }
                             }
-                            Err(error) => {
-                                let _ = reports.send(Event::BundleExportFailed {
-                                    host,
-                                    request,
-                                    message: localized_error(&error),
-                                });
-                                Err(error)
-                            }
-                        }
-                    },
-                );
+                        },
+                    );
+                });
             }
             Command::OpenBundleFolder(path) => {
                 if !ephervex_core::open_containing_folder(&path) {
@@ -4416,12 +4482,9 @@ fn run_worker(
             Command::RefreshMods(host) => {
                 send_host_mods(&app, host, &events, &refreshed_mods, true);
             }
-            Command::PlanLocalMods { host, sources } => match app.plan_local_mods(host, &sources) {
-                Ok(plan) => {
-                    let _ = events.send(Event::LocalModPlan(local_mod_plan_data(host, &plan)));
-                }
-                Err(error) => send_error(&events, &error),
-            },
+            Command::PlanLocalMods { host, sources } => {
+                spawn_local_mod_plan(app.paths().clone(), events.clone(), host, sources);
+            }
             Command::AddLocalMods {
                 host,
                 sources,
@@ -4444,52 +4507,59 @@ fn run_worker(
                 }
             }
             Command::RestoreModFile { host, path } => {
-                if refuse_while_changing(&changing, host, &events) {
+                // Claimed here, on the command loop, so no other change can
+                // slip in between the check and the mark.
+                let Some(in_flight) = claim_hosts_for_change(
+                    &changing,
+                    &[host],
+                    "gui-mod-change-busy",
+                    ModalScope::NONE,
+                    &events,
+                ) else {
                     continue;
-                }
-                let reporter = OperationReporter::silent("operation-restoring-mod");
-                let restored = runtime.block_on(app.restore_mod_file(
-                    host,
-                    &path,
-                    &reporter,
-                    &CancellationToken::new(),
-                ));
-                match restored {
-                    Ok(()) => {
-                        let _ = events.send(Event::Toast {
-                            message: lookup("gui-mod-restored"),
-                            error: false,
-                        });
-                        send_host_mods(&app, host, &events, &refreshed_mods, false);
-                    }
-                    // The provider will not let this launcher fetch the jar
-                    // back, so the user is asked for it instead. The wait runs
-                    // off the command loop, which has other work to do.
-                    Err(error @ CoreError::ModAcquisitionRestricted { .. }) => {
-                        let Some(in_flight) = claim_hosts_for_change(
-                            &changing,
-                            &[host],
-                            "gui-mod-change-busy",
-                            ModalScope::NONE,
-                            &events,
-                        ) else {
-                            continue;
-                        };
-                        restore_after_acquisition(
-                            app.paths().clone(),
-                            &events,
-                            &acquisition_waits,
-                            RestoreRequest {
-                                host,
-                                path,
-                                refusal: error,
-                                refreshed: Arc::clone(&refreshed_mods),
-                                in_flight,
-                            },
-                        );
-                    }
-                    Err(error) => send_error(&events, &error),
-                }
+                };
+                let waits = acquisition_waits.clone();
+                let refreshed = Arc::clone(&refreshed_mods);
+                spawn_detached(
+                    app.paths().clone(),
+                    events.clone(),
+                    move |app, events, runtime| {
+                        let reporter = OperationReporter::silent("operation-restoring-mod");
+                        let restored = runtime.block_on(app.restore_mod_file(
+                            host,
+                            &path,
+                            &reporter,
+                            &CancellationToken::new(),
+                        ));
+                        match restored {
+                            Ok(()) => {
+                                let _ = events.send(Event::Toast {
+                                    message: lookup("gui-mod-restored"),
+                                    error: false,
+                                });
+                                send_host_mods(&app, host, &events, &refreshed, false);
+                            }
+                            // The provider will not let this launcher fetch the
+                            // jar back, so the user is asked for it instead,
+                            // with the host still claimed.
+                            Err(error @ CoreError::ModAcquisitionRestricted { .. }) => {
+                                restore_after_acquisition(
+                                    app.paths().clone(),
+                                    &events,
+                                    &waits,
+                                    RestoreRequest {
+                                        host,
+                                        path,
+                                        refusal: error,
+                                        refreshed,
+                                        in_flight,
+                                    },
+                                );
+                            }
+                            Err(error) => send_error(&events, &error),
+                        }
+                    },
+                );
             }
             Command::DeleteHandPlacedMod { host, path } => {
                 if let Some(refusal) = change_in_flight(&changing, host) {
@@ -4580,37 +4650,67 @@ fn run_worker(
                 send_mod_relations(&app, host, &path, &BTreeMap::new(), &events);
             }
             Command::ResolveDeclaredRelations { host, path } => {
-                resolve_declared_relations(&app, &runtime, host, &path, &events);
+                spawn_detached(
+                    app.paths().clone(),
+                    events.clone(),
+                    move |app, events, runtime| {
+                        resolve_declared_relations(&app, &runtime, host, &path, &events);
+                    },
+                );
             }
             Command::RefreshModDependencies { host, reload } => {
-                if refuse_while_changing(&changing, host, &events) {
+                let Some(in_flight) = claim_hosts_for_change(
+                    &changing,
+                    &[host],
+                    "gui-mod-change-busy",
+                    ModalScope::NONE,
+                    &events,
+                ) else {
                     continue;
-                }
-                let reporter = OperationReporter::silent("refreshing-mod-dependencies");
-                match runtime.block_on(app.refresh_mod_dependencies(
-                    host,
-                    &reporter,
-                    &CancellationToken::new(),
-                )) {
-                    Ok(report) => {
-                        let _ = events.send(Event::Toast {
-                            message: lookup_args(
-                                "gui-mod-dependencies-refreshed",
-                                [(
-                                    "count",
-                                    Arg::from(i64::try_from(report.recorded).unwrap_or(0)),
-                                )],
-                            ),
-                            error: !report.is_complete(),
-                        });
-                        send_host_mods(&app, host, &events, &refreshed_mods, false);
-                        if let Some(path) = reload {
-                            send_mod_relations(&app, host, &path, &BTreeMap::new(), &events);
-                            resolve_declared_relations(&app, &runtime, host, &path, &events);
+                };
+                let refreshed = Arc::clone(&refreshed_mods);
+                spawn_detached(
+                    app.paths().clone(),
+                    events.clone(),
+                    move |app, events, runtime| {
+                        let reporter = OperationReporter::silent("refreshing-mod-dependencies");
+                        match runtime.block_on(app.refresh_mod_dependencies(
+                            host,
+                            &reporter,
+                            &CancellationToken::new(),
+                        )) {
+                            Ok(report) => {
+                                let _ = events.send(Event::Toast {
+                                    message: lookup_args(
+                                        "gui-mod-dependencies-refreshed",
+                                        [(
+                                            "count",
+                                            Arg::from(i64::try_from(report.recorded).unwrap_or(0)),
+                                        )],
+                                    ),
+                                    error: !report.is_complete(),
+                                });
+                                send_host_mods(&app, host, &events, &refreshed, false);
+                                // The host's files are not being rewritten any
+                                // more, and the catalog lookup below is slow.
+                                drop(in_flight);
+                                if let Some(path) = reload {
+                                    send_mod_relations(
+                                        &app,
+                                        host,
+                                        &path,
+                                        &BTreeMap::new(),
+                                        &events,
+                                    );
+                                    resolve_declared_relations(
+                                        &app, &runtime, host, &path, &events,
+                                    );
+                                }
+                            }
+                            Err(error) => send_error(&events, &error),
                         }
-                    }
-                    Err(error) => send_error(&events, &error),
-                }
+                    },
+                );
             }
             Command::DeleteModFiles { host, paths } => {
                 if refuse_mod_change_while_changing(&app, &changing, host, &events, &refreshed_mods)
@@ -4870,14 +4970,21 @@ fn run_worker(
                     Err(error) => send_error(&events, &error),
                 }
             }
-            Command::MeasureArtifactCache => match runtime.block_on(app.artifact_cache_status()) {
-                Ok(status) => {
-                    let _ = events.send(Event::ArtifactCacheStatus(artifact_cache_status_data(
-                        &status,
-                    )));
-                }
-                Err(error) => send_error(&events, &error),
-            },
+            Command::MeasureArtifactCache => {
+                spawn_in_lane(
+                    &cache_lane,
+                    app.paths().clone(),
+                    events.clone(),
+                    |app, events, runtime| match runtime.block_on(app.artifact_cache_status()) {
+                        Ok(status) => {
+                            let _ = events.send(Event::ArtifactCacheStatus(
+                                artifact_cache_status_data(&status),
+                            ));
+                        }
+                        Err(error) => send_error(&events, &error),
+                    },
+                );
+            }
             Command::SaveArtifactCacheLimit {
                 selection,
                 custom_value,
@@ -4891,29 +4998,50 @@ fn run_worker(
                     &custom_unit,
                 );
                 match limit {
-                    Ok(limit) => match runtime.block_on(app.set_artifact_cache_limit(limit)) {
-                        Ok(status) => {
-                            let _ = events.send(Event::Toast {
-                                message: lookup("gui-artifact-cache-limit-saved"),
-                                error: false,
-                            });
-                            let _ = events.send(Event::ArtifactCacheStatus(
-                                artifact_cache_status_data(&status),
-                            ));
-                            send_snapshot(&app, &events);
-                        }
-                        Err(error) => send_error(&events, &error),
-                    },
+                    Ok(limit) => spawn_in_lane(
+                        &cache_lane,
+                        app.paths().clone(),
+                        events.clone(),
+                        move |mut app, events, runtime| {
+                            match runtime.block_on(app.set_artifact_cache_limit(limit)) {
+                                Ok(status) => {
+                                    let _ = events.send(Event::Toast {
+                                        message: lookup("gui-artifact-cache-limit-saved"),
+                                        error: false,
+                                    });
+                                    let _ = events.send(Event::ArtifactCacheStatus(
+                                        artifact_cache_status_data(&status),
+                                    ));
+                                    // Enforcing the new budget can take long
+                                    // enough for other settings to have been
+                                    // saved meanwhile, and the snapshot must
+                                    // not show the older ones.
+                                    if let Err(error) = app.reload_config() {
+                                        tracing::warn!(%error, "kept the configuration read earlier");
+                                    }
+                                    send_snapshot(&app, &events);
+                                }
+                                Err(error) => send_error(&events, &error),
+                            }
+                        },
+                    ),
                     Err(error) => send_error(&events, &CoreError::from(error)),
                 }
             }
             Command::ClearArtifactCache => {
-                let cleared = runtime.block_on(app.clear_artifact_cache());
-                for event in clear_artifact_cache_events(cleared, || {
-                    runtime.block_on(app.artifact_cache_status())
-                }) {
-                    let _ = events.send(event);
-                }
+                spawn_in_lane(
+                    &cache_lane,
+                    app.paths().clone(),
+                    events.clone(),
+                    |app, events, runtime| {
+                        let cleared = runtime.block_on(app.clear_artifact_cache());
+                        for event in clear_artifact_cache_events(cleared, || {
+                            runtime.block_on(app.artifact_cache_status())
+                        }) {
+                            let _ = events.send(event);
+                        }
+                    },
+                );
             }
             Command::SaveDefaultModCatalog { catalog } => {
                 let stored = app.set_default_mod_catalog(catalog);
@@ -4955,37 +5083,73 @@ fn run_worker(
             // the first scan; the page's own button is what forces a rescan.
             // Probing forks a JVM per runtime, so a page that rescanned every
             // time it was opened would pay for it every time.
-            Command::LoadJavaRuntimes => match runtime.block_on(app.java_runtimes()) {
-                Ok(inventory) => {
-                    let _ = events.send(Event::JavaRuntimes(describe_runtimes(&inventory)));
-                }
-                Err(error) => send_error(&events, &error),
-            },
-            Command::RefreshJava => match runtime.block_on(app.refresh_java_runtimes()) {
-                Ok(inventory) => {
-                    let _ = events.send(Event::JavaRuntimes(describe_runtimes(&inventory)));
-                }
-                Err(error) => send_error(&events, &error),
-            },
+            Command::LoadJavaRuntimes => {
+                // Answered from the lane even when the inventory is known, so
+                // a page never receives an older list after a newer one.
+                let inventory = Arc::clone(&java_inventory);
+                let paths = app.paths().clone();
+                let events = events.clone();
+                java_lane.submit(Box::new(move || {
+                    let known = inventory.lock().ok().and_then(|slot| slot.clone());
+                    if let Some(known) = known {
+                        send_java_inventory(Ok(known), &inventory, &events);
+                        return;
+                    }
+                    run_detached(
+                        paths,
+                        events,
+                        |_| {},
+                        move |app, events, runtime| {
+                            send_java_inventory(
+                                runtime.block_on(app.java_runtimes()),
+                                &inventory,
+                                &events,
+                            );
+                        },
+                    );
+                }));
+            }
+            Command::RefreshJava => {
+                let inventory = Arc::clone(&java_inventory);
+                spawn_in_lane(
+                    &java_lane,
+                    app.paths().clone(),
+                    events.clone(),
+                    move |app, events, runtime| {
+                        send_java_inventory(
+                            runtime.block_on(app.refresh_java_runtimes()),
+                            &inventory,
+                            &events,
+                        );
+                    },
+                );
+            }
             Command::RemoveManagedJavaRuntime(path) => {
-                match runtime.block_on(app.remove_managed_java_runtime(Path::new(&path))) {
-                    Ok(_) => {
-                        let _ = events.send(Event::Toast {
-                            message: lookup("gui-java-runtime-removed"),
-                            error: false,
-                        });
-                        // The list the page is showing now names a directory
-                        // that is gone, so it is re-read rather than left.
-                        match runtime.block_on(app.java_runtimes()) {
-                            Ok(inventory) => {
-                                let _ =
-                                    events.send(Event::JavaRuntimes(describe_runtimes(&inventory)));
+                let inventory = Arc::clone(&java_inventory);
+                spawn_in_lane(
+                    &java_lane,
+                    app.paths().clone(),
+                    events.clone(),
+                    move |app, events, runtime| {
+                        match runtime.block_on(app.remove_managed_java_runtime(Path::new(&path))) {
+                            Ok(_) => {
+                                let _ = events.send(Event::Toast {
+                                    message: lookup("gui-java-runtime-removed"),
+                                    error: false,
+                                });
+                                // The list the page is showing now names a
+                                // directory that is gone, so it is read again
+                                // rather than left.
+                                send_java_inventory(
+                                    runtime.block_on(app.refresh_java_runtimes()),
+                                    &inventory,
+                                    &events,
+                                );
                             }
                             Err(error) => send_error(&events, &error),
                         }
-                    }
-                    Err(error) => send_error(&events, &error),
-                }
+                    },
+                );
             }
             Command::SaveJavaSettings {
                 auto_detect,
@@ -8802,35 +8966,138 @@ fn spawn_detached_with_setup_failure(
     setup_failed: impl FnOnce(&Sender<Event>) + Send + 'static,
     work: impl FnOnce(App, Sender<Event>, tokio::runtime::Runtime) + Send + 'static,
 ) {
+    thread::spawn(move || run_detached(paths, events, setup_failed, work));
+}
+
+fn run_detached(
+    paths: Paths,
+    events: Sender<Event>,
+    setup_failed: impl FnOnce(&Sender<Event>),
+    work: impl FnOnce(App, Sender<Event>, tokio::runtime::Runtime),
+) {
+    let app = match App::open_at(paths) {
+        Ok(app) => app,
+        Err(error) => {
+            send_error(&events, &error);
+            setup_failed(&events);
+            return;
+        }
+    };
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let _ = events.send(Event::Toast {
+                message: localized_value("gui-background-operation-failed", &error.to_string()),
+                error: true,
+            });
+            setup_failed(&events);
+            return;
+        }
+    };
+    work(app, events, runtime);
+}
+
+type LaneJob = Box<dyn FnOnce() + Send>;
+
+/// A thread that runs the jobs it is given one at a time, in the order they
+/// arrived, for work whose results must not overtake each other.
+///
+/// The thread ends once the lane and every clone of it are dropped.
+#[derive(Clone)]
+struct SerialLane {
+    jobs: Sender<LaneJob>,
+}
+
+impl SerialLane {
+    fn start(name: &str) -> Self {
+        let (jobs, queue) = mpsc::channel::<LaneJob>();
+        if let Err(error) = thread::Builder::new().name(name.to_owned()).spawn(move || {
+            for job in queue {
+                job();
+            }
+        }) {
+            tracing::error!(%error, lane = name, "could not start a serial work lane");
+        }
+        Self { jobs }
+    }
+
+    fn submit(&self, job: LaneJob) {
+        // A lane whose thread is gone still has to run the work.
+        if let Err(mpsc::SendError(job)) = self.jobs.send(job) {
+            thread::spawn(job);
+        }
+    }
+}
+
+/// [`spawn_detached`] for work that waits its turn on `lane`.
+fn spawn_in_lane(
+    lane: &SerialLane,
+    paths: Paths,
+    events: Sender<Event>,
+    work: impl FnOnce(App, Sender<Event>, tokio::runtime::Runtime) + Send + 'static,
+) {
+    lane.submit(Box::new(move || {
+        run_detached(paths, events, |_| {}, work);
+    }));
+}
+
+/// Held while a native dialog is open, so dialogs asked for in a row open one
+/// after another.
+type DialogGate = Arc<Mutex<()>>;
+
+/// Runs `open` on a thread of its own, once no other native dialog is open.
+fn spawn_dialog(gate: &DialogGate, open: impl FnOnce() + Send + 'static) {
+    let gate = Arc::clone(gate);
     thread::spawn(move || {
-        let mut setup_failed = Some(setup_failed);
-        let app = match App::open_at(paths) {
-            Ok(app) => app,
-            Err(error) => {
-                send_error(&events, &error);
-                if let Some(setup_failed) = setup_failed.take() {
-                    setup_failed(&events);
-                }
-                return;
+        let _open = gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        open();
+    });
+}
+
+/// What the Java page last learned, kept for the whole session because
+/// probing forks a JVM per runtime and every detached operation opens an
+/// `App` with an empty inventory of its own.
+type JavaInventorySlot = Arc<Mutex<Option<Arc<ephervex_core::RuntimeInventory>>>>;
+
+/// Remembers a Java inventory and sends it to the page, or reports why there
+/// is none.
+fn send_java_inventory(
+    inventory: CoreResult<Arc<ephervex_core::RuntimeInventory>>,
+    slot: &JavaInventorySlot,
+    events: &Sender<Event>,
+) {
+    match inventory {
+        Ok(inventory) => {
+            let rows = describe_runtimes(&inventory);
+            if let Ok(mut known) = slot.lock() {
+                *known = Some(inventory);
             }
-        };
-        let runtime = match tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                let _ = events.send(Event::Toast {
-                    message: localized_value("gui-background-operation-failed", &error.to_string()),
-                    error: true,
-                });
-                if let Some(setup_failed) = setup_failed.take() {
-                    setup_failed(&events);
-                }
-                return;
+            let _ = events.send(Event::JavaRuntimes(rows));
+        }
+        Err(error) => send_error(events, &error),
+    }
+}
+
+/// Plans the addition of local jars to a host without holding up the command
+/// loop, because reading and hashing them takes as long as the jars are big.
+fn spawn_local_mod_plan(
+    paths: Paths,
+    events: Sender<Event>,
+    host: InstalledHost,
+    sources: Vec<PathBuf>,
+) {
+    spawn_detached(paths, events, move |app, events, _runtime| {
+        match app.plan_local_mods(host, &sources) {
+            Ok(plan) => {
+                let _ = events.send(Event::LocalModPlan(local_mod_plan_data(host, &plan)));
             }
-        };
-        work(app, events, runtime);
+            Err(error) => send_error(&events, &error),
+        }
     });
 }
 
@@ -11868,6 +12135,125 @@ mod tests {
             "the failure is reported as lasting: {event:?}"
         );
         assert!(received.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_serial_lane_keeps_submission_order_without_holding_up_the_submitter() {
+        let lane = SerialLane::start("lane-order-test");
+        let (release, released) = mpsc::channel::<()>();
+        let (done, finished) = mpsc::channel();
+        let first = done.clone();
+        lane.submit(Box::new(move || {
+            released.recv().expect("release");
+            first.send(1).expect("first result");
+        }));
+        lane.submit(Box::new(move || {
+            done.send(2).expect("second result");
+        }));
+
+        assert!(
+            finished.recv_timeout(Duration::from_millis(100)).is_err(),
+            "the second job waits for the first"
+        );
+        release.send(()).expect("release the first job");
+        let order: Vec<i32> = (0..2)
+            .map(|_| {
+                finished
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("a job")
+            })
+            .collect();
+        assert_eq!(order, [1, 2]);
+    }
+
+    #[test]
+    fn a_native_dialog_waits_for_the_one_already_open() {
+        let gate = DialogGate::default();
+        let (release, released) = mpsc::channel::<()>();
+        let (opened, seen) = mpsc::channel();
+        let first = opened.clone();
+        spawn_dialog(&gate, move || {
+            first.send("first").expect("first opened");
+            released.recv().expect("release");
+        });
+        assert_eq!(
+            seen.recv_timeout(Duration::from_secs(10))
+                .expect("a dialog"),
+            "first"
+        );
+        spawn_dialog(&gate, move || {
+            opened.send("second").expect("second opened");
+        });
+
+        assert!(
+            seen.recv_timeout(Duration::from_millis(100)).is_err(),
+            "only one dialog is open at a time"
+        );
+        release.send(()).expect("close the first dialog");
+        assert_eq!(
+            seen.recv_timeout(Duration::from_secs(10))
+                .expect("a dialog"),
+            "second"
+        );
+    }
+
+    #[test]
+    fn a_java_inventory_is_remembered_for_the_page_that_asks_again() {
+        let slot: JavaInventorySlot = Arc::new(Mutex::new(None));
+        let (events, received) = mpsc::channel();
+        let inventory = Arc::new(ephervex_core::RuntimeInventory {
+            runtimes: Vec::new(),
+            failures: Vec::new(),
+            probed: 0,
+            candidates: 0,
+            scanned_at: Utc::now(),
+        });
+
+        send_java_inventory(Ok(inventory), &slot, &events);
+
+        assert!(matches!(
+            received.try_recv().expect("an event"),
+            Event::JavaRuntimes(rows) if rows.is_empty()
+        ));
+        assert!(slot.lock().expect("slot").is_some());
+    }
+
+    /// The worker answers the requests that touch a catalog, a cache or a
+    /// probe through threads of their own, so those results still arrive.
+    #[test]
+    fn work_moved_off_the_command_loop_still_reports_its_result() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = Paths::rooted_at(root.path());
+        let (commands, command_rx) = mpsc::channel();
+        let (events, received) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            run_worker(
+                || App::open_at(paths),
+                command_rx,
+                events,
+                Arc::new(Mutex::new(HashMap::new())),
+                SupervisedServers::default(),
+            );
+        });
+
+        commands
+            .send(Command::MeasureArtifactCache)
+            .expect("measure request");
+        commands.send(Command::Refresh).expect("refresh request");
+        let mut measured = false;
+        let mut refreshed = 0;
+        while !measured || refreshed < 2 {
+            match received
+                .recv_timeout(Duration::from_secs(30))
+                .expect("an event")
+            {
+                Event::ArtifactCacheStatus(_) => measured = true,
+                Event::Snapshot(_) => refreshed += 1,
+                _ => {}
+            }
+        }
+        drop(commands);
+        worker.join().expect("the worker ends with its commands");
     }
 
     #[test]

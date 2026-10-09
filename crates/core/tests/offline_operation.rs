@@ -14,6 +14,8 @@
 //! `ephervex-download`.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::sync::Arc;
+
 use ephervex_core::{App, Paths};
 use ephervex_model::{ArtifactCacheLimit, LoaderSelection, ModProvider, StorageClass};
 use ephervex_options::PreferenceKey;
@@ -125,6 +127,29 @@ async fn a_corrupt_cached_options_feed_falls_back_to_the_bundled_baseline() {
     assert!(
         compatibility.schema_id("1.20.1").is_some(),
         "the bundled baseline still answers when the cache cannot"
+    );
+}
+
+#[tokio::test]
+async fn rereading_the_cached_options_feed_replaces_what_an_app_loaded_earlier() {
+    let base = tempfile::tempdir().expect("temp dir");
+    let paths = roots(&base);
+    let app = app(&paths);
+    let loaded = app.cached_minecraft_options().await;
+
+    let metadata_root = paths.cache_dir().join("metadata");
+    std::fs::create_dir_all(&metadata_root).expect("create the metadata store");
+    std::fs::write(metadata_root.join("minecraft-options.json"), b"{not json")
+        .expect("write rubbish");
+    let reloaded = app.reload_cached_minecraft_options().await;
+
+    assert!(
+        !Arc::ptr_eq(&loaded, &reloaded),
+        "the document is read again rather than the loaded one returned"
+    );
+    assert!(
+        Arc::ptr_eq(&reloaded, &app.minecraft_options()),
+        "later answers use the reloaded data"
     );
 }
 

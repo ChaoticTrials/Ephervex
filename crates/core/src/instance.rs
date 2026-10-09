@@ -190,6 +190,16 @@ impl App {
         {
             return Arc::clone(compatibility);
         }
+        self.reload_cached_minecraft_options().await
+    }
+
+    /// Rereads the cached feed document, replacing what this `App` loaded
+    /// earlier.
+    ///
+    /// For an `App` that must see a refresh another one made since, such as a
+    /// worker that refreshes the feed while a long-lived `App` keeps answering
+    /// settings previews. Never touches the network.
+    pub async fn reload_cached_minecraft_options(&self) -> Arc<OptionsCompatibility> {
         let cached = match self.options_feed() {
             Ok(feed) => feed.cached().await,
             Err(error) => {

@@ -1833,6 +1833,11 @@ impl ImportFlowState {
         self.next_generation
     }
 
+    /// Whether `generation` still names the attempt this flow is tracking.
+    fn tracks(&self, generation: u64) -> bool {
+        self.tracked_generation == Some(generation)
+    }
+
     /// The native file dialog closed with no choice made. `false` means it
     /// was discarded: a newer attempt is already current. Otherwise the
     /// attempt returns to `Idle`, the same safe, non-ready state as before
@@ -7376,6 +7381,20 @@ fn apply_event(
         // (superseded, the modal was closed and reopened, or an unrelated
         // submission finished): there is nothing that should touch whatever
         // modal is open now. See `apply_import_result`.
+        Event::ImportArchivePicked {
+            generation,
+            archive,
+        } => {
+            if import_flow.borrow().tracks(generation) {
+                send(
+                    commands,
+                    Command::AnalyzeImport {
+                        generation,
+                        archive,
+                    },
+                );
+            }
+        }
         Event::ImportPickCanceled { generation } => {
             let applied = import_flow.borrow_mut().pick_canceled(generation);
             apply_import_result(ui, import_flow, applied);
@@ -15519,6 +15538,20 @@ mod tests {
             "the second attempt is untouched"
         );
         assert_eq!(flow.tracked_generation, Some(second));
+    }
+
+    #[test]
+    fn a_picked_archive_is_analyzed_only_while_its_attempt_is_current() {
+        let mut flow = ImportFlowState::default();
+        let first = flow.begin_attempt();
+        assert!(flow.tracks(first));
+
+        let second = flow.begin_attempt();
+        assert!(!flow.tracks(first), "a newer attempt superseded it");
+        assert!(flow.tracks(second));
+
+        flow.reset();
+        assert!(!flow.tracks(second), "closing the modal ends the attempt");
     }
 
     #[test]
