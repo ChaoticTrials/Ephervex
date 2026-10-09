@@ -24,8 +24,8 @@ the default sync command. The Rust generator keeps both sizes configurable.
 The WebP files under `static/img/ephervex/` and their manifest under
 `src/components/` are the site assets. The original PNGs and contact sheets
 remain gitignored under `tools/auto-screenshot-tool/screenshots/`. Generated
-WebP files under `static/img/ephervex/` are also ignored until publication.
-A fresh checkout must generate and synchronize images before building.
+WebP files under `static/img/ephervex/` are also ignored. A fresh checkout must
+generate and synchronize images before building.
 
 `npm run screenshots:sync` checks that both themes exist for every selected
 state, region, and size. Full-window WebPs live directly under each state;
@@ -34,8 +34,8 @@ WebPs.
 `npm run screenshots:contact-sheet` writes local review sheets grouped by
 resolution and region type. `npm run screenshots:check` validates the published
 assets and runs automatically before `npm run build`. An ordinary local build
-does not run Rust or recompress images. A clean CI job can run the command
-sequence above before publishing `web/build/`.
+does not run Rust or recompress images. The Pages workflow regenerates the
+screenshots before publishing `web/build/`.
 
 `ThemeScreenshot` reads the synchronized manifest. It renders a sized
 placeholder for server rendering and hydration, then mounts only the image
@@ -46,9 +46,22 @@ entry in the Rust tool; the sync command discovers their output directories.
 
 ## Site configuration and docs versions
 
-The production domain is `https://ephervex.chaotictrials.de`, with GitHub Pages
-hosting planned. `static/CNAME` records the domain; no deployment workflow is
-configured yet. GitHub release downloads are the installation page's source;
+The production domain is `https://ephervex.chaotictrials.de` and `static/CNAME`
+records it. Configure the GitHub repository's Pages source as **GitHub Actions**
+and point the domain's DNS at GitHub Pages. `.github/workflows/pages.yml` builds
+and uploads `web/build/`, then deploys it with `actions/deploy-pages`; deployment
+does not create a commit.
+
+Pages deploys after a successful GitHub Release workflow or a manually published
+release. A push to `main` that changes `web/`, `tools/auto-screenshot-tool/`,
+`assets/`, or the Pages workflow also deploys when a published full release
+exists. The latest published full release supplies the application source and
+Cargo lockfile. On `main` pushes, the workflow applies the current website,
+screenshot tool, and artwork to that released source. If a capture needs an
+unreleased application change, the build fails and the prior Pages deployment
+stays in place. Manual workflow dispatch can retry the current `main` source.
+Each build regenerates both screenshot sizes and WebP assets without committing
+generated files. GitHub release downloads are the installation page's source;
 see `.github/workflows/release.yml` for artifact names and architectures.
 
 Edit `docs/` for v1, which includes all pre-v1 releases and the v1 series.

@@ -1,0 +1,159 @@
+# The Release workflow publishes with GITHUB_TOKEN, so its release event cannot
+# start another workflow. workflow_run covers that path; release covers releases
+# published by a maintainer.
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - 'tools/auto-screenshot-tool/**'
+      - 'assets/**'
+      - '.github/workflows/pages.yml'
+  release:
+    types: [published]
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.latest.outputs.tag }}
+    steps:
+      - name: Find the latest published release
+        id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          response=$(mktemp)
+          trap 'rm -f "$response"' EXIT
+          status=$(curl --silent --show-error --location --retry 3 \
+            --output "$response" --write-out '%{http_code}' \
+            --header 'Accept: application/vnd.github+json' \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/latest")
+          case "$status" in
+            200)
+              tag=$(jq -er '.tag_name | select(type == "string" and test("^v[0-9][A-Za-z0-9._-]*$"))' "$response")
+              printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
+              echo "Building Pages with application source from $tag"
+              ;;
+            404)
+              echo 'No published full release yet; Pages will deploy after the first release.'
+              ;;
+            *)
+              cat "$response" >&2
+              exit 1
+              ;;
+          esac
+
+  build:
+    needs: release
+    if: needs.release.outputs.tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: read
+    steps:
+      - name: Check out released application source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.tag }}
+          path: source
+          persist-credentials: false
+
+      - name: Check out current website source
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: current
+          persist-credentials: false
+
+      - name: Apply current website and capture sources
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          for directory in web tools/auto-screenshot-tool assets; do
+            rm -rf "source/$directory"
+            mkdir -p "source/$(dirname "$directory")"
+            cp -a "current/$directory" "source/$directory"
+          done
+
+      - name: Install screenshot build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig-dev libfreetype-dev libssl-dev fonts-dejavu-core
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: source -> target
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: source/web/package-lock.json
+
+      - name: Generate application screenshots
+        working-directory: source
+        run: ./tools/auto-screenshot-tool/generate.sh
+
+      - name: Install website dependencies
+        working-directory: source/web
+        run: npm ci
+
+      - name: Generate website images
+        working-directory: source/web
+        run: npm run screenshots:sync -- --size 1920x1080 --size 2560x1440
+
+      - name: Check website types
+        working-directory: source/web
+        run: npm run typecheck
+
+      - name: Build website
+        working-directory: source/web
+        run: npm run build
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: source/web/build
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

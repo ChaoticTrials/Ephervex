@@ -9,8 +9,9 @@ the README disagrees (see "Known stale sources").
 
 ## Site setup
 
-- [ ] Deploy to GitHub Pages at `https://ephervex.chaotictrials.de`.
-      The site configuration and `static/CNAME` use this domain.
+- [ ] Configure GitHub Pages to deploy from Actions, set DNS for
+      `https://ephervex.chaotictrials.de`, and verify the first deployment.
+      The site configuration, `static/CNAME`, and Pages workflow use this domain.
 - [ ] Verify the `/deb` and `/rpm` repository endpoints and signing metadata
       after the first release publishes them.
 
@@ -233,6 +234,5 @@ easy to update, and capture screenshots late.
 - [ ] `cargo test --workspace`
 - [ ] `tools/licenses/generate.sh --check`
 - [ ] `cd web && npm run screenshots:check && npm run typecheck && npm run build`
-- [ ] Regenerate screenshots and run `npm run screenshots:sync` locally.
-      Keep `static/img/ephervex/` ignored until screenshot publication is
-      approved; synchronize assets during deployment before building.
+- [ ] Regenerate screenshots and run `npm run screenshots:sync` locally to
+      review captures before merging. Pages regenerates them for deployment.
