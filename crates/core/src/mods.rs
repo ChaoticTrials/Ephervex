@@ -656,6 +656,14 @@ impl InstalledHost {
         }
     }
 
+    /// The storage record this host is.
+    pub(crate) const fn record_ref(self) -> ephervex_storage::RecordRef {
+        match self {
+            Self::Instance(id) => ephervex_storage::RecordRef::Client(id),
+            Self::Server(id) => ephervex_storage::RecordRef::Server(id),
+        }
+    }
+
     /// The side of the game whose entries of a recipe this host installs.
     pub(crate) const fn side(self) -> PackSide {
         match self {
@@ -1514,7 +1522,7 @@ impl App {
                 // The releases just fetched state what each mod requires. Kept,
                 // so refreshing the list leaves dependency questions answered
                 // exactly as an explicit dependency refresh would.
-                if let Some(_gate) = host_recipe_gate::hold(host, cancel).await {
+                if let Some(_gate) = host_recipe_gate::hold(self.registry(), host, cancel).await {
                     if let Err(error) = self.record_declared_relations(
                         host,
                         details
@@ -1661,7 +1669,7 @@ impl App {
         }
         // Held from the read inside to the write, so a change made to this
         // host in the meantime is neither lost nor lost to it.
-        let Some(_gate) = host_recipe_gate::hold(host, cancel).await else {
+        let Some(_gate) = host_recipe_gate::hold(self.registry(), host, cancel).await else {
             return;
         };
         record_identified(&layout.root, &adopted);

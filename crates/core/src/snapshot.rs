@@ -434,21 +434,20 @@ impl App {
         // Held until the restore is finished, rolled back, or abandoned: it
         // keeps a move from carrying the host away mid-restore and tells
         // reconciliation in another launcher that this restore is running.
-        let _claim = self
-            .registry()
-            .claim_host(match host {
-                InstalledHost::Instance(id) => ephervex_storage::RecordRef::Client(id),
-                InstalledHost::Server(id) => ephervex_storage::RecordRef::Server(id),
-            })
-            .map_err(|error| match error {
-                ephervex_storage::RegistryError::HostBusy { path } => {
-                    SnapshotError::HostBusy { path }
-                }
-                other => snapshot_core_error(crate::CoreError::from(other)),
-            })?;
+        let _claim =
+            self.registry()
+                .claim_host(host.record_ref())
+                .map_err(|error| match error {
+                    ephervex_storage::RegistryError::HostBusy { path } => {
+                        SnapshotError::HostBusy { path }
+                    }
+                    other => snapshot_core_error(crate::CoreError::from(other)),
+                })?;
         // The restore replaces the recipe wholesale, so a background write
         // that read the previous one must not land on top of it.
-        let _gate = crate::host_recipe_gate::hold_blocking(host);
+        let _gate =
+            crate::host_recipe_gate::hold_blocking_for_change(self.registry(), host, cancel)
+                .map_err(snapshot_core_error)?;
         self.refuse_restore_during_isolation(host, owner)?;
         let layout = self.host_layout(host).map_err(snapshot_core_error)?;
         let snapshot = self.snapshot_directory(host, id)?;
@@ -962,6 +961,9 @@ enum SnapshotRestoreOwner {
 }
 
 fn snapshot_core_error(error: crate::CoreError) -> SnapshotError {
+    if error.is_cancellation() {
+        return SnapshotError::Canceled;
+    }
     let path = error
         .failing_path()
         .unwrap_or_else(|| PathBuf::from("snapshot host"));
@@ -1267,6 +1269,55 @@ mod tests {
             1,
             "refusal must happen before creating a safety snapshot"
         );
+    }
+
+    #[test]
+    fn a_restore_canceled_while_another_launcher_changes_the_recipe_is_reported_as_canceled() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let app = App::open_at(Paths::rooted_at(temporary.path())).expect("open app");
+        let client = app
+            .create_client_for_test(NewClient::new(
+                "busy client",
+                "1.21.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create client");
+        let host = InstalledHost::Instance(client.id);
+        let snapshot = app
+            .create_snapshot(
+                host,
+                "known good",
+                SnapshotOrigin::Manual,
+                &CancellationToken::new(),
+            )
+            .expect("create snapshot");
+        let other_launcher =
+            ephervex_storage::Registry::open_in_memory(Paths::rooted_at(temporary.path()))
+                .expect("registry");
+        let _recipe = other_launcher
+            .try_claim_recipe(host.record_ref())
+            .expect("try")
+            .expect("free");
+        let cancel = CancellationToken::new();
+        let canceler = std::thread::spawn({
+            let cancel = cancel.clone();
+            move || {
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                cancel.cancel();
+            }
+        });
+
+        let error = app
+            .restore_snapshot(
+                host,
+                snapshot.id,
+                SnapshotRestoreOptions::default(),
+                &cancel,
+            )
+            .expect_err("the recipe is being changed elsewhere");
+
+        canceler.join().expect("canceler finishes");
+        assert!(error.is_cancellation(), "{error:?}");
     }
 
     #[test]

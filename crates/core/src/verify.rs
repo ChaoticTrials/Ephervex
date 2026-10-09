@@ -450,7 +450,7 @@ impl App {
         self.refuse_repair(host)?;
         // Replacing files is a change to the host's mods, so it cannot overlap
         // an isolation session starting.
-        let _gate = crate::host_recipe_gate::hold_for_change(host, cancel).await?;
+        let _gate = crate::host_recipe_gate::hold_for_change(self.registry(), host, cancel).await?;
         self.refuse_repair(host)?;
         let layout = self.host_layout(host)?;
         let found = self.verify_host(host, reporter, cancel).await?;
@@ -590,7 +590,7 @@ impl App {
         host: InstalledHost,
         cancel: &CancellationToken,
     ) -> CoreResult<crate::host_recipe_gate::HostRecipeGate> {
-        let gate = crate::host_recipe_gate::hold_for_change(host, cancel).await?;
+        let gate = crate::host_recipe_gate::hold_for_change(self.registry(), host, cancel).await?;
         self.refuse_mod_change_during_isolation(host)?;
         Ok(gate)
     }
@@ -601,7 +601,7 @@ impl App {
         &self,
         host: InstalledHost,
     ) -> CoreResult<crate::host_recipe_gate::HostRecipeGate> {
-        let gate = crate::host_recipe_gate::hold_blocking(host);
+        let gate = crate::host_recipe_gate::hold_blocking(self.registry(), host)?;
         self.refuse_mod_change_during_isolation(host)?;
         Ok(gate)
     }

@@ -885,7 +885,7 @@ impl App {
             }
         }
 
-        let _gate = host_recipe_gate::hold_for_change(host, cancel).await?;
+        let _gate = host_recipe_gate::hold_for_change(self.registry(), host, cancel).await?;
         let recorded = self.record_declared_relations(
             host,
             answered.iter().map(|(catalog, answer)| (*catalog, answer)),
@@ -3095,7 +3095,7 @@ mod tests {
             .expect("loopback catalog");
         let store = SourceStore::new(ephervex_storage::metadata::source_dir(&root));
 
-        let gate = host_recipe_gate::hold(host, &CancellationToken::new())
+        let gate = host_recipe_gate::hold(app.registry(), host, &CancellationToken::new())
             .await
             .expect("the change holds the host");
         let mut changed = store.read_recipe().expect("recipe");
@@ -3154,10 +3154,11 @@ mod tests {
     /// afterwards for lack of a catalog, which is beside the point: only
     /// whether they respect the gate is asserted.
     async fn waits_for_the_host_gate<T>(
+        app: &App,
         host: InstalledHost,
         operation: impl std::future::Future<Output = T>,
     ) {
-        let gate = host_recipe_gate::hold(host, &CancellationToken::new())
+        let gate = host_recipe_gate::hold(app.registry(), host, &CancellationToken::new())
             .await
             .expect("the change holds the host");
         let mut operation = std::pin::pin!(operation);
@@ -3188,6 +3189,7 @@ mod tests {
         app.use_loopback_catalog(&catalog.uri())
             .expect("loopback catalog");
         waits_for_the_host_gate(
+            &app,
             host,
             Box::pin(async {
                 let _ = app
@@ -3211,6 +3213,7 @@ mod tests {
         app.use_loopback_catalog(&catalog.uri())
             .expect("loopback catalog");
         waits_for_the_host_gate(
+            &app,
             host,
             Box::pin(async {
                 let _ = app
@@ -3235,8 +3238,10 @@ mod tests {
 
         let change = std::thread::spawn({
             let released = std::sync::Arc::clone(&released);
+            let paths = app.paths().clone();
             move || {
-                let gate = host_recipe_gate::hold_blocking(host);
+                let other = App::open_at(paths).expect("open app");
+                let gate = host_recipe_gate::hold_blocking(other.registry(), host).expect("gate");
                 held_tx.send(()).expect("announce the change");
                 std::thread::sleep(std::time::Duration::from_millis(300));
                 released.store(true, std::sync::atomic::Ordering::SeqCst);

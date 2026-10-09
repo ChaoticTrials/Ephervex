@@ -106,8 +106,12 @@ are not refused; cancel restores the session's safety snapshot itself.
 A session starts under the host's recipe gate, and every change that holds the
 gate checks for a session again after taking it. A change that was already past
 its first check therefore either finishes before the session's safety snapshot
-is taken or is refused. The gate is process-wide, so this does not reach a
-second Ephervex process. The linked mod plan marks a server with a session as
+is taken or is refused. The gate holds across Ephervex processes: besides a
+process-wide slot it takes a per-host claim file under the launcher state
+directory, released by the kernel if its holder dies, so the command line and
+the desktop app changing one host's recipe take turns. A wait that cannot be
+canceled gives up after a few seconds behind another process instead of
+stalling a frontend. The linked mod plan marks a server with a session as
 blocked, so a confirmation never offers a change that applying would refuse.
 
 Deleting the safety snapshot is refused while its session is active. A session

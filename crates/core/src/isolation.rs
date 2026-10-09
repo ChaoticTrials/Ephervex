@@ -650,7 +650,8 @@ impl App {
         // Held until the session file exists, so a mod change either finishes
         // before the safety snapshot is taken or sees the session and is
         // refused. The wait ends if the caller cancels.
-        let _gate = crate::host_recipe_gate::hold_blocking_for_change(host, cancel)?;
+        let _gate =
+            crate::host_recipe_gate::hold_blocking_for_change(self.registry(), host, cancel)?;
         let path = self.isolation_path(host)?;
         if path.exists() {
             return Err(IsolationError::AlreadyActive { host: host.id() }.into());
@@ -1384,7 +1385,9 @@ mod tests {
     fn starting_a_session_waits_for_a_mod_change_in_progress() {
         let base = tempfile::tempdir().expect("temp dir");
         let (paths, host) = client_without_mods(base.path());
-        let change = crate::host_recipe_gate::hold_blocking(host);
+        let holder = App::open_at(paths.clone()).expect("open app");
+        let change =
+            crate::host_recipe_gate::hold_blocking(holder.registry(), host).expect("the gate");
 
         let starting = std::thread::spawn({
             let paths = paths.clone();
@@ -1414,7 +1417,9 @@ mod tests {
     fn starting_a_session_stops_waiting_for_a_mod_change_when_canceled() {
         let base = tempfile::tempdir().expect("temp dir");
         let (paths, host) = client_without_mods(base.path());
-        let _change = crate::host_recipe_gate::hold_blocking(host);
+        let holder = App::open_at(paths.clone()).expect("open app");
+        let _change =
+            crate::host_recipe_gate::hold_blocking(holder.registry(), host).expect("the gate");
         let cancel = CancellationToken::new();
 
         let starting = std::thread::spawn({
@@ -1453,6 +1458,6 @@ mod tests {
             })
         ));
         // The refusal released the gate it took.
-        drop(crate::host_recipe_gate::hold_blocking(host));
+        drop(crate::host_recipe_gate::hold_blocking(app.registry(), host).expect("the gate"));
     }
 }

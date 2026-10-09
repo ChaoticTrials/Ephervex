@@ -87,6 +87,10 @@ pub enum RegistryError {
     /// running.
     #[error("{path} is being changed by a snapshot restore or a move to another storage root")]
     HostBusy { path: PathBuf },
+    /// Another launcher process is changing this host's recipe and did not
+    /// finish within the time a caller that cannot be canceled waits.
+    #[error("{path} has a mod change in progress in another Ephervex process")]
+    RecipeBusy { path: PathBuf },
     /// The file that keeps changes to one host apart could not be used.
     #[error("the host guard at {path} could not be used")]
     HostGuardUnusable {
@@ -126,6 +130,7 @@ impl RegistryError {
             Self::RootOccupied { .. } => "error-registry-root-occupied",
             Self::RestoreUnfinished { .. } => "error-registry-restore-unfinished",
             Self::HostBusy { .. } => "error-registry-host-busy",
+            Self::RecipeBusy { .. } => "error-registry-recipe-busy",
             Self::HostGuardUnusable { .. } => "error-registry-host-guard-unusable",
             Self::RootMissing { .. } => "error-registry-root-missing",
             Self::Io { .. } => "error-paths-directory-creation",
@@ -1427,6 +1432,21 @@ impl std::fmt::Debug for HostClaim {
     }
 }
 
+/// One host's exclusive right to rewrite its recipe, in every launcher process.
+///
+/// A recipe is changed by reading it, working, and writing the whole of it
+/// back, so two launchers doing that at once lose whichever wrote first. The
+/// kernel drops the claim when its holder dies.
+pub struct RecipeClaim {
+    _guard: FileGuard,
+}
+
+impl std::fmt::Debug for RecipeClaim {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecipeClaim").finish_non_exhaustive()
+    }
+}
+
 /// What reconciliation learns by probing a host's claim.
 pub(crate) enum HostProbe {
     /// Nothing is changing the host; the claim is held until it is dropped.
@@ -1447,6 +1467,21 @@ impl Registry {
             RecordRef::Server(id) => self.server(id)?.root,
         };
         claim_host(&self.paths, host, &root)
+    }
+
+    /// Tries a host's recipe claim without waiting: `None` while a thread or
+    /// process holds it.
+    ///
+    /// Separate from [`Self::claim_host`], so a recipe change neither refuses
+    /// nor is refused by a restore or move that only needs the tree to stay put.
+    pub fn try_claim_recipe(&self, host: RecordRef) -> Result<Option<RecipeClaim>, RegistryError> {
+        match try_take_guard(&self.paths, &recipe_guard_name(host)) {
+            Ok(guard) => Ok(Some(RecipeClaim { _guard: guard })),
+            Err(GuardError::Busy { .. }) => Ok(None),
+            Err(GuardError::Unusable { path, source }) => {
+                Err(RegistryError::HostGuardUnusable { path, source })
+            }
+        }
     }
 
     /// Tries a host's claim without waiting.
@@ -1482,22 +1517,29 @@ fn claim_host(paths: &Paths, host: RecordRef, root: &Path) -> Result<HostClaim, 
 }
 
 fn try_claim_host(paths: &Paths, host: RecordRef) -> Result<FileGuard, GuardError> {
+    try_take_guard(paths, &host_guard_name(host))
+}
+
+fn try_take_guard(paths: &Paths, name: &str) -> Result<FileGuard, GuardError> {
     let directory = paths.move_guards_dir();
     std::fs::create_dir_all(&directory).map_err(|source| GuardError::Unusable {
         path: directory.clone(),
         source,
     })?;
-    FileGuard::take(
-        &directory,
-        &host_guard_name(host),
-        std::time::Duration::ZERO,
-    )
+    FileGuard::take(&directory, name, std::time::Duration::ZERO)
 }
 
 pub(crate) fn host_guard_name(host: RecordRef) -> String {
     match host {
         RecordRef::Client(id) => format!("client-{id}.guard"),
         RecordRef::Server(id) => format!("server-{id}.guard"),
+    }
+}
+
+fn recipe_guard_name(host: RecordRef) -> String {
+    match host {
+        RecordRef::Client(id) => format!("client-{id}.recipe.guard"),
+        RecordRef::Server(id) => format!("server-{id}.recipe.guard"),
     }
 }
 
@@ -2424,6 +2466,53 @@ mod tests {
 
         assert!(matches!(error, RegistryError::HostBusy { .. }));
         assert!(client.root.is_dir());
+    }
+
+    #[test]
+    fn a_recipe_claim_held_by_another_process_is_seen_and_released_with_it() {
+        use rustix::fs::{FlockOperation, flock};
+
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let host = RecordRef::Client(InstanceId::new());
+        let guards = registry.paths().move_guards_dir();
+        std::fs::create_dir_all(&guards).expect("guard directory");
+        // Through its own descriptor with no in-process claim, so only the
+        // kernel lock shows it, as another process would.
+        let other_process = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(guards.join(recipe_guard_name(host)))
+            .expect("open the guard");
+        flock(&other_process, FlockOperation::NonBlockingLockExclusive).expect("lock");
+
+        assert!(registry.try_claim_recipe(host).expect("try").is_none());
+
+        drop(other_process);
+        let claim = registry.try_claim_recipe(host).expect("try");
+        assert!(claim.is_some());
+        assert!(
+            registry.try_claim_recipe(host).expect("try").is_none(),
+            "one claim at a time within this process too"
+        );
+    }
+
+    #[test]
+    fn a_recipe_claim_does_not_block_a_restore_or_move_claim_of_the_same_host() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new("x", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        let _recipe = registry
+            .try_claim_recipe(RecordRef::Client(client.id))
+            .expect("try")
+            .expect("free");
+
+        registry
+            .claim_host(RecordRef::Client(client.id))
+            .expect("the tree claim is independent");
     }
 
     #[test]

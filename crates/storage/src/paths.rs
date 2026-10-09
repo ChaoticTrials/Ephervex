@@ -346,7 +346,8 @@ impl Paths {
     }
 
     /// `$XDG_STATE_HOME/ephervex/moves/`, holding one guard file per host a
-    /// snapshot restore or storage move has claimed.
+    /// snapshot restore or storage move has claimed, and one per host whose
+    /// recipe a change has claimed.
     #[must_use]
     pub(crate) fn move_guards_dir(&self) -> PathBuf {
         self.state.join("moves")

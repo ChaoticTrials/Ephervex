@@ -551,7 +551,11 @@ mod tests {
 
         let mut unchanged = plan(LoaderKind::Forge, Some("47.1.107"), "47.1.107");
         unchanged.instance = record.id;
-        let gate = crate::host_recipe_gate::hold_blocking(InstalledHost::Instance(record.id));
+        let gate = crate::host_recipe_gate::hold_blocking(
+            app.registry(),
+            InstalledHost::Instance(record.id),
+        )
+        .expect("the gate");
         let change = App::settle_unchanged_build(&record, unchanged, new.clone(), &gate)
             .expect("the request completes");
         drop(gate);

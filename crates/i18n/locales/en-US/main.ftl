@@ -247,6 +247,9 @@ error-registry-root-occupied = That instance directory already contains files.
 error-registry-host-busy = That instance or server is being restored from a snapshot or moved to another storage location.
 .action = Wait for the other change to finish, then try again.
 
+error-registry-recipe-busy = Another { app-name } window or command is still changing the mods of that instance or server.
+.action = Wait for it to finish, then try again.
+
 error-registry-restore-unfinished = That instance has an interrupted snapshot restore that has not been recovered yet.
 .action = Restart { app-name } so it can recover the restore, then try again.
 

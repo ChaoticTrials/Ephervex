@@ -946,6 +946,7 @@ fn registry_failing_path(error: &ephervex_storage::RegistryError) -> Option<Path
     match error {
         RegistryError::RootOccupied { path }
         | RegistryError::HostBusy { path }
+        | RegistryError::RecipeBusy { path }
         | RegistryError::RestoreUnfinished { path }
         | RegistryError::HostGuardUnusable { path, .. }
         | RegistryError::RootMissing { path }
