@@ -53,7 +53,7 @@ const config: Config = {
           items: [
             {label: 'Introduction', to: '/docs/v1/intro'},
             {label: 'Installation', to: '/docs/v1/install'},
-            {label: 'Interface tour', to: '/docs/v1/interface-screenshots'},
+            {label: 'Interface tour', to: '/docs/v1/interface-tour'},
           ],
         },
         {

@@ -103,7 +103,7 @@ export default function Home(): ReactNode {
               </article>
             </div>
             <div className={styles.showcaseLinks}>
-              <Link to="/docs/v1/interface-screenshots">Take the interface tour <span aria-hidden="true">→</span></Link>
+              <Link to="/docs/v1/interface-tour">Take the interface tour <span aria-hidden="true">→</span></Link>
               <Link to="/screenshots">Browse all screenshots <span aria-hidden="true">→</span></Link>
             </div>
           </div>

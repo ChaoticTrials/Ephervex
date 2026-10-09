@@ -88,6 +88,7 @@ In-progress work (the headless renderer uses mock time, so spinners and bars
 are deterministic):
 - [x] `import-modpack-running` (pending card, 57% bar, stage and item count)
 - [x] `activity-import-in-progress`
+- [x] `running-page` (one client and one server)
 - [x] `instance-launching` (Starting state plus a Launching Minecraft row)
 - [x] `server-starting`, `server-running`
 - [x] `diagnostics-working`
@@ -111,7 +112,6 @@ Hosts:
 - [x] `client-run-failure-notice`
 - [x] `server-console`, `server-properties` (EULA card), `server-crash-notice`
 - [x] `split-workspace` (client logs beside server console)
-- [ ] `running-page`, `activity-page`
 
 Settings:
 - [x] `settings-general` (theme, text sizes, trusted hosts)
@@ -146,7 +146,7 @@ Write only what ships. Each task page uses `Tabs` with `groupId="interface"`
 and `queryString="interface"` (GUI first, then CLI). GUI-only and CLI-only
 features show one tab or a short note.
 
-- [ ] Interface tour (replaces `interface-screenshots.mdx`)
+- [x] Interface tour
 - [ ] Accounts: offline and Microsoft, device code, session-only, keyring
 - [ ] Instances: temporary vs persistent, create, launch, duplicate, make
       persistent, delete, per-instance Java and memory, change loader build
@@ -223,7 +223,8 @@ easy to update, and capture screenshots late.
 - AppImage needs FUSE or `APPIMAGE_EXTRACT_AND_RUN=1`. glibc 2.35 baseline.
   Wayland sessions without XWayland are untested, and file drag and drop
   needs X11 or XWayland.
-- ARM (aarch64) is currently unsupported; support is deferred to a later release.
+- Ephervex runs on ARM (aarch64), but ARM launches have not been tested.
+  Minecraft also needs native libraries compatible with the selected version.
 
 ## 10. Verification before merging
 
