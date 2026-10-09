@@ -107,6 +107,13 @@ impl Allowance {
 const CENTRAL_HEADER_SIGNATURE: [u8; 4] = *b"PK\x01\x02";
 const CENTRAL_HEADER_FIXED_LEN: usize = 46;
 
+/// The ZIP64 end-of-central-directory record: its signature, the length of the
+/// fixed part `zip` reads in one call, and where the total entry count sits in
+/// it (a little-endian `u64`).
+const END_RECORD64_SIGNATURE: [u8; 4] = *b"PK\x06\x06";
+const END_RECORD64_FIXED_LEN: usize = 56;
+const END_RECORD64_ENTRY_COUNT: std::ops::Range<usize> = 32..40;
+
 /// Counts central directory headers as `zip` parses them and refuses further
 /// reads once the entry limit is crossed.
 ///
@@ -116,9 +123,16 @@ const CENTRAL_HEADER_FIXED_LEN: usize = 46;
 /// across every candidate and is disarmed once the archive is open, so entry
 /// contents are never counted. Only a read of exactly the fixed header length
 /// counts: `zip` also scans for the first header with larger buffered reads.
+///
+/// A ZIP64 end record is checked the same way, before any header is parsed:
+/// `zip` reserves room for the entry count it declares, and only the archive's
+/// own size bounds that number. A ZIP32 count is a `u16`, so the room it
+/// reserves is already small.
 #[derive(Debug)]
 struct HeaderBudget {
     allowed: u64,
+    /// Headers parsed so far, or the entry count a ZIP64 end record declared
+    /// when that is what crossed the limit.
     seen: AtomicU64,
     armed: AtomicBool,
     exceeded: AtomicBool,
@@ -147,6 +161,27 @@ impl HeaderBudget {
     fn refusal() -> io::Error {
         io::Error::other("the archive declares more entries than the entry-count limit allows")
     }
+
+    /// Looks at one read `zip` made, where `requested` is the buffer it offered.
+    fn observe(&self, read: &[u8], requested: usize) {
+        if !self.armed.load(Ordering::Relaxed) || read.len() != requested {
+            return;
+        }
+        if requested == CENTRAL_HEADER_FIXED_LEN && read.starts_with(&CENTRAL_HEADER_SIGNATURE) {
+            if self.seen.fetch_add(1, Ordering::Relaxed) >= self.allowed {
+                self.exceeded.store(true, Ordering::Relaxed);
+            }
+        } else if requested == END_RECORD64_FIXED_LEN && read.starts_with(&END_RECORD64_SIGNATURE) {
+            let declared = read
+                .get(END_RECORD64_ENTRY_COUNT)
+                .and_then(|field| <[u8; 8]>::try_from(field).ok())
+                .map_or(u64::MAX, u64::from_le_bytes);
+            if declared > self.allowed {
+                self.seen.store(declared, Ordering::Relaxed);
+                self.exceeded.store(true, Ordering::Relaxed);
+            }
+        }
+    }
 }
 
 /// The archive file as `zip` sees it, with [`HeaderBudget`] applied.
@@ -162,13 +197,8 @@ impl Read for BudgetedFile {
             return Err(HeaderBudget::refusal());
         }
         let read = self.file.read(buf)?;
-        if self.budget.armed.load(Ordering::Relaxed)
-            && read == CENTRAL_HEADER_FIXED_LEN
-            && buf.len() == CENTRAL_HEADER_FIXED_LEN
-            && buf[..CENTRAL_HEADER_SIGNATURE.len()] == CENTRAL_HEADER_SIGNATURE
-            && self.budget.seen.fetch_add(1, Ordering::Relaxed) >= self.budget.allowed
-        {
-            self.budget.exceeded.store(true, Ordering::Relaxed);
+        self.budget.observe(&buf[..read], buf.len());
+        if self.budget.exceeded.load(Ordering::Relaxed) {
             return Err(HeaderBudget::refusal());
         }
         Ok(read)
@@ -1292,6 +1322,93 @@ mod tests {
         )
         .expect("the limit itself is allowed");
         assert!(pack.contains("overrides/5.txt"));
+    }
+
+    /// Rewrites a ZIP32 archive so a ZIP64 end record declares `declared`
+    /// entries, over the same directory that really holds `real` of them.
+    fn declare_zip64_entry_count(path: &Path, real: u64, declared: u64) {
+        let mut bytes = std::fs::read(path).expect("read archive");
+        let end = bytes
+            .windows(4)
+            .rposition(|window| window == b"PK\x05\x06")
+            .expect("end record");
+        let directory_size = u64::from(u32::from_le_bytes(
+            bytes[end + 12..end + 16].try_into().expect("size field"),
+        ));
+        let directory_offset = u64::from(u32::from_le_bytes(
+            bytes[end + 16..end + 20].try_into().expect("offset field"),
+        ));
+        bytes.truncate(end);
+
+        let record_offset = bytes.len() as u64;
+        bytes.extend_from_slice(b"PK\x06\x06");
+        bytes.extend_from_slice(&44u64.to_le_bytes()); // record size
+        bytes.extend_from_slice(&45u16.to_le_bytes()); // made by
+        bytes.extend_from_slice(&45u16.to_le_bytes()); // needed to extract
+        bytes.extend_from_slice(&[0; 8]); // disk numbers
+        bytes.extend_from_slice(&real.min(declared).to_le_bytes()); // on this disk
+        bytes.extend_from_slice(&declared.to_le_bytes()); // in total
+        bytes.extend_from_slice(&directory_size.to_le_bytes());
+        bytes.extend_from_slice(&directory_offset.to_le_bytes());
+        bytes.extend_from_slice(b"PK\x06\x07");
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // disk with the record
+        bytes.extend_from_slice(&record_offset.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // disks
+        bytes.extend_from_slice(b"PK\x05\x06");
+        bytes.extend_from_slice(&[0; 4]); // disk numbers
+        bytes.extend_from_slice(&u16::MAX.to_le_bytes());
+        bytes.extend_from_slice(&u16::MAX.to_le_bytes());
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // comment length
+        std::fs::write(path, bytes).expect("rewrite archive");
+    }
+
+    #[test]
+    fn a_zip64_entry_count_over_the_limit_is_refused_before_any_header_is_parsed() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("declared.mrpack");
+        write_numbered_zip(&archive, 3);
+        declare_zip64_entry_count(&archive, 3, 1 << 40);
+
+        let (opened, declared) = headers_parsed_before_refusal(&archive, 10);
+        assert!(!opened, "an over-limit count must not open");
+        assert_eq!(declared, 1 << 40, "the declared count is what was refused");
+
+        let error = PackArchive::open(
+            &archive,
+            ExtractionLimits {
+                max_entries: 10,
+                ..ExtractionLimits::default()
+            },
+        )
+        .expect_err("must refuse");
+        assert!(matches!(
+            error,
+            PackError::LimitExceeded {
+                limit: "entry-count",
+                allowed: 10,
+                reached,
+            } if reached == 1 << 40
+        ));
+    }
+
+    #[test]
+    fn a_zip64_entry_count_at_the_limit_opens() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("zip64.mrpack");
+        write_numbered_zip(&archive, 3);
+        declare_zip64_entry_count(&archive, 3, 3);
+
+        let pack = PackArchive::open(
+            &archive,
+            ExtractionLimits {
+                max_entries: 3,
+                ..ExtractionLimits::default()
+            },
+        )
+        .expect("the limit itself is allowed");
+        assert!(pack.contains("overrides/2.txt"));
     }
 
     #[test]
