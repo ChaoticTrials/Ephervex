@@ -664,14 +664,15 @@ fn retire(
     Ok(())
 }
 
-/// A free name inside the retired directory.
+/// A free name inside the retired directory for a file about to be moved there.
 ///
 /// Two mutations can retire files with the same name, and one instance can have
 /// leftovers from an earlier one, so the name is made unique rather than
-/// assumed to be. The candidate is built from the file's own name only, which
-/// the recipe has already validated as a safe relative path.
-fn unique_retired_path(retired_dir: &Path, logical_path: &Path) -> PathBuf {
-    let name = logical_path
+/// assumed to be. The candidate is built from the final component of `path`
+/// only, so an untrusted directory part never reaches the retired directory.
+#[must_use]
+pub fn unique_retired_path(retired_dir: &Path, path: &Path) -> PathBuf {
+    let name = path
         .file_name()
         .map_or_else(|| PathBuf::from("retired"), PathBuf::from);
     let candidate = retired_dir.join(&name);
@@ -834,6 +835,25 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::*;
+
+    #[test]
+    fn a_retired_name_never_reuses_an_existing_leftover_or_follows_a_directory_part() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let retired = temporary.path();
+
+        let first = unique_retired_path(retired, Path::new("mods/a.jar"));
+        assert_eq!(first, retired.join("a.jar"));
+        std::fs::write(&first, b"first").expect("leftover");
+
+        let second = unique_retired_path(retired, Path::new("elsewhere/../a.jar"));
+        assert_eq!(second, retired.join("a.jar.1"));
+        std::fs::write(&second, b"second").expect("leftover");
+
+        assert_eq!(
+            unique_retired_path(retired, Path::new("a.jar")),
+            retired.join("a.jar.2")
+        );
+    }
 
     #[test]
     fn rollback_failures_are_returned_as_typed_recovery_issues() {

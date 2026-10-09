@@ -621,10 +621,9 @@ fn retire(
 
     let directory = ephervex_storage::metadata::retired_dir(&layout.root);
     std::fs::create_dir_all(&directory)?;
-    let name = present
-        .file_name()
-        .unwrap_or(std::ffi::OsStr::new("mod.jar"));
-    let destination = directory.join(name);
+    // A leftover from an interrupted mutation can sit under the same name, and
+    // is retained evidence that a repair must neither replace nor delete.
+    let destination = ephervex_pack::unique_retired_path(&directory, &present);
     std::fs::rename(&present, &destination)?;
     Ok(Some(Retired {
         from: present,
@@ -1076,6 +1075,87 @@ mod tests {
             b"a ja"
         );
         assert!(!mods.join("truncated.jar").exists());
+    }
+
+    #[tokio::test]
+    async fn a_repair_keeps_a_leftover_already_in_the_retired_directory() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, id, root) = instance(base.path());
+        let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+        let retired = ephervex_storage::metadata::retired_dir(&root);
+        std::fs::create_dir_all(&retired).expect("retired dir");
+        std::fs::write(retired.join("truncated.jar"), b"earlier leftover").expect("leftover");
+        seed_cache(&app);
+
+        let report = repair(&app, id).await.expect("repair");
+
+        assert!(report.is_complete(), "{report:?}");
+        assert_eq!(
+            std::fs::read(mods.join("truncated.jar")).expect("read"),
+            BODY
+        );
+        assert_eq!(
+            std::fs::read(retired.join("truncated.jar")).expect("the leftover survives"),
+            b"earlier leftover",
+            "a repair neither overwrites nor deletes evidence an earlier mutation left"
+        );
+        assert_eq!(
+            std::fs::read_dir(&retired).expect("scratch").count(),
+            1,
+            "only the earlier leftover remains; the repair's own copy is gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repair_of_a_turned_off_jar_keeps_a_leftover_under_its_name() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, id, root) = instance(base.path());
+        let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+        std::fs::rename(
+            mods.join("truncated.jar"),
+            mods.join("truncated.jar.disabled"),
+        )
+        .expect("disable");
+        let retired = ephervex_storage::metadata::retired_dir(&root);
+        std::fs::create_dir_all(&retired).expect("retired dir");
+        std::fs::write(retired.join("truncated.jar.disabled"), b"earlier leftover")
+            .expect("leftover");
+        seed_cache(&app);
+
+        let report = repair(&app, id).await.expect("repair");
+
+        assert!(report.is_complete(), "{report:?}");
+        assert_eq!(
+            std::fs::read(mods.join("truncated.jar.disabled")).expect("still turned off"),
+            BODY
+        );
+        assert_eq!(
+            std::fs::read(retired.join("truncated.jar.disabled")).expect("the leftover survives"),
+            b"earlier leftover"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_repair_restores_its_jar_and_keeps_a_leftover_under_the_same_name() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, id, root) = instance(base.path());
+        let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+        let retired = ephervex_storage::metadata::retired_dir(&root);
+        std::fs::create_dir_all(&retired).expect("retired dir");
+        std::fs::write(retired.join("truncated.jar"), b"earlier leftover").expect("leftover");
+
+        let report = repair(&app, id).await.expect("repair");
+
+        assert!(report.failed.contains(&PathBuf::from("mods/truncated.jar")));
+        assert!(report.recovery_issues.is_empty(), "{report:?}");
+        assert_eq!(
+            std::fs::read(mods.join("truncated.jar")).expect("back where it was"),
+            b"a ja"
+        );
+        assert_eq!(
+            std::fs::read(retired.join("truncated.jar")).expect("the leftover survives"),
+            b"earlier leftover"
+        );
     }
 
     #[tokio::test]

@@ -88,7 +88,7 @@ pub use managed::{
 };
 pub use mutate::{
     ManagedMutation, ManagedMutationReport, ManagedProject, MutationRecoveryAction,
-    MutationRecoveryIssue, ReplacedMod, mutate_managed, projected,
+    MutationRecoveryIssue, ReplacedMod, mutate_managed, projected, unique_retired_path,
 };
 pub use path::{RESERVED_METADATA_DIR, safe_file_name};
 pub use policy::PackPolicy;
