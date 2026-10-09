@@ -78,13 +78,13 @@ pub enum Command {
     SetFavoriteMinecraftVersions(Vec<String>),
     CancelOperation(String),
     /// Replace one instance's own Java and JVM settings. `None` on a field
-    /// restores the global one.
+    /// restores the global one. `jvm_args` is the typed argument line.
     SaveInstanceRuntime {
         instance: InstanceId,
         java: Option<PathBuf>,
         min_memory_mib: Option<u32>,
         max_memory_mib: Option<u32>,
-        jvm_args: Vec<String>,
+        jvm_args: String,
     },
     /// Turns pack-owned mod mutation on or off for one instance.
     SetAllowPackModVersionChanges {
@@ -2590,6 +2590,18 @@ fn run_worker(
                 {
                     continue;
                 }
+                // Text that cannot be read as one argument list is refused,
+                // never saved as some other reading of it.
+                let jvm_args = match crate::jvm_arguments::parse(&jvm_args) {
+                    Ok(arguments) => arguments,
+                    Err(error) => {
+                        let _ = events.send(Event::ModalError {
+                            scope: ModalScope::Anywhere,
+                            message: lookup(error.message_id()),
+                        });
+                        continue;
+                    }
+                };
                 let jvm = ephervex_model::JvmSettings {
                     min_memory_mib,
                     max_memory_mib,
@@ -8523,7 +8535,9 @@ fn instance_runtime_data(app: &App, instance: InstanceId) -> CoreResult<Instance
             .unwrap_or_default(),
         min_memory: number(jvm.and_then(|jvm| jvm.min_memory_mib)),
         max_memory: number(jvm.and_then(|jvm| jvm.max_memory_mib)),
-        jvm_args: jvm.map(|jvm| jvm.jvm_args.join(" ")).unwrap_or_default(),
+        jvm_args: jvm
+            .map(|jvm| crate::jvm_arguments::render(&jvm.jvm_args))
+            .unwrap_or_default(),
         pinned: record.java_override.is_some() || jvm.is_some(),
         global: localized_values(
             "gui-instance-runtime-global",

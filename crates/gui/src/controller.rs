@@ -5130,10 +5130,7 @@ fn register_instance_runtime_actions(ui: &AppWindow, commands: &Sender<Command>)
                 java: optional_path(&java),
                 min_memory_mib: optional_number(&min),
                 max_memory_mib: optional_number(&max),
-                // Split on whitespace: a JVM argument never contains one, and
-                // one field is easier to reason about than a list editor for
-                // something typed twice a year.
-                jvm_args: args.split_whitespace().map(ToOwned::to_owned).collect(),
+                jvm_args: args.to_string(),
             },
         );
     });
@@ -5148,7 +5145,7 @@ fn register_instance_runtime_actions(ui: &AppWindow, commands: &Sender<Command>)
                     java: None,
                     min_memory_mib: None,
                     max_memory_mib: None,
-                    jvm_args: Vec::new(),
+                    jvm_args: String::new(),
                 },
             );
         }

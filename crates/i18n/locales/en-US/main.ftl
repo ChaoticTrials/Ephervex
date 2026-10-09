@@ -2081,7 +2081,9 @@ gui-instance-runtime-detail = What this instance runs with. Anything left empty 
 gui-instance-runtime-inherited = Global setting
 gui-java-auto-selected = whichever runtime is selected
 gui-instance-jvm-args = Extra JVM arguments
-gui-instance-jvm-args-placeholder = Separated by spaces, for example -XX:+UseZGC
+gui-instance-jvm-args-placeholder = Separated by spaces, for example -XX:+UseZGC "-Dname=a b"
+gui-instance-jvm-args-unclosed-quote = The extra JVM arguments have a double quote that is never closed. To use a quote inside an argument, put the whole argument in double quotes and write \" for the quote.
+gui-instance-jvm-args-unsupported-escape = In the extra JVM arguments, a backslash inside double quotes must be followed by a double quote or another backslash. Write \\ for a single backslash.
 gui-instance-runtime-save = Save Runtime Settings
 gui-instance-runtime-clear = Follow Global Settings
 gui-instance-runtime-saved = Saved this instance's runtime settings.
