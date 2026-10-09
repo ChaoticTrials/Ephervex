@@ -381,55 +381,81 @@ impl App {
     /// does not have and nothing to say why.
     pub fn delete_mod_file(&self, host: InstalledHost, logical_path: &Path) -> CoreResult<()> {
         self.refuse_mod_change_during_isolation(host)?;
-        // Held until the record is forgotten, so a background write of the
-        // recipe cannot restore it or be lost to this one.
+        self.delete_mod_files_together(host, &[logical_path])
+    }
+
+    /// Deletes several mods' jars as one change that either happens whole or
+    /// not at all.
+    ///
+    /// Every path is checked before any file moves. The jars are then set
+    /// aside in the host's retired directory rather than removed, so a failure
+    /// partway through puts every one back, and only a batch that moved
+    /// everything forgets the adopted records and drops the set-aside copies.
+    /// A jar that cannot be put back stays in the retired directory, which
+    /// reconciliation reports.
+    pub(crate) fn delete_mod_files_together(
+        &self,
+        host: InstalledHost,
+        paths: &[&Path],
+    ) -> CoreResult<()> {
+        // Held until the records are forgotten, so a background write of the
+        // recipe cannot restore one or be lost to this one.
         let _gate = crate::host_recipe_gate::hold_blocking(host);
         let snapshot = self.host_mod_snapshot(host)?;
-        let entry = snapshot
-            .mods
-            .iter()
-            .find(|entry| entry.logical_path == logical_path)
-            .ok_or_else(|| CoreError::ModNotManaged {
-                path: logical_path.to_path_buf(),
-            })?;
-        let origin = entry.origin;
-        if !crate::mutation::ModMutability::of(entry).can_delete_file {
-            return Err(CoreError::ModNotHandPlaced {
-                path: logical_path.to_path_buf(),
-            });
+        let mut origins = Vec::with_capacity(paths.len());
+        for logical_path in paths {
+            let entry = snapshot
+                .mods
+                .iter()
+                .find(|entry| entry.logical_path == *logical_path)
+                .ok_or_else(|| CoreError::ModNotManaged {
+                    path: logical_path.to_path_buf(),
+                })?;
+            if !crate::mutation::ModMutability::of(entry).can_delete_file {
+                return Err(CoreError::ModNotHandPlaced {
+                    path: logical_path.to_path_buf(),
+                });
+            }
+            origins.push(entry.origin);
         }
 
         let layout = self.host_layout(host)?;
-        let installed = layout.game_dir.join(logical_path);
-        let disabled = disabled_path(&installed);
-        // Both spellings, because a jar the user turned off is still their jar
-        // and a deletion that left the disabled twin behind would put the row
-        // straight back on the next refresh.
-        for path in [&installed, &disabled] {
-            match std::fs::remove_file(path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(source) => {
-                    return Err(CoreError::ModFileNotDeleted {
-                        path: logical_path.to_path_buf(),
-                        source,
-                    });
-                }
+        let retired_dir = ephervex_storage::metadata::retired_dir(&layout.root);
+        let mut set_aside = Vec::new();
+        for logical_path in paths {
+            if let Err(error) = set_aside_jar(&layout, &retired_dir, logical_path, &mut set_aside) {
+                put_back(&mut set_aside);
+                return Err(error);
             }
         }
 
         // Only for a jar nothing else describes. A pack's declaration is what
         // makes its file restorable, so removing it here would turn a reversible
         // deletion into a permanent one.
-        if origin == ModOrigin::HandPlaced {
-            forget_adopted_record(&layout, logical_path);
+        let forgotten: Vec<&Path> = paths
+            .iter()
+            .zip(&origins)
+            .filter(|(_, origin)| **origin == ModOrigin::HandPlaced)
+            .map(|(path, _)| *path)
+            .collect();
+        forget_adopted_records(&layout, &forgotten);
+        for moved in &set_aside {
+            if let Err(error) = std::fs::remove_file(&moved.to) {
+                warn!(
+                    %error,
+                    path = %moved.to.display(),
+                    "a deleted mod is still in the instance's retired directory"
+                );
+            }
         }
-        info!(
-            host = %host.id(),
-            path = %logical_path.display(),
-            ?origin,
-            "deleted a mod's jar"
-        );
+        for (logical_path, origin) in paths.iter().zip(&origins) {
+            info!(
+                host = %host.id(),
+                path = %logical_path.display(),
+                ?origin,
+                "deleted a mod's jar"
+            );
+        }
         Ok(())
     }
 
@@ -501,21 +527,92 @@ impl App {
     }
 }
 
-/// Drops the recipe entry adoption wrote for a hand-placed jar, if there is one.
+/// Drops the recipe entries adoption wrote for hand-placed jars, if there are any.
 ///
-/// Best effort on purpose. The file is already gone, and a recipe that could not
-/// be rewritten is a stale record rather than a lost one: the next refresh finds
-/// no jar behind it and the list does not show it either way.
-fn forget_adopted_record(layout: &crate::mods::HostLayout, logical_path: &Path) {
+/// One write for all of them: each entry is forgotten from the same copy of the
+/// recipe, so a later write cannot bring back what an earlier one dropped.
+///
+/// Best effort on purpose. The files are already gone, and a recipe that could
+/// not be rewritten is a stale record rather than a lost one: the next refresh
+/// finds no jar behind it and the list does not show it either way.
+fn forget_adopted_records(layout: &crate::mods::HostLayout, logical_paths: &[&Path]) {
     let Some(mut recipe) = layout.recipe.clone() else {
         return;
     };
-    if !recipe.forget_hand_placed(logical_path) {
+    let mut forgot_any = false;
+    for logical_path in logical_paths {
+        forgot_any |= recipe.forget_hand_placed(logical_path);
+    }
+    if !forgot_any {
         return;
     }
     let store = SourceStore::new(ephervex_storage::metadata::source_dir(&layout.root));
     if let Err(error) = store.write_recipe(&recipe) {
         warn!(%error, "a deleted jar's record could not be dropped");
+    }
+}
+
+/// A jar moved into the retired directory, and where it came from.
+struct SetAside {
+    from: PathBuf,
+    to: PathBuf,
+}
+
+/// Moves both spellings of a mod's jar into the retired directory.
+///
+/// Both, because a jar the user turned off is still their jar and a deletion
+/// that left the disabled twin behind would put the row straight back on the
+/// next refresh. A spelling that is not there is skipped; one that is not a
+/// file is a refusal rather than something to move.
+fn set_aside_jar(
+    layout: &crate::mods::HostLayout,
+    retired_dir: &Path,
+    logical_path: &Path,
+    set_aside: &mut Vec<SetAside>,
+) -> CoreResult<()> {
+    let failed = |source: std::io::Error| CoreError::ModFileNotDeleted {
+        path: logical_path.to_path_buf(),
+        source,
+    };
+    let installed = layout.game_dir.join(logical_path);
+    let disabled = disabled_path(&installed);
+    for from in [installed, disabled] {
+        match std::fs::symlink_metadata(&from) {
+            Ok(metadata) if metadata.is_dir() => {
+                return Err(failed(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "a directory stands where the jar should be",
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(failed(error)),
+        }
+        std::fs::create_dir_all(retired_dir).map_err(failed)?;
+        // A leftover from an interrupted change can sit under the same name,
+        // and is retained evidence that a deletion must neither replace nor
+        // delete.
+        let to = ephervex_pack::unique_retired_path(retired_dir, &from);
+        std::fs::rename(&from, &to).map_err(failed)?;
+        set_aside.push(SetAside { from, to });
+    }
+    Ok(())
+}
+
+/// Puts every jar a failed batch set aside back where it was, newest first.
+///
+/// The deletion has already failed by the time this runs, so a jar that cannot
+/// come back is logged and left in the retired directory, where reconciliation
+/// reports it, rather than replacing the error that matters.
+fn put_back(set_aside: &mut Vec<SetAside>) {
+    while let Some(moved) = set_aside.pop() {
+        if let Err(error) = std::fs::rename(&moved.to, &moved.from) {
+            warn!(
+                %error,
+                path = %moved.from.display(),
+                "a mod set aside by a failed deletion could not be put back"
+            );
+        }
     }
 }
 
@@ -1013,5 +1110,87 @@ mod tests {
                 .is_empty(),
             "and no row comes back"
         );
+    }
+
+    #[test]
+    fn deleting_several_jars_added_by_hand_forgets_every_record() {
+        // Each record is dropped from the same copy of the recipe, so the last
+        // write cannot bring back what an earlier one forgot.
+        let host = fixture();
+        for name in ["first.jar", "second.jar"] {
+            std::fs::write(host.mods_dir.join(name), b"jar").expect("jar");
+            record_mod_appending(&host, name, ModOrigin::HandPlaced);
+        }
+
+        host.app
+            .delete_mod_files(
+                host.host,
+                &[
+                    PathBuf::from("mods/first.jar"),
+                    PathBuf::from("mods/second.jar"),
+                ],
+            )
+            .expect("delete");
+
+        assert!(names_in(&host.mods_dir).is_empty());
+        let layout = host.app.host_layout(host.host).expect("layout");
+        assert!(
+            layout
+                .recipe
+                .expect("the recipe survives")
+                .recorded_mods()
+                .is_empty(),
+            "both records go with their files"
+        );
+    }
+
+    #[test]
+    fn a_failed_batch_delete_keeps_every_jar_and_its_adopted_record() {
+        let host = fixture();
+        for name in ["first.jar", "second.jar"] {
+            std::fs::write(host.mods_dir.join(name), b"jar").expect("jar");
+            record_mod_appending(&host, name, ModOrigin::HandPlaced);
+        }
+        // The second jar cannot be moved: a directory stands where its
+        // disabled spelling would be.
+        std::fs::create_dir(host.mods_dir.join("second.jar.disabled")).expect("directory");
+
+        let result = host.app.delete_mod_files(
+            host.host,
+            &[
+                PathBuf::from("mods/first.jar"),
+                PathBuf::from("mods/second.jar"),
+            ],
+        );
+
+        assert!(
+            matches!(result, Err(CoreError::ModFileNotDeleted { .. })),
+            "{result:?}"
+        );
+        assert!(host.mods_dir.join("first.jar").is_file());
+        assert!(host.mods_dir.join("second.jar").is_file());
+        let layout = host.app.host_layout(host.host).expect("layout");
+        assert_eq!(
+            layout.recipe.expect("recipe").recorded_mods().len(),
+            2,
+            "no record is forgotten for a batch that did not finish"
+        );
+    }
+
+    #[test]
+    fn a_batch_delete_refuses_before_moving_anything_when_one_path_is_not_deletable() {
+        let host = fixture();
+        std::fs::write(host.mods_dir.join("mine.jar"), b"jar").expect("jar");
+
+        let result = host.app.delete_mod_files(
+            host.host,
+            &[
+                PathBuf::from("mods/mine.jar"),
+                PathBuf::from("mods/nothing-here.jar"),
+            ],
+        );
+
+        assert!(matches!(result, Err(CoreError::ModNotManaged { .. })));
+        assert!(host.mods_dir.join("mine.jar").is_file());
     }
 }

@@ -1295,6 +1295,21 @@ impl App {
         logical_path: &Path,
         enabled: bool,
     ) -> CoreResult<ModPresence> {
+        self.toggle_mod_file_reporting_move(host, logical_path, enabled)
+            .map(|(presence, _moved)| presence)
+    }
+
+    /// [`Self::toggle_mod_file`], also saying whether a file was renamed.
+    ///
+    /// A batch that has to undo itself must put back only the renames it made;
+    /// reversing a toggle that found the mod already in place would change a
+    /// mod the batch never touched.
+    pub(crate) fn toggle_mod_file_reporting_move(
+        &self,
+        host: InstalledHost,
+        logical_path: &Path,
+        enabled: bool,
+    ) -> CoreResult<(ModPresence, bool)> {
         let layout = self.host_layout(host)?;
         let installed = layout.game_dir.join(logical_path);
         let disabled = disabled_path(&installed);
@@ -1306,11 +1321,7 @@ impl App {
         };
         if to.is_file() && !from.is_file() {
             // Already where it was asked to be.
-            return Ok(if enabled {
-                ModPresence::Installed
-            } else {
-                ModPresence::Disabled
-            });
+            return Ok((presence_after_toggle(enabled), false));
         }
         if !from.is_file() {
             return Err(CoreError::ModFileMissing {
@@ -1335,11 +1346,7 @@ impl App {
             enabled,
             "changed whether a mod loads"
         );
-        Ok(if enabled {
-            ModPresence::Installed
-        } else {
-            ModPresence::Disabled
-        })
+        Ok((presence_after_toggle(enabled), true))
     }
 
     /// Every mod this client instance has, from durable state alone.
@@ -2145,6 +2152,15 @@ pub(crate) const fn side_requirement(support: SideSupport) -> SideRequirement {
         SideSupport::Optional => SideRequirement::Optional,
         SideSupport::Unsupported => SideRequirement::Unsupported,
         SideSupport::Unknown => SideRequirement::Unknown,
+    }
+}
+
+/// Where a mod's presence ends up once it has been asked to be on or off.
+fn presence_after_toggle(enabled: bool) -> ModPresence {
+    if enabled {
+        ModPresence::Installed
+    } else {
+        ModPresence::Disabled
     }
 }
 

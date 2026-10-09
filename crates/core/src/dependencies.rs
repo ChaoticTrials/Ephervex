@@ -56,6 +56,17 @@ impl DependencyRefreshReport {
     }
 }
 
+/// Appends `position` to `order` after every position that has to precede it.
+fn visit(position: usize, before: &[Vec<usize>], seen: &mut [bool], order: &mut Vec<usize>) {
+    if std::mem::replace(&mut seen[position], true) {
+        return;
+    }
+    for first in &before[position] {
+        visit(*first, before, seen, order);
+    }
+    order.push(position);
+}
+
 /// How much is known about what one mod requires.
 ///
 /// Separate from what it requires, because "this mod needs nothing" and "nobody
@@ -705,14 +716,14 @@ impl App {
     /// Deletes several mods' jars in one call.
     ///
     /// Ordered exactly as a disable is, and for the same reason: what
-    /// everything needs goes last, so an interrupted run never leaves a mod
-    /// loading with its library already gone.
+    /// everything needs goes last, so nothing is ever reported deleted while
+    /// something that needs it is still loading.
     ///
     /// The set to pass is the one [`Self::dependents_of`] proves, which is what
     /// keeps deleting and disabling from ever disagreeing about consequences.
-    /// Each deletion is the same [`App::delete_mod_file`] the list offers, so
-    /// what each origin allows, and what record survives the file, is decided
-    /// in one place rather than two.
+    /// What each origin allows, and what record survives the file, is decided
+    /// in one place with [`App::delete_mod_file`], and the batch is all or
+    /// nothing: a jar that cannot be deleted puts back the ones already moved.
     pub fn delete_mod_files(
         &self,
         host: InstalledHost,
@@ -720,31 +731,28 @@ impl App {
     ) -> CoreResult<Vec<PathBuf>> {
         self.refuse_mod_change_during_isolation(host)?;
         let graph = ModGraph::build(self, host)?;
-        let mut ordered: Vec<&PathBuf> = paths.iter().collect();
-        ordered.sort_by_key(|path| {
-            graph
-                .index_of(path)
-                .map_or(0, |index| graph.dependents_of(index).len())
-        });
+        let ordered: Vec<&Path> = graph
+            .batch_order(paths.iter().map(PathBuf::as_path), false)
+            .into_iter()
+            .map(|position| paths[position].as_path())
+            .collect();
 
-        let mut deleted = Vec::with_capacity(ordered.len());
-        for path in ordered {
-            self.delete_mod_file(host, path)?;
-            deleted.push(path.clone());
-        }
-        Ok(deleted)
+        self.delete_mod_files_together(host, &ordered)?;
+        Ok(ordered.into_iter().map(Path::to_path_buf).collect())
     }
 
     /// Turns several mods on or off in one call.
     ///
     /// Ordered so that any prefix of it leaves a mod set the loader can start:
-    /// disables go dependents first, enables go dependencies first. A frontend
-    /// issuing one rename per row cannot promise that, and an operation that
-    /// dies halfway through a cascade would otherwise leave a dependency gone
-    /// and something that needs it still loading.
+    /// disables go dependents first, enables go dependencies first, and the
+    /// order counts a mod that is switched on or off by this very batch. A
+    /// frontend issuing one rename per row cannot promise that, and an
+    /// operation that dies halfway through a cascade would otherwise leave a
+    /// dependency gone and something that needs it still loading.
     ///
     /// Each change is the same rename [`App::set_mod_enabled`] performs, and is
-    /// idempotent for the same reason.
+    /// idempotent for the same reason. The batch is all or nothing: a rename
+    /// that fails puts back the ones already made.
     pub fn set_mods_enabled(
         &self,
         host: InstalledHost,
@@ -762,23 +770,56 @@ impl App {
         changes: &[(PathBuf, bool)],
     ) -> CoreResult<Vec<(PathBuf, ModPresence)>> {
         let graph = ModGraph::build(self, host)?;
-        let mut ordered: Vec<&(PathBuf, bool)> = changes.iter().collect();
-        ordered.sort_by_key(|(path, enabled)| {
-            let depth = graph
-                .index_of(path)
-                .map_or(0, |index| graph.dependents_of(index).len());
-            // Disabling: fewest dependents first, so what everything needs goes
-            // last and nothing loses what it needs while still loading.
-            // Enabling: the same order reversed, so nothing loads before what
-            // it needs.
-            if *enabled { usize::MAX - depth } else { depth }
-        });
+        // Disables first, so what a batch turns off stops loading before what
+        // it turns on starts to.
+        let mut ordered: Vec<&(PathBuf, bool)> = Vec::with_capacity(changes.len());
+        for enabling in [false, true] {
+            let group: Vec<&(PathBuf, bool)> = changes
+                .iter()
+                .filter(|(_, enabled)| *enabled == enabling)
+                .collect();
+            ordered.extend(
+                graph
+                    .batch_order(group.iter().map(|(path, _)| path.as_path()), enabling)
+                    .into_iter()
+                    .map(|position| group[position]),
+            );
+        }
 
         let mut applied = Vec::with_capacity(ordered.len());
+        let mut renamed: Vec<(&Path, bool)> = Vec::new();
         for (path, enabled) in ordered {
-            applied.push((path.clone(), self.toggle_mod_file(host, path, *enabled)?));
+            match self.toggle_mod_file_reporting_move(host, path, *enabled) {
+                Ok((presence, moved)) => {
+                    if moved {
+                        renamed.push((path, *enabled));
+                    }
+                    applied.push((path.clone(), presence));
+                }
+                Err(error) => {
+                    self.undo_mod_toggles(host, &renamed);
+                    return Err(error);
+                }
+            }
         }
         Ok(applied)
+    }
+
+    /// Reverses the renames of a batch that failed, newest first.
+    ///
+    /// A rename that cannot be reversed is logged and leaves that mod in the
+    /// state the batch gave it, which is a state the user can see and change;
+    /// it does not replace the failure that ended the batch.
+    fn undo_mod_toggles(&self, host: InstalledHost, renamed: &[(&Path, bool)]) {
+        for (path, enabled) in renamed.iter().rev() {
+            if let Err(error) = self.toggle_mod_file(host, path, !enabled) {
+                warn!(
+                    %error,
+                    path = %path.display(),
+                    "a mod toggled by a failed batch could not be put back"
+                );
+            }
+        }
     }
 
     /// Asks each catalog what this host's mods need, and records the answers.
@@ -1305,6 +1346,84 @@ impl ModGraph {
         self.entries
             .iter()
             .position(|entry| entry.mod_entry.logical_path == logical_path)
+    }
+
+    /// Every mod that `start` needs, transitively, loading or not.
+    fn requirements_of(&self, start: usize) -> BTreeSet<usize> {
+        let mut found = BTreeSet::new();
+        let mut frontier = vec![start];
+        while let Some(index) = frontier.pop() {
+            for candidate in 0..self.entries.len() {
+                if candidate != start
+                    && !found.contains(&candidate)
+                    && self.declares(index, candidate, ModRelationKind::Required)
+                {
+                    found.insert(candidate);
+                    frontier.push(candidate);
+                }
+            }
+        }
+        found
+    }
+
+    /// The order in which to apply a change to a batch of mods.
+    ///
+    /// Returns positions in `paths`. With `dependencies_first` a mod follows
+    /// everything in the batch that it needs, which is the order to turn mods
+    /// on in; without it a mod follows everything in the batch that needs it,
+    /// which is the order to turn them off or delete them in.
+    ///
+    /// The relation is the transitive closure of `Required` edges, and counts a
+    /// mod whether or not it is loading now, because a batch that enables a
+    /// mod and its library is the case where neither is loading yet. Mods the
+    /// batch does not relate keep the order they were given in, and a cycle of
+    /// requirements is broken at its first member in that order rather than
+    /// refused.
+    fn batch_order<'a>(
+        &self,
+        paths: impl IntoIterator<Item = &'a Path>,
+        dependencies_first: bool,
+    ) -> Vec<usize> {
+        let indices: Vec<Option<usize>> =
+            paths.into_iter().map(|path| self.index_of(path)).collect();
+        let needs: Vec<Vec<usize>> = indices
+            .iter()
+            .enumerate()
+            .map(|(position, index)| {
+                let Some(index) = index else {
+                    return Vec::new();
+                };
+                let required = self.requirements_of(*index);
+                indices
+                    .iter()
+                    .enumerate()
+                    .filter(|(other, other_index)| {
+                        *other != position
+                            && other_index
+                                .is_some_and(|other_index| required.contains(&other_index))
+                    })
+                    .map(|(other, _)| other)
+                    .collect()
+            })
+            .collect();
+        let before: Vec<Vec<usize>> = (0..indices.len())
+            .map(|position| {
+                if dependencies_first {
+                    needs[position].clone()
+                } else {
+                    (0..indices.len())
+                        .filter(|other| needs[*other].contains(&position))
+                        .collect()
+                }
+            })
+            .collect();
+
+        let mut seen = vec![false; indices.len()];
+        let mut order = Vec::with_capacity(indices.len());
+        for position in 0..indices.len() {
+            visit(position, &before, &mut seen, &mut order);
+        }
+        order
     }
 
     /// Whether this mod declares a relation of one kind on another mod.
@@ -2511,6 +2630,177 @@ mod tests {
             applied
                 .iter()
                 .all(|(_, presence)| *presence == ModPresence::Disabled)
+        );
+    }
+
+    fn turn_off_on_disk(root: &Path, jars: &[&str]) {
+        let mods = ephervex_storage::metadata::client_game_dir(root).join("mods");
+        for jar in jars {
+            std::fs::rename(mods.join(jar), mods.join(format!("{jar}.disabled")))
+                .expect("turn the jar off");
+        }
+    }
+
+    #[test]
+    fn a_batch_enable_turns_a_library_on_before_the_mod_that_needs_it_in_either_input_order() {
+        // Nothing that loads needs the library, so only the batch's own members
+        // can say which goes first.
+        for library_first in [true, false] {
+            let base = tempfile::tempdir().expect("temp dir");
+            let (app, instance, root) = library_and_its_dependents(base.path());
+            turn_off_on_disk(
+                &root,
+                &[
+                    "LibX.jar",
+                    "SkyblockBuilder.jar",
+                    "SkyGUIs.jar",
+                    "UtilitiX.jar",
+                ],
+            );
+            let mut changes = vec![
+                (PathBuf::from("mods/LibX.jar"), true),
+                (PathBuf::from("mods/SkyblockBuilder.jar"), true),
+            ];
+            if !library_first {
+                changes.reverse();
+            }
+
+            let applied = app
+                .set_mods_enabled(InstalledHost::Instance(instance), &changes)
+                .expect("batch");
+
+            let order: Vec<&str> = applied
+                .iter()
+                .map(|(path, _)| path.file_name().expect("name").to_str().expect("utf8"))
+                .collect();
+            assert_eq!(
+                order,
+                ["LibX.jar", "SkyblockBuilder.jar"],
+                "the library is on before what needs it (library listed first: {library_first})"
+            );
+        }
+    }
+
+    #[test]
+    fn a_batch_enable_orders_a_whole_chain_of_requirements_dependencies_first() {
+        // SkyGUIs needs Skyblock Builder, and both need the library.
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, instance, root) = library_and_its_dependents(base.path());
+        turn_off_on_disk(
+            &root,
+            &[
+                "LibX.jar",
+                "SkyblockBuilder.jar",
+                "SkyGUIs.jar",
+                "UtilitiX.jar",
+            ],
+        );
+
+        let applied = app
+            .set_mods_enabled(
+                InstalledHost::Instance(instance),
+                &[
+                    (PathBuf::from("mods/SkyGUIs.jar"), true),
+                    (PathBuf::from("mods/SkyblockBuilder.jar"), true),
+                    (PathBuf::from("mods/LibX.jar"), true),
+                ],
+            )
+            .expect("batch");
+
+        let order: Vec<&str> = applied
+            .iter()
+            .map(|(path, _)| path.file_name().expect("name").to_str().expect("utf8"))
+            .collect();
+        assert_eq!(order, ["LibX.jar", "SkyblockBuilder.jar", "SkyGUIs.jar"]);
+    }
+
+    #[test]
+    fn a_failed_batch_toggle_puts_back_the_renames_already_made() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, instance, root) = library_and_its_dependents(base.path());
+        let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+        // Both spellings of the library exist, so turning it off is refused.
+        std::fs::write(mods.join("LibX.jar.disabled"), b"twin").expect("twin");
+
+        let result = app.set_mods_enabled(
+            InstalledHost::Instance(instance),
+            &[
+                (PathBuf::from("mods/LibX.jar"), false),
+                (PathBuf::from("mods/SkyblockBuilder.jar"), false),
+                (PathBuf::from("mods/SkyGUIs.jar"), false),
+            ],
+        );
+
+        assert!(
+            matches!(result, Err(CoreError::ModSpellingOccupied { .. })),
+            "{result:?}"
+        );
+        for jar in ["LibX.jar", "SkyblockBuilder.jar", "SkyGUIs.jar"] {
+            assert!(mods.join(jar).is_file(), "{jar} is enabled again");
+        }
+        assert!(
+            !mods.join("SkyblockBuilder.jar.disabled").exists()
+                && !mods.join("SkyGUIs.jar.disabled").exists(),
+            "no half-applied spelling is left behind"
+        );
+    }
+
+    #[test]
+    fn a_failed_batch_toggle_does_not_change_a_mod_that_was_already_in_place() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, instance, root) = library_and_its_dependents(base.path());
+        let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+        turn_off_on_disk(&root, &["UtilitiX.jar"]);
+        std::fs::write(mods.join("LibX.jar.disabled"), b"twin").expect("twin");
+
+        let result = app.set_mods_enabled(
+            InstalledHost::Instance(instance),
+            &[
+                (PathBuf::from("mods/UtilitiX.jar"), false),
+                (PathBuf::from("mods/LibX.jar"), false),
+            ],
+        );
+
+        assert!(result.is_err());
+        assert!(
+            mods.join("UtilitiX.jar.disabled").is_file() && !mods.join("UtilitiX.jar").exists(),
+            "a mod the batch found already off stays off"
+        );
+    }
+
+    #[test]
+    fn a_failed_batch_delete_brings_back_every_jar_already_deleted() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, instance, root) = library_and_its_dependents(base.path());
+        let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+        // The last jar to go cannot be moved: a directory stands in the place
+        // of its disabled spelling.
+        std::fs::create_dir(mods.join("LibX.jar.disabled")).expect("directory");
+
+        let result = app.delete_mod_files(
+            InstalledHost::Instance(instance),
+            &[
+                PathBuf::from("mods/LibX.jar"),
+                PathBuf::from("mods/SkyblockBuilder.jar"),
+                PathBuf::from("mods/SkyGUIs.jar"),
+            ],
+        );
+
+        assert!(
+            matches!(result, Err(CoreError::ModFileNotDeleted { .. })),
+            "{result:?}"
+        );
+        for jar in ["LibX.jar", "SkyblockBuilder.jar", "SkyGUIs.jar"] {
+            assert!(mods.join(jar).is_file(), "{jar} is back");
+        }
+        let retired = ephervex_storage::metadata::retired_dir(&root);
+        assert!(
+            !retired.exists()
+                || std::fs::read_dir(&retired)
+                    .expect("retired")
+                    .next()
+                    .is_none(),
+            "nothing is left in the retired directory"
         );
     }
 
