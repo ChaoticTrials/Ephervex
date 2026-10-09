@@ -175,9 +175,13 @@ held by another process, or the incomplete marker is still present) holds the
 snapshot's copy of the metadata, which is never adopted or mirrored into the
 index. Canonical metadata whose storage class contradicts where the root stands
 is reported as unhealthy instead of written, because the next pass would
-otherwise forget the record. A server directory the index has lost gets the same
-treatment before it is indexed: its restore is recovered under the host's claim,
-and a root that is still unresolved is reported and left unindexed.
+otherwise forget the record. A server or persistent client directory the index
+has lost gets the same treatment before it is indexed: a root whose claim another
+process holds is skipped, its restore is recovered under the host's claim, and a
+root that is still unresolved is reported and left unindexed. A client root the
+index already points at is never reported as an unfinished directory, because
+the pass over the index has reconciled it. Only an unindexed root, or a copy that
+carries an indexed client's id, is reported as one.
 
 Reconciliation takes a host's claim before it reads the record, so it never acts
 on a record a finishing move has just changed, and a host found at its

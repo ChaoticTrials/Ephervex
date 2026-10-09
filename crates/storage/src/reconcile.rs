@@ -649,31 +649,12 @@ fn reindex_orphaned_clients(
             }
         };
 
-        // The marker is checked before the index, not after it. An interrupted
-        // duplication carries the *original's* `instance.json` until the copy
-        // finishes, so its id is already indexed; testing the index first would
-        // skip the one directory the marker was written for.
-        //
-        // An instance whose creation, import, or duplication never finished
-        // parses perfectly and is missing whatever the materialization had not
-        // written yet. Adopting it would present a half-built instance as a
-        // complete one, which is exactly what the marker exists to prevent.
-        // Reported and left alone -- never indexed, and never deleted on the
-        // user's behalf.
-        if metadata::is_incomplete(&directory) {
-            tracing::warn!(
-                instance_id = %record.id,
-                path = %directory.display(),
-                "an instance directory was never finished; leaving it unindexed"
-            );
-            report.unfinished_instances.push(ReconciledRecord {
-                reference: RecordRef::Client(record.id),
-                name: record.name.clone(),
-                root: directory.clone(),
-                storage: StorageClass::Persistent,
-            });
+        let entry = indexed.iter().find(|entry| entry.id == record.id);
+        let Some(record) =
+            settle_unfinished_client_root(registry, &directory, record, entry, report)
+        else {
             continue;
-        }
+        };
 
         discovered
             .entry(record.id)
@@ -730,6 +711,73 @@ fn reindex_orphaned_clients(
         });
     }
     Ok(())
+}
+
+/// Decides whether a client directory read from the persistent root can be
+/// considered for indexing, returning its metadata if so.
+///
+/// `indexed` is the index row for the directory's id, if any. A directory that
+/// is skipped or reported is never indexed.
+fn settle_unfinished_client_root(
+    registry: &Registry,
+    directory: &Path,
+    record: ClientRecord,
+    indexed: Option<&ClientRecord>,
+    report: &mut ReconciliationReport,
+) -> Option<ClientRecord> {
+    let marked = metadata::is_incomplete(directory);
+
+    // The pass over the index already reconciled this root, recovering its
+    // restore or reporting it, so a marker here is not an unfinished creation.
+    if marked && indexed.is_some_and(|entry| entry.root == directory) {
+        return None;
+    }
+
+    // The marker is checked before the index, not after it. An interrupted
+    // duplication carries the *original's* `instance.json` until the copy
+    // finishes, so its id is already indexed; testing the index first would
+    // skip the one directory the marker was written for.
+    //
+    // An instance whose creation, import, or duplication never finished
+    // parses perfectly and is missing whatever the materialization had not
+    // written yet. Adopting it would present a half-built instance as a
+    // complete one, which is exactly what the marker exists to prevent.
+    // Reported and left alone -- never indexed, and never deleted on the
+    // user's behalf.
+    if marked && indexed.is_some() {
+        tracing::warn!(
+            instance_id = %record.id,
+            path = %directory.display(),
+            "an instance directory was never finished; leaving it unindexed"
+        );
+        report.unfinished_instances.push(ReconciledRecord {
+            reference: RecordRef::Client(record.id),
+            name: record.name,
+            root: directory.to_path_buf(),
+            storage: StorageClass::Persistent,
+        });
+        return None;
+    }
+
+    // A root the index does not know may be a restore's. The marker is also an
+    // interrupted creation's, so recovery is only the first step: the root is
+    // reported unless nothing is left unresolved afterward.
+    if indexed.is_none() && (marked || has_interrupted_state(directory)) {
+        // A restore still running holds the host's claim and owns the files; one
+        // that was abandoned is recovered before anything is read from them.
+        let probe = registry.probe_host(RecordRef::Client(record.id));
+        if matches!(probe, HostProbe::Mutating) {
+            return None;
+        }
+        return resolve_orphaned_client(
+            record.id,
+            directory,
+            record.name,
+            matches!(probe, HostProbe::Idle(_)),
+            report,
+        );
+    }
+    Some(record)
 }
 
 fn reindex_orphaned_servers(
@@ -865,14 +913,7 @@ fn resolve_orphaned_server(
         root: directory.to_path_buf(),
         storage: StorageClass::Persistent,
     };
-    let recovery = if idle {
-        recover_restore_state(directory, &entry, report)
-    } else if metadata::is_incomplete(directory) || has_interrupted_state(directory) {
-        RestoreRecovery::Unknown
-    } else {
-        // The claim could not be tried, but there is no restore to recover.
-        RestoreRecovery::Nothing
-    };
+    let recovery = recover_orphaned_restore(directory, idle, &entry, report);
 
     let Some(record) = metadata::read_server_metadata(directory)
         .ok()
@@ -888,6 +929,71 @@ fn resolve_orphaned_server(
             server_id = %id,
             path = %directory.display(),
             "a server directory has an unresolved restore or was never finished; leaving it unindexed"
+        );
+        report.unfinished_instances.push(ReconciledRecord {
+            name: record.name,
+            ..entry
+        });
+        return None;
+    }
+    Some(record)
+}
+
+/// Recovers the restore of a host root the index has lost, when its claim is
+/// held by the caller (`idle`). Without the claim a restore cannot be told
+/// from an abandoned one, so any restore state is left alone and reported as
+/// unknown.
+fn recover_orphaned_restore(
+    root: &Path,
+    idle: bool,
+    entry: &ReconciledRecord,
+    report: &mut ReconciliationReport,
+) -> RestoreRecovery {
+    if idle {
+        recover_restore_state(root, entry, report)
+    } else if metadata::is_incomplete(root) || has_interrupted_state(root) {
+        RestoreRecovery::Unknown
+    } else {
+        // The claim could not be tried, but there is no restore to recover.
+        RestoreRecovery::Nothing
+    }
+}
+
+/// Recovers the restore of a client directory the index has lost and returns
+/// its canonical metadata, or reports the directory and returns nothing.
+///
+/// Like [`resolve_orphaned_server`], recovery rewrites canonical metadata, so
+/// it is read again afterward, and a root whose restore is unresolved is
+/// reported and left unindexed.
+fn resolve_orphaned_client(
+    id: InstanceId,
+    directory: &Path,
+    name: String,
+    idle: bool,
+    report: &mut ReconciliationReport,
+) -> Option<ClientRecord> {
+    let entry = ReconciledRecord {
+        reference: RecordRef::Client(id),
+        name,
+        root: directory.to_path_buf(),
+        storage: StorageClass::Persistent,
+    };
+    let recovery = recover_orphaned_restore(directory, idle, &entry, report);
+
+    let Some(record) = metadata::read_client_metadata(directory)
+        .ok()
+        .filter(|record| record.id == id)
+    else {
+        report.persistence_unhealthy.push(entry);
+        return None;
+    };
+    if matches!(recovery, RestoreRecovery::Failed | RestoreRecovery::Unknown)
+        || metadata::is_incomplete(directory)
+    {
+        tracing::warn!(
+            instance_id = %id,
+            path = %directory.display(),
+            "an instance directory has an unresolved restore or was never finished; leaving it unindexed"
         );
         report.unfinished_instances.push(ReconciledRecord {
             name: record.name,
@@ -2019,9 +2125,10 @@ mod tests {
         std::fs::create_dir_all(journal.parent().expect("parent")).expect("staging");
         std::fs::write(&journal, "not json").expect("journal");
 
-        reconcile(&registry).expect("first");
+        let report = reconcile(&registry).expect("first");
         reconcile(&registry).expect("second");
 
+        assert!(report.unfinished_instances.is_empty());
         let kept = registry.client(client.id).expect("the record survives");
         assert_eq!(kept.storage, StorageClass::Persistent);
         assert_eq!(kept.root, client.root);
@@ -2265,6 +2372,7 @@ mod tests {
 
         assert!(report.restores_rolled_back.is_empty());
         assert!(report.interrupted_hosts.is_empty());
+        assert!(report.unfinished_instances.is_empty());
         assert_eq!(std::fs::read(game.join("state")).unwrap(), b"restored");
         transaction.finish().expect("the restore still finishes");
     }
@@ -2462,6 +2570,196 @@ mod tests {
 
         drop(other_process);
         transaction.finish().expect("the restore still finishes");
+    }
+
+    /// Publishes a restore of the client's canonical metadata that replaces it
+    /// with `replacement` and is never finished, as a crash would leave it.
+    fn leave_client_restore_unfinished(
+        environment: &TestEnvironment,
+        client: &ClientRecord,
+        replacement: &ClientRecord,
+    ) -> crate::restore::RestoreTransaction {
+        use crate::restore::{RestorePart, RestorePartState, prepare_restore};
+
+        let transaction = prepare_restore(
+            &client.root,
+            ephervex_model::SnapshotId::new(),
+            vec![RestorePartState {
+                part: RestorePart::ClientMetadata,
+                original_present: true,
+                replacement_present: true,
+            }],
+        )
+        .unwrap();
+        let scratch = environment.base().join("snapshot-copy");
+        metadata::write_client_metadata(&scratch, replacement).unwrap();
+        let incoming = transaction.incoming_path(RestorePart::ClientMetadata);
+        std::fs::create_dir_all(incoming.parent().unwrap()).unwrap();
+        std::fs::copy(metadata::client_metadata_path(&scratch), &incoming).unwrap();
+        transaction.publish().unwrap();
+        transaction
+    }
+
+    fn snapshot_copy_of_a_persistent_client(
+        registry: &Registry,
+        client: &ClientRecord,
+    ) -> ClientRecord {
+        let mut copy = client.clone();
+        copy.name = "snapshot copy".to_owned();
+        copy.storage = StorageClass::Temporary;
+        copy.root = registry
+            .paths()
+            .instance_root(StorageClass::Temporary, client.id);
+        copy
+    }
+
+    fn persistent_client(registry: &Registry, name: &str) -> ClientRecord {
+        registry
+            .create_published_client(
+                NewClient::new(name, "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(StorageClass::Persistent),
+            )
+            .expect("create")
+    }
+
+    #[test]
+    fn an_unindexed_client_with_an_interrupted_restore_is_rolled_back_before_it_is_indexed() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = persistent_client(&registry, "original");
+        let snapshot = snapshot_copy_of_a_persistent_client(&registry, &client);
+        let _transaction = leave_client_restore_unfinished(&environment, &client, &snapshot);
+        registry
+            .delete_client(client.id, FileDisposition::Keep)
+            .expect("lose the index row");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.restores_rolled_back.len(), 1);
+        assert_eq!(report.reindexed.len(), 1);
+        assert!(report.unfinished_instances.is_empty());
+        assert!(!metadata::is_incomplete(&client.root));
+        assert_eq!(
+            registry.client(client.id).expect("indexed").name,
+            "original"
+        );
+        assert_eq!(
+            metadata::read_client_metadata(&client.root)
+                .expect("metadata")
+                .name,
+            "original"
+        );
+    }
+
+    #[test]
+    fn an_unindexed_client_whose_restore_cannot_be_recovered_is_reported_and_left_unindexed() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = persistent_client(&registry, "original");
+        let snapshot = snapshot_copy_of_a_persistent_client(&registry, &client);
+        let transaction = leave_client_restore_unfinished(&environment, &client, &snapshot);
+        make_restore_unrecoverable(&transaction);
+        registry
+            .delete_client(client.id, FileDisposition::Keep)
+            .expect("lose the index row");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert!(report.reindexed.is_empty());
+        assert_eq!(report.unfinished_instances.len(), 1);
+        assert_eq!(
+            report.unfinished_instances[0].reference,
+            RecordRef::Client(client.id)
+        );
+        assert!(registry.client(client.id).is_err());
+        assert!(metadata::is_incomplete(&client.root));
+        assert_eq!(
+            metadata::read_client_metadata(&client.root)
+                .expect("metadata")
+                .name,
+            "snapshot copy",
+            "the root is left exactly as it was found"
+        );
+    }
+
+    #[test]
+    fn an_unindexed_client_a_restore_in_another_process_holds_is_skipped() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = persistent_client(&registry, "original");
+        let snapshot = snapshot_copy_of_a_persistent_client(&registry, &client);
+        let other_process = hold_as_another_process(&registry, RecordRef::Client(client.id));
+        let transaction = leave_client_restore_unfinished(&environment, &client, &snapshot);
+        registry
+            .delete_client(client.id, FileDisposition::Keep)
+            .expect("lose the index row");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert!(report.is_empty());
+        assert!(registry.client(client.id).is_err());
+        assert!(metadata::is_incomplete(&client.root));
+
+        drop(other_process);
+        transaction.finish().expect("the restore still finishes");
+    }
+
+    #[test]
+    fn an_unindexed_client_never_finished_is_reported_when_its_claim_is_free() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = persistent_client(&registry, "half built");
+        metadata::mark_incomplete(&client.root).expect("marker");
+        registry
+            .delete_client(client.id, FileDisposition::Keep)
+            .expect("lose the index row");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert!(report.reindexed.is_empty());
+        assert!(report.restores_rolled_back.is_empty());
+        assert_eq!(report.unfinished_instances.len(), 1);
+        assert!(registry.client(client.id).is_err());
+    }
+
+    #[test]
+    fn an_indexed_client_with_an_unrecovered_restore_is_not_an_unfinished_directory() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = persistent_client(&registry, "promoted");
+        let snapshot = snapshot_copy_of_a_persistent_client(&registry, &client);
+        let transaction = leave_client_restore_unfinished(&environment, &client, &snapshot);
+        make_restore_unrecoverable(&transaction);
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert!(
+            report.unfinished_instances.is_empty(),
+            "an indexed client is not an unindexed directory"
+        );
+        let kept = registry.client(client.id).expect("kept");
+        assert_eq!(kept.name, "promoted");
+        assert_eq!(kept.root, client.root);
+    }
+
+    #[test]
+    fn an_interrupted_duplicate_of_an_indexed_client_is_still_reported() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = persistent_client(&registry, "original");
+        let unfinished = registry
+            .paths()
+            .persistent_instances_dir()
+            .join("unfinished");
+        copy_client_metadata_to(&client, &unfinished);
+        metadata::mark_incomplete(&unfinished).expect("marker");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert!(report.client_conflicts.is_empty());
+        assert_eq!(report.unfinished_instances.len(), 1);
+        assert_eq!(report.unfinished_instances[0].root, unfinished);
+        assert_eq!(registry.client(client.id).expect("kept"), client);
     }
 
     #[test]
