@@ -252,7 +252,7 @@ pub struct App {
     /// The keyring a test build uses instead of Secret Service. Compiled only
     /// into a test build.
     #[cfg(test)]
-    pub(crate) test_keyring: Option<crate::account::TestKeyring>,
+    pub(crate) test_keyring: crate::account::TestKeyring,
 }
 
 impl App {
@@ -291,7 +291,7 @@ impl App {
             #[cfg(test)]
             loopback_http: false,
             #[cfg(test)]
-            test_keyring: None,
+            test_keyring: crate::account::TestKeyring::default(),
         })
     }
 
@@ -316,7 +316,7 @@ impl App {
             #[cfg(test)]
             loopback_http: false,
             #[cfg(test)]
-            test_keyring: None,
+            test_keyring: crate::account::TestKeyring::default(),
         })
     }
 

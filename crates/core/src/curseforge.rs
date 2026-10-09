@@ -42,6 +42,9 @@ enum Source {
     /// An explicit store. Used by tests, which must never touch the developer's
     /// own keyring.
     Explicit(Arc<dyn CredentialStore>),
+    /// The keyring a test `App` was given.
+    #[cfg(test)]
+    Test(crate::account::TestKeyring),
 }
 
 impl StoredApiKey {
@@ -66,6 +69,8 @@ impl fmt::Debug for StoredApiKey {
         formatter.write_str(match self.0 {
             Source::Keyring => "StoredApiKey(keyring)",
             Source::Explicit(_) => "StoredApiKey(explicit store)",
+            #[cfg(test)]
+            Source::Test(_) => "StoredApiKey(test keyring)",
         })
     }
 }
@@ -75,6 +80,8 @@ impl CurseForgeCredentialSource for StoredApiKey {
         resolve_key(match &self.0 {
             Source::Keyring => credential_store(),
             Source::Explicit(store) => Ok(Arc::clone(store)),
+            #[cfg(test)]
+            Source::Test(keyring) => keyring.open(),
         })
     }
 }
@@ -125,7 +132,11 @@ impl App {
         if let Some(api) = self.curseforge.get() {
             return Ok(api);
         }
-        let api = CurseForgeApi::new(Arc::new(StoredApiKey::in_keyring()), &self.http_config())?;
+        #[cfg(test)]
+        let key = StoredApiKey(Source::Test(self.test_keyring.clone()));
+        #[cfg(not(test))]
+        let key = StoredApiKey::in_keyring();
+        let api = CurseForgeApi::new(Arc::new(key), &self.http_config())?;
         Ok(self.curseforge.get_or_init(|| api))
     }
 
@@ -161,6 +172,22 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
+
+    #[test]
+    fn an_app_without_a_named_keyring_resolves_the_build_key_instead_of_opening_secret_storage() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = App::open_at(Paths::rooted_at(base.path())).expect("app opens");
+        let source = StoredApiKey(Source::Test(app.test_keyring.clone()));
+
+        let key = source
+            .api_key()
+            .expect("no secret storage is not a failure");
+
+        assert_eq!(
+            key.is_some(),
+            !ephervex_auth::DEFAULT_CURSEFORGE_API_KEY.is_empty()
+        );
+    }
 
     /// Obviously not a credential.
     const FAKE_KEY: &str = "test-curseforge-key-do-not-use";

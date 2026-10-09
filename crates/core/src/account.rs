@@ -292,7 +292,7 @@ impl App {
     /// Setting a key never contacts CurseForge: a user configuring the launcher
     /// offline must still be able to finish.
     pub fn set_curseforge_api_key(&self, key: &SecretString) -> CoreResult<()> {
-        let store = credential_store()?;
+        let store = self.keyring()?;
         Ok(ephervex_auth::set_curseforge_api_key(store.as_ref(), key)?)
     }
 
@@ -302,7 +302,7 @@ impl App {
     /// submitting an empty field - and so that it never needs the existing
     /// value.
     pub fn clear_curseforge_api_key(&self) -> CoreResult<()> {
-        let store = credential_store()?;
+        let store = self.keyring()?;
         Ok(ephervex_auth::clear_curseforge_api_key(store.as_ref())?)
     }
 
@@ -341,7 +341,7 @@ impl App {
     /// and a status command that hangs on a Microsoft outage is worse than no
     /// status command.
     pub fn account_status(&self) -> CoreResult<AccountStatus> {
-        let store = credential_store().ok();
+        let store = self.keyring().ok();
         let storage = store.as_ref().map(|store| store.storage());
         let default = self.config().active_account();
 
@@ -779,8 +779,8 @@ impl App {
         &self,
         allow_session_only: bool,
     ) -> CoreResult<MicrosoftAccountProvider> {
-        let store: Arc<dyn CredentialStore> = match KeyringStore::open() {
-            Ok(keyring) => Arc::new(keyring),
+        let store: Arc<dyn CredentialStore> = match self.keyring() {
+            Ok(keyring) => keyring,
             Err(error) if allow_session_only => {
                 warn!(%error, "signing in for this session only; no secure storage is available");
                 Arc::new(MemoryStore::new())
@@ -814,24 +814,18 @@ impl App {
     }
 
     /// The persistent keyring, or why it cannot be reached.
-    #[cfg_attr(
-        not(test),
-        expect(
-            clippy::unused_self,
-            reason = "a test build reads its keyring from the App"
-        )
+    #[cfg(test)]
+    fn keyring(&self) -> Result<Arc<dyn CredentialStore>, AuthError> {
+        self.test_keyring.open()
+    }
+
+    /// The persistent keyring, or why it cannot be reached.
+    #[cfg(not(test))]
+    #[expect(
+        clippy::unused_self,
+        reason = "a test build reads its keyring from the App"
     )]
     fn keyring(&self) -> Result<Arc<dyn CredentialStore>, AuthError> {
-        #[cfg(test)]
-        match &self.test_keyring {
-            Some(TestKeyring::Store(store)) => return Ok(Arc::clone(store)),
-            Some(TestKeyring::Unreachable) => {
-                return Err(AuthError::SecretStorageUnavailable {
-                    detail: "no keyring in this test".to_owned(),
-                });
-            }
-            None => {}
-        }
         credential_store()
     }
 
@@ -1042,11 +1036,27 @@ impl App {
 }
 
 /// The keyring a test build uses instead of Secret Service.
+///
+/// A test build never opens the desktop keyring: a test that needs stored
+/// credentials names the store, and every other test finds no secret storage.
 #[cfg(test)]
-#[derive(Debug)]
+#[derive(Debug, Clone, Default)]
 pub(crate) enum TestKeyring {
+    #[default]
     Unreachable,
     Store(Arc<dyn CredentialStore>),
+}
+
+#[cfg(test)]
+impl TestKeyring {
+    pub(crate) fn open(&self) -> Result<Arc<dyn CredentialStore>, AuthError> {
+        match self {
+            Self::Store(store) => Ok(Arc::clone(store)),
+            Self::Unreachable => Err(AuthError::SecretStorageUnavailable {
+                detail: "no keyring in this test".to_owned(),
+            }),
+        }
+    }
 }
 
 /// The credential store, when Secret Service answers.
@@ -1194,7 +1204,7 @@ mod tests {
                 std::fs::create_dir_all(&blocked).expect("block");
             }),
         });
-        app.test_keyring = Some(TestKeyring::Store(store.clone()));
+        app.test_keyring = TestKeyring::Store(store.clone());
         let provider = provider_over(store.clone());
 
         app.adopt_login(&provider, login_with(id, "refresh"))
@@ -1211,7 +1221,7 @@ mod tests {
         let id = Uuid::new_v4();
         remember_microsoft_account(&mut app, id);
         let store = keyring_holding(id);
-        app.test_keyring = Some(TestKeyring::Store(store.clone()));
+        app.test_keyring = TestKeyring::Store(store.clone());
         block_configuration_writes(&app);
 
         app.adopt_login(&provider_over(store.clone()), login_with(id, "newer"))
@@ -1227,7 +1237,7 @@ mod tests {
         let mut app = app_rooted_at(base.path());
         let id = Uuid::new_v4();
         let store = Arc::new(MemoryStore::new());
-        app.test_keyring = Some(TestKeyring::Store(store.clone()));
+        app.test_keyring = TestKeyring::Store(store.clone());
         // A directory where the file belongs can neither be read nor written.
         std::fs::create_dir_all(app.paths().config_file()).expect("block the file");
 
@@ -1260,7 +1270,7 @@ mod tests {
                 }
             }),
         });
-        app.test_keyring = Some(TestKeyring::Store(store.clone()));
+        app.test_keyring = TestKeyring::Store(store.clone());
 
         app.adopt_login(&provider_over(store.clone()), login_with(id, "refresh"))
             .expect("recorded");
@@ -1312,7 +1322,7 @@ mod tests {
             .expect("seed");
         app.mutate_config(|config| config.record_keyring_cleanup(&id.to_string()))
             .expect("pending cleanup");
-        app.test_keyring = Some(TestKeyring::Store(store.clone()));
+        app.test_keyring = TestKeyring::Store(store.clone());
 
         app.adopt_login(&provider_over(store.clone()), login_with(id, "refresh"))
             .expect_err("the keyring refuses the credential");
@@ -1334,7 +1344,7 @@ mod tests {
         let store = keyring_holding(id);
         app.mutate_config(|config| config.record_keyring_cleanup(&id.to_string()))
             .expect("intent");
-        app.test_keyring = Some(TestKeyring::Store(store.clone()));
+        app.test_keyring = TestKeyring::Store(store.clone());
 
         app.finish_keyring_cleanup();
 
@@ -1348,7 +1358,7 @@ mod tests {
         let mut app = app_rooted_at(base.path());
         let id = Uuid::new_v4();
         let store = Arc::new(MemoryStore::new());
-        app.test_keyring = Some(TestKeyring::Store(store.clone()));
+        app.test_keyring = TestKeyring::Store(store.clone());
         block_configuration_writes(&app);
 
         let login = Login::new(microsoft_session(id), None);
@@ -1381,7 +1391,7 @@ mod tests {
             let root = base.path().to_path_buf();
             move || {
                 let mut app = app_rooted_at(&root);
-                app.test_keyring = Some(TestKeyring::Store(store.clone()));
+                app.test_keyring = TestKeyring::Store(store.clone());
                 app.adopt_login(&provider_over(store), login_with(id, "refresh"))
                     .map(|_| ())
             }
@@ -1395,7 +1405,7 @@ mod tests {
             let root = base.path().to_path_buf();
             move || {
                 let mut app = app_rooted_at(&root);
-                app.test_keyring = Some(TestKeyring::Store(store));
+                app.test_keyring = TestKeyring::Store(store);
                 app.remove_account(&id.to_string()).map(|_| ())
             }
         });
@@ -1426,7 +1436,7 @@ mod tests {
             let root = base.path().to_path_buf();
             move || {
                 let mut app = app_rooted_at(&root);
-                app.test_keyring = Some(TestKeyring::Store(store));
+                app.test_keyring = TestKeyring::Store(store);
                 app.remove_account(&id.to_string()).map(|_| ())
             }
         });
@@ -1447,11 +1457,11 @@ mod tests {
             .mutate_config(|config| config.record_keyring_cleanup(&id.to_string()))
             .expect("record the earlier removal's cleanup");
         let store = Arc::new(MemoryStore::new());
-        stale.test_keyring = Some(TestKeyring::Store(store.clone()));
+        stale.test_keyring = TestKeyring::Store(store.clone());
 
         // Another window signs the same account in again, which clears the entry.
         let mut other = app_rooted_at(base.path());
-        other.test_keyring = Some(TestKeyring::Store(store.clone()));
+        other.test_keyring = TestKeyring::Store(store.clone());
         other
             .adopt_login(&provider_over(store.clone()), login_with(id, "fresh"))
             .expect("recorded");
@@ -1477,7 +1487,7 @@ mod tests {
             let root = base.path().to_path_buf();
             move || {
                 let mut app = app_rooted_at(&root);
-                app.test_keyring = Some(TestKeyring::Store(store.clone()));
+                app.test_keyring = TestKeyring::Store(store.clone());
                 app.adopt_login(&provider_over(store), login_with(id, "second"))
                     .map(|_| ())
             }
@@ -1510,11 +1520,11 @@ mod tests {
         let id = Uuid::new_v4();
         remember_microsoft_account(&mut resuming, id);
         let store = keyring_holding(id);
-        resuming.test_keyring = Some(TestKeyring::Store(store.clone()));
+        resuming.test_keyring = TestKeyring::Store(store.clone());
 
         // The removal runs in another `App` after the resume's last check.
         let mut removing = app_rooted_at(base.path());
-        removing.test_keyring = Some(TestKeyring::Store(store.clone()));
+        removing.test_keyring = TestKeyring::Store(store.clone());
         removing.remove_account(&id.to_string()).expect("removed");
 
         let error = resuming
@@ -1551,7 +1561,7 @@ mod tests {
         let mut app = app_rooted_at(base.path());
         let id = Uuid::new_v4();
         remember_microsoft_account(&mut app, id);
-        app.test_keyring = Some(TestKeyring::Unreachable);
+        app.test_keyring = TestKeyring::Unreachable;
 
         app.remove_account(&id.to_string()).expect("removed");
 
@@ -1566,7 +1576,7 @@ mod tests {
         let mut app = app_rooted_at(base.path());
         let id = Uuid::new_v4();
         remember_microsoft_account(&mut app, id);
-        app.test_keyring = Some(TestKeyring::Unreachable);
+        app.test_keyring = TestKeyring::Unreachable;
         app.remove_account(&id.to_string()).expect("removed");
 
         let store = Arc::new(MemoryStore::new());
@@ -1574,7 +1584,7 @@ mod tests {
         store
             .store(&key, &SecretString::new("refresh".to_owned()))
             .expect("store");
-        app.test_keyring = Some(TestKeyring::Store(store.clone()));
+        app.test_keyring = TestKeyring::Store(store.clone());
         app.finish_keyring_cleanup();
 
         assert!(store.load(&key).expect("load").is_none());
@@ -1597,7 +1607,7 @@ mod tests {
         store
             .store(&key, &SecretString::new("refresh".to_owned()))
             .expect("store");
-        app.test_keyring = Some(TestKeyring::Store(store.clone()));
+        app.test_keyring = TestKeyring::Store(store.clone());
 
         app.remove_account(&id.to_string()).expect("removed");
 
@@ -1653,7 +1663,7 @@ mod tests {
     fn the_api_settings_report_the_build_key_on_a_machine_without_secret_storage() {
         let base = tempfile::tempdir().expect("temp dir");
         let mut app = app_rooted_at(base.path());
-        app.test_keyring = Some(TestKeyring::Unreachable);
+        app.test_keyring = TestKeyring::Unreachable;
 
         let settings = app.api_settings().expect("settings");
 
@@ -1665,6 +1675,44 @@ mod tests {
             } else {
                 CurseForgeKeyState::BuildDefault
             }
+        );
+    }
+
+    #[test]
+    fn an_app_with_no_named_keyring_finds_no_secret_storage_in_every_credential_entry_point() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let unreachable = |error: CoreError| {
+            matches!(
+                error,
+                CoreError::Auth(AuthError::SecretStorageUnavailable { ref detail })
+                    if detail == "no keyring in this test"
+            )
+        };
+
+        assert!(unreachable(
+            app.set_curseforge_api_key(&SecretString::new("key".to_owned()))
+                .expect_err("no keyring")
+        ));
+        assert!(unreachable(
+            app.clear_curseforge_api_key().expect_err("no keyring")
+        ));
+        assert!(unreachable(
+            app.build_account_provider(false)
+                .map(|_| ())
+                .expect_err("no keyring")
+        ));
+        assert!(
+            app.api_settings()
+                .expect("settings")
+                .credential_storage
+                .is_none()
+        );
+        assert!(
+            app.account_status()
+                .expect("status")
+                .credential_storage
+                .is_none()
         );
     }
 
