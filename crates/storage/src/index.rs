@@ -15,8 +15,9 @@
 //! create the table that records migrations.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, ErrorCode, TransactionBehavior};
 
 use crate::paths::{PathError, create_dir_all};
 
@@ -157,12 +158,7 @@ impl Index {
         // connection. Without this the servers/instances link is decorative.
         connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL;")?;
 
-        // Write-ahead logging keeps a long-running launch from blocking the
-        // instance list. It reports the resulting mode as a row - which is
-        // "memory" for an in-memory database - so it cannot go through
-        // `execute_batch`.
-        let _mode: String =
-            connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+        enable_write_ahead_logging(&connection)?;
 
         let outcome = apply_migrations(&mut connection, MIGRATIONS)?;
         if outcome.is_noop() {
@@ -196,13 +192,51 @@ impl Index {
     }
 }
 
+/// How long a connection keeps retrying the switch to write-ahead logging while
+/// another connection is making the same switch.
+const JOURNAL_MODE_RETRY_WINDOW: Duration = Duration::from_secs(5);
+
+/// Switches the database to write-ahead logging, which keeps a long-running
+/// launch from blocking the instance list.
+///
+/// The mode is stored in the file, so it is read first and only changed when it
+/// differs. SQLite reports `SQLITE_BUSY` for a concurrent switch without
+/// consulting the busy timeout, so a losing connection retries until the
+/// winner has finished. `PRAGMA journal_mode` answers with a row - "memory" for
+/// an in-memory database - so it cannot go through `execute_batch`.
+fn enable_write_ahead_logging(connection: &Connection) -> Result<(), IndexError> {
+    let deadline = Instant::now() + JOURNAL_MODE_RETRY_WINDOW;
+    loop {
+        let mode: String = connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+        if mode.eq_ignore_ascii_case("wal") || mode.eq_ignore_ascii_case("memory") {
+            return Ok(());
+        }
+        match connection.query_row("PRAGMA journal_mode = WAL", [], |row| {
+            row.get::<_, String>(0)
+        }) {
+            Ok(_) => return Ok(()),
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if matches!(
+                    error.code,
+                    ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked
+                ) && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
 /// Applies every migration newer than the database's `user_version`.
 ///
-/// Each migration runs inside its own transaction together with the
-/// `user_version` bump, so an interrupted upgrade leaves the database at a
-/// version whose schema is actually present. A database newer than the supplied
-/// list is refused rather than downgraded - guessing at a schema we do not know
-/// is how data gets lost.
+/// Each migration runs inside its own write-locked transaction together with
+/// the `user_version` bump, so an interrupted upgrade leaves the database at a
+/// version whose schema is actually present. The version is read again under
+/// that lock, so another connection or process migrating the same file at the
+/// same time applies each migration exactly once and the loser reports a
+/// no-op. A database newer than the supplied list is refused rather than
+/// downgraded - guessing at a schema we do not know is how data gets lost.
 pub fn apply_migrations(
     connection: &mut Connection,
     migrations: &[Migration],
@@ -214,19 +248,20 @@ pub fn apply_migrations(
         "migrations must be numbered 1..n with no gaps"
     );
 
-    let from = read_user_version(connection)?;
     let latest = migrations.last().map_or(0, |migration| migration.version);
-
-    if from > latest {
-        return Err(IndexError::SchemaFromFuture {
-            found: from,
-            supported: latest,
-        });
-    }
+    let from = check_not_from_future(read_user_version(connection)?, latest)?;
 
     let mut applied = Vec::new();
     for migration in migrations.iter().filter(|m| m.version > from) {
-        let transaction = connection.transaction()?;
+        // An immediate transaction takes the write lock before the version is
+        // read, so the check and the apply cannot be separated by a competing
+        // migration. A deferred one would read, then fail to upgrade its
+        // snapshot or re-run a schema the winner already created.
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = check_not_from_future(read_user_version(&transaction)?, latest)?;
+        if current >= migration.version {
+            continue;
+        }
         transaction
             .execute_batch(migration.sql)
             .map_err(|source| IndexError::Migration {
@@ -247,11 +282,21 @@ pub fn apply_migrations(
         applied.push(migration.name);
     }
 
+    let to = read_user_version(connection)?;
     Ok(MigrationOutcome {
-        from,
-        to: read_user_version(connection)?,
+        // A connection that lost the race started from the version the winner
+        // left, not the one it first read.
+        from: if applied.is_empty() { to } else { from },
+        to,
         applied,
     })
+}
+
+fn check_not_from_future(found: u32, supported: u32) -> Result<u32, IndexError> {
+    if found > supported {
+        return Err(IndexError::SchemaFromFuture { found, supported });
+    }
+    Ok(found)
 }
 
 fn read_user_version(connection: &Connection) -> Result<u32, IndexError> {
@@ -441,6 +486,67 @@ mod tests {
             !table_exists(&connection, "half"),
             "the failed migration's partial work must be rolled back"
         );
+    }
+
+    #[test]
+    fn concurrent_first_opens_of_one_file_all_succeed_and_apply_the_schema_once() {
+        const OPENERS: usize = 8;
+
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("launcher.sqlite");
+        let barrier = std::sync::Barrier::new(OPENERS);
+
+        let outcomes: Vec<MigrationOutcome> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..OPENERS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut connection = Connection::open(&path).expect("open");
+                        barrier.wait();
+                        apply_migrations(&mut connection, MIGRATIONS).expect("migrate")
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("opener thread"))
+                .collect()
+        });
+
+        let appliers = outcomes.iter().filter(|outcome| !outcome.is_noop()).count();
+        assert_eq!(appliers, 1, "exactly one connection applies the schema");
+        for outcome in &outcomes {
+            assert_eq!(outcome.to, latest_schema_version());
+        }
+        for outcome in outcomes.iter().filter(|outcome| outcome.is_noop()) {
+            assert_eq!(outcome.from, outcome.to);
+        }
+    }
+
+    #[test]
+    fn concurrent_index_opens_of_a_fresh_file_all_succeed() {
+        const OPENERS: usize = 8;
+
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("launcher.sqlite");
+        let barrier = std::sync::Barrier::new(OPENERS);
+
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..OPENERS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        Index::open(&path).expect("open")
+                    })
+                })
+                .collect();
+            for handle in handles {
+                let index = handle.join().expect("opener thread");
+                assert_eq!(
+                    index.schema_version().expect("version"),
+                    latest_schema_version()
+                );
+            }
+        });
     }
 
     #[test]
