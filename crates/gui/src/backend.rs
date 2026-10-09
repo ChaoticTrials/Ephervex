@@ -1696,8 +1696,8 @@ pub enum Event {
         host: InstalledHost,
         failure: String,
         view: Option<Box<DiagnosisView>>,
-        // A new server run invalidates a quick diagnosis still in flight.
-        server_revision: Option<u64>,
+        // A newer run of the host invalidates a quick diagnosis still in flight.
+        revision: RunRevision,
     },
     /// One measurement of Ephervex's storage.
     DiskUsage {
@@ -3020,7 +3020,7 @@ fn run_worker(
                             &events,
                             InstalledHost::Server(server),
                             Some(failure),
-                            Some(revision),
+                            RunRevision::Server(revision),
                         ));
                     },
                 );
@@ -5666,6 +5666,29 @@ async fn report_diagnosis(
     }
 }
 
+/// Which run of a host a failure notice belongs to, so a notice for a run the
+/// host has since started over never lands on the newer one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunRevision {
+    /// The controller's count of the server's reported failures.
+    Server(u64),
+    /// Where the client run ended on [`run_clock`].
+    Client(u64),
+}
+
+static RUN_CLOCK: AtomicU64 = AtomicU64::new(1);
+
+/// The stamp the next client run to end takes. A run that ends after this call
+/// is stamped at or above the returned value, and one that ended before it
+/// below.
+pub fn run_clock() -> u64 {
+    RUN_CLOCK.load(Ordering::SeqCst)
+}
+
+fn end_client_run() -> RunRevision {
+    RunRevision::Client(RUN_CLOCK.fetch_add(1, Ordering::SeqCst))
+}
+
 /// Explains a run that just failed with a diagnosis that hashes nothing, so
 /// it is quick and never mistaken for the full check.
 async fn explain_failed_run(
@@ -5673,7 +5696,7 @@ async fn explain_failed_run(
     events: &Sender<Event>,
     host: InstalledHost,
     failure: Option<String>,
-    server_revision: Option<u64>,
+    revision: RunRevision,
 ) {
     let Some(failure) = failure else {
         return;
@@ -5692,7 +5715,7 @@ async fn explain_failed_run(
         host,
         failure,
         view,
-        server_revision,
+        revision,
     });
 }
 
@@ -5731,12 +5754,39 @@ fn launch_failure(
         return None;
     }
     match result {
-        Ok(outcome) => outcome
-            .exit
-            .is_some_and(|exit| exit.code.is_some_and(|code| code != 0))
-            .then(|| lookup("gui-run-exited-with-error")),
-        Err(error) if error.is_cancellation() || error.requires_interactive_login() => None,
-        Err(error) => Some(localized_error(error)),
+        Ok(outcome) => game_exit_failure(outcome.exit),
+        Err(error) => launch_error_failure(error),
+    }
+}
+
+fn game_exit_failure(exit: Option<ephervex_core::GameExit>) -> Option<String> {
+    exit.is_some_and(|exit| exit.code.is_some_and(|code| code != 0))
+        .then(|| lookup("gui-run-exited-with-error"))
+}
+
+fn launch_error_failure(error: &CoreError) -> Option<String> {
+    if error.is_cancellation() || error.requires_interactive_login() {
+        None
+    } else {
+        Some(localized_error(error))
+    }
+}
+
+/// What went wrong with the client of a Launch & Connect run, classified as a
+/// plain launch is. An error before the server was ready never reached the
+/// client, and the server's own failure is reported on its side.
+fn connect_client_failure(
+    result: &CoreResult<ephervex_core::LaunchAndConnectOutcome>,
+    server_ready: bool,
+    stopped: bool,
+) -> Option<String> {
+    if stopped {
+        return None;
+    }
+    match result {
+        Ok(outcome) => game_exit_failure(outcome.launch.exit),
+        Err(error) if server_ready => launch_error_failure(error),
+        Err(_) => None,
     }
 }
 
@@ -7215,6 +7265,7 @@ fn spawn_launch(
                         &cancel,
                     )
                     .await;
+                let revision = end_client_run();
                 drop(observer);
                 let _ = forward.await;
                 let _ = ended_sender.send(replacement_end_reason(&result));
@@ -7239,7 +7290,7 @@ fn spawn_launch(
                     &events,
                     InstalledHost::Instance(instance),
                     failure,
-                    None,
+                    revision,
                 )
                 .await;
             });
@@ -8080,6 +8131,7 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
                         &cancel,
                     )
                     .await;
+                let revision = end_client_run();
                 drop(connect_observer);
                 drop(server_observer);
                 drop(launch_observer);
@@ -8093,18 +8145,33 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
                     });
                 }
                 let _ = launch_forward.await;
+                let failure = connect_client_failure(
+                    &result,
+                    server_ready.load(Ordering::SeqCst),
+                    cancel.is_cancelled(),
+                );
                 match result {
-                    Ok(outcome) => send_activity_state(
-                        &events,
-                        outcome.launch.operation.to_string(),
-                        &lookup("gui-launch-and-connect"),
-                        &entity,
-                        &localized_value("gui-activity-connected-to", &outcome.target.to_string()),
-                        "completed",
-                        false,
-                        false,
-                        false,
-                    ),
+                    Ok(outcome) => {
+                        let success = outcome.launch.is_success();
+                        send_activity_state(
+                            &events,
+                            outcome.launch.operation.to_string(),
+                            &lookup("gui-launch-and-connect"),
+                            &entity,
+                            &if success {
+                                localized_value(
+                                    "gui-activity-connected-to",
+                                    &outcome.target.to_string(),
+                                )
+                            } else {
+                                lookup("gui-activity-game-error")
+                            },
+                            if success { "completed" } else { "failed" },
+                            false,
+                            !success,
+                            false,
+                        );
+                    }
                     Err(error) => match &server_name {
                         Some(server_name) => send_pair_start_failure(
                             &events,
@@ -8130,6 +8197,14 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
                 if let Ok(app) = App::open_at(paths.clone()) {
                     send_snapshot(&app, &events);
                 }
+                explain_failed_run(
+                    &app,
+                    &events,
+                    InstalledHost::Instance(client),
+                    failure,
+                    revision,
+                )
+                .await;
                 // If this operation started the server, its supervisor is a
                 // task on this runtime. Keep the runtime alive until that
                 // server exits instead of canceling it when the client closes.
@@ -11686,6 +11761,43 @@ mod tests {
     }
 
     #[test]
+    fn a_game_that_exits_with_a_nonzero_code_is_a_failed_run() {
+        let exit = |code, signal| Some(ephervex_core::GameExit { code, signal });
+        assert!(game_exit_failure(exit(Some(1), None)).is_some());
+        assert!(game_exit_failure(exit(Some(0), None)).is_none());
+        assert!(game_exit_failure(exit(None, Some(9))).is_none());
+        assert!(game_exit_failure(None).is_none());
+    }
+
+    #[test]
+    fn a_connect_run_fails_the_client_only_once_the_server_is_ready() {
+        let error = || -> CoreResult<ephervex_core::LaunchAndConnectOutcome> {
+            Err(ephervex_server::ServerError::NotInstalled.into())
+        };
+        let canceled = || -> CoreResult<ephervex_core::LaunchAndConnectOutcome> {
+            Err(ephervex_server::ServerError::ReadinessCanceled.into())
+        };
+        assert!(connect_client_failure(&error(), true, false).is_some());
+        assert!(connect_client_failure(&error(), false, false).is_none());
+        assert!(connect_client_failure(&error(), true, true).is_none());
+        assert!(connect_client_failure(&canceled(), true, false).is_none());
+    }
+
+    #[test]
+    fn each_ended_client_run_is_stamped_at_or_after_the_clock_read_before_it() {
+        let before = run_clock();
+        let RunRevision::Client(first) = end_client_run() else {
+            unreachable!();
+        };
+        let RunRevision::Client(second) = end_client_run() else {
+            unreachable!();
+        };
+        assert!(first >= before);
+        assert!(second > first);
+        assert!(run_clock() > second);
+    }
+
+    #[test]
     fn launch_and_connect_keeps_runtime_and_live_state_forwarding_owned() {
         let source = include_str!("backend.rs");
         assert!(source.contains("let (launch_observer, mut launch_events)"));
@@ -12519,14 +12631,14 @@ mod tests {
         let app = App::open_at(Paths::rooted_at(root.path())).expect("app");
         let (events, received) = std::sync::mpsc::channel();
         let host = InstalledHost::Server(ServerId::new());
-        explain_failed_run(&app, &events, host, None, None).await;
+        explain_failed_run(&app, &events, host, None, RunRevision::Server(1)).await;
         assert!(received.try_recv().is_err());
         explain_failed_run(
             &app,
             &events,
             host,
             Some("unexpected exit".to_owned()),
-            Some(1),
+            RunRevision::Server(1),
         )
         .await;
         assert!(

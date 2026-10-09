@@ -3256,31 +3256,6 @@ fn next_launch_handle() -> String {
     )
 }
 
-/// Launching an instance, as the default account or as a chosen one.
-fn register_launch_actions(ui: &AppWindow, commands: &Sender<Command>) {
-    let sender = commands.clone();
-    ui.on_launch_client_as(move |id, account, alongside| {
-        let Some(instance) = backend::parse_instance_id(&id) else {
-            return;
-        };
-        // An empty choice is the default account, which is what plain Launch
-        // does. Passing it through as a reference would ask the services to
-        // resolve the empty string.
-        let account = (!account.is_empty()).then(|| account.to_string());
-        // A second client needs a handle of its own, so it can be listed and
-        // stopped without touching the launch it is running beside.
-        let additional = alongside.then(next_launch_handle);
-        send(
-            &sender,
-            Command::LaunchClient {
-                instance,
-                account,
-                additional,
-            },
-        );
-    });
-}
-
 fn register_client_actions(
     ui: &AppWindow,
     commands: &Sender<Command>,
@@ -3325,8 +3300,6 @@ fn register_client_actions(
     });
 
     register_instance_selection(ui, commands);
-
-    register_launch_actions(ui, commands);
 
     let sender = commands.clone();
     ui.on_kill_instance(move |id, launch| {
@@ -4592,6 +4565,7 @@ impl Workspace {
     /// Clears what a host's last run left behind once it starts again. A new
     /// failure brings its own notices.
     fn forget_last_run(&self, host: InstalledHost) {
+        self.diagnosis.borrow_mut().note_client_start(host);
         diagnosis_flow::forget_run(self, host);
         self.update(host, |view| {
             view.crash_report = SharedString::default();
@@ -4930,6 +4904,7 @@ fn register_linked_pair(ui: &AppWindow, workspace: &Workspace) {
             stamp_host_lifecycle(&ui, &lifecycle);
             operation
         };
+        connect.forget_last_run(InstalledHost::Instance(client));
         send(
             &connect.commands,
             Command::LaunchAndConnect {
@@ -5046,6 +5021,31 @@ fn register_host_starts(ui: &AppWindow, workspace: &Workspace) {
                 ui.invoke_present_toast(lookup("gui-pair-start-busy").into(), true);
             }
         }
+    });
+
+    // Launching as a chosen account, or beside a running launch, is a start of
+    // the client like any other.
+    let launch_as = workspace.clone();
+    ui.on_launch_client_as(move |id, account, alongside| {
+        let Some(instance) = backend::parse_instance_id(&id) else {
+            return;
+        };
+        launch_as.forget_last_run(InstalledHost::Instance(instance));
+        // An empty choice is the default account, which is what plain Launch
+        // does. Passing it through as a reference would ask the services to
+        // resolve the empty string.
+        let account = (!account.is_empty()).then(|| account.to_string());
+        // A second client needs a handle of its own, so it can be listed and
+        // stopped without touching the launch it is running beside.
+        let additional = alongside.then(next_launch_handle);
+        send(
+            &launch_as.commands,
+            Command::LaunchClient {
+                instance,
+                account,
+                additional,
+            },
+        );
     });
 
     let weak = ui.as_weak();
@@ -6955,6 +6955,37 @@ fn apply_promotion_plan(ui: &AppWindow, plan: &backend::PromotionPlanData) {
     ui.set_modal("make-persistent".into());
 }
 
+/// Shows a failed run's notice, unless the host has been started over since
+/// the run it is about.
+fn apply_run_failure(
+    workspace: &Workspace,
+    lifecycle: &RefCell<HostLifecycle>,
+    host: InstalledHost,
+    failure: String,
+    view: Option<Box<crate::diagnosis_view::DiagnosisView>>,
+    revision: backend::RunRevision,
+) {
+    let current = match (host, revision) {
+        (InstalledHost::Server(server), backend::RunRevision::Server(revision)) => {
+            lifecycle.borrow().servers.failure_revision(server) == Some(revision)
+        }
+        (_, backend::RunRevision::Client(ended)) => workspace
+            .diagnosis
+            .borrow()
+            .client_run_is_current(host, ended),
+        _ => true,
+    };
+    if current {
+        diagnosis_flow::apply_run_failed(
+            workspace,
+            &mut workspace.diagnosis.borrow_mut(),
+            host,
+            failure,
+            view.map(|view| *view),
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn apply_event(
     ui: &AppWindow,
@@ -7301,24 +7332,8 @@ fn apply_event(
             host,
             failure,
             view,
-            server_revision,
-        } => {
-            let current = match (host, server_revision) {
-                (InstalledHost::Server(server), Some(revision)) => {
-                    lifecycle.borrow().servers.failure_revision(server) == Some(revision)
-                }
-                _ => true,
-            };
-            if current {
-                diagnosis_flow::apply_run_failed(
-                    workspace,
-                    &mut workspace.diagnosis.borrow_mut(),
-                    host,
-                    failure,
-                    view.map(|view| *view),
-                );
-            }
-        }
+            revision,
+        } => apply_run_failure(workspace, lifecycle, host, failure, view, revision),
         Event::BundlePlanned { host, parts } => {
             diagnosis_flow::apply_bundle_plan(
                 workspace,
@@ -11278,6 +11293,97 @@ mod tests {
 
         ui.invoke_launch_client(client.id().into());
         assert!(run_notices(&ui).iter().all(String::is_empty));
+    }
+
+    /// A failure reported by a client run that ended at `ended`.
+    fn fail_client_run(workspace: &Workspace, client: InstalledHost, ended: u64) {
+        apply_run_failure(
+            workspace,
+            &workspace.lifecycle,
+            client,
+            lookup("gui-run-exited-with-error"),
+            None,
+            backend::RunRevision::Client(ended),
+        );
+    }
+
+    #[test]
+    fn launch_and_connect_forgets_the_clients_failed_run() {
+        let ui = test_window();
+        let (workspace, _commands, client, server) = paired_workspace(&ui);
+        workspace.open(&ui, client, Surface::Overview);
+        fail_run(&workspace, client);
+        assert_eq!(run_notices(&ui), [lookup("gui-run-failed-client")]);
+
+        ui.invoke_launch_and_connect(client.id().into(), server.id().into());
+        assert!(run_notices(&ui).iter().all(String::is_empty));
+    }
+
+    #[test]
+    fn launching_as_an_account_or_alongside_forgets_the_clients_failed_run() {
+        for alongside in [false, true] {
+            let ui = test_window();
+            let (workspace, commands, client, _server) = paired_workspace(&ui);
+            workspace.open(&ui, client, Surface::Overview);
+            fail_run(&workspace, client);
+            assert_eq!(run_notices(&ui), [lookup("gui-run-failed-client")]);
+
+            ui.invoke_launch_client_as(client.id().into(), "".into(), alongside);
+            assert_eq!(run_notices(&ui), [String::new()], "alongside: {alongside}");
+            assert_eq!(starts(&commands), [("launch", client, 0)]);
+        }
+    }
+
+    #[test]
+    fn a_failure_of_a_run_the_client_has_since_started_over_is_dropped() {
+        let ui = test_window();
+        let (workspace, _commands, client, _server) = paired_workspace(&ui);
+        workspace.open(&ui, client, Surface::Overview);
+        // A run that ended before the user launched again.
+        let earlier = backend::run_clock().saturating_sub(1);
+        ui.invoke_launch_client(client.id().into());
+
+        fail_client_run(&workspace, client, earlier);
+        assert_eq!(run_notices(&ui), [String::new()]);
+
+        fail_client_run(&workspace, client, backend::run_clock());
+        assert_eq!(run_notices(&ui), [lookup("gui-run-failed-client")]);
+    }
+
+    #[test]
+    fn dismissing_a_notice_does_not_drop_the_failure_of_a_run_that_ended_before() {
+        let ui = test_window();
+        let (workspace, _commands, client, _server) = paired_workspace(&ui);
+        workspace.open(&ui, client, Surface::Overview);
+        fail_run(&workspace, client);
+        // A run that ended before the dismissal.
+        let ended = backend::run_clock().saturating_sub(1);
+
+        ui.invoke_dismiss_run_failure("client".into(), client.id().into());
+        fail_client_run(&workspace, client, ended);
+        assert_eq!(run_notices(&ui), [lookup("gui-run-failed-client")]);
+    }
+
+    #[test]
+    fn a_run_still_alive_when_the_client_launches_alongside_shows_its_crash() {
+        let ui = test_window();
+        let (workspace, _commands, client, _server) = paired_workspace(&ui);
+        workspace.open(&ui, client, Surface::Overview);
+        ui.invoke_launch_client_as(client.id().into(), "".into(), true);
+
+        // The earlier run ends after the second launch was requested.
+        fail_client_run(&workspace, client, backend::run_clock());
+        assert_eq!(run_notices(&ui), [lookup("gui-run-failed-client")]);
+    }
+
+    #[test]
+    fn a_failure_of_a_client_run_with_no_later_start_is_shown() {
+        let ui = test_window();
+        let (workspace, _commands, client, _server) = paired_workspace(&ui);
+        workspace.open(&ui, client, Surface::Overview);
+
+        fail_client_run(&workspace, client, 0);
+        assert_eq!(run_notices(&ui), [lookup("gui-run-failed-client")]);
     }
 
     #[test]

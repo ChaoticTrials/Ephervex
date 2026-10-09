@@ -180,9 +180,28 @@ pub(super) struct DiagnosisFlowState {
     /// request, from any view of any host, is refused here before a second
     /// command can queue behind it.
     pending: Option<Pending>,
+    /// Per client, where [`backend::run_clock`] stood when it was last started.
+    /// A failure of a run that ended before that is stale.
+    run_floors: HashMap<InstalledHost, u64>,
 }
 
 impl DiagnosisFlowState {
+    /// Whether a failed client run that ended at `ended` is not older than the
+    /// host's last start.
+    pub(super) fn client_run_is_current(&self, host: InstalledHost, ended: u64) -> bool {
+        self.run_floors
+            .get(&host)
+            .is_none_or(|floor| ended >= *floor)
+    }
+
+    /// Notes that a client was started, so a failure of a run that already
+    /// ended is stale from here on.
+    pub(super) fn note_client_start(&mut self, host: InstalledHost) {
+        if matches!(host, InstalledHost::Instance(_)) {
+            self.run_floors.insert(host, backend::run_clock());
+        }
+    }
+
     /// Makes sure the surface has a place for `host`.
     fn open(&mut self, host: InstalledHost) {
         self.hosts.entry(host).or_default();
