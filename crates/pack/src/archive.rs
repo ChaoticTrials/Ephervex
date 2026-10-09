@@ -32,6 +32,7 @@
 //! `spawn_blocking` is the caller's decision because only the caller knows
 //! whether it is on a runtime.
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -41,7 +42,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tracing::{debug, instrument};
 use zip::ZipArchive;
 
-use crate::detect::{PackFormat, identify};
+use crate::detect::{PackFormat, PackLocation, entry_components, is_directory_name, locate};
 use crate::error::{PackError, PackResult};
 use crate::path::{DestinationLinks, contained_join, is_reserved, safe_relative_path};
 
@@ -255,6 +256,13 @@ pub struct PackArchive {
     path: PathBuf,
     zip: ZipArchive<BudgetedFile>,
     limits: ExtractionLimits,
+    /// Which pack format the archive is and where its files live, decided once
+    /// when the archive is opened so every later read resolves against the same
+    /// root detection chose.
+    location: Option<PackLocation>,
+    /// Manifests already read, so a later read of the same manifest returns the
+    /// bytes that were parsed without reading or charging the entry again.
+    manifests: BTreeMap<&'static str, Vec<u8>>,
     /// Bytes and entries consumed so far, across every read of this archive.
     spent_bytes: u64,
     spent_entries: u64,
@@ -285,10 +293,13 @@ impl PackArchive {
             source,
         })?;
 
+        let location = locate(zip.file_names());
         Ok(Self {
             path: path.to_path_buf(),
             zip,
             limits,
+            location,
+            manifests: BTreeMap::new(),
             spent_bytes: 0,
             spent_entries: 0,
         })
@@ -310,7 +321,7 @@ impl PackArchive {
     /// Which pack format this archive is, if any (format detection).
     #[must_use]
     pub fn format(&self) -> Option<PackFormat> {
-        identify(self.zip.file_names())
+        self.location.as_ref().map(|location| location.format)
     }
 
     /// Whether the archive contains an entry with this exact name.
@@ -323,13 +334,55 @@ impl PackArchive {
     ///
     /// Directory entries are optional in a ZIP - plenty of writers emit only
     /// file entries - so this asks about *contents* rather than about the
-    /// directory entry itself.
+    /// directory entry itself. The prefix is read from the archive root;
+    /// [`Self::contains_layer`] is the pack-relative form.
     #[must_use]
     pub fn contains_prefix(&self, prefix: &str) -> bool {
-        let prefix = normalize_prefix(prefix);
-        self.zip
-            .file_names()
-            .any(|name| name.replace('\\', "/").starts_with(&prefix))
+        self.has_entries_under(&entry_components(prefix).unwrap_or_default())
+    }
+
+    /// Whether the pack carries an override layer at `prefix`, resolved against
+    /// the root detection selected.
+    pub(crate) fn contains_layer(&self, prefix: &str) -> bool {
+        self.has_entries_under(&self.under_pack_root(prefix))
+    }
+
+    fn has_entries_under(&self, prefix: &[String]) -> bool {
+        if prefix.is_empty() {
+            return !self.zip.is_empty();
+        }
+        self.zip.file_names().any(|name| {
+            entry_components(name).is_some_and(|parts| {
+                parts.starts_with(prefix) && (parts.len() > prefix.len() || is_directory_name(name))
+            })
+        })
+    }
+
+    /// `relative` placed beneath the directory the pack's own files sit in.
+    fn under_pack_root(&self, relative: &str) -> Vec<String> {
+        let wrapper = self
+            .location
+            .as_ref()
+            .and_then(|location| location.wrapper.clone());
+        wrapper
+            .into_iter()
+            .chain(entry_components(relative).unwrap_or_default())
+            .collect()
+    }
+
+    /// The index of the file entry that is `components` once names are read the
+    /// way extraction reads them. An entry spelled exactly as asked for wins,
+    /// then the first one in archive order.
+    fn file_index(&self, components: &[String]) -> Option<usize> {
+        if let Some(index) = self.zip.index_for_name(&components.join("/")) {
+            return Some(index);
+        }
+        (0..self.zip.len()).find(|&index| {
+            self.zip.name_for_index(index).is_some_and(|name| {
+                !is_directory_name(name)
+                    && entry_components(name).is_some_and(|parts| parts == components)
+            })
+        })
     }
 
     /// The one top-level directory every entry lives under, if there is one.
@@ -373,10 +426,16 @@ impl PackArchive {
     ///
     /// Manifests are the only thing read this way; everything else is streamed
     /// to disk.
+    ///
+    /// The manifest is looked up beside the pack's other files, in the root
+    /// detection selected. It is read and charged once; asking again returns
+    /// the same bytes.
     pub fn read_manifest(&mut self, name: &'static str) -> PackResult<Vec<u8>> {
+        if let Some(bytes) = self.manifests.get(name) {
+            return Ok(bytes.clone());
+        }
         let index = self
-            .zip
-            .index_for_name(name)
+            .file_index(&self.under_pack_root(name))
             .ok_or(PackError::ManifestMissing { entry: name })?;
 
         let allowance = self.allowance(&[
@@ -411,6 +470,7 @@ impl PackArchive {
         })?;
         drop(entry);
         self.spend_bytes(read);
+        self.manifests.insert(name, bytes.clone());
         Ok(bytes)
     }
 
@@ -447,7 +507,29 @@ impl PackArchive {
         decide: &mut dyn FnMut(&Path) -> EntryDecision,
     ) -> PackResult<ExtractionReport> {
         let prefix = normalize_prefix(prefix);
-        if !self.contains_prefix(&prefix) {
+        self.extract_under(&prefix, destination, decide)
+    }
+
+    /// The same extraction for an override layer, resolved against the root
+    /// detection selected. `prefix` stays the layer's own name (`overrides`),
+    /// which is what a recipe records.
+    pub(crate) fn extract_layer_filtered(
+        &mut self,
+        prefix: &str,
+        destination: &Path,
+        decide: &mut dyn FnMut(&Path) -> EntryDecision,
+    ) -> PackResult<ExtractionReport> {
+        let prefix = self.under_pack_root(prefix).join("/");
+        self.extract_under(&normalize_prefix(&prefix), destination, decide)
+    }
+
+    fn extract_under(
+        &mut self,
+        prefix: &str,
+        destination: &Path,
+        decide: &mut dyn FnMut(&Path) -> EntryDecision,
+    ) -> PackResult<ExtractionReport> {
+        if !self.contains_prefix(prefix) {
             return Ok(ExtractionReport::default());
         }
 
@@ -477,7 +559,7 @@ impl PackArchive {
                         })?;
 
                 let name = String::from_utf8_lossy(entry.name_raw()).into_owned();
-                let Some(relative) = entry_under(entry.name_raw(), &prefix)? else {
+                let Some(relative) = entry_under(entry.name_raw(), prefix)? else {
                     continue;
                 };
                 if entry.is_symlink() {
@@ -531,7 +613,7 @@ impl PackArchive {
         }
 
         debug!(
-            prefix = %prefix,
+            prefix,
             files = report.files,
             directories = report.directories,
             skipped = report.skipped,
@@ -1588,6 +1670,50 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_manifest_is_read_and_charged_once_however_often_it_is_asked_for() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("pack.mrpack");
+        zip_file(&archive, &[("modrinth.index.json", br#"{"name":"x"}"#)]);
+        let limits = ExtractionLimits {
+            max_entries: 1,
+            ..ExtractionLimits::default()
+        };
+
+        let mut pack = PackArchive::open(&archive, limits).expect("open");
+        let first = pack.read_manifest("modrinth.index.json").expect("first");
+        let second = pack.read_manifest("modrinth.index.json").expect("second");
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn a_manifest_is_found_under_the_wrapper_or_dot_prefix_detection_selected() {
+        for name in [
+            "Wrapper/manifest.json",
+            "./manifest.json",
+            "./Wrapper/manifest.json",
+        ] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let archive = dir.path().join("pack.zip");
+            zip_file(
+                &archive,
+                &[
+                    (name, b"{}"),
+                    (&name.replace("manifest.json", "overrides/a.txt"), b"a"),
+                ],
+            );
+
+            let mut pack = open(&archive);
+            assert_eq!(pack.format(), Some(PackFormat::CurseForgePack), "{name}");
+            assert_eq!(
+                pack.read_manifest("manifest.json").expect("read"),
+                b"{}",
+                "{name}"
+            );
+            assert!(pack.contains_layer("overrides"), "{name}");
+        }
     }
 
     #[test]

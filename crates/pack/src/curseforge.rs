@@ -114,7 +114,7 @@ pub fn read(archive: &mut PackArchive) -> PackResult<ParsedExport> {
     parsed
         .recipe
         .override_layers
-        .retain(|layer| archive.contains_prefix(&layer.archive_prefix));
+        .retain(|layer| archive.contains_layer(&layer.archive_prefix));
     Ok(parsed)
 }
 

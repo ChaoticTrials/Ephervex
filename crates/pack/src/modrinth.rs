@@ -102,7 +102,7 @@ fn present_layers(archive: &PackArchive) -> Vec<OverrideLayer> {
         (OverrideScope::Server, SERVER_OVERRIDES),
     ]
     .into_iter()
-    .filter(|(_, prefix)| archive.contains_prefix(prefix))
+    .filter(|(_, prefix)| archive.contains_layer(prefix))
     .map(|(scope, prefix)| OverrideLayer {
         scope,
         archive_prefix: prefix.to_owned(),

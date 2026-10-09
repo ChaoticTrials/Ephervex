@@ -22,10 +22,12 @@ use ephervex_model::ImportSourceKind;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum PackFormat {
-    /// A Modrinth `.mrpack`: `modrinth.index.json` at the archive root.
+    /// A Modrinth `.mrpack`: `modrinth.index.json` at the archive root, or
+    /// under the one directory a re-zipped folder adds.
     ModrinthPack,
-    /// A CurseForge export: `manifest.json` at the archive root, normally with
-    /// an `overrides/` directory beside it.
+    /// A CurseForge export: `manifest.json` at the archive root (or under the
+    /// one directory a re-zipped folder adds), normally with an `overrides/`
+    /// directory beside it.
     CurseForgePack,
     /// A Prism-compatible instance export: `mmc-pack.json`, usually with an
     /// `instance.cfg`, either at the root or under a single wrapper directory.
@@ -93,6 +95,20 @@ pub const CURSEFORGE_MANIFEST: &str = "manifest.json";
 /// `mmc-pack.json` - the component list in a Prism-compatible export.
 pub const PRISM_PACK: &str = "mmc-pack.json";
 
+/// Where in an archive a recognized pack keeps its own files.
+///
+/// Detection and every later read agree on this one answer: the manifest, the
+/// override layers, and the retained copy of the manifest are all resolved
+/// against [`Self::wrapper`], never against a root each reader guesses for
+/// itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PackLocation {
+    pub(crate) format: PackFormat,
+    /// The single directory the pack's files sit under, or `None` when they sit
+    /// at the archive root.
+    pub(crate) wrapper: Option<String>,
+}
+
 /// Identifies an archive from the entry names it contains.
 ///
 /// Takes names rather than an archive so it can be unit-tested against a list
@@ -102,23 +118,70 @@ pub const PRISM_PACK: &str = "mmc-pack.json";
 /// produces the same shape for the other two.
 #[must_use]
 pub fn identify<'a>(entries: impl IntoIterator<Item = &'a str>) -> Option<PackFormat> {
-    let mut wrapped: Option<PackFormat> = None;
+    locate(entries).map(|location| location.format)
+}
+
+/// Identifies an archive and says where its files live.
+///
+/// Entries are visited in the order given. A manifest at the archive root
+/// outranks any wrapped one, and among wrapped manifests the first wins, so the
+/// answer is a function of the archive alone.
+pub(crate) fn locate<'a>(entries: impl IntoIterator<Item = &'a str>) -> Option<PackLocation> {
+    let mut first_wrapped: Option<PackLocation> = None;
 
     for entry in entries {
-        let normalized = entry.replace('\\', "/");
-        let trimmed = normalized.trim_start_matches("./");
-        if let Some(format) = format_of(trimmed) {
-            return Some(format);
+        // A directory entry named like a manifest is not a manifest.
+        if is_directory_name(entry) {
+            continue;
         }
-        // One level of wrapper directory, and only one: deeper matches are as
-        // likely to be a pack that ships another pack's manifest as a payload.
-        if let Some((_, inner)) = trimmed.split_once('/')
-            && let Some(format) = format_of(inner)
-        {
-            wrapped = Some(wrapped.unwrap_or(format));
+        let Some(parts) = entry_components(entry) else {
+            continue;
+        };
+        match parts.as_slice() {
+            [name] => {
+                if let Some(format) = format_of(name) {
+                    return Some(PackLocation {
+                        format,
+                        wrapper: None,
+                    });
+                }
+            }
+            // One level of wrapper directory, and only one: deeper matches are
+            // as likely to be a pack that ships another pack's manifest as a
+            // payload. `..` is never a directory a pack lives in.
+            [directory, name] if directory != ".." && first_wrapped.is_none() => {
+                if let Some(format) = format_of(name) {
+                    first_wrapped = Some(PackLocation {
+                        format,
+                        wrapper: Some(directory.clone()),
+                    });
+                }
+            }
+            _ => {}
         }
     }
-    wrapped
+    first_wrapped
+}
+
+/// Splits an entry name into the components extraction will read it as.
+///
+/// Backslashes separate like slashes, and empty and `.` components (a leading
+/// `./`, a doubled slash) are dropped. `..` is kept as a component rather than
+/// resolved: it can never match a manifest or a wrapper, and an entry using it
+/// still counts as being where it claims so extraction, which refuses it, gets
+/// to see it. Returns `None` for a name with nothing in it.
+pub(crate) fn entry_components(name: &str) -> Option<Vec<String>> {
+    let parts: Vec<String> = name
+        .split(['/', '\\'])
+        .filter(|part| !part.is_empty() && *part != ".")
+        .map(ToOwned::to_owned)
+        .collect();
+    (!parts.is_empty()).then_some(parts)
+}
+
+/// Whether an entry name is a directory entry rather than a file.
+pub(crate) fn is_directory_name(name: &str) -> bool {
+    name.ends_with(['/', '\\'])
 }
 
 /// Which format a root-level entry name identifies.
@@ -237,5 +300,38 @@ mod tests {
             ImportSourceKind::PrismExport
         );
         assert_eq!(PackFormat::ModrinthPack.to_string(), "Modrinth");
+    }
+
+    #[test]
+    fn detection_reports_the_wrapper_directory_the_pack_lives_in() {
+        let located = locate(["My Pack/modrinth.index.json", "My Pack/overrides/a.toml"])
+            .expect("a wrapped Modrinth pack");
+        assert_eq!(located.format, PackFormat::ModrinthPack);
+        assert_eq!(located.wrapper.as_deref(), Some("My Pack"));
+
+        for name in ["modrinth.index.json", "./modrinth.index.json"] {
+            let located = locate([name]).expect("a root-level Modrinth pack");
+            assert_eq!(located.wrapper, None, "{name}");
+        }
+        let located = locate(["./My Pack\\manifest.json"]).expect("a wrapped export");
+        assert_eq!(located.format, PackFormat::CurseForgePack);
+        assert_eq!(located.wrapper.as_deref(), Some("My Pack"));
+    }
+
+    #[test]
+    fn a_directory_entry_named_like_a_manifest_is_not_a_manifest() {
+        assert_eq!(identify(["manifest.json/", "wrapper/manifest.json/"]), None);
+    }
+
+    #[test]
+    fn a_parent_directory_component_is_never_a_wrapper() {
+        assert_eq!(identify(["../modrinth.index.json"]), None);
+    }
+
+    #[test]
+    fn the_first_wrapped_manifest_decides_the_root() {
+        let located = locate(["A/manifest.json", "B/modrinth.index.json"]).expect("wrapped");
+        assert_eq!(located.format, PackFormat::CurseForgePack);
+        assert_eq!(located.wrapper.as_deref(), Some("A"));
     }
 }

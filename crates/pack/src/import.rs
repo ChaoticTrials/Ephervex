@@ -459,8 +459,8 @@ fn retain_source(
     store: &SourceStore,
 ) -> PackResult<Vec<(PathBuf, OverrideScope)>> {
     let kind = recipe.source_kind;
-    let manifest_entry = manifest_entry_for(kind);
-    if let Some(entry) = manifest_entry {
+    if let Some(entry) = manifest_entry_for(kind) {
+        // The bytes analysis already parsed, not a second read of the entry.
         let bytes = archive.read_manifest(entry)?;
         let relative = store.retain_manifest(kind, entry, &bytes)?;
         recipe.provider_metadata.manifest_file = Some(relative);
@@ -484,7 +484,7 @@ fn retain_source(
         // instance loads whatever that layer places.
         let mut shipped_files = Vec::new();
         let report =
-            archive.extract_prefix_filtered(&layer.archive_prefix, &absolute, &mut |path| {
+            archive.extract_layer_filtered(&layer.archive_prefix, &absolute, &mut |path| {
                 if filter.selects(path) {
                     shipped_files.push(path.to_path_buf());
                 }
@@ -814,5 +814,152 @@ mod tests {
                 .plan(PackSide::Client, &OptionalSelection::none())
                 .layers_are_retained()
         );
+    }
+
+    fn under(root: &str, name: &str) -> String {
+        format!("{root}{name}")
+    }
+
+    async fn materialize_client(
+        dir: &Path,
+        archive_path: &Path,
+        policy: &PackPolicy,
+    ) -> PackResult<(MaterializedPack, PathBuf, PathBuf)> {
+        let (mut archive, analysis) = analyze(archive_path, policy)?;
+        let game = dir.join("instance/minecraft");
+        let source = dir.join("instance/.launcher/source");
+        let manager =
+            DownloadManager::new(ephervex_download::DownloaderConfig::default()).expect("manager");
+        let materialized = materialize(MaterializeRequest {
+            archive: &mut archive,
+            analysis: &analysis,
+            side: PackSide::Client,
+            selection: &OptionalSelection::none(),
+            game_dir: &game,
+            source_dir: &source,
+            manager: &manager,
+            cache: &CacheLayout::new(dir.join("cache")),
+            credentials: &OpenArtifacts,
+            reporter: &OperationReporter::silent("test-import"),
+            cancel: &CancellationToken::new(),
+        })
+        .await?;
+        Ok((materialized, game, source))
+    }
+
+    #[tokio::test]
+    async fn a_modrinth_pack_under_a_wrapper_or_a_dot_prefix_imports_from_the_root_detection_chose()
+    {
+        for root in ["", "./", "Wrapper/", "./Wrapper/"] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let archive_path = dir.path().join("pack.mrpack");
+            zip_file(
+                &archive_path,
+                &[
+                    (&under(root, "modrinth.index.json"), INDEX),
+                    (&under(root, "overrides/config/common.toml"), b"common"),
+                    (
+                        &under(root, "client-overrides/options.txt"),
+                        b"guiScale:1\n",
+                    ),
+                    (
+                        &under(root, "server-overrides/server.properties"),
+                        b"motd=t\n",
+                    ),
+                ],
+            );
+
+            let (materialized, game, source) =
+                materialize_client(dir.path(), &archive_path, &PackPolicy::modrinth())
+                    .await
+                    .unwrap_or_else(|error| panic!("{root:?}: {error}"));
+
+            assert_eq!(
+                std::fs::read_to_string(game.join("config/common.toml")).expect("common"),
+                "common",
+                "{root:?}"
+            );
+            assert!(game.join("options.txt").is_file(), "{root:?}");
+            assert_eq!(
+                std::fs::read(source.join("modrinth/modrinth.index.json")).expect("manifest"),
+                INDEX,
+                "{root:?}: the manifest is retained byte for byte"
+            );
+            assert!(
+                source
+                    .join("modrinth/server-overrides/server.properties")
+                    .is_file(),
+                "{root:?}: a retained layer keeps its logical name, not the wrapper's"
+            );
+            let prefixes: Vec<&str> = materialized
+                .recipe
+                .override_layers
+                .iter()
+                .map(|layer| layer.archive_prefix.as_str())
+                .collect();
+            assert_eq!(
+                prefixes,
+                vec!["overrides", "client-overrides", "server-overrides"],
+                "{root:?}: the recipe records layer names without the wrapper"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_curseforge_export_under_a_wrapper_or_a_dot_prefix_imports_from_the_root_detection_chose()
+     {
+        for root in ["", "./", "Wrapper/", "./Wrapper/"] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let archive_path = dir.path().join("export.zip");
+            let manifest = curseforge_manifest("");
+            zip_file(
+                &archive_path,
+                &[
+                    (&under(root, "manifest.json"), &manifest),
+                    (&under(root, "overrides/config/a.toml"), b"a"),
+                ],
+            );
+
+            let (materialized, game, source) =
+                materialize_client(dir.path(), &archive_path, &PackPolicy::curseforge())
+                    .await
+                    .unwrap_or_else(|error| panic!("{root:?}: {error}"));
+
+            assert_eq!(
+                std::fs::read_to_string(game.join("config/a.toml")).expect("override"),
+                "a",
+                "{root:?}"
+            );
+            assert_eq!(
+                std::fs::read(source.join("curseforge/manifest.json")).expect("manifest"),
+                manifest,
+                "{root:?}"
+            );
+            assert_eq!(materialized.layers.len(), 1, "{root:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_import_reads_and_charges_the_manifest_once() {
+        // Five charges when the manifest is read once: the manifest, the common
+        // file (applied, then retained for a server), the client file, and the
+        // retained server file. A second manifest read would be a sixth.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive_path = dir.path().join("pack.mrpack");
+        zip_file(
+            &archive_path,
+            &[
+                ("modrinth.index.json", INDEX),
+                ("overrides/config/common.toml", b"common"),
+                ("client-overrides/options.txt", b"guiScale:1\n"),
+                ("server-overrides/server.properties", b"motd=t\n"),
+            ],
+        );
+        let mut policy = PackPolicy::modrinth();
+        policy.limits.max_entries = 5;
+
+        materialize_client(dir.path(), &archive_path, &policy)
+            .await
+            .expect("the manifest is charged once");
     }
 }

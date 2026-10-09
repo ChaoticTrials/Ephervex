@@ -945,7 +945,7 @@ pub fn apply_overrides(
         // is only written once extraction has succeeded.
         let mut shipped_files = Vec::new();
         let report =
-            archive.extract_prefix_filtered(&layer.archive_prefix, game_dir, &mut |path| {
+            archive.extract_layer_filtered(&layer.archive_prefix, game_dir, &mut |path| {
                 if filter.selects(path) {
                     shipped_files.push(path.to_path_buf());
                 }

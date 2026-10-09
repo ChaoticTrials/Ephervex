@@ -750,4 +750,27 @@ mod tests {
         assert_eq!(file.size, Some(3));
         assert!(recipe.override_layers.is_empty());
     }
+
+    #[test]
+    fn a_server_archive_that_carries_a_manifest_file_is_still_extracted_from_its_own_wrapper() {
+        // `manifest.json` is only a pack manifest in a pack. A server archive
+        // that happens to ship one beside its files keeps the wrapper rule.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("pack-server.zip");
+        zip_file(
+            &archive,
+            &[
+                ("pack-server/manifest.json", b"{}"),
+                ("pack-server/mods/one.jar", b"one"),
+                ("pack-server/config/a.toml", b"a"),
+            ],
+        );
+        let game_dir = dir.path().join("server");
+
+        let installed = install(&archive, &game_dir, &[]).expect("install");
+
+        assert_eq!(installed.stripped_root.as_deref(), Some("pack-server"));
+        assert!(game_dir.join("mods/one.jar").is_file());
+        assert!(game_dir.join("config/a.toml").is_file());
+    }
 }
