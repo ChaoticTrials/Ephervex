@@ -33,8 +33,9 @@ use std::sync::Arc;
 use chrono::{SecondsFormat, TimeDelta, Utc};
 use ephervex_auth::{
     AccountProvider, AuthError, AuthObserver, AuthResult, CredentialChangeGuard,
-    CredentialChangeOrder, CredentialKey, CredentialStorage, CredentialStore, KeyringStore, Login,
-    LoginRequest, MemoryStore, MicrosoftAccountProvider, ProcessChangeOrder, SecretString, Session,
+    CredentialChangeOrder, CredentialKey, CredentialRemoval, CredentialStorage, CredentialStore,
+    KeyringStore, Login, LoginRequest, MemoryStore, MicrosoftAccountProvider, ProcessChangeOrder,
+    SecretString, Session,
 };
 use ephervex_download::HttpConfig;
 use ephervex_model::AccountKind;
@@ -180,6 +181,40 @@ impl AccountSummary {
     pub const fn is_authenticated(&self) -> bool {
         self.kind.is_authenticated()
     }
+}
+
+/// What became of an account's stored credential when the account was removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialOutcome {
+    /// A saved credential was found in the keyring and deleted.
+    Deleted,
+    /// The keyring could not be reached, so any credential it holds is
+    /// recorded for deletion once it can be. It may still be there.
+    ScheduledForDeletion,
+    /// There was no saved credential: an offline account, a session-only
+    /// sign-in, or a keyring with no entry for the account.
+    NoneStored,
+}
+
+impl CredentialOutcome {
+    /// A stable machine name for scripted output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Deleted => "deleted",
+            Self::ScheduledForDeletion => "scheduled-for-deletion",
+            Self::NoneStored => "none-stored",
+        }
+    }
+}
+
+/// The result of removing one account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountRemoval {
+    /// The account that is default afterwards, if any.
+    pub remaining: Option<AccountSummary>,
+    /// What happened to the removed account's stored credential.
+    pub credential: CredentialOutcome,
 }
 
 /// What the launcher knows about its accounts without asking anyone.
@@ -655,7 +690,8 @@ impl App {
 
     /// Removes one account: its credential first, then its metadata.
     ///
-    /// Returns the account that is default afterwards, if any.
+    /// Returns the account that is default afterwards, if any, and whether the
+    /// credential was deleted, is only scheduled for deletion, or never existed.
     ///
     /// # The ordering is the guarantee
     ///
@@ -670,7 +706,7 @@ impl App {
     /// Only *this* account's entry is touched. `CredentialKey` is keyed per
     /// account precisely so removing one cannot disturb another.
     #[instrument(skip(self))]
-    pub fn remove_account(&mut self, reference: &str) -> CoreResult<Option<AccountSummary>> {
+    pub fn remove_account(&mut self, reference: &str) -> CoreResult<AccountRemoval> {
         // Deleting the credential and forgetting the account are one change: a
         // sign-in or resume in between would store a credential back for an
         // account that is then forgotten.
@@ -690,10 +726,14 @@ impl App {
 
         let mut keyring = None;
         let mut keyring_reachable = true;
+        let mut credential = CredentialOutcome::NoneStored;
         if kind.has_stored_credential() {
             match self.keyring() {
                 Ok(store) => {
-                    store.delete(&CredentialKey::MicrosoftRefreshToken(id))?;
+                    credential = match store.delete(&CredentialKey::MicrosoftRefreshToken(id))? {
+                        CredentialRemoval::Removed => CredentialOutcome::Deleted,
+                        CredentialRemoval::Absent => CredentialOutcome::NoneStored,
+                    };
                     keyring = Some(store);
                 }
                 // The keyring may only be locked or briefly gone, so the
@@ -703,6 +743,7 @@ impl App {
                 Err(error) => {
                     debug!(%error, "keyring unavailable; its credential is removed later");
                     keyring_reachable = false;
+                    credential = CredentialOutcome::ScheduledForDeletion;
                 }
             }
         }
@@ -729,29 +770,33 @@ impl App {
             self.session = None;
         }
 
-        match self.config().active_account() {
+        let remaining = match self.config().active_account() {
             Some(remaining) => {
                 let remaining = Uuid::parse_str(remaining).ok();
-                remaining.map(|id| self.account_summary(id)).transpose()
+                remaining.map(|id| self.account_summary(id)).transpose()?
             }
-            None => Ok(None),
-        }
+            None => None,
+        };
+        Ok(AccountRemoval {
+            remaining,
+            credential,
+        })
     }
 
     /// Signs out of the default account: removes its credential and forgets it.
     ///
     /// Exactly [`Self::remove_account`] aimed at whichever account is default,
     /// which is what "log out" means once there can be more than one. Returns
-    /// whether there was anything to sign out of.
+    /// what happened to the credential, or `None` when there was nobody to
+    /// sign out.
     #[instrument(skip(self))]
-    pub fn logout(&mut self) -> CoreResult<bool> {
+    pub fn logout(&mut self) -> CoreResult<Option<CredentialOutcome>> {
         self.reload_config()?;
         let Some(id) = self.config().active_account().map(str::to_owned) else {
             self.session = None;
-            return Ok(false);
+            return Ok(None);
         };
-        self.remove_account(&id)?;
-        Ok(true)
+        Ok(Some(self.remove_account(&id)?.credential))
     }
 
     /// One account, by id.
@@ -961,7 +1006,7 @@ impl App {
             .keyring()
             .and_then(|store| store.delete(&CredentialKey::MicrosoftRefreshToken(id)));
         match deleted {
-            Ok(()) => self.forget_cleanup_intent(&account),
+            Ok(_) => self.forget_cleanup_intent(&account),
             Err(error) => {
                 warn!(%error, account = %id, "could not remove the credential of a login that was not recorded");
             }
@@ -1170,7 +1215,7 @@ mod tests {
             self.inner.load(key)
         }
 
-        fn delete(&self, key: &CredentialKey) -> AuthResult<()> {
+        fn delete(&self, key: &CredentialKey) -> AuthResult<CredentialRemoval> {
             self.inner.delete(key)
         }
 
@@ -1300,7 +1345,7 @@ mod tests {
             self.0.load(key)
         }
 
-        fn delete(&self, key: &CredentialKey) -> AuthResult<()> {
+        fn delete(&self, key: &CredentialKey) -> AuthResult<CredentialRemoval> {
             self.0.delete(key)
         }
 
@@ -1571,6 +1616,76 @@ mod tests {
     }
 
     #[test]
+    fn removing_an_account_while_the_keyring_is_unreachable_reports_the_deletion_as_scheduled() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let id = Uuid::new_v4();
+        remember_microsoft_account(&mut app, id);
+        app.test_keyring = TestKeyring::Unreachable;
+
+        let removal = app.remove_account(&id.to_string()).expect("removed");
+
+        assert_eq!(removal.credential, CredentialOutcome::ScheduledForDeletion);
+    }
+
+    #[test]
+    fn logging_out_while_the_keyring_is_unreachable_reports_the_deletion_as_scheduled() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let id = Uuid::new_v4();
+        remember_microsoft_account(&mut app, id);
+        app.test_keyring = TestKeyring::Unreachable;
+
+        assert_eq!(
+            app.logout().expect("logged out"),
+            Some(CredentialOutcome::ScheduledForDeletion)
+        );
+    }
+
+    #[test]
+    fn logging_out_with_a_saved_credential_reports_it_deleted() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let id = Uuid::new_v4();
+        remember_microsoft_account(&mut app, id);
+        let store = keyring_holding(id);
+        app.test_keyring = TestKeyring::Store(store.clone());
+
+        assert_eq!(
+            app.logout().expect("logged out"),
+            Some(CredentialOutcome::Deleted)
+        );
+        assert!(store.load(&refresh_key(id)).expect("load").is_none());
+    }
+
+    #[test]
+    fn removing_a_microsoft_account_with_no_keyring_entry_reports_no_credential() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let id = Uuid::new_v4();
+        remember_microsoft_account(&mut app, id);
+        app.test_keyring = TestKeyring::Store(Arc::new(MemoryStore::new()));
+
+        let removal = app.remove_account(&id.to_string()).expect("removed");
+
+        assert_eq!(removal.credential, CredentialOutcome::NoneStored);
+        assert!(app.config().keyring_cleanup.is_empty());
+    }
+
+    #[test]
+    fn removing_an_offline_account_reports_no_credential_even_when_the_keyring_is_unreachable() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.add_offline_account("Alice").expect("added");
+        app.test_keyring = TestKeyring::Unreachable;
+
+        assert_eq!(
+            app.logout().expect("logged out"),
+            Some(CredentialOutcome::NoneStored)
+        );
+    }
+
+    #[test]
     fn a_recorded_credential_is_deleted_once_the_keyring_is_reachable() {
         let base = tempfile::tempdir().expect("temp dir");
         let mut app = app_rooted_at(base.path());
@@ -1609,8 +1724,9 @@ mod tests {
             .expect("store");
         app.test_keyring = TestKeyring::Store(store.clone());
 
-        app.remove_account(&id.to_string()).expect("removed");
+        let removal = app.remove_account(&id.to_string()).expect("removed");
 
+        assert_eq!(removal.credential, CredentialOutcome::Deleted);
         assert!(store.load(&key).expect("load").is_none());
         assert!(app.config().keyring_cleanup.is_empty());
     }
@@ -1972,7 +2088,7 @@ mod tests {
         app.add_offline_account("Alice").expect("added");
         app.add_offline_account("Bob").expect("added");
 
-        let remaining = app.remove_account("Alice").expect("removed");
+        let remaining = app.remove_account("Alice").expect("removed").remaining;
         let remaining = remaining.expect("one account is left, so one is default");
         assert_eq!(remaining.name, "Bob");
         assert!(remaining.is_default);
@@ -1989,6 +2105,7 @@ mod tests {
         let remaining = app
             .remove_account("Bob")
             .expect("removed")
+            .remaining
             .expect("default");
         assert_eq!(remaining.name, "Alice");
     }
@@ -1999,7 +2116,12 @@ mod tests {
         let mut app = app_rooted_at(base.path());
         app.add_offline_account("Alice").expect("added");
 
-        assert!(app.remove_account("Alice").expect("removed").is_none());
+        assert!(
+            app.remove_account("Alice")
+                .expect("removed")
+                .remaining
+                .is_none()
+        );
         assert!(app.accounts().expect("list").is_empty());
         assert!(!app.account_status().expect("status").is_signed_in());
     }
@@ -2182,7 +2304,11 @@ mod tests {
     fn signing_out_when_nobody_is_signed_in_succeeds_and_reports_nothing_to_do() {
         let base = tempfile::tempdir().expect("temp dir");
         let mut app = app_rooted_at(base.path());
-        assert!(!app.logout().expect("logout"), "nothing to sign out of");
+        assert_eq!(
+            app.logout().expect("logout"),
+            None,
+            "nothing to sign out of"
+        );
     }
 
     #[tokio::test]

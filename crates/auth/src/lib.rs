@@ -152,7 +152,9 @@ pub use provider::{
 };
 pub use secret::{REDACTED, SecretString};
 pub use stage::AuthStage;
-pub use store::{CredentialKey, CredentialStorage, CredentialStore, KeyringStore, MemoryStore};
+pub use store::{
+    CredentialKey, CredentialRemoval, CredentialStorage, CredentialStore, KeyringStore, MemoryStore,
+};
 
 /// The Azure application registration Ephervex authenticates as by default.
 ///

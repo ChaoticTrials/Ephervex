@@ -118,6 +118,15 @@ impl CredentialStorage {
     }
 }
 
+/// What [`CredentialStore::delete`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialRemoval {
+    /// A stored credential was there and is gone.
+    Removed,
+    /// Nothing was stored under that key.
+    Absent,
+}
+
 /// Somewhere a credential can be kept.
 ///
 /// Synchronous on purpose: both implementations are, the Secret Service call is
@@ -132,8 +141,9 @@ pub trait CredentialStore: fmt::Debug + Send + Sync {
 
     /// Removes a credential. Removing one that is not there succeeds: logout
     /// must be idempotent, and "it was already gone" is the outcome the caller
-    /// wanted.
-    fn delete(&self, key: &CredentialKey) -> AuthResult<()>;
+    /// wanted. The result says which of the two happened, so a caller never
+    /// reports a deletion that did not take place.
+    fn delete(&self, key: &CredentialKey) -> AuthResult<CredentialRemoval>;
 
     /// Where this store keeps things.
     fn storage(&self) -> CredentialStorage;
@@ -212,14 +222,15 @@ impl CredentialStore for KeyringStore {
         }
     }
 
-    fn delete(&self, key: &CredentialKey) -> AuthResult<()> {
+    fn delete(&self, key: &CredentialKey) -> AuthResult<CredentialRemoval> {
         match self.entry(key)?.delete_credential() {
+            Ok(()) => {
+                debug!(entry = %key, "removed a credential from the keyring");
+                Ok(CredentialRemoval::Removed)
+            }
             // Logout is idempotent: a credential that was already gone is the
             // state the caller asked for.
-            Ok(()) | Err(keyring::Error::NoEntry) => {
-                debug!(entry = %key, "removed a credential from the keyring");
-                Ok(())
-            }
+            Err(keyring::Error::NoEntry) => Ok(CredentialRemoval::Absent),
             Err(source) => Err(AuthError::CredentialStore {
                 operation: CredentialOperation::Delete,
                 source: Box::new(source),
@@ -267,9 +278,12 @@ impl CredentialStore for MemoryStore {
         Ok(self.entries().get(key).cloned())
     }
 
-    fn delete(&self, key: &CredentialKey) -> AuthResult<()> {
-        self.entries().remove(key);
-        Ok(())
+    fn delete(&self, key: &CredentialKey) -> AuthResult<CredentialRemoval> {
+        Ok(if self.entries().remove(key).is_some() {
+            CredentialRemoval::Removed
+        } else {
+            CredentialRemoval::Absent
+        })
     }
 
     fn storage(&self) -> CredentialStorage {
@@ -319,18 +333,24 @@ mod tests {
             "M.C1_refresh"
         );
 
-        store.delete(&key).expect("delete");
+        assert_eq!(
+            store.delete(&key).expect("delete"),
+            CredentialRemoval::Removed
+        );
         assert!(store.load(&key).expect("load").is_none());
     }
 
     #[test]
-    fn deleting_a_credential_that_is_not_there_succeeds() {
+    fn deleting_a_credential_that_is_not_there_succeeds_and_says_it_was_absent() {
         // Logout must be idempotent: a user who logs out twice, or who logs out
         // after the keyring was cleared externally, has got what they asked for.
         let store = MemoryStore::new();
-        store
-            .delete(&CredentialKey::CurseForgeApiKey)
-            .expect("delete must be idempotent");
+        assert_eq!(
+            store
+                .delete(&CredentialKey::CurseForgeApiKey)
+                .expect("delete must be idempotent"),
+            CredentialRemoval::Absent
+        );
     }
 
     #[test]

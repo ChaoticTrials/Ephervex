@@ -71,8 +71,8 @@ pub mod url_handler;
 pub mod verify;
 
 pub use account::{
-    AccountStatus, AccountSummary, ApiSettings, CurseForgeKeyState, LoginOptions,
-    TOKEN_REFRESH_MARGIN,
+    AccountRemoval, AccountStatus, AccountSummary, ApiSettings, CredentialOutcome,
+    CurseForgeKeyState, LoginOptions, TOKEN_REFRESH_MARGIN,
 };
 pub use app::{
     App, ApplicationDisplaySettings, JavaPlan, JavaPlanRequest, JavaTarget,

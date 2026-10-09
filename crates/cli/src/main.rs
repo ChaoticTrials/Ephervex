@@ -20,33 +20,34 @@ use std::process::ExitCode;
 use clap::{Args, CommandFactory as _, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use ephervex_core::{
-    AccountStatus, AccountSummary, ApiSettings, App, ArgumentForm, Artifact, ArtifactCacheHealth,
-    AssetIndexRef, AuthEvent, AuthObserver, BundleContents, BundleSelection, BundledDocumentHealth,
-    CancellationToken, CaptureHealth, CapturedLine, ClientFolder, ClientRecord, CloneMethod,
-    Compatibility, Config, ConfigurationHealth, ControlResponse, CoreError, CrashReview,
-    CreatedClient, CredentialBackendHealth, CredentialStorage, DEFAULT_DIAGNOSTIC_BYTES,
-    DEFAULT_SEARCH_LIMIT, DependencyKnowledge, DependencyRefreshReport, DependentMods,
-    DiagnosticEntry, DiagnosticKind, DiagnosticRequest, DiagnosticScope, DiagnosticSearch,
-    DirectoryState, DuplicateClient, EULA_CONFIRMATION_PHRASE, Entitlements, EulaStatus,
-    FileDisposition, Freshness, GameExit, ImpactedMod, ImportRequest, ImportedPack,
-    IncompatibilityReason, InstallationHealth, InstalledHost, InstalledMods, IsolationRequest,
-    IsolationRound, IsolationSession, IsolationStep, JavaHealth, JavaPathChoice, JavaPlan,
-    JavaPlanRequest, JavaRuntime, JavaTarget, LaunchAndConnectEvent, LaunchAndConnectObserver,
-    LaunchAndConnectOptions, LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver,
-    LaunchOptions, LaunchOutcome, LaunchState, LoginFlow, LoginOptions, LoginRequest,
-    MAX_SEARCH_MATCHES, MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod,
-    ManagedModSnapshot, ModInstallPlan, ModInstallRequest, ModPresence, ModProjectDetails,
-    ModRelations, ModSearchQuery, ModSearchResults, NetworkAccess, NewClient, NewServer,
-    OperationReporter, OptionalSelection, OutputLine, PackAnalysis, PackRecipe, PackSide, Paths,
-    PlanWarning, PlannedMod, PreferenceApplication, PreferenceId, PreferenceKey, ProcessMonitor,
-    PromotionRequest, ReconciliationReport, RelatedMod, ReleaseListing, RequiredMods,
-    RequirementBasis, RoundAnswer, RuntimeClassification, RuntimeInventory, SearchOptions,
-    SecretString, ServerCommitWarning, ServerContentSource, ServerCreateOptions, ServerEvent,
-    ServerExit, ServerFolder, ServerNetworkChange, ServerObserver, ServerPersistenceHealth,
-    ServerRecord, ServerWarning, Session, SharedArtifactReport, SideRequirement, SkipReason,
-    SnapshotOrigin, SnapshotRecord, SnapshotRestoreOptions, StartedServerLifetime,
-    SuspectConfidence, SuspectReason, TerminationRequests, TextAnchor, TextView,
-    UnknownServerFiles, VerificationReport, VersionMetadata, VersionRecord, format_binary_bytes,
+    AccountRemoval, AccountStatus, AccountSummary, ApiSettings, App, ArgumentForm, Artifact,
+    ArtifactCacheHealth, AssetIndexRef, AuthEvent, AuthObserver, BundleContents, BundleSelection,
+    BundledDocumentHealth, CancellationToken, CaptureHealth, CapturedLine, ClientFolder,
+    ClientRecord, CloneMethod, Compatibility, Config, ConfigurationHealth, ControlResponse,
+    CoreError, CrashReview, CreatedClient, CredentialBackendHealth, CredentialOutcome,
+    CredentialStorage, DEFAULT_DIAGNOSTIC_BYTES, DEFAULT_SEARCH_LIMIT, DependencyKnowledge,
+    DependencyRefreshReport, DependentMods, DiagnosticEntry, DiagnosticKind, DiagnosticRequest,
+    DiagnosticScope, DiagnosticSearch, DirectoryState, DuplicateClient, EULA_CONFIRMATION_PHRASE,
+    Entitlements, EulaStatus, FileDisposition, Freshness, GameExit, ImpactedMod, ImportRequest,
+    ImportedPack, IncompatibilityReason, InstallationHealth, InstalledHost, InstalledMods,
+    IsolationRequest, IsolationRound, IsolationSession, IsolationStep, JavaHealth, JavaPathChoice,
+    JavaPlan, JavaPlanRequest, JavaRuntime, JavaTarget, LaunchAndConnectEvent,
+    LaunchAndConnectObserver, LaunchAndConnectOptions, LaunchAndConnectOutcome, LaunchEvent,
+    LaunchFeatures, LaunchObserver, LaunchOptions, LaunchOutcome, LaunchState, LoginFlow,
+    LoginOptions, LoginRequest, MAX_SEARCH_MATCHES, MINECRAFT_EULA_REFERENCE, ManagedInstallation,
+    ManagedMod, ManagedModSnapshot, ModInstallPlan, ModInstallRequest, ModPresence,
+    ModProjectDetails, ModRelations, ModSearchQuery, ModSearchResults, NetworkAccess, NewClient,
+    NewServer, OperationReporter, OptionalSelection, OutputLine, PackAnalysis, PackRecipe,
+    PackSide, Paths, PlanWarning, PlannedMod, PreferenceApplication, PreferenceId, PreferenceKey,
+    ProcessMonitor, PromotionRequest, ReconciliationReport, RelatedMod, ReleaseListing,
+    RequiredMods, RequirementBasis, RoundAnswer, RuntimeClassification, RuntimeInventory,
+    SearchOptions, SecretString, ServerCommitWarning, ServerContentSource, ServerCreateOptions,
+    ServerEvent, ServerExit, ServerFolder, ServerNetworkChange, ServerObserver,
+    ServerPersistenceHealth, ServerRecord, ServerWarning, Session, SharedArtifactReport,
+    SideRequirement, SkipReason, SnapshotOrigin, SnapshotRecord, SnapshotRestoreOptions,
+    StartedServerLifetime, SuspectConfidence, SuspectReason, TerminationRequests, TextAnchor,
+    TextView, UnknownServerFiles, VerificationReport, VersionMetadata, VersionRecord,
+    format_binary_bytes,
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{
@@ -5607,14 +5608,20 @@ async fn run_account_command(
             }
         }
         AccountCommand::Logout => {
-            let removed = app.logout()?;
-            let message = if removed {
-                "auth-logged-out"
-            } else {
-                "auth-nothing-to-log-out-of"
+            let outcome = app.logout()?;
+            let message = match outcome {
+                Some(CredentialOutcome::Deleted) => "auth-logged-out-credential-deleted",
+                Some(CredentialOutcome::ScheduledForDeletion) => {
+                    "auth-logged-out-credential-pending"
+                }
+                Some(CredentialOutcome::NoneStored) => "auth-logged-out-no-credential",
+                None => "auth-nothing-to-log-out-of",
             };
             if json {
-                print_json(&serde_json::json!({"signed_out": removed}));
+                print_json(&serde_json::json!({
+                    "signed_out": outcome.is_some(),
+                    "credential": outcome.map(CredentialOutcome::as_str),
+                }));
             } else {
                 outln!("{}", ephervex_i18n::lookup(message));
             }
@@ -5671,24 +5678,28 @@ fn run_account_management(
             }
         }
         AccountCommand::Remove { account } => {
-            // Resolved before removal so the message can name what went, and
-            // can say whether a credential was actually deleted — an offline
-            // account never had one.
+            // Resolved before removal so the message can name what went.
             let removed = app.account(account)?;
-            let remaining = app.remove_account(account)?;
+            let AccountRemoval {
+                remaining,
+                credential,
+            } = app.remove_account(account)?;
             if json {
                 print_json(&serde_json::json!({
                     "removed": account_json(&removed),
                     "default": remaining.as_ref().map(account_json),
+                    "credential": credential.as_str(),
                 }));
             } else {
                 outln!(
                     "{}",
                     ephervex_i18n::lookup_args(
-                        if removed.kind.has_stored_credential() {
-                            "account-removed-with-credential"
-                        } else {
-                            "account-removed"
+                        match credential {
+                            CredentialOutcome::Deleted => "account-removed-with-credential",
+                            CredentialOutcome::ScheduledForDeletion => {
+                                "account-removed-credential-pending"
+                            }
+                            CredentialOutcome::NoneStored => "account-removed",
                         },
                         [("name", MessageArg::from(removed.name.as_str()))]
                     )

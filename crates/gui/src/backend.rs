@@ -15,20 +15,21 @@ use ephervex_core::ManagedMutationReport;
 use ephervex_core::live_diagnostics::TailedLine;
 use ephervex_core::{
     App, AuthEvent, AuthObserver, CancellationToken, ClientFolder, ClientModOutcome, ClientModPlan,
-    ConnectionTarget, CoreError, CoreResult, CrashReview, DeclaredProject, DiagnosisRequest,
-    DiagnosticFix, DiagnosticKind, DiagnosticRequest, DiagnosticScope, ErrorChain, EulaStatus,
-    ImportRequest, InstalledHost, IsolationError, IsolationPlan, IsolationReconciliation,
-    IsolationReport, IsolationRequest, IsolationSession, LaunchAndConnectEvent,
-    LaunchAndConnectObserver, LaunchAndConnectOptions, LaunchEvent, LaunchFeatures, LaunchObserver,
-    LaunchOptions, LinkedModOutcome, LinkedModPlan, LinkedModRequest, LinkedStart,
-    LinkedTargetPlan, LinkedTargetResult, LinkedTargetState, LocalModOffer, LocalModPlan,
-    LocalModReport, LoginOptions, ManagedModEntry, ManagedModSnapshot, MetadataAvailability,
-    ModInstallPlan, ModMutability, ModMutation, ModMutationPlan, ModPresence, ModSearchQuery,
-    MutationRestriction, NewClient, NewServer, OperationReporter, OptionalSelection, PackAnalysis,
-    Paths, PlannedOutcome, ProcessMonitor, ProgressSink, ProviderFileIdentity, RoundAnswer,
-    SearchOptions, ServerCommit, ServerContentSource, ServerCreateOptions, ServerEvent,
-    ServerFolder, ServerNetworkSettings, ServerObserver, ServerRecord, SideRequirement,
-    SnapshotOrigin, SnapshotRestoreOptions, SuspectReason, WatchTarget,
+    ConnectionTarget, CoreError, CoreResult, CrashReview, CredentialOutcome, DeclaredProject,
+    DiagnosisRequest, DiagnosticFix, DiagnosticKind, DiagnosticRequest, DiagnosticScope,
+    ErrorChain, EulaStatus, ImportRequest, InstalledHost, IsolationError, IsolationPlan,
+    IsolationReconciliation, IsolationReport, IsolationRequest, IsolationSession,
+    LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions, LaunchEvent,
+    LaunchFeatures, LaunchObserver, LaunchOptions, LinkedModOutcome, LinkedModPlan,
+    LinkedModRequest, LinkedStart, LinkedTargetPlan, LinkedTargetResult, LinkedTargetState,
+    LocalModOffer, LocalModPlan, LocalModReport, LoginOptions, ManagedModEntry, ManagedModSnapshot,
+    MetadataAvailability, ModInstallPlan, ModMutability, ModMutation, ModMutationPlan, ModPresence,
+    ModSearchQuery, MutationRestriction, NewClient, NewServer, OperationReporter,
+    OptionalSelection, PackAnalysis, Paths, PlannedOutcome, ProcessMonitor, ProgressSink,
+    ProviderFileIdentity, RoundAnswer, SearchOptions, ServerCommit, ServerContentSource,
+    ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings, ServerObserver,
+    ServerRecord, SideRequirement, SnapshotOrigin, SnapshotRestoreOptions, SuspectReason,
+    WatchTarget,
 };
 use ephervex_core::{
     ConfiguredPreferences, LanguageAvailability, LanguageEntry, MinecraftPreferencePreview,
@@ -4863,9 +4864,15 @@ fn run_worker(
                 Err(error) => send_error(&events, &error),
             },
             Command::RemoveAccount(reference) => match app.remove_account(&reference) {
-                Ok(_) => {
+                Ok(removal) => {
                     let _ = events.send(Event::Toast {
-                        message: lookup("gui-account-removed"),
+                        message: lookup(match removal.credential {
+                            CredentialOutcome::Deleted => "gui-account-removed-credential-deleted",
+                            CredentialOutcome::ScheduledForDeletion => {
+                                "gui-account-removed-credential-pending"
+                            }
+                            CredentialOutcome::NoneStored => "gui-account-removed",
+                        }),
                         error: false,
                     });
                     send_snapshot(&app, &events);

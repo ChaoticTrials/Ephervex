@@ -651,7 +651,10 @@ auth-session-only-warning = This sign-in is not saved and will be forgotten when
 auth-open-browser = Open this address to sign in: { $url }
 # $code is Microsoft's short device code and $url is where to enter it.
 auth-device-code-prompt = Go to { $url } and enter the code { $code }.
-auth-logged-out = Signed out and removed the saved credential.
+auth-logged-out-credential-deleted = Signed out and deleted the saved credential.
+# Shown when the keyring could not be reached: the credential may still be there.
+auth-logged-out-credential-pending = Signed out. The keyring could not be reached, so any saved credential will be deleted once it is available.
+auth-logged-out-no-credential = Signed out. There was no saved credential to delete.
 auth-nothing-to-log-out-of = No account was signed in.
 
 ## Accounts 
@@ -680,6 +683,8 @@ account-default-set = { $name } is now the default account.
 account-active-offline = Using the offline account { $name }.
 account-removed = Removed the account { $name }.
 account-removed-with-credential = Removed the account { $name } and deleted its saved credential.
+# Shown when the keyring could not be reached: the credential may still be there.
+account-removed-credential-pending = Removed the account { $name }. The keyring could not be reached, so any saved credential will be deleted once it is available.
 
 # An offline account has no credential at all - this is not a missing or
 # degraded one. Offline accounts have no credential material to store.
@@ -2868,6 +2873,8 @@ gui-eula-browser-failed = The browser could not be opened. Visit https://aka.ms/
 gui-offline-account-added = Added offline account "{ $value }".
 gui-default-account-set = "{ $value }" is now the default account.
 gui-account-removed = Removed account.
+gui-account-removed-credential-deleted = Removed account and deleted its saved credential.
+gui-account-removed-credential-pending = Removed account. The keyring could not be reached, so any saved credential will be deleted once it is available.
 gui-provider-settings-saved = Saved provider settings.
 gui-storage-root-saved = Saved the persistent instance root.
 gui-java-settings-saved = Saved Java settings.

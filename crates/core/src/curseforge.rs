@@ -264,8 +264,11 @@ mod tests {
                     detail: "locked".to_owned(),
                 })
             }
-            fn delete(&self, _: &ephervex_auth::CredentialKey) -> ephervex_auth::AuthResult<()> {
-                Ok(())
+            fn delete(
+                &self,
+                _: &ephervex_auth::CredentialKey,
+            ) -> ephervex_auth::AuthResult<ephervex_auth::CredentialRemoval> {
+                Ok(ephervex_auth::CredentialRemoval::Absent)
             }
             fn storage(&self) -> ephervex_auth::CredentialStorage {
                 ephervex_auth::CredentialStorage::Keyring

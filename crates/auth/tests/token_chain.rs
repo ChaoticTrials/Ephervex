@@ -28,8 +28,8 @@ use std::time::Duration;
 
 use ephervex_auth::{
     AccountProvider, AuthError, AuthEvent, AuthObserver, CredentialChangeOrder, CredentialKey,
-    CredentialStorage, CredentialStore, Endpoints, LoginFlow, LoginRequest, MemoryStore,
-    MicrosoftAccountProvider, ProcessChangeOrder, SecretString, XstsDenial,
+    CredentialRemoval, CredentialStorage, CredentialStore, Endpoints, LoginFlow, LoginRequest,
+    MemoryStore, MicrosoftAccountProvider, ProcessChangeOrder, SecretString, XstsDenial,
 };
 use ephervex_download::HttpConfig;
 use tokio_util::sync::CancellationToken;
@@ -813,7 +813,7 @@ impl CredentialStore for StoreHeldOpen {
         self.inner.load(key)
     }
 
-    fn delete(&self, key: &CredentialKey) -> Result<(), AuthError> {
+    fn delete(&self, key: &CredentialKey) -> Result<CredentialRemoval, AuthError> {
         self.inner.delete(key)
     }
 

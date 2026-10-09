@@ -406,6 +406,7 @@ impl AccountProvider for MicrosoftAccountProvider {
         let _ordered = self.order.hold()?;
         self.credentials
             .delete(&CredentialKey::MicrosoftRefreshToken(account))
+            .map(|_| ())
     }
 
     fn has_stored_credential(&self, account: Uuid) -> AuthResult<bool> {
@@ -499,14 +500,14 @@ pub fn set_curseforge_api_key(store: &dyn CredentialStore, key: &SecretString) -
 /// Idempotent, and it never needs the existing value: removing a credential
 /// must not require revealing one.
 pub fn clear_curseforge_api_key(store: &dyn CredentialStore) -> AuthResult<()> {
-    store.delete(&CredentialKey::CurseForgeApiKey)
+    store.delete(&CredentialKey::CurseForgeApiKey).map(|_| ())
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
-    use crate::store::MemoryStore;
+    use crate::store::{CredentialRemoval, MemoryStore};
 
     fn provider() -> MicrosoftAccountProvider {
         MicrosoftAccountProvider::with_endpoints(
@@ -704,7 +705,7 @@ mod tests {
             })
         }
 
-        fn delete(&self, _key: &CredentialKey) -> AuthResult<()> {
+        fn delete(&self, _key: &CredentialKey) -> AuthResult<CredentialRemoval> {
             Err(AuthError::SecretStorageUnavailable {
                 detail: "no secret service".to_owned(),
             })
