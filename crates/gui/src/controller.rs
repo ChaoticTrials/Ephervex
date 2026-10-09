@@ -4234,11 +4234,14 @@ fn register_pack_link_actions(ui: &AppWindow, commands: &Sender<Command>) {
     // before anyone opens it.
     send(commands, Command::LoadLinkSettings);
 
+    let weak = ui.as_weak();
     let sender = commands.clone();
     ui.on_deliver_pack_link(move |url| {
+        let Some(ui) = weak.upgrade() else { return };
         send(
             &sender,
             Command::OpenPackUrl {
+                generation: begin_pack_link_request(&ui),
                 url: url.to_string(),
                 host: None,
                 consent: None,
@@ -4246,8 +4249,18 @@ fn register_pack_link_actions(ui: &AppWindow, commands: &Sender<Command>) {
         );
     });
 
+    let weak = ui.as_weak();
+    let sender = commands.clone();
+    ui.on_cancel_pack_link(move || {
+        if let Some(ui) = weak.upgrade() {
+            cancel_pack_link_download(&ui, &sender);
+        }
+    });
+
+    let weak = ui.as_weak();
     let sender = commands.clone();
     ui.on_open_pack_link(move |url, host, remember| {
+        let Some(ui) = weak.upgrade() else { return };
         let consent = if remember {
             ephervex_core::HostConsent::Remember
         } else {
@@ -4256,12 +4269,46 @@ fn register_pack_link_actions(ui: &AppWindow, commands: &Sender<Command>) {
         send(
             &sender,
             Command::OpenPackUrl {
+                generation: begin_pack_link_request(&ui),
                 url: url.to_string(),
                 host: Some(host.to_string()),
                 consent: Some(consent),
             },
         );
     });
+}
+
+/// Stops the modpack link download the window is showing, if there is one.
+///
+/// Clearing the flag is what keeps its archive out of the import: a download
+/// that finishes anyway is no longer wanted, and is dropped when it arrives.
+fn cancel_pack_link_download(ui: &AppWindow, commands: &Sender<Command>) {
+    if ui.get_pack_link_downloading() {
+        ui.set_pack_link_downloading(false);
+        send(
+            commands,
+            Command::CancelPackUrl {
+                generation: ui.get_pack_link_generation(),
+            },
+        );
+    }
+}
+
+/// Starts following a modpack link request and returns its number.
+///
+/// The window numbers its requests itself, so it knows which one an event or a
+/// Cancel is about even before the backend has answered the first command.
+fn begin_pack_link_request(ui: &AppWindow) -> i32 {
+    let generation = ui.get_pack_link_generation().saturating_add(1);
+    ui.set_pack_link_generation(generation);
+    ui.set_pack_link_downloading(true);
+    generation
+}
+
+/// Whether an event is about the request the window is still waiting on,
+/// rather than one that was replaced, answered or canceled since.
+fn pack_link_request_pending(ui: &AppWindow, generation: i32) -> bool {
+    ui.get_pack_link_downloading() && ui.get_pack_link_generation() == generation
 }
 
 /// Hands the window a modpack link, as a desktop scheme handler delivers one.
@@ -6925,28 +6972,10 @@ fn apply_event(
         }
         Event::AbsentMods(absent) => apply_absent_mods(ui, &absent, commands),
         Event::PromotionPlan(plan) => apply_promotion_plan(ui, &plan),
-        Event::PackUrlConsent {
-            url,
-            display,
-            host,
-            redirected,
-        } => {
-            if !make_room_for_dialog(ui) {
-                return;
-            }
-            ui.set_pack_link_url(url.as_str().into());
-            ui.set_pack_link_display(display.as_str().into());
-            ui.set_pack_link_host(host.as_str().into());
-            ui.set_pack_link_redirected(redirected);
-            ui.set_pack_link_remember(true);
-            ui.set_modal_error(SharedString::default());
-            ui.set_modal("open-pack-link".into());
-        }
-        Event::PackDownloaded { archive } => {
-            if make_room_for_dialog(ui) {
-                begin_import(ui, import_flow, commands, archive);
-            }
-        }
+        event @ (Event::PackUrlConsent { .. }
+        | Event::PackUrlDownloading { .. }
+        | Event::PackDownloaded { .. }
+        | Event::PackUrlEnded { .. }) => apply_pack_link_event(ui, event, import_flow, commands),
         Event::LinkSettings(settings) => {
             ui.set_trusted_pack_hosts(
                 settings
@@ -8432,7 +8461,113 @@ fn leave_modal(ui: &AppWindow) {
     match ui.get_modal().as_str() {
         "mod-plan" => ui.invoke_abandon_browser_install(),
         "import" => ui.invoke_close_import_modal(),
+        "open-pack-link" => ui.invoke_cancel_pack_link(),
         _ => {}
+    }
+}
+
+/// What a modpack link's download reports to the window.
+///
+/// Each event names the delivery it is about. One older than the newest the
+/// window has seen is ignored, and an archive nothing will import is deleted.
+fn apply_pack_link_event(
+    ui: &AppWindow,
+    event: Event,
+    import_flow: &Rc<RefCell<ImportFlowState>>,
+    commands: &Sender<Command>,
+) {
+    match event {
+        Event::PackUrlConsent {
+            generation,
+            url,
+            display,
+            host,
+            redirected,
+        } => {
+            // The dialog already on screen is the link's own, so it is reused.
+            if !pack_link_request_pending(ui, generation)
+                || (ui.get_modal() != "open-pack-link" && !make_room_for_dialog(ui))
+            {
+                return;
+            }
+            ui.set_pack_link_downloading(false);
+            ui.set_pack_link_url(url.as_str().into());
+            ui.set_pack_link_display(display.as_str().into());
+            ui.set_pack_link_host(host.as_str().into());
+            ui.set_pack_link_redirected(redirected);
+            ui.set_pack_link_remember(true);
+            ui.set_modal_error(SharedString::default());
+            ui.set_modal("open-pack-link".into());
+        }
+        Event::PackUrlDownloading {
+            generation,
+            url,
+            display,
+            host,
+        } => {
+            if !pack_link_request_pending(ui, generation) {
+                return;
+            }
+            let on_screen = ui.get_modal() == "open-pack-link";
+            if !on_screen && !make_room_for_dialog(ui) {
+                cancel_pack_link_download(ui, commands);
+                return;
+            }
+            // Confirming the question on screen keeps what it showed, so a
+            // failure can be retried with the same answer. A different link
+            // replaces it.
+            if !(on_screen && ui.get_pack_link_url() == url.as_str()) {
+                ui.set_pack_link_url(url.as_str().into());
+                ui.set_pack_link_display(display.as_str().into());
+                ui.set_pack_link_host(host.as_str().into());
+                ui.set_pack_link_redirected(false);
+                ui.set_pack_link_remember(true);
+            }
+            ui.set_modal_error(SharedString::default());
+            ui.set_modal("open-pack-link".into());
+        }
+        Event::PackDownloaded {
+            generation,
+            archive,
+        } => {
+            // Not wanted once the user canceled or left the dialog, or a
+            // newer link took over: nothing will import it, so it goes.
+            let wanted = pack_link_request_pending(ui, generation);
+            if wanted {
+                ui.set_pack_link_downloading(false);
+            }
+            if wanted && make_room_for_dialog(ui) {
+                begin_import(ui, import_flow, commands, archive);
+            } else {
+                discard_pack_archive(&archive);
+            }
+        }
+        Event::PackUrlEnded {
+            generation,
+            message,
+        } => {
+            if !pack_link_request_pending(ui, generation) {
+                return;
+            }
+            ui.set_pack_link_downloading(false);
+            match message {
+                Some(message) => apply_modal_error(ui, backend::ModalScope::PACK_LINK, message),
+                // Canceled from the activity list: the dialog has nothing left
+                // to wait for.
+                None if ui.get_modal() == "open-pack-link" => {
+                    ui.set_modal(SharedString::default());
+                }
+                None => {}
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Deletes a downloaded modpack archive that no import will take.
+fn discard_pack_archive(archive: &Path) {
+    if let Err(error) = std::fs::remove_file(archive) {
+        tracing::debug!(%error, "kept a downloaded modpack archive that nothing will import");
     }
 }
 
@@ -13625,6 +13760,280 @@ mod tests {
 
         assert_eq!(ui.get_modal_error(), "Not saved");
         assert!(toasts.borrow().is_empty());
+    }
+
+    /// A link request the backend has answered with its download, as the window
+    /// sees it. Returns the request's number.
+    fn pack_link_downloading(
+        ui: &AppWindow,
+        commands: &Sender<Command>,
+        import_flow: &Rc<RefCell<ImportFlowState>>,
+    ) -> i32 {
+        let generation = begin_pack_link_request(ui);
+        apply_pack_link_event(
+            ui,
+            Event::PackUrlDownloading {
+                generation,
+                url: "https://packs.example/pack.mrpack".to_owned(),
+                display: "https://packs.example/pack.mrpack".to_owned(),
+                host: "packs.example".to_owned(),
+            },
+            import_flow,
+            commands,
+        );
+        generation
+    }
+
+    fn pack_link_cancel_wiring(ui: &AppWindow, commands: &Sender<Command>) {
+        let weak = ui.as_weak();
+        let sender = commands.clone();
+        ui.on_cancel_pack_link(move || {
+            if let Some(ui) = weak.upgrade() {
+                cancel_pack_link_download(&ui, &sender);
+            }
+        });
+    }
+
+    fn archive_in(base: &tempfile::TempDir, name: &str) -> PathBuf {
+        let archive = base.path().join(name);
+        std::fs::write(&archive, b"a pack").expect("write");
+        archive
+    }
+
+    #[test]
+    fn a_link_download_is_shown_and_canceling_it_stops_it_and_opens_no_import() {
+        let ui = test_window();
+        let (commands, received) = std::sync::mpsc::channel();
+        let import_flow = Rc::new(RefCell::new(ImportFlowState::default()));
+        pack_link_cancel_wiring(&ui, &commands);
+        let base = tempfile::tempdir().expect("a disposable root");
+        let archive = archive_in(&base, "link.pack");
+
+        let generation = pack_link_downloading(&ui, &commands, &import_flow);
+        assert_eq!(ui.get_modal(), "open-pack-link");
+        assert!(ui.get_pack_link_downloading());
+
+        ui.invoke_cancel_pack_link();
+        assert!(!ui.get_pack_link_downloading());
+        assert!(matches!(
+            received.try_recv(),
+            Ok(Command::CancelPackUrl { generation: stopped }) if stopped == generation
+        ));
+
+        // The archive was already on its way when Cancel was pressed.
+        ui.set_modal(SharedString::default());
+        apply_pack_link_event(
+            &ui,
+            Event::PackDownloaded {
+                generation,
+                archive: archive.clone(),
+            },
+            &import_flow,
+            &commands,
+        );
+
+        assert_eq!(
+            ui.get_modal(),
+            "",
+            "no import opens over what the user is doing"
+        );
+        assert!(received.try_recv().is_err(), "nothing analyzes the archive");
+        assert!(!archive.exists(), "the unwanted archive is deleted");
+    }
+
+    /// Confirm hands the request to a backend that may be busy, so Cancel can
+    /// come before anything has answered.
+    #[test]
+    fn canceling_before_the_backend_answers_a_confirmed_link_opens_nothing_later() {
+        let ui = test_window();
+        let (commands, received) = std::sync::mpsc::channel();
+        let import_flow = Rc::new(RefCell::new(ImportFlowState::default()));
+        pack_link_cancel_wiring(&ui, &commands);
+        let base = tempfile::tempdir().expect("a disposable root");
+        let archive = archive_in(&base, "link.pack");
+        ui.set_modal("open-pack-link".into());
+        let generation = begin_pack_link_request(&ui);
+
+        ui.invoke_cancel_pack_link();
+        ui.set_modal("rename".into());
+        assert!(matches!(
+            received.try_recv(),
+            Ok(Command::CancelPackUrl { generation: stopped }) if stopped == generation
+        ));
+
+        for event in [
+            Event::PackUrlDownloading {
+                generation,
+                url: "https://packs.example/pack.mrpack".to_owned(),
+                display: "https://packs.example/pack.mrpack".to_owned(),
+                host: "packs.example".to_owned(),
+            },
+            Event::PackDownloaded {
+                generation,
+                archive: archive.clone(),
+            },
+        ] {
+            apply_pack_link_event(&ui, event, &import_flow, &commands);
+        }
+
+        assert_eq!(ui.get_modal(), "rename", "the user's dialog is left alone");
+        assert!(received.try_recv().is_err());
+        assert!(!archive.exists());
+    }
+
+    #[test]
+    fn a_finished_link_download_opens_the_import() {
+        let ui = test_window();
+        let (commands, received) = std::sync::mpsc::channel();
+        let import_flow = Rc::new(RefCell::new(ImportFlowState::default()));
+        pack_link_cancel_wiring(&ui, &commands);
+        let generation = pack_link_downloading(&ui, &commands, &import_flow);
+
+        apply_pack_link_event(
+            &ui,
+            Event::PackDownloaded {
+                generation,
+                archive: PathBuf::from("link.pack"),
+            },
+            &import_flow,
+            &commands,
+        );
+
+        assert_eq!(ui.get_modal(), "import");
+        assert!(!ui.get_pack_link_downloading());
+        assert!(matches!(
+            received.try_recv(),
+            Ok(Command::AnalyzeImport { .. })
+        ));
+    }
+
+    #[test]
+    fn leaving_the_link_dialog_by_any_route_cancels_its_download() {
+        let ui = test_window();
+        let (commands, received) = std::sync::mpsc::channel();
+        let import_flow = Rc::new(RefCell::new(ImportFlowState::default()));
+        pack_link_cancel_wiring(&ui, &commands);
+        let generation = pack_link_downloading(&ui, &commands, &import_flow);
+
+        assert!(make_room_for_dialog(&ui));
+
+        assert!(matches!(
+            received.try_recv(),
+            Ok(Command::CancelPackUrl { generation: stopped }) if stopped == generation
+        ));
+        assert!(!ui.get_pack_link_downloading());
+    }
+
+    #[test]
+    fn events_of_a_replaced_link_download_are_ignored() {
+        let ui = test_window();
+        let (commands, received) = std::sync::mpsc::channel();
+        let import_flow = Rc::new(RefCell::new(ImportFlowState::default()));
+        pack_link_cancel_wiring(&ui, &commands);
+        let base = tempfile::tempdir().expect("a disposable root");
+        let archive = archive_in(&base, "old.pack");
+        let older = pack_link_downloading(&ui, &commands, &import_flow);
+        let newer = begin_pack_link_request(&ui);
+        assert!(newer > older);
+
+        apply_pack_link_event(
+            &ui,
+            Event::PackDownloaded {
+                generation: older,
+                archive: archive.clone(),
+            },
+            &import_flow,
+            &commands,
+        );
+        apply_pack_link_event(
+            &ui,
+            Event::PackUrlEnded {
+                generation: older,
+                message: Some("old failure".to_owned()),
+            },
+            &import_flow,
+            &commands,
+        );
+
+        assert_eq!(ui.get_modal(), "open-pack-link");
+        assert!(
+            ui.get_pack_link_downloading(),
+            "the newer link keeps downloading"
+        );
+        assert_eq!(ui.get_modal_error(), "");
+        assert!(received.try_recv().is_err());
+        assert!(!archive.exists());
+    }
+
+    #[test]
+    fn a_redirect_question_for_a_download_the_user_canceled_is_not_asked() {
+        let ui = test_window();
+        let (commands, _received) = std::sync::mpsc::channel();
+        let import_flow = Rc::new(RefCell::new(ImportFlowState::default()));
+        pack_link_cancel_wiring(&ui, &commands);
+        let generation = pack_link_downloading(&ui, &commands, &import_flow);
+        ui.invoke_cancel_pack_link();
+        ui.set_modal(SharedString::default());
+
+        apply_pack_link_event(
+            &ui,
+            Event::PackUrlConsent {
+                generation,
+                url: "https://packs.example/pack.mrpack".to_owned(),
+                display: "https://cdn.example/pack.mrpack".to_owned(),
+                host: "cdn.example".to_owned(),
+                redirected: true,
+            },
+            &import_flow,
+            &commands,
+        );
+
+        assert_eq!(ui.get_modal(), "");
+    }
+
+    #[test]
+    fn a_failed_link_download_shows_why_in_its_dialog() {
+        let ui = test_window();
+        let (commands, _received) = std::sync::mpsc::channel();
+        let import_flow = Rc::new(RefCell::new(ImportFlowState::default()));
+        pack_link_cancel_wiring(&ui, &commands);
+        let generation = pack_link_downloading(&ui, &commands, &import_flow);
+
+        apply_pack_link_event(
+            &ui,
+            Event::PackUrlEnded {
+                generation,
+                message: Some("The download failed".to_owned()),
+            },
+            &import_flow,
+            &commands,
+        );
+
+        assert_eq!(ui.get_modal(), "open-pack-link");
+        assert_eq!(ui.get_modal_error(), "The download failed");
+        assert!(!ui.get_pack_link_downloading());
+    }
+
+    #[test]
+    fn a_link_download_canceled_elsewhere_closes_its_dialog() {
+        let ui = test_window();
+        let (commands, _received) = std::sync::mpsc::channel();
+        let import_flow = Rc::new(RefCell::new(ImportFlowState::default()));
+        pack_link_cancel_wiring(&ui, &commands);
+        let generation = pack_link_downloading(&ui, &commands, &import_flow);
+
+        apply_pack_link_event(
+            &ui,
+            Event::PackUrlEnded {
+                generation,
+                message: None,
+            },
+            &import_flow,
+            &commands,
+        );
+
+        assert_eq!(ui.get_modal(), "");
+        assert!(!ui.get_pack_link_downloading());
     }
 
     #[test]

@@ -137,6 +137,37 @@ fn cancelling_sends_nothing_at_all() {
     assert_eq!(ui.get_modal(), "", "declining closes the dialog");
 }
 
+/// A download under way is shown as one and can be stopped from the dialog,
+/// including for a host that needed no question.
+#[test]
+fn a_download_under_way_offers_cancel_and_no_second_confirm() {
+    let ui = window();
+    let canceled = Rc::new(RefCell::new(0));
+    let sink = Rc::clone(&canceled);
+    ui.on_cancel_pack_link(move || *sink.borrow_mut() += 1);
+    consent_dialog(&ui);
+    ui.set_pack_link_downloading(true);
+    settle(&ui);
+
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-downloading-pack"))
+            .any(|element| element.size().width > 0.0),
+        "the dialog has to say the download is under way"
+    );
+    assert!(
+        widest(&ui, &lookup("gui-open-pack-link-confirm")).is_none(),
+        "a second confirm would queue a second download"
+    );
+
+    widest(&ui, &lookup("gui-cancel"))
+        .expect("the download can be stopped")
+        .invoke_accessible_default_action();
+    settle(&ui);
+
+    assert_eq!(*canceled.borrow(), 1, "cancel has to reach the backend");
+    assert_eq!(ui.get_modal(), "");
+}
+
 /// Whether the scheme is claimed at all is settled by installing (ADR 0028,
 /// ADR 0029). The control that used to stand here meant "yes" on an AppImage
 /// and nothing at all on a packaged install, and had three lines of copy

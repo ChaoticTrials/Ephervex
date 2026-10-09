@@ -214,10 +214,19 @@ pub enum Command {
     /// host has been agreed to before or `consent` carries the answer for
     /// `host`, the host the question was about. A link that redirects to another
     /// host asks again for that one.
+    ///
+    /// `generation` is the window's number for this delivery, which every event
+    /// about it carries back and `CancelPackUrl` names.
     OpenPackUrl {
+        generation: i32,
         url: String,
         host: Option<String>,
         consent: Option<ephervex_core::HostConsent>,
+    },
+    /// Stop the modpack link download that `generation` names, so no import
+    /// opens for it. A download that has since been replaced is left alone.
+    CancelPackUrl {
+        generation: i32,
     },
     /// Read what this copy remembers about modpack links.
     LoadLinkSettings,
@@ -1467,6 +1476,7 @@ impl ModalScope {
     pub const LOADER_CHANGE: Self = Self::Dialogs(&["loader-change"]);
     pub const MAKE_PERSISTENT: Self = Self::Dialogs(&["make-persistent"]);
     pub const MOD_MANAGE: Self = Self::Dialogs(&["mod-manage"]);
+    pub const PACK_LINK: Self = Self::Dialogs(&["open-pack-link"]);
     pub const RENAME: Self = Self::Dialogs(&["rename"]);
 
     /// Whether `modal`, the dialog on screen, is one this scope speaks for.
@@ -1544,7 +1554,12 @@ pub enum Event {
     /// user can bring along.
     PromotionPlan(PromotionPlanData),
     /// A link wants a modpack downloaded from a host nobody has agreed to yet.
+    ///
+    /// `generation` names the link delivery the event is about: an event older
+    /// than the newest one the window has seen belongs to a link that was since
+    /// replaced or canceled, and is ignored.
     PackUrlConsent {
+        generation: i32,
         url: String,
         display: String,
         /// The host the question is about, which the answer comes back with.
@@ -1553,11 +1568,26 @@ pub enum Event {
         /// link's own.
         redirected: bool,
     },
+    /// A modpack link's archive is being downloaded, and can be canceled.
+    PackUrlDownloading {
+        generation: i32,
+        url: String,
+        display: String,
+        /// The link's own host.
+        host: String,
+    },
     /// A modpack that arrived over a link, ready for the import dialog.
     ///
     /// The archive is under the temporary root and is the import's to consume.
     PackDownloaded {
+        generation: i32,
         archive: PathBuf,
+    },
+    /// A modpack link's download ended without an archive: it failed with
+    /// `message`, or it was canceled and `message` is empty.
+    PackUrlEnded {
+        generation: i32,
+        message: Option<String>,
     },
     /// The sites this copy may fetch a modpack archive from without asking.
     LinkSettings(LinkSettingsData),
@@ -2414,6 +2444,9 @@ fn run_worker(
     // What the user has answered about the hosts of the modpack link being
     // opened, kept until it opens or a new link replaces it.
     let mut pack_link_answers = PackLinkAnswers::default();
+    // The download a link started, if it is still running. Shared with the
+    // download's thread, which clears it.
+    let pack_link_download: RunningPackLink = Arc::new(Mutex::new(None));
 
     // Sign-in and other detached operations write the configuration through an
     // `App` of their own, so it is reread whenever the file has changed.
@@ -2939,15 +2972,28 @@ fn run_worker(
                 Ok(_) => send_link_settings(&app, &events),
                 Err(error) => send_error(&events, &error),
             },
-            Command::OpenPackUrl { url, host, consent } => {
-                runtime.block_on(open_pack_url(
-                    &mut app,
-                    &url,
-                    host.as_deref(),
-                    consent,
+            Command::OpenPackUrl {
+                generation,
+                url,
+                host,
+                consent,
+            } => {
+                open_pack_url(
+                    &app,
+                    PackLinkRequest {
+                        generation,
+                        url: &url,
+                        asked: host.as_deref(),
+                        consent,
+                    },
                     &mut pack_link_answers,
+                    &pack_link_download,
                     &events,
-                ));
+                    &cancellations,
+                );
+            }
+            Command::CancelPackUrl { generation } => {
+                cancel_pack_url(&pack_link_download, generation);
             }
             Command::PlanPromotion(instance) => match app.plan_instance_promotion(instance) {
                 Ok(plan) => {
@@ -5677,62 +5723,316 @@ impl PackLinkAnswers {
     }
 }
 
-/// Turns an address a link carried into an archive the import dialog can open.
+/// The modpack link download that is running, which a newer link or the user's
+/// Cancel ends.
+type RunningPackLink = Arc<Mutex<Option<PackLinkDownload>>>;
+
+#[derive(Debug)]
+struct PackLinkDownload {
+    generation: i32,
+    cancel: CancellationToken,
+}
+
+/// What the user did with a delivered link: `consent` answers the question
+/// about `asked`, the host it was about, or the link's own host when none.
+#[derive(Debug, Clone, Copy)]
+struct PackLinkRequest<'a> {
+    generation: i32,
+    url: &'a str,
+    asked: Option<&'a str>,
+    consent: Option<ephervex_core::HostConsent>,
+}
+
+/// Starts turning an address a link carried into an archive the import dialog
+/// can open, and returns without waiting for the download.
 ///
 /// Asks first whenever a host the download reaches has not been agreed to
 /// before: the link's own, and any other a redirect names. The question is the
 /// whole point of the feature's safety story, so it is asked here rather than
 /// assumed by the caller: a frontend that forgot would otherwise download from
 /// whatever a web page named (ADR 0027).
-async fn open_pack_url(
-    app: &mut App,
-    url: &str,
-    asked: Option<&str>,
-    consent: Option<ephervex_core::HostConsent>,
+///
+/// The download runs on a thread of its own so Stop, Kill and Cancel for other
+/// hosts are not queued behind it. Only one runs at a time: a link replaces the
+/// one before it, even when it turns out not to be one that can be opened.
+fn open_pack_url(
+    app: &App,
+    request: PackLinkRequest<'_>,
     answers: &mut PackLinkAnswers,
+    running: &RunningPackLink,
     events: &Sender<Event>,
+    cancellations: &CancellationRegistry,
 ) {
+    let PackLinkRequest {
+        generation,
+        url,
+        asked,
+        consent,
+    } = request;
+    let mut current = running
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(previous) = current.take() {
+        previous.cancel.cancel();
+    }
     let source = match app.pack_source(url) {
         Ok(source) => source,
         Err(error) => {
-            send_modal_error(events, &error);
+            tracing::warn!(message_id = error.message_id(), detail = %ErrorChain(&error), "modpack link refused");
+            let _ = events.send(Event::PackUrlEnded {
+                generation,
+                message: Some(localized_error(&error)),
+            });
             return;
         }
     };
     answers.receive(url, source.host(), asked, consent);
 
-    let reporter = OperationReporter::silent("operation-downloading-pack");
-    let outcome = app
-        .fetch_pack(
-            &source,
-            &answers.consents,
-            &reporter,
-            &CancellationToken::new(),
-        )
-        .await;
+    let consents = answers.consents.clone();
+    // Only so the window does not flash a download that cannot start. The
+    // fetch itself refuses an unagreed host on its own.
+    if !consents.agrees_to(source.host()) && !app.pack_host_is_trusted(&source) {
+        let _ = events.send(Event::PackUrlConsent {
+            generation,
+            url: url.to_owned(),
+            display: source.display().to_owned(),
+            host: source.host().to_owned(),
+            redirected: false,
+        });
+        return;
+    }
+
+    let cancel = CancellationToken::new();
+    *current = Some(PackLinkDownload {
+        generation,
+        cancel: cancel.clone(),
+    });
+    drop(current);
+    let _ = events.send(Event::PackUrlDownloading {
+        generation,
+        url: url.to_owned(),
+        display: source.display().to_owned(),
+        host: source.host().to_owned(),
+    });
+    spawn_pack_link_download(
+        app.paths().clone(),
+        PackLinkWork {
+            source,
+            url: url.to_owned(),
+            consents,
+            generation,
+            cancel,
+        },
+        running,
+        events,
+        cancellations,
+    );
+}
+
+/// Everything a link's download thread needs, owned by it.
+struct PackLinkWork {
+    source: ephervex_core::PackSource,
+    url: String,
+    consents: ephervex_core::PackConsents,
+    generation: i32,
+    cancel: CancellationToken,
+}
+
+/// Runs a link's download on a thread of its own, as an operation the activity
+/// list shows and can cancel.
+fn spawn_pack_link_download(
+    paths: Paths,
+    work: PackLinkWork,
+    running: &RunningPackLink,
+    events: &Sender<Event>,
+    cancellations: &CancellationRegistry,
+) {
+    let generation = work.generation;
+    let slot = PackLinkSlot {
+        running: Arc::clone(running),
+        generation,
+        events: events.clone(),
+    };
+    let cancellations = Arc::clone(cancellations);
+    spawn_detached_with_setup_failure(
+        paths,
+        events.clone(),
+        move |events| {
+            let _ = events.send(Event::PackUrlEnded {
+                generation,
+                message: None,
+            });
+        },
+        move |mut app, events, runtime| {
+            let PackLinkWork {
+                source,
+                url,
+                consents,
+                generation,
+                cancel,
+            } = work;
+            let sink = Arc::new(UiProgressSink {
+                events: events.clone(),
+                entity: source.display().to_owned(),
+                allow_cancel: true,
+                pending: None,
+            });
+            let reporter = OperationReporter::new("operation-downloading-pack", true, sink);
+            reporter.begin(None);
+            register_cancellation(&cancellations, &reporter, &cancel);
+            runtime.block_on(download_pack_link(
+                &mut app,
+                PackLinkTransfer {
+                    source: &source,
+                    url: &url,
+                    consents: &consents,
+                    generation,
+                    slot: &slot,
+                },
+                &reporter,
+                &cancel,
+                &events,
+            ));
+            remove_cancellation(&cancellations, &reporter);
+        },
+    );
+}
+
+/// Ends the download `generation` names, if it is still the one running.
+fn cancel_pack_url(running: &RunningPackLink, generation: i32) {
+    let mut current = running
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if current
+        .as_ref()
+        .is_some_and(|download| download.generation == generation)
+        && let Some(download) = current.take()
+    {
+        download.cancel.cancel();
+    }
+}
+
+/// One modpack link transfer: what to fetch, the answers it may use, and the
+/// delivery it belongs to.
+struct PackLinkTransfer<'a> {
+    source: &'a ephervex_core::PackSource,
+    url: &'a str,
+    consents: &'a ephervex_core::PackConsents,
+    generation: i32,
+    slot: &'a PackLinkSlot,
+}
+
+/// A download's claim on the running-link slot, given back on every way the
+/// download thread can end so a link that is not downloading is never mistaken
+/// for one that is.
+struct PackLinkSlot {
+    running: RunningPackLink,
+    generation: i32,
+    events: Sender<Event>,
+}
+
+impl PackLinkSlot {
+    /// Frees the slot if this download still holds it.
+    fn release(&self) {
+        let mut current = self
+            .running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if current
+            .as_ref()
+            .is_some_and(|download| download.generation == self.generation)
+        {
+            *current = None;
+        }
+    }
+}
+
+impl Drop for PackLinkSlot {
+    fn drop(&mut self) {
+        self.release();
+        // A download that died without saying so would leave the dialog
+        // waiting on it for good.
+        if std::thread::panicking() {
+            let _ = self.events.send(Event::PackUrlEnded {
+                generation: self.generation,
+                message: None,
+            });
+        }
+    }
+}
+
+/// Downloads a link's archive and says how it ended.
+///
+/// A canceled transfer sends no archive and no failure, only that it ended.
+async fn download_pack_link(
+    app: &mut App,
+    transfer: PackLinkTransfer<'_>,
+    reporter: &OperationReporter,
+    cancel: &CancellationToken,
+    events: &Sender<Event>,
+) {
+    let PackLinkTransfer {
+        source,
+        url,
+        consents,
+        generation,
+        slot,
+    } = transfer;
+    let outcome = app.fetch_pack(source, consents, reporter, cancel).await;
+    // Before the outcome is announced, so a link answered at once is not
+    // taken for the download that just ended.
+    slot.release();
     // Either way: the host is agreed to before a byte is fetched, so a download
     // that then failed still added a site the settings page has to show. Left
     // out, the list only caught up on the next start.
     send_link_settings(app, events);
     match outcome {
+        // A download that finished as the user canceled is dropped, and the
+        // staged file goes with it.
+        Ok(_) if cancel.is_cancelled() => {
+            reporter.finish(OperationStatus::Canceled);
+            let _ = events.send(Event::PackUrlEnded {
+                generation,
+                message: None,
+            });
+        }
         // `keep` because the import that follows owns the file now: it runs as
         // a separate command, so tying the archive's life to this scope would
         // delete it before anything read it.
         Ok(staged) => {
+            reporter.finish(OperationStatus::Completed);
             let _ = events.send(Event::PackDownloaded {
+                generation,
                 archive: staged.keep(),
             });
         }
         Err(ephervex_core::CoreError::PackHostNotTrusted { url: shown, host }) => {
+            reporter.finish(OperationStatus::Canceled);
             let redirected = host != source.host();
             let _ = events.send(Event::PackUrlConsent {
+                generation,
                 url: url.to_owned(),
                 display: shown,
                 host,
                 redirected,
             });
         }
-        Err(error) => send_modal_error(events, &error),
+        Err(error) if error.is_cancellation() => {
+            reporter.finish(OperationStatus::Canceled);
+            let _ = events.send(Event::PackUrlEnded {
+                generation,
+                message: None,
+            });
+        }
+        Err(error) => {
+            tracing::warn!(message_id = error.message_id(), detail = %ErrorChain(&error), "modpack link download failed");
+            let message = localized_error(&error);
+            reporter.finish(OperationStatus::Failed(message.clone()));
+            let _ = events.send(Event::PackUrlEnded {
+                generation,
+                message: Some(message),
+            });
+        }
     }
 }
 
@@ -10323,14 +10623,23 @@ mod tests {
             .enable_all()
             .build()
             .expect("a runtime");
+        let url = "https://packs.invalid.localhost:1/pack.mrpack";
+        let source = app.pack_source(url).expect("an address");
+        let consents = ephervex_core::PackConsents::none()
+            .agreeing(source.host(), ephervex_core::HostConsent::Remember);
 
         // Nothing is listening, so the fetch fails after the host is agreed to.
-        runtime.block_on(open_pack_url(
+        runtime.block_on(download_pack_link(
             &mut app,
-            "https://packs.invalid.localhost:1/pack.mrpack",
-            None,
-            Some(ephervex_core::HostConsent::Remember),
-            &mut PackLinkAnswers::default(),
+            PackLinkTransfer {
+                source: &source,
+                url,
+                consents: &consents,
+                generation: 1,
+                slot: &idle_slot(1, &events),
+            },
+            &OperationReporter::silent("operation-downloading-pack"),
+            &CancellationToken::new(),
             &events,
         ));
 
@@ -10346,6 +10655,221 @@ mod tests {
             vec![vec!["packs.invalid.localhost".to_owned()]],
             "the site the user just agreed to has to reach the settings page"
         );
+    }
+
+    /// A slot nothing is running in, for a download driven directly.
+    fn idle_slot(generation: i32, events: &Sender<Event>) -> PackLinkSlot {
+        PackLinkSlot {
+            running: Arc::new(Mutex::new(None)),
+            generation,
+            events: events.clone(),
+        }
+    }
+
+    struct LinkHarness {
+        _base: tempfile::TempDir,
+        app: App,
+        answers: PackLinkAnswers,
+        delivered: i32,
+        running: RunningPackLink,
+        cancellations: CancellationRegistry,
+        events: Sender<Event>,
+        received: std::sync::mpsc::Receiver<Event>,
+    }
+
+    impl LinkHarness {
+        fn new() -> Self {
+            let base = tempfile::tempdir().expect("a disposable root");
+            let app =
+                App::open_at(ephervex_core::Paths::rooted_at(base.path())).expect("an app opens");
+            let (events, received) = std::sync::mpsc::channel();
+            Self {
+                _base: base,
+                app,
+                answers: PackLinkAnswers::default(),
+                delivered: 0,
+                running: Arc::new(Mutex::new(None)),
+                cancellations: Arc::new(Mutex::new(HashMap::new())),
+                events,
+                received,
+            }
+        }
+
+        /// Delivers a link the way the window does, numbering each delivery.
+        fn deliver(&mut self, url: &str, consent: Option<ephervex_core::HostConsent>) -> i32 {
+            self.delivered += 1;
+            open_pack_url(
+                &self.app,
+                PackLinkRequest {
+                    generation: self.delivered,
+                    url,
+                    asked: None,
+                    consent,
+                },
+                &mut self.answers,
+                &self.running,
+                &self.events,
+                &self.cancellations,
+            );
+            self.delivered
+        }
+
+        fn running_token(&self) -> Option<CancellationToken> {
+            self.running
+                .lock()
+                .expect("lock")
+                .as_ref()
+                .map(|download| download.cancel.clone())
+        }
+
+        /// Stops what is running and waits for its thread to say it ended, so
+        /// nothing outlives the throwaway root.
+        fn finish(&self, ended: usize) -> Vec<Event> {
+            if let Some(token) = self.running_token() {
+                token.cancel();
+            }
+            let mut seen = Vec::new();
+            let mut remaining = ended;
+            while remaining > 0 {
+                let event = self
+                    .received
+                    .recv_timeout(std::time::Duration::from_secs(60))
+                    .expect("the download thread ends");
+                if matches!(event, Event::PackUrlEnded { .. }) {
+                    remaining -= 1;
+                }
+                seen.push(event);
+            }
+            seen
+        }
+    }
+
+    const LINK: &str = "https://packs.invalid.localhost:1/pack.mrpack";
+
+    #[test]
+    fn a_link_to_a_host_nobody_agreed_to_asks_first_and_downloads_nothing() {
+        let mut harness = LinkHarness::new();
+
+        harness.deliver(LINK, None);
+
+        assert!(matches!(
+            harness.received.try_recv(),
+            Ok(Event::PackUrlConsent {
+                generation: 1,
+                redirected: false,
+                ..
+            })
+        ));
+        assert!(harness.received.try_recv().is_err());
+        assert!(harness.running_token().is_none());
+    }
+
+    #[test]
+    fn a_newer_delivery_replaces_the_download_before_it_instead_of_adding_one() {
+        let mut harness = LinkHarness::new();
+        harness.deliver(LINK, Some(ephervex_core::HostConsent::JustOnce));
+        let first = harness.running_token().expect("a download is running");
+
+        let second = harness.deliver(LINK, Some(ephervex_core::HostConsent::JustOnce));
+
+        assert!(first.is_cancelled(), "the older delivery is stopped");
+        assert_eq!(second, 2);
+        let running = harness
+            .running_token()
+            .expect("the newer download is running");
+        assert!(!running.is_cancelled());
+        harness.finish(2);
+    }
+
+    #[test]
+    fn a_link_that_cannot_be_opened_still_ends_the_download_before_it() {
+        let mut harness = LinkHarness::new();
+        harness.deliver(LINK, Some(ephervex_core::HostConsent::JustOnce));
+        let first = harness.running_token().expect("a download is running");
+
+        harness.deliver("not an address", None);
+
+        assert!(first.is_cancelled());
+        assert!(harness.running_token().is_none());
+        let events = harness.finish(2);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::PackUrlEnded {
+                generation: 2,
+                message: Some(_)
+            }
+        )));
+    }
+
+    /// Canceling a link's download is not a failure: no archive reaches the
+    /// import and no error is shown for it.
+    #[test]
+    fn a_canceled_link_download_ends_without_an_archive_or_an_error() {
+        let base = tempfile::tempdir().expect("a disposable root");
+        let mut app =
+            App::open_at(ephervex_core::Paths::rooted_at(base.path())).expect("an app opens");
+        let (events, received) = std::sync::mpsc::channel();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let url = "https://packs.invalid.localhost:1/pack.mrpack";
+        let source = app.pack_source(url).expect("an address");
+        let consents = ephervex_core::PackConsents::none()
+            .agreeing(source.host(), ephervex_core::HostConsent::JustOnce);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        runtime.block_on(download_pack_link(
+            &mut app,
+            PackLinkTransfer {
+                source: &source,
+                url,
+                consents: &consents,
+                generation: 7,
+                slot: &idle_slot(7, &events),
+            },
+            &OperationReporter::silent("operation-downloading-pack"),
+            &cancel,
+            &events,
+        ));
+
+        let mut ended = Vec::new();
+        let mut unwanted = Vec::new();
+        for event in received.try_iter() {
+            match event {
+                Event::PackUrlEnded {
+                    generation,
+                    message,
+                } => ended.push((generation, message)),
+                Event::PackDownloaded { .. } => unwanted.push("an archive for the import"),
+                Event::ModalError { .. } => unwanted.push("a failure message"),
+                _ => {}
+            }
+        }
+        assert!(unwanted.is_empty(), "a canceled download sent {unwanted:?}");
+        assert_eq!(ended, vec![(7, None)]);
+    }
+
+    #[test]
+    fn canceling_a_link_download_leaves_a_newer_one_running() {
+        let running: RunningPackLink = Arc::new(Mutex::new(None));
+        let newer = CancellationToken::new();
+        *running.lock().expect("lock") = Some(PackLinkDownload {
+            generation: 2,
+            cancel: newer.clone(),
+        });
+
+        cancel_pack_url(&running, 1);
+        assert!(
+            !newer.is_cancelled(),
+            "a stale cancel must not stop the newer link"
+        );
+        assert!(running.lock().expect("lock").is_some());
+
+        cancel_pack_url(&running, 2);
+        assert!(newer.is_cancelled());
+        assert!(running.lock().expect("lock").is_none());
     }
 
     #[test]

@@ -29,6 +29,7 @@ use ephervex_download::{
     DomainAllowlist, DownloadError, DownloadManager, DownloadRequest, DownloaderConfig, HostScope,
     OperationReporter, Url, check_transport, redacted,
 };
+use ephervex_pack::PackError;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
 
@@ -408,6 +409,7 @@ impl App {
                 DownloadError::RedirectRefused { target, host, .. } => {
                     CoreError::PackHostNotTrusted { url: target, host }
                 }
+                DownloadError::Canceled { .. } => CoreError::Pack(PackError::Canceled),
                 error => CoreError::PackDownloadFailed {
                     url: source.display().to_owned(),
                     detail: error.to_string(),
@@ -840,6 +842,36 @@ mod tests {
             !app.pack_host_is_trusted(&source),
             "answering once must not record an answer for next time"
         );
+    }
+
+    #[tokio::test]
+    async fn a_canceled_pack_download_is_a_cancellation_and_leaves_no_staged_file() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let server = serving(b"a pack archive".to_vec()).await;
+        let mut app = app_rooted_at(base.path());
+        let source = app
+            .pack_source(&format!("{}/pack", server.uri()))
+            .expect("a loopback address");
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let error = app
+            .fetch_pack(
+                &source,
+                &PackConsents::none().agreeing(source.host(), HostConsent::JustOnce),
+                &silent(),
+                &cancel,
+            )
+            .await
+            .expect_err("the download was canceled");
+
+        assert!(
+            error.is_cancellation(),
+            "expected a cancellation, got {error}"
+        );
+        let leftovers =
+            std::fs::read_dir(pack_download_dir(app.paths())).map_or(0, Iterator::count);
+        assert_eq!(leftovers, 0, "a canceled download must not leave a file");
     }
 
     #[tokio::test]
