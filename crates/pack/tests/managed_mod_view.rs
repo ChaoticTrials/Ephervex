@@ -201,7 +201,7 @@ fn a_mod_hosted_somewhere_other_than_the_catalog_claims_no_catalog_identity() {
     let recipe = parse(&[format!(
         r#"{{
             "path": "mods/lfHFW1mp.jar",
-            "hashes": {{"sha1": "{SHA1}"}},
+            "hashes": {{"sha1": "{SHA1}", "sha512": "{SHA512}"}},
             "downloads": ["https://github.com/example/mod/releases/download/v1/lfHFW1mp.jar"]
         }}"#
     )]);

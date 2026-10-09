@@ -167,8 +167,9 @@ pub enum PackError {
     #[error("{remaining} of the pack's files are not available for automatic download")]
     ProviderFilesBlocked { remaining: usize, first: String },
 
-    /// A pack file carries no hash, so a download could not be verified
-    #[error("the pack file `{path}` has no usable hash")]
+    /// A pack file lacks a hash its format requires, so a download could not be
+    /// verified.
+    #[error("the pack file `{path}` lacks a required hash")]
     FileHashesMissing { path: String },
 
     /// A pack file carries no download address and no physical copy.

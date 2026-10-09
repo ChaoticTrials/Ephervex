@@ -7,12 +7,13 @@
 //!
 //! # What is validated, and why refusal is the right answer
 //!
-//! Validation covers the ZIP structure, `formatVersion`, `game`, the
-//! Minecraft dependency, the loader dependencies, file paths, hashes, download
-//! URL scheme and domain, and the environment metadata. Every one of them is a
-//! hard failure rather than a repair, because this is a *reproduction* launcher:
-//! a pack that has been quietly adjusted to import cleanly reproduces something
-//! other than the bug.
+//! Validation covers the ZIP structure, the required top-level fields
+//! (`formatVersion`, `game`, `versionId`, `name`), the Minecraft dependency, the
+//! loader dependencies, file paths, hashes, download URL scheme and domain, and
+//! the environment metadata. A file must carry both `sha1` and `sha512`, as the
+//! format requires. Every one of them is a hard failure rather than a repair,
+//! because this is a *reproduction* launcher: a pack that has been quietly
+//! adjusted to import cleanly reproduces something other than the bug.
 //!
 //! Two of the refusals are worth naming:
 //!
@@ -25,6 +26,7 @@
 //!   picking one would be inventing an interpretation the format does not have.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroU64;
 
 use ephervex_download::DomainAllowlist;
 use ephervex_model::{
@@ -125,10 +127,11 @@ pub fn parse(
             source,
         })?;
 
-    if index.format_version > SUPPORTED_FORMAT_VERSION {
+    let format_version = index.format_version.get();
+    if format_version > SUPPORTED_FORMAT_VERSION {
         return Err(PackError::ManifestUnsupportedVersion {
             entry: MODRINTH_INDEX,
-            found: index.format_version,
+            found: format_version,
             supported: SUPPORTED_FORMAT_VERSION,
         });
     }
@@ -153,12 +156,8 @@ pub fn parse(
     let recipe = PackRecipe {
         recipe_version: RECIPE_VERSION,
         source_kind: ImportSourceKind::ModrinthPack,
-        original_name: index.name.unwrap_or_else(|| {
-            archive_name
-                .clone()
-                .unwrap_or_else(|| "Modrinth pack".to_owned())
-        }),
-        original_version: index.version_id,
+        original_name: index.name,
+        original_version: Some(index.version_id),
         author: None,
         summary: index.summary,
         archive_name,
@@ -249,14 +248,14 @@ fn normalize_file(
         });
     }
 
-    let hashes = normalize_hashes(&file.hashes);
-    if hashes.is_empty() {
-        // Verification is mandatory, so a file nobody published a
-        // usable hash for is a file this launcher will not fetch.
+    let Some(hashes) = normalize_hashes(&file.hashes) else {
+        // Verification is mandatory, and the format requires both digests, so
+        // a file missing either one (or carrying a malformed one) is a file
+        // this launcher will not fetch.
         return Err(PackError::FileHashesMissing {
             path: declared_path,
         });
-    }
+    };
 
     if file.downloads.is_empty() {
         return Err(PackError::FileDownloadsMissing {
@@ -397,8 +396,12 @@ pub(crate) fn reconcile_identities(recipe: &mut PackRecipe) {
     }
 }
 
-/// Keeps the hashes this launcher can actually verify, in a stable order.
-fn normalize_hashes(raw: &BTreeMap<String, String>) -> Vec<Hash> {
+/// The file's `sha512` and `sha1` digests, strongest first, or `None` unless
+/// both are present and well formed.
+///
+/// The format requires both, so a missing or malformed one is not narrowed down
+/// to the other: the strongest hash would otherwise be silently dropped.
+fn normalize_hashes(raw: &BTreeMap<String, String>) -> Option<Vec<Hash>> {
     // SHA-512 first: it is the one Modrinth's own tooling treats as canonical,
     // and a stable order keeps the recipe file diffable.
     [
@@ -406,7 +409,7 @@ fn normalize_hashes(raw: &BTreeMap<String, String>) -> Vec<Hash> {
         ("sha1", HashAlgorithm::Sha1),
     ]
     .into_iter()
-    .filter_map(|(name, algorithm)| {
+    .map(|(name, algorithm)| {
         raw.iter()
             .find(|(key, _)| key.eq_ignore_ascii_case(name))
             .and_then(|(_, digest)| Hash::new(algorithm, digest))
@@ -439,28 +442,18 @@ fn redacted_address(raw: &str) -> String {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawIndex {
-    #[serde(default = "default_format_version")]
-    format_version: u64,
-    #[serde(default = "default_game")]
+    // Zero is not a format revision, and deserializing it as a non-zero number
+    // refuses it as an unreadable manifest rather than as a "newer" one.
+    format_version: NonZeroU64,
     game: String,
-    #[serde(default)]
-    version_id: Option<String>,
-    #[serde(default)]
-    name: Option<String>,
+    version_id: String,
+    name: String,
     #[serde(default)]
     summary: Option<String>,
     #[serde(default)]
     files: Vec<RawFile>,
     #[serde(default)]
     dependencies: BTreeMap<String, String>,
-}
-
-const fn default_format_version() -> u64 {
-    SUPPORTED_FORMAT_VERSION
-}
-
-fn default_game() -> String {
-    SUPPORTED_GAME.to_owned()
 }
 
 #[derive(Debug, Deserialize)]
@@ -540,6 +533,19 @@ mod tests {
                 "name": "Test Pack",
                 "files": [{files}],
                 "dependencies": {dependencies}
+            }}"#
+        )
+    }
+
+    fn with_header(format_version: u64, game: &str) -> String {
+        format!(
+            r#"{{
+                "formatVersion": {format_version},
+                "game": "{game}",
+                "versionId": "1.0.0",
+                "name": "Test Pack",
+                "files": [],
+                "dependencies": {{"minecraft": "1.20.1"}}
             }}"#
         )
     }
@@ -633,9 +639,8 @@ mod tests {
 
     #[test]
     fn a_newer_format_version_is_refused_rather_than_guessed_at() {
-        let document =
-            r#"{"formatVersion": 2, "game": "minecraft", "dependencies": {"minecraft": "1.20.1"}}"#;
-        let error = parse_index(document).expect_err("must refuse");
+        let document = with_header(2, "minecraft");
+        let error = parse_index(&document).expect_err("must refuse");
         assert!(matches!(
             error,
             PackError::ManifestUnsupportedVersion {
@@ -648,10 +653,38 @@ mod tests {
 
     #[test]
     fn a_pack_for_another_game_is_refused() {
-        let document =
-            r#"{"formatVersion": 1, "game": "terraria", "dependencies": {"minecraft": "1.20.1"}}"#;
-        let error = parse_index(document).expect_err("must refuse");
+        let document = with_header(1, "terraria");
+        let error = parse_index(&document).expect_err("must refuse");
         assert!(matches!(error, PackError::GameUnsupported { .. }));
+    }
+
+    #[test]
+    fn format_version_zero_is_refused_as_an_unreadable_manifest() {
+        let document = with_header(0, "minecraft");
+        let error = parse_index(&document).expect_err("must refuse");
+        assert!(matches!(error, PackError::ManifestInvalid { .. }));
+    }
+
+    #[test]
+    fn a_missing_required_top_level_field_is_refused_rather_than_defaulted() {
+        let complete: serde_json::Value =
+            serde_json::from_str(&index(r#"{"minecraft": "1.20.1"}"#, "")).unwrap();
+        for field in ["formatVersion", "game", "versionId", "name"] {
+            let mut document = complete.clone();
+            document.as_object_mut().unwrap().remove(field);
+            let error = parse_index(&document.to_string()).expect_err("must refuse");
+            assert!(
+                matches!(error, PackError::ManifestInvalid { .. }),
+                "a pack without `{field}` should have been refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_document_with_only_a_minecraft_dependency_is_refused() {
+        let document = r#"{"dependencies": {"minecraft": "1.20.1"}}"#;
+        let error = parse_index(document).expect_err("must refuse");
+        assert!(matches!(error, PackError::ManifestInvalid { .. }));
     }
 
     #[test]
@@ -706,7 +739,7 @@ mod tests {
         let document = index(
             r#"{"minecraft": "1.20.1"}"#,
             &format!(
-                r#"{{"path": "mods/a.jar", "hashes": {{"sha1": "{SHA1}"}}, "downloads": ["https://cdn.modrinth.com/a.jar"]}}"#
+                r#"{{"path": "mods/a.jar", "hashes": {{"sha1": "{SHA1}", "sha512": "{SHA512}"}}, "downloads": ["https://cdn.modrinth.com/a.jar"]}}"#
             ),
         );
         let parsed = parse_index(&document).expect("valid");
@@ -772,11 +805,40 @@ mod tests {
     }
 
     #[test]
+    fn a_file_without_both_required_digests_is_refused() {
+        let cases = [
+            ("sha1 only", format!(r#"{{"sha1": "{SHA1}"}}"#)),
+            ("sha512 only", format!(r#"{{"sha512": "{SHA512}"}}"#)),
+            (
+                "malformed sha1",
+                format!(r#"{{"sha1": "not-a-digest", "sha512": "{SHA512}"}}"#),
+            ),
+            (
+                "malformed sha512",
+                format!(r#"{{"sha1": "{SHA1}", "sha512": "not-a-digest"}}"#),
+            ),
+        ];
+        for (label, hashes) in cases {
+            let document = index(
+                r#"{"minecraft": "1.20.1"}"#,
+                &format!(
+                    r#"{{"path": "mods/a.jar", "hashes": {hashes}, "downloads": ["https://cdn.modrinth.com/a.jar"]}}"#
+                ),
+            );
+            let error = parse_index(&document).expect_err("must refuse");
+            assert!(
+                matches!(error, PackError::FileHashesMissing { .. }),
+                "{label} should have been refused"
+            );
+        }
+    }
+
+    #[test]
     fn a_file_with_no_download_address_is_refused() {
         let document = index(
             r#"{"minecraft": "1.20.1"}"#,
             &format!(
-                r#"{{"path": "mods/a.jar", "hashes": {{"sha1": "{SHA1}"}}, "downloads": []}}"#
+                r#"{{"path": "mods/a.jar", "hashes": {{"sha1": "{SHA1}", "sha512": "{SHA512}"}}, "downloads": []}}"#
             ),
         );
         let error = parse_index(&document).expect_err("must refuse");
@@ -790,7 +852,7 @@ mod tests {
         let document = index(
             r#"{"minecraft": "1.20.1"}"#,
             &format!(
-                r#"{{"path": "mods/a.jar", "hashes": {{"sha1": "{SHA1}"}}, "downloads": ["https://evil.example/a.jar", "https://cdn.modrinth.com/a.jar"]}}"#
+                r#"{{"path": "mods/a.jar", "hashes": {{"sha1": "{SHA1}", "sha512": "{SHA512}"}}, "downloads": ["https://evil.example/a.jar", "https://cdn.modrinth.com/a.jar"]}}"#
             ),
         );
         let parsed = parse_index(&document).expect("one address is permitted");
@@ -811,7 +873,7 @@ mod tests {
             let document = index(
                 r#"{"minecraft": "1.20.1"}"#,
                 &format!(
-                    r#"{{"path": "mods/a.jar", "hashes": {{"sha1": "{SHA1}"}}, "downloads": ["{address}"]}}"#
+                    r#"{{"path": "mods/a.jar", "hashes": {{"sha1": "{SHA1}", "sha512": "{SHA512}"}}, "downloads": ["{address}"]}}"#
                 ),
             );
             let error = parse_index(&document).expect_err("must refuse");

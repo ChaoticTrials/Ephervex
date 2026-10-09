@@ -1080,7 +1080,7 @@ error-pack-provider-files-unresolved = { $remaining } of the pack's files have n
 error-pack-provider-files-blocked = { $remaining } of the pack's files are not available for automatic download.
 .action = Find each one in the import screen's blocked-downloads list, then download it manually or skip it, and try importing again.
 
-error-pack-file-hashes-missing = One of the pack's files has no checksum Ephervex can verify.
+error-pack-file-hashes-missing = One of the pack's files is missing a checksum Ephervex requires.
 .action = Ephervex will not download a file it cannot verify.
 
 error-pack-file-downloads-missing = One of the pack's files has no download address.
