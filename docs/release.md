@@ -64,6 +64,26 @@ command-line interface is on `PATH` immediately and the desktop entry appears in
 the system menu. `sudo apt remove ephervex` or `sudo dnf remove ephervex` undoes
 it.
 
+To get upgrades through the package manager instead of downloading each
+release, add the ChaoticTrials repository once. The packages and the repository
+metadata are signed with the same key.
+
+```bash
+# Debian, Ubuntu, Linux Mint and derivatives
+curl -fsSL https://repo.chaotictrials.de/apt-keyring.gpg \
+  | sudo tee /usr/share/keyrings/chaotictrials.gpg > /dev/null
+echo "deb [signed-by=/usr/share/keyrings/chaotictrials.gpg] https://repo.chaotictrials.de/deb stable main" \
+  | sudo tee /etc/apt/sources.list.d/chaotictrials.list
+sudo apt update && sudo apt install ephervex
+
+# Fedora and other dnf-based distributions
+sudo dnf config-manager addrepo --from-repofile=https://repo.chaotictrials.de/rpm/chaotictrials.repo
+sudo dnf install ephervex
+```
+
+On dnf 4 the second command is `sudo dnf config-manager --add-repo` with the same
+address.
+
 Everywhere else, the AppImage runs without installing anything:
 
 ```bash
@@ -83,10 +103,9 @@ their version in their file names, because that is what a package manager and an
 apt repository read. Which release you have is the tag it was published under,
 and what `ephervex --version` reports.
 
-Only the Debian packages are published to the shared ChaoticTrials apt
-repository, for both architectures. There is no RPM repository: the `.rpm` is a
-downloadable release artifact, and upgrading means downloading the next one
-(ADR 0026).
+The Debian and RPM packages are both published to the shared ChaoticTrials
+package repository, for both architectures (ADR 0026, ADR 0044). The `.rpm` in
+the repository carries a signature the one on the release page does not.
 
 ### When FUSE is unavailable
 
@@ -848,13 +867,15 @@ would have to be cross-built and would arrive unverified. ARM releases come from
 GitHub; there is deliberately no ARM runner label, matrix entry, or setting in
 the Forgejo workflow to configure.
 
-**Only the GitHub workflow publishes packages to the apt repository**, as a
-third job, for both architectures. It takes the `.deb` files from the release
-rather than rebuilding them, so what lands in the repository is byte for byte
-what the release page offers, and it refuses a release that is missing either
-architecture. The Forgejo workflow has no path into that repository and no
-credentials for it, and neither workflow publishes an RPM anywhere: there is no
-RPM repository.
+**Only the GitHub workflow publishes packages to the package repository**, as
+a third job, for both architectures. It adds the `.deb` files to the apt
+repository (`/deb`) and the `.rpm` files to the RPM repository (`/rpm`) and
+pushes both in one commit. It takes its files from the release rather than
+rebuilding them, and refuses a release that is missing either architecture. The `.deb` that lands
+in the repository is byte for byte what the release page offers; the `.rpm` is
+signed on the way in, so it differs from the release artifact by its signature
+alone (ADR 0044). The Forgejo workflow has no path into the repository and no
+credentials for it.
 
 > **One-time step when arm64 first ships.** `aptly` records a distribution's
 > architecture list when it is first published, and `aptly publish update`
@@ -898,9 +919,9 @@ before telling anyone the release is there.
   `APPIMAGE_EXTRACT_AND_RUN=1` works at the cost of unpacking on every start.
 - The glibc 2.35 baseline excludes distributions older than Ubuntu 22.04 and
   Debian 12, on both architectures.
-- There is no RPM repository. The `.rpm` is a downloadable artifact, so an RPM
-  installation is upgraded by downloading the next one rather than by a package
-  manager. Only the Debian packages get repository upgrades.
+- A package installed from a downloaded file has no repository to upgrade
+  from. Add the ChaoticTrials repository (see [Installing](#installing)) to get
+  upgrades through `apt` or `dnf`.
 - `aarch64` releases are built only by GitHub. A Forgejo release carries
   `x86_64` artifacts alone.
 - A Wayland-only session without XWayland is untested; the desktop application

@@ -16,8 +16,8 @@
 #
 # Three jobs, because they need different things. The build matrix needs a
 # toolchain and no repository access; publishing needs a token that can write
-# releases and nothing else; the apt repository needs its own credentials and a
-# key. Splitting them is also what keeps two architectures from racing to
+# releases and nothing else; the package repository needs its own credentials
+# and a key. Splitting them is also what keeps two architectures from racing to
 # create the same release.
 #
 # `appimagetool` and the AppImage type-2 runtime are host dependencies that
@@ -359,41 +359,45 @@ jobs:
               "${uploads}?name=${name}" >/dev/null
           done
 
-  # Publishes the Debian packages into the shared ChaoticTrials apt repository,
-  # so a user who added that repository gets Ephervex upgrades through their
-  # package manager rather than by downloading a file.
+  # Publishes the Debian and RPM packages into the shared ChaoticTrials package
+  # repository, so a user who added it gets Ephervex upgrades through their
+  # package manager rather than by downloading a file: apt serves
+  # repo.chaotictrials.de/deb and dnf serves repo.chaotictrials.de/rpm (ADR 0026,
+  # ADR 0044).
   #
-  # Both architectures, because an apt repository serves whichever one the
-  # machine asking for it is. The RPM packages are downloadable release
-  # artifacts and nothing else: Ephervex publishes no RPM repository, and this
-  # job never touches them.
+  # Both architectures, because a repository serves whichever one the machine
+  # asking for it is. Both formats go in one job and one commit, so the
+  # repository never holds one format at the new release and the other at the
+  # old one, and Ephervex never pushes twice for one release.
   #
   # This is the only place Ephervex publishes packages to a repository. The
   # Forgejo release workflow builds the same artifacts and attaches them to its
-  # own release, and deliberately has no path into the apt repository and no
+  # own release, and deliberately has no path into the repository and no
   # credentials for it.
   #
   # Separate from the build because it needs different credentials and writes to
   # a different repository. It runs only after a release exists, and it takes
-  # the packages from that release rather than rebuilding them, so what lands in
-  # the repository is byte for byte what the release page offers.
-  apt-repo:
+  # the packages from that release rather than rebuilding them. The .deb that
+  # lands in the repository is byte for byte what the release page offers; the
+  # .rpm is signed on the way in, so it differs by its signature alone.
+  package-repo:
     needs: publish
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
-      - name: Checkout the apt repository
+      - name: Checkout the package repository
         uses: actions/checkout@v4
         with:
           repository: ChaoticTrials/package-repo
           token: ${{ secrets.APT_REPO_TOKEN }}
-          path: apt-repo
+          path: package-repo
 
-      - name: Install aptly
+      - name: Install the repository tooling
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends aptly gnupg
+          sudo apt-get install -y --no-install-recommends \
+            aptly rpm createrepo-c gnupg
 
       - name: Import the signing key
         env:
@@ -402,7 +406,7 @@ jobs:
           set -eu
           if [ -z "${GPG_PRIVATE_KEY:-}" ]; then
             echo "ERROR: the GPG_PRIVATE_KEY secret is empty or not set." >&2
-            echo "An unsigned apt repository is one every user has to override a" >&2
+            echo "An unsigned repository is one every user has to override a" >&2
             echo "security check to use, so this refuses rather than publishing one." >&2
             exit 1
           fi
@@ -421,29 +425,35 @@ jobs:
           set -eu
           gh release download "${GITHUB_REF_NAME}" \
             --repo "${GITHUB_REPOSITORY}" --pattern '*.deb' --dir debs
+          gh release download "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" --pattern '*.rpm' --dir rpms
           # A release that somehow carries no package would otherwise publish an
           # unchanged repository and report success. Every architecture the
           # release builds has to be there, because a repository that silently
           # dropped one serves upgrades to some machines and not others.
           for arch in amd64 arm64; do
             ls debs/*_"${arch}".deb >/dev/null ||
-              { echo "ERROR: the release carries no ${arch} package." >&2; exit 1; }
+              { echo "ERROR: the release carries no ${arch} .deb." >&2; exit 1; }
           done
-          ls -l debs
+          for arch in x86_64 aarch64; do
+            ls rpms/*."${arch}".rpm >/dev/null ||
+              { echo "ERROR: the release carries no ${arch} .rpm." >&2; exit 1; }
+          done
+          ls -l debs rpms
 
-      - name: Add the package and publish the repository
+      - name: Add the Debian packages and publish the apt repository
         env:
           GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           set -eu
-          mkdir -p apt-repo/public
+          mkdir -p package-repo/public
           cat > ~/.aptly.conf <<EOF
           {
-            "rootDir": "${GITHUB_WORKSPACE}/apt-repo/.aptly",
+            "rootDir": "${GITHUB_WORKSPACE}/package-repo/.aptly",
             "FileSystemPublishEndpoints": {
-              "apt-repo": {
-                "rootDir": "${GITHUB_WORKSPACE}/apt-repo/public",
+              "package-repo": {
+                "rootDir": "${GITHUB_WORKSPACE}/package-repo/public",
                 "linkMethod": "copy"
               }
             }
@@ -456,9 +466,8 @@ jobs:
           aptly repo create -distribution=stable -component=main packages 2>/dev/null || true
           aptly repo add packages debs/*.deb
 
-          # The apt repository is served under the `deb` prefix of the package
-          # repository (repo.chaotictrials.de/deb); `rpm` beside it is the RPM
-          # repository, which the next job publishes.
+          # The apt repository is served under the `deb` prefix, and the RPM
+          # repository beside it under `rpm`.
           #
           # Publishing a distribution that is already published is an update,
           # not a second publish. Which one applies depends on the state of a
@@ -477,24 +486,30 @@ jobs:
             -architectures=amd64,arm64 \
             -distribution=stable \
             packages \
-            filesystem:apt-repo:deb 2>/dev/null || \
+            filesystem:package-repo:deb 2>/dev/null || \
           aptly publish update \
             -gpg-key="${GPG_KEY_ID}" \
             -passphrase="${GPG_PASSPHRASE}" \
             stable \
-            filesystem:apt-repo:deb
+            filesystem:package-repo:deb
+
+      - name: Add the RPM packages and publish the RPM repository
+        env:
+          GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: package-repo/scripts/publish-rpm.sh rpms
 
       - name: Commit the updated repository
-        working-directory: apt-repo
+        working-directory: package-repo
         run: |
           set -eu
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          # A re-run of the same tag adds a package the repository already has,
+          # A re-run of the same tag adds packages the repository already has,
           # which leaves nothing to commit. That is a success, not a failure.
           if git diff --cached --quiet; then
-            echo "The apt repository already carries this release."
+            echo "The package repository already carries this release."
             exit 0
           fi
           git commit -m "Release Ephervex ${GITHUB_REF_NAME}"

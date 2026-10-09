@@ -13,8 +13,10 @@
 # /usr/share/doc, and reads dependencies off the binaries through its own
 # generator instead of dpkg-shlibdeps.
 #
-# The artifact is a downloadable package and nothing else. Ephervex publishes no
-# RPM repository, so nothing here signs, indexes, or uploads (ADR 0026).
+# The artifact is an unsigned package. Publishing it to the RPM repository, with
+# the signing and indexing that needs, is the release workflow's job and happens
+# after this script has finished (ADR 0044); nothing here signs, indexes, or
+# uploads.
 #
 # Two host dependencies must already be present:
 #

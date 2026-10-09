@@ -31,7 +31,7 @@ so the reasoning trail survives.
 | [0023](0023-appimage-is-the-linux-release-artifact.md) | AppImage is the Linux release artifact, on a declared glibc baseline | Accepted (its "No `.deb`" decision superseded by ADR 0026) |
 | [0024](0024-published-server-files-are-a-complete-installation.md) | Published server files are installed as a complete server, and the loader stays the launcher's | Accepted |
 | [0025](0025-storage-class-is-promoted-in-place.md) | An instance becomes persistent by moving, not by being copied | Accepted |
-| [0026](0026-a-debian-package-alongside-the-appimage.md) | A Debian package alongside the AppImage | Accepted |
+| [0026](0026-a-debian-package-alongside-the-appimage.md) | A Debian package alongside the AppImage | Accepted (its "no RPM repository" decision amended by ADR 0044) |
 | [0027](0027-a-pack-address-is-a-second-trust-category.md) | A pack address the user activated is a second trust category | Accepted (its scheme-registration decision amended by ADR 0028) |
 | [0028](0028-the-settings-screen-does-not-switch-the-link-handler.md) | The settings screen does not switch the link handler | Superseded by ADR 0029 |
 | [0029](0029-the-allowed-sites-list-carries-its-own-context.md) | The allowed-sites list carries its own context | Accepted |
@@ -49,3 +49,4 @@ so the reasoning trail survives.
 | [0041](0041-a-theme-is-a-complete-color-palette.md) | A theme is a complete color palette | Accepted |
 | [0042](0042-user-themes-are-toml-files-over-a-built-in-parent.md) | User themes are TOML files over a built-in parent | Accepted |
 | [0043](0043-diagnostics-explains-and-changes-nothing-until-a-previewed-fix-is-applied.md) | Diagnostics explains, and changes nothing until a previewed fix is applied | Accepted |
+| [0044](0044-rpm-packages-are-published-to-the-signed-package-repository.md) | RPM packages are published to the signed package repository | Accepted (amends ADR 0026) |

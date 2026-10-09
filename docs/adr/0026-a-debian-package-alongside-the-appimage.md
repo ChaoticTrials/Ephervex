@@ -1,6 +1,6 @@
 # ADR 0026 - A Debian package alongside the AppImage
 
-**Status:** Accepted
+**Status:** Accepted (its "no RPM repository" decision amended by ADR 0044)
 
 Supersedes the "No `.deb`" decision in
 [ADR 0023](0023-appimage-is-the-linux-release-artifact.md). Everything else in

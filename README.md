@@ -187,8 +187,9 @@ shell configuration files or install completion scripts automatically.
   version's metadata. Versions that select x86 natives, including Vanilla
   1.12.2, 1.20.1, and 1.21.1, are refused before installation. Ephervex does not
   substitute native downloads or change the selected versions.
-* Debian packages reach the ChaoticTrials apt repository; the RPM packages are
-  downloadable release artifacts, with no repository to upgrade from.
+* The Debian and RPM packages both reach the ChaoticTrials package repository,
+  so an installation from it upgrades through the package manager. A package
+  installed from a downloaded file has no repository to upgrade from.
 * Running the AppImage needs FUSE. Where it is unavailable,
   `APPIMAGE_EXTRACT_AND_RUN=1` starts it without mounting.
 * Native text selection in the virtualized live diagnostics viewer is currently
@@ -219,6 +220,9 @@ On Fedora, openSUSE, RHEL and derivatives:
 ```bash
 sudo dnf install ./ephervex-<version>-1.x86_64.rpm
 ```
+
+To receive upgrades through the package manager instead, add the ChaoticTrials
+repository once. See [`docs/release.md`](docs/release.md#installing).
 
 Either puts `ephervex` and `ephervex-gui` on `PATH` and the desktop entry in the
 system menu. Everywhere else, the AppImage runs as it is:
