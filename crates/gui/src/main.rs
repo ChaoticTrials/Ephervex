@@ -48,6 +48,18 @@ fn handoff_argument<'a>(startup: &Startup, arguments: &'a [String]) -> Option<&'
     }
 }
 
+/// A termination request ends the event loop, so the code after `run` that
+/// stops the supervised servers runs for it as it does for a closed window.
+fn quit_event_loop_on_termination_request() {
+    if let Err(error) = ephervex_gui::termination::quit_on_termination_request(|| {
+        let _ = slint::invoke_from_event_loop(|| {
+            let _ = slint::quit_event_loop();
+        });
+    }) {
+        tracing::warn!("termination requests are not watched: {error}");
+    }
+}
+
 fn main() -> Result<(), slint::PlatformError> {
     let launcher_logs = ephervex_core::Paths::from_environment()
         .ok()
@@ -165,6 +177,8 @@ fn main() -> Result<(), slint::PlatformError> {
         })
     });
 
+    quit_event_loop_on_termination_request();
+
     tracing::info!(
         "starting {} {} desktop interface",
         ephervex_model::APP_NAME,
@@ -176,7 +190,8 @@ fn main() -> Result<(), slint::PlatformError> {
     if let Some(launcher_name) = launcher_name {
         launcher_name.release();
     }
-    // Closing the window is quitting: the servers it started go with it.
+    // Closing the window and a termination request are both quitting: the
+    // servers it started go with it.
     controller.stop_supervised_servers();
     outcome
 }

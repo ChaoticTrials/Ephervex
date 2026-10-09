@@ -9,6 +9,7 @@ pub mod minecraft_defaults;
 pub mod monospace;
 mod palette;
 pub mod presentation;
+pub mod termination;
 pub mod theme_files;
 // Slint's generated bindings contain framework-owned unsafe blocks, unwraps,
 // and undocumented public items. Keep the exceptions on that generated module;

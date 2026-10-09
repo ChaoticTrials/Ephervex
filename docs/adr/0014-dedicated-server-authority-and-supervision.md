@@ -98,7 +98,10 @@ group, so a wrapper's own children go with it. Abrupt supervisor termination
 can leave an orphan despite best-effort child cleanup. The desktop application
 supervises the servers it starts on threads of its own process, so quitting
 stops each of them first (`Stop`, then `Kill` when it does not exit) and waits
-for the supervisors to finish before the process exits.
+for the supervisors to finish before the process exits. A termination request
+(SIGTERM, SIGINT, or SIGHUP unless it started ignoring hangups) counts as
+quitting: it ends the event loop, and repeated requests during the stop are
+absorbed.
 
 A run ends when the server process exits. Output that a descendant still holds
 open is read for a short while longer and then dropped, so a lingering

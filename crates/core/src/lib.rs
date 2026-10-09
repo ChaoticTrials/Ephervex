@@ -65,6 +65,7 @@ pub mod server;
 pub mod server_pack;
 pub mod single_instance;
 pub mod snapshot;
+pub mod termination;
 pub mod url_handler;
 pub mod verify;
 
@@ -172,6 +173,7 @@ pub use single_instance::{PrimaryInstance, Startup as SingleInstanceStartup};
 pub use snapshot::{
     SnapshotError, SnapshotOrigin, SnapshotRecord, SnapshotRestore, SnapshotRestoreOptions,
 };
+pub use termination::TerminationRequests;
 pub use url_handler::{URL_HANDLER_ENTRY, UrlHandlerSource, UrlHandlerStatus, scheme_mime_type};
 pub use verify::{
     Integrity, RepairRefusal, RepairReport, SharedArtifactReport, VerificationReport, VerifiedFile,

@@ -45,8 +45,8 @@ use ephervex_core::{
     ServerExit, ServerFolder, ServerNetworkChange, ServerObserver, ServerPersistenceHealth,
     ServerRecord, ServerWarning, Session, SharedArtifactReport, SideRequirement, SkipReason,
     SnapshotOrigin, SnapshotRecord, SnapshotRestoreOptions, StartedServerLifetime,
-    SuspectConfidence, SuspectReason, TextAnchor, TextView, UnknownServerFiles, VerificationReport,
-    VersionMetadata, VersionRecord, format_binary_bytes,
+    SuspectConfidence, SuspectReason, TerminationRequests, TextAnchor, TextView,
+    UnknownServerFiles, VerificationReport, VersionMetadata, VersionRecord, format_binary_bytes,
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{
@@ -3220,68 +3220,6 @@ impl LaunchProgressPrinter {
     }
 }
 
-/// Ctrl-C and, on Unix, the terminal closing or a termination request.
-///
-/// The signals stay registered for as long as this value lives, so a request
-/// that arrives between two waits is not lost.
-struct TerminationRequests {
-    #[cfg(unix)]
-    interrupt: tokio::signal::unix::Signal,
-    /// Absent when the process started with hangups ignored, as under
-    /// `nohup`: registering would replace that choice with a stop.
-    #[cfg(unix)]
-    hangup: Option<tokio::signal::unix::Signal>,
-    #[cfg(unix)]
-    terminate: tokio::signal::unix::Signal,
-}
-
-impl TerminationRequests {
-    fn watch() -> std::io::Result<Self> {
-        #[cfg(unix)]
-        {
-            use tokio::signal::unix::{SignalKind, signal};
-
-            Ok(Self {
-                interrupt: signal(SignalKind::interrupt())?,
-                hangup: if hangup_ignored() {
-                    None
-                } else {
-                    Some(signal(SignalKind::hangup())?)
-                },
-                terminate: signal(SignalKind::terminate())?,
-            })
-        }
-        #[cfg(not(unix))]
-        {
-            Ok(Self {})
-        }
-    }
-}
-
-/// Whether the process was started with `SIGHUP` ignored.
-///
-/// Must be asked before anything registers the signal, because registering
-/// replaces the disposition. Reads the process's own signal mask, which needs
-/// no unsafe code.
-#[cfg(unix)]
-fn hangup_ignored() -> bool {
-    std::fs::read_to_string("/proc/self/status").is_ok_and(|status| signal_ignored(&status, 1))
-}
-
-/// Whether `signal` is set in the `SigIgn` mask of a `/proc/<pid>/status` text.
-#[cfg(unix)]
-fn signal_ignored(status: &str, signal: u32) -> bool {
-    status
-        .lines()
-        .find_map(|line| line.strip_prefix("SigIgn:"))
-        .and_then(|mask| u64::from_str_radix(mask.trim(), 16).ok())
-        .is_some_and(|mask| {
-            signal
-                .checked_sub(1)
-                .is_some_and(|bit| mask >> bit & 1 == 1)
-        })
-}
-
 /// Where a foreground command hears that it was asked to end.
 trait StopRequests {
     /// Resolves once per request.
@@ -3290,22 +3228,7 @@ trait StopRequests {
 
 impl StopRequests for TerminationRequests {
     async fn next(&mut self) {
-        #[cfg(unix)]
-        tokio::select! {
-            Some(()) = self.interrupt.recv() => {}
-            Some(()) = async {
-                match self.hangup.as_mut() {
-                    Some(hangup) => hangup.recv().await,
-                    None => std::future::pending().await,
-                }
-            } => {}
-            Some(()) = self.terminate.recv() => {}
-            else => std::future::pending().await,
-        }
-        #[cfg(not(unix))]
-        if tokio::signal::ctrl_c().await.is_err() {
-            std::future::pending::<()>().await;
-        }
+        TerminationRequests::next(self).await;
     }
 }
 
@@ -8319,17 +8242,6 @@ mod tests {
 
         assert!(cancel.is_cancelled());
         assert!(watch.result().is_ok());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_signal_started_as_ignored_is_found_in_the_process_mask() {
-        let status = "Name:\tephervex\nSigBlk:\t0000000000000000\nSigIgn:\t0000000000000001\nSigCgt:\t0000000000004002\n";
-
-        assert!(signal_ignored(status, 1));
-        assert!(!signal_ignored(status, 2));
-        assert!(!signal_ignored(status, 15));
-        assert!(!signal_ignored("Name:\tephervex\n", 1));
     }
 
     #[test]
