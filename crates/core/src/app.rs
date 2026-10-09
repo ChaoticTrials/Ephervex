@@ -664,6 +664,8 @@ impl App {
 
     /// Replaces one instance's Java and JVM overrides as one metadata mutation.
     ///
+    /// A relative Java path is stored as an absolute one.
+    ///
     /// `None` on either restores the corresponding global setting, which is
     /// what "use the global value" means and is a different state from pinning
     /// the value the global one happens to hold today.
@@ -679,6 +681,18 @@ impl App {
         java_override: Option<ephervex_model::JavaOverride>,
         jvm_override: Option<ephervex_model::JvmSettings>,
     ) -> CoreResult<ClientRecord> {
+        // A relative path would resolve against whichever directory the next
+        // command runs in, so the instance would launch a different Java.
+        let java_override = java_override
+            .map(|java| {
+                std::path::absolute(&java.path)
+                    .map(ephervex_model::JavaOverride::new)
+                    .map_err(|source| ephervex_storage::PathError::DirectoryCreation {
+                        path: java.path,
+                        source,
+                    })
+            })
+            .transpose()?;
         let mut record = self.client(id)?;
         self.refuse_while_running(id)?;
         record.java_override = java_override;
@@ -1794,6 +1808,42 @@ mod tests {
             .expect("clear");
         assert!(cleared.java_override.is_none());
         assert!(cleared.jvm_override.is_none());
+    }
+
+    #[test]
+    fn a_relative_instance_java_path_is_stored_as_an_absolute_one() {
+        // A path that resolved against the working directory would launch a
+        // different Java, or none, from every other directory.
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let created = app
+            .create_client_for_test(NewClient::new(
+                "Bug Repro",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+
+        let relative = std::path::Path::new("jdk-17/bin/java");
+        let pinned = app
+            .set_client_runtime_settings(
+                created.id,
+                Some(ephervex_model::JavaOverride::new(relative)),
+                None,
+            )
+            .expect("pin");
+
+        let stored = pinned.java_override.expect("a pinned java").path;
+        assert!(stored.is_absolute(), "stored as `{}`", stored.display());
+        assert!(
+            stored.ends_with(relative),
+            "stored as `{}`",
+            stored.display()
+        );
+        let reopened = app_rooted_at(base.path())
+            .client(created.id)
+            .expect("client");
+        assert_eq!(reopened.java_override.map(|java| java.path), Some(stored));
     }
 
     /// The setting decides what the mod list offers, and what it unlocks is

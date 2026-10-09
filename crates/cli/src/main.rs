@@ -50,8 +50,8 @@ use ephervex_core::{
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{
-    AbsentModPolicy, DefaultModCatalog, InstanceId, JavaOverride, JvmSettings, LoaderKind,
-    LoaderSelection, ModProvider, OperationId, ServerId, SnapshotId, StorageClass,
+    AbsentModPolicy, DefaultModCatalog, InstanceId, JavaOverride, LoaderKind, LoaderSelection,
+    ModProvider, OperationId, ServerId, SnapshotId, StorageClass,
 };
 
 #[derive(Debug, Parser)]
@@ -991,6 +991,7 @@ enum InstanceCommand {
     /// Show or change this instance's own Java and JVM settings.
     ///
     /// Each value falls back to the global setting until it is pinned here.
+    /// An option changes only its own value and keeps the others as pinned.
     /// With no options, prints what is pinned.
     Runtime {
         id: InstanceId,
@@ -7280,8 +7281,8 @@ fn run_instance_runtime(app: &App, command: &InstanceCommand, json: bool) -> any
 
 /// Applies a runtime change, or reads the instance back when none was asked for.
 ///
-/// Pinned values replace what was pinned before rather than merging into it, so
-/// one invocation describes one intended state.
+/// Each option changes only the value it names and leaves every other pinned
+/// value as it was. `--jvm-arg` replaces the pinned argument list as a whole.
 fn apply_instance_runtime(
     app: &App,
     id: InstanceId,
@@ -7294,19 +7295,18 @@ fn apply_instance_runtime(
         || args.min_memory.is_some()
         || args.max_memory.is_some()
         || !args.jvm_args.is_empty();
+    let record = app.client(id)?;
     if !asked {
-        return Ok(app.client(id)?);
+        return Ok(record);
     }
-    let jvm = JvmSettings {
-        min_memory_mib: args.min_memory,
-        max_memory_mib: args.max_memory,
-        jvm_args: args.jvm_args.to_vec(),
-    };
-    Ok(app.set_client_runtime_settings(
-        id,
-        args.java.map(JavaOverride::new),
-        (!jvm.pins_nothing()).then_some(jvm),
-    )?)
+    let java = args.java.map(JavaOverride::new).or(record.java_override);
+    let mut jvm = record.jvm_override.unwrap_or_default();
+    jvm.min_memory_mib = args.min_memory.or(jvm.min_memory_mib);
+    jvm.max_memory_mib = args.max_memory.or(jvm.max_memory_mib);
+    if !args.jvm_args.is_empty() {
+        jvm.jvm_args = args.jvm_args.to_vec();
+    }
+    Ok(app.set_client_runtime_settings(id, java, (!jvm.pins_nothing()).then_some(jvm))?)
 }
 
 /// What one instance pins for itself, and what it leaves to the global setting.
