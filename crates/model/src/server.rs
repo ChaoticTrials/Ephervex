@@ -8,9 +8,10 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 /// A Minecraft operator permission level.
 ///
-/// Minecraft accepts the bounded integer domain 1 through 4. Keeping that
-/// range in the type prevents configuration and `ops.json` handling from
-/// disagreeing about whether an arbitrary integer is valid.
+/// The levels Ephervex configures and writes are the bounded integer domain 1
+/// through 4. Keeping that range in the type prevents configuration handling
+/// from disagreeing about whether an arbitrary integer is valid. Existing
+/// `ops.json` entries are not limited to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct OperatorPermissionLevel(u8);

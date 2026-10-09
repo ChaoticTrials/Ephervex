@@ -8,13 +8,22 @@ use serde_json::Value;
 use uuid::Uuid;
 
 /// One operator entry in Minecraft's `ops.json` format.
+///
+/// Minecraft reads `level` and `bypassesPlayerLimit` as optional and accepts any
+/// integer level, so both are kept as read: an entry is rewritten only in the
+/// fields Ephervex sets.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OperatorEntry {
     pub uuid: Uuid,
     pub name: String,
-    pub level: OperatorPermissionLevel,
-    #[serde(rename = "bypassesPlayerLimit")]
-    pub bypasses_player_limit: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    level: Option<Value>,
+    #[serde(
+        default,
+        rename = "bypassesPlayerLimit",
+        skip_serializing_if = "Option::is_none"
+    )]
+    bypasses_player_limit: Option<Value>,
     /// Fields written by a newer Minecraft build or server implementation.
     #[serde(flatten)]
     unknown: BTreeMap<String, Value>,
@@ -26,10 +35,23 @@ impl OperatorEntry {
         Self {
             uuid,
             name: name.into(),
-            level,
-            bypasses_player_limit: false,
+            level: Some(Value::from(level.value())),
+            bypasses_player_limit: Some(Value::Bool(false)),
             unknown: BTreeMap::new(),
         }
+    }
+
+    /// The entry's permission level, or `None` when it is absent or not an integer.
+    #[must_use]
+    pub fn level(&self) -> Option<i64> {
+        self.level.as_ref().and_then(Value::as_i64)
+    }
+
+    /// Whether the entry bypasses the player limit, or `None` when it is absent
+    /// or not a boolean.
+    #[must_use]
+    pub fn bypasses_player_limit(&self) -> Option<bool> {
+        self.bypasses_player_limit.as_ref().and_then(Value::as_bool)
     }
 }
 
@@ -73,8 +95,8 @@ impl OperatorsDocument {
 
     /// Adds or updates the operator identified by `uuid`.
     ///
-    /// Existing entries retain `bypassesPlayerLimit` and unknown extension
-    /// fields. If a malformed document contains the same UUID more than once,
+    /// Existing entries retain `bypassesPlayerLimit`, including its absence, and
+    /// unknown extension fields. If a malformed document contains the same UUID more than once,
     /// every matching entry is made consistent without disturbing the rest of
     /// the array.
     pub fn upsert(
@@ -88,9 +110,9 @@ impl OperatorsDocument {
         let mut changed = false;
         for entry in self.entries.iter_mut().filter(|entry| entry.uuid == uuid) {
             found = true;
-            if entry.name != name || entry.level != level {
+            if entry.name != name || entry.level() != Some(i64::from(level.value())) {
                 entry.name.clone_from(&name);
-                entry.level = level;
+                entry.level = Some(Value::from(level.value()));
                 changed = true;
             }
         }
@@ -173,7 +195,7 @@ mod tests {
         let rendered = document.render().expect("render");
         let reparsed = OperatorsDocument::parse(&rendered).expect("reparse");
         assert_eq!(reparsed.entries()[0].name, "quoted\"name\\value");
-        assert!(!reparsed.entries()[0].bypasses_player_limit);
+        assert_eq!(reparsed.entries()[0].bypasses_player_limit(), Some(false));
     }
 
     #[test]
@@ -192,13 +214,48 @@ mod tests {
     }
 
     #[test]
-    fn malformed_or_out_of_range_documents_are_rejected() {
+    fn non_json_documents_are_rejected() {
         assert!(OperatorsDocument::parse("not json").is_err());
-        assert!(
-            OperatorsDocument::parse(
-                r#"[{"uuid":"22222222-2222-4222-8222-222222222222","name":"Developer","level":5,"bypassesPlayerLimit":false}]"#
-            )
-            .is_err()
+    }
+
+    #[test]
+    fn entries_minecraft_accepts_survive_parse_and_render_unchanged() {
+        let id = "33333333-3333-4333-8333-333333333333";
+        let text = format!(
+            r#"[{{"uuid":"{id}","name":"Zero","level":0}},{{"uuid":"{id}","name":"NoLevel","bypassesPlayerLimit":true}},{{"uuid":"{id}","name":"Five","level":5,"bypassesPlayerLimit":false}}]"#
         );
+        let document = OperatorsDocument::parse(&text).expect("parse");
+        assert_eq!(document.entries()[0].level(), Some(0));
+        assert_eq!(document.entries()[0].bypasses_player_limit(), None);
+        assert_eq!(document.entries()[1].level(), None);
+        assert_eq!(document.entries()[2].level(), Some(5));
+
+        let rendered: Value =
+            serde_json::from_str(&document.render().expect("render")).expect("valid JSON");
+        let original: Value = serde_json::from_str(&text).expect("valid JSON");
+        assert_eq!(rendered, original);
+    }
+
+    #[test]
+    fn upsert_sets_a_valid_level_on_an_entry_without_one_and_keeps_absent_fields_absent() {
+        let selected = uuid("22222222-2222-4222-8222-222222222222");
+        let mut document = OperatorsDocument::parse(&format!(
+            r#"[{{"uuid":"{selected}","name":"Developer","level":0}}]"#
+        ))
+        .expect("parse");
+
+        assert_eq!(
+            document.upsert(
+                selected,
+                "Developer",
+                OperatorPermissionLevel::new(4).expect("level")
+            ),
+            OperatorUpdate::Updated
+        );
+
+        let rendered: Value =
+            serde_json::from_str(&document.render().expect("render")).expect("valid JSON");
+        assert_eq!(rendered[0]["level"], 4);
+        assert!(rendered[0].get("bypassesPlayerLimit").is_none());
     }
 }

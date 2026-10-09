@@ -2050,7 +2050,7 @@ mod tests {
                 .any(|entry| entry.uuid == unrelated)
         );
         assert!(operators.entries().iter().any(|entry| {
-            entry.uuid == selected && entry.level.value() == 4 && entry.name == "OnlineDeveloper"
+            entry.uuid == selected && entry.level() == Some(4) && entry.name == "OnlineDeveloper"
         }));
         let operator_json: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(directory.path().join(OPERATORS_FILE)).expect("ops"),
@@ -2060,6 +2060,48 @@ mod tests {
         let properties = std::fs::read_to_string(properties).expect("properties");
         assert!(properties.contains("op-permission-level=2"));
         assert!(properties.contains("motd=keep"));
+    }
+
+    #[test]
+    fn operator_setup_keeps_entries_minecraft_accepts_with_missing_or_zero_levels() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let zero = Uuid::new_v4();
+        let no_level = Uuid::new_v4();
+        let no_bypass = Uuid::new_v4();
+        let selected = Uuid::new_v4();
+        std::fs::write(
+            directory.path().join(OPERATORS_FILE),
+            format!(
+                r#"[{{"uuid":"{zero}","name":"Zero","level":0,"bypassesPlayerLimit":false}},{{"uuid":"{no_level}","name":"NoLevel","bypassesPlayerLimit":true}},{{"uuid":"{no_bypass}","name":"NoBypass","level":3}}]"#
+            ),
+        )
+        .expect("fixture");
+
+        materialize_operator_setup(
+            directory.path(),
+            &ServerNetworkSettings::default(),
+            Some(&ServerOperatorSetup {
+                permission_level: ephervex_model::OperatorPermissionLevel::default(),
+                profile: Some(ServerOperatorProfile {
+                    id: selected,
+                    name: "Developer".to_owned(),
+                    identity: ServerOperatorIdentity::Offline,
+                }),
+            }),
+        )
+        .expect("tolerant entries must not block the start");
+
+        let operators: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(directory.path().join(OPERATORS_FILE)).expect("ops"),
+        )
+        .expect("JSON");
+        assert_eq!(operators[0]["level"], 0);
+        assert!(operators[1].get("level").is_none());
+        assert_eq!(operators[1]["bypassesPlayerLimit"], true);
+        assert_eq!(operators[2]["level"], 3);
+        assert!(operators[2].get("bypassesPlayerLimit").is_none());
+        assert_eq!(operators[3]["uuid"], selected.to_string());
+        assert_eq!(operators[3]["level"], 4);
     }
 
     #[test]
