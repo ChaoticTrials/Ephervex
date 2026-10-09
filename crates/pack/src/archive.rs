@@ -33,8 +33,10 @@
 //! whether it is on a runtime.
 
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use tracing::{debug, instrument};
 use zip::ZipArchive;
@@ -100,6 +102,88 @@ impl Allowance {
     }
 }
 
+/// A ZIP central directory file header: the signature that starts it, and the
+/// length of its fixed part, which `zip` reads in one call per entry.
+const CENTRAL_HEADER_SIGNATURE: [u8; 4] = *b"PK\x01\x02";
+const CENTRAL_HEADER_FIXED_LEN: usize = 46;
+
+/// Counts central directory headers as `zip` parses them and refuses further
+/// reads once the entry limit is crossed.
+///
+/// `zip` allocates a record for every header it parses, and when the first
+/// end-of-central-directory candidate fails it retries earlier ones, so a
+/// count checked after `ZipArchive::new` comes too late. The budget is shared
+/// across every candidate and is disarmed once the archive is open, so entry
+/// contents are never counted. Only a read of exactly the fixed header length
+/// counts: `zip` also scans for the first header with larger buffered reads.
+#[derive(Debug)]
+struct HeaderBudget {
+    allowed: u64,
+    seen: AtomicU64,
+    armed: AtomicBool,
+    exceeded: AtomicBool,
+}
+
+impl HeaderBudget {
+    fn new(allowed: u64) -> Arc<Self> {
+        Arc::new(Self {
+            allowed,
+            seen: AtomicU64::new(0),
+            armed: AtomicBool::new(true),
+            exceeded: AtomicBool::new(false),
+        })
+    }
+
+    fn disarm(&self) {
+        self.armed.store(false, Ordering::Relaxed);
+    }
+
+    fn exceeded(&self) -> Option<u64> {
+        self.exceeded
+            .load(Ordering::Relaxed)
+            .then(|| self.seen.load(Ordering::Relaxed))
+    }
+
+    fn refusal() -> io::Error {
+        io::Error::other("the archive declares more entries than the entry-count limit allows")
+    }
+}
+
+/// The archive file as `zip` sees it, with [`HeaderBudget`] applied.
+#[derive(Debug)]
+struct BudgetedFile {
+    file: File,
+    budget: Arc<HeaderBudget>,
+}
+
+impl Read for BudgetedFile {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.budget.exceeded.load(Ordering::Relaxed) {
+            return Err(HeaderBudget::refusal());
+        }
+        let read = self.file.read(buf)?;
+        if self.budget.armed.load(Ordering::Relaxed)
+            && read == CENTRAL_HEADER_FIXED_LEN
+            && buf.len() == CENTRAL_HEADER_FIXED_LEN
+            && buf[..CENTRAL_HEADER_SIGNATURE.len()] == CENTRAL_HEADER_SIGNATURE
+            && self.budget.seen.fetch_add(1, Ordering::Relaxed) >= self.budget.allowed
+        {
+            self.budget.exceeded.store(true, Ordering::Relaxed);
+            return Err(HeaderBudget::refusal());
+        }
+        Ok(read)
+    }
+}
+
+impl Seek for BudgetedFile {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        if self.budget.exceeded.load(Ordering::Relaxed) {
+            return Err(HeaderBudget::refusal());
+        }
+        self.file.seek(position)
+    }
+}
+
 /// What one extraction produced.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ExtractionReport {
@@ -139,7 +223,7 @@ impl ExtractionReport {
 #[derive(Debug)]
 pub struct PackArchive {
     path: PathBuf,
-    zip: ZipArchive<File>,
+    zip: ZipArchive<BudgetedFile>,
     limits: ExtractionLimits,
     /// Bytes and entries consumed so far, across every read of this archive.
     spent_bytes: u64,
@@ -153,19 +237,23 @@ impl PackArchive {
             path: path.to_path_buf(),
             source,
         })?;
-        let zip = ZipArchive::new(file).map_err(|source| PackError::ArchiveInvalid {
-            path: path.to_path_buf(),
-            source,
-        })?;
-
-        let entries = zip.len() as u64;
-        if entries > limits.max_entries {
+        let budget = HeaderBudget::new(limits.max_entries);
+        let opened = ZipArchive::new(BudgetedFile {
+            file,
+            budget: Arc::clone(&budget),
+        });
+        budget.disarm();
+        if let Some(reached) = budget.exceeded() {
             return Err(PackError::LimitExceeded {
                 limit: "entry-count",
                 allowed: limits.max_entries,
-                reached: entries,
+                reached,
             });
         }
+        let zip = opened.map_err(|source| PackError::ArchiveInvalid {
+            path: path.to_path_buf(),
+            source,
+        })?;
 
         Ok(Self {
             path: path.to_path_buf(),
@@ -1067,6 +1155,161 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// How many central directory headers `zip` parses before the budget stops it.
+    fn headers_parsed_before_refusal(path: &Path, max_entries: u64) -> (bool, u64) {
+        let budget = HeaderBudget::new(max_entries);
+        let file = File::open(path).expect("open archive");
+        let opened = ZipArchive::new(BudgetedFile {
+            file,
+            budget: Arc::clone(&budget),
+        });
+        (opened.is_ok(), budget.seen.load(Ordering::Relaxed))
+    }
+
+    fn numbered_entries(count: usize) -> Vec<(String, Vec<u8>)> {
+        (0..count)
+            .map(|index| (format!("overrides/{index}.txt"), b"x".to_vec()))
+            .collect()
+    }
+
+    fn write_numbered_zip(path: &Path, count: usize) {
+        let entries = numbered_entries(count);
+        let borrowed: Vec<(&str, &[u8])> = entries
+            .iter()
+            .map(|(name, body)| (name.as_str(), body.as_slice()))
+            .collect();
+        zip_file(path, &borrowed);
+    }
+
+    #[test]
+    fn central_directory_parsing_stops_once_the_entry_limit_is_crossed() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("many.mrpack");
+        write_numbered_zip(&archive, 500);
+
+        let (opened, parsed) = headers_parsed_before_refusal(&archive, 2);
+        assert!(!opened, "an over-limit directory must not open");
+        assert_eq!(parsed, 3, "parsing must stop at the first excess header");
+
+        let error = PackArchive::open(
+            &archive,
+            ExtractionLimits {
+                max_entries: 2,
+                ..ExtractionLimits::default()
+            },
+        )
+        .expect_err("must refuse");
+        assert!(matches!(
+            error,
+            PackError::LimitExceeded {
+                limit: "entry-count",
+                allowed: 2,
+                reached: 3,
+            }
+        ));
+    }
+
+    #[test]
+    fn an_earlier_end_record_cannot_be_used_to_parse_past_the_entry_limit() {
+        // A trailing end record whose directory parses a few headers and then
+        // breaks makes `zip` fall back to the previous end record, which
+        // declares far more entries. Both candidates draw on one budget.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("fallback.mrpack");
+        write_numbered_zip(&archive, 200);
+        let mut bytes = std::fs::read(&archive).expect("read archive");
+
+        let u16_at =
+            |bytes: &[u8], at: usize| usize::from(u16::from_le_bytes([bytes[at], bytes[at + 1]]));
+        let end = bytes
+            .windows(4)
+            .rposition(|window| window == b"PK\x05\x06")
+            .expect("end record");
+        let mut cursor = usize::try_from(u32::from_le_bytes(
+            bytes[end + 16..end + 20].try_into().expect("offset field"),
+        ))
+        .expect("offset");
+        let mut copied = Vec::new();
+        for _ in 0..5 {
+            let length = 46
+                + u16_at(&bytes, cursor + 28)
+                + u16_at(&bytes, cursor + 30)
+                + u16_at(&bytes, cursor + 32);
+            copied.extend_from_slice(&bytes[cursor..cursor + length]);
+            cursor += length;
+        }
+        // A sixth header whose name length runs past the end of the file.
+        let mut broken = bytes[cursor..cursor + 46].to_vec();
+        broken[28..30].copy_from_slice(&u16::MAX.to_le_bytes());
+        copied.extend_from_slice(&broken);
+
+        let directory_offset = u32::try_from(bytes.len()).expect("small archive");
+        let directory_size = u32::try_from(copied.len()).expect("small directory");
+        bytes.extend_from_slice(&copied);
+        bytes.extend_from_slice(b"PK\x05\x06");
+        bytes.extend_from_slice(&[0; 4]); // disk numbers
+        bytes.extend_from_slice(&6u16.to_le_bytes()); // entries on this disk
+        bytes.extend_from_slice(&6u16.to_le_bytes()); // entries in total
+        bytes.extend_from_slice(&directory_size.to_le_bytes());
+        bytes.extend_from_slice(&directory_offset.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // comment length
+        std::fs::write(&archive, bytes).expect("rewrite archive");
+
+        // Five headers from the trailing record, then six from the earlier one.
+        let (_, parsed) = headers_parsed_before_refusal(&archive, 10);
+        assert_eq!(parsed, 11, "fallback candidates share one entry budget");
+        let error = PackArchive::open(
+            &archive,
+            ExtractionLimits {
+                max_entries: 10,
+                ..ExtractionLimits::default()
+            },
+        )
+        .expect_err("must refuse");
+        assert!(matches!(
+            error,
+            PackError::LimitExceeded {
+                limit: "entry-count",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn an_archive_with_exactly_the_entry_limit_opens() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("exact.mrpack");
+        write_numbered_zip(&archive, 6);
+
+        let pack = PackArchive::open(
+            &archive,
+            ExtractionLimits {
+                max_entries: 6,
+                ..ExtractionLimits::default()
+            },
+        )
+        .expect("the limit itself is allowed");
+        assert!(pack.contains("overrides/5.txt"));
+    }
+
+    #[test]
+    fn entry_contents_that_look_like_directory_headers_are_not_counted() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("lookalike.mrpack");
+        let body = b"PK\x01\x02".repeat(64);
+        zip_file(&archive, &[("manifest.json", &body)]);
+
+        let mut pack = PackArchive::open(
+            &archive,
+            ExtractionLimits {
+                max_entries: 1,
+                ..ExtractionLimits::default()
+            },
+        )
+        .expect("one entry fits");
+        assert_eq!(pack.read_manifest("manifest.json").expect("read"), body);
     }
 
     #[test]
