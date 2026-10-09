@@ -354,7 +354,7 @@ impl App {
         self.refuse_mod_change_during_isolation(host)?;
         // Held from reading the recipe to writing it, so a background write
         // cannot restore a record dropped here or be lost to this one.
-        let _gate = crate::host_recipe_gate::hold_blocking(host);
+        let _gate = self.hold_mod_change_blocking(host)?;
         let layout = self.host_layout(host)?;
         let dir = layout.game_dir.join(MODS_DIR);
         let staging = ephervex_storage::metadata::staging_dir(&layout.root);
@@ -450,7 +450,7 @@ impl App {
     ) -> CoreResult<()> {
         // Held until the records are forgotten, so a background write of the
         // recipe cannot restore one or be lost to this one.
-        let _gate = crate::host_recipe_gate::hold_blocking(host);
+        let _gate = self.hold_mod_change_blocking(host)?;
         let snapshot = self.host_mod_snapshot(host)?;
         let mut origins = Vec::with_capacity(paths.len());
         for logical_path in paths {
@@ -528,6 +528,22 @@ impl App {
         cancel: &CancellationToken,
     ) -> CoreResult<()> {
         self.refuse_mod_change_during_isolation(host)?;
+        // Held across the download and the write, so a session cannot start
+        // in between and leave a jar it never considered.
+        let _gate = self.hold_mod_change(host, cancel).await?;
+        self.restore_mod_file_holding_the_gate(host, logical_path, reporter, cancel)
+            .await
+    }
+
+    /// [`Self::restore_mod_file`] for a caller that already holds the host's
+    /// recipe gate and has checked for an isolation session under it.
+    pub(crate) async fn restore_mod_file_holding_the_gate(
+        &self,
+        host: InstalledHost,
+        logical_path: &Path,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> CoreResult<()> {
         let layout = self.host_layout(host)?;
         let recipe = layout
             .recipe

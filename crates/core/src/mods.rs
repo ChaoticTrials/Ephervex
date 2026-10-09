@@ -1139,8 +1139,9 @@ impl App {
 
         // From reading the recipe to the install writing it back, so the
         // background enrichment of this host cannot write in between.
-        let _gate =
-            host_recipe_gate::hold_for_change(InstalledHost::Instance(instance), cancel).await?;
+        let _gate = self
+            .hold_mod_change(InstalledHost::Instance(instance), cancel)
+            .await?;
 
         // An instance created by hand has no recipe until something needs one.
         let store = SourceStore::new(ephervex_storage::metadata::source_dir(&record.root));

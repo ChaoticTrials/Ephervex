@@ -448,6 +448,10 @@ impl App {
         cancel: &CancellationToken,
     ) -> CoreResult<RepairReport> {
         self.refuse_repair(host)?;
+        // Replacing files is a change to the host's mods, so it cannot overlap
+        // an isolation session starting.
+        let _gate = crate::host_recipe_gate::hold_for_change(host, cancel).await?;
+        self.refuse_repair(host)?;
         let layout = self.host_layout(host)?;
         let found = self.verify_host(host, reporter, cancel).await?;
         let asked =
@@ -484,7 +488,10 @@ impl App {
                     continue;
                 }
             };
-            match self.restore_mod_file(host, &path, reporter, cancel).await {
+            match self
+                .restore_mod_file_holding_the_gate(host, &path, reporter, cancel)
+                .await
+            {
                 Ok(()) => {
                     // Deleting the outgoing copy is allowed to fail: a leftover
                     // in launcher-owned scratch is invisible to the game. It
@@ -569,6 +576,34 @@ impl App {
             });
         }
         Ok(())
+    }
+
+    /// Waits for the host's recipe gate, then refuses while an isolation
+    /// session owns the host.
+    ///
+    /// A session starts under the same gate, so a change that holds it either
+    /// began before the session existed and finishes first, or sees the
+    /// session here. The check before planning only fails fast; this one is
+    /// what keeps a change from committing underneath a session.
+    pub(crate) async fn hold_mod_change(
+        &self,
+        host: InstalledHost,
+        cancel: &CancellationToken,
+    ) -> CoreResult<crate::host_recipe_gate::HostRecipeGate> {
+        let gate = crate::host_recipe_gate::hold_for_change(host, cancel).await?;
+        self.refuse_mod_change_during_isolation(host)?;
+        Ok(gate)
+    }
+
+    /// [`Self::hold_mod_change`] for synchronous changes, which are short
+    /// enough to wait on the calling thread.
+    pub(crate) fn hold_mod_change_blocking(
+        &self,
+        host: InstalledHost,
+    ) -> CoreResult<crate::host_recipe_gate::HostRecipeGate> {
+        let gate = crate::host_recipe_gate::hold_blocking(host);
+        self.refuse_mod_change_during_isolation(host)?;
+        Ok(gate)
     }
 
     /// What stops a change to this host's files right now: the host running,

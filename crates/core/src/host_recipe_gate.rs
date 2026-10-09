@@ -12,10 +12,12 @@
 //!
 //! Waiting is possible from async and from synchronous code, because both
 //! kinds of operation rewrite recipes. Waiting synchronously blocks the thread,
-//! which is only acceptable for a short holder.
+//! which is only acceptable for a short holder, or for a wait that `cancel`
+//! can end.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
+use std::time::Duration;
 
 use ephervex_pack::PackError;
 use tokio::sync::Notify;
@@ -121,6 +123,33 @@ pub(crate) fn hold_blocking(host: InstalledHost) -> HostRecipeGate {
     HostRecipeGate { slot }
 }
 
+/// How often a synchronous wait looks at its cancellation token.
+const CANCEL_POLL: Duration = Duration::from_millis(50);
+
+/// Like [`hold_blocking`], for a holder that may wait behind a long change:
+/// gives up when `cancel` fires first, as `hold` does.
+pub(crate) fn hold_blocking_for_change(
+    host: InstalledHost,
+    cancel: &CancellationToken,
+) -> CoreResult<HostRecipeGate> {
+    let slot = slot(host);
+    {
+        let mut held = slot.held.lock().unwrap_or_else(PoisonError::into_inner);
+        while *held {
+            if cancel.is_cancelled() {
+                return Err(PackError::Canceled.into());
+            }
+            held = slot
+                .freed
+                .wait_timeout(held, CANCEL_POLL)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        *held = true;
+    }
+    Ok(HostRecipeGate { slot })
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -194,6 +223,27 @@ mod tests {
 
         drop(held);
         waiting.join().expect("the waiting thread finishes");
+        assert!(hold(host, &CancellationToken::new()).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_thread_waiting_for_a_change_stops_waiting_when_canceled() {
+        let host = host();
+        let held = hold(host, &CancellationToken::new())
+            .await
+            .expect("first holder");
+
+        let cancel = CancellationToken::new();
+        let waiting = std::thread::spawn({
+            let cancel = cancel.clone();
+            move || hold_blocking_for_change(host, &cancel).is_err()
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!waiting.is_finished(), "the gate was shared while held");
+
+        cancel.cancel();
+        assert!(waiting.join().expect("the waiting thread finishes"));
+        drop(held);
         assert!(hold(host, &CancellationToken::new()).await.is_some());
     }
 

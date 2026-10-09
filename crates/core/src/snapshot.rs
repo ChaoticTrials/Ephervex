@@ -133,6 +133,8 @@ pub enum SnapshotError {
     HostRunning { host: String },
     #[error("{path} is being restored or moved by another operation")]
     HostBusy { path: PathBuf },
+    #[error("an isolation session owns the host's mods")]
+    IsolationActive,
     #[error("snapshot {id} does not exist")]
     NotFound { id: SnapshotId },
     #[error("snapshot {snapshot} belongs to {found}, not {expected}")]
@@ -177,6 +179,7 @@ impl SnapshotError {
         match self {
             Self::HostRunning { .. } => "error-snapshot-host-running",
             Self::HostBusy { .. } => "error-snapshot-host-busy",
+            Self::IsolationActive => "error-snapshot-isolation-active",
             Self::NotFound { .. } => "error-snapshot-not-found",
             Self::HostMismatch { .. } => "error-snapshot-host-mismatch",
             Self::LabelInvalid => "error-snapshot-label-invalid",
@@ -387,12 +390,45 @@ impl App {
     }
 
     /// Replaces the live host parts with a captured snapshot.
+    ///
+    /// Refused while an isolation session is active: the restore replaces the
+    /// mods the session names its candidates from.
     pub fn restore_snapshot(
         &self,
         host: InstalledHost,
         id: SnapshotId,
         options: SnapshotRestoreOptions,
         cancel: &CancellationToken,
+    ) -> Result<SnapshotRestore, SnapshotError> {
+        self.restore_snapshot_for(host, id, options, cancel, SnapshotRestoreOwner::Caller)
+    }
+
+    /// Restores the safety snapshot an isolation session took, which is how
+    /// the session itself ends.
+    pub(crate) fn restore_isolation_snapshot(
+        &self,
+        host: InstalledHost,
+        id: SnapshotId,
+        cancel: &CancellationToken,
+    ) -> Result<SnapshotRestore, SnapshotError> {
+        self.restore_snapshot_for(
+            host,
+            id,
+            SnapshotRestoreOptions {
+                safety_snapshot: false,
+            },
+            cancel,
+            SnapshotRestoreOwner::IsolationSession,
+        )
+    }
+
+    fn restore_snapshot_for(
+        &self,
+        host: InstalledHost,
+        id: SnapshotId,
+        options: SnapshotRestoreOptions,
+        cancel: &CancellationToken,
+        owner: SnapshotRestoreOwner,
     ) -> Result<SnapshotRestore, SnapshotError> {
         self.refuse_snapshot_while_running(host)?;
         // Held until the restore is finished, rolled back, or abandoned: it
@@ -413,6 +449,7 @@ impl App {
         // The restore replaces the recipe wholesale, so a background write
         // that read the previous one must not land on top of it.
         let _gate = crate::host_recipe_gate::hold_blocking(host);
+        self.refuse_restore_during_isolation(host, owner)?;
         let layout = self.host_layout(host).map_err(snapshot_core_error)?;
         let snapshot = self.snapshot_directory(host, id)?;
         let restored = read_manifest(&snapshot)?;
@@ -550,6 +587,20 @@ impl App {
         };
         write_manifest(capture.staging, &record)?;
         Ok(record)
+    }
+
+    /// Checked under the host's gate, because a session starts under it too.
+    fn refuse_restore_during_isolation(
+        &self,
+        host: InstalledHost,
+        owner: SnapshotRestoreOwner,
+    ) -> Result<(), SnapshotError> {
+        let session = self.isolation_state(host).map_err(snapshot_core_error)?;
+        if session.is_some() && owner == SnapshotRestoreOwner::Caller {
+            Err(SnapshotError::IsolationActive)
+        } else {
+            Ok(())
+        }
     }
 
     fn refuse_snapshot_while_running(&self, host: InstalledHost) -> Result<(), SnapshotError> {
@@ -900,6 +951,14 @@ fn read_manifest(directory: &Path) -> Result<SnapshotRecord, SnapshotError> {
         });
     }
     Ok(document.record)
+}
+
+/// Who is asking for a restore: it decides whether an isolation session
+/// refuses it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotRestoreOwner {
+    Caller,
+    IsolationSession,
 }
 
 fn snapshot_core_error(error: crate::CoreError) -> SnapshotError {

@@ -43,6 +43,7 @@ use tracing::{info, instrument, warn};
 
 use crate::app::{App, JavaPlanRequest, JavaTarget};
 use crate::error::{CoreError, CoreResult};
+use crate::host_recipe_gate::HostRecipeGate;
 use crate::mods::InstalledHost;
 
 /// One managed mod that does not fit a candidate loader build.
@@ -215,7 +216,10 @@ impl App {
         }
         let selection = LoaderSelection::exact(plan.loader, plan.candidate_version.clone());
         if !plan.changes_anything() {
-            return Self::settle_unchanged_build(&record, plan, selection);
+            let gate = self
+                .hold_mod_change(InstalledHost::Instance(instance), cancel)
+                .await?;
+            return Self::settle_unchanged_build(&record, plan, selection, &gate);
         }
 
         let metadata = self.minecraft_version(&record.minecraft_version).await?;
@@ -249,12 +253,18 @@ impl App {
         // The installation can take long enough for a launch to begin.
         self.refuse_while_running(instance)?;
 
+        // Held from the last check to the recipe write, so a session cannot
+        // start between them.
+        let gate = self
+            .hold_mod_change(InstalledHost::Instance(instance), cancel)
+            .await?;
+
         // Only now. Everything above can fail without the instance having
         // changed at all.
         let record = self.registry().modify_client(instance, |current| {
             current.loader = selection.clone();
         })?;
-        Self::align_recipe_loader(&record)?;
+        Self::align_recipe_loader(&record, &gate)?;
 
         info!(
             loader = %plan.loader,
@@ -278,9 +288,10 @@ impl App {
         record: &ephervex_storage::ClientRecord,
         plan: LoaderVersionPlan,
         selection: LoaderSelection,
+        gate: &HostRecipeGate,
     ) -> CoreResult<LoaderVersionChange> {
         info!("the instance already runs this loader build");
-        Self::align_recipe_loader(record)?;
+        Self::align_recipe_loader(record, gate)?;
         Ok(LoaderVersionChange {
             plan,
             loader: selection,
@@ -294,9 +305,12 @@ impl App {
     /// Only the target moves: the pack's name, its version, and every file it
     /// declared are untouched, so what the pack shipped is still recorded
     /// exactly as it was imported.
-    fn align_recipe_loader(record: &ephervex_storage::ClientRecord) -> CoreResult<()> {
-        let _gate =
-            crate::host_recipe_gate::hold_blocking(crate::mods::InstalledHost::Instance(record.id));
+    ///
+    /// The caller holds the instance's recipe gate, which the parameter proves.
+    fn align_recipe_loader(
+        record: &ephervex_storage::ClientRecord,
+        _gate: &HostRecipeGate,
+    ) -> CoreResult<()> {
         let store =
             ephervex_pack::SourceStore::new(ephervex_storage::metadata::source_dir(&record.root));
         if !store.has_recipe() {
@@ -537,8 +551,10 @@ mod tests {
 
         let mut unchanged = plan(LoaderKind::Forge, Some("47.1.107"), "47.1.107");
         unchanged.instance = record.id;
-        let change = App::settle_unchanged_build(&record, unchanged, new.clone())
+        let gate = crate::host_recipe_gate::hold_blocking(InstalledHost::Instance(record.id));
+        let change = App::settle_unchanged_build(&record, unchanged, new.clone(), &gate)
             .expect("the request completes");
+        drop(gate);
 
         assert_eq!(change.loader, new);
         assert_eq!(

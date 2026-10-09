@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use crate::dependencies::ModGraph;
 use crate::{
     App, CoreError, CoreResult, DependencyKnowledge, InstalledHost, ModPresence, SnapshotError,
-    SnapshotOrigin, SnapshotRestoreOptions,
+    SnapshotOrigin,
 };
 
 const ISOLATION_VERSION: u32 = 1;
@@ -647,6 +647,10 @@ impl App {
         cancel: &CancellationToken,
     ) -> CoreResult<IsolationRound> {
         self.refuse_isolation_while_running(host)?;
+        // Held until the session file exists, so a mod change either finishes
+        // before the safety snapshot is taken or sees the session and is
+        // refused. The wait ends if the caller cancels.
+        let _gate = crate::host_recipe_gate::hold_blocking_for_change(host, cancel)?;
         let path = self.isolation_path(host)?;
         if path.exists() {
             return Err(IsolationError::AlreadyActive { host: host.id() }.into());
@@ -854,14 +858,7 @@ impl App {
         self.refuse_isolation_while_running(host)?;
         let path = self.isolation_path(host)?;
         let session = self.read_required_session(host)?;
-        match self.restore_snapshot(
-            host,
-            session.safety_snapshot,
-            SnapshotRestoreOptions {
-                safety_snapshot: false,
-            },
-            cancel,
-        ) {
+        match self.restore_isolation_snapshot(host, session.safety_snapshot, cancel) {
             Ok(_) => {}
             // The snapshot was deleted before deletion was refused. Re-enabling
             // the recorded starting mods is the closest remaining restore.
@@ -1337,5 +1334,125 @@ fn populate_candidates(
                 closure: closure.iter().cloned().collect(),
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    use std::time::Duration;
+
+    use ephervex_model::LoaderSelection;
+    use ephervex_storage::{NewClient, Paths};
+
+    use super::*;
+    use crate::error::CoreError;
+    use crate::verify::RepairRefusal;
+
+    fn client_without_mods(root: &Path) -> (Paths, InstalledHost) {
+        let paths = Paths::rooted_at(root);
+        let app = App::open_at(paths.clone()).expect("open app");
+        let client = app
+            .create_client_for_test(NewClient::new(
+                "Isolation",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create client");
+        let store =
+            ephervex_pack::SourceStore::new(ephervex_storage::metadata::source_dir(&client.root));
+        store
+            .write_recipe(&ephervex_pack::PackRecipe::for_manual_instance(
+                "Isolation",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("write the recipe");
+        (paths, InstalledHost::Instance(client.id))
+    }
+
+    fn request() -> IsolationRequest {
+        IsolationRequest {
+            pinned: Vec::new(),
+            accept_unrecorded: false,
+            accept_missing: false,
+        }
+    }
+
+    #[test]
+    fn starting_a_session_waits_for_a_mod_change_in_progress() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (paths, host) = client_without_mods(base.path());
+        let change = crate::host_recipe_gate::hold_blocking(host);
+
+        let starting = std::thread::spawn({
+            let paths = paths.clone();
+            move || {
+                App::open_at(paths)
+                    .expect("open app")
+                    .begin_isolation(host, request(), &CancellationToken::new())
+                    .map(drop)
+            }
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !starting.is_finished(),
+            "the session started under a change"
+        );
+
+        drop(change);
+        starting
+            .join()
+            .expect("the starting thread finishes")
+            .expect("the session starts once the change is done");
+        let app = App::open_at(paths).expect("open app");
+        assert!(app.isolation_state(host).expect("state").is_some());
+    }
+
+    #[test]
+    fn starting_a_session_stops_waiting_for_a_mod_change_when_canceled() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (paths, host) = client_without_mods(base.path());
+        let _change = crate::host_recipe_gate::hold_blocking(host);
+        let cancel = CancellationToken::new();
+
+        let starting = std::thread::spawn({
+            let cancel = cancel.clone();
+            let paths = paths.clone();
+            move || {
+                App::open_at(paths)
+                    .expect("open app")
+                    .begin_isolation(host, request(), &cancel)
+                    .map(drop)
+            }
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        cancel.cancel();
+
+        let result = starting.join().expect("the starting thread finishes");
+        assert!(result.is_err_and(|error| error.is_cancellation()));
+        let app = App::open_at(paths).expect("open app");
+        assert!(app.isolation_state(host).expect("state").is_none());
+    }
+
+    #[test]
+    fn a_mod_change_that_waited_for_the_gate_is_refused_once_a_session_exists() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (paths, host) = client_without_mods(base.path());
+        let app = App::open_at(paths).expect("open app");
+        app.begin_isolation(host, request(), &CancellationToken::new())
+            .expect("the session starts");
+
+        let refused = app.hold_mod_change_blocking(host);
+
+        assert!(matches!(
+            refused,
+            Err(CoreError::ChangeRefused {
+                reason: RepairRefusal::IsolationActive
+            })
+        ));
+        // The refusal released the gate it took.
+        drop(crate::host_recipe_gate::hold_blocking(host));
     }
 }

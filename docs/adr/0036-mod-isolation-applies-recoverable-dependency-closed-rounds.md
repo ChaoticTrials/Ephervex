@@ -97,10 +97,18 @@ last two were never tested for removal.
 
 Any change to the host's mod set is refused while a session is active:
 installing, updating, changing the version of, removing, adding, restoring,
-deleting, enabling, or disabling a mod, changing the loader build, and linked
-mod operations. A mod added or replaced during a session would either break
-every later round or escape being a suspect. Rounds, resume, finish, and cancel
-are the session's own changes and are not refused.
+deleting, enabling, or disabling a mod, changing the loader build, repairing
+the host, restoring a snapshot, and linked mod operations. A mod added or
+replaced during a session would either break every later round or escape being
+a suspect. Rounds, resume, finish, and cancel are the session's own changes and
+are not refused; cancel restores the session's safety snapshot itself.
+
+A session starts under the host's recipe gate, and every change that holds the
+gate checks for a session again after taking it. A change that was already past
+its first check therefore either finishes before the session's safety snapshot
+is taken or is refused. The gate is process-wide, so this does not reach a
+second Ephervex process. The linked mod plan marks a server with a session as
+blocked, so a confirmation never offers a change that applying would refuse.
 
 Deleting the safety snapshot is refused while its session is active. A session
 whose snapshot is already missing still ends: finish skips the dated label, and

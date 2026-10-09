@@ -4,6 +4,7 @@ use ephervex_core::{
     App, CoreError, DuplicateClient, InstalledHost, IsolationConfidence, IsolationError,
     IsolationReport, IsolationRequest, IsolationRound, IsolationRoundKind, IsolationStep,
     LinkedModRequest, ModInstallRequest, ModVersionChoice, Paths, RepairRefusal, RoundAnswer,
+    SnapshotError, SnapshotOrigin, SnapshotRestoreOptions,
 };
 use ephervex_download::{ChannelSink, OperationReporter};
 use ephervex_model::{AbsentModPolicy, LoaderSelection};
@@ -774,6 +775,36 @@ fn cancel_restores_the_exact_pre_isolation_mod_state_through_the_snapshot() {
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(after, before);
     assert!(!fixture.root.join(".launcher/isolation.json").exists());
+}
+
+#[test]
+fn a_snapshot_restore_is_refused_while_a_session_owns_the_host() {
+    let fixture = Fixture::new();
+    let app = fixture.app();
+    let cancel = CancellationToken::new();
+    let snapshot = app
+        .create_snapshot(fixture.host, "before", SnapshotOrigin::Manual, &cancel)
+        .unwrap();
+    std::fs::remove_file(fixture.root.join("minecraft/mods/c.jar")).unwrap();
+    app.begin_isolation(fixture.host, request(&["pin"]), &cancel)
+        .unwrap();
+    let before = enabled_files(&fixture);
+
+    let result = app.restore_snapshot(
+        fixture.host,
+        snapshot.id,
+        SnapshotRestoreOptions::default(),
+        &cancel,
+    );
+
+    assert!(
+        matches!(result, Err(SnapshotError::IsolationActive)),
+        "expected an isolation refusal, got {result:?}"
+    );
+    assert_eq!(enabled_files(&fixture), before);
+    assert!(app.isolation_state(fixture.host).unwrap().is_some());
+    app.cancel_isolation(fixture.host, &cancel).unwrap();
+    assert!(app.isolation_state(fixture.host).unwrap().is_none());
 }
 
 #[test]

@@ -65,7 +65,6 @@ use tracing::{info, instrument, warn};
 
 use crate::app::App;
 use crate::error::{CoreError, CoreResult};
-use crate::host_recipe_gate;
 use crate::mods::{InstalledHost, ManagedModEntry, ManagedModSnapshot};
 
 /// Why a mod cannot be mutated.
@@ -586,8 +585,9 @@ impl App {
     ) -> CoreResult<ModMutation> {
         // Held from reading the recipe to committing it, so nothing else
         // writes this host's recipe in between and has its write overwritten.
-        let _gate =
-            host_recipe_gate::hold_for_change(InstalledHost::Instance(instance), cancel).await?;
+        let _gate = self
+            .hold_mod_change(InstalledHost::Instance(instance), cancel)
+            .await?;
         let mut context = self.mutation_context(instance, target)?;
         let plan = self
             .version_change_plan(&context, choice, reporter, cancel)
@@ -673,8 +673,9 @@ impl App {
         self.refuse_mod_change_during_isolation(InstalledHost::Instance(instance))?;
         // Held from reading the recipe to committing it, so nothing else
         // writes this host's recipe in between and has its write overwritten.
-        let _gate =
-            host_recipe_gate::hold_for_change(InstalledHost::Instance(instance), cancel).await?;
+        let _gate = self
+            .hold_mod_change(InstalledHost::Instance(instance), cancel)
+            .await?;
         let mut context = self.mutation_context(instance, target)?;
         let plan = self.removal_plan(&context, reporter, cancel).await?;
         let removals = removals_for(&plan);

@@ -58,7 +58,6 @@ use tracing::{info, instrument, warn};
 
 use crate::app::App;
 use crate::error::{CoreError, CoreResult};
-use crate::host_recipe_gate;
 use crate::mods::{InstalledHost, InstalledMods, ModInstallRequest, side_requirement};
 use crate::mutation::{
     DependencyScope, ModMutation, ModMutationPlan, ModVersionChoice, PlannedFile,
@@ -178,6 +177,9 @@ pub enum LinkedTargetBlock {
     /// The server's own retained desired state could not be read, so there is
     /// nothing to prove ownership against.
     StateUnavailable,
+    /// An isolation session owns which of the server's mods are enabled, so
+    /// its mod set cannot change until the session ends.
+    IsolationActive,
     /// The server's pack declares this mod. Pack-owned content is reconstructed,
     /// never independently mutated.
     PackOwned,
@@ -203,6 +205,7 @@ impl LinkedTargetBlock {
             Self::NoLongerLinked => "linked-target-no-longer-linked",
             Self::ProviderUnavailable => "linked-target-provider-unavailable",
             Self::StateUnavailable => "linked-target-state-unavailable",
+            Self::IsolationActive => "linked-target-isolation-active",
             Self::PackOwned => "linked-target-pack-owned",
             Self::ServerDependency => "linked-target-server-dependency",
             Self::MovesAnotherMod => "linked-target-moves-another-mod",
@@ -221,6 +224,7 @@ impl LinkedTargetBlock {
             Self::NoLongerLinked => "no-longer-linked",
             Self::ProviderUnavailable => "provider-unavailable",
             Self::StateUnavailable => "state-unavailable",
+            Self::IsolationActive => "isolation-active",
             Self::PackOwned => "pack-owned",
             Self::ServerDependency => "server-dependency",
             Self::MovesAnotherMod => "moves-another-mod",
@@ -861,6 +865,18 @@ impl App {
                 LinkedTargetBlock::ServerNotInstalled,
             ));
         }
+        // The same refusal applying makes, so a confirmation never offers a
+        // server the apply would turn away.
+        match self.isolation_state(InstalledHost::Server(server)) {
+            Ok(None) => {}
+            Ok(Some(_)) => {
+                return Some(blocked(&record, root, LinkedTargetBlock::IsolationActive));
+            }
+            Err(error) => {
+                warn!(%server, %error, "a linked server's isolation session could not be read");
+                return Some(blocked(&record, root, LinkedTargetBlock::StateUnavailable));
+            }
+        }
         let store = SourceStore::new(ephervex_storage::metadata::source_dir(&record.root));
         if !store.has_recipe() {
             return Some(blocked(&record, root, LinkedTargetBlock::StateUnavailable));
@@ -1120,26 +1136,25 @@ impl App {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> LinkedTargetOutcome {
+        let failed = |error: &CoreError| LinkedTargetOutcome {
+            server,
+            name: self
+                .server(server)
+                .map_or_else(|_| server.to_string(), |record| record.name),
+            result: LinkedTargetResult::Failed(LinkedTargetFailure::from(error)),
+        };
         if let Err(error) = self.refuse_mod_change_during_isolation(InstalledHost::Server(server)) {
-            return LinkedTargetOutcome {
-                server,
-                name: self
-                    .server(server)
-                    .map_or_else(|_| server.to_string(), |record| record.name),
-                result: LinkedTargetResult::Failed(LinkedTargetFailure::from(&error)),
-            };
+            return failed(&error);
         }
 
-        // Held from reading the server's recipe to committing it.
-        let Some(_gate) = host_recipe_gate::hold(InstalledHost::Server(server), cancel).await
-        else {
-            return LinkedTargetOutcome {
-                server,
-                name: server.to_string(),
-                result: LinkedTargetResult::Failed(LinkedTargetFailure::from(&CoreError::from(
-                    ephervex_pack::PackError::Canceled,
-                ))),
-            };
+        // Held from reading the server's recipe to committing it, and checked
+        // again under the gate because a session can start while this waits.
+        let _gate = match self
+            .hold_mod_change(InstalledHost::Server(server), cancel)
+            .await
+        {
+            Ok(gate) => gate,
+            Err(error) => return failed(&error),
         };
         // Planned again from scratch rather than trusted. A server can be
         // started, unlinked, deleted, or moved to another loader build between
@@ -2582,6 +2597,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_server_in_an_isolation_session_is_planned_as_blocked_and_never_preselected() {
+        let world = world().await;
+        let isolating = world.link_server("Isolated Server", MINECRAFT);
+        let other = world.link_server("Other Server", MINECRAFT);
+        apply(&world, &install("ROOTPROJ"), &[isolating, other]).await;
+        world
+            .app
+            .begin_isolation(
+                InstalledHost::Server(isolating),
+                crate::IsolationRequest {
+                    pinned: Vec::new(),
+                    accept_unrecorded: true,
+                    accept_missing: true,
+                },
+                &CancellationToken::new(),
+            )
+            .expect("the server starts a session");
+
+        let confirmation = plan(&world, &remove(ROOT_V2)).await;
+
+        assert_eq!(
+            target(&confirmation, isolating).state,
+            LinkedTargetState::Blocked(LinkedTargetBlock::IsolationActive)
+        );
+        assert_eq!(
+            target(&confirmation, other).state,
+            LinkedTargetState::WillRemove
+        );
+        assert_eq!(confirmation.default_selection(), vec![other]);
+    }
+
+    #[tokio::test]
     async fn one_verified_artifact_serves_the_client_and_every_server() {
         let world = world().await;
         let first = world.link_server("Reproduction Server", MINECRAFT);
@@ -3055,8 +3102,10 @@ Details:\n\
             LinkedTargetBlock::NoLongerLinked,
             LinkedTargetBlock::ProviderUnavailable,
             LinkedTargetBlock::StateUnavailable,
+            LinkedTargetBlock::IsolationActive,
             LinkedTargetBlock::PackOwned,
             LinkedTargetBlock::ServerDependency,
+            LinkedTargetBlock::MovesAnotherMod,
         ];
         let ids: BTreeSet<&str> = blocks.iter().map(LinkedTargetBlock::message_id).collect();
         assert_eq!(ids.len(), blocks.len(), "two refusals share a sentence");
