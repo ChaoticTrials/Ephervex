@@ -2234,6 +2234,51 @@ fn refuse_while_changing(
     refusal.is_some()
 }
 
+/// Refuses a save into a host's settings while a change is rewriting its
+/// files, on the screen the fields are on.
+fn refuse_save_while_changing(
+    changing: &ChangingHosts,
+    host: InstalledHost,
+    events: &Sender<Event>,
+) -> bool {
+    let refusal = change_in_flight(changing, host);
+    if let Some(refusal) = refusal {
+        let _ = events.send(Event::ModalError {
+            scope: ModalScope::Anywhere,
+            message: lookup(refusal),
+        });
+    }
+    refusal.is_some()
+}
+
+/// What to tell the user when a change is rewriting one of `hosts`, which are
+/// an instance followed by the linked servers an operation also moves.
+fn busy_host_message(
+    app: &App,
+    changing: &ChangingHosts,
+    hosts: &[InstalledHost],
+) -> Option<String> {
+    let (host, refusal) = hosts
+        .iter()
+        .find_map(|host| change_in_flight(changing, *host).map(|refusal| (*host, refusal)))?;
+    Some(match host {
+        InstalledHost::Server(server) => lookup_args(
+            "gui-delete-instance-linked-server-busy",
+            [
+                (
+                    "first",
+                    Arg::from(
+                        app.server(server)
+                            .map_or_else(|_| server.to_string(), |record| record.name),
+                    ),
+                ),
+                ("second", Arg::from(lookup(refusal))),
+            ],
+        ),
+        InstalledHost::Instance(_) => lookup(refusal),
+    })
+}
+
 /// Claims `targets` for a change that runs beside the command loop, or tells
 /// the dialogs in `dialogs` (a toast when none is open) why it cannot start.
 /// The claim lasts until the returned marks are dropped.
@@ -2459,6 +2504,10 @@ fn run_worker(
                 max_memory_mib,
                 jvm_args,
             } => {
+                if refuse_save_while_changing(&changing, InstalledHost::Instance(instance), &events)
+                {
+                    continue;
+                }
                 let jvm = ephervex_model::JvmSettings {
                     min_memory_mib,
                     max_memory_mib,
@@ -2503,22 +2552,24 @@ fn run_worker(
             Command::SetAllowPackModVersionChanges { instance, allow } => {
                 // No toast. The toggle itself is the confirmation; a refusal
                 // is still reported, because then nothing on screen changed.
-                match app.set_allow_pack_mod_version_changes(instance, allow) {
-                    Ok(_) => {
-                        send_snapshot(&app, &events);
-                        // The setting decides what each row may have done to
-                        // it, so the list it decides for is re-read here
-                        // rather than at the next time the tab happens to be
-                        // opened.
-                        send_host_mods(
-                            &app,
-                            InstalledHost::Instance(instance),
-                            &events,
-                            &refreshed_mods,
-                            false,
-                        );
+                if !refuse_while_changing(&changing, InstalledHost::Instance(instance), &events) {
+                    match app.set_allow_pack_mod_version_changes(instance, allow) {
+                        Ok(_) => {
+                            send_snapshot(&app, &events);
+                            // The setting decides what each row may have done
+                            // to it, so the list it decides for is re-read
+                            // here rather than at the next time the tab
+                            // happens to be opened.
+                            send_host_mods(
+                                &app,
+                                InstalledHost::Instance(instance),
+                                &events,
+                                &refreshed_mods,
+                                false,
+                            );
+                        }
+                        Err(error) => send_error(&events, &error),
                     }
-                    Err(error) => send_error(&events, &error),
                 }
                 // Either way, because the snapshot does not carry this flag:
                 // after a refusal the toggle shows what the user asked for
@@ -2911,7 +2962,7 @@ fn run_worker(
                 Err(error) => send_error(&events, &error),
             },
             Command::PromoteInstance { instance, servers } => {
-                promote_instance(&app, instance, servers, &events);
+                promote_instance(&app, &changing, instance, servers, &events);
             }
             Command::DuplicateClient {
                 instance,
@@ -2957,26 +3008,7 @@ fn run_worker(
                     }
                 };
                 // Said in the dialog, which is still open and would otherwise look ignored.
-                if let Some((host, refusal)) = hosts.iter().find_map(|host| {
-                    change_in_flight(&changing, *host).map(|refusal| (*host, refusal))
-                }) {
-                    let message =
-                        match host {
-                            InstalledHost::Server(server) => lookup_args(
-                                "gui-delete-instance-linked-server-busy",
-                                [
-                                    (
-                                        "first",
-                                        Arg::from(app.server(server).map_or_else(
-                                            |_| server.to_string(),
-                                            |record| record.name,
-                                        )),
-                                    ),
-                                    ("second", Arg::from(lookup(refusal))),
-                                ],
-                            ),
-                            InstalledHost::Instance(_) => lookup(refusal),
-                        };
+                if let Some(message) = busy_host_message(&app, &changing, &hosts) {
                     let _ = events.send(Event::ModalError {
                         scope: ModalScope::DELETE_INSTANCE,
                         message,
@@ -4601,6 +4633,9 @@ fn run_worker(
                 network,
                 values,
             } => {
+                if refuse_while_changing(&changing, InstalledHost::Server(server), &events) {
+                    continue;
+                }
                 let result = app.set_server_network(server, network).and_then(|_| {
                     for (key, value) in values {
                         app.set_server_property(server, &key, &value)?;
@@ -5547,10 +5582,22 @@ fn send_host_mods(
 /// use than reporting the whole thing as broken.
 fn promote_instance(
     app: &App,
+    changing: &ChangingHosts,
     instance: InstanceId,
     servers: Vec<ServerId>,
     events: &Sender<Event>,
 ) {
+    // The directories move, so a change still writing into any of them would
+    // keep writing to the old path.
+    if let Some(message) =
+        busy_host_message(app, changing, &mod_operation_hosts(instance, &servers))
+    {
+        let _ = events.send(Event::ModalError {
+            scope: ModalScope::MAKE_PERSISTENT,
+            message,
+        });
+        return;
+    }
     let request = ephervex_core::PromotionRequest { servers };
     let reporter = OperationReporter::silent("operation-promoting-instance");
     match app.promote_instance(instance, &request, &reporter) {
@@ -11035,6 +11082,76 @@ mod tests {
         );
         drop(in_flight);
     }
+
+    #[test]
+    fn making_an_instance_persistent_is_refused_while_it_or_a_selected_server_changes() {
+        let root = tempfile::tempdir().expect("root");
+        let app = App::open_at(Paths::rooted_at(root.path())).expect("app");
+        let hosts: ChangingHosts = Arc::new(Mutex::new(HashMap::new()));
+        let (events, received) = mpsc::channel();
+        let instance = ephervex_model::InstanceId::new();
+        let server = ServerId::new();
+
+        let on_instance = HostChangeInFlight::mark(
+            &hosts,
+            InstalledHost::Instance(instance),
+            "gui-snapshot-busy",
+        );
+        promote_instance(&app, &hosts, instance, Vec::new(), &events);
+        let refusal = received.try_recv().expect("a refusal");
+        assert!(
+            matches!(
+                &refusal,
+                Event::ModalError { scope, message }
+                    if *scope == ModalScope::MAKE_PERSISTENT
+                        && *message == lookup("gui-snapshot-busy")
+            ),
+            "the change on the instance is named to the dialog: {refusal:?}"
+        );
+        assert!(received.try_recv().is_err(), "nothing else was announced");
+        drop(on_instance);
+
+        let on_server =
+            HostChangeInFlight::mark(&hosts, InstalledHost::Server(server), "gui-fix-busy");
+        promote_instance(&app, &hosts, instance, vec![server], &events);
+        let refusal = received.try_recv().expect("a refusal");
+        assert!(
+            matches!(
+                &refusal,
+                Event::ModalError { scope, message }
+                    if *scope == ModalScope::MAKE_PERSISTENT
+                        && message.contains(&server.to_string())
+                        && message.contains(&lookup("gui-fix-busy"))
+            ),
+            "the change on the selected server is named to the dialog: {refusal:?}"
+        );
+        drop(on_server);
+    }
+
+    #[test]
+    fn a_settings_save_is_refused_on_its_screen_while_the_host_changes() {
+        let hosts: ChangingHosts = Arc::new(Mutex::new(HashMap::new()));
+        let (events, received) = mpsc::channel();
+        let host = InstalledHost::Instance(ephervex_model::InstanceId::new());
+
+        assert!(!refuse_save_while_changing(&hosts, host, &events));
+        assert!(received.try_recv().is_err());
+
+        let in_flight = HostChangeInFlight::mark(&hosts, host, "gui-snapshot-busy");
+        assert!(refuse_save_while_changing(&hosts, host, &events));
+        let refusal = received.try_recv().expect("a refusal");
+        assert!(
+            matches!(
+                &refusal,
+                Event::ModalError { scope, message }
+                    if *scope == ModalScope::Anywhere && *message == lookup("gui-snapshot-busy")
+            ),
+            "the change in flight is named where the fields are: {refusal:?}"
+        );
+        drop(in_flight);
+        assert!(!refuse_save_while_changing(&hosts, host, &events));
+    }
+
     #[test]
     fn linked_server_completion_targets_the_server_without_waiting_for_the_client() {
         let root = tempfile::tempdir().expect("root");
