@@ -109,6 +109,9 @@ pub(super) struct RawVersion {
     pub(super) files: Vec<RawFile>,
     #[serde(default)]
     pub(super) dependencies: Vec<RawDependency>,
+    /// The version's own environment, absent on older documents.
+    #[serde(default)]
+    pub(super) environment: Option<String>,
 }
 
 /// One downloadable file belonging to a version.

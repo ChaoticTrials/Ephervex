@@ -145,6 +145,20 @@ pub struct PlannedMod {
     pub requested_by: Vec<String>,
 }
 
+impl PlannedMod {
+    /// Client support of the planned release, falling back to its project.
+    #[must_use]
+    pub fn client_side(&self) -> crate::model::SideSupport {
+        self.version.effective_sides(&self.project).0
+    }
+
+    /// Server support of the planned release, falling back to its project.
+    #[must_use]
+    pub fn server_side(&self) -> crate::model::SideSupport {
+        self.version.effective_sides(&self.project).1
+    }
+}
+
 /// An optional dependency the user has not taken.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OptionalCandidate {
@@ -929,7 +943,7 @@ impl<'a> Resolver<'a> {
                     .unwrap_or_default(),
             };
             if project_id == root_id {
-                if planned.project.client_side == crate::model::SideSupport::Unsupported {
+                if planned.client_side() == crate::model::SideSupport::Unsupported {
                     self.warnings.push(PlanWarning::ClientSideUnsupported {
                         project_id: project_id.clone(),
                     });

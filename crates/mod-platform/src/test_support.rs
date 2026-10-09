@@ -52,6 +52,8 @@ pub(crate) fn version(
             hashes: vec![Hash::new(HashAlgorithm::Sha1, SHA1).expect("valid sha1")],
         },
         dependencies: Vec::new(),
+        client_side: SideSupport::Unknown,
+        server_side: SideSupport::Unknown,
     }
 }
 

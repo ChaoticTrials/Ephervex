@@ -131,6 +131,7 @@ pub(super) fn checked_project(raw: RawProject, reference: &str) -> ModPlatformRe
 /// One version, with the single file this launcher would install.
 pub(super) fn version(raw: RawVersion) -> ModPlatformResult<ModVersionInfo> {
     let file = select_primary_file(&raw.id, raw.files)?;
+    let (client_side, server_side) = environment_sides(raw.environment.as_deref());
     Ok(ModVersionInfo {
         provider: ModProvider::Modrinth,
         id: raw.id,
@@ -143,7 +144,28 @@ pub(super) fn version(raw: RawVersion) -> ModPlatformResult<ModVersionInfo> {
         published_at: raw.date_published,
         file,
         dependencies: raw.dependencies.into_iter().map(Into::into).collect(),
+        client_side,
+        server_side,
     })
+}
+
+/// The client and server support a version's `environment` value declares.
+///
+/// The values are Modrinth's `environment` loader-field enum. An absent,
+/// `unknown`, or unrecognized value declares nothing: both sides stay
+/// `Unknown` so the project's declaration applies, rather than being read as
+/// `Required`.
+fn environment_sides(environment: Option<&str>) -> (SideSupport, SideSupport) {
+    use SideSupport::{Optional, Required, Unknown, Unsupported};
+    match environment.map(str::trim) {
+        Some("client_and_server") => (Required, Required),
+        Some("client_only" | "singleplayer_only") => (Required, Unsupported),
+        Some("client_only_server_optional") => (Required, Optional),
+        Some("server_only" | "dedicated_server_only") => (Unsupported, Required),
+        Some("server_only_client_optional") => (Optional, Required),
+        Some("client_or_server" | "client_or_server_prefers_both") => (Optional, Optional),
+        _ => (Unknown, Unknown),
+    }
 }
 
 /// Picks the one file a version installs.
@@ -226,6 +248,31 @@ mod tests {
             primary,
             size: Some(1),
         }
+    }
+
+    #[test]
+    fn every_environment_value_maps_to_the_sides_it_declares() {
+        use SideSupport::{Optional, Required, Unknown, Unsupported};
+        for (environment, expected) in [
+            ("client_and_server", (Required, Required)),
+            ("client_only", (Required, Unsupported)),
+            ("singleplayer_only", (Required, Unsupported)),
+            ("client_only_server_optional", (Required, Optional)),
+            ("server_only", (Unsupported, Required)),
+            ("dedicated_server_only", (Unsupported, Required)),
+            ("server_only_client_optional", (Optional, Required)),
+            ("client_or_server", (Optional, Optional)),
+            ("client_or_server_prefers_both", (Optional, Optional)),
+            ("unknown", (Unknown, Unknown)),
+            ("something-new", (Unknown, Unknown)),
+        ] {
+            assert_eq!(
+                environment_sides(Some(environment)),
+                expected,
+                "{environment}"
+            );
+        }
+        assert_eq!(environment_sides(None), (Unknown, Unknown));
     }
 
     #[test]

@@ -771,6 +771,11 @@ impl ManagedModSnapshot {
                 .version_id()
                 .and_then(|id| index.versions.get(&(provider, id.to_owned())));
 
+            let (client_side, server_side) = version
+                .map_or((project.client_side, project.server_side), |version| {
+                    version.effective_sides(project)
+                });
+
             entry.icon = index.icons.get(&key).cloned();
             entry.details = Some(ModDetails {
                 title: project.title.clone(),
@@ -785,8 +790,8 @@ impl ManagedModSnapshot {
                 loaders: version
                     .map(|version| version.loaders.clone())
                     .unwrap_or_default(),
-                client_side: project.client_side,
-                server_side: project.server_side,
+                client_side,
+                server_side,
             });
         }
     }
@@ -2026,9 +2031,9 @@ pub(crate) fn recipe_entry_for(
         // The user asked for this mod on this client, which is a fact about the
         // instance rather than a claim about the project.
         PackSide::Client => SideRequirement::Required,
-        PackSide::Server => side_requirement(planned.project.client_side),
+        PackSide::Server => side_requirement(planned.client_side()),
     };
-    let server = side_requirement(planned.project.server_side);
+    let server = side_requirement(planned.server_side());
     let selected = match side {
         // Nobody has been asked about the server yet. `None` is what lets a
         // later prompt tell "unanswered" from "the user said no".
@@ -2296,6 +2301,8 @@ mod tests {
                     ],
                 },
                 dependencies: Vec::new(),
+                client_side: SideSupport::Unknown,
+                server_side: SideSupport::Unknown,
             },
             origin: ModOrigin::RequiredDependency,
             requested_by: vec!["root".to_owned()],
@@ -2414,6 +2421,18 @@ mod tests {
             entry.recorded_relations(),
             Some(&[][..]),
             "there is nothing in it to match an installed file against"
+        );
+    }
+
+    #[test]
+    fn a_release_declaring_client_only_is_recorded_client_only_though_its_project_is_not() {
+        let mut planned = planned(SideSupport::Required, "a.jar");
+        planned.version.server_side = SideSupport::Unsupported;
+        let entry = recipe_entry(&planned, ModProvider::Modrinth).expect("entry");
+        assert_eq!(
+            entry.server,
+            SideRequirement::Unsupported,
+            "the selected release's own declaration decides"
         );
     }
 
@@ -2650,6 +2669,8 @@ mod tests {
                 hashes: Vec::new(),
             },
             dependencies: Vec::new(),
+            client_side: SideSupport::Unknown,
+            server_side: SideSupport::Unknown,
         }
     }
 

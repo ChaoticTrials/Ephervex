@@ -277,7 +277,7 @@ fn blocked_file(planned: &PlannedMod, provider: ModProvider) -> BlockedProviderF
         // The user asked for this mod on this client, which is a fact about
         // the instance rather than a claim about the project.
         client: SideRequirement::Required,
-        server: crate::mods::side_requirement(planned.project.server_side),
+        server: crate::mods::side_requirement(planned.server_side()),
     }
 }
 

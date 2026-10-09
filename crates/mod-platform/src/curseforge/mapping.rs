@@ -163,6 +163,7 @@ pub(super) fn version(
     }
 
     let (game_versions, loaders) = split_declared_support(&document.game_versions);
+    let (client_side, server_side) = file_declared_sides(&document.game_versions);
     // CurseForge publishes one label for a release and no separate version
     // number. Both fields carry it rather than one of them carrying something
     // parsed out of the other.
@@ -191,6 +192,8 @@ pub(super) fn version(
             hashes,
         },
         dependencies: file_relations(&document.dependencies),
+        client_side,
+        server_side,
     })
 }
 
@@ -252,8 +255,8 @@ pub(super) fn file_relations(relations: &[CurseForgeFileRelation]) -> Vec<ModDep
 /// CurseForge mixes both, plus environment entries that are neither. Anything
 /// matching a name from the API's own documented loader enum is a loader;
 /// an environment entry ([`CURSEFORGE_ENVIRONMENT_NAMES`]) is dropped, since it
-/// names a side rather than a release and is read separately, at the project
-/// level; everything else is left where a Minecraft release would be, which is
+/// names a side rather than a release and is read separately, by
+/// [`file_declared_sides`]; everything else is left where a Minecraft release would be, which is
 /// harmless because compatibility asks whether the *exact* instance release is
 /// present rather than what else the list contains.
 pub(super) fn split_declared_support(declared: &[String]) -> (Vec<String>, Vec<String>) {

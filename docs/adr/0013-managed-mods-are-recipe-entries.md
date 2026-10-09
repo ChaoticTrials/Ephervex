@@ -26,6 +26,10 @@ project declares `client_side` and `server_side`, and one of the values those
 fields can take is `unknown`: the author declared nothing. Reading that as
 "required" would assert something they declined to assert.
 
+A release can declare its own sides, and a project's declaration only summarizes
+its releases. The selected release's declaration decides what is recorded, and
+the project's is used only for a side the release leaves undeclared.
+
 ## Decision
 
 A mod installed through a provider is an entry in the same `PackRecipe`, and the

@@ -5253,7 +5253,7 @@ fn planned_json(planned: &PlannedMod) -> serde_json::Value {
         "file_name": planned.version.file.file_name,
         "origin": planned.origin.as_str(),
         "requested_by": planned.requested_by,
-        "server_side": planned.project.server_side.to_string(),
+        "server_side": planned.server_side().to_string(),
     })
 }
 

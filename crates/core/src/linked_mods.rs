@@ -710,7 +710,7 @@ impl App {
     /// linked half needs.
     ///
     /// A mutation plan names the exact release it chose; what it does not carry
-    /// is that release's own compatibility and the project's declared server
+    /// is that release's own compatibility and its declared server
     /// support, and both are needed before a server can be evaluated. Both come
     /// from the catalog's metadata cache, so a repeated open costs nothing.
     async fn mutation_half(
@@ -746,7 +746,7 @@ impl App {
             name: display_name(&project, &plan.name),
             version_id: Some(release.id.clone()),
             version_number: Some(release.version_number.clone()),
-            server_side: side_requirement(project.server_side),
+            server_side: side_requirement(release.effective_sides(&project).1),
         };
         Ok((ClientModPlan::Mutate(Box::new(plan)), root, Some(release)))
     }
@@ -1291,14 +1291,14 @@ fn installing_state(
 /// A dependency the server already holds at the resolved release is left as it
 /// is, so the preview lists only what is written.
 ///
-/// A dependency the project declares `unsupported` on servers is left out —
+/// A dependency whose release declares `unsupported` on servers is left out —
 /// that is the author saying it cannot run there. `unknown` is not: an
 /// undeclared side is not a statement that the mod is client-only, and a
 /// required dependency of something the server is running is needed by it.
 fn server_applicable(plan: &ModInstallPlan) -> Vec<&PlannedMod> {
     crate::mutation::written_mods(plan)
         .into_iter()
-        .filter(|planned| planned.project.server_side != SideSupport::Unsupported)
+        .filter(|planned| planned.server_side() != SideSupport::Unsupported)
         .collect()
 }
 
@@ -1412,7 +1412,7 @@ fn root_of_install(plan: &ModInstallPlan) -> LinkedModRoot {
         name: display_name(&plan.root.project, &plan.root.version.file.file_name),
         version_id: Some(plan.root.version.id.clone()),
         version_number: Some(plan.root.version.version_number.clone()),
-        server_side: side_requirement(plan.root.project.server_side),
+        server_side: side_requirement(plan.root.server_side()),
     }
 }
 
@@ -1538,6 +1538,12 @@ mod tests {
         })
     }
 
+    /// Gives a release its own `environment` declaration.
+    fn declaring_environment(mut version: Value, environment: &str) -> Value {
+        version["environment"] = json!(environment);
+        version
+    }
+
     /// Adds a requirement on one exact release of a project.
     fn pinning(mut version: Value, project: &str, release: &str) -> Value {
         version["dependencies"]
@@ -1568,6 +1574,7 @@ mod tests {
             project_json("MOVEPROJ", "Moving Mod", "required", "required"),
             project_json("NEWLIB", "Moving Library", "required", "required"),
             project_json("PINNER", "Release Pinner", "required", "required"),
+            project_json("RELDECLPROJ", "Release Declared", "required", "required"),
         ];
         let versions = vec![
             version_json(base, "ROOTV1", "ROOTPROJ", &[MINECRAFT], &["CLIENTLIB"], 0),
@@ -1583,6 +1590,10 @@ mod tests {
             version_json(base, "LIBV1", "LIBPROJ", &[MINECRAFT], &[], 0),
             version_json(base, "CLIENTLIBV1", "CLIENTLIB", &[MINECRAFT], &[], 0),
             version_json(base, "CLIENTMODV1", "CLIENTMOD", &[MINECRAFT], &[], 0),
+            declaring_environment(
+                version_json(base, "RELDECLV1", "RELDECLPROJ", &[MINECRAFT], &[], 0),
+                "client_only",
+            ),
             version_json(base, "OPTV1", "OPTPROJ", &[MINECRAFT], &[], 0),
             version_json(base, "UNKV1", "UNKPROJ", &[MINECRAFT], &[], 0),
             version_json(
@@ -2001,6 +2012,22 @@ mod tests {
             !plan.has_relevant_targets(),
             "a decision nobody can act on is not a decision to put in front of a user"
         );
+    }
+
+    #[tokio::test]
+    async fn a_release_declared_client_only_is_not_offered_though_its_project_requires_the_server()
+    {
+        let world = world().await;
+        let server = world.link_server("Reproduction Server", MINECRAFT);
+
+        let plan = plan(&world, &install("RELDECLPROJ")).await;
+
+        assert_eq!(plan.root.server_side, SideRequirement::Unsupported);
+        assert_eq!(
+            target(&plan, server).state,
+            LinkedTargetState::Blocked(LinkedTargetBlock::ServerUnsupported)
+        );
+        assert!(plan.default_selection().is_empty());
     }
 
     #[tokio::test]

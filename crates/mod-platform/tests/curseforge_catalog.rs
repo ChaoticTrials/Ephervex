@@ -16,7 +16,7 @@ use std::sync::Arc;
 use ephervex_download::{DomainAllowlist, HttpConfig, OperationReporter};
 use ephervex_mod_platform::{
     ConfiguredApiKey, CurseForgeApi, CurseForgeProvider, InstanceTarget, ModPlatformError,
-    ModProviderApi, ModSearchQuery, ReleaseChannel,
+    ModProviderApi, ModSearchQuery, ReleaseChannel, SideSupport,
 };
 use ephervex_model::{LoaderKind, ModProvider, ModRelationKind, SecretString};
 use tokio_util::sync::CancellationToken;
@@ -699,6 +699,65 @@ async fn an_exactly_named_file_is_fetched_by_its_own_id() {
     assert_eq!(versions.len(), 1);
     assert_eq!(versions[0].id, JEI_FILE.to_string());
     assert_eq!(versions[0].project_id, JEI_PROJECT.to_string());
+}
+
+#[tokio::test]
+async fn each_listed_file_carries_its_own_side_declaration() {
+    // The older file names only Client while a newer one names both, so the
+    // project reads as running on both sides and the older release still must
+    // not: the selected release's own tags decide.
+    let server = MockServer::start().await;
+    serve_categories(&server).await;
+    let files = |id: u32, tags: &str| {
+        format!(
+            r#"{{"id":{id},"gameId":432,"modId":{JEI_PROJECT},"isAvailable":true,
+                "displayName":"File {id}","fileName":"jei-{id}.jar","releaseType":1,
+                "fileDate":"2023-07-01T10:00:00Z","fileLength":10,
+                "downloadUrl":"{uri}/files/{id}/jei-{id}.jar",
+                "hashes":[{{"value":"da39a3ee5e6b4b0d3255bfef95601890afd80709","algo":1}}],
+                "gameVersions":["1.20.1","NeoForge"{tags}],"dependencies":[]}}"#,
+            uri = server.uri()
+        )
+    };
+    let body = format!(
+        r#"{{"data":[{},{},{}],"pagination":{{"totalCount":3}}}}"#,
+        files(1, r#","Client""#),
+        files(2, r#","Client","Server""#),
+        files(3, ""),
+    );
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/v1/mods/\d+/files$"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+        .mount(&server)
+        .await;
+
+    let versions = provider_against(&server, Some(FAKE_KEY))
+        .versions(
+            &JEI_PROJECT.to_string(),
+            &target(LoaderKind::NeoForge),
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("a file listing");
+
+    let sides = |id: &str| {
+        let release = versions
+            .iter()
+            .find(|version| version.id == id)
+            .expect("file");
+        (release.client_side, release.server_side)
+    };
+    assert_eq!(
+        sides("1"),
+        (SideSupport::Required, SideSupport::Unsupported)
+    );
+    assert_eq!(sides("2"), (SideSupport::Required, SideSupport::Required));
+    assert_eq!(
+        sides("3"),
+        (SideSupport::Unknown, SideSupport::Unknown),
+        "a file naming neither side declares nothing"
+    );
 }
 
 #[tokio::test]

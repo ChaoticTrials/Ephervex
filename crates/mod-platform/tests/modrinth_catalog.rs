@@ -16,7 +16,7 @@ use ephervex_download::{
 };
 use ephervex_mod_platform::{
     InstallSelection, InstanceTarget, ModDependency, ModProviderApi, ModSearchQuery,
-    ModrinthProvider, ResolveRequest, resolve,
+    ModrinthProvider, ResolveRequest, SideSupport, resolve,
 };
 use ephervex_model::{Hash, HashAlgorithm, LoaderKind, ModProvider, ModRelationKind};
 use tempfile::TempDir;
@@ -537,6 +537,75 @@ async fn resolving_from_the_catalog_installs_the_mod_and_its_required_library() 
             .all(|planned| planned.version.project_id != "EXTRAPROJ"),
         "an unselected optional installs nothing"
     );
+}
+
+/// One version document of a single-project catalog, declaring `environment`.
+fn version_with_environment(environment: &str) -> String {
+    format!(
+        r#"[{{"id":"SIDEV1","project_id":"SIDEPROJ","name":"Side 1","version_number":"1.0.0",
+            "version_type":"release","game_versions":["1.20.1"],"loaders":["neoforge"],
+            "date_published":"2026-01-01T00:00:00Z","environment":{environment},
+            "files":[{{"hashes":{{"sha1":"da39a3ee5e6b4b0d3255bfef95601890afd80709"}},
+                       "url":"https://cdn.modrinth.com/data/SIDEPROJ/versions/SIDEV1/side.jar",
+                       "filename":"side.jar","primary":true,"size":1}}],
+            "dependencies":[]}}]"#
+    )
+}
+
+/// Plans `SIDEPROJ`, whose project says `required` on both sides, from a
+/// catalog whose only version declares `environment`.
+async fn planned_sides(environment: &str) -> (SideSupport, SideSupport) {
+    let catalog = Catalog::start()
+        .await
+        .serving(
+            "/v2/project/SIDEPROJ/version",
+            version_with_environment(environment),
+        )
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/projects"))
+        .and(query_param("ids", r#"["SIDEPROJ"]"#))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"[{"id":"SIDEPROJ","title":"Side","description":"","project_type":"mod",
+                 "client_side":"required","server_side":"required"}]"#,
+            "application/json",
+        ))
+        .mount(&catalog.server)
+        .await;
+
+    let plan = resolve(ResolveRequest {
+        provider: &catalog.provider,
+        target: &target(),
+        loader_name: "neoforge",
+        selection: &InstallSelection::new("SIDEPROJ"),
+        installed: &[],
+        installed_policy: ephervex_mod_platform::InstalledPolicy::Preserve,
+        reporter: &reporter(),
+        cancel: &CancellationToken::new(),
+    })
+    .await
+    .expect("a plan");
+    (plan.root.client_side(), plan.root.server_side())
+}
+
+#[tokio::test]
+async fn a_selected_versions_environment_overrides_its_projects_server_side() {
+    assert_eq!(
+        planned_sides(r#""client_only""#).await,
+        (SideSupport::Required, SideSupport::Unsupported),
+        "a client-only version is not a server mod because its project is"
+    );
+}
+
+#[tokio::test]
+async fn a_version_that_declares_no_environment_takes_its_projects_sides() {
+    for environment in ["null", r#""unknown""#, r#""something-new""#] {
+        assert_eq!(
+            planned_sides(environment).await,
+            (SideSupport::Required, SideSupport::Required),
+            "{environment}"
+        );
+    }
 }
 
 #[tokio::test]

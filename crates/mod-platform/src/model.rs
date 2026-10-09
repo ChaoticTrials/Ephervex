@@ -207,9 +207,32 @@ pub struct ModVersionInfo {
     pub published_at: DateTime<Utc>,
     pub file: ModFile,
     pub dependencies: Vec<ModDependency>,
+    /// The sides this release itself declares. `Unknown` means the release
+    /// declared nothing and the project's declaration applies instead; see
+    /// [`ModVersionInfo::effective_sides`].
+    pub client_side: SideSupport,
+    pub server_side: SideSupport,
 }
 
 impl ModVersionInfo {
+    /// The client and server support of this release, in that order.
+    ///
+    /// A side the release declares wins over the project's, because a
+    /// project's declaration summarizes its releases and a release can
+    /// disagree with it. The project's value is used only for a side the
+    /// release leaves undeclared.
+    #[must_use]
+    pub fn effective_sides(&self, project: &ModProject) -> (SideSupport, SideSupport) {
+        let pick = |release: SideSupport, project: SideSupport| match release {
+            SideSupport::Unknown => project,
+            declared => declared,
+        };
+        (
+            pick(self.client_side, project.client_side),
+            pick(self.server_side, project.server_side),
+        )
+    }
+
     /// Whether this version fits an instance, and if not, why not.
     ///
     /// Both halves are checked and both reasons are reported, because "wrong
@@ -571,5 +594,40 @@ mod tests {
                  does not advance past {start}"
             );
         }
+    }
+
+    fn project(client: SideSupport, server: SideSupport) -> ModProject {
+        ModProject {
+            provider: ModProvider::CurseForge,
+            id: "1".to_owned(),
+            slug: None,
+            title: "P".to_owned(),
+            description: String::new(),
+            author: None,
+            client_side: client,
+            server_side: server,
+            icon_url: None,
+        }
+    }
+
+    #[test]
+    fn a_release_that_disagrees_with_its_project_decides_its_own_sides() {
+        let mut release = crate::test_support::compatible("v1", "1");
+        release.client_side = SideSupport::Required;
+        release.server_side = SideSupport::Unsupported;
+        assert_eq!(
+            release.effective_sides(&project(SideSupport::Required, SideSupport::Required)),
+            (SideSupport::Required, SideSupport::Unsupported)
+        );
+    }
+
+    #[test]
+    fn a_side_the_release_leaves_undeclared_takes_the_projects() {
+        let mut release = crate::test_support::compatible("v1", "1");
+        release.server_side = SideSupport::Optional;
+        assert_eq!(
+            release.effective_sides(&project(SideSupport::Required, SideSupport::Required)),
+            (SideSupport::Required, SideSupport::Optional)
+        );
     }
 }

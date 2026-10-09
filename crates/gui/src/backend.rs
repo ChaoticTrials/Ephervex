@@ -9249,7 +9249,7 @@ fn linked_section(plan: &LinkedModPlan) -> LinkedSectionData {
     }
 }
 
-/// What the project declares about the server side, said out loud.
+/// What the release declares about the server side, said out loud.
 ///
 /// A removal claims nothing: it is decided by what a server durably owns, not
 /// by what the project says.
