@@ -30,8 +30,8 @@ use ephervex_core::{
     DiagnosticScope, DiagnosticSearch, DirectoryState, DuplicateClient, EULA_CONFIRMATION_PHRASE,
     Entitlements, EulaStatus, FileDisposition, Freshness, GameExit, ImpactedMod, ImportRequest,
     ImportedPack, IncompatibilityReason, InstallationHealth, InstalledHost, InstalledMods,
-    IsolationRequest, IsolationRound, IsolationSession, IsolationStep, JavaHealth, JavaPathChoice,
-    JavaPlan, JavaPlanRequest, JavaRuntime, JavaTarget, LaunchAndConnectEvent,
+    Integrity, IsolationRequest, IsolationRound, IsolationSession, IsolationStep, JavaHealth,
+    JavaPathChoice, JavaPlan, JavaPlanRequest, JavaRuntime, JavaTarget, LaunchAndConnectEvent,
     LaunchAndConnectObserver, LaunchAndConnectOptions, LaunchAndConnectOutcome, LaunchEvent,
     LaunchFeatures, LaunchObserver, LaunchOptions, LaunchOutcome, LaunchState, LoginFlow,
     LoginOptions, LoginRequest, MAX_SEARCH_MATCHES, MINECRAFT_EULA_REFERENCE, ManagedInstallation,
@@ -4806,14 +4806,14 @@ async fn run_mod_verify(
             &CancellationToken::new(),
         )
         .await?;
-    print_verification(&report, json);
-
-    let mut shared_sound = true;
-    if let (true, Some(instance)) = (shared, host.instance) {
-        let artifacts = app.verify_shared_artifacts(instance).await?;
-        print_shared_artifacts(&artifacts, json);
-        shared_sound = artifacts.is_sound();
-    }
+    let artifacts = match (shared, host.instance) {
+        (true, Some(instance)) => Some(app.verify_shared_artifacts(instance).await?),
+        _ => None,
+    };
+    print_verification(&report, artifacts.as_ref(), json);
+    let shared_sound = artifacts
+        .as_ref()
+        .is_none_or(SharedArtifactReport::is_sound);
 
     if report.is_sound() && shared_sound {
         return Ok(());
@@ -4872,24 +4872,25 @@ async fn run_mod_repair(app: &App, host: InstalledHost, json: bool) -> anyhow::R
     anyhow::bail!("this instance still does not hold what it recorded")
 }
 
-/// Reports what checking the shared stores found.
-fn print_shared_artifacts(report: &SharedArtifactReport, json: bool) {
-    if json {
-        print_json(&serde_json::json!({
-            "metadata_cached": report.metadata_cached,
-            "sound": report.is_sound(),
-            "loader_libraries_uncovered": report.loader_libraries_uncovered,
-            "files": report
-                .files
-                .iter()
-                .map(|file| serde_json::json!({
-                    "artifact": file.logical_path,
-                    "integrity": file.integrity.as_str(),
-                }))
-                .collect::<Vec<_>>(),
-        }));
-        return;
-    }
+/// The shared-store report as JSON.
+fn shared_artifacts_json(report: &SharedArtifactReport) -> serde_json::Value {
+    serde_json::json!({
+        "metadata_cached": report.metadata_cached,
+        "sound": report.is_sound(),
+        "loader_libraries_uncovered": report.loader_libraries_uncovered,
+        "files": report
+            .files
+            .iter()
+            .map(|file| serde_json::json!({
+                "artifact": file.logical_path,
+                "integrity": file.integrity.as_str(),
+            }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// Prints what checking the shared stores found.
+fn print_shared_artifacts(report: &SharedArtifactReport) {
     if !report.metadata_cached {
         outln!("shared files: not checked, no metadata cached for this release");
         return;
@@ -4902,8 +4903,9 @@ fn print_shared_artifacts(report: &SharedArtifactReport, json: bool) {
         );
     }
     let waiting = report.not_yet_fetched().count();
-    if report.is_sound() {
-        outln!("{} shared files checked, none wrong", report.files.len());
+    let checked = report.files.len() - waiting;
+    if report.is_sound() && checked > 0 {
+        outln!("{checked} shared files checked, none wrong");
     }
     if waiting > 0 {
         outln!("{waiting} are not downloaded yet; launching fetches them");
@@ -4914,9 +4916,16 @@ fn print_shared_artifacts(report: &SharedArtifactReport, json: bool) {
 }
 
 /// Reports what checking an instance's recorded files found.
-fn print_verification(report: &VerificationReport, json: bool) {
+///
+/// The shared-store report, when one was asked for, goes into the same JSON
+/// document under `shared` so the output stays a single value.
+fn print_verification(
+    report: &VerificationReport,
+    shared: Option<&SharedArtifactReport>,
+    json: bool,
+) {
     if json {
-        print_json(&serde_json::json!({
+        let mut document = serde_json::json!({
             "sound": report.is_sound(),
             "files": report
                 .files
@@ -4927,20 +4936,37 @@ fn print_verification(report: &VerificationReport, json: bool) {
                     "repairable": file.integrity.is_repairable() && file.has_source,
                 }))
                 .collect::<Vec<_>>(),
-        }));
+        });
+        if let Some(shared) = shared {
+            document["shared"] = shared_artifacts_json(shared);
+        }
+        print_json(&document);
         return;
     }
     for file in &report.files {
-        if !file.integrity.is_sound() {
-            outln!(
+        match file.integrity {
+            Integrity::Intact => {}
+            Integrity::Unverifiable => outln!("unproven  {}", file.logical_path.display()),
+            _ => outln!(
                 "{}  {}",
                 file.integrity.as_str(),
                 file.logical_path.display()
-            );
+            ),
         }
     }
     if report.is_sound() {
-        outln!("{} files, all intact", report.files.len());
+        let unproven = report.count(&Integrity::Unverifiable);
+        if unproven == 0 {
+            outln!("{} files, all intact", report.files.len());
+        } else {
+            outln!(
+                "{} files intact, {unproven} unproven: no digest is recorded to check them against",
+                report.files.len() - unproven
+            );
+        }
+    }
+    if let Some(shared) = shared {
+        print_shared_artifacts(shared);
     }
 }
 
