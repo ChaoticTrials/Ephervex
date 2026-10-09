@@ -6872,6 +6872,7 @@ fn apply_local_mod_plan(
                 source: clash.source.display().to_string().into(),
                 file_name: clash.file_name.clone().into(),
                 existing_is_disabled: clash.existing_is_disabled,
+                existing_is_recorded: clash.existing_is_recorded,
             })
             .collect::<Vec<_>>()
             .as_slice()

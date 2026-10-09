@@ -74,6 +74,31 @@ to verify, and an unverifiable file does not belong among files whose identity
 is a checked digest. It is still held to the transport and host policy an
 untrusted pack's downloads are held to, plus a size ceiling.
 
+## Amendment: a jar the user supplies over a recorded file
+
+A recipe entry says which bytes belong at a path. When the user adds a jar whose
+name an entry already claims, leaving the entry in place makes it false:
+verification calls the user's file corrupt, repair and the restore-files fix
+overwrite it with the recorded release, and a server built from the recipe ships
+that release instead.
+
+The entry therefore goes with the file it described. This covers the launcher's
+own records (a mod chosen in the browser, a dependency, an optional dependency)
+and the adopted record of an identified hand-placed jar, whose old identity and
+hashes describe bytes that are no longer there. The user's jar is hand-placed
+like any other, and the next refresh identifies it again. The same holds when
+the recorded jar had been put aside, because restoring it would overwrite the
+file the user just supplied. The question put to the user says the record is
+dropped.
+
+A pack's declaration is the exception. It is the pack's and stays exactly as
+imported, so a jar that would sit over a declaration this host installs is
+refused rather than leaving the declaration describing a different file. A
+declaration the host never installs, such as a server-only mod seen from a
+client, puts nothing at the path there and does not block. The refusal points to
+the instance's independent mod changes (ADR 0032), which move a pack's mod to
+another release through the catalog.
+
 ## Consequences
 
 - An imported pack's mods appear in the same list, in the same shape, as ones

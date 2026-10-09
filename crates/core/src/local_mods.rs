@@ -14,6 +14,16 @@
 //! refresh. Nothing here writes a recipe entry, because nothing here has
 //! learned anything a recipe could record.
 //!
+//! # Replacing a recorded file
+//!
+//! A recipe entry says which bytes belong at a path. A jar put over one makes
+//! that entry false: verification would call the user's file corrupt, repair
+//! would overwrite it, and a server built from the recipe would ship the
+//! recorded release. So the entry goes with the file it described, whether a
+//! catalog chose it or a digest lookup adopted it, and the user's jar is
+//! hand-placed like any other. An entry the imported pack declares is the
+//! pack's to keep, so that file is refused instead (ADR 0019).
+//!
 //! # What is checked
 //!
 //! The path is untrusted. Its name is put through the same guard a provider's
@@ -28,7 +38,8 @@ use std::path::{Path, PathBuf};
 use ephervex_download::{CacheLayout, OperationReporter};
 use ephervex_model::ModOrigin;
 use ephervex_pack::{
-    ArtifactFetch, ExtractionLimits, MODS_DIR, PackArchive, SourceStore, safe_file_name,
+    ArtifactFetch, ExtractionLimits, MODS_DIR, PackArchive, PackRecipe, PackSide, SourceStore,
+    safe_file_name,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
@@ -75,6 +86,9 @@ pub enum LocalModRefusal {
     NotAnArchive,
     /// Larger than [`MAX_LOCAL_MOD_BYTES`].
     TooLarge,
+    /// The imported pack declares a file of that name, and its declaration
+    /// would keep describing the release it shipped.
+    RecordedByPack,
 }
 
 impl LocalModRefusal {
@@ -87,6 +101,7 @@ impl LocalModRefusal {
             Self::UnusableName => "local-mod-unusable-name",
             Self::NotAnArchive => "local-mod-not-an-archive",
             Self::TooLarge => "local-mod-too-large",
+            Self::RecordedByPack => "local-mod-recorded-by-pack",
         }
     }
 
@@ -99,6 +114,7 @@ impl LocalModRefusal {
             Self::UnusableName => "unusable-name",
             Self::NotAnArchive => "not-an-archive",
             Self::TooLarge => "too-large",
+            Self::RecordedByPack => "recorded-by-pack",
         }
     }
 }
@@ -123,6 +139,10 @@ pub enum LocalModOffer {
         file_name: String,
         /// Whether the jar already there is one the loader is ignoring.
         existing_is_disabled: bool,
+        /// Whether the instance records that jar as a catalog release or an
+        /// identified file. Adding the new one drops that record, so the
+        /// question put to the user has to say so.
+        existing_is_recorded: bool,
     },
     /// It cannot be added at all.
     Refused {
@@ -275,6 +295,14 @@ impl App {
                     continue;
                 }
             };
+            let record = recorded_at(layout.recipe.as_ref(), host.side(), &file_name);
+            if record == Recorded::ByPack {
+                offers.push(LocalModOffer::Refused {
+                    source: source.clone(),
+                    reason: LocalModRefusal::RecordedByPack,
+                });
+                continue;
+            }
             let installed = dir.join(&file_name);
             // The disabled spelling counts as taken. Writing beside it would
             // leave two copies of one mod in the folder with one of them
@@ -285,12 +313,14 @@ impl App {
                     source: source.clone(),
                     file_name,
                     existing_is_disabled: false,
+                    existing_is_recorded: record == Recorded::Replaceable,
                 }
             } else if disabled.is_file() {
                 LocalModOffer::Clashing {
                     source: source.clone(),
                     file_name,
                     existing_is_disabled: true,
+                    existing_is_recorded: record == Recorded::Replaceable,
                 }
             } else {
                 LocalModOffer::Ready {
@@ -322,9 +352,13 @@ impl App {
         sources: &[PathBuf],
     ) -> CoreResult<LocalModReport> {
         self.refuse_mod_change_during_isolation(host)?;
+        // Held from reading the recipe to writing it, so a background write
+        // cannot restore a record dropped here or be lost to this one.
+        let _gate = crate::host_recipe_gate::hold_blocking(host);
         let layout = self.host_layout(host)?;
         let dir = layout.game_dir.join(MODS_DIR);
         let staging = ephervex_storage::metadata::staging_dir(&layout.root);
+        let mut recipe = layout.recipe.clone();
 
         let mut report = LocalModReport::default();
         for source in sources {
@@ -335,8 +369,24 @@ impl App {
                     continue;
                 }
             };
+            let record = recorded_at(recipe.as_ref(), host.side(), &file_name);
+            if record == Recorded::ByPack {
+                report
+                    .refused
+                    .push((source.clone(), LocalModRefusal::RecordedByPack));
+                continue;
+            }
             let installed = dir.join(&file_name);
             let existed = installed.is_file() || disabled_path(&installed).is_file();
+            // Before the file, so a record that cannot be dropped leaves the
+            // folder as it was. A record dropped for a file that then fails to
+            // copy only leaves the old jar unrecorded, which a refresh
+            // identifies again.
+            if record == Recorded::Replaceable {
+                if let Some(recipe) = recipe.as_mut() {
+                    forget_replaced_record(&layout, recipe, &file_name)?;
+                }
+            }
             publish_local_mod(source, &staging, &dir, &file_name)?;
             if existed {
                 report.replaced.push(file_name);
@@ -616,6 +666,47 @@ fn put_back(set_aside: &mut Vec<SetAside>) {
     }
 }
 
+/// What the recipe records at one destination in `mods/`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Recorded {
+    /// No entry claims the path.
+    Nothing,
+    /// The imported pack declares it, so the declaration has to stay true.
+    ByPack,
+    /// Something else wrote the entry: a catalog install, a dependency, or the
+    /// adoption of a jar that was hand-placed.
+    Replaceable,
+}
+
+/// Which kind of entry, if any, claims `mods/<file_name>` for this host.
+fn recorded_at(recipe: Option<&PackRecipe>, side: PackSide, file_name: &str) -> Recorded {
+    let Some(recipe) = recipe else {
+        return Recorded::Nothing;
+    };
+    let path = Path::new(MODS_DIR).join(file_name);
+    if recipe.pack_declares_for(&path, side) {
+        Recorded::ByPack
+    } else if recipe.records_replaceable_at(&path) {
+        Recorded::Replaceable
+    } else {
+        Recorded::Nothing
+    }
+}
+
+/// Drops the entries a user's own jar makes false, and saves the recipe.
+fn forget_replaced_record(
+    layout: &crate::mods::HostLayout,
+    recipe: &mut PackRecipe,
+    file_name: &str,
+) -> CoreResult<()> {
+    if !recipe.forget_replaced_records(&Path::new(MODS_DIR).join(file_name)) {
+        return Ok(());
+    }
+    let store = SourceStore::new(ephervex_storage::metadata::source_dir(&layout.root));
+    store.write_recipe(recipe)?;
+    Ok(())
+}
+
 /// Copies one file through staging and renames it into `mods/`.
 fn publish_local_mod(source: &Path, staging: &Path, dir: &Path, file_name: &str) -> CoreResult<()> {
     let failed = |error: std::io::Error| CoreError::ModFileNotAdded {
@@ -626,11 +717,13 @@ fn publish_local_mod(source: &Path, staging: &Path, dir: &Path, file_name: &str)
     std::fs::create_dir_all(staging).map_err(failed)?;
     std::fs::create_dir_all(dir).map_err(failed)?;
 
-    // Named after the destination rather than after anything unique: one call
-    // writes each name at most once, and a leftover from an interrupted run is
-    // a file this overwrites rather than one it has to work around.
-    let staged = staging.join(file_name);
-    std::fs::copy(source, &staged).map_err(failed)?;
+    // Unique per copy, so two adds of the same name, or a leftover from an
+    // interrupted run, never share bytes with this one.
+    let staged = staging.join(format!("{file_name}.{}", uuid::Uuid::new_v4().simple()));
+    if let Err(error) = std::fs::copy(source, &staged) {
+        let _ = std::fs::remove_file(&staged);
+        return Err(failed(error));
+    }
 
     let installed = dir.join(file_name);
     // The disabled twin goes first. Leaving it would hide a second copy of the
@@ -1192,5 +1285,184 @@ mod tests {
 
         assert!(matches!(result, Err(CoreError::ModNotManaged { .. })));
         assert!(host.mods_dir.join("mine.jar").is_file());
+    }
+
+    fn recorded_paths(host: &Fixture) -> Vec<PathBuf> {
+        host.app
+            .host_layout(host.host)
+            .expect("layout")
+            .recipe
+            .map(|recipe| {
+                recipe
+                    .files
+                    .iter()
+                    .map(|file| file.logical_path.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_jar_dropped_over_a_catalog_mod_replaces_its_record_with_nothing() {
+        // A record that outlives the bytes it described is what made repair
+        // overwrite the user's jar and a built server ship the old release.
+        let host = fixture();
+        std::fs::write(host.mods_dir.join("library.jar"), b"catalog release").expect("jar");
+        record_mod(&host, "library.jar", ModOrigin::UserSelected);
+        record_mod_appending(&host, "unrelated.jar", ModOrigin::UserSelected);
+        std::fs::write(host.mods_dir.join("unrelated.jar"), b"other").expect("jar");
+        let chosen = tempfile::tempdir().expect("temp dir");
+        let source = jar_at(chosen.path(), "library.jar");
+
+        let plan = host
+            .app
+            .plan_local_mods(host.host, std::slice::from_ref(&source))
+            .expect("plan");
+        assert!(
+            matches!(
+                plan.offers.as_slice(),
+                [LocalModOffer::Clashing {
+                    existing_is_recorded: true,
+                    ..
+                }]
+            ),
+            "the question has to say the record goes too: {:?}",
+            plan.offers
+        );
+
+        let report = host.app.add_local_mods(host.host, &[source]).expect("add");
+        assert_eq!(report.replaced, vec!["library.jar".to_owned()]);
+
+        assert_eq!(
+            recorded_paths(&host),
+            vec![PathBuf::from("mods/unrelated.jar")],
+            "only the replaced file's record goes"
+        );
+        let snapshot = host.app.host_mod_snapshot(host.host).expect("snapshot");
+        let replaced = snapshot
+            .mods
+            .iter()
+            .find(|entry| entry.logical_path == Path::new("mods/library.jar"))
+            .expect("the user's jar is listed");
+        assert_eq!(replaced.origin, ModOrigin::HandPlaced);
+    }
+
+    #[test]
+    fn a_jar_dropped_over_an_identified_hand_placed_jar_drops_the_old_identity() {
+        let host = fixture();
+        std::fs::write(host.mods_dir.join("identified.jar"), b"old bytes").expect("jar");
+        record_mod(&host, "identified.jar", ModOrigin::HandPlaced);
+        let chosen = tempfile::tempdir().expect("temp dir");
+        let source = jar_at(chosen.path(), "identified.jar");
+
+        host.app.add_local_mods(host.host, &[source]).expect("add");
+
+        assert!(
+            recorded_paths(&host).is_empty(),
+            "the adopted identity described the old file"
+        );
+    }
+
+    #[test]
+    fn a_jar_dropped_where_a_recorded_mod_was_put_aside_replaces_the_record() {
+        // Restoring the recorded release over the file the user then supplied
+        // would be the same loss as replacing a present one.
+        let host = fixture();
+        record_mod(&host, "put-aside.jar", ModOrigin::UserSelected);
+        let chosen = tempfile::tempdir().expect("temp dir");
+        let source = jar_at(chosen.path(), "put-aside.jar");
+
+        let plan = host
+            .app
+            .plan_local_mods(host.host, std::slice::from_ref(&source))
+            .expect("plan");
+        assert!(matches!(
+            plan.offers.as_slice(),
+            [LocalModOffer::Ready { .. }]
+        ));
+
+        host.app.add_local_mods(host.host, &[source]).expect("add");
+
+        assert!(recorded_paths(&host).is_empty());
+        assert_eq!(names_in(&host.mods_dir), vec!["put-aside.jar"]);
+    }
+
+    #[test]
+    fn a_jar_dropped_over_a_file_the_pack_declares_is_refused_and_changes_nothing() {
+        let host = fixture();
+        std::fs::write(host.mods_dir.join("from-pack.jar"), b"pack bytes").expect("jar");
+        record_mod(&host, "from-pack.jar", ModOrigin::PackDeclared);
+        let chosen = tempfile::tempdir().expect("temp dir");
+        let source = jar_at(chosen.path(), "from-pack.jar");
+
+        let plan = host
+            .app
+            .plan_local_mods(host.host, std::slice::from_ref(&source))
+            .expect("plan");
+        assert!(
+            matches!(
+                plan.offers.as_slice(),
+                [LocalModOffer::Refused {
+                    reason: LocalModRefusal::RecordedByPack,
+                    ..
+                }]
+            ),
+            "{:?}",
+            plan.offers
+        );
+
+        let report = host
+            .app
+            .add_local_mods(host.host, std::slice::from_ref(&source))
+            .expect("the batch itself succeeds");
+        assert_eq!(
+            report.refused,
+            vec![(source, LocalModRefusal::RecordedByPack)]
+        );
+        assert!(!report.changed_anything());
+        assert_eq!(
+            std::fs::read(host.mods_dir.join("from-pack.jar")).expect("read"),
+            b"pack bytes"
+        );
+        assert_eq!(
+            recorded_paths(&host),
+            vec![PathBuf::from("mods/from-pack.jar")]
+        );
+    }
+
+    #[test]
+    fn a_copied_jar_leaves_nothing_behind_in_staging() {
+        let host = fixture();
+        let chosen = tempfile::tempdir().expect("temp dir");
+        let source = jar_at(chosen.path(), "tidy.jar");
+
+        host.app.add_local_mods(host.host, &[source]).expect("add");
+
+        let staging = ephervex_storage::metadata::staging_dir(&host.root);
+        assert!(names_in(&staging).is_empty(), "{:?}", names_in(&staging));
+    }
+
+    #[test]
+    fn a_jar_dropped_over_a_declaration_this_host_never_installs_is_added() {
+        // A server-only mod puts no file at the path on a client, so the
+        // declaration has nothing there to protect.
+        let host = fixture();
+        record_mod(&host, "server-only.jar", ModOrigin::PackDeclared);
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(&host.root));
+        let mut recipe = store.read_recipe().expect("recipe");
+        recipe.files[0].client = ephervex_pack::SideRequirement::Unsupported;
+        recipe.files[0].server = ephervex_pack::SideRequirement::Required;
+        store.write_recipe(&recipe).expect("write the recipe");
+        let chosen = tempfile::tempdir().expect("temp dir");
+        let source = jar_at(chosen.path(), "server-only.jar");
+
+        let report = host.app.add_local_mods(host.host, &[source]).expect("add");
+
+        assert_eq!(report.added, vec!["server-only.jar".to_owned()]);
+        assert_eq!(
+            recorded_paths(&host),
+            vec![PathBuf::from("mods/server-only.jar")],
+            "the declaration for the other side is untouched"
+        );
     }
 }

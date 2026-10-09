@@ -288,6 +288,9 @@ export struct LocalModClashRow {
     // Whether the jar already there is one the loader is ignoring, which
     // changes what replacing it means.
     existing-is-disabled: bool,
+    // Whether the instance records the jar already there, a record that
+    // replacing it drops.
+    existing-is-recorded: bool,
 }
 
 export struct ModVersionRow {

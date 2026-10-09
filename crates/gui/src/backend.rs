@@ -964,6 +964,9 @@ pub struct LocalModClashData {
     /// Whether the jar already there is one the loader is ignoring, which is
     /// worth saying: replacing it turns the mod back on.
     pub existing_is_disabled: bool,
+    /// Whether the instance records the jar already there, which the new one
+    /// replaces: worth saying, because the record goes with it.
+    pub existing_is_recorded: bool,
 }
 
 /// The recorded mods an instance has no jar for, as a prompt needs them.
@@ -9869,10 +9872,12 @@ fn local_mod_plan_data(host: InstalledHost, plan: &LocalModPlan) -> LocalModPlan
                 source,
                 file_name,
                 existing_is_disabled,
+                existing_is_recorded,
             } => clashing.push(LocalModClashData {
                 source: source.clone(),
                 file_name: file_name.clone(),
                 existing_is_disabled: *existing_is_disabled,
+                existing_is_recorded: *existing_is_recorded,
             }),
             LocalModOffer::Refused { source, reason } => refused.push(LocalModRefusalData {
                 // The file's own name, not the whole path: the user just

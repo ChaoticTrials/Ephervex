@@ -1434,6 +1434,49 @@ impl PackRecipe {
         self.files.len() != before
     }
 
+    /// Whether the imported pack declares `logical_path` for `side`.
+    ///
+    /// Judged by the rule the mod list uses: a declaration that `side` never
+    /// installs (a server-only mod seen from a client, an optional file nobody
+    /// selected) puts nothing at the path there and describes no file to
+    /// protect.
+    #[must_use]
+    pub fn pack_declares_for(&self, logical_path: &Path, side: PackSide) -> bool {
+        let selection = OptionalSelection::none();
+        self.files.iter().any(|file| {
+            file.logical_path == logical_path
+                && file.origin.is_pack_owned()
+                && file.is_installed_on(side, &selection)
+        })
+    }
+
+    /// Whether any record the imported pack does not own claims `logical_path`.
+    #[must_use]
+    pub fn records_replaceable_at(&self, logical_path: &Path) -> bool {
+        self.files
+            .iter()
+            .any(|file| file.logical_path == logical_path && !file.origin.is_pack_owned())
+    }
+
+    /// Drops every record at `logical_path` that is not the imported pack's.
+    ///
+    /// For a user who puts their own jar over a recorded one. The record says
+    /// what bytes belong at that path, so once other bytes are there it
+    /// describes a file that is not on disk, and verification, repair and a
+    /// server built from the recipe would all act on it. This is not a mod
+    /// removal: it resolves no dependencies and retires no file, because the
+    /// jar stays and is simply no longer a claim about a catalog release.
+    ///
+    /// A pack's declaration is the one record it leaves alone, because that
+    /// declaration is the pack's and stays exactly as imported. Returns
+    /// whether anything was forgotten.
+    pub fn forget_replaced_records(&mut self, logical_path: &Path) -> bool {
+        let before = self.files.len();
+        self.files
+            .retain(|file| file.logical_path != logical_path || file.origin.is_pack_owned());
+        self.files.len() != before
+    }
+
     /// Drops the record of every mod whose jar is not in `game_dir`.
     ///
     /// For a copy, never for the instance the copy was made from: a recipe
@@ -2406,6 +2449,72 @@ mod tests {
 
         assert!(!recipe.forget_hand_placed(Path::new("mods/library-1.2.3.jar")));
         assert_eq!(recipe.recorded_mods().len(), 1);
+    }
+
+    #[test]
+    fn forgetting_replaced_records_drops_catalog_and_adopted_entries_only() {
+        let mut recipe = PackRecipe::for_manual_instance(
+            "Repro",
+            "1.20.1",
+            LoaderSelection::exact(LoaderKind::NeoForge, "47.1.106"),
+        );
+        recipe
+            .record_managed(managed("u6dRKJwZ", "Orv4ObRj", "library-1.2.3.jar"))
+            .expect("record");
+        recipe
+            .record_managed(adopted_by_hand("P7dR8mSH", "from-a-forum-post.jar"))
+            .expect("record");
+        recipe
+            .record_managed(managed("AANobbMI", "Orv4ObRj", "other-1.0.jar"))
+            .expect("record");
+
+        assert!(recipe.forget_replaced_records(Path::new("mods/library-1.2.3.jar")));
+        assert!(recipe.forget_replaced_records(Path::new("mods/from-a-forum-post.jar")));
+
+        let remaining: Vec<PathBuf> = recipe
+            .recorded_mods()
+            .into_iter()
+            .map(|entry| entry.logical_path)
+            .collect();
+        assert_eq!(remaining, vec![PathBuf::from("mods/other-1.0.jar")]);
+    }
+
+    #[test]
+    fn forgetting_replaced_records_keeps_a_pack_declaration() {
+        let mut recipe = PackRecipe::for_manual_instance(
+            "Repro",
+            "1.20.1",
+            LoaderSelection::exact(LoaderKind::NeoForge, "47.1.106"),
+        );
+        recipe.files.push(PackFileRecipe {
+            origin: ModOrigin::PackDeclared,
+            ..managed("u6dRKJwZ", "Orv4ObRj", "library-1.2.3.jar")
+        });
+
+        let path = Path::new("mods/library-1.2.3.jar");
+        assert!(recipe.pack_declares_for(path, PackSide::Client));
+        assert!(!recipe.records_replaceable_at(path));
+        assert!(!recipe.forget_replaced_records(path));
+        assert_eq!(recipe.files.len(), 1);
+    }
+
+    #[test]
+    fn a_declaration_a_side_never_installs_does_not_protect_the_path_there() {
+        let mut recipe = PackRecipe::for_manual_instance(
+            "Repro",
+            "1.20.1",
+            LoaderSelection::exact(LoaderKind::NeoForge, "47.1.106"),
+        );
+        recipe.files.push(PackFileRecipe {
+            origin: ModOrigin::PackDeclared,
+            client: SideRequirement::Unsupported,
+            server: SideRequirement::Required,
+            ..managed("u6dRKJwZ", "Orv4ObRj", "server-only.jar")
+        });
+
+        let path = Path::new("mods/server-only.jar");
+        assert!(recipe.pack_declares_for(path, PackSide::Server));
+        assert!(!recipe.pack_declares_for(path, PackSide::Client));
     }
 
     #[test]

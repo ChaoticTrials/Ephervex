@@ -998,6 +998,7 @@ local-mod-not-a-jar = Not a JAR. Minecraft mods are .jar files.
 local-mod-unusable-name = Its name cannot be used for a file in the mods folder.
 local-mod-not-an-archive = Not a readable JAR. It may be incomplete or corrupt.
 local-mod-too-large = Too large to be a mod.
+local-mod-recorded-by-pack = The imported pack declares a mod with this file name, so a JAR cannot replace it. Enable independent mod changes for this instance to move the mod to another release.
 
 # Why a mod belongs to an instance. Kept distinct because they are different
 # things to look at and, later, different things to change.
@@ -2489,6 +2490,7 @@ gui-mod-deleted-with-dependents = { $count ->
 gui-modal-mod-clash = Name Already Taken
 gui-mod-clash-detail = The mods folder already has a file called { $value }.
 gui-mod-clash-disabled = The one already there is turned off. Replacing it turns the mod back on.
+gui-mod-clash-recorded = The instance keeps a record of the one already there. Replacing it drops that record, so repair and new servers no longer restore the old release.
 gui-mod-clash-progress = { $value } of { $other }
 gui-overwrite = Overwrite
 gui-overwrite-all = Overwrite All
