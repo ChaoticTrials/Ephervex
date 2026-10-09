@@ -11,8 +11,8 @@ the README disagrees (see "Known stale sources").
 
 - [ ] Deploy to GitHub Pages at `https://ephervex.chaotictrials.de`.
       The site configuration and `static/CNAME` use this domain.
-- [ ] Review package repository instructions before publishing the installation
-      page.
+- [ ] Verify the `/deb` and `/rpm` repository endpoints and signing metadata
+      after the first release publishes them.
 
 Docs use major versions: pre-v1 and v1 releases share v1 at `/docs/v1/`.
 See `README.md` for archiving v1 when v2 work starts.

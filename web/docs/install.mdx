@@ -1,86 +1,93 @@
 ---
 title: Installation
-description: Install Ephervex on Linux from a Debian package, RPM, or AppImage.
+description: Install Ephervex on Linux with APT, an AppImage, or RPM.
 ---
 
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
+import Admonition from '@theme/Admonition';
+import useBaseUrl from '@docusaurus/useBaseUrl';
+import styles from './install.module.css';
 
-# Installation
+# Install Ephervex
 
-Download Ephervex from the
-[GitHub releases page](https://github.com/ChaoticTrials/Ephervex/releases).
-Use the x86_64 AppImage, Debian package, or RPM, with its matching `.sha256`
-file.
+Ephervex ships a desktop app and CLI for Linux. Choose a package for your
+distribution, or use the AppImage without installing a package.
 
-:::note ARM support
-
-ARM (aarch64) is currently not supported. Support is deferred to a later release,
-even if ARM artifacts are available on the releases page.
-
-:::
-
-## Requirements
-
-- Linux with **glibc 2.35 or newer**, such as Ubuntu 22.04 or Debian 12.
-- An x86_64 system.
-- X11 or XWayland for the desktop application. A Wayland session without
-  XWayland is untested.
-- FUSE for the AppImage, or the extraction option described below.
-
-Run `uname -m` in a terminal to check your architecture:
-
-| `uname -m` | AppImage | Debian package | RPM |
-| --- | --- | --- | --- |
-| `x86_64` | `Ephervex-x86_64.AppImage` | `ephervex_VERSION_amd64.deb` | `ephervex-VERSION-1.x86_64.rpm` |
-
-`VERSION` stands for the release number in the downloaded filename. The
-commands below use x86_64 filenames. Run them from the directory containing
-your download.
-
-To check a download, save its matching `.sha256` file in the same directory
-and run, for example:
-
-```bash
-sha256sum --check Ephervex-x86_64.AppImage.sha256
-```
-
-Continue only if the check reports `OK`. If it fails, download the artifact
-and its checksum again from the same release.
+<div className={styles.options}>
+  <article className={`${styles.option} ${styles.preferred}`}>
+    <div className={styles.logos} aria-hidden="true">
+      <span className={styles.logo}><img src={useBaseUrl('/img/install/debian.svg')} alt="" /></span>
+      <span className={styles.logo}><img src={useBaseUrl('/img/install/ubuntu.svg')} alt="" /></span>
+    </div>
+    <div>
+      <h2>Debian & Ubuntu</h2>
+      <p>Add the ChaoticTrials repository to install and update Ephervex with APT.</p>
+    </div>
+    <a href="#debian-and-ubuntu">View Debian instructions</a>
+  </article>
+  <article className={styles.option}>
+    <div className={styles.logos} aria-hidden="true">
+      <span className={styles.logo}><img src={useBaseUrl('/img/install/appimage.svg')} alt="" /></span>
+    </div>
+    <div>
+      <h2>AppImage</h2>
+      <p>Run Ephervex from a single file without adding a package source.</p>
+    </div>
+    <a href="#appimage">View AppImage instructions</a>
+  </article>
+  <article className={styles.option}>
+    <div className={styles.logos} aria-hidden="true">
+      <span className={styles.logo}><img src={useBaseUrl('/img/install/fedora.svg')} alt="" /></span>
+      <span className={styles.logo}><img src={useBaseUrl('/img/install/opensuse.svg')} alt="" /></span>
+    </div>
+    <div>
+      <h2>Fedora & openSUSE</h2>
+      <p>Add the signed repository with DNF, or install a release RPM with Zypper.</p>
+    </div>
+    <a href="#fedora-and-other-rpm-distributions">View RPM instructions</a>
+  </article>
+</div>
 
 ## Debian and Ubuntu
 
-Download the amd64 `.deb`. Replace `VERSION` with the number
-in its filename:
+Add the signed ChaoticTrials APT repository, then install Ephervex. These
+commands are the same on x86_64 and aarch64: APT selects `amd64` or `arm64`
+for your system automatically.
+
+```bash
+curl -fsSL https://repo.chaotictrials.de/apt-keyring.gpg \
+  | sudo tee /usr/share/keyrings/chaotictrials.gpg > /dev/null
+echo "deb [signed-by=/usr/share/keyrings/chaotictrials.gpg] \
+https://repo.chaotictrials.de/deb stable main" \
+  | sudo tee /etc/apt/sources.list.d/chaotictrials.list > /dev/null
+sudo apt update
+sudo apt install ephervex
+```
+
+APT will include Ephervex in later package updates. The package installs
+`ephervex` and `ephervex-gui` on your command path and adds Ephervex to the
+application menu.
+
+Alternatively, download the `.deb` for your architecture from the
+[GitHub releases page](https://github.com/ChaoticTrials/Ephervex/releases).
+Replace `VERSION` with the number in its filename, then install the matching
+package. The example uses the x86_64 filename; on ARM, replace `amd64` with
+`arm64`:
 
 ```bash
 sudo apt install ./ephervex_VERSION_amd64.deb
 ```
 
-The package installs `ephervex` and `ephervex-gui` on your command path and
-adds Ephervex to the application menu.
-
-## Fedora and other RPM distributions
-
-Download the x86_64 `.rpm`. On Fedora or another distribution
-using DNF:
-
-```bash
-sudo dnf install ./ephervex-VERSION-1.x86_64.rpm
-```
-
-On openSUSE, install the same RPM with Zypper:
-
-```bash
-sudo zypper install ./ephervex-VERSION-1.x86_64.rpm
-```
-
-The package installs both commands and an application menu entry. There is no
-Ephervex RPM repository; download a new RPM when you want to upgrade.
+The direct download does not add the repository, so install later versions from
+their release packages.
 
 ## AppImage
 
-Download the x86_64 AppImage and make it executable:
+Download the AppImage matching your architecture from the
+[GitHub releases page](https://github.com/ChaoticTrials/Ephervex/releases) and
+make it executable. The commands below use the x86_64 filename; on ARM, replace
+`x86_64` with `aarch64`:
 
 ```bash
 chmod +x Ephervex-x86_64.AppImage
@@ -101,6 +108,79 @@ APPIMAGE_EXTRACT_AND_RUN=1 ./Ephervex-x86_64.AppImage
 This extracts the AppImage into a temporary directory each time it starts and
 works without FUSE. You can also use this environment variable with the CLI
 commands below.
+
+## Fedora and other RPM distributions
+
+On Fedora and other distributions using DNF 5, add the signed ChaoticTrials
+repository, then install Ephervex:
+
+```bash
+sudo dnf config-manager addrepo --from-repofile=https://repo.chaotictrials.de/rpm/chaotictrials.repo
+sudo dnf install ephervex
+```
+
+On DNF 4, replace the first command with:
+
+```bash
+sudo dnf config-manager --add-repo https://repo.chaotictrials.de/rpm/chaotictrials.repo
+```
+
+DNF will include Ephervex in later package updates.
+
+Alternatively, download the `.rpm` matching your architecture from the
+[GitHub releases page](https://github.com/ChaoticTrials/Ephervex/releases).
+Replace `VERSION` with the number in its filename. The commands below use the
+x86_64 filename; on ARM, replace `x86_64` with `aarch64`. On Fedora or another
+distribution using DNF:
+
+```bash
+sudo dnf install ./ephervex-VERSION-1.x86_64.rpm
+```
+
+On openSUSE, install the release RPM with Zypper:
+
+```bash
+sudo zypper install ./ephervex-VERSION-1.x86_64.rpm
+```
+
+The package installs both commands and an application menu entry. A direct RPM
+download does not add the repository, so install later versions from their
+release packages.
+
+## Requirements
+
+<Admonition type="note" title="ARM support">
+  Ephervex runs on ARM (aarch64). Minecraft needs compatible ARM native
+  libraries for the version you choose; versions without them are refused.
+  ARM launches have not been tested yet, so try it and see.
+</Admonition>
+
+- Linux with **glibc 2.35 or newer**, such as Ubuntu 22.04 or Debian 12.
+- An x86_64 or aarch64 system.
+- X11 or XWayland for the desktop application. A Wayland session without
+  XWayland is untested.
+- FUSE for the AppImage, or the extraction option described above.
+
+Run `uname -m` in a terminal to check your architecture:
+
+| `uname -m` | AppImage | Debian package | RPM |
+| --- | --- | --- | --- |
+| `x86_64` | `Ephervex-x86_64.AppImage` | `ephervex_VERSION_amd64.deb` | `ephervex-VERSION-1.x86_64.rpm` |
+| `aarch64` | `Ephervex-aarch64.AppImage` | `ephervex_VERSION_arm64.deb` | `ephervex-VERSION-1.aarch64.rpm` |
+
+`VERSION` stands for the release number in a downloaded package filename.
+Use the package for your architecture, and run file installation commands from
+the directory containing the download.
+
+To check a direct download, save its matching `.sha256` file in the same
+directory and run, for example:
+
+```bash
+sha256sum --check Ephervex-x86_64.AppImage.sha256
+```
+
+Continue only if the check reports `OK`. If it fails, download the artifact
+and its checksum again from the same release.
 
 ## Start Ephervex
 
