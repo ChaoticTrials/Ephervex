@@ -85,6 +85,12 @@ pub enum AuthError {
         source: Box<serde_json::Error>,
     },
 
+    /// A service sent a body larger than any document the chain expects.
+    ///
+    /// Not transient: a retry would receive the same oversized document.
+    #[error("the {stage} service returned more than {limit} bytes")]
+    ResponseTooLarge { stage: AuthStage, limit: usize },
+
     /// Microsoft refused the request with an OAuth error code.
     ///
     /// `description` is Microsoft's own `error_description`, which carries the
@@ -365,7 +371,9 @@ impl AuthError {
                     "error-auth-unexpected-response"
                 }
             }
-            Self::MalformedResponse { .. } => "error-auth-unexpected-response",
+            Self::MalformedResponse { .. } | Self::ResponseTooLarge { .. } => {
+                "error-auth-unexpected-response"
+            }
             Self::OAuth { .. } => "error-auth-microsoft-rejected",
             Self::Declined => "error-auth-declined",
             Self::DeviceCodeExpired => "error-auth-device-code-expired",

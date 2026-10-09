@@ -49,6 +49,13 @@ use crate::stage::AuthStage;
 /// than a spinner.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// The most bytes of response body any request in the chain may deliver.
+///
+/// Token, Xbox, and profile documents are a few kilobytes; the profile with
+/// skin and cape lists is the largest. The ceiling is applied to the decoded
+/// body, so a compressed response cannot expand past it.
+pub const MAX_RESPONSE_BYTES: usize = 256 * 1024;
+
 /// Builds the HTTP client the chain uses.
 ///
 /// Every request carries a credential in its body, so a redirect that leaves
@@ -90,7 +97,8 @@ impl RawResponse {
     }
 }
 
-/// Sends a request, honoring cancellation, and reads the whole body.
+/// Sends a request and reads the whole body, honoring cancellation until the
+/// last byte has arrived and refusing a body over [`MAX_RESPONSE_BYTES`].
 pub async fn send(
     stage: AuthStage,
     request: RequestBuilder,
@@ -98,7 +106,7 @@ pub async fn send(
     cancel: &CancellationToken,
 ) -> AuthResult<RawResponse> {
     let request = request.timeout(REQUEST_TIMEOUT);
-    let response: Response = tokio::select! {
+    let mut response: Response = tokio::select! {
         // Biased so that a token canceled before the request even starts wins
         // rather than racing a network round trip it is going to discard.
         biased;
@@ -110,10 +118,40 @@ pub async fn send(
     };
 
     let status = response.status().as_u16();
-    let body = response
-        .text()
-        .await
-        .map_err(|source| AuthError::transport(stage, source))?;
+    let too_large = || AuthError::ResponseTooLarge {
+        stage,
+        limit: MAX_RESPONSE_BYTES,
+    };
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+    {
+        return Err(too_large());
+    }
+
+    // Content-Length may be absent or wrong, so the ceiling is enforced on the
+    // bytes actually received.
+    let mut bytes: Vec<u8> = Vec::new();
+    loop {
+        let chunk = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(AuthError::Canceled),
+            result = response.chunk() => {
+                result.map_err(|source| AuthError::transport(stage, source))?
+            }
+        };
+        let Some(chunk) = chunk else { break };
+        if bytes.len() + chunk.len() > MAX_RESPONSE_BYTES {
+            return Err(too_large());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    // A cancellation that lands as the last chunk does must not turn into a
+    // success.
+    if cancel.is_cancelled() {
+        return Err(AuthError::Canceled);
+    }
+    let body = String::from_utf8_lossy(&bytes).into_owned();
 
     // The URL is redacted and the body is reported only by length. Both matter:
     // a device-code poll URL is harmless but a token response body is the
@@ -171,6 +209,155 @@ impl OAuthErrorBody {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+
+    /// Serves one response over raw TCP: `head` and `first` immediately, then
+    /// `rest` once `release` fires. wiremock cannot pause mid-body.
+    async fn serve_split(
+        head: String,
+        first: Vec<u8>,
+        rest: Vec<u8>,
+    ) -> (Url, oneshot::Sender<()>, oneshot::Receiver<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        let (release, released) = oneshot::channel::<()>();
+        let (sent_first, first_sent) = oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut scratch = [0_u8; 2048];
+            let _ = stream.read(&mut scratch).await;
+            stream.write_all(head.as_bytes()).await.unwrap();
+            stream.write_all(&first).await.unwrap();
+            stream.flush().await.unwrap();
+            let _ = sent_first.send(());
+            if released.await.is_ok() {
+                let _ = stream.write_all(&rest).await;
+                let _ = stream.flush().await;
+            }
+        });
+        (url, release, first_sent)
+    }
+
+    fn client() -> Client {
+        build_client(&HttpConfig::for_loopback_tests()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_the_body_never_completes_successfully() {
+        let (url, release, first_sent) = serve_split(
+            "HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\n".to_owned(),
+            b"{\"a\"".to_vec(),
+            b":1}".to_vec(),
+        )
+        .await;
+        let cancel = CancellationToken::new();
+        let client = client();
+        let mut task = {
+            let (cancel, url) = (cancel.clone(), url.clone());
+            tokio::spawn(async move {
+                send(AuthStage::Microsoft, client.get(url.clone()), &url, &cancel).await
+            })
+        };
+        first_sent.await.unwrap();
+        // Let the client read the headers and the partial body, so the
+        // cancellation below arrives while the body is being collected.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !task.is_finished(),
+            "the stalled body should keep send pending"
+        );
+
+        cancel.cancel();
+        // The server is still stalled: cancellation alone must end the call.
+        let result = tokio::time::timeout(Duration::from_secs(5), &mut task)
+            .await
+            .expect("cancellation should end a stalled body read")
+            .unwrap();
+        assert!(matches!(result, Err(AuthError::Canceled)), "{result:?}");
+        drop(release);
+    }
+
+    #[tokio::test]
+    async fn a_body_over_the_ceiling_is_refused_when_content_length_is_declared() {
+        let length = MAX_RESPONSE_BYTES + 1;
+        let (url, release, _) = serve_split(
+            format!("HTTP/1.1 200 OK\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n"),
+            Vec::new(),
+            Vec::new(),
+        )
+        .await;
+        let _ = release.send(());
+        let result = send(
+            AuthStage::Microsoft,
+            client().get(url.clone()),
+            &url,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(AuthError::ResponseTooLarge { .. })),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_body_over_the_ceiling_is_refused_when_content_length_is_absent() {
+        let (url, release, _) = serve_split(
+            "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_owned(),
+            vec![b'x'; MAX_RESPONSE_BYTES + 1],
+            Vec::new(),
+        )
+        .await;
+        let _ = release.send(());
+        let result = send(
+            AuthStage::Microsoft,
+            client().get(url.clone()),
+            &url,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(AuthError::ResponseTooLarge { .. })),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_body_at_the_ceiling_is_delivered_intact() {
+        let body = vec![b'x'; MAX_RESPONSE_BYTES];
+        let (url, release, _) = serve_split(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {MAX_RESPONSE_BYTES}\r\nConnection: close\r\n\r\n"
+            ),
+            body,
+            Vec::new(),
+        )
+        .await;
+        let _ = release.send(());
+        let response = send(
+            AuthStage::Microsoft,
+            client().get(url.clone()),
+            &url,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body.len(), MAX_RESPONSE_BYTES);
+    }
+
+    #[test]
+    fn an_oversized_response_is_not_worth_retrying() {
+        let error = AuthError::ResponseTooLarge {
+            stage: AuthStage::Microsoft,
+            limit: MAX_RESPONSE_BYTES,
+        };
+        assert!(!error.is_transient());
+        assert_eq!(error.message_id(), "error-auth-unexpected-response");
+    }
 
     #[test]
     fn an_expired_refresh_token_asks_for_an_interactive_login() {
