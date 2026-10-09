@@ -695,10 +695,23 @@ impl App {
             .transpose()?;
         let mut record = self.client(id)?;
         self.refuse_while_running(id)?;
+        self.validate_jvm_override(jvm_override.as_ref())?;
         record.java_override = java_override;
         record.jvm_override = jvm_override;
         self.registry().update_client(&mut record)?;
         Ok(record)
+    }
+
+    /// Refuses an override that, layered over the current global settings,
+    /// leaves no valid heap range. Planning checks again because the global
+    /// settings can change after the override is saved.
+    pub(crate) fn validate_jvm_override(
+        &self,
+        jvm_override: Option<&ephervex_model::JvmSettings>,
+    ) -> CoreResult<()> {
+        EffectiveJvmSettings::resolve(&self.java_settings(), jvm_override)
+            .validate_memory_range()?;
+        Ok(())
     }
 
     /// Turns pack-owned mod mutation on or off for this instance.
@@ -986,15 +999,7 @@ impl App {
     /// Replaces global Java discovery and JVM defaults after validating the
     /// memory range as one coherent setting.
     pub fn set_java_settings(&mut self, settings: &GlobalJavaSettings) -> CoreResult<()> {
-        if settings.min_memory_mib == 0
-            || settings.max_memory_mib == 0
-            || settings.min_memory_mib > settings.max_memory_mib
-        {
-            return Err(crate::CoreError::JavaSettingsInvalid {
-                minimum_mib: settings.min_memory_mib,
-                maximum_mib: settings.max_memory_mib,
-            });
-        }
+        EffectiveJvmSettings::resolve(settings, None).validate_memory_range()?;
         self.mutate_config(|config| {
             config.java.auto_detect = settings.auto_detect;
             config.java.auto_download = settings.auto_download;
@@ -1090,6 +1095,7 @@ impl App {
             global: settings.preferred_path.clone(),
         };
         let jvm = EffectiveJvmSettings::resolve(&settings, jvm_override.as_ref());
+        jvm.validate_memory_range()?;
 
         let choice = preference.resolve();
         if let JavaPathChoice::Pinned { path, source } = &choice {
@@ -1808,6 +1814,95 @@ mod tests {
             .expect("clear");
         assert!(cleared.java_override.is_none());
         assert!(cleared.jvm_override.is_none());
+    }
+
+    #[test]
+    fn an_instance_override_whose_layered_heap_range_is_invalid_is_refused_and_not_stored() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let created = app
+            .create_client_for_test(NewClient::new(
+                "Bug Repro",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+
+        // The default global range is 512..4096 MiB.
+        let error = app
+            .set_client_runtime_settings(
+                created.id,
+                None,
+                Some(ephervex_model::JvmSettings {
+                    min_memory_mib: Some(8192),
+                    ..ephervex_model::JvmSettings::default()
+                }),
+            )
+            .expect_err("a minimum above the global maximum cannot launch");
+
+        assert!(
+            matches!(
+                error,
+                crate::CoreError::JavaSettingsInvalid {
+                    minimum_mib: 8192,
+                    maximum_mib: 4096,
+                    minimum_layer: ephervex_java::JvmSettingLayer::Override,
+                    maximum_layer: ephervex_java::JvmSettingLayer::Global,
+                }
+            ),
+            "{error:?}"
+        );
+        assert!(
+            app.client(created.id)
+                .expect("client")
+                .jvm_override
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn planning_refuses_a_pinned_minimum_that_a_lowered_global_maximum_left_invalid() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let pinned = ephervex_model::JvmSettings {
+            min_memory_mib: Some(2048),
+            ..ephervex_model::JvmSettings::default()
+        };
+        app.validate_jvm_override(Some(&pinned))
+            .expect("valid against the default global range");
+
+        app.set_java_settings(&GlobalJavaSettings {
+            max_memory_mib: 1024,
+            ..app.java_settings()
+        })
+        .expect("a lower global maximum is valid on its own");
+
+        let required =
+            RequiredJava::from_table(&ephervex_minecraft::MinecraftVersionId::parse("1.21.1"));
+        let error = app
+            .plan_java_for_selection(
+                "1.21.1",
+                required,
+                &LoaderSelection::vanilla(),
+                None,
+                Some(pinned),
+                &JavaPlanRequest::default(),
+            )
+            .await
+            .expect_err("the stored override no longer yields a launchable range");
+
+        assert!(
+            matches!(
+                error,
+                crate::CoreError::JavaSettingsInvalid {
+                    minimum_mib: 2048,
+                    maximum_mib: 1024,
+                    minimum_layer: ephervex_java::JvmSettingLayer::Override,
+                    maximum_layer: ephervex_java::JvmSettingLayer::Global,
+                }
+            ),
+            "{error:?}"
+        );
     }
 
     #[test]

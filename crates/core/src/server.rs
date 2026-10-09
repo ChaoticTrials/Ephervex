@@ -654,6 +654,7 @@ impl App {
     ) -> CoreResult<ServerCommit<ServerRecord>> {
         let mut record = self.canonical_server_for_mutation(id)?;
         refuse_if_running(&record)?;
+        self.validate_jvm_override(jvm_override.as_ref())?;
         record.java_override = java_override;
         record.jvm_override = jvm_override;
         Ok(self
@@ -2277,6 +2278,50 @@ mod tests {
         let indexed = app.server(server.id).expect("indexed recovery copy");
         assert_eq!(indexed.java_override, Some(java_override));
         assert_eq!(indexed.jvm_override, Some(jvm_override));
+    }
+
+    #[test]
+    fn server_runtime_settings_whose_layered_heap_range_is_invalid_are_refused() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let server = app
+            .registry_for_services()
+            .create_server(NewServer::new(
+                "invalid heap",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("scaffold");
+
+        // The default global range is 512..4096 MiB.
+        let error = app
+            .set_server_runtime_settings(
+                server.id,
+                None,
+                Some(JvmSettings {
+                    max_memory_mib: Some(256),
+                    ..JvmSettings::default()
+                }),
+            )
+            .expect_err("a maximum below the global minimum cannot launch");
+
+        assert!(
+            matches!(
+                error,
+                CoreError::JavaSettingsInvalid {
+                    minimum_mib: 512,
+                    maximum_mib: 256,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+        assert!(
+            app.server(server.id)
+                .expect("server")
+                .jvm_override
+                .is_none()
+        );
     }
 
     #[test]

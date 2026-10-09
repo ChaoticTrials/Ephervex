@@ -76,11 +76,19 @@ pub enum CoreError {
     #[error(transparent)]
     Java(#[from] JavaError),
 
-    /// Global JVM memory settings cannot produce a valid Java command.
+    /// The effective JVM heap range cannot produce a valid Java command.
+    /// Each bound names the layer that supplied it.
     #[error(
-        "java memory settings are invalid: minimum {minimum_mib} MiB, maximum {maximum_mib} MiB"
+        "java memory settings are invalid: minimum {minimum_mib} MiB ({minimum_layer}), maximum {maximum_mib} MiB ({maximum_layer})",
+        minimum_layer = .minimum_layer.as_str(),
+        maximum_layer = .maximum_layer.as_str(),
     )]
-    JavaSettingsInvalid { minimum_mib: u32, maximum_mib: u32 },
+    JavaSettingsInvalid {
+        minimum_mib: u32,
+        maximum_mib: u32,
+        minimum_layer: ephervex_java::JvmSettingLayer,
+        maximum_layer: ephervex_java::JvmSettingLayer,
+    },
 
     /// Forge/NeoForge discovery and installation.
     #[error(transparent)]
@@ -470,6 +478,17 @@ impl From<IsolationError> for CoreError {
     }
 }
 
+impl From<ephervex_java::MemoryRangeViolation> for CoreError {
+    fn from(violation: ephervex_java::MemoryRangeViolation) -> Self {
+        Self::JavaSettingsInvalid {
+            minimum_mib: violation.minimum_mib,
+            maximum_mib: violation.maximum_mib,
+            minimum_layer: violation.minimum_layer,
+            maximum_layer: violation.maximum_layer,
+        }
+    }
+}
+
 impl CoreError {
     /// The `ephervex-i18n` message id describing this failure to a user.
     ///
@@ -591,9 +610,13 @@ impl CoreError {
             Self::JavaSettingsInvalid {
                 minimum_mib,
                 maximum_mib,
+                minimum_layer,
+                maximum_layer,
             } => vec![
                 ("minimum", minimum_mib.to_string()),
                 ("maximum", maximum_mib.to_string()),
+                ("minimum_layer", minimum_layer.as_str().to_owned()),
+                ("maximum_layer", maximum_layer.as_str().to_owned()),
             ],
             _ => Vec::new(),
         }

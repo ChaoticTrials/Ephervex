@@ -161,6 +161,36 @@ impl JvmField {
     }
 }
 
+/// The layer a JVM setting's effective value came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JvmSettingLayer {
+    Global,
+    /// The per-instance or per-server override.
+    Override,
+}
+
+impl JvmSettingLayer {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::Override => "override",
+        }
+    }
+}
+
+/// An effective heap range no JVM accepts, with the layer behind each bound.
+///
+/// A zero bound or a minimum above the maximum makes the JVM refuse to start
+/// ("Initial heap size set to a larger value than the maximum heap size").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryRangeViolation {
+    pub minimum_mib: u32,
+    pub maximum_mib: u32,
+    pub minimum_layer: JvmSettingLayer,
+    pub maximum_layer: JvmSettingLayer,
+}
+
 /// The JVM settings an instance actually runs with, and where each came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectiveJvmSettings {
@@ -209,6 +239,33 @@ impl EffectiveJvmSettings {
     #[must_use]
     pub fn is_overridden(&self, field: JvmField) -> bool {
         self.overridden.contains(&field)
+    }
+
+    /// The layer that supplied a field's effective value.
+    #[must_use]
+    pub fn layer_of(&self, field: JvmField) -> JvmSettingLayer {
+        if self.is_overridden(field) {
+            JvmSettingLayer::Override
+        } else {
+            JvmSettingLayer::Global
+        }
+    }
+
+    /// Checks the heap range after layering. Each layer can be valid alone and
+    /// still combine into a range the JVM refuses.
+    pub fn validate_memory_range(&self) -> Result<(), MemoryRangeViolation> {
+        if self.min_memory_mib == 0
+            || self.max_memory_mib == 0
+            || self.min_memory_mib > self.max_memory_mib
+        {
+            return Err(MemoryRangeViolation {
+                minimum_mib: self.min_memory_mib,
+                maximum_mib: self.max_memory_mib,
+                minimum_layer: self.layer_of(JvmField::MinMemory),
+                maximum_layer: self.layer_of(JvmField::MaxMemory),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -659,6 +716,75 @@ mod tests {
             effective.overridden.iter().copied().collect::<Vec<_>>(),
             vec![JvmField::MaxMemory]
         );
+    }
+
+    #[test]
+    fn a_pinned_minimum_above_the_global_maximum_is_a_range_violation_naming_both_layers() {
+        let effective = EffectiveJvmSettings::resolve(
+            &global_settings(),
+            Some(&JvmSettings {
+                min_memory_mib: Some(8192),
+                ..JvmSettings::default()
+            }),
+        );
+        assert_eq!(
+            effective.validate_memory_range(),
+            Err(MemoryRangeViolation {
+                minimum_mib: 8192,
+                maximum_mib: 4096,
+                minimum_layer: JvmSettingLayer::Override,
+                maximum_layer: JvmSettingLayer::Global,
+            })
+        );
+    }
+
+    #[test]
+    fn a_pinned_maximum_below_the_global_minimum_is_a_range_violation() {
+        let effective = EffectiveJvmSettings::resolve(
+            &global_settings(),
+            Some(&JvmSettings {
+                max_memory_mib: Some(256),
+                ..JvmSettings::default()
+            }),
+        );
+        let violation = effective
+            .validate_memory_range()
+            .expect_err("min above max");
+        assert_eq!(violation.minimum_layer, JvmSettingLayer::Global);
+        assert_eq!(violation.maximum_layer, JvmSettingLayer::Override);
+    }
+
+    #[test]
+    fn a_zero_pinned_bound_is_a_range_violation() {
+        for settings in [
+            JvmSettings {
+                min_memory_mib: Some(0),
+                ..JvmSettings::default()
+            },
+            JvmSettings {
+                max_memory_mib: Some(0),
+                ..JvmSettings::default()
+            },
+        ] {
+            assert!(
+                EffectiveJvmSettings::resolve(&global_settings(), Some(&settings))
+                    .validate_memory_range()
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn a_consistent_layered_range_is_accepted() {
+        let effective = EffectiveJvmSettings::resolve(
+            &global_settings(),
+            Some(&JvmSettings {
+                min_memory_mib: Some(2048),
+                max_memory_mib: Some(2048),
+                ..JvmSettings::default()
+            }),
+        );
+        assert_eq!(effective.validate_memory_range(), Ok(()));
     }
 
     #[test]

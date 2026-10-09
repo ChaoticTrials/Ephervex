@@ -84,7 +84,8 @@ pub use rules::{
     RuleVerdict, VersionBound,
 };
 pub use selection::{
-    EffectiveJvmSettings, GlobalJavaSettings, JavaPathChoice, JavaPreference, JvmField, PinSource,
-    RejectedRuntime, Selection, check_pinned, select,
+    EffectiveJvmSettings, GlobalJavaSettings, JavaPathChoice, JavaPreference, JvmField,
+    JvmSettingLayer, MemoryRangeViolation, PinSource, RejectedRuntime, Selection, check_pinned,
+    select,
 };
 pub use version::JavaVersion;

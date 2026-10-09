@@ -486,8 +486,14 @@ error-java-not-managed = That Java runtime is not one Ephervex installed, so it 
 error-java-io = A file needed for the Java runtime could not be written.
     .action = Check free space and permissions on { $path }.
 
-error-java-settings-invalid = Java memory settings are invalid: minimum { $minimum } MiB, maximum { $maximum } MiB.
-    .action = Use positive values and make the maximum at least the minimum.
+error-java-settings-invalid = Java memory settings are invalid: minimum { $minimum } MiB ({ $minimum_layer ->
+        [override] set by the override
+       *[global] from the global settings
+    }), maximum { $maximum } MiB ({ $maximum_layer ->
+        [override] set by the override
+       *[global] from the global settings
+    }).
+    .action = Use positive values and make the maximum at least the minimum. When an override is involved, change it or the global settings it combines with.
 
 error-java-probe-not-executable = That Java program could not be started.
 

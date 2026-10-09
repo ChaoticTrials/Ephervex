@@ -608,7 +608,10 @@ step removes the staged root and cannot leave an indexed complete server.
 Runtime Java precedence is operation-specific path, server override, global
 preferred path, then compatible discovered or managed runtime. Minimum memory,
 maximum memory, and extra JVM arguments resolve independently from per-server
-overrides over global defaults. Compatibility is checked during installation
+overrides over global defaults. The layered heap range must be positive with
+the minimum no greater than the maximum: saving an override that cannot form a
+valid range is refused, and planning checks again because the global settings
+can change afterward. Compatibility is checked during installation
 and every start, including the legacy Forge Java 8 update ceiling.
 
 A start first merges canonical typed network settings and validates global EULA
