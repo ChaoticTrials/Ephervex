@@ -1710,6 +1710,10 @@ pub enum Event {
         scope: ModalScope,
         message: String,
     },
+    /// The background service could not start, so no command will ever be
+    /// answered. Stays on screen, because no dialog or toast outlives the
+    /// window's loading state.
+    BackendUnavailable(String),
     /// An operation's dialog is done with. Closes the dialog on screen only
     /// when `ModalScope` names it.
     CloseModal(ModalScope),
@@ -2336,6 +2340,7 @@ pub fn spawn() -> BackendHandle {
         .name("ephervex-core-worker".to_owned())
         .spawn(move || {
             run_worker(
+                App::open,
                 command_rx,
                 worker_events,
                 worker_cancellations,
@@ -2344,10 +2349,10 @@ pub fn spawn() -> BackendHandle {
         })
     {
         tracing::error!(%error, "could not start the GUI core worker");
-        let _ = event_tx.send(Event::ModalError {
-            scope: ModalScope::Anywhere,
-            message: localized_value("gui-background-service-failed", &error.to_string()),
-        });
+        let _ = event_tx.send(Event::BackendUnavailable(localized_value(
+            "gui-background-service-failed",
+            &error.to_string(),
+        )));
     }
     BackendHandle {
         commands: command_tx,
@@ -2358,6 +2363,7 @@ pub fn spawn() -> BackendHandle {
 
 #[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
 fn run_worker(
+    open_app: impl FnOnce() -> CoreResult<App>,
     commands: Receiver<Command>,
     events: Sender<Event>,
     cancellations: CancellationRegistry,
@@ -2369,20 +2375,17 @@ fn run_worker(
     {
         Ok(runtime) => runtime,
         Err(error) => {
-            let _ = events.send(Event::ModalError {
-                scope: ModalScope::Anywhere,
-                message: localized_value("gui-background-runtime-failed", &error.to_string()),
-            });
+            let _ = events.send(Event::BackendUnavailable(localized_value(
+                "gui-background-runtime-failed",
+                &error.to_string(),
+            )));
             return;
         }
     };
-    let mut app = match App::open() {
+    let mut app = match open_app() {
         Ok(app) => app,
         Err(error) => {
-            let _ = events.send(Event::ModalError {
-                scope: ModalScope::Anywhere,
-                message: localized_error(&error),
-            });
+            let _ = events.send(Event::BackendUnavailable(localized_error(&error)));
             return;
         }
     };
@@ -11150,6 +11153,31 @@ mod tests {
         );
         drop(in_flight);
         assert!(!refuse_save_while_changing(&hosts, host, &events));
+    }
+
+    #[test]
+    fn worker_that_cannot_open_the_application_reports_it_as_unavailable() {
+        let root = tempfile::tempdir().expect("root");
+        let blocker = root.path().join("not-a-directory");
+        std::fs::write(&blocker, b"").expect("blocker");
+        let paths = Paths::rooted_at(blocker.join("data"));
+        let (_commands, command_rx) = std::sync::mpsc::channel();
+        let (events, received) = std::sync::mpsc::channel();
+
+        run_worker(
+            || App::open_at(paths),
+            command_rx,
+            events,
+            Arc::new(Mutex::new(HashMap::new())),
+            SupervisedServers::default(),
+        );
+
+        let event = received.try_recv().expect("an event");
+        assert!(
+            matches!(&event, Event::BackendUnavailable(message) if !message.is_empty()),
+            "the failure is reported as lasting: {event:?}"
+        );
+        assert!(received.try_recv().is_err());
     }
 
     #[test]

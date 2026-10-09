@@ -7330,6 +7330,7 @@ fn apply_event(
         Event::ModImpact(impact) => apply_mod_impact(ui, &impact),
         Event::ModRequirements(needs) => apply_mod_requirements(ui, &needs),
         Event::ModalError { scope, message } => apply_modal_error(ui, scope, message),
+        Event::BackendUnavailable(message) => apply_backend_unavailable(ui, message),
         Event::CloseModal(scope) => close_modal_for(ui, scope),
         // A new instance is what the user was just looking at the dialog for,
         // so it is what they are looking at now. The snapshot that follows this
@@ -8451,6 +8452,13 @@ fn make_room_for_dialog(ui: &AppWindow) -> bool {
     true
 }
 
+/// Keeps the reason the background service is down on screen and ends the
+/// loading state, because the snapshot that would end it never arrives.
+fn apply_backend_unavailable(ui: &AppWindow, message: String) {
+    ui.set_startup_error(message.into());
+    ui.set_loading(false);
+}
+
 /// Puts a failure where the user can read it: in the dialog it is about while
 /// that is still open, as a toast once it is gone.
 fn apply_modal_error(ui: &AppWindow, scope: backend::ModalScope, message: String) {
@@ -8995,6 +9003,18 @@ mod tests {
                 },
             )));
         AppWindow::new().expect("window")
+    }
+
+    #[test]
+    fn unavailable_backend_ends_loading_and_keeps_its_reason_on_screen() {
+        let ui = test_window();
+        assert!(ui.get_loading());
+
+        apply_backend_unavailable(&ui, "config.toml is malformed".to_owned());
+
+        assert!(!ui.get_loading());
+        assert_eq!(ui.get_startup_error(), "config.toml is malformed");
+        assert_eq!(ui.get_modal_error(), "");
     }
 
     fn isolation_data(host: &str, active: bool, phase: &str) -> IsolationData {

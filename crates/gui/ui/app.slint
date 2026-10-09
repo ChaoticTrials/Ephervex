@@ -330,6 +330,9 @@ export component AppWindow inherits Window {
     in-out property <string> modal-error;
     in-out property <string> status-message: GuiI18n.text("gui-ready");
     in-out property <bool> loading: true;
+    // Why the background service is not running, shown in the window for as
+    // long as it is down. Empty while it is running.
+    in-out property <string> startup-error;
     in-out property <int> active-operations;
     in-out property <string> storage-root;
     in-out property <string> app-version;
@@ -917,8 +920,8 @@ export component AppWindow inherits Window {
                                     TextField { text <=> root.instance-query; placeholder: GuiI18n.text("gui-filter-instances"); input-type: InputType.search; width: 290px; accepted => { root.refresh(); } }
                                 }
                             }
-                            if root.loading : VerticalLayout { alignment: center; Spinner { indeterminate: true; width: 38px; height: 38px; } BodyText { text: GuiI18n.text("gui-loading-instances"); horizontal-alignment: center; } }
-                            if !root.loading && root.instances.length == 0 && root.pending-instances.length == 0 : EmptyState {
+                            if root.loading && root.startup-error == "" : VerticalLayout { alignment: center; Spinner { indeterminate: true; width: 38px; height: 38px; } BodyText { text: GuiI18n.text("gui-loading-instances"); horizontal-alignment: center; } }
+                            if !root.loading && root.startup-error == "" && root.instances.length == 0 && root.pending-instances.length == 0 : EmptyState {
                                 title: GuiI18n.text("gui-no-client-instances");
                                 message: GuiI18n.text("gui-no-client-instances-detail");
                                 primary-text: GuiI18n.text("gui-modal-new-instance"); secondary-text: GuiI18n.text("gui-import-modpack");
@@ -1902,6 +1905,15 @@ export component AppWindow inherits Window {
                         }
                     } } }
                 }
+            }
+        }
+
+        if root.startup-error != "" : Rectangle {
+            background: Theme.danger-fill;
+            VerticalLayout {
+                padding: 10px; spacing: 4px;
+                BodyText { text: GuiI18n.text("gui-background-unavailable"); color: Theme.on-danger; font-weight: 600; wrap: word-wrap; }
+                BodyText { text: root.startup-error; color: Theme.on-danger; wrap: word-wrap; }
             }
         }
 
