@@ -37,7 +37,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use ephervex_download::{
-    CacheLayout, DownloadManager, MetadataCache, MetadataCacheError, MetadataKey,
+    CacheLayout, DownloadError, DownloadManager, MetadataCache, MetadataCacheError, MetadataKey,
     OperationReporter, Url, build_single_origin_client, check_transport,
 };
 use ephervex_model::{Hash, ModProvider};
@@ -412,14 +412,31 @@ fn unreachable(error: MetadataCacheError) -> ModPlatformError {
 
 /// A 404 from a project endpoint means the reference is wrong, which is worth
 /// saying rather than reporting as an outage.
+///
+/// Only a not-found answer says that: an outage, a 5xx and a timeout stay what
+/// they were, because a catalog that is not answering knows nothing about the
+/// project (ADR 0037).
 fn project_unknown(error: ModPlatformError, reference: &str) -> ModPlatformError {
-    if error.is_offline() {
+    if is_not_found(&error) {
         return ModPlatformError::ProjectUnknown {
             provider: ModProvider::Modrinth,
             reference: reference.to_owned(),
         };
     }
     error
+}
+
+/// Whether the provider answered that the requested resource does not exist.
+fn is_not_found(error: &ModPlatformError) -> bool {
+    let ModPlatformError::Unreachable { source, .. } = error else {
+        return false;
+    };
+    let (MetadataCacheError::Fetch { source, .. } | MetadataCacheError::Unavailable { source, .. }) =
+        &**source
+    else {
+        return false;
+    };
+    matches!(&**source, DownloadError::HttpStatus { status, .. } if *status == 404)
 }
 
 #[cfg(test)]
@@ -447,6 +464,28 @@ mod tests {
             project_unknown(error, "jei").is_cancellation(),
             "a canceled lookup must not become an unknown project"
         );
+    }
+
+    fn status(code: u16) -> ModPlatformError {
+        unreachable(MetadataCacheError::Unavailable {
+            key: "project".to_owned(),
+            source: Box::new(ephervex_download::DownloadError::HttpStatus {
+                url: "https://example.invalid/".to_owned(),
+                status: code,
+            }),
+        })
+    }
+
+    #[test]
+    fn only_a_not_found_answer_makes_a_project_unknown() {
+        assert!(matches!(
+            project_unknown(status(404), "jei"),
+            ModPlatformError::ProjectUnknown { .. }
+        ));
+        for code in [403, 429, 500, 502, 503] {
+            let error = project_unknown(status(code), "jei");
+            assert!(error.is_offline(), "{code} must stay an outage: {error:?}");
+        }
     }
 
     #[test]

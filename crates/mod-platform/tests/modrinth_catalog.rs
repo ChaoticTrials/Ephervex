@@ -15,8 +15,8 @@ use ephervex_download::{
     CacheLayout, DownloadManager, DownloaderConfig, HttpConfig, OperationReporter, RetryPolicy,
 };
 use ephervex_mod_platform::{
-    InstallSelection, InstanceTarget, ModDependency, ModProviderApi, ModSearchQuery,
-    ModrinthProvider, ResolveRequest, SideSupport, resolve,
+    InstallSelection, InstanceTarget, ModDependency, ModPlatformError, ModProviderApi,
+    ModSearchQuery, ModrinthProvider, ResolveRequest, SideSupport, resolve,
 };
 use ephervex_model::{Hash, HashAlgorithm, LoaderKind, ModProvider, ModRelationKind};
 use tempfile::TempDir;
@@ -648,17 +648,166 @@ async fn the_primary_file_rule_is_applied_to_real_response_shapes() {
     );
 }
 
-#[tokio::test]
-async fn an_unreachable_provider_is_reported_as_such_rather_than_as_an_empty_catalog() {
+/// How a provider that cannot answer a project lookup is reported: only a
+/// not-found response may say the project does not exist.
+async fn failing_catalog(status: u16) -> Catalog {
     let catalog = Catalog::start().await;
-    let error = catalog
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(status))
+        .mount(&catalog.server)
+        .await;
+    catalog
+}
+
+#[tokio::test]
+async fn a_not_found_answer_makes_a_project_unknown() {
+    let catalog = failing_catalog(404).await;
+    let cancel = CancellationToken::new();
+    let project = catalog
         .provider
-        .versions("NOTHING", &target(), &reporter(), &CancellationToken::new())
+        .project("NOTHING", &reporter(), &cancel)
         .await
-        .expect_err("nothing is mocked");
-    // Reported, not swallowed: an empty list would look like a mod with no
-    // releases rather than a service that could not be reached.
-    assert!(!error.is_cancellation());
+        .expect_err("the project does not exist");
+    assert!(
+        matches!(project, ModPlatformError::ProjectUnknown { .. }),
+        "got {project:?}"
+    );
+    let versions = catalog
+        .provider
+        .versions("NOTHING", &target(), &reporter(), &cancel)
+        .await
+        .expect_err("the project does not exist");
+    assert!(
+        matches!(versions, ModPlatformError::ProjectUnknown { .. }),
+        "got {versions:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_server_error_is_an_outage_rather_than_an_unknown_project() {
+    for status in [500, 503] {
+        let catalog = failing_catalog(status).await;
+        let cancel = CancellationToken::new();
+        let project = catalog
+            .provider
+            .project("jei", &reporter(), &cancel)
+            .await
+            .expect_err("the provider is failing");
+        assert!(
+            project.is_offline() && !matches!(project, ModPlatformError::ProjectUnknown { .. }),
+            "{status}: {project:?}"
+        );
+        let versions = catalog
+            .provider
+            .versions("jei", &target(), &reporter(), &cancel)
+            .await
+            .expect_err("the provider is failing");
+        assert!(
+            versions.is_offline() && !matches!(versions, ModPlatformError::ProjectUnknown { .. }),
+            "{status}: {versions:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_refused_connection_is_an_outage_rather_than_an_unknown_project() {
+    // A port that was bound and released, so nothing is listening on it.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind a loopback port")
+        .local_addr()
+        .expect("bound address");
+    let cache = tempfile::tempdir().expect("temp dir");
+    let manager = DownloadManager::new(DownloaderConfig {
+        retry: RetryPolicy::none(),
+        http: HttpConfig::for_loopback_tests(),
+        ..DownloaderConfig::default()
+    })
+    .expect("client builds");
+    let provider = ModrinthProvider::with_base_url(
+        manager,
+        CacheLayout::new(cache.path()),
+        &format!("http://{closed}/v2"),
+    )
+    .expect("provider");
+    let cancel = CancellationToken::new();
+    let project = provider
+        .project("jei", &reporter(), &cancel)
+        .await
+        .expect_err("nothing is listening");
+    let versions = provider
+        .versions("jei", &target(), &reporter(), &cancel)
+        .await
+        .expect_err("nothing is listening");
+    for error in [project, versions] {
+        assert!(
+            error.is_offline() && !matches!(error, ModPlatformError::ProjectUnknown { .. }),
+            "{error:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_read_timeout_is_an_outage_rather_than_an_unknown_project() {
+    let catalog = Catalog::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(30)))
+        .mount(&catalog.server)
+        .await;
+    let manager = DownloadManager::new(DownloaderConfig {
+        retry: RetryPolicy::none(),
+        http: HttpConfig {
+            read_timeout: std::time::Duration::from_millis(200),
+            ..HttpConfig::for_loopback_tests()
+        },
+        ..DownloaderConfig::default()
+    })
+    .expect("client builds");
+    let provider = ModrinthProvider::with_base_url(
+        manager,
+        CacheLayout::new(catalog.cache.path()),
+        &format!("{}/v2", catalog.server.uri()),
+    )
+    .expect("provider");
+    let error = provider
+        .project("jei", &reporter(), &CancellationToken::new())
+        .await
+        .expect_err("the provider never answers");
+    assert!(
+        error.is_offline() && !matches!(error, ModPlatformError::ProjectUnknown { .. }),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_explicit_cancellation_is_reported_as_one_on_every_metadata_path() {
+    let catalog = Catalog::full().await;
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let ids = vec!["FITSPROJ".to_owned()];
+
+    let project = catalog
+        .provider
+        .project("FITSPROJ", &reporter(), &cancel)
+        .await
+        .expect_err("canceled");
+    let versions = catalog
+        .provider
+        .versions("FITSPROJ", &target(), &reporter(), &cancel)
+        .await
+        .expect_err("canceled");
+    let projects = catalog
+        .provider
+        .projects_by_id(&ids, &reporter(), &cancel)
+        .await
+        .expect_err("canceled");
+    let versions_by_id = catalog
+        .provider
+        .versions_by_id(&ids, &reporter(), &cancel)
+        .await
+        .expect_err("canceled");
+    for error in [project, versions, projects, versions_by_id] {
+        assert!(error.is_cancellation(), "got {error:?}");
+    }
 }
 
 /// Recognizing installed files is one request for the whole batch, keyed by the
