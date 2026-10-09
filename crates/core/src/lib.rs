@@ -116,7 +116,7 @@ pub use health::{
     ConfigurationHealth, CredentialBackendHealth, DirectoryHealth, DirectoryState,
     InstallationHealth, JavaHealth, PlatformIdentity, installation_health,
 };
-pub use import::{ImportRequest, ImportedPack};
+pub use import::{ImportRequest, ImportedPack, suggested_instance_name};
 pub use instance::{
     CreatedClient, MAX_ENTITY_NAME_CHARS, NameRefusal, PreferenceContext,
     global_minecraft_preferences, validated_entity_name,

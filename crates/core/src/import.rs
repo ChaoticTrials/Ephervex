@@ -43,6 +43,7 @@ use tracing::{info, instrument, warn};
 use crate::app::App;
 use crate::curseforge_pack::ProviderCredentials;
 use crate::error::CoreResult;
+use crate::instance::{sanitized_entity_name, validated_entity_name};
 
 /// What a caller wants imported.
 #[derive(Debug, Clone)]
@@ -50,6 +51,9 @@ pub struct ImportRequest {
     /// The archive to import. Detected by content, not by extension.
     pub archive: PathBuf,
     /// The instance's name, or `None` for the pack's own name.
+    ///
+    /// A name given here is refused when a rename would refuse it. The pack's
+    /// own name is cleaned up instead, because the user did not write it.
     pub name: Option<String>,
     /// Where the instance lives. Temporary by default, like everything else
     /// this launcher creates.
@@ -186,6 +190,12 @@ impl App {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<ImportedPack> {
+        // A name the caller typed is checked before any archive or network work.
+        let chosen_name = request
+            .name
+            .as_deref()
+            .map(validated_entity_name)
+            .transpose()?;
         // Everything that can refuse the pack runs before the instance exists.
         reporter.set_stage(Some("operation-stage-reading-archive".to_owned()));
         let (mut archive, mut analysis) = Self::open_pack(&request.archive)?;
@@ -204,10 +214,10 @@ impl App {
             None => self.provider_credentials(),
         };
 
-        let name = request
-            .name
-            .clone()
-            .unwrap_or_else(|| analysis.recipe.original_name.clone());
+        let name = match chosen_name {
+            Some(chosen) => chosen,
+            None => suggested_instance_name(&analysis),
+        };
         let record = self.registry_for_services().create_client(
             NewClient::new(
                 name,
@@ -363,6 +373,29 @@ fn check_supported_release(version: &str) -> CoreResult<()> {
     Ok(())
 }
 
+/// The name an instance gets when the caller did not choose one.
+///
+/// The pack's name is archive content, so it is repaired to the same rules a
+/// rename enforces. A name with nothing usable left falls back to the archive's
+/// file name, then to a generic one. A frontend offering a name to edit should
+/// offer this one, since submitting the pack's raw name is refused when it
+/// breaks those rules.
+#[must_use]
+pub fn suggested_instance_name(analysis: &PackAnalysis) -> String {
+    let recipe = &analysis.recipe;
+    sanitized_entity_name(&recipe.original_name)
+        .or_else(|| {
+            recipe
+                .archive_name
+                .as_deref()
+                .and_then(sanitized_entity_name)
+        })
+        .unwrap_or_else(|| FALLBACK_INSTANCE_NAME.to_owned())
+}
+
+/// The instance name of a pack that supplies no usable name at all.
+const FALLBACK_INSTANCE_NAME: &str = "Imported pack";
+
 /// How the instance records where it came from.
 ///
 /// The reference is untranslated technical text. The archive's file name is
@@ -478,6 +511,134 @@ mod tests {
             !options.contains("renderDistance:12"),
             "a later override layer replaces the earlier file wholesale: {options}"
         );
+    }
+
+    fn named_index(name_json: &str) -> Vec<u8> {
+        format!(
+            r#"{{
+                "formatVersion": 1,
+                "game": "minecraft",
+                "versionId": "2.1.0",
+                "name": {name_json},
+                "files": [],
+                "dependencies": {{"minecraft": "1.20.1", "forge": "47.4.0"}}
+            }}"#
+        )
+        .into_bytes()
+    }
+
+    async fn import_named_pack(name_json: &str) -> (App, tempfile::TempDir, ImportedPack) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("pack.mrpack");
+        zip_file(
+            &archive,
+            &[("modrinth.index.json", &named_index(name_json))],
+        );
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let imported = import(&app, &archive).await.expect("import");
+        (app, base, imported)
+    }
+
+    #[tokio::test]
+    async fn a_pack_name_with_control_characters_is_stored_as_a_name_a_rename_accepts() {
+        let (app, _base, imported) =
+            import_named_pack(r#""Evil\u001b[2J\u001b[31mPWNED\nsecond line""#).await;
+
+        assert!(!imported.record.name.chars().any(char::is_control));
+        assert!(imported.record.name.starts_with("Evil"));
+        assert!(imported.record.name.ends_with("second line"));
+        app.rename_client(imported.record.id, &imported.record.name)
+            .expect("the stored name survives a rename of itself");
+    }
+
+    #[tokio::test]
+    async fn a_pack_name_over_the_ceiling_is_cut_to_it() {
+        let long = "n".repeat(crate::instance::MAX_ENTITY_NAME_CHARS + 30);
+        let (app, _base, imported) = import_named_pack(&format!("\"{long}\"")).await;
+
+        assert_eq!(
+            imported.record.name.chars().count(),
+            crate::instance::MAX_ENTITY_NAME_CHARS
+        );
+        validated_entity_name(&imported.record.name).expect("the stored name passes the rules");
+        app.rename_client(imported.record.id, &imported.record.name)
+            .expect("rename");
+    }
+
+    #[tokio::test]
+    async fn the_suggested_name_of_an_awkward_pack_is_accepted_when_submitted_explicitly() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("pack.mrpack");
+        zip_file(
+            &archive,
+            &[(
+                "modrinth.index.json",
+                &named_index(r#""Evil\u001b[2J\nsecond""#),
+            )],
+        );
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+
+        let suggested = suggested_instance_name(&app.analyze_pack(&archive).expect("analyze"));
+        let imported = app
+            .import_pack(
+                &ImportRequest::new(&archive).named(&suggested),
+                &OperationReporter::silent("test-import"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("the suggested name is accepted as a chosen one");
+        assert_eq!(imported.record.name, suggested);
+    }
+
+    #[tokio::test]
+    async fn a_blank_pack_name_falls_back_to_the_archive_file_name() {
+        for blank in [r#""""#, r#""  \n\t ""#] {
+            let (_app, _base, imported) = import_named_pack(blank).await;
+            assert_eq!(imported.record.name, "pack.mrpack", "{blank}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_explicit_instance_name_a_rename_would_refuse_is_refused_and_creates_nothing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("report.mrpack");
+        zip_file(
+            &archive,
+            &[(
+                "modrinth.index.json",
+                &index(r#"{"minecraft": "1.20.1", "forge": "47.4.0"}"#),
+            )],
+        );
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+
+        for bad in ["", "   ", "two\nlines", "x".repeat(200).as_str()] {
+            let error = app
+                .import_pack(
+                    &ImportRequest::new(&archive).named(bad),
+                    &OperationReporter::silent("test-import"),
+                    &CancellationToken::new(),
+                )
+                .await
+                .expect_err("must refuse");
+            assert!(
+                matches!(error, crate::error::CoreError::EntityNameInvalid { .. }),
+                "{error:?}"
+            );
+        }
+        assert!(app.list_clients().expect("list").is_empty());
+
+        let imported = app
+            .import_pack(
+                &ImportRequest::new(&archive).named("  Chosen name  "),
+                &OperationReporter::silent("test-import"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("import");
+        assert_eq!(imported.record.name, "Chosen name");
     }
 
     #[tokio::test]

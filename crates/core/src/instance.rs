@@ -473,6 +473,27 @@ pub fn validated_entity_name(name: &str) -> CoreResult<String> {
     Ok(trimmed.to_owned())
 }
 
+/// An entity name derived from text the user did not type, such as a pack's
+/// own name, or `None` when nothing usable is left.
+///
+/// Unlike [`validated_entity_name`] this repairs rather than refuses: a pack
+/// with an awkward name should still import. Control characters become spaces,
+/// surrounding whitespace is dropped, and a name over [`MAX_ENTITY_NAME_CHARS`]
+/// is cut. The result always passes [`validated_entity_name`].
+pub(crate) fn sanitized_entity_name(raw: &str) -> Option<String> {
+    let replaced: String = raw
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let truncated: String = replaced
+        .trim()
+        .chars()
+        .take(MAX_ENTITY_NAME_CHARS)
+        .collect();
+    let name = truncated.trim_end();
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
 impl App {
     // -- renaming ----------------------------------------------------------
 
@@ -776,6 +797,28 @@ mod tests {
             ),
             "{error:?}"
         );
+    }
+
+    #[test]
+    fn a_sanitized_name_always_passes_the_rules_a_rename_enforces() {
+        let long = "w".repeat(MAX_ENTITY_NAME_CHARS * 2);
+        for raw in [
+            "Evil\u{1b}[2J\nsecond",
+            "  padded \t ",
+            "\u{85}tail\u{9f}",
+            long.as_str(),
+            &format!("{} tail", "w".repeat(MAX_ENTITY_NAME_CHARS - 1)),
+        ] {
+            let name = sanitized_entity_name(raw).expect("something usable remains");
+            assert_eq!(
+                validated_entity_name(&name).expect("valid"),
+                name,
+                "{raw:?}"
+            );
+        }
+        assert_eq!(sanitized_entity_name("a\nb").as_deref(), Some("a b"));
+        assert_eq!(sanitized_entity_name(" \t\n\u{1b} "), None);
+        assert_eq!(sanitized_entity_name(""), None);
     }
 
     #[test]

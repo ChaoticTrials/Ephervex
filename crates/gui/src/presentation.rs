@@ -2171,7 +2171,7 @@ impl ImportPresentation {
     pub fn from_analysis(analysis: &PackAnalysis) -> Self {
         Self {
             format: analysis.format.to_string(),
-            name: analysis.name().to_owned(),
+            name: ephervex_core::suggested_instance_name(analysis),
             version: analysis.recipe.original_version.clone().unwrap_or_default(),
             author: analysis.author().unwrap_or_default().to_owned(),
             minecraft_version: analysis.minecraft_version().to_owned(),
@@ -2363,6 +2363,36 @@ mod import_tests {
         let header = presentation().header_line();
         assert!(header.contains("CurseForge"), "{header}");
         assert!(header.contains("Example Pack 1.2.0"), "{header}");
+    }
+
+    #[test]
+    fn the_name_offered_for_an_import_is_one_the_import_accepts() {
+        // The field is pre-filled and submitted as an explicit name, which
+        // is checked like a rename, so the raw pack name cannot be offered.
+        let raw = format!("Evil\u{1b}[2J\nsecond {}", "x".repeat(200));
+        let analysis = ephervex_core::PackAnalysis {
+            format: ephervex_core::PackFormat::ModrinthPack,
+            recipe: ephervex_core::PackRecipe::for_manual_instance(
+                raw,
+                "1.20.1",
+                ephervex_model::LoaderSelection::vanilla(),
+            ),
+            pending: Vec::new(),
+            rejected_urls: Vec::new(),
+            blocked: Vec::new(),
+            attention: Vec::new(),
+            duplicate_files: Vec::new(),
+        };
+
+        let offered = ImportPresentation::from_analysis(&analysis).name;
+        assert_eq!(
+            ephervex_core::validated_entity_name(&offered)
+                .ok()
+                .as_deref(),
+            Some(offered.as_str()),
+            "{offered:?}"
+        );
+        assert!(offered.starts_with("Evil"), "{offered}");
     }
 
     #[test]
