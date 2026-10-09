@@ -27,7 +27,7 @@ artwork.
 The import dialog states show CaveStone with its documented name, version,
 Minecraft version, and loader. The Modrinth format names no author, so none is
 shown. The pack's required and optional split (50 and 2) and the two optional
-file names are synthetic. The duplicate, blocked-file, and resolving states
+file names are synthetic. The duplicate, manual-download, and resolving states
 use a synthetic CurseForge export named Creeper Containment Lab; its author,
 counts, and file names are synthetic, as is the archive name in the missing-key
 state.

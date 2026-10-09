@@ -80,7 +80,7 @@ Getting started:
 - [x] `create-instance-dialog`
 - [x] `import-modpack-ready` (pack card, optional files, blocked files,
       duplicates)
-- [x] `import-modpack-blocked-files`
+- [x] `import-modpack-manual-download` (Open in Browser for a blocked CurseForge file)
 - [x] `import-modpack-credential-missing` (error plus Providers & APIs link)
 - [x] `import-modpack-resolving` (frozen spinner)
 
@@ -119,7 +119,6 @@ Settings:
 - [x] `settings-java`
 - [x] `settings-providers` (catalog, CurseForge key states)
 - [x] `settings-storage`, `settings-disk-usage`
-- [x] `about-licenses`
 
 Not capturable without extending the tool (an interaction step): hover
 tooltips and disabled-button reasons, context menus, open dropdowns, the
@@ -128,8 +127,7 @@ workspace "More" popup, the diagnostic bundle panel (folded by default),
 
 Limits of the captured states (the tool renders one frame and cannot scroll or
 interact):
-- Tall dialogs and pages show only their top: `import-modpack-blocked-files`,
-  `import-modpack-duplicates` and the lower part of
+- Tall dialogs and pages show only their top: `import-modpack-duplicates` and the lower part of
   `client-diagnostics-result` at 1080p (all of it fits at 1440p).
 - `mod-impact` shows only the breaks group, and `mod-manager` shows Reset to
   pack version but no Update button, because the app's dialog layout cannot

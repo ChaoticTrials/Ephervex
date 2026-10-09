@@ -22,6 +22,15 @@ function digest(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
+function captureKey(file) {
+  return file.region === 'full' ? file.state : `${file.state}/${file.region}`;
+}
+
+function assetPath(file) {
+  const directory = captureKey(file);
+  return `${directory}/${file.theme}-${file.window}.webp`;
+}
+
 async function readManifest() {
   try {
     return JSON.parse(await readFile(manifestFile, 'utf8'));
@@ -37,17 +46,31 @@ async function pngFiles() {
   for (const state of states) {
     if (!state.isDirectory() || state.name === 'review') continue;
     if (!safeName.test(state.name)) fail(`Invalid screenshot state: ${state.name}`);
-    const regions = await readdir(path.join(source, state.name), {withFileTypes: true});
-    for (const region of regions) {
-      if (!region.isDirectory()) fail(`Invalid screenshot region: ${region.name}`);
-      if (!safeName.test(region.name)) fail(`Invalid screenshot region: ${region.name}`);
-      const directory = path.join(source, state.name, region.name);
+    const stateDirectory = path.join(source, state.name);
+    const entries = await readdir(stateDirectory, {withFileTypes: true});
+    for (const entry of entries) {
+      if (entry.isFile()) {
+        const match = filenamePattern.exec(entry.name);
+        if (!match) fail(`Unexpected screenshot file: ${entry.name}`);
+        result.push({
+          state: state.name,
+          region: 'full',
+          theme: match[1],
+          window: `${match[2]}x${match[3]}`,
+          path: path.join(stateDirectory, entry.name),
+        });
+        continue;
+      }
+      if (!entry.isDirectory() || !safeName.test(entry.name) || entry.name === 'full') {
+        fail(`Invalid screenshot crop directory: ${entry.name}. Regenerate the screenshot matrix.`);
+      }
+      const directory = path.join(stateDirectory, entry.name);
       for (const file of await readdir(directory, {withFileTypes: true})) {
         const match = filenamePattern.exec(file.name);
         if (!file.isFile() || !match) fail(`Unexpected screenshot file: ${file.name}`);
         result.push({
           state: state.name,
-          region: region.name,
+          region: entry.name,
           theme: match[1],
           window: `${match[2]}x${match[3]}`,
           path: path.join(directory, file.name),
@@ -75,7 +98,7 @@ function selectedSizes(args) {
 function requiredFiles(files, sizes) {
   const groups = new Map();
   for (const file of files) {
-    const key = `${file.state}/${file.region}`;
+    const key = captureKey(file);
     if (!groups.has(key)) groups.set(key, new Map());
     groups.get(key).set(`${file.theme}-${file.window}`, file);
   }
@@ -104,9 +127,9 @@ async function sync(args) {
     const input = await readFile(file.path);
     const sourceSha256 = digest(input);
     const sourceSize = input.length;
-    const relative = `${file.state}/${file.region}/${file.theme}-${file.window}.webp`;
+    const relative = assetPath(file);
     const target = path.join(assets, relative);
-    const old = previous?.captures?.[`${file.state}/${file.region}`]?.[file.theme]
+    const old = previous?.captures?.[captureKey(file)]?.[file.theme]
       ?.find((variant) => variant.window === file.window);
     let outputSha256;
     let bytes;
@@ -140,7 +163,7 @@ async function sync(args) {
     if (file.region === 'full' && (metadata.width !== windowWidth || metadata.height !== windowHeight)) {
       fail(`Incorrect full-window dimensions in ${file.path}`);
     }
-    const key = `${file.state}/${file.region}`;
+    const key = captureKey(file);
     captures[key] ??= {light: [], dark: []};
     captures[key][file.theme].push({
       window: file.window,
@@ -168,26 +191,26 @@ async function sync(args) {
   } finally {
     await rm(temporary, {force: true});
   }
-  await removeStaleAssets(new Set(files.map((file) =>
-    `${file.state}/${file.region}/${file.theme}-${file.window}.webp`)));
+  await removeStaleAssets(new Set(files.map(assetPath)));
   console.log(`${files.length} WebP files (${encoded} encoded, ${files.length - encoded} unchanged)`);
   console.log(`PNG ${formatBytes(sourceBytes)} -> WebP ${formatBytes(outputBytes)} (${Math.round(100 * outputBytes / sourceBytes)}%)`);
 }
 
 async function removeStaleAssets(expected) {
-  try {
-    for (const state of await readdir(assets, {withFileTypes: true})) {
-      if (!state.isDirectory()) continue;
-      for (const region of await readdir(path.join(assets, state.name), {withFileTypes: true})) {
-        if (!region.isDirectory()) continue;
-        for (const file of await readdir(path.join(assets, state.name, region.name))) {
-          const relative = `${state.name}/${region.name}/${file}`;
-          if (file.endsWith('.webp') && !expected.has(relative)) {
-            await rm(path.join(assets, relative));
-          }
-        }
+  async function visit(directory, prefix) {
+    for (const entry of await readdir(directory, {withFileTypes: true})) {
+      const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const target = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await visit(target, relative);
+        if ((await readdir(target)).length === 0) await rm(target, {recursive: true});
+      } else if (entry.isFile() && entry.name.endsWith('.webp') && !expected.has(relative)) {
+        await rm(target);
       }
     }
+  }
+  try {
+    await visit(assets, '');
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
   }

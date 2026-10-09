@@ -36,14 +36,15 @@ export default function ThemeScreenshot({
   const base = useBaseUrl('/img/ephervex/');
   const isBrowser = useIsBrowser();
   const {colorMode} = useColorMode();
-  const capture = captures[`${state}/${region}`];
+  const key = region === 'full' ? state : `${state}/${region}`;
+  const capture = captures[key];
   if (!capture) {
-    throw new Error(`Missing screenshot state ${state}/${region}. Run npm run screenshots:sync.`);
+    throw new Error(`Missing screenshot state ${key}. Run npm run screenshots:sync.`);
   }
   const variants = capture.light;
   const fallback = variants[0];
   if (!fallback) {
-    throw new Error(`Missing screenshot sources for ${state}/${region}. Run npm run screenshots:sync.`);
+    throw new Error(`Missing screenshot sources for ${key}. Run npm run screenshots:sync.`);
   }
 
   // Docusaurus renders this placeholder on the server and during hydration.

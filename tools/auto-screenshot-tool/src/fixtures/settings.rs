@@ -1,9 +1,9 @@
 //! Synthetic Settings pages: General, Minecraft defaults, Java, Providers & APIs,
-//! Storage, Disk usage, and About & Licenses.
+//! Storage, and Disk usage.
 
 use ephervex_gui::minecraft_defaults::{CATEGORIES, WINDOW_ASPECTS, category_label};
 use ephervex_gui::presentation::{cache_limit_choices, cache_limit_units};
-use ephervex_gui::ui::{AppWindow, DiskUsageRow, JavaRow, LicenseRow, MinecraftPreferenceRow};
+use ephervex_gui::ui::{AppWindow, DiskUsageRow, JavaRow, MinecraftPreferenceRow};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use slint::{ModelRc, SharedString, VecModel};
 
@@ -440,63 +440,6 @@ pub(crate) fn disk_usage(ui: &AppWindow) {
     ]));
 }
 
-pub(crate) fn about(ui: &AppWindow) {
-    open_settings(ui, "About & Licenses");
-}
-
-/// Rows from the head of the alphabetical dependency list: name, version, SPDX.
-const PACKAGES: [(&str, &str, &str); 24] = [
-    ("ab_glyph", "0.2.32", "Apache-2.0"),
-    ("ab_glyph_rasterizer", "0.1.10", "Apache-2.0"),
-    ("accesskit", "0.24.1", "MIT OR Apache-2.0"),
-    ("accesskit_atspi_common", "0.19.1", "MIT OR Apache-2.0"),
-    ("accesskit_consumer", "0.38.0", "MIT OR Apache-2.0"),
-    ("accesskit_unix", "0.22.1", "MIT OR Apache-2.0"),
-    ("accesskit_winit", "0.33.2", "Apache-2.0"),
-    ("adler2", "2.0.1", "0BSD OR MIT OR Apache-2.0"),
-    ("aes", "0.8.4", "MIT OR Apache-2.0"),
-    ("ahash", "0.8.12", "MIT OR Apache-2.0"),
-    ("allocator-api2", "0.2.21", "MIT OR Apache-2.0"),
-    ("anstream", "1.0.0", "MIT OR Apache-2.0"),
-    ("anstyle", "1.0.14", "MIT OR Apache-2.0"),
-    ("anyhow", "1.0.104", "MIT OR Apache-2.0"),
-    ("arc-swap", "1.9.2", "MIT OR Apache-2.0"),
-    ("arrayref", "0.3.9", "BSD-2-Clause"),
-    ("arrayvec", "0.7.8", "MIT OR Apache-2.0"),
-    ("async-channel", "2.5.0", "Apache-2.0 OR MIT"),
-    ("async-executor", "1.14.0", "Apache-2.0 OR MIT"),
-    ("async-io", "2.6.0", "Apache-2.0 OR MIT"),
-    ("async-lock", "3.4.2", "Apache-2.0 OR MIT"),
-    ("async-process", "2.5.0", "Apache-2.0 OR MIT"),
-    ("async-task", "4.7.1", "Apache-2.0 OR MIT"),
-    ("atspi", "0.29.0", "Apache-2.0 OR MIT"),
-];
-
-pub(crate) fn third_party_licenses(ui: &AppWindow) {
-    about(ui);
-    ui.set_third_party_packages(rows(
-        PACKAGES
-            .iter()
-            .map(|(name, version, license)| LicenseRow {
-                name: (*name).into(),
-                version: (*version).into(),
-                license: (*license).into(),
-                text: SharedString::default(),
-            })
-            .collect(),
-    ));
-    ui.set_third_party_summary(
-        lookup_args(
-            "gui-third-party-summary",
-            [("crates", Arg::from(524)), ("licenses", Arg::from(140))],
-        )
-        .into(),
-    );
-    ui.set_third_party_error(SharedString::default());
-    ui.set_third_party_open(-1);
-    ui.set_modal("third-party".into());
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
@@ -531,8 +474,6 @@ mod tests {
             "settings-providers",
             "settings-storage",
             "settings-disk-usage",
-            "about-licenses",
-            "third-party-licenses-dialog",
         ];
         let states: Vec<_> = STATES
             .iter()

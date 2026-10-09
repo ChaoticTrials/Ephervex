@@ -164,17 +164,14 @@ pub(crate) fn import_modpack_duplicates(ui: &AppWindow) {
     }]));
 }
 
-pub(crate) fn import_modpack_blocked_files(ui: &AppWindow) {
+pub(crate) fn import_modpack_manual_download(ui: &AppWindow) {
     open_import(ui, &CONTAINMENT_LAB, "ready");
     ui.set_import_ready(false);
-    ui.set_import_blocked_items(rows(vec![
-        blocked_file(
-            "Obsidian Mirror",
-            "obsidian-mirror-1.12.2-0.9.1.jar",
-            1_048_301,
-        ),
-        blocked_file("Pocket Piglin", "pocket-piglin-1.12.2-1.2.0.jar", 1_048_377),
-    ]));
+    ui.set_import_blocked_items(rows(vec![blocked_file(
+        "Obsidian Mirror",
+        "obsidian-mirror-1.12.2-0.9.1.jar",
+        1_048_301,
+    )]));
 }
 
 pub(crate) fn import_modpack_credential_missing(ui: &AppWindow) {

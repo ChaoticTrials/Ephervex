@@ -33,7 +33,7 @@ export const catalogGroups: CatalogGroup[] = [
       {state: 'import-modpack-resolving', title: 'Reading a pack'},
       {state: 'import-modpack-ready', title: 'Pack ready to import'},
       {state: 'import-modpack-duplicates', title: 'Duplicate projects in a pack'},
-      {state: 'import-modpack-blocked-files', title: 'Files that must be downloaded manually'},
+      {state: 'import-modpack-manual-download', title: 'Manual CurseForge download', regions: {'blocked-file': 'Open in Browser'}},
       {state: 'import-modpack-credential-missing', title: 'CurseForge key missing'},
       {state: 'import-modpack-running', title: 'Import in progress'},
       {state: 'activity-import-in-progress', title: 'Activity history'},
@@ -98,8 +98,6 @@ export const catalogGroups: CatalogGroup[] = [
       {state: 'settings-providers', title: 'Providers and APIs'},
       {state: 'settings-storage', title: 'Storage'},
       {state: 'settings-disk-usage', title: 'Disk usage'},
-      {state: 'about-licenses', title: 'About and licenses'},
-      {state: 'third-party-licenses-dialog', title: 'Third-party software'},
     ],
   },
 ];

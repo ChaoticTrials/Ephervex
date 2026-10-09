@@ -236,7 +236,7 @@ fn crop_region(ui: &AppWindow, image: &RgbaImage, region: &Region) -> Result<Rgb
     );
     // The checked window is at most 3840x2160. Converting its logical
     // coordinates to integer pixel bounds intentionally drops fractions.
-    let padding = 12.0;
+    let padding = region.padding;
     let x = (position.x - padding).max(0.0).floor() as u32;
     let y = (position.y - padding).max(0.0).floor() as u32;
     let right = (position.x + size.width + padding).ceil() as u32;
@@ -256,10 +256,13 @@ fn output_path(
     theme: ThemeName,
     size: Dimensions,
 ) -> PathBuf {
-    output
-        .join(state.name)
-        .join(region.name)
-        .join(format!("{}-{}.png", theme.name(), size.label()))
+    let directory = output.join(state.name);
+    let directory = if region.name == "full" {
+        directory
+    } else {
+        directory.join(region.name)
+    };
+    directory.join(format!("{}-{}.png", theme.name(), size.label()))
 }
 
 fn write_png(path: &Path, image: &RgbaImage) -> Result<()> {

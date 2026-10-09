@@ -8,6 +8,7 @@ use crate::fixtures;
 pub(crate) struct Region {
     pub(crate) name: &'static str,
     pub(crate) accessible_label: Option<&'static str>,
+    pub(crate) padding: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -24,55 +25,79 @@ const INSTANCE_REGIONS: &[Region] = &[
     Region {
         name: "full",
         accessible_label: None,
+        padding: 0.0,
     },
     Region {
         name: "client-card",
         accessible_label: Some("CaveStone"),
+        padding: 12.0,
     },
 ];
 const SERVER_REGIONS: &[Region] = &[
     Region {
         name: "full",
         accessible_label: None,
+        padding: 0.0,
     },
     Region {
         name: "server-card",
         accessible_label: Some("CaveStone Server"),
+        padding: 12.0,
     },
 ];
 const ACCOUNT_REGIONS: &[Region] = &[
     Region {
         name: "full",
         accessible_label: None,
+        padding: 0.0,
     },
     Region {
         name: "offline-profile",
         accessible_label: Some("MelanX"),
+        padding: 12.0,
     },
 ];
 const FULL_ONLY: &[Region] = &[Region {
     name: "full",
     accessible_label: None,
+    padding: 0.0,
 }];
+
+const MANUAL_DOWNLOAD_REGIONS: &[Region] = &[
+    Region {
+        name: "full",
+        accessible_label: None,
+        padding: 0.0,
+    },
+    Region {
+        name: "blocked-file",
+        accessible_label: Some("Obsidian Mirror"),
+        padding: 0.0,
+    },
+];
 
 const CLIENT_HOSTS_REGIONS: &[Region] = &[Region {
     name: "full",
     accessible_label: None,
+    padding: 0.0,
 }];
 
 const SETTINGS_REGIONS: &[Region] = &[Region {
     name: "full",
     accessible_label: None,
+    padding: 0.0,
 }];
 
 const MODS_FULL_WINDOW_REGIONS: &[Region] = &[Region {
     name: "full",
     accessible_label: None,
+    padding: 0.0,
 }];
 
 const DIAGNOSTICS_SERVERS_REGIONS: &[Region] = &[Region {
     name: "full",
     accessible_label: None,
+    padding: 0.0,
 }];
 
 pub(crate) const STATES: &[State] = &[
@@ -125,9 +150,9 @@ pub(crate) const STATES: &[State] = &[
         same_layout_at_both_sizes: false,
     },
     State {
-        name: "import-modpack-blocked-files",
-        show: fixtures::getting_started::import_modpack_blocked_files,
-        regions: FULL_ONLY,
+        name: "import-modpack-manual-download",
+        show: fixtures::getting_started::import_modpack_manual_download,
+        regions: MANUAL_DOWNLOAD_REGIONS,
         same_layout_at_both_sizes: false,
     },
     State {
@@ -265,18 +290,6 @@ pub(crate) const STATES: &[State] = &[
     State {
         name: "settings-disk-usage",
         show: fixtures::settings::disk_usage,
-        regions: SETTINGS_REGIONS,
-        same_layout_at_both_sizes: false,
-    },
-    State {
-        name: "about-licenses",
-        show: fixtures::settings::about,
-        regions: SETTINGS_REGIONS,
-        same_layout_at_both_sizes: false,
-    },
-    State {
-        name: "third-party-licenses-dialog",
-        show: fixtures::settings::third_party_licenses,
         regions: SETTINGS_REGIONS,
         same_layout_at_both_sizes: false,
     },

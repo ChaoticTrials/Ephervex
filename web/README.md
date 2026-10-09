@@ -28,7 +28,9 @@ WebP files under `static/img/ephervex/` are also ignored until publication.
 A fresh checkout must generate and synchronize images before building.
 
 `npm run screenshots:sync` checks that both themes exist for every selected
-state, region, and size. It hashes the source PNGs and reuses unchanged WebPs.
+state, region, and size. Full-window WebPs live directly under each state;
+named crops have a subdirectory. It hashes the source PNGs and reuses unchanged
+WebPs.
 `npm run screenshots:contact-sheet` writes local review sheets grouped by
 resolution and region type. `npm run screenshots:check` validates the published
 assets and runs automatically before `npm run build`. An ordinary local build

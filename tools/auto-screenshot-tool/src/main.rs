@@ -57,6 +57,8 @@ fn run(args: GenerateArgs) -> Result<()> {
     ephervex_i18n::select_language(&args.locale)
         .with_context(|| format!("select screenshot locale {:?}", args.locale))?;
 
+    let replace_default_output =
+        args.output.is_none() && args.state.is_empty() && args.theme.is_empty();
     let states = if args.state.is_empty() {
         STATES.to_vec()
     } else {
@@ -92,6 +94,10 @@ fn run(args: GenerateArgs) -> Result<()> {
         .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("screenshots"));
 
     capture::initialize()?;
+    if replace_default_output && output.exists() {
+        std::fs::remove_dir_all(&output)
+            .with_context(|| format!("replace generated screenshots in {}", output.display()))?;
+    }
     let files = capture::generate(&CaptureOptions {
         states: &states,
         themes: &themes,

@@ -18,10 +18,13 @@ pack fields are transcribed from a supplied Modrinth archive; its provenance
 is recorded in `SOURCES.md`. Regeneration does not need that archive.
 
 The default command writes both Ephervex Light and Dark captures at 1920x1080
-and 2560x1440 into `screenshots/<state>/<region>/<theme>-<width>x<height>.png`.
-Each state includes a full-window image; some also include a crop around an
-accessible UI element. A crop is taken from the rendered window, not rebuilt
-separately. Light and Dark use the same fixture object.
+and 2560x1440. Full-window files are stored at
+`screenshots/<state>/<theme>-<width>x<height>.png`; crops are stored at
+`screenshots/<state>/<region>/<theme>-<width>x<height>.png`. A full run replaces
+the default screenshot directory, so removed states and old paths do not remain.
+Some states also include a crop around an accessible UI element. A crop is taken
+from the rendered window, not rebuilt separately. Light and Dark use the same
+fixture object.
 The PNG directory, including review contact sheets, is gitignored.
 
 To capture a subset, pass options through the script:

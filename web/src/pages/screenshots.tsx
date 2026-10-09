@@ -17,7 +17,8 @@ type Card = {state: string; region: string; title: string};
 function cardsFor(entry: CatalogEntry): Card[] {
   const cards: Card[] = [];
   for (const region of ['full', ...Object.keys(entry.regions ?? {})]) {
-    if (!captures[`${entry.state}/${region}`]) continue;
+    const key = region === 'full' ? entry.state : `${entry.state}/${region}`;
+    if (!captures[key]) continue;
     cards.push({
       state: entry.state,
       region,
@@ -29,11 +30,12 @@ function cardsFor(entry: CatalogEntry): Card[] {
 
 function ScreenshotCard({card}: {card: Card}): ReactNode {
   const {colorMode} = useColorMode();
-  const capture = captures[`${card.state}/${card.region}`];
+  const key = card.region === 'full' ? card.state : `${card.state}/${card.region}`;
+  const capture = captures[key];
   const variants = capture[colorMode === 'dark' ? 'dark' : 'light'];
   const href = useBaseUrl(`/img/ephervex/${variants[variants.length - 1].file}`);
   return (
-    <figure className={styles.card} id={`${card.state}-${card.region}`}>
+    <figure className={styles.card} id={card.region === 'full' ? card.state : `${card.state}-${card.region}`}>
       <a
         className={`${styles.frame} ${card.region === 'full' ? '' : styles.cropFrame}`}
         href={href}
@@ -43,7 +45,7 @@ function ScreenshotCard({card}: {card: Card}): ReactNode {
       </a>
       <figcaption>
         <strong>{card.title}</strong>
-        <span className={styles.state}>{card.state}/{card.region}</span>
+        <span className={styles.state}>{key}</span>
       </figcaption>
     </figure>
   );
