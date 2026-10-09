@@ -32,18 +32,45 @@ use std::sync::Arc;
 
 use chrono::{SecondsFormat, TimeDelta, Utc};
 use ephervex_auth::{
-    AccountProvider, AuthError, AuthObserver, CredentialStorage, CredentialStore, KeyringStore,
-    LoginRequest, MemoryStore, MicrosoftAccountProvider, SecretString, Session,
+    AccountProvider, AuthError, AuthObserver, AuthResult, CredentialChangeGuard,
+    CredentialChangeOrder, CredentialKey, CredentialStorage, CredentialStore, KeyringStore, Login,
+    LoginRequest, MemoryStore, MicrosoftAccountProvider, ProcessChangeOrder, SecretString, Session,
 };
 use ephervex_download::HttpConfig;
 use ephervex_model::AccountKind;
-use ephervex_storage::AccountLookup;
+use ephervex_storage::{AccountLookup, ConfigError, CredentialChangeLock, Paths};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument, warn};
 use uuid::Uuid;
 
 use crate::App;
 use crate::error::{CoreError, CoreResult};
+
+/// Orders credential changes across every process that shares one
+/// configuration directory (ADR 0004).
+///
+/// The keyring is per user and the account records are per configuration
+/// directory, so the order is keyed by the directory that holds the records.
+#[derive(Debug)]
+struct ConfigDirectoryOrder {
+    paths: Paths,
+}
+
+impl CredentialChangeOrder for ConfigDirectoryOrder {
+    fn hold(&self) -> AuthResult<CredentialChangeGuard> {
+        CredentialChangeLock::take(&self.paths)
+            .map(CredentialChangeGuard::new)
+            .map_err(|error| match error {
+                ConfigError::Busy { path } => AuthError::CredentialChangeBusy { path },
+                ConfigError::Unwritable { path, .. } => {
+                    AuthError::CredentialChangeUnavailable { path }
+                }
+                _ => AuthError::CredentialChangeUnavailable {
+                    path: self.paths.config_dir().to_path_buf(),
+                },
+            })
+    }
+}
 
 /// How much life a Minecraft token needs left on it to be worth reusing.
 ///
@@ -429,8 +456,8 @@ impl App {
         // for the same account must not then delete.
         self.finish_keyring_cleanup();
         let provider = self.build_account_provider(options.allow_session_only)?;
-        let session = provider.login(&options.request, observer, cancel).await?;
-        self.adopt_login(session)
+        let login = provider.login(&options.request, observer, cancel).await?;
+        self.adopt_login(&provider, login)
     }
 
     /// Re-establishes a session for the account already signed in.
@@ -644,6 +671,10 @@ impl App {
     /// account precisely so removing one cannot disturb another.
     #[instrument(skip(self))]
     pub fn remove_account(&mut self, reference: &str) -> CoreResult<Option<AccountSummary>> {
+        // Deleting the credential and forgetting the account are one change: a
+        // sign-in or resume in between would store a credential back for an
+        // account that is then forgotten.
+        let held = self.hold_credential_changes()?;
         self.reload_config()?;
         let key = self.resolve_account_key(reference)?.to_owned();
         let id = Uuid::parse_str(&key).map_err(|_| {
@@ -662,10 +693,7 @@ impl App {
         if kind.has_stored_credential() {
             match self.keyring() {
                 Ok(store) => {
-                    ephervex_auth::delete_credential(
-                        store.as_ref(),
-                        &ephervex_auth::CredentialKey::MicrosoftRefreshToken(id),
-                    )?;
+                    store.delete(&CredentialKey::MicrosoftRefreshToken(id))?;
                     keyring = Some(store);
                 }
                 // The keyring may only be locked or briefly gone, so the
@@ -681,10 +709,6 @@ impl App {
 
         if keyring_reachable {
             self.mutate_config(|config| config.forget_account(&key))?;
-            match keyring {
-                Some(store) => self.clean_up_keyring(store.as_ref()),
-                None => self.finish_keyring_cleanup(),
-            }
         } else {
             // Recorded in the spelling a later sign-in remembers it by.
             let account = id.to_string();
@@ -692,6 +716,14 @@ impl App {
                 config.forget_account(&key);
                 config.record_keyring_cleanup(&account);
             })?;
+        }
+        // Each pending deletion takes the order itself.
+        drop(held);
+        if keyring_reachable {
+            match keyring {
+                Some(store) => self.clean_up_keyring(store.as_ref()),
+                None => self.finish_keyring_cleanup(),
+            }
         }
         if self.session.as_ref().is_some_and(|s| s.account.id == id) {
             self.session = None;
@@ -763,7 +795,22 @@ impl App {
             store,
             ephervex_auth::Endpoints::production(),
             &self.http_config(),
-        )?)
+        )?
+        .with_change_order(Arc::new(self.credential_order())))
+    }
+
+    fn credential_order(&self) -> ConfigDirectoryOrder {
+        ConfigDirectoryOrder {
+            paths: self.paths().clone(),
+        }
+    }
+
+    /// Claims the order that keeps stored credentials and the account records
+    /// that name them consistent, across processes.
+    ///
+    /// Not reentrant, and never taken while holding the configuration lock.
+    fn hold_credential_changes(&self) -> CoreResult<CredentialChangeGuard> {
+        Ok(self.credential_order().hold()?)
     }
 
     /// The persistent keyring, or why it cannot be reached.
@@ -801,36 +848,37 @@ impl App {
 
     /// [`Self::finish_keyring_cleanup`] with a keyring already open.
     ///
-    /// The deletions happen outside the configuration lock, because one can
-    /// wait on a keyring unlock prompt. A deletion that fails stays recorded
-    /// for the next attempt.
+    /// Each deletion is decided and made under the credential order against
+    /// the current configuration, so a sign-in in another process that has
+    /// since recorded the account keeps its new credential. The deletions
+    /// happen outside the configuration lock, because one can wait on a
+    /// keyring unlock prompt. A deletion that fails stays recorded for the next
+    /// attempt.
     fn clean_up_keyring(&mut self, store: &dyn CredentialStore) {
-        let mut done = Vec::new();
-        for pending in &self.config().keyring_cleanup {
-            let deleted = Uuid::parse_str(pending).map_or(Ok(()), |account| {
-                ephervex_auth::delete_credential(
-                    store,
-                    &ephervex_auth::CredentialKey::MicrosoftRefreshToken(account),
-                )
-            });
-            match deleted {
-                Ok(()) => done.push(pending.clone()),
-                Err(error) => {
-                    warn!(%error, account = %pending, "could not remove a removed account's credential yet");
-                }
+        for pending in self.config().keyring_cleanup.clone() {
+            if let Err(error) = self.finish_pending_cleanup(store, &pending) {
+                warn!(%error, account = %pending, "could not remove a removed account's credential yet");
             }
         }
-        if done.is_empty() {
-            return;
+    }
+
+    fn finish_pending_cleanup(
+        &mut self,
+        store: &dyn CredentialStore,
+        pending: &str,
+    ) -> CoreResult<()> {
+        let _held = self.hold_credential_changes()?;
+        self.reload_config()?;
+        if !self.config().keyring_cleanup.iter().any(|p| p == pending) {
+            return Ok(());
         }
-        let result = self.mutate_config(|config| {
-            config
-                .keyring_cleanup
-                .retain(|pending| !done.contains(pending));
-        });
-        if let Err(error) = result {
-            warn!(%error, "could not record the finished keyring cleanup");
+        // A recorded account's credential is current, not one to clean up.
+        if !self.config().accounts.contains_key(pending)
+            && let Ok(account) = Uuid::parse_str(pending)
+        {
+            store.delete(&CredentialKey::MicrosoftRefreshToken(account))?;
         }
+        self.mutate_config(|config| config.keyring_cleanup.retain(|p| p != pending))
     }
 
     /// The active account's id, or a typed "nobody is signed in".
@@ -851,26 +899,63 @@ impl App {
         self.hold_session(session)
     }
 
-    /// [`Self::adopt`] for a new login. When the account cannot be recorded,
-    /// the credential the login just stored is deleted again, so it is never
-    /// left with nothing naming it (ADR 0004).
-    fn adopt_login(&mut self, session: Session) -> CoreResult<&Session> {
-        if let Err(error) = self.record_account(&session) {
-            self.discard_unrecorded_credential(&session);
+    /// [`Self::adopt`] for a new login: stores its credential and records its
+    /// account as one change under the credential order (ADR 0004).
+    ///
+    /// An account that is not recorded yet is first written to the pending
+    /// cleanup list, which recording it clears in the same update. A login
+    /// that dies between storing and recording therefore leaves a credential
+    /// that a later cleanup deletes, never one nothing names. When the account
+    /// cannot be recorded, the credential this login stored is deleted again.
+    fn adopt_login(
+        &mut self,
+        provider: &MicrosoftAccountProvider,
+        login: Login,
+    ) -> CoreResult<&Session> {
+        let persistent = login
+            .session
+            .storage()
+            .is_some_and(CredentialStorage::is_persistent);
+        // A session-only credential lives in this process, so only this
+        // process can race it.
+        let held = if persistent {
+            self.hold_credential_changes()?
+        } else {
+            ProcessChangeOrder.hold()?
+        };
+        let id = login.session.account.id;
+        let account = id.to_string();
+
+        let mut stores_new_account = false;
+        if persistent && login.has_refresh_credential() {
+            self.reload_config()?;
+            stores_new_account = !self.config().accounts.contains_key(&account);
+            if stores_new_account {
+                self.mutate_config(|config| config.record_keyring_cleanup(&account))?;
+            }
+        }
+        // A failed store may still have written the secret, and the entry may
+        // already name an earlier credential, so it stays for a cleanup.
+        provider.keep_login(&login, &held)?;
+        if let Err(error) = self.record_account(&login.session) {
+            if stores_new_account {
+                self.discard_unrecorded_credential(id);
+            }
             return Err(error);
         }
-        self.hold_session(session)
+        self.hold_session(login.session)
     }
 
-    /// Deletes a just-stored credential whose account is not recorded.
+    /// Deletes the credential a login just stored for an account that is not
+    /// recorded. Runs under the credential order, so no other login can have
+    /// stored one for it since.
     ///
-    /// One the configuration already names replaced an earlier credential for
-    /// the same account, which is still recorded, so it stays.
-    fn discard_unrecorded_credential(&self, session: &Session) {
-        let id = session.account.id;
+    /// An account the configuration names after all keeps its credential.
+    fn discard_unrecorded_credential(&mut self, id: Uuid) {
+        let account = id.to_string();
         // Read without adopting it, so a failed login changes nothing else.
         match ephervex_storage::Config::load_or_default(self.paths()) {
-            Ok(config) if !config.accounts.contains_key(&id.to_string()) => {}
+            Ok(config) if !config.accounts.contains_key(&account) => {}
             Ok(_) => return,
             // It may well record the account, so the credential stays.
             Err(error) => {
@@ -878,14 +963,23 @@ impl App {
                 return;
             }
         }
-        let deleted = self.keyring().and_then(|store| {
-            ephervex_auth::delete_credential(
-                store.as_ref(),
-                &ephervex_auth::CredentialKey::MicrosoftRefreshToken(id),
-            )
-        });
-        if let Err(error) = deleted {
-            warn!(%error, account = %id, "could not remove the credential of a login that was not recorded");
+        let deleted = self
+            .keyring()
+            .and_then(|store| store.delete(&CredentialKey::MicrosoftRefreshToken(id)));
+        match deleted {
+            Ok(()) => self.forget_cleanup_intent(&account),
+            Err(error) => {
+                warn!(%error, account = %id, "could not remove the credential of a login that was not recorded");
+            }
+        }
+    }
+
+    /// Drops the pending-cleanup entry a login wrote before storing, once its
+    /// credential is gone or was never stored.
+    fn forget_cleanup_intent(&mut self, account: &str) {
+        let result = self.mutate_config(|config| config.keyring_cleanup.retain(|p| p != account));
+        if let Err(error) = result {
+            warn!(%error, account, "could not clear the pending cleanup of a login that was not recorded");
         }
     }
 
@@ -968,8 +1062,6 @@ pub(crate) fn credential_store() -> Result<Arc<dyn CredentialStore>, AuthError> 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-    use ephervex_storage::Paths;
-
     use super::*;
 
     fn app_rooted_at(base: &std::path::Path) -> App {
@@ -1023,20 +1115,92 @@ mod tests {
         std::fs::create_dir_all(lock).expect("block");
     }
 
+    fn provider_over(store: Arc<dyn CredentialStore>) -> MicrosoftAccountProvider {
+        MicrosoftAccountProvider::with_endpoints(
+            ephervex_auth::resolve_client_id(""),
+            store,
+            ephervex_auth::Endpoints::production(),
+            &HttpConfig::default(),
+        )
+        .expect("provider")
+    }
+
+    fn login_with(id: Uuid, refresh: &str) -> Login {
+        Login::new(
+            microsoft_session(id),
+            Some(SecretString::new(refresh.to_owned())),
+        )
+    }
+
+    fn refresh_key(id: Uuid) -> CredentialKey {
+        CredentialKey::MicrosoftRefreshToken(id)
+    }
+
+    /// A keyring that runs a hook right after each store, as another process
+    /// or a failure would between a login's store and its record.
+    struct HookedStore {
+        inner: MemoryStore,
+        after_store: Box<dyn Fn() + Send + Sync>,
+    }
+
+    impl std::fmt::Debug for HookedStore {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("HookedStore")
+        }
+    }
+
+    impl CredentialStore for HookedStore {
+        fn store(&self, key: &CredentialKey, secret: &SecretString) -> AuthResult<()> {
+            self.inner.store(key, secret)?;
+            (self.after_store)();
+            Ok(())
+        }
+
+        fn load(&self, key: &CredentialKey) -> AuthResult<Option<SecretString>> {
+            self.inner.load(key)
+        }
+
+        fn delete(&self, key: &CredentialKey) -> AuthResult<()> {
+            self.inner.delete(key)
+        }
+
+        fn storage(&self) -> CredentialStorage {
+            CredentialStorage::Keyring
+        }
+    }
+
+    /// Runs `body` on a thread and reports whether it is still waiting after
+    /// a grace period, then lets the caller release what it waits on.
+    fn still_waiting<T: Send + 'static>(
+        body: impl FnOnce() -> T + Send + 'static,
+    ) -> (std::thread::JoinHandle<T>, bool) {
+        let handle = std::thread::spawn(body);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let waiting = !handle.is_finished();
+        (handle, waiting)
+    }
+
     #[test]
     fn a_login_that_cannot_be_recorded_removes_the_credential_it_stored() {
         let base = tempfile::tempdir().expect("temp dir");
         let mut app = app_rooted_at(base.path());
         let id = Uuid::new_v4();
-        let store = keyring_holding(id);
+        let blocked = app.paths().config_dir().join("config.lock");
+        let store = Arc::new(HookedStore {
+            inner: MemoryStore::new(),
+            // The intent was written before the store; recording fails after it.
+            after_store: Box::new(move || {
+                let _ = std::fs::remove_file(&blocked);
+                std::fs::create_dir_all(&blocked).expect("block");
+            }),
+        });
         app.test_keyring = Some(TestKeyring::Store(store.clone()));
-        block_configuration_writes(&app);
+        let provider = provider_over(store.clone());
 
-        app.adopt_login(microsoft_session(id))
+        app.adopt_login(&provider, login_with(id, "refresh"))
             .expect_err("the account cannot be recorded");
 
-        let key = ephervex_auth::CredentialKey::MicrosoftRefreshToken(id);
-        assert!(store.load(&key).expect("load").is_none());
+        assert!(store.load(&refresh_key(id)).expect("load").is_none());
         assert!(app.session().is_none());
     }
 
@@ -1050,33 +1214,292 @@ mod tests {
         app.test_keyring = Some(TestKeyring::Store(store.clone()));
         block_configuration_writes(&app);
 
-        app.adopt_login(microsoft_session(id))
+        app.adopt_login(&provider_over(store.clone()), login_with(id, "newer"))
             .expect_err("the account cannot be recorded again");
 
-        let key = ephervex_auth::CredentialKey::MicrosoftRefreshToken(id);
-        assert!(
-            store.load(&key).expect("load").is_some(),
-            "the recorded account keeps it"
-        );
+        let kept = store.load(&refresh_key(id)).expect("load");
+        assert!(kept.is_some(), "the recorded account keeps a credential");
     }
 
     #[test]
-    fn a_failed_record_keeps_the_credential_when_the_configuration_cannot_be_read() {
+    fn a_login_stores_nothing_when_the_configuration_cannot_be_read() {
         let base = tempfile::tempdir().expect("temp dir");
         let mut app = app_rooted_at(base.path());
         let id = Uuid::new_v4();
-        let store = keyring_holding(id);
+        let store = Arc::new(MemoryStore::new());
         app.test_keyring = Some(TestKeyring::Store(store.clone()));
         // A directory where the file belongs can neither be read nor written.
         std::fs::create_dir_all(app.paths().config_file()).expect("block the file");
 
-        app.adopt_login(microsoft_session(id))
+        app.adopt_login(&provider_over(store.clone()), login_with(id, "refresh"))
             .expect_err("the account cannot be recorded");
 
-        let key = ephervex_auth::CredentialKey::MicrosoftRefreshToken(id);
         assert!(
-            store.load(&key).expect("load").is_some(),
-            "it may record the account"
+            store.load(&refresh_key(id)).expect("load").is_none(),
+            "no credential is stored for an account that cannot be recorded"
+        );
+    }
+
+    #[test]
+    fn a_login_that_stores_a_credential_is_covered_by_a_pending_cleanup_until_recorded() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let id = Uuid::new_v4();
+        let seen_covered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let store = Arc::new(HookedStore {
+            inner: MemoryStore::new(),
+            after_store: Box::new({
+                let seen_covered = Arc::clone(&seen_covered);
+                let paths = Paths::rooted_at(base.path());
+                move || {
+                    let config = ephervex_storage::Config::load_or_default(&paths).expect("load");
+                    seen_covered.store(
+                        config.keyring_cleanup == [id.to_string()],
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                }
+            }),
+        });
+        app.test_keyring = Some(TestKeyring::Store(store.clone()));
+
+        app.adopt_login(&provider_over(store.clone()), login_with(id, "refresh"))
+            .expect("recorded");
+
+        assert!(
+            seen_covered.load(std::sync::atomic::Ordering::SeqCst),
+            "a login that dies after storing leaves a credential a cleanup deletes"
+        );
+        let config = app_rooted_at(base.path()).config().clone();
+        assert!(config.keyring_cleanup.is_empty(), "recording clears it");
+        assert!(config.accounts.contains_key(&id.to_string()));
+        assert!(store.load(&refresh_key(id)).expect("load").is_some());
+    }
+
+    /// A keyring that cannot store, as one that is locked and unanswered.
+    #[derive(Debug)]
+    struct RefusingStore(MemoryStore);
+
+    impl CredentialStore for RefusingStore {
+        fn store(&self, _key: &CredentialKey, _secret: &SecretString) -> AuthResult<()> {
+            Err(AuthError::SecretStorageUnavailable {
+                detail: "locked".to_owned(),
+            })
+        }
+
+        fn load(&self, key: &CredentialKey) -> AuthResult<Option<SecretString>> {
+            self.0.load(key)
+        }
+
+        fn delete(&self, key: &CredentialKey) -> AuthResult<()> {
+            self.0.delete(key)
+        }
+
+        fn storage(&self) -> CredentialStorage {
+            CredentialStorage::Keyring
+        }
+    }
+
+    #[test]
+    fn a_login_whose_store_fails_keeps_the_pending_cleanup_of_an_earlier_credential() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let id = Uuid::new_v4();
+        // An earlier removal left its credential behind and its cleanup pending.
+        let store = Arc::new(RefusingStore(MemoryStore::new()));
+        store
+            .0
+            .store(&refresh_key(id), &SecretString::new("earlier".to_owned()))
+            .expect("seed");
+        app.mutate_config(|config| config.record_keyring_cleanup(&id.to_string()))
+            .expect("pending cleanup");
+        app.test_keyring = Some(TestKeyring::Store(store.clone()));
+
+        app.adopt_login(&provider_over(store.clone()), login_with(id, "refresh"))
+            .expect_err("the keyring refuses the credential");
+
+        assert_eq!(
+            app_rooted_at(base.path()).config().keyring_cleanup,
+            [id.to_string()],
+            "the earlier credential is still named by a pending cleanup"
+        );
+        assert!(store.load(&refresh_key(id)).expect("load").is_some());
+    }
+
+    #[test]
+    fn a_credential_left_by_an_interrupted_login_is_deleted_by_the_next_cleanup() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let id = Uuid::new_v4();
+        // What a login that died between its store and its record leaves.
+        let store = keyring_holding(id);
+        app.mutate_config(|config| config.record_keyring_cleanup(&id.to_string()))
+            .expect("intent");
+        app.test_keyring = Some(TestKeyring::Store(store.clone()));
+
+        app.finish_keyring_cleanup();
+
+        assert!(store.load(&refresh_key(id)).expect("load").is_none());
+        assert!(app.config().keyring_cleanup.is_empty());
+    }
+
+    #[test]
+    fn a_login_without_a_refresh_credential_leaves_nothing_to_clean_up() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let id = Uuid::new_v4();
+        let store = Arc::new(MemoryStore::new());
+        app.test_keyring = Some(TestKeyring::Store(store.clone()));
+        block_configuration_writes(&app);
+
+        let login = Login::new(microsoft_session(id), None);
+        app.adopt_login(&provider_over(store.clone()), login)
+            .expect_err("the account cannot be recorded");
+
+        assert!(store.load(&refresh_key(id)).expect("load").is_none());
+    }
+
+    #[test]
+    fn a_removal_waits_for_a_login_that_is_storing_and_then_removes_what_it_stored() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let id = Uuid::new_v4();
+        let (stored_tx, stored_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let store = Arc::new(HookedStore {
+            inner: MemoryStore::new(),
+            after_store: Box::new({
+                let stored_tx = std::sync::Mutex::new(stored_tx);
+                let release_rx = std::sync::Mutex::new(release_rx);
+                move || {
+                    stored_tx.lock().expect("lock").send(()).expect("signal");
+                    release_rx.lock().expect("lock").recv().expect("release");
+                }
+            }),
+        });
+
+        let login = std::thread::spawn({
+            let store = Arc::clone(&store);
+            let root = base.path().to_path_buf();
+            move || {
+                let mut app = app_rooted_at(&root);
+                app.test_keyring = Some(TestKeyring::Store(store.clone()));
+                app.adopt_login(&provider_over(store), login_with(id, "refresh"))
+                    .map(|_| ())
+            }
+        });
+        stored_rx.recv().expect("the login stored its credential");
+
+        // The account is not recorded yet, so only the order can protect the
+        // credential from a removal of the same account.
+        let (removal, waiting) = still_waiting({
+            let store = Arc::clone(&store);
+            let root = base.path().to_path_buf();
+            move || {
+                let mut app = app_rooted_at(&root);
+                app.test_keyring = Some(TestKeyring::Store(store));
+                app.remove_account(&id.to_string()).map(|_| ())
+            }
+        });
+        assert!(waiting, "the removal must wait for the login in progress");
+
+        release_tx.send(()).expect("release");
+        login.join().expect("login thread").expect("login");
+        removal.join().expect("removal thread").expect("removed");
+
+        // The removal ran after the login recorded the account, so neither remains.
+        let config = app_rooted_at(base.path()).config().clone();
+        assert!(!config.accounts.contains_key(&id.to_string()));
+        assert!(store.load(&refresh_key(id)).expect("load").is_none());
+    }
+
+    #[test]
+    fn a_removal_waits_for_a_credential_change_held_elsewhere() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let id = Uuid::new_v4();
+        remember_microsoft_account(&mut app, id);
+        let store = keyring_holding(id);
+        let paths = app.paths().clone();
+        let held = CredentialChangeLock::take(&paths).expect("lock");
+
+        let (removal, waiting) = still_waiting({
+            let store = Arc::clone(&store);
+            let root = base.path().to_path_buf();
+            move || {
+                let mut app = app_rooted_at(&root);
+                app.test_keyring = Some(TestKeyring::Store(store));
+                app.remove_account(&id.to_string()).map(|_| ())
+            }
+        });
+        assert!(waiting, "a removal must not run while a credential changes");
+        assert!(store.load(&refresh_key(id)).expect("load").is_some());
+
+        drop(held);
+        removal.join().expect("removal thread").expect("removed");
+        assert!(store.load(&refresh_key(id)).expect("load").is_none());
+    }
+
+    #[test]
+    fn a_pending_cleanup_does_not_delete_the_credential_of_a_login_recorded_since() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let id = Uuid::new_v4();
+        let mut stale = app_rooted_at(base.path());
+        stale
+            .mutate_config(|config| config.record_keyring_cleanup(&id.to_string()))
+            .expect("record the earlier removal's cleanup");
+        let store = Arc::new(MemoryStore::new());
+        stale.test_keyring = Some(TestKeyring::Store(store.clone()));
+
+        // Another window signs the same account in again, which clears the entry.
+        let mut other = app_rooted_at(base.path());
+        other.test_keyring = Some(TestKeyring::Store(store.clone()));
+        other
+            .adopt_login(&provider_over(store.clone()), login_with(id, "fresh"))
+            .expect("recorded");
+
+        stale.clean_up_keyring(store.as_ref());
+
+        assert!(
+            store.load(&refresh_key(id)).expect("load").is_some(),
+            "the cleanup was decided against the list as it is now"
+        );
+    }
+
+    #[test]
+    fn a_login_waits_for_another_login_of_the_same_account_and_neither_deletes_the_other() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let id = Uuid::new_v4();
+        let store = Arc::new(MemoryStore::new());
+        let paths = Paths::rooted_at(base.path());
+        let held = CredentialChangeLock::take(&paths).expect("lock");
+
+        let (second, waiting) = still_waiting({
+            let store = Arc::clone(&store);
+            let root = base.path().to_path_buf();
+            move || {
+                let mut app = app_rooted_at(&root);
+                app.test_keyring = Some(TestKeyring::Store(store.clone()));
+                app.adopt_login(&provider_over(store), login_with(id, "second"))
+                    .map(|_| ())
+            }
+        });
+        assert!(waiting, "a login must wait for the change in progress");
+
+        // The login in progress elsewhere stores and records its account.
+        let mut first = app_rooted_at(base.path());
+        store
+            .store(&refresh_key(id), &SecretString::new("first".to_owned()))
+            .expect("store");
+        remember_microsoft_account(&mut first, id);
+        drop(held);
+
+        second.join().expect("login thread").expect("login");
+        let kept = store.load(&refresh_key(id)).expect("load");
+        assert!(kept.is_some(), "the recorded account keeps its credential");
+        assert!(
+            app_rooted_at(base.path())
+                .config()
+                .accounts
+                .contains_key(&id.to_string())
         );
     }
 

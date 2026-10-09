@@ -27,9 +27,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ephervex_auth::{
-    AccountProvider, AuthError, AuthEvent, AuthObserver, CredentialKey, CredentialStorage,
-    CredentialStore, Endpoints, LoginFlow, LoginRequest, MemoryStore, MicrosoftAccountProvider,
-    SecretString, XstsDenial,
+    AccountProvider, AuthError, AuthEvent, AuthObserver, CredentialChangeOrder, CredentialKey,
+    CredentialStorage, CredentialStore, Endpoints, LoginFlow, LoginRequest, MemoryStore,
+    MicrosoftAccountProvider, ProcessChangeOrder, SecretString, XstsDenial,
 };
 use ephervex_download::HttpConfig;
 use tokio_util::sync::CancellationToken;
@@ -188,7 +188,16 @@ async fn drive_browser_login(
         )
         .await;
     browser.await.expect("the browser stand-in finished");
-    session
+    let login = session?;
+    keep(provider, &login);
+    Ok(login.session)
+}
+
+/// Stores a login's credential the way the account service does, under the
+/// credential-change order.
+fn keep(provider: &MicrosoftAccountProvider, login: &ephervex_auth::Login) {
+    let held = ProcessChangeOrder.hold().expect("order");
+    provider.keep_login(login, &held).expect("keep");
 }
 
 // ------------------------------------------------------------------ the flows
@@ -342,7 +351,9 @@ async fn the_redirect_uri_sent_to_microsoft_names_localhost_and_is_reachable() {
         .await;
     drop(observer);
     browser.await.expect("the browser stand-in finished");
-    session.expect("the redirect must reach the listener");
+    session
+        .map(|login| login.session)
+        .expect("the redirect must reach the listener");
 
     let redirect = seen
         .lock()
@@ -457,7 +468,8 @@ async fn the_device_code_flow_polls_until_the_user_finishes() {
 
     let store = Arc::new(MemoryStore::new());
     let (observer, mut events) = AuthObserver::channel();
-    let session = provider(&server, store.clone())
+    let provider = provider(&server, store.clone());
+    let login = provider
         .login(
             &LoginRequest {
                 flow: LoginFlow::DeviceCode,
@@ -468,6 +480,8 @@ async fn the_device_code_flow_polls_until_the_user_finishes() {
         )
         .await
         .expect("the device flow completes");
+    keep(&provider, &login);
+    let session = login.session;
 
     assert_eq!(session.account.id, account());
 
@@ -848,7 +862,8 @@ async fn a_removal_made_outside_the_provider_waits_for_a_resume_that_is_publishi
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = done.clone();
         let handle = std::thread::spawn(move || {
-            ephervex_auth::delete_credential(store.as_ref(), &key).expect("delete");
+            let _ordered = ProcessChangeOrder.hold().expect("order");
+            store.delete(&key).expect("delete");
             flag.store(true, std::sync::atomic::Ordering::SeqCst);
         });
         (handle, done)
@@ -866,6 +881,51 @@ async fn a_removal_made_outside_the_provider_waits_for_a_resume_that_is_publishi
     assert!(
         store.load(&key).expect("load").is_none(),
         "a resume that was publishing must not bring the removed credential back"
+    );
+}
+
+/// An order that never lets a change proceed, as a lock held by another
+/// process for longer than a change waits.
+#[derive(Debug)]
+struct OrderHeldElsewhere;
+
+impl CredentialChangeOrder for OrderHeldElsewhere {
+    fn hold(&self) -> Result<ephervex_auth::CredentialChangeGuard, AuthError> {
+        Err(AuthError::CredentialChangeBusy {
+            path: std::path::PathBuf::from("credentials.lock"),
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_resume_stores_nothing_when_the_supplied_order_cannot_be_taken() {
+    let server = MockServer::start().await;
+    mount_token(&server, 200, TOKEN_ROTATED).await;
+    mount_chain(&server).await;
+    let store = Arc::new(MemoryStore::new());
+    let key = CredentialKey::MicrosoftRefreshToken(account());
+    store
+        .store(&key, &SecretString::new("FAKE-MICROSOFT-REFRESH-TOKEN"))
+        .expect("seed");
+
+    let error = provider(&server, store.clone())
+        .with_change_order(Arc::new(OrderHeldElsewhere))
+        .resume(
+            account(),
+            &AuthObserver::silent(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("another process is changing credentials");
+
+    assert!(
+        matches!(error, AuthError::CredentialChangeBusy { .. }),
+        "{error:?}"
+    );
+    assert_eq!(
+        store.load(&key).expect("load").expect("kept").expose(),
+        "FAKE-MICROSOFT-REFRESH-TOKEN",
+        "the rotated credential is not stored outside the order"
     );
 }
 

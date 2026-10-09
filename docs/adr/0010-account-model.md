@@ -90,6 +90,10 @@ leave a secret in the keyring with nothing in `config.toml` recording that it
 exists - an orphan nobody could find to remove later. This way the worst case is
 an account still listed, which can simply be removed again.
 
+The deletion and the account's removal from `config.toml` are one change under
+the credential lock described in ADR 0004, so a sign-in or resume in another
+window or process cannot store a credential between them.
+
 ## Consequences
 
 - `logout` becomes "remove the default account", which is what it means once

@@ -163,7 +163,7 @@ fn provider(server: &MockServer, store: Arc<dyn CredentialStore>) -> MicrosoftAc
 /// Plays the part of the browser: performs the redirect Microsoft would.
 async fn drive_browser_login(
     provider: &MicrosoftAccountProvider,
-) -> Result<ephervex_auth::Session, ephervex_auth::AuthError> {
+) -> Result<ephervex_auth::Login, ephervex_auth::AuthError> {
     let (observer, mut events) = AuthObserver::channel();
     let browser = tokio::spawn(async move {
         while let Some(event) = events.recv().await {
@@ -236,7 +236,7 @@ async fn a_successful_browser_login_emits_no_credential_at_trace_level() {
     assert_no_secret(&capture.contents(), "the trace-level log");
     // The value a frontend is most likely to render, checked separately: a
     // `Debug` that leaks is a leak even if nothing logged it today.
-    assert_no_secret(&format!("{session:?}"), "the session's Debug output");
+    assert_no_secret(&format!("{session:?}"), "the login's Debug output");
 }
 
 #[tokio::test]
@@ -261,7 +261,7 @@ async fn a_device_code_login_emits_neither_the_device_code_nor_the_tokens() {
         .expect("chain completes");
 
     assert_no_secret(&capture.contents(), "the trace-level log");
-    assert_no_secret(&format!("{session:?}"), "the session's Debug output");
+    assert_no_secret(&format!("{session:?}"), "the login's Debug output");
 }
 
 #[tokio::test]

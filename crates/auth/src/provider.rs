@@ -33,6 +33,7 @@ use uuid::Uuid;
 use crate::error::AuthResult;
 use crate::microsoft::DeviceCodePrompt;
 use crate::minecraft::Entitlements;
+use crate::order::CredentialChangeGuard;
 use crate::secret::SecretString;
 use crate::stage::AuthStage;
 use crate::store::CredentialStorage;
@@ -228,6 +229,35 @@ impl Session {
     }
 }
 
+/// A completed login whose refresh credential has not been stored yet.
+///
+/// Storing is a separate step so that whoever records the account can store
+/// the credential in the same ordered change: a credential stored first and
+/// recorded later is exposed to a removal, a cleanup, or a crash in between
+/// (ADR 0004).
+#[derive(Debug)]
+pub struct Login {
+    /// The authenticated session.
+    pub session: Session,
+    pub(crate) refresh: Option<SecretString>,
+}
+
+impl Login {
+    /// A completed login holding the refresh credential to store, if one was
+    /// issued.
+    #[must_use]
+    pub const fn new(session: Session, refresh: Option<SecretString>) -> Self {
+        Self { session, refresh }
+    }
+
+    /// Whether Microsoft issued a refresh credential for [`AccountProvider::keep_login`]
+    /// to store. Without one the login does not survive a restart.
+    #[must_use]
+    pub const fn has_refresh_credential(&self) -> bool {
+        self.refresh.is_some()
+    }
+}
+
 /// Something a login wants to tell the user while it is running.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -299,14 +329,22 @@ impl AuthObserver {
 // `async_trait` marks each boxed future it returns `#[must_use]`.
 #[allow(clippy::double_must_use)]
 pub trait AccountProvider: std::fmt::Debug + Send + Sync {
-    /// Runs an interactive login and, on success, persists the refresh
-    /// credential wherever this provider was told to put it.
+    /// Runs an interactive login. Nothing is stored until
+    /// [`Self::keep_login`].
     async fn login(
         &self,
         request: &LoginRequest,
         observer: &AuthObserver,
         cancel: &CancellationToken,
-    ) -> AuthResult<Session>;
+    ) -> AuthResult<Login>;
+
+    /// Stores a login's refresh credential wherever this provider was told to
+    /// put it.
+    ///
+    /// The caller holds the credential-change order, which `held` proves, and
+    /// keeps holding it until the account that names the credential is
+    /// recorded. Does nothing when no credential was issued.
+    fn keep_login(&self, login: &Login, held: &CredentialChangeGuard) -> AuthResult<()>;
 
     /// Re-establishes a session for an account that has already logged in,
     /// using the stored refresh credential.

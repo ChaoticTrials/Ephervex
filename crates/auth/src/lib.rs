@@ -124,6 +124,7 @@ pub mod loopback;
 pub mod microsoft;
 pub mod minecraft;
 pub mod offline;
+pub mod order;
 pub mod pkce;
 pub mod provider;
 pub mod secret;
@@ -134,7 +135,7 @@ pub mod xbox;
 pub use chain::{
     DEFAULT_CURSEFORGE_API_KEY, MicrosoftAccountProvider, clear_curseforge_api_key,
     curseforge_api_key, curseforge_api_key_configured, curseforge_api_key_without_store,
-    delete_credential, set_curseforge_api_key,
+    set_curseforge_api_key,
 };
 pub use endpoints::{Endpoints, SCOPE, TENANT};
 pub use error::{
@@ -143,9 +144,10 @@ pub use error::{
 pub use microsoft::{DeviceCodePrompt, MicrosoftClient};
 pub use minecraft::{Entitlements, MinecraftProfile};
 pub use offline::{OfflineAccount, offline_uuid};
+pub use order::{CredentialChangeGuard, CredentialChangeOrder, ProcessChangeOrder};
 pub use pkce::Pkce;
 pub use provider::{
-    Account, AccountProvider, AuthEvent, AuthObserver, Credentials, LoginFlow, LoginRequest,
+    Account, AccountProvider, AuthEvent, AuthObserver, Credentials, Login, LoginFlow, LoginRequest,
     Session,
 };
 pub use secret::{REDACTED, SecretString};

@@ -84,6 +84,14 @@ const CONFIG_LOCK_FILE: &str = "config.lock";
 /// stopped or wedged one cannot hang this one.
 const CONFIG_LOCK_PATIENCE: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// The file in the configuration directory whose `flock` orders changes to the
+/// stored credentials against the account records that name them.
+const CREDENTIAL_LOCK_FILE: &str = "credentials.lock";
+
+/// Longer than a configuration update: a change under this lock can wait on a
+/// keyring unlock prompt.
+const CREDENTIAL_LOCK_PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Held while one update reloads, changes, and writes the configuration.
 ///
 /// A `flock`, which the kernel drops if the holder dies, plus a claim on the
@@ -114,11 +122,11 @@ impl Drop for ConfigWriteClaim {
 }
 
 impl ConfigWriteLock {
-    fn take(path: &Path) -> Result<Self, ConfigError> {
+    fn take(path: &Path, patience: std::time::Duration) -> Result<Self, ConfigError> {
         use rustix::fs::{FlockOperation, Mode, OFlags, flock};
         use rustix::io::Errno;
 
-        let deadline = std::time::Instant::now() + CONFIG_LOCK_PATIENCE;
+        let deadline = std::time::Instant::now() + patience;
         let busy = || ConfigError::Busy {
             path: path.to_path_buf(),
         };
@@ -176,6 +184,46 @@ impl ConfigWriteLock {
                 Err(errno) => return Err(unwritable(errno)),
             }
         }
+    }
+}
+
+/// Held while a stored credential is changed together with the decision about
+/// the account record that names it.
+///
+/// Orders a sign-in's store and record, a removal's delete and forget, a
+/// pending cleanup's delete, and a resume's replacement against each other,
+/// across processes, so the keyring never keeps a credential that no recorded
+/// account and no pending cleanup names (ADR 0004). Taken before any
+/// configuration update it surrounds, never inside one, and never taken again
+/// while held: a second take in the same process waits for the first.
+pub struct CredentialChangeLock {
+    _lock: ConfigWriteLock,
+}
+
+impl std::fmt::Debug for CredentialChangeLock {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CredentialChangeLock")
+    }
+}
+
+impl CredentialChangeLock {
+    /// Waits for the credential lock of this configuration directory.
+    ///
+    /// Fails with [`ConfigError::Busy`] when another holder keeps it longer
+    /// than a change should wait.
+    pub fn take(paths: &Paths) -> Result<Self, ConfigError> {
+        crate::paths::create_dir_all(paths.config_dir())?;
+        let directory = std::fs::canonicalize(paths.config_dir()).map_err(|source| {
+            ConfigError::Unwritable {
+                path: paths.config_dir().to_path_buf(),
+                source,
+            }
+        })?;
+        let lock = ConfigWriteLock::take(
+            &directory.join(CREDENTIAL_LOCK_FILE),
+            CREDENTIAL_LOCK_PATIENCE,
+        )?;
+        Ok(Self { _lock: lock })
     }
 }
 
@@ -1134,7 +1182,8 @@ impl Config {
                 source,
             }
         })?;
-        let _writing = ConfigWriteLock::take(&directory.join(CONFIG_LOCK_FILE))?;
+        let _writing =
+            ConfigWriteLock::take(&directory.join(CONFIG_LOCK_FILE), CONFIG_LOCK_PATIENCE)?;
         let mut config = Self::load_or_default(paths)?;
         change(&mut config);
         config.save_to(&paths.config_file())?;
@@ -1731,11 +1780,47 @@ mod tests {
         let held = Paths::rooted_at(base.path().join("held"));
         let other = Paths::rooted_at(base.path().join("other"));
         crate::paths::create_dir_all(held.config_dir()).expect("config dir");
-        let _writing =
-            ConfigWriteLock::take(&held.config_dir().join(CONFIG_LOCK_FILE)).expect("lock");
+        let _writing = ConfigWriteLock::take(
+            &held.config_dir().join(CONFIG_LOCK_FILE),
+            CONFIG_LOCK_PATIENCE,
+        )
+        .expect("lock");
 
         Config::update(&other, |config| config.display.show_linked_servers = true)
             .expect("an unrelated configuration updates at once");
+    }
+
+    #[test]
+    fn credential_changes_in_one_directory_wait_for_each_other_but_not_for_configuration_updates() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let paths = Paths::rooted_at(base.path());
+        let held = CredentialChangeLock::take(&paths).expect("lock");
+
+        Config::update(&paths, |config| config.display.show_linked_servers = true)
+            .expect("a configuration update does not wait for a credential change");
+
+        let waiting = std::thread::spawn({
+            let paths = paths.clone();
+            move || CredentialChangeLock::take(&paths).map(drop)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            !waiting.is_finished(),
+            "a second credential change waits for the first"
+        );
+
+        drop(held);
+        waiting.join().expect("no panic").expect("lock");
+    }
+
+    #[test]
+    fn credential_changes_in_different_directories_do_not_wait_on_each_other() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let _held =
+            CredentialChangeLock::take(&Paths::rooted_at(base.path().join("held"))).expect("lock");
+
+        CredentialChangeLock::take(&Paths::rooted_at(base.path().join("other")))
+            .expect("an unrelated directory is not blocked");
     }
 
     #[test]
@@ -1746,7 +1831,7 @@ mod tests {
         let lock = std::fs::canonicalize(paths.config_dir())
             .expect("canonical")
             .join(CONFIG_LOCK_FILE);
-        let first_writer = ConfigWriteLock::take(&lock).expect("lock");
+        let first_writer = ConfigWriteLock::take(&lock, CONFIG_LOCK_PATIENCE).expect("lock");
 
         let waiting = std::thread::spawn({
             let paths = paths.clone();

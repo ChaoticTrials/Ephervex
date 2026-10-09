@@ -815,7 +815,11 @@ impl CoreError {
             | Self::ModIdentityIncomplete { path }
             | Self::ModDependencyNotMovable { path, .. }
             | Self::DiagnosticBundleNotWritten { path, .. }
-            | Self::DiagnosticBundleOverwritesSource { path } => Some(path.clone()),
+            | Self::DiagnosticBundleOverwritesSource { path }
+            | Self::Auth(
+                ephervex_auth::AuthError::CredentialChangeBusy { path }
+                | ephervex_auth::AuthError::CredentialChangeUnavailable { path },
+            ) => Some(path.clone()),
             Self::ArtifactCache(error) => error.failing_path(),
             Self::Auth(_)
             | Self::ArtifactCacheLimitInvalid(_)
@@ -1181,6 +1185,19 @@ mod tests {
             "the sentence has to name the same ceiling the type enforces"
         );
         assert!(ephervex_i18n::has_attribute(error.message_id(), "action"));
+    }
+
+    #[test]
+    fn a_blocked_credential_change_names_the_lock_a_user_can_be_pointed_at() {
+        let path = PathBuf::from("/config/ephervex/credentials.lock");
+        for error in [
+            ephervex_auth::AuthError::CredentialChangeBusy { path: path.clone() },
+            ephervex_auth::AuthError::CredentialChangeUnavailable { path: path.clone() },
+        ] {
+            let error = CoreError::from(error);
+            assert_eq!(error.failing_path(), Some(path.clone()));
+            assert!(ephervex_i18n::has_attribute(error.message_id(), "action"));
+        }
     }
 
     #[test]

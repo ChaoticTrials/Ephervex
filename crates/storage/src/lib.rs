@@ -51,9 +51,9 @@ pub use clone::{CloneMethod, CloneReport, clone_file, clone_tree, clone_tree_wit
 pub use config::{
     AccountConfig, AccountLookup, ApiConfig, ApplicationColorScheme, ApplicationDisplayConfig,
     ApplicationTextScale, ApplicationTheme, ArtifactCacheLimitMode, CONFIG_SCHEMA_VERSION,
-    CacheConfig, Config, ConfigError, EulaConfig, ImportConfig, JavaConfig, LinkedPairConfig,
-    ModsConfig, NetworkAccess, PreferenceSetting, SECRET_KEY_MARKERS, ServerDefaults,
-    TechnicalTextSize,
+    CacheConfig, Config, ConfigError, CredentialChangeLock, EulaConfig, ImportConfig, JavaConfig,
+    LinkedPairConfig, ModsConfig, NetworkAccess, PreferenceSetting, SECRET_KEY_MARKERS,
+    ServerDefaults, TechnicalTextSize,
 };
 pub use diagnostics::{
     CrashSummary, DEFAULT_VIEW_BYTES, DiagnosticEntry, DiagnosticError, DiagnosticKind,

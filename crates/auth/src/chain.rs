@@ -8,8 +8,9 @@
 //! obtained; a refresh differs only in that it obtains one without the user
 //! present. Everything after that is identical, which is why [`Self::establish`]
 //! exists and why there is exactly one implementation of the four Minecraft
-//! legs rather than three near-copies that drift. A login then stores its
-//! refresh token in [`Self::finish`]; a resume stores its own as it is issued.
+//! legs rather than three near-copies that drift. A login hands its refresh
+//! token back for [`AccountProvider::keep_login`]; a resume stores its own as
+//! it is issued.
 //!
 //! # Rotation is not optional
 //!
@@ -22,18 +23,19 @@
 //! Xbox, Minecraft, and profile legs run. The replacement is the token the
 //! client is expected to keep, so an outage further down the chain must not
 //! cost the user the credential they were issued. A login has no earlier
-//! credential to protect and stores only once the account is known to own the
-//! game.
+//! credential to protect and is stored only once the account is known to own the
+//! game and its caller is ready to record it.
 //!
 //! # Resume and logout are ordered
 //!
 //! A resume reads a credential, spends time on the network, and writes a
 //! replacement. Every write after that wait, and every removal of a rejected
-//! credential, happens under one lock that [`AccountProvider::logout`] also
-//! takes, and only if the store still holds the credential the resume started
-//! from. A logout that completed in between therefore stays complete.
+//! credential, happens under one [`CredentialChangeOrder`] that
+//! [`AccountProvider::logout`] and the account records' owner also take, and
+//! only if the store still holds the credential the resume started from. A
+//! logout that completed in between therefore stays complete.
 
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -48,9 +50,10 @@ use crate::error::{AuthError, AuthResult};
 use crate::loopback::{LoopbackReceiver, Redirect};
 use crate::microsoft::{MicrosoftClient, MicrosoftTokens};
 use crate::minecraft::{Entitlements, MinecraftServicesClient};
+use crate::order::{CredentialChangeGuard, CredentialChangeOrder, ProcessChangeOrder};
 use crate::pkce::Pkce;
 use crate::provider::{
-    Account, AccountProvider, AuthEvent, AuthObserver, Credentials, LoginFlow, LoginRequest,
+    Account, AccountProvider, AuthEvent, AuthObserver, Credentials, Login, LoginFlow, LoginRequest,
     Session,
 };
 use crate::secret::SecretString;
@@ -65,32 +68,7 @@ pub struct MicrosoftAccountProvider {
     xbox: XboxClient,
     minecraft: MinecraftServicesClient,
     credentials: Arc<dyn CredentialStore>,
-}
-
-/// Orders every credential change that follows a wait on the network against
-/// the removal of that credential.
-///
-/// Process-wide rather than per provider: a launch builds its own provider,
-/// and the account removal that races it runs in another `App`.
-static CREDENTIAL_CHANGES: Mutex<()> = Mutex::new(());
-
-fn lock_credential_changes() -> MutexGuard<'static, ()> {
-    // The guard protects ordering, not data, so a panic elsewhere leaves
-    // nothing to distrust.
-    CREDENTIAL_CHANGES
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-}
-
-/// Deletes a stored credential in order with every resume in this process.
-///
-/// A resume that is publishing or checking the same credential finishes
-/// before the deletion starts, and one that starts afterwards finds it gone.
-/// Anything that removes an account's credential outside a provider uses this
-/// so a resume in flight cannot store it again.
-pub fn delete_credential(store: &dyn CredentialStore, key: &CredentialKey) -> AuthResult<()> {
-    let _ordered = lock_credential_changes();
-    store.delete(key)
+    order: Arc<dyn CredentialChangeOrder>,
 }
 
 impl MicrosoftAccountProvider {
@@ -120,7 +98,20 @@ impl MicrosoftAccountProvider {
             xbox: XboxClient::new(client.clone(), endpoints.clone()),
             minecraft: MinecraftServicesClient::new(client, endpoints, client_id),
             credentials,
+            order: Arc::new(ProcessChangeOrder),
         })
+    }
+
+    /// Orders this provider's credential changes with `order` instead of
+    /// within this process only.
+    ///
+    /// Whoever records accounts passes the order that also covers its own
+    /// removals and cleanups, so a resume cannot store a credential back after
+    /// another process removed its account.
+    #[must_use]
+    pub fn with_change_order(mut self, order: Arc<dyn CredentialChangeOrder>) -> Self {
+        self.order = order;
+        self
     }
 
     /// The Azure application registration in use. Not a secret.
@@ -260,25 +251,21 @@ impl MicrosoftAccountProvider {
         })
     }
 
-    /// Completes a login: runs the chain, then keeps the refresh token.
+    /// Completes a login: runs the chain and keeps the refresh token for
+    /// [`AccountProvider::keep_login`].
     ///
-    /// The token is stored *after* the chain has succeeded. Persisting one for
-    /// an account that cannot play would leave a credential behind that every
-    /// later resume fails on.
+    /// The token is stored only *after* the chain has succeeded and the caller
+    /// is ready to record the account. Persisting one for an account that
+    /// cannot play would leave a credential behind that every later resume
+    /// fails on.
     async fn finish(
         &self,
         tokens: MicrosoftTokens,
         observer: &AuthObserver,
         cancel: &CancellationToken,
-    ) -> AuthResult<Session> {
+    ) -> AuthResult<Login> {
         let session = self.establish(&tokens.access, observer, cancel).await?;
-
-        if let Some(refresh) = &tokens.refresh {
-            self.credentials.store(
-                &CredentialKey::MicrosoftRefreshToken(session.account.id),
-                refresh,
-            )?;
-        } else {
+        if tokens.refresh.is_none() {
             // Microsoft always issues one for `offline_access`, so this means
             // the scope was dropped somewhere. Worth saying: the symptom is a
             // login that mysteriously does not survive a restart.
@@ -287,7 +274,10 @@ impl MicrosoftAccountProvider {
                 "no refresh token was issued; this login will not survive a restart"
             );
         }
-        Ok(session)
+        Ok(Login {
+            session,
+            refresh: tokens.refresh,
+        })
     }
 
     /// Stores the refresh token a resume was issued in place of `loaded`.
@@ -302,7 +292,7 @@ impl MicrosoftAccountProvider {
         loaded: &SecretString,
         replacement: &SecretString,
     ) -> AuthResult<()> {
-        let _ordered = lock_credential_changes();
+        let _ordered = self.order.hold()?;
         match self.credentials.load(key)? {
             None => Err(AuthError::NotSignedIn),
             Some(current) if current == *loaded => self.credentials.store(key, replacement),
@@ -313,7 +303,13 @@ impl MicrosoftAccountProvider {
     /// Removes the credential Microsoft rejected, unless it has changed since
     /// it was read.
     fn discard_rejected(&self, key: &CredentialKey, rejected: &SecretString) {
-        let _ordered = lock_credential_changes();
+        let _ordered = match self.order.hold() {
+            Ok(ordered) => ordered,
+            Err(error) => {
+                warn!(%error, "could not remove the rejected credential");
+                return;
+            }
+        };
         match self.credentials.load(key) {
             Ok(Some(current)) if current == *rejected => {
                 if let Err(removal) = self.credentials.delete(key) {
@@ -327,7 +323,7 @@ impl MicrosoftAccountProvider {
 
     /// Fails when the account signed out while a resume was running.
     fn ensure_signed_in(&self, key: &CredentialKey) -> AuthResult<()> {
-        let _ordered = lock_credential_changes();
+        let _ordered = self.order.hold()?;
         match self.credentials.load(key)? {
             Some(_) => Ok(()),
             None => Err(AuthError::NotSignedIn),
@@ -343,7 +339,7 @@ impl AccountProvider for MicrosoftAccountProvider {
         request: &LoginRequest,
         observer: &AuthObserver,
         cancel: &CancellationToken,
-    ) -> AuthResult<Session> {
+    ) -> AuthResult<Login> {
         observer.stage(AuthStage::Microsoft);
         let tokens = match request.flow {
             LoginFlow::Browser => self.browser_login(request, observer, cancel).await?,
@@ -396,11 +392,20 @@ impl AccountProvider for MicrosoftAccountProvider {
         Ok(session)
     }
 
+    fn keep_login(&self, login: &Login, _held: &CredentialChangeGuard) -> AuthResult<()> {
+        match &login.refresh {
+            Some(refresh) => self.credentials.store(
+                &CredentialKey::MicrosoftRefreshToken(login.session.account.id),
+                refresh,
+            ),
+            None => Ok(()),
+        }
+    }
+
     fn logout(&self, account: Uuid) -> AuthResult<()> {
-        delete_credential(
-            self.credentials.as_ref(),
-            &CredentialKey::MicrosoftRefreshToken(account),
-        )
+        let _ordered = self.order.hold()?;
+        self.credentials
+            .delete(&CredentialKey::MicrosoftRefreshToken(account))
     }
 
     fn has_stored_credential(&self, account: Uuid) -> AuthResult<bool> {

@@ -603,6 +603,12 @@ error-auth-profile-malformed = Minecraft returned a profile Ephervex could not r
 error-auth-secret-storage-unavailable = Ephervex cannot store your sign-in securely on this computer.
 .action = Install and unlock a keyring such as GNOME Keyring or KWallet, or sign in for this session only. Ephervex will never write your credentials to a file.
 
+error-auth-credential-change-busy = Another Ephervex window or command is changing sign-in credentials right now.
+.action = Try again in a moment. If it keeps happening, check which process holds { $path }.
+
+error-auth-credential-change-unavailable = Ephervex cannot safely change your sign-in right now.
+.action = Check that { $path } can be created and written, then try again.
+
 error-auth-credential-store-failed = The system keyring could not be used.
 .action = Check that your keyring is unlocked, then try again.
 

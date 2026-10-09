@@ -38,5 +38,15 @@ When Secret Service is unavailable:
 - Log redaction is the responsibility of whichever crate produces the event,
   because only it knows which fields are secret. Tokens, API keys, and
   authorization headers never reach `tracing`.
+- The keyring never holds a credential that no recorded account and no pending
+  cleanup names. Every change to a stored credential, and the decision about
+  the account record that names it, happens under one lock per configuration
+  directory that holds across processes: a sign-in stores its credential and
+  records its account together, a removal deletes the credential and forgets
+  the account together, a resume replaces a credential only while it is still
+  the one it started from, and each pending cleanup is decided against the
+  current list. A sign-in first lists its account for cleanup, which recording
+  the account clears, so one that stops between storing and recording leaves a
+  credential that a later cleanup deletes.
 - Tests must not require a keyring. The `AccountProvider` abstraction (ADR 0005)
   is what makes credential storage mockable.

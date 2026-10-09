@@ -197,6 +197,15 @@ pub enum AuthError {
     #[error("secure credential storage is unavailable")]
     SecretStorageUnavailable { detail: String },
 
+    /// Another process kept sign-in credentials locked for longer than a
+    /// change waits.
+    #[error("another process is changing sign-in credentials ({path})")]
+    CredentialChangeBusy { path: std::path::PathBuf },
+
+    /// The lock that orders sign-in credential changes could not be taken.
+    #[error("sign-in credential changes could not be ordered ({path})")]
+    CredentialChangeUnavailable { path: std::path::PathBuf },
+
     /// A credential was submitted with nothing but whitespace in it.
     ///
     /// Refused before it reaches the keyring rather than stored and discovered
@@ -416,6 +425,8 @@ impl AuthError {
             }
             Self::ProfileMalformed => "error-auth-profile-malformed",
             Self::SecretStorageUnavailable { .. } => "error-auth-secret-storage-unavailable",
+            Self::CredentialChangeBusy { .. } => "error-auth-credential-change-busy",
+            Self::CredentialChangeUnavailable { .. } => "error-auth-credential-change-unavailable",
             Self::CredentialValueBlank => "error-auth-credential-blank",
             Self::CredentialStore { .. } => "error-auth-credential-store-failed",
             Self::OfflineNameInvalid { .. } => "error-auth-offline-name-invalid",

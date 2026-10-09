@@ -667,6 +667,8 @@ mod tests {
             "error-auth-profile-unavailable",
             "error-auth-profile-malformed",
             "error-auth-secret-storage-unavailable",
+            "error-auth-credential-change-busy",
+            "error-auth-credential-change-unavailable",
             "error-auth-credential-store-failed",
             "error-auth-credential-blank",
             "error-auth-not-signed-in",
