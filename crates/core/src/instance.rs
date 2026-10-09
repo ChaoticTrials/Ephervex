@@ -498,11 +498,12 @@ impl App {
     ) -> CoreResult<ServerCommit<ServerRecord>> {
         let name = validated_entity_name(name)?;
         let mut record = self.canonical_server_for_mutation(server)?;
+        let previous = record.clone();
         record.name = name;
         let committed = self
             .registry_for_services()
             .update_server_committed(&mut record)?;
-        self.sync_linked_server_list(&committed.record);
+        self.sync_linked_server_list(&committed.record, Some(&previous));
         Ok(committed)
     }
 }

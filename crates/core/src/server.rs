@@ -294,7 +294,7 @@ impl App {
             .registry_for_services()
             .publish_staged_server(&record, &staging)?;
         cleanup.disarm();
-        self.sync_linked_server_list(&committed.record);
+        self.sync_linked_server_list(&committed.record, None);
         Ok(committed)
     }
 
@@ -614,11 +614,12 @@ impl App {
         let typed = network_properties(&network)?;
         typed.validate()?;
         merge_network_file(&server_properties_path(&record), &network)?;
+        let previous = record.clone();
         record.network = network;
         let committed = self
             .registry_for_services()
             .update_server_committed(&mut record)?;
-        self.sync_linked_server_list(&committed.record);
+        self.sync_linked_server_list(&committed.record, Some(&previous));
         Ok(committed)
     }
 
@@ -634,11 +635,12 @@ impl App {
         let network = change.applied_to(&record.network)?;
         network_properties(&network)?.validate()?;
         merge_network_file(&server_properties_path(&record), &network)?;
+        let previous = record.clone();
         record.network = network;
         let committed = self
             .registry_for_services()
             .update_server_committed(&mut record)?;
-        self.sync_linked_server_list(&committed.record);
+        self.sync_linked_server_list(&committed.record, Some(&previous));
         Ok(committed)
     }
 
@@ -974,26 +976,53 @@ impl App {
     /// `servers.dat`, so the client's own Multiplayer screen already names
     /// this exact server without anyone typing its address in by hand.
     ///
+    /// `previous` is the record before the change being synced, so an entry
+    /// the game has rewritten without its tag is still found by the name and
+    /// address it showed. If the change moved the server to another client, or
+    /// unlinked it, the entry is removed from the client it left.
+    ///
     /// A no-op for a standalone server, or one whose client cannot currently
     /// be read: there is nothing to update against. Never fails the caller;
     /// see [`crate::linked_server_list`].
-    pub(super) fn sync_linked_server_list(&self, record: &ServerRecord) {
+    pub(super) fn sync_linked_server_list(
+        &self,
+        record: &ServerRecord,
+        previous: Option<&ServerRecord>,
+    ) {
+        if let Some(previous) = previous
+            && previous.linked_client_id.is_some()
+            && previous.linked_client_id != record.linked_client_id
+        {
+            self.forget_linked_server_list_entry(previous);
+        }
         let Some(client_id) = record.linked_client_id else {
             return;
         };
         let Ok(client) = self.client(client_id) else {
             return;
         };
-        let Ok(target) = Self::server_connection_target(record) else {
+        let Some(current) = Self::listed_server(record) else {
             return;
         };
+        let previous = previous
+            .filter(|previous| previous.linked_client_id == record.linked_client_id)
+            .and_then(Self::listed_server);
         let game_dir = ephervex_storage::metadata::client_game_dir(&client.root);
-        crate::linked_server_list::sync_entry(
-            &game_dir,
-            record.id,
-            &record.name,
-            &target.to_string(),
-        );
+        crate::linked_server_list::sync_entry(&game_dir, record.id, &current, previous.as_ref());
+    }
+
+    /// Re-syncs the entry of every server linked to `client`, for a client
+    /// whose `servers.dat` was replaced wholesale.
+    pub(super) fn sync_linked_server_lists_of_client(&self, client: InstanceId) {
+        let Ok(servers) = self.list_servers() else {
+            return;
+        };
+        for server in servers
+            .iter()
+            .filter(|server| server.linked_client_id == Some(client))
+        {
+            self.sync_linked_server_list(server, None);
+        }
     }
 
     /// Removes `record`'s entry from its linked client's `servers.dat`, the
@@ -1006,8 +1035,19 @@ impl App {
         let Ok(client) = self.client(client_id) else {
             return;
         };
+        let Some(listed) = Self::listed_server(record) else {
+            return;
+        };
         let game_dir = ephervex_storage::metadata::client_game_dir(&client.root);
-        crate::linked_server_list::remove_entry(&game_dir, record.id);
+        crate::linked_server_list::remove_entry(&game_dir, record.id, &listed);
+    }
+
+    fn listed_server(record: &ServerRecord) -> Option<crate::linked_server_list::ListedServer> {
+        let target = Self::server_connection_target(record).ok()?;
+        Some(crate::linked_server_list::ListedServer {
+            name: record.name.clone(),
+            address: target.to_string(),
+        })
     }
 }
 
@@ -2609,6 +2649,122 @@ mod tests {
             find_managed_entry(&servers_dat, server.id).is_none(),
             "deleting the server removes its entry, not just the record"
         );
+    }
+
+    /// A client with a linked server, the way a user would have them before
+    /// the game ever saved its server list.
+    fn linked_server_in_client_with_entry(app: &App) -> (PathBuf, ServerRecord) {
+        let client = app
+            .registry_for_services()
+            .create_client(ephervex_storage::NewClient::new(
+                "Repro Client",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("client");
+        app.registry_for_services()
+            .publish_client(&client)
+            .expect("publish");
+        let server = app
+            .registry_for_services()
+            .create_server(NewServer::linked("Repro Server", client.id))
+            .expect("create");
+        app.sync_linked_server_list(&server, None);
+        let servers_dat =
+            ephervex_storage::metadata::client_game_dir(&client.root).join("servers.dat");
+        (servers_dat, server)
+    }
+
+    /// Rewrites `servers.dat` the way Minecraft saves its server list: every
+    /// entry keeps only its own fields, so the hidden id is lost.
+    fn strip_managed_ids(path: &Path) {
+        let bytes = std::fs::read(path).expect("read servers.dat");
+        let mut root: std::collections::HashMap<String, Value> =
+            fastnbt::from_bytes(&bytes).expect("valid nbt");
+        let Some(Value::List(list)) = root.get_mut("servers") else {
+            panic!("no servers list");
+        };
+        for item in list.iter_mut() {
+            if let Value::Compound(fields) = item {
+                fields.remove("ephervexLinkedServerId");
+            }
+        }
+        std::fs::write(path, fastnbt::to_bytes(&root).expect("encode")).expect("write servers.dat");
+    }
+
+    fn listed_entries(path: &Path) -> Vec<(String, String)> {
+        let bytes = std::fs::read(path).expect("read servers.dat");
+        let root: std::collections::HashMap<String, Value> =
+            fastnbt::from_bytes(&bytes).expect("valid nbt");
+        let Some(Value::List(list)) = root.get("servers") else {
+            panic!("no servers list");
+        };
+        list.iter()
+            .map(|item| {
+                let Value::Compound(fields) = item else {
+                    panic!("not a compound");
+                };
+                let text = |key: &str| match fields.get(key) {
+                    Some(Value::String(value)) => value.clone(),
+                    _ => panic!("missing {key}"),
+                };
+                (text("name"), text("ip"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_rename_updates_the_one_entry_after_the_game_dropped_its_hidden_id() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let (servers_dat, server) = linked_server_in_client_with_entry(&app);
+        strip_managed_ids(&servers_dat);
+
+        app.rename_server(server.id, "Renamed Repro Server")
+            .expect("rename");
+
+        assert_eq!(
+            listed_entries(&servers_dat),
+            vec![(
+                "Renamed Repro Server".to_owned(),
+                "127.0.0.1:25565".to_owned()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_port_change_updates_the_one_entry_after_the_game_dropped_its_hidden_id() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let (servers_dat, server) = linked_server_in_client_with_entry(&app);
+        strip_managed_ids(&servers_dat);
+
+        app.update_server_network(
+            server.id,
+            &ServerNetworkChange {
+                port: Some(25_571),
+                ..ServerNetworkChange::default()
+            },
+        )
+        .expect("port change");
+
+        assert_eq!(
+            listed_entries(&servers_dat),
+            vec![("Repro Server".to_owned(), "127.0.0.1:25571".to_owned())]
+        );
+    }
+
+    #[test]
+    fn deleting_a_server_removes_its_entry_after_the_game_dropped_its_hidden_id() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let (servers_dat, server) = linked_server_in_client_with_entry(&app);
+        strip_managed_ids(&servers_dat);
+
+        app.delete_server(server.id, FileDisposition::Remove)
+            .expect("delete");
+
+        assert!(listed_entries(&servers_dat).is_empty());
     }
 
     /// The one entry `sync_entry`/`remove_entry` manage in a client's

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use ephervex_model::{LoaderSelection, SnapshotId};
-use ephervex_storage::{CloneMethod, clone_file};
+use ephervex_storage::{CloneMethod, ServerRecord, clone_file};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio_util::sync::CancellationToken;
 
@@ -462,25 +462,40 @@ impl App {
                 source,
             })?;
 
-        if let Err(error) = self.synchronize_restored_host(host, &layout.root) {
-            let rollback = transaction.rollback();
-            let message = match rollback {
-                Ok(()) => error.to_string(),
-                Err(rollback) => {
-                    format!("could not record restored host: {error}; rollback failed: {rollback}")
-                }
-            };
-            return Err(SnapshotError::Unwritable {
-                path: transaction.directory().to_path_buf(),
-                source: std::io::Error::other(message),
-            });
-        }
+        let previous_server = match self.synchronize_restored_host(host, &layout.root) {
+            Ok(previous_server) => previous_server,
+            Err(error) => {
+                let rollback = transaction.rollback();
+                let message = match rollback {
+                    Ok(()) => error.to_string(),
+                    Err(rollback) => {
+                        format!(
+                            "could not record restored host: {error}; rollback failed: {rollback}"
+                        )
+                    }
+                };
+                return Err(SnapshotError::Unwritable {
+                    path: transaction.directory().to_path_buf(),
+                    source: std::io::Error::other(message),
+                });
+            }
+        };
         transaction
             .finish()
             .map_err(|source| SnapshotError::Unwritable {
                 path: transaction.directory().to_path_buf(),
                 source,
             })?;
+        // The restore can no longer be rolled back, so the client's server
+        // list is brought in line with the records only once it is final.
+        match host {
+            InstalledHost::Instance(id) => self.sync_linked_server_lists_of_client(id),
+            InstalledHost::Server(id) => {
+                if let Ok(restored_server) = self.server(id) {
+                    self.sync_linked_server_list(&restored_server, previous_server.as_ref());
+                }
+            }
+        }
         Ok(SnapshotRestore {
             restored,
             safety_snapshot,
@@ -571,11 +586,14 @@ impl App {
         }
     }
 
+    /// Records the restored host's metadata. For a server, returns the record
+    /// it replaced, which tells the linked client's server list what the
+    /// entry showed before.
     fn synchronize_restored_host(
         &self,
         host: InstalledHost,
         root: &Path,
-    ) -> Result<(), SnapshotError> {
+    ) -> Result<Option<ServerRecord>, SnapshotError> {
         match host {
             InstalledHost::Instance(id) => {
                 let current = self.client(id).map_err(snapshot_core_error)?;
@@ -602,6 +620,7 @@ impl App {
                     .update_client(&mut restored)
                     .map_err(crate::CoreError::from)
                     .map_err(snapshot_core_error)?;
+                Ok(None)
             }
             InstalledHost::Server(id) => {
                 let current = self.server(id).map_err(snapshot_core_error)?;
@@ -622,15 +641,15 @@ impl App {
                         ),
                     });
                 }
-                restored.root = current.root;
+                restored.root.clone_from(&current.root);
                 restored.storage = current.storage;
                 self.registry()
                     .update_server(&mut restored)
                     .map_err(crate::CoreError::from)
                     .map_err(snapshot_core_error)?;
+                Ok(Some(current))
             }
         }
-        Ok(())
     }
 }
 
@@ -1278,6 +1297,140 @@ mod tests {
         );
         assert!(!transaction.directory().exists());
         assert!(!ephervex_storage::metadata::is_incomplete(&client.root));
+    }
+
+    fn listed_servers(client_root: &Path) -> Vec<(String, String)> {
+        let path = ephervex_storage::metadata::client_game_dir(client_root).join("servers.dat");
+        let bytes = std::fs::read(path).expect("read servers.dat");
+        let root: std::collections::HashMap<String, fastnbt::Value> =
+            fastnbt::from_bytes(&bytes).expect("valid nbt");
+        let Some(fastnbt::Value::List(list)) = root.get("servers") else {
+            return Vec::new();
+        };
+        let text =
+            |fields: &std::collections::HashMap<String, fastnbt::Value>, key: &str| match fields
+                .get(key)
+            {
+                Some(fastnbt::Value::String(value)) => Some(value.clone()),
+                _ => None,
+            };
+        list.iter()
+            .filter_map(|item| match item {
+                fastnbt::Value::Compound(fields) => {
+                    Some((text(fields, "name")?, text(fields, "ip")?))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn restoring_a_server_snapshot_puts_its_address_back_in_the_linked_clients_list() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let app = App::open_at(Paths::rooted_at(temporary.path())).expect("open app");
+        let client = app
+            .create_client_for_test(NewClient::new(
+                "linked client",
+                "1.21.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create client");
+        let server = app
+            .registry_for_services()
+            .create_server(ephervex_storage::NewServer::linked(
+                "Repro Server",
+                client.id,
+            ))
+            .expect("create server");
+        app.sync_linked_server_list(&server, None);
+        let snapshot = app
+            .create_snapshot(
+                InstalledHost::Server(server.id),
+                "before port change",
+                SnapshotOrigin::Manual,
+                &CancellationToken::new(),
+            )
+            .expect("create snapshot");
+        app.update_server_network(
+            server.id,
+            &crate::ServerNetworkChange {
+                port: Some(25_571),
+                ..Default::default()
+            },
+        )
+        .expect("port change");
+        assert_eq!(
+            listed_servers(&client.root),
+            vec![("Repro Server".to_owned(), "127.0.0.1:25571".to_owned())]
+        );
+
+        app.restore_snapshot(
+            InstalledHost::Server(server.id),
+            snapshot.id,
+            SnapshotRestoreOptions::default(),
+            &CancellationToken::new(),
+        )
+        .expect("restore");
+
+        assert_eq!(
+            listed_servers(&client.root),
+            vec![("Repro Server".to_owned(), "127.0.0.1:25565".to_owned())]
+        );
+    }
+
+    #[test]
+    fn restoring_a_client_snapshot_lists_every_server_linked_since_it_was_taken() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let app = App::open_at(Paths::rooted_at(temporary.path())).expect("open app");
+        let client = app
+            .create_client_for_test(NewClient::new(
+                "linked client",
+                "1.21.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create client");
+        let early = app
+            .registry_for_services()
+            .create_server(ephervex_storage::NewServer::linked(
+                "Early Server",
+                client.id,
+            ))
+            .expect("create server");
+        app.sync_linked_server_list(&early, None);
+        let snapshot = app
+            .create_snapshot(
+                InstalledHost::Instance(client.id),
+                "before second server",
+                SnapshotOrigin::Manual,
+                &CancellationToken::new(),
+            )
+            .expect("create snapshot");
+        let mut late_new = ephervex_storage::NewServer::linked("Late Server", client.id);
+        late_new.network.port = 25_580;
+        let late = app
+            .registry_for_services()
+            .create_server(late_new)
+            .expect("create server");
+        app.sync_linked_server_list(&late, None);
+        assert_eq!(listed_servers(&client.root).len(), 2);
+
+        app.restore_snapshot(
+            InstalledHost::Instance(client.id),
+            snapshot.id,
+            SnapshotRestoreOptions::default(),
+            &CancellationToken::new(),
+        )
+        .expect("restore");
+
+        let mut listed = listed_servers(&client.root);
+        listed.sort();
+        assert_eq!(
+            listed,
+            vec![
+                ("Early Server".to_owned(), "127.0.0.1:25565".to_owned()),
+                ("Late Server".to_owned(), "127.0.0.1:25580".to_owned()),
+            ]
+        );
     }
 
     #[test]
