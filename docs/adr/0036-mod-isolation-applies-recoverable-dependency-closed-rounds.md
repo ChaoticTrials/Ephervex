@@ -95,6 +95,13 @@ that no other remaining candidate requires, and separates them from the files
 they require, from pinned roots, and from the files pinned roots require. The
 last two were never tested for removal.
 
+Any change to the host's mod set is refused while a session is active:
+installing, updating, changing the version of, removing, adding, restoring,
+deleting, enabling, or disabling a mod, changing the loader build, and linked
+mod operations. A mod added or replaced during a session would either break
+every later round or escape being a suspect. Rounds, resume, finish, and cancel
+are the session's own changes and are not refused.
+
 Deleting the safety snapshot is refused while its session is active. A session
 whose snapshot is already missing still ends: finish skips the dated label, and
 cancel re-enables the mods the plan recorded as initially enabled.

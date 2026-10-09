@@ -102,5 +102,9 @@ If Ephervex or the machine stops during a session, run `status` to inspect the
 persisted round and `resume` to reapply its exact configuration before testing.
 `answer` refuses while the host's mods differ from the round, since the answer
 would describe a configuration that was not tested.
+While a session is active, every other change to the host's mods is refused
+(install, update, remove, add, delete, enable, disable, and loader changes),
+because the session decides which of them are enabled. Finish or cancel the
+session first.
 The session lives at `.launcher/isolation.json` inside the host until finish or
 cancel succeeds.

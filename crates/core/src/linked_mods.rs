@@ -58,7 +58,7 @@ use tracing::{info, instrument, warn};
 
 use crate::app::App;
 use crate::error::{CoreError, CoreResult};
-use crate::mods::{InstalledMods, ModInstallRequest, side_requirement};
+use crate::mods::{InstalledHost, InstalledMods, ModInstallRequest, side_requirement};
 use crate::mutation::{
     DependencyScope, ModMutation, ModMutationPlan, ModVersionChoice, PlannedFile,
 };
@@ -1119,6 +1119,16 @@ impl App {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> LinkedTargetOutcome {
+        if let Err(error) = self.refuse_mod_change_during_isolation(InstalledHost::Server(server)) {
+            return LinkedTargetOutcome {
+                server,
+                name: self
+                    .server(server)
+                    .map_or_else(|_| server.to_string(), |record| record.name),
+                result: LinkedTargetResult::Failed(LinkedTargetFailure::from(&error)),
+            };
+        }
+
         // Planned again from scratch rather than trusted. A server can be
         // started, unlinked, deleted, or moved to another loader build between
         // a confirmation opening and the user pressing apply, and asking again
@@ -2516,6 +2526,47 @@ mod tests {
             "a linked server nobody selected is not touched"
         );
         assert!(!world.server_jars(applied).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_server_in_an_isolation_session_is_refused_while_the_other_targets_proceed() {
+        let world = world().await;
+        let isolating = world.link_server("Isolated Server", MINECRAFT);
+        let other = world.link_server("Other Server", MINECRAFT);
+        apply(&world, &install("ROOTPROJ"), &[isolating, other]).await;
+        world
+            .app
+            .begin_isolation(
+                InstalledHost::Server(isolating),
+                crate::IsolationRequest {
+                    pinned: Vec::new(),
+                    accept_unrecorded: true,
+                    accept_missing: true,
+                },
+                &CancellationToken::new(),
+            )
+            .expect("the server starts a session");
+        let before = world.server_recipe(isolating);
+
+        let outcome = apply(&world, &remove(ROOT_V2), &[isolating, other]).await;
+
+        let LinkedTargetResult::Failed(failure) = result_for(&outcome, isolating) else {
+            panic!("the isolated server is refused");
+        };
+        assert_eq!(failure.message_id, "error-change-isolation-active");
+        let refused = outcome
+            .targets
+            .iter()
+            .find(|target| target.server == isolating)
+            .expect("a result for the isolated server");
+        assert_eq!(refused.name, "Isolated Server");
+        assert_eq!(
+            world.server_recipe(isolating).managed_mods(),
+            before.managed_mods()
+        );
+        assert!(result_for(&outcome, other).succeeded());
+        assert!(world.server_recipe(other).managed_mods().is_empty());
+        assert!(matches!(outcome.client, ClientModOutcome::Mutated(_)));
     }
 
     #[tokio::test]

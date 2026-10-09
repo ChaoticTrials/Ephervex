@@ -717,6 +717,7 @@ impl App {
         host: InstalledHost,
         paths: &[PathBuf],
     ) -> CoreResult<Vec<PathBuf>> {
+        self.refuse_mod_change_during_isolation(host)?;
         let graph = ModGraph::build(self, host)?;
         let mut ordered: Vec<&PathBuf> = paths.iter().collect();
         ordered.sort_by_key(|path| {
@@ -748,6 +749,17 @@ impl App {
         host: InstalledHost,
         changes: &[(PathBuf, bool)],
     ) -> CoreResult<Vec<(PathBuf, ModPresence)>> {
+        self.refuse_mod_change_during_isolation(host)?;
+        self.apply_mod_toggles(host, changes)
+    }
+
+    /// The ordered renames behind [`Self::set_mods_enabled`], for the callers
+    /// that own the decision to change the mod set, such as an isolation round.
+    pub(crate) fn apply_mod_toggles(
+        &self,
+        host: InstalledHost,
+        changes: &[(PathBuf, bool)],
+    ) -> CoreResult<Vec<(PathBuf, ModPresence)>> {
         let graph = ModGraph::build(self, host)?;
         let mut ordered: Vec<&(PathBuf, bool)> = changes.iter().collect();
         ordered.sort_by_key(|(path, enabled)| {
@@ -763,7 +775,7 @@ impl App {
 
         let mut applied = Vec::with_capacity(ordered.len());
         for (path, enabled) in ordered {
-            applied.push((path.clone(), self.set_mod_enabled(host, path, *enabled)?));
+            applied.push((path.clone(), self.toggle_mod_file(host, path, *enabled)?));
         }
         Ok(applied)
     }

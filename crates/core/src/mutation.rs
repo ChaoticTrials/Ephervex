@@ -65,7 +65,7 @@ use tracing::{info, instrument, warn};
 
 use crate::app::App;
 use crate::error::{CoreError, CoreResult};
-use crate::mods::{ManagedModEntry, ManagedModSnapshot};
+use crate::mods::{InstalledHost, ManagedModEntry, ManagedModSnapshot};
 
 /// Why a mod cannot be mutated.
 ///
@@ -568,6 +568,7 @@ impl App {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<ModMutation> {
+        self.refuse_mod_change_during_isolation(InstalledHost::Instance(instance))?;
         self.with_artifact_cache(Box::pin(self.change_managed_mod_version_holding_the_cache(
             instance, target, choice, reporter, cancel,
         )))
@@ -664,6 +665,7 @@ impl App {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<ModMutation> {
+        self.refuse_mod_change_during_isolation(InstalledHost::Instance(instance))?;
         let mut context = self.mutation_context(instance, target)?;
         let plan = self.removal_plan(&context, reporter, cancel).await?;
         let removals = removals_for(&plan);

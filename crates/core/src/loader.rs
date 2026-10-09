@@ -43,6 +43,7 @@ use tracing::{info, instrument, warn};
 
 use crate::app::{App, JavaPlanRequest, JavaTarget};
 use crate::error::{CoreError, CoreResult};
+use crate::mods::InstalledHost;
 
 /// One managed mod that does not fit a candidate loader build.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,6 +204,7 @@ impl App {
         // What a running game was started with cannot be changed underneath
         // it, and the record would then misdescribe the reproduction.
         self.refuse_while_running(instance)?;
+        self.refuse_mod_change_during_isolation(InstalledHost::Instance(instance))?;
         let plan = self.plan_loader_version_change(instance, exact).await?;
         let record = self.client(instance)?;
 

@@ -556,6 +556,21 @@ impl App {
         }
     }
 
+    /// Refuses a change to which mods a host has while an isolation session
+    /// owns them.
+    ///
+    /// A session names its candidates and tests rounds by toggling their files,
+    /// so a mod added, replaced or removed underneath it would either break
+    /// every later round or escape being a suspect.
+    pub(crate) fn refuse_mod_change_during_isolation(&self, host: InstalledHost) -> CoreResult<()> {
+        if self.isolation_state(host)?.is_some() {
+            return Err(CoreError::ChangeRefused {
+                reason: RepairRefusal::IsolationActive,
+            });
+        }
+        Ok(())
+    }
+
     /// What stops a change to this host's files right now: the host running,
     /// or an isolation session owning which of its mods are enabled.
     pub(crate) fn mutation_blocker(

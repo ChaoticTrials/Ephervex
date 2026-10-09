@@ -4608,7 +4608,12 @@ fn run_worker(
                     // Re-read rather than patched in place: the durable state is
                     // what the panel shows, and it has just changed.
                     Ok(_) => send_host_mods(&app, host, &events, &refreshed_mods, false),
-                    Err(error) => send_error(&events, &error),
+                    // A refused toggle was already flipped in the panel, so the
+                    // durable state is sent back along with the error.
+                    Err(error) => {
+                        send_error(&events, &error);
+                        send_host_mods(&app, host, &events, &refreshed_mods, false);
+                    }
                 }
             }
             Command::QueryDeleteImpact { host, path, name } => {
@@ -9907,7 +9912,10 @@ fn set_mod_enabled(
     if !policy.cascades() {
         match app.set_mods_enabled(host, &[(path.to_path_buf(), enabled)]) {
             Ok(_) => send_host_mods(app, host, events, refreshed, false),
-            Err(error) => send_error(events, &error),
+            Err(error) => {
+                send_error(events, &error);
+                send_host_mods(app, host, events, refreshed, false);
+            }
         }
         return;
     }
@@ -9976,7 +9984,10 @@ fn set_mod_enabled(
 
     match app.set_mods_enabled(host, &changes) {
         Ok(_) => send_host_mods(app, host, events, refreshed, false),
-        Err(error) => send_error(events, &error),
+        Err(error) => {
+            send_error(events, &error);
+            send_host_mods(app, host, events, refreshed, false);
+        }
     }
 }
 

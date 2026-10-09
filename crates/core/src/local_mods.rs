@@ -321,6 +321,7 @@ impl App {
         host: InstalledHost,
         sources: &[PathBuf],
     ) -> CoreResult<LocalModReport> {
+        self.refuse_mod_change_during_isolation(host)?;
         let layout = self.host_layout(host)?;
         let dir = layout.game_dir.join(MODS_DIR);
         let staging = ephervex_storage::metadata::staging_dir(&layout.root);
@@ -379,6 +380,7 @@ impl App {
     /// jar underneath that record would leave the instance describing a mod it
     /// does not have and nothing to say why.
     pub fn delete_mod_file(&self, host: InstalledHost, logical_path: &Path) -> CoreResult<()> {
+        self.refuse_mod_change_during_isolation(host)?;
         let snapshot = self.host_mod_snapshot(host)?;
         let entry = snapshot
             .mods
@@ -446,6 +448,7 @@ impl App {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<()> {
+        self.refuse_mod_change_during_isolation(host)?;
         let layout = self.host_layout(host)?;
         let recipe = layout
             .recipe

@@ -1117,6 +1117,7 @@ impl App {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<InstalledMods> {
+        self.refuse_mod_change_during_isolation(InstalledHost::Instance(instance))?;
         self.with_artifact_cache(Box::pin(
             self.install_mods_holding_the_cache(instance, request, reporter, cancel),
         ))
@@ -1271,6 +1272,18 @@ impl App {
     /// that is not there would report a lie.
     #[instrument(skip(self), fields(host = %host.id()))]
     pub fn set_mod_enabled(
+        &self,
+        host: InstalledHost,
+        logical_path: &Path,
+        enabled: bool,
+    ) -> CoreResult<ModPresence> {
+        self.refuse_mod_change_during_isolation(host)?;
+        self.toggle_mod_file(host, logical_path, enabled)
+    }
+
+    /// The rename behind [`Self::set_mod_enabled`], for the callers that own
+    /// the decision to change the mod set, such as an isolation round.
+    pub(crate) fn toggle_mod_file(
         &self,
         host: InstalledHost,
         logical_path: &Path,

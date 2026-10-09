@@ -937,7 +937,7 @@ impl App {
             .iter()
             .map(|path| (path.clone(), enabled.contains(path)))
             .collect();
-        self.set_mods_enabled(host, &changes)?;
+        self.apply_mod_toggles(host, &changes)?;
         Ok(())
     }
 }

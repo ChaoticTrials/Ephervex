@@ -2,8 +2,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use ephervex_core::{
     App, CoreError, DuplicateClient, InstalledHost, IsolationConfidence, IsolationError,
-    IsolationReport, IsolationRequest, IsolationRound, IsolationRoundKind, IsolationStep, Paths,
-    RoundAnswer,
+    IsolationReport, IsolationRequest, IsolationRound, IsolationRoundKind, IsolationStep,
+    LinkedModRequest, ModInstallRequest, ModVersionChoice, Paths, RepairRefusal, RoundAnswer,
 };
 use ephervex_download::{ChannelSink, OperationReporter};
 use ephervex_model::{AbsentModPolicy, LoaderSelection};
@@ -1310,4 +1310,124 @@ fn a_duplicate_made_during_a_session_carries_no_session_and_can_start_its_own() 
     let copied = InstalledHost::Instance(copy.id);
     assert!(app.isolation_state(copied).unwrap().is_none());
     assert!(app.isolation_state(fixture.host).unwrap().is_some());
+}
+
+fn assert_isolation_refusal<T: std::fmt::Debug>(result: Result<T, CoreError>) {
+    match result {
+        Err(CoreError::ChangeRefused {
+            reason: RepairRefusal::IsolationActive,
+        }) => {}
+        other => panic!("expected an isolation refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn local_mod_changes_are_refused_while_a_session_owns_the_host() {
+    let fixture = Fixture::new();
+    let (app, _) = begin(&fixture, &["pin"]);
+    let before = enabled_files(&fixture);
+    let dropped = fixture.root.join("dropped.jar");
+    std::fs::write(&dropped, b"dropped").unwrap();
+
+    assert_isolation_refusal(app.set_mod_enabled(fixture.host, Path::new("mods/c.jar"), false));
+    assert_isolation_refusal(
+        app.set_mods_enabled(fixture.host, &[(mods(&["c"])[0].clone(), false)]),
+    );
+    assert_isolation_refusal(app.delete_mod_file(fixture.host, Path::new("mods/c.jar")));
+    assert_isolation_refusal(app.delete_mod_files(fixture.host, &mods(&["c"])));
+    assert_isolation_refusal(app.add_local_mods(fixture.host, &[dropped]));
+
+    assert_eq!(enabled_files(&fixture), before);
+    assert!(!fixture.root.join("minecraft/mods/dropped.jar").exists());
+}
+
+#[tokio::test]
+async fn catalog_and_loader_changes_are_refused_while_a_session_owns_the_host() {
+    let fixture = Fixture::new();
+    let (app, _) = begin(&fixture, &["pin"]);
+    let InstalledHost::Instance(instance) = fixture.host else {
+        panic!("a client fixture");
+    };
+    let reporter = OperationReporter::silent("changing");
+    let cancel = CancellationToken::new();
+    let target = Path::new("mods/c.jar");
+
+    assert_isolation_refusal(
+        app.install_mods(
+            instance,
+            &ModInstallRequest::new("sodium"),
+            &reporter,
+            &cancel,
+        )
+        .await,
+    );
+    assert_isolation_refusal(
+        app.change_managed_mod_version(
+            instance,
+            target,
+            &ModVersionChoice::NewestCompatible,
+            &reporter,
+            &cancel,
+        )
+        .await,
+    );
+    assert_isolation_refusal(
+        app.update_managed_mod(instance, target, &reporter, &cancel)
+            .await,
+    );
+    assert_isolation_refusal(
+        app.remove_managed_mod(instance, target, &reporter, &cancel)
+            .await,
+    );
+    assert_isolation_refusal(
+        app.restore_mod_file(fixture.host, target, &reporter, &cancel)
+            .await,
+    );
+    assert_isolation_refusal(
+        app.change_loader_version(instance, "0.0.0", true, &reporter, &cancel)
+            .await,
+    );
+    assert_isolation_refusal(
+        app.apply_linked_mod_operation(
+            instance,
+            &LinkedModRequest::Update {
+                target: target.to_path_buf(),
+            },
+            &[],
+            &reporter,
+            &cancel,
+        )
+        .await,
+    );
+}
+
+#[test]
+fn mod_changes_work_again_once_the_session_ends() {
+    let fixture = Fixture::new();
+    let (app, _) = begin(&fixture, &["pin"]);
+    app.cancel_isolation(fixture.host, &CancellationToken::new())
+        .unwrap();
+    app.set_mod_enabled(fixture.host, Path::new("mods/c.jar"), false)
+        .unwrap();
+    assert!(fixture.root.join("minecraft/mods/c.jar.disabled").is_file());
+
+    let (app, first) = begin(&fixture, &["pin"]);
+    drive(&app, fixture.host, first, enables(&["e"]));
+    app.finish_isolation(fixture.host).unwrap();
+    app.set_mod_enabled(fixture.host, Path::new("mods/c.jar"), true)
+        .unwrap();
+}
+
+#[test]
+fn rounds_resume_and_finish_still_apply_while_mod_changes_are_refused() {
+    let fixture = Fixture::new();
+    let (app, first) = begin(&fixture, &["pin"]);
+    assert_isolation_refusal(app.set_mod_enabled(fixture.host, Path::new("mods/e.jar"), false));
+
+    interrupt_round(&fixture);
+    app.resume_isolation(fixture.host).unwrap();
+    let (_, step) = drive(&app, fixture.host, first, enables(&["e"]));
+    assert!(matches!(step, IsolationStep::Complete(_)));
+    let report = app.finish_isolation(fixture.host).unwrap();
+    assert_eq!(roots(&report), mods(&["e"]));
 }
