@@ -410,6 +410,9 @@ impl App {
                 }
                 other => snapshot_core_error(crate::CoreError::from(other)),
             })?;
+        // The restore replaces the recipe wholesale, so a background write
+        // that read the previous one must not land on top of it.
+        let _gate = crate::host_recipe_gate::hold_blocking(host);
         let layout = self.host_layout(host).map_err(snapshot_core_error)?;
         let snapshot = self.snapshot_directory(host, id)?;
         let restored = read_manifest(&snapshot)?;

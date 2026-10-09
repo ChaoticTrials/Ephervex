@@ -63,6 +63,7 @@ use tracing::{debug, info, instrument, warn};
 
 use crate::app::App;
 use crate::error::{CoreError, CoreResult};
+use crate::host_recipe_gate;
 use crate::mod_display_cache::{
     self, ModDisplay, ProjectDisplay, RememberedDisplay, VersionDisplay,
 };
@@ -1136,6 +1137,11 @@ impl App {
             .plan_for(&record, request, InstalledPolicy::Preserve, reporter)
             .await?;
 
+        // From reading the recipe to the install writing it back, so the
+        // background enrichment of this host cannot write in between.
+        let _gate =
+            host_recipe_gate::hold_for_change(InstalledHost::Instance(instance), cancel).await?;
+
         // An instance created by hand has no recipe until something needs one.
         let store = SourceStore::new(ephervex_storage::metadata::source_dir(&record.root));
         let mut recipe = if store.has_recipe() {
@@ -1500,14 +1506,16 @@ impl App {
                 // The releases just fetched state what each mod requires. Kept,
                 // so refreshing the list leaves dependency questions answered
                 // exactly as an explicit dependency refresh would.
-                if let Err(error) = self.record_declared_relations(
-                    host,
-                    details
-                        .versions
-                        .iter()
-                        .map(|((catalog, _), version)| (*catalog, version)),
-                ) {
-                    warn!(%error, "the relations these mods declare could not be recorded");
+                if let Some(_gate) = host_recipe_gate::hold(host, cancel).await {
+                    if let Err(error) = self.record_declared_relations(
+                        host,
+                        details
+                            .versions
+                            .iter()
+                            .map(|((catalog, _), version)| (*catalog, version)),
+                    ) {
+                        warn!(%error, "the relations these mods declare could not be recorded");
+                    }
                 }
                 snapshot.apply(&details);
                 snapshot.metadata = MetadataAvailability::Provider;
@@ -1643,6 +1651,11 @@ impl App {
             };
             adopted.push(entry.clone());
         }
+        // Held from the read inside to the write, so a change made to this
+        // host in the meantime is neither lost nor lost to it.
+        let Some(_gate) = host_recipe_gate::hold(host, cancel).await else {
+            return;
+        };
         record_identified(&layout.root, &adopted);
     }
 

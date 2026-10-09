@@ -381,6 +381,9 @@ impl App {
     /// does not have and nothing to say why.
     pub fn delete_mod_file(&self, host: InstalledHost, logical_path: &Path) -> CoreResult<()> {
         self.refuse_mod_change_during_isolation(host)?;
+        // Held until the record is forgotten, so a background write of the
+        // recipe cannot restore it or be lost to this one.
+        let _gate = crate::host_recipe_gate::hold_blocking(host);
         let snapshot = self.host_mod_snapshot(host)?;
         let entry = snapshot
             .mods

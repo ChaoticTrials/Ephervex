@@ -295,6 +295,8 @@ impl App {
     /// declared are untouched, so what the pack shipped is still recorded
     /// exactly as it was imported.
     fn align_recipe_loader(record: &ephervex_storage::ClientRecord) -> CoreResult<()> {
+        let _gate =
+            crate::host_recipe_gate::hold_blocking(crate::mods::InstalledHost::Instance(record.id));
         let store =
             ephervex_pack::SourceStore::new(ephervex_storage::metadata::source_dir(&record.root));
         if !store.has_recipe() {

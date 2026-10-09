@@ -58,6 +58,7 @@ use tracing::{info, instrument, warn};
 
 use crate::app::App;
 use crate::error::{CoreError, CoreResult};
+use crate::host_recipe_gate;
 use crate::mods::{InstalledHost, InstalledMods, ModInstallRequest, side_requirement};
 use crate::mutation::{
     DependencyScope, ModMutation, ModMutationPlan, ModVersionChoice, PlannedFile,
@@ -1129,6 +1130,17 @@ impl App {
             };
         }
 
+        // Held from reading the server's recipe to committing it.
+        let Some(_gate) = host_recipe_gate::hold(InstalledHost::Server(server), cancel).await
+        else {
+            return LinkedTargetOutcome {
+                server,
+                name: server.to_string(),
+                result: LinkedTargetResult::Failed(LinkedTargetFailure::from(&CoreError::from(
+                    ephervex_pack::PackError::Canceled,
+                ))),
+            };
+        };
         // Planned again from scratch rather than trusted. A server can be
         // started, unlinked, deleted, or moved to another loader build between
         // a confirmation opening and the user pressing apply, and asking again

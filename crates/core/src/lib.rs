@@ -40,6 +40,7 @@ mod disk_usage;
 pub mod download_watch;
 pub mod error;
 pub mod health;
+mod host_recipe_gate;
 pub mod import;
 pub mod instance;
 pub mod isolation;

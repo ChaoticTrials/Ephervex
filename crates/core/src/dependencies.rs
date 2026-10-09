@@ -23,6 +23,7 @@ use tracing::{info, instrument, warn};
 
 use crate::app::App;
 use crate::error::{CoreError, CoreResult};
+use crate::host_recipe_gate;
 use crate::mod_display_cache::{self, RememberedDisplay};
 use crate::mods::{InstalledHost, ModPresence, recipe_relations};
 
@@ -843,6 +844,7 @@ impl App {
             }
         }
 
+        let _gate = host_recipe_gate::hold_for_change(host, cancel).await?;
         let recorded = self.record_declared_relations(
             host,
             answered.iter().map(|(catalog, answer)| (*catalog, answer)),
@@ -2788,6 +2790,179 @@ mod tests {
             closure_of(&after, "SkyblockBuilder.jar"),
             ["LibX.jar", "SkyblockBuilder.jar"]
         );
+    }
+
+    /// A change reads the recipe, works, and writes the copy it read. Recording
+    /// relations in the middle of that must neither be overwritten by it nor
+    /// overwrite what it writes.
+    async fn relations_survive_a_change_that_overlaps(
+        record: impl AsyncFnOnce(&App, InstalledHost),
+    ) {
+        let base = tempfile::tempdir().expect("temp dir");
+        let catalog = listing_catalog(every_release()).await;
+        let (mut app, host, root) = listed_instance_with_unasked_mods(base.path());
+        app.use_loopback_catalog(&catalog.uri())
+            .expect("loopback catalog");
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(&root));
+
+        let gate = host_recipe_gate::hold(host, &CancellationToken::new())
+            .await
+            .expect("the change holds the host");
+        let mut changed = store.read_recipe().expect("recipe");
+
+        let change = async {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            assert_eq!(
+                relations_of(&recipe_at(&root), "SkyGUIs.jar"),
+                None,
+                "relations were written while a change held the host"
+            );
+            changed
+                .files
+                .push(recorded("Installed.jar", LIBRARY, LIBRARY_RELEASE));
+            store.write_recipe(&changed).expect("the change commits");
+            drop(gate);
+        };
+        tokio::join!(record(&app, host), change);
+
+        let recipe = recipe_at(&root);
+        assert!(
+            recipe
+                .files
+                .iter()
+                .any(|file| file.file_name() == "Installed.jar"),
+            "the change was lost"
+        );
+        assert_eq!(
+            relations_of(&recipe, "SkyGUIs.jar").map(<[_]>::len),
+            Some(2),
+            "the relations were lost"
+        );
+    }
+
+    #[tokio::test]
+    async fn refreshing_the_mod_list_waits_for_a_change_in_progress_before_recording_relations() {
+        relations_survive_a_change_that_overlaps(async |app, host| list(app, host).await).await;
+    }
+
+    #[tokio::test]
+    async fn an_explicit_dependency_refresh_waits_for_a_change_in_progress_before_recording() {
+        relations_survive_a_change_that_overlaps(async |app, host| {
+            app.refresh_mod_dependencies(
+                host,
+                &OperationReporter::silent("test-refresh"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("refresh");
+        })
+        .await;
+    }
+
+    /// Whether `operation` is stuck behind a change holding the host, and then
+    /// runs to completion once that change is done. The operations here fail
+    /// afterwards for lack of a catalog, which is beside the point: only
+    /// whether they respect the gate is asserted.
+    async fn waits_for_the_host_gate<T>(
+        host: InstalledHost,
+        operation: impl std::future::Future<Output = T>,
+    ) {
+        let gate = host_recipe_gate::hold(host, &CancellationToken::new())
+            .await
+            .expect("the change holds the host");
+        let mut operation = std::pin::pin!(operation);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), operation.as_mut())
+                .await
+                .is_err(),
+            "the operation ran while another change held the host"
+        );
+        drop(gate);
+        tokio::time::timeout(std::time::Duration::from_secs(30), operation)
+            .await
+            .expect("the operation proceeds once the host is free");
+    }
+
+    fn instance_of(host: InstalledHost) -> ephervex_model::InstanceId {
+        match host {
+            InstalledHost::Instance(id) => id,
+            InstalledHost::Server(_) => unreachable!("the fixture is a client"),
+        }
+    }
+
+    #[tokio::test]
+    async fn removing_a_mod_waits_for_a_change_in_progress() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let catalog = listing_catalog(every_release()).await;
+        let (mut app, host, _root) = listed_instance_with_unasked_mods(base.path());
+        app.use_loopback_catalog(&catalog.uri())
+            .expect("loopback catalog");
+        waits_for_the_host_gate(
+            host,
+            Box::pin(async {
+                let _ = app
+                    .remove_managed_mod(
+                        instance_of(host),
+                        Path::new("mods/LibX.jar"),
+                        &OperationReporter::silent("test-removal"),
+                        &CancellationToken::new(),
+                    )
+                    .await;
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn changing_a_mod_version_waits_for_a_change_in_progress() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let catalog = listing_catalog(every_release()).await;
+        let (mut app, host, _root) = listed_instance_with_unasked_mods(base.path());
+        app.use_loopback_catalog(&catalog.uri())
+            .expect("loopback catalog");
+        waits_for_the_host_gate(
+            host,
+            Box::pin(async {
+                let _ = app
+                    .update_managed_mod(
+                        instance_of(host),
+                        Path::new("mods/LibX.jar"),
+                        &OperationReporter::silent("test-update"),
+                        &CancellationToken::new(),
+                    )
+                    .await;
+            }),
+        )
+        .await;
+    }
+
+    #[test]
+    fn deleting_a_jar_waits_for_a_change_in_progress() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, host, _root) = listed_instance_with_unasked_mods(base.path());
+        let released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+
+        let change = std::thread::spawn({
+            let released = std::sync::Arc::clone(&released);
+            move || {
+                let gate = host_recipe_gate::hold_blocking(host);
+                held_tx.send(()).expect("announce the change");
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                released.store(true, std::sync::atomic::Ordering::SeqCst);
+                drop(gate);
+            }
+        });
+        held_rx.recv().expect("the change holds the host");
+
+        // Whether the jar can be deleted is beside the point. It must not be
+        // attempted before the change is done.
+        let _ = app.delete_mod_file(host, Path::new("mods/LibX.jar"));
+        assert!(
+            released.load(std::sync::atomic::Ordering::SeqCst),
+            "the jar was deleted while another change held the host"
+        );
+        change.join().expect("the change finishes");
     }
 
     #[tokio::test]
