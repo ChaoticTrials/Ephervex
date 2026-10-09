@@ -966,6 +966,14 @@ const fn default_recipe_version() -> u32 {
     RECIPE_VERSION
 }
 
+/// Whether an entry records one provider's project.
+fn records_project(file: &PackFileRecipe, provider: ModProvider, project_id: &str) -> bool {
+    file.identity
+        .as_ref()
+        .and_then(ProviderFileIdentity::project)
+        .is_some_and(|(kind, id)| kind == provider && id == project_id)
+}
+
 impl PackRecipe {
     /// The files that would be installed on one side, in pack order.
     #[must_use]
@@ -1205,12 +1213,21 @@ impl PackRecipe {
         provider: ModProvider,
         project_id: &str,
     ) -> Option<&PackFileRecipe> {
-        self.files.iter().find(|file| {
-            file.identity
-                .as_ref()
-                .and_then(ProviderFileIdentity::project)
-                .is_some_and(|(kind, id)| kind == provider && id == project_id)
-        })
+        self.files
+            .iter()
+            .find(|file| records_project(file, provider, project_id))
+    }
+
+    /// How many entries record one provider's project.
+    ///
+    /// More than one is a state no operation of this crate produces, but a
+    /// stored recipe can carry it, and an operation that only ever sees the
+    /// first entry would leave the others' jars outside what it records.
+    pub(crate) fn managed_project_entries(&self, provider: ModProvider, project_id: &str) -> usize {
+        self.files
+            .iter()
+            .filter(|file| records_project(file, provider, project_id))
+            .count()
     }
 
     /// Fills in what a recorded entry turned out to be, without changing whose

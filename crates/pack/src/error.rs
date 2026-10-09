@@ -344,6 +344,16 @@ pub enum PackError {
     #[error("two mods in this installation both install as `{name}`")]
     DestinationCollision { name: String },
 
+    /// One provider project is named, or already recorded, more than once.
+    ///
+    /// Publication and removal work by project, so a second jar for a project
+    /// would be written or left behind without the recipe describing it.
+    #[error("`{project_id}` from {provider} is named or recorded more than once")]
+    DuplicateManagedProject {
+        provider: ephervex_model::ModProvider,
+        project_id: String,
+    },
+
     /// The original failure was followed by a rollback failure.
     ///
     /// The paths in `issues` remain in launcher-owned recovery storage. They
@@ -410,6 +420,7 @@ impl PackError {
             Self::ManagedVersionConflict { .. } => "error-mod-already-installed",
             Self::DestinationOccupied { .. } => "error-mod-destination-occupied",
             Self::DestinationCollision { .. } => "error-mod-destination-collision",
+            Self::DuplicateManagedProject { .. } => "error-mod-duplicate-project",
             Self::ManagedPathUnsafe { .. } => "error-mod-path-unsafe",
             Self::ManagedDestinationLinked { .. } => "error-mod-destination-linked",
             Self::RollbackIncomplete { .. } => "error-mod-rollback-incomplete",
@@ -547,6 +558,13 @@ impl PackError {
                 ("requested", requested.clone()),
             ],
             Self::DestinationCollision { name } => vec![("name", name.clone())],
+            Self::DuplicateManagedProject {
+                provider,
+                project_id,
+            } => vec![
+                ("provider", provider.to_string()),
+                ("project", project_id.clone()),
+            ],
             Self::FileHashesMissing { path }
             | Self::FileDownloadsMissing { path }
             | Self::DownloadUrlRejected { path, .. }
@@ -773,6 +791,10 @@ mod tests {
             },
             PackError::DestinationCollision {
                 name: "mods/a.jar".to_owned(),
+            },
+            PackError::DuplicateManagedProject {
+                provider: ephervex_model::ModProvider::Modrinth,
+                project_id: "p".to_owned(),
             },
             PackError::ManagedPathUnsafe {
                 path: PathBuf::from("../outside.jar"),

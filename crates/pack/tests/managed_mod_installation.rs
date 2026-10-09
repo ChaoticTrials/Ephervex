@@ -964,3 +964,49 @@ async fn a_linked_disabled_twin_is_refused_and_named_as_the_link() {
     assert!(!target.exists());
     assert!(!instance.jar("root-1.0.jar").exists());
 }
+
+#[tokio::test]
+async fn one_project_requested_at_two_paths_is_refused_before_any_jar_is_written() {
+    // Both jars would be written but only the first recorded, leaving a jar the
+    // recipe does not describe.
+    let server = MockServer::start().await;
+    serve(&server, "/root.jar", ROOT_JAR).await;
+
+    let instance = Instance::new();
+    let mut recipe = recipe();
+    let additions = vec![
+        addition(&server, "/root.jar", "root-a.jar", ROOT_JAR, "ROOTPROJ"),
+        addition(&server, "/root.jar", "root-b.jar", ROOT_JAR, "ROOTPROJ"),
+    ];
+
+    let error = install(&instance, &mut recipe, &additions)
+        .await
+        .expect_err("must refuse");
+    assert!(matches!(
+        error,
+        PackError::DuplicateManagedProject { ref project_id, .. } if project_id == "ROOTPROJ"
+    ));
+    assert!(!instance.jar("root-a.jar").exists());
+    assert!(!instance.jar("root-b.jar").exists());
+    assert!(!instance.store.has_recipe());
+}
+
+#[tokio::test]
+async fn a_project_the_recipe_records_twice_is_refused_when_it_is_requested_again() {
+    let server = MockServer::start().await;
+    serve(&server, "/root.jar", ROOT_JAR).await;
+
+    let instance = Instance::new();
+    let mut recipe = recipe();
+    let first = addition(&server, "/root.jar", "root-a.jar", ROOT_JAR, "ROOTPROJ");
+    let mut second = first.clone();
+    second.logical_path = PathBuf::from("mods/root-b.jar");
+    recipe.files.push(first.clone());
+    recipe.files.push(second);
+
+    let error = install(&instance, &mut recipe, &[first])
+        .await
+        .expect_err("must refuse");
+    assert!(matches!(error, PackError::DuplicateManagedProject { .. }));
+    assert!(!instance.jar("root-a.jar").exists());
+}

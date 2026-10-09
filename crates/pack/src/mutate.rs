@@ -55,7 +55,8 @@ use tracing::{info, instrument, warn};
 use crate::error::{PackError, PackResult};
 use crate::install::{ArtifactFetch, copy_into_instance, fetch_all};
 use crate::managed::{
-    ManagedDestinations, RecordedJar, disabled_path, occupant, recorded_jar, settle_recorded_paths,
+    ManagedDestinations, RecordedJar, disabled_path, occupant, recorded_jar,
+    require_one_entry_per_project, settle_recorded_paths,
 };
 use crate::recipe::{PackFileRecipe, PackRecipe, ProviderFileIdentity};
 use crate::store::SourceStore;
@@ -319,6 +320,14 @@ async fn plan(
             });
         }
     }
+
+    require_one_entry_per_project(
+        recipe,
+        upserts,
+        removals
+            .iter()
+            .map(|removal| (removal.provider, removal.project_id.as_str())),
+    )?;
 
     // A removal must name something Ephervex installed. Anything else is a jar
     // the user owns, and no provider operation gets to delete one.

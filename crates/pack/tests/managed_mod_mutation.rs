@@ -1687,3 +1687,200 @@ async fn a_recorded_logical_path_outside_the_game_directory_is_never_retired_or_
         "the file outside the instance is untouched"
     );
 }
+
+// -- one entry per project ------------------------------------------------
+
+fn duplicate_project(error: &PackError) -> Option<&str> {
+    match error {
+        PackError::DuplicateManagedProject { project_id, .. } => Some(project_id),
+        _ => None,
+    }
+}
+
+#[tokio::test]
+async fn two_new_entries_for_one_project_are_refused_before_any_jar_is_written() {
+    let server = MockServer::start().await;
+    serve(&server, "/root-1.jar", ROOT_V1).await;
+    let instance = Instance::new();
+    let mut recipe = recipe();
+
+    let error = mutate(
+        &instance,
+        &mut recipe,
+        &[
+            entry(
+                &server,
+                "/root-1.jar",
+                "root-a.jar",
+                ROOT_V1,
+                "ROOTPROJ",
+                "ROOTV1",
+                ModOrigin::UserSelected,
+            ),
+            entry(
+                &server,
+                "/root-1.jar",
+                "root-b.jar",
+                ROOT_V1,
+                "ROOTPROJ",
+                "ROOTV1",
+                ModOrigin::UserSelected,
+            ),
+        ],
+        &[],
+    )
+    .await
+    .expect_err("one project cannot be installed twice");
+
+    assert_eq!(duplicate_project(&error), Some("ROOTPROJ"));
+    assert!(instance.jars().is_empty(), "no jar is written");
+    assert!(!instance.store.has_recipe());
+    assert!(recipe.files.is_empty());
+}
+
+#[tokio::test]
+async fn two_replacements_for_one_installed_project_leave_the_instance_untouched() {
+    let server = MockServer::start().await;
+    let instance = Instance::new();
+    let mut recipe = installed(&server, &instance).await;
+    serve(&server, "/root-2.jar", ROOT_V2).await;
+    serve(&server, "/root-3.jar", ROOT_V3).await;
+    let before = instance.store.read_recipe().expect("recipe");
+
+    let error = mutate(
+        &instance,
+        &mut recipe,
+        &[
+            entry(
+                &server,
+                "/root-2.jar",
+                "root-2.0.jar",
+                ROOT_V2,
+                "ROOTPROJ",
+                "ROOTV2",
+                ModOrigin::UserSelected,
+            ),
+            entry(
+                &server,
+                "/root-3.jar",
+                "root-3.0.jar",
+                ROOT_V3,
+                "ROOTPROJ",
+                "ROOTV3",
+                ModOrigin::UserSelected,
+            ),
+        ],
+        &[],
+    )
+    .await
+    .expect_err("one project cannot take two versions");
+
+    assert_eq!(duplicate_project(&error), Some("ROOTPROJ"));
+    assert_eq!(instance.jars(), vec!["library-2.0.jar", "root-1.0.jar"]);
+    assert_eq!(instance.store.read_recipe().expect("recipe"), before);
+    assert_eq!(version_of(&recipe, "ROOTPROJ").as_deref(), Some("ROOTV1"));
+}
+
+#[tokio::test]
+async fn removing_a_project_the_recipe_records_twice_is_refused_and_keeps_both_jars() {
+    let server = MockServer::start().await;
+    let instance = Instance::new();
+    let mut recipe = installed(&server, &instance).await;
+    // Stored state that no operation of this crate produces: a second jar and a
+    // second record for the same project.
+    std::fs::write(instance.jar("root-copy.jar"), ROOT_V1).expect("write");
+    let mut copy = recipe
+        .managed_project(ModProvider::Modrinth, "ROOTPROJ")
+        .expect("recorded")
+        .clone();
+    copy.logical_path = PathBuf::from("mods/root-copy.jar");
+    recipe.files.push(copy);
+    let before = recipe.clone();
+
+    let error = mutate(
+        &instance,
+        &mut recipe,
+        &[],
+        &[ManagedProject::new(ModProvider::Modrinth, "ROOTPROJ")],
+    )
+    .await
+    .expect_err("a removal would strand the second jar");
+
+    assert_eq!(duplicate_project(&error), Some("ROOTPROJ"));
+    assert_eq!(
+        instance.jars(),
+        vec!["library-2.0.jar", "root-1.0.jar", "root-copy.jar"]
+    );
+    assert_eq!(recipe, before);
+}
+
+#[tokio::test]
+async fn replacing_a_project_the_recipe_records_twice_is_refused() {
+    let server = MockServer::start().await;
+    let instance = Instance::new();
+    let mut recipe = installed(&server, &instance).await;
+    serve(&server, "/root-2.jar", ROOT_V2).await;
+    std::fs::write(instance.jar("root-copy.jar"), ROOT_V1).expect("write");
+    let mut copy = recipe
+        .managed_project(ModProvider::Modrinth, "ROOTPROJ")
+        .expect("recorded")
+        .clone();
+    copy.logical_path = PathBuf::from("mods/root-copy.jar");
+    recipe.files.push(copy);
+
+    let error = mutate(
+        &instance,
+        &mut recipe,
+        &[entry(
+            &server,
+            "/root-2.jar",
+            "root-2.0.jar",
+            ROOT_V2,
+            "ROOTPROJ",
+            "ROOTV2",
+            ModOrigin::UserSelected,
+        )],
+        &[],
+    )
+    .await
+    .expect_err("a replacement would strand the second jar");
+
+    assert_eq!(duplicate_project(&error), Some("ROOTPROJ"));
+    assert!(!instance.jar("root-2.0.jar").exists());
+    assert!(instance.jar("root-1.0.jar").is_file());
+    assert!(instance.jar("root-copy.jar").is_file());
+}
+
+#[tokio::test]
+async fn naming_one_project_twice_in_removals_or_in_both_lists_is_refused() {
+    let server = MockServer::start().await;
+    let instance = Instance::new();
+    let mut recipe = installed(&server, &instance).await;
+    serve(&server, "/root-2.jar", ROOT_V2).await;
+    let root = ManagedProject::new(ModProvider::Modrinth, "ROOTPROJ");
+
+    let twice = mutate(&instance, &mut recipe, &[], &[root.clone(), root.clone()])
+        .await
+        .expect_err("a project cannot be removed twice");
+    let both = mutate(
+        &instance,
+        &mut recipe,
+        &[entry(
+            &server,
+            "/root-2.jar",
+            "root-2.0.jar",
+            ROOT_V2,
+            "ROOTPROJ",
+            "ROOTV2",
+            ModOrigin::UserSelected,
+        )],
+        &[root],
+    )
+    .await
+    .expect_err("a project cannot be replaced and removed at once");
+
+    assert_eq!(duplicate_project(&twice), Some("ROOTPROJ"));
+    assert_eq!(duplicate_project(&both), Some("ROOTPROJ"));
+    assert_eq!(instance.jars(), vec!["library-2.0.jar", "root-1.0.jar"]);
+    assert_eq!(version_of(&recipe, "ROOTPROJ").as_deref(), Some("ROOTV1"));
+}

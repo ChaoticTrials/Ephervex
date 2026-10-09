@@ -1552,6 +1552,9 @@ error-mod-destination-linked = A link is in the way of that mod's file.
 error-mod-destination-collision = Two of these mods install under the same file name.
 .action = { $name } is claimed twice, so installing them would leave only one. Install them separately, or leave one out.
 
+error-mod-duplicate-project = A mod is listed more than once.
+.action = { $project } from { $provider } appears more than once in this change or in the instance's mod list, so it cannot be changed safely. Nothing was changed.
+
 error-mod-rollback-incomplete = The mod change failed and the previous files could not be fully restored.
 .action = Review the recovery files at { $path } before changing this instance again.
 

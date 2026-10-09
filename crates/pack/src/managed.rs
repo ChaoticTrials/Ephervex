@@ -29,10 +29,11 @@
 //! restoring by guesswork over pre-existing files is how an installer eats
 //! somebody's work.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use ephervex_download::stored_file_matches;
+use ephervex_model::ModProvider;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
 
@@ -335,12 +336,49 @@ async fn plan_destinations(
         }
     }
 
+    require_one_entry_per_project(recipe, additions, [])?;
+
     let mut destinations = ManagedDestinations::new(game_dir);
     let mut dispositions = Vec::with_capacity(additions.len());
     for file in additions {
         dispositions.push(disposition_for(recipe, file, game_dir, &mut destinations).await?);
     }
     Ok(dispositions)
+}
+
+/// Refuses a change that names one provider project twice, or touches a
+/// project the recipe already records more than once.
+///
+/// Publication and removal work by project and only ever see the first
+/// recorded entry. A second jar for the same project, named by the request or
+/// already standing in the recipe, would be written or left behind without the
+/// recipe describing it. Runs before anything is fetched or written, and is the
+/// one place both the installer and the mutation ask.
+pub(crate) fn require_one_entry_per_project<'a>(
+    recipe: &PackRecipe,
+    requested: &'a [PackFileRecipe],
+    removed: impl IntoIterator<Item = (ModProvider, &'a str)>,
+) -> PackResult<()> {
+    let mut named: BTreeSet<(ModProvider, &str)> = BTreeSet::new();
+    let projects = requested
+        .iter()
+        .filter_map(|file| {
+            file.identity
+                .as_ref()
+                .and_then(ProviderFileIdentity::project)
+        })
+        .chain(removed);
+    for (provider, project_id) in projects {
+        if !named.insert((provider, project_id))
+            || recipe.managed_project_entries(provider, project_id) > 1
+        {
+            return Err(PackError::DuplicateManagedProject {
+                provider,
+                project_id: project_id.to_owned(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// What to do with one planned file.
