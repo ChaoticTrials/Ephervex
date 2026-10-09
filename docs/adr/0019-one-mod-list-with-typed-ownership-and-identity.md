@@ -131,12 +131,16 @@ here replaces or deletes a file the launcher did not install.
 
 Identification is separate from listing, because listing has to remain a
 directory read: it hashes and asks catalogs, so it runs only on an explicit
-refresh. A jar a catalog recognizes is then recorded, with its identity, as
-`client` required and `server` undeclared - the existing way of saying nobody
-has decided whether it belongs on a server, which makes creating one ask rather
-than assume. Its origin stays `HandPlaced`, so being recorded does not make it
-the launcher's to change. A jar nothing recognizes is listed and left
-unrecorded, and a later refresh may still identify it.
+refresh. A jar a catalog recognizes is then recorded, with its identity and the
+relations that release declares, as required on the side of the host it was
+found on and undeclared on the other. On a client that leaves `server`
+undeclared - the existing way of saying nobody has decided whether it belongs on
+a server, which makes creating one ask rather than assume - and on a server the
+jar is one of that server's own mods. It is recorded only if the file is still
+the one that was hashed when the catalog answered. Its origin stays
+`HandPlaced`, so being recorded does not make it the launcher's to change. A
+jar nothing recognizes is listed and left unrecorded, and a later refresh may
+still identify it.
 
 ## Amendment: the list shows the folder, and a hand-placed jar is the user's to delete
 

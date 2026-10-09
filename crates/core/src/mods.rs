@@ -226,6 +226,15 @@ fn may_be_identified(entry: &ManagedModEntry) -> bool {
         && entry.presence != ModPresence::Missing
 }
 
+/// A jar a digest lookup recognized, with what the catalog said about it.
+struct IdentifiedJar {
+    /// The listed entry, carrying the identity the catalog gave and the digest
+    /// that was asked about.
+    entry: ManagedModEntry,
+    /// What the recognized release declares, in the recipe's own shape.
+    relations: Vec<RecipeRelation>,
+}
+
 /// Records what a digest lookup identified in the host's own recipe.
 ///
 /// This is what makes the answer durable. It is deliberately narrow, and it
@@ -234,14 +243,19 @@ fn may_be_identified(entry: &ManagedModEntry) -> bool {
 /// * only jars a catalog actually recognized, so the recipe never gains an
 ///   entry the launcher could not describe;
 /// * a jar the pack shipped inside itself is already an entry, so only its
-///   identity is filled in and its origin, sides and path stay as the pack's
-///   own layer put them;
-/// * for a hand-placed jar, `server` stays `Unknown`, which is the existing way
-///   of saying "nobody has decided whether this belongs on a server". Creating
-///   one then asks, exactly as it does for a CurseForge pack's files, rather
-///   than assuming;
+///   identity and relations are filled in and its origin, sides and path stay
+///   as the pack's own layer put them;
+/// * a hand-placed jar is required on the side of the host it was found on,
+///   and undeclared on the other, which is the existing way of saying "nobody
+///   has decided whether this belongs there". A server's jar is therefore one
+///   of that server's mods, and a client's jar is not assumed to belong on a
+///   server;
 /// * the origin stays whatever it was, so the mod list keeps saying who put the
 ///   file there and mutation keeps refusing what it refused.
+///
+/// The relations the catalog stated for the recognized release are recorded
+/// with the identity, so they do not depend on a second lookup succeeding
+/// (ADR 0034).
 ///
 /// A refusal from `record_managed` is left alone on purpose: it means this
 /// project is already recorded at another version, which is two jars for one
@@ -250,7 +264,7 @@ fn may_be_identified(entry: &ManagedModEntry) -> bool {
 /// The recipe is read here, not taken from the caller, because the lookups that
 /// produced `adopted` ran over the network. An install, a removal or a restored
 /// snapshot that landed meanwhile must survive; only the identities are added.
-fn record_identified(root: &Path, adopted: &[ManagedModEntry]) {
+fn record_identified(root: &Path, side: PackSide, adopted: &[IdentifiedJar]) {
     if adopted.is_empty() {
         return;
     }
@@ -268,9 +282,13 @@ fn record_identified(root: &Path, adopted: &[ManagedModEntry]) {
             return;
         }
     };
+    let (client, server) = match side {
+        PackSide::Client => (SideRequirement::Required, SideRequirement::Unknown),
+        PackSide::Server => (SideRequirement::Unknown, SideRequirement::Required),
+    };
 
     let mut changed = false;
-    for entry in adopted {
+    for IdentifiedJar { entry, relations } in adopted {
         let (Some(provider), Some(project_id)) =
             (entry.identity.provider(), entry.identity.project_id())
         else {
@@ -287,7 +305,16 @@ fn record_identified(root: &Path, adopted: &[ManagedModEntry]) {
         };
         // The pack already recorded this one; a lookup only says what it is.
         if entry.origin == ModOrigin::PackOverride {
-            changed |= recipe.record_identity(&entry.logical_path, identity);
+            if recipe.record_identity(&entry.logical_path, identity) {
+                if let Some(file) = recipe
+                    .files
+                    .iter_mut()
+                    .find(|file| file.logical_path == entry.logical_path)
+                {
+                    file.relations = Some(relations.clone());
+                }
+                changed = true;
+            }
             continue;
         }
         let file = PackFileRecipe {
@@ -295,16 +322,23 @@ fn record_identified(root: &Path, adopted: &[ManagedModEntry]) {
             hashes: entry.hashes.clone(),
             downloads: Vec::new(),
             size: entry.size,
-            client: SideRequirement::Required,
-            server: SideRequirement::Unknown,
+            client,
+            server,
             selected: None,
             origin: ModOrigin::HandPlaced,
             identity: Some(identity),
             original_identity: None,
-            relations: None,
+            relations: Some(relations.clone()),
         };
+        // The same jar may already be recorded from the host's other side
+        // (an earlier identification), which `record_managed` leaves alone.
+        if align_recorded_hand_placed(&mut recipe, side, &file) {
+            changed = true;
+            continue;
+        }
+        let recorded = recipe.files.len();
         match recipe.record_managed(file) {
-            Ok(()) => changed = true,
+            Ok(()) => changed |= recipe.files.len() > recorded,
             Err(error) => {
                 debug!(%error, "a hand-placed jar was not recorded");
             }
@@ -316,6 +350,73 @@ fn record_identified(root: &Path, adopted: &[ManagedModEntry]) {
             warn!(%error, "identified mods could not be recorded");
         }
     }
+}
+
+/// Brings an existing record of a hand-placed jar in line with the host it was
+/// found on.
+///
+/// A record that leaves this host's side undeclared would keep the jar out of
+/// the host's own mod list, so it is listed as unrecorded and identified again
+/// on every refresh. Only that undeclared state is settled; an answer already
+/// given for the side is never overwritten. Returns whether anything changed.
+fn align_recorded_hand_placed(
+    recipe: &mut PackRecipe,
+    side: PackSide,
+    found: &PackFileRecipe,
+) -> bool {
+    let Some(existing) = recipe.files.iter_mut().find(|file| {
+        file.logical_path == found.logical_path
+            && file.origin == ModOrigin::HandPlaced
+            && file.identity == found.identity
+    }) else {
+        return false;
+    };
+    let mut changed = false;
+    if existing.requirement(side) == SideRequirement::Unknown && existing.selected.is_none() {
+        existing.client = found.client;
+        existing.server = found.server;
+        changed = true;
+    }
+    if existing.relations.is_none() && found.relations.is_some() {
+        existing.relations.clone_from(&found.relations);
+        changed = true;
+    }
+    changed
+}
+
+/// The recognized jars whose file is still the one that was hashed.
+///
+/// The lookups ran over the network, so a jar can have been replaced or
+/// deleted since: a snapshot restore, a local mod added, a file manager. An
+/// identification of bytes that are no longer there would describe a file the
+/// user does not have, and verification would then call theirs corrupt. A jar
+/// toggled on or off meanwhile is the same file under its other name.
+async fn still_hashed(game_dir: &Path, adopted: Vec<IdentifiedJar>) -> Vec<IdentifiedJar> {
+    let mut unchanged = Vec::with_capacity(adopted.len());
+    for jar in adopted {
+        let Some(hashed) = jar.entry.hashes.first() else {
+            continue;
+        };
+        let installed = game_dir.join(&jar.entry.logical_path);
+        let mut holds = false;
+        for path in [disabled_path(&installed), installed] {
+            if let Ok(now) = hash_file(&path, hashed.algorithm).await {
+                if now == *hashed {
+                    holds = true;
+                    break;
+                }
+            }
+        }
+        if holds {
+            unchanged.push(jar);
+        } else {
+            debug!(
+                path = %jar.entry.logical_path.display(),
+                "a jar changed while it was being identified; it was not recorded"
+            );
+        }
+    }
+    unchanged
 }
 
 /// One recorded mod whose jar is not in the game directory.
@@ -1665,14 +1766,18 @@ impl App {
                 version_id: found.version_id.clone(),
                 file_id: found.file_id.clone(),
             };
-            adopted.push(entry.clone());
+            adopted.push(IdentifiedJar {
+                entry: entry.clone(),
+                relations: recipe_relations(&found.dependencies),
+            });
         }
         // Held from the read inside to the write, so a change made to this
         // host in the meantime is neither lost nor lost to it.
         let Some(_gate) = host_recipe_gate::hold(self.registry(), host, cancel).await else {
             return;
         };
-        record_identified(&layout.root, &adopted);
+        let adopted = still_hashed(&layout.game_dir, adopted).await;
+        record_identified(&layout.root, host.side(), &adopted);
     }
 
     /// Whatever Modrinth did not recognize, asked of CurseForge by fingerprint.
@@ -3202,7 +3307,7 @@ mod tests {
             size: Some(10),
             ..listed_entry("mods/hand.jar", "hand.jar", ModPresence::Installed)
         };
-        record_identified(root.path(), &[adopted]);
+        record_identified(root.path(), PackSide::Client, &[identified(adopted)]);
 
         let recipe = store.read_recipe().expect("recipe");
         let paths: Vec<_> = recipe
@@ -3221,6 +3326,193 @@ mod tests {
         );
     }
 
+    fn identified(entry: ManagedModEntry) -> IdentifiedJar {
+        IdentifiedJar {
+            entry,
+            relations: Vec::new(),
+        }
+    }
+
+    fn hand_placed_find(name: &str) -> ManagedModEntry {
+        ManagedModEntry {
+            origin: ModOrigin::HandPlaced,
+            identity: version_identity("FOUND", "FOUND-1"),
+            hashes: vec![sha1('d')],
+            size: Some(10),
+            ..listed_entry(&format!("mods/{name}"), name, ModPresence::Installed)
+        }
+    }
+
+    /// A jar found on a server is one of that server's mods, so the server's
+    /// own list no longer reports it as unrecorded on the next refresh.
+    #[test]
+    fn a_jar_identified_on_a_server_is_recorded_as_the_servers_own() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let store = recipe_with_one_mod(root.path());
+
+        record_identified(
+            root.path(),
+            PackSide::Server,
+            &[identified(hand_placed_find("hand.jar"))],
+        );
+
+        let recipe = store.read_recipe().expect("recipe");
+        let hand = &recipe.files[1];
+        assert_eq!(hand.client, SideRequirement::Unknown);
+        assert_eq!(hand.server, SideRequirement::Required);
+        let listed: Vec<_> = recipe
+            .recorded_mods_for(PackSide::Server)
+            .into_iter()
+            .map(|recorded| recorded.logical_path)
+            .collect();
+        assert!(listed.contains(&PathBuf::from("mods/hand.jar")));
+    }
+
+    /// A server that already holds the client-shaped record an earlier
+    /// identification wrote has that record settled, once, rather than the jar
+    /// being identified and the recipe rewritten on every refresh.
+    #[test]
+    fn a_client_shaped_record_on_a_server_is_settled_to_the_servers_side() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let store = recipe_with_one_mod(root.path());
+        record_identified(
+            root.path(),
+            PackSide::Client,
+            &[identified(hand_placed_find("hand.jar"))],
+        );
+        let before = store.read_recipe().expect("recipe");
+        assert!(
+            !before
+                .recorded_mods_for(PackSide::Server)
+                .iter()
+                .any(|recorded| recorded.logical_path == Path::new("mods/hand.jar"))
+        );
+
+        let found = || [identified(hand_placed_find("hand.jar"))];
+        record_identified(root.path(), PackSide::Server, &found());
+
+        let settled = store.read_recipe().expect("recipe");
+        assert_eq!(settled.files.len(), before.files.len());
+        assert!(
+            settled
+                .recorded_mods_for(PackSide::Server)
+                .iter()
+                .any(|recorded| recorded.logical_path == Path::new("mods/hand.jar"))
+        );
+        // Recording it again changes nothing, so nothing is written.
+        let bytes = std::fs::read(store.recipe_path()).expect("recipe bytes");
+        record_identified(root.path(), PackSide::Server, &found());
+        assert_eq!(
+            std::fs::read(store.recipe_path()).expect("recipe bytes"),
+            bytes
+        );
+    }
+
+    /// A jar found on a client is not assumed to belong on a server.
+    #[test]
+    fn a_jar_identified_on_a_client_leaves_the_server_side_undeclared() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let store = recipe_with_one_mod(root.path());
+
+        record_identified(
+            root.path(),
+            PackSide::Client,
+            &[identified(hand_placed_find("hand.jar"))],
+        );
+
+        let hand = &store.read_recipe().expect("recipe").files[1];
+        assert_eq!(hand.client, SideRequirement::Required);
+        assert_eq!(hand.server, SideRequirement::Unknown);
+    }
+
+    /// The release's declared relations arrive with the answer that named it, so
+    /// they are kept even when no second lookup ever succeeds.
+    #[test]
+    fn identification_records_the_relations_the_catalog_declared() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let store = recipe_with_one_mod(root.path());
+        let relations = recipe_relations(&[ModDependency {
+            project_id: Some("LIB".to_owned()),
+            version_id: None,
+            file_name: None,
+            kind: ModRelationKind::Required,
+        }]);
+        assert_eq!(relations.len(), 1);
+
+        let mut shipped = pack_mod("shipped.jar", "SHIP", "SHIP-1");
+        shipped.origin = ModOrigin::PackOverride;
+        let mut recipe = store.read_recipe().expect("recipe");
+        recipe.files.push(shipped);
+        store.write_recipe(&recipe).expect("write the recipe");
+        let mut shipped_find = hand_placed_find("shipped.jar");
+        shipped_find.origin = ModOrigin::PackOverride;
+
+        record_identified(
+            root.path(),
+            PackSide::Client,
+            &[
+                IdentifiedJar {
+                    entry: hand_placed_find("hand.jar"),
+                    relations: relations.clone(),
+                },
+                IdentifiedJar {
+                    entry: shipped_find,
+                    relations: relations.clone(),
+                },
+            ],
+        );
+
+        let recipe = store.read_recipe().expect("recipe");
+        let recorded = |name: &str| {
+            recipe
+                .files
+                .iter()
+                .find(|file| file.logical_path == Path::new("mods").join(name))
+                .and_then(|file| file.recorded_relations().map(<[_]>::to_vec))
+        };
+        assert_eq!(recorded("hand.jar"), Some(relations.clone()));
+        assert_eq!(recorded("shipped.jar"), Some(relations));
+    }
+
+    /// An identification describes the bytes that were hashed. A jar replaced or
+    /// removed while the catalog was being asked is not one of them.
+    #[tokio::test]
+    async fn a_jar_that_changed_during_the_lookup_is_not_recorded() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mods = dir.path().join("mods");
+        std::fs::create_dir_all(&mods).expect("mods dir");
+        let digest = |bytes: &[u8]| {
+            use sha1::{Digest, Sha1};
+            Hash::new(HashAlgorithm::Sha1, &hex::encode(Sha1::digest(bytes)))
+                .expect("a sha1 digest")
+        };
+        let hashed = |name: &str, bytes: &[u8]| {
+            let mut entry = hand_placed_find(name);
+            entry.hashes = vec![digest(bytes)];
+            identified(entry)
+        };
+        std::fs::write(mods.join("same.jar"), b"same").expect("write");
+        std::fs::write(mods.join("replaced.jar"), b"other bytes").expect("write");
+        std::fs::write(mods.join("toggled.jar.disabled"), b"toggled").expect("write");
+
+        let kept = still_hashed(
+            dir.path(),
+            vec![
+                hashed("same.jar", b"same"),
+                hashed("replaced.jar", b"original bytes"),
+                hashed("deleted.jar", b"deleted"),
+                hashed("toggled.jar", b"toggled"),
+            ],
+        )
+        .await;
+
+        let names: Vec<_> = kept
+            .iter()
+            .map(|jar| jar.entry.file_name.as_str())
+            .collect();
+        assert_eq!(names, ["same.jar", "toggled.jar"]);
+    }
+
     /// A host without a recipe is never given one by a lookup.
     #[test]
     fn identifying_a_jar_does_not_create_a_recipe() {
@@ -3230,7 +3522,7 @@ mod tests {
             identity: version_identity("FOUND", "FOUND-1"),
             ..listed_entry("mods/hand.jar", "hand.jar", ModPresence::Installed)
         };
-        record_identified(root.path(), &[adopted]);
+        record_identified(root.path(), PackSide::Client, &[identified(adopted)]);
         assert!(
             !SourceStore::new(ephervex_storage::metadata::source_dir(root.path())).has_recipe()
         );
