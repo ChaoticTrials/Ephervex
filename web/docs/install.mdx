@@ -1,0 +1,168 @@
+---
+title: Installation
+description: Install Ephervex on Linux from a Debian package, RPM, or AppImage.
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# Installation
+
+Download Ephervex from the
+[GitHub releases page](https://github.com/ChaoticTrials/Ephervex/releases).
+Use the x86_64 AppImage, Debian package, or RPM, with its matching `.sha256`
+file.
+
+:::note ARM support
+
+ARM (aarch64) is currently not supported. Support is deferred to a later release,
+even if ARM artifacts are available on the releases page.
+
+:::
+
+## Requirements
+
+- Linux with **glibc 2.35 or newer**, such as Ubuntu 22.04 or Debian 12.
+- An x86_64 system.
+- X11 or XWayland for the desktop application. A Wayland session without
+  XWayland is untested.
+- FUSE for the AppImage, or the extraction option described below.
+
+Run `uname -m` in a terminal to check your architecture:
+
+| `uname -m` | AppImage | Debian package | RPM |
+| --- | --- | --- | --- |
+| `x86_64` | `Ephervex-x86_64.AppImage` | `ephervex_VERSION_amd64.deb` | `ephervex-VERSION-1.x86_64.rpm` |
+
+`VERSION` stands for the release number in the downloaded filename. The
+commands below use x86_64 filenames. Run them from the directory containing
+your download.
+
+To check a download, save its matching `.sha256` file in the same directory
+and run, for example:
+
+```bash
+sha256sum --check Ephervex-x86_64.AppImage.sha256
+```
+
+Continue only if the check reports `OK`. If it fails, download the artifact
+and its checksum again from the same release.
+
+## Debian and Ubuntu
+
+Download the amd64 `.deb`. Replace `VERSION` with the number
+in its filename:
+
+```bash
+sudo apt install ./ephervex_VERSION_amd64.deb
+```
+
+The package installs `ephervex` and `ephervex-gui` on your command path and
+adds Ephervex to the application menu.
+
+## Fedora and other RPM distributions
+
+Download the x86_64 `.rpm`. On Fedora or another distribution
+using DNF:
+
+```bash
+sudo dnf install ./ephervex-VERSION-1.x86_64.rpm
+```
+
+On openSUSE, install the same RPM with Zypper:
+
+```bash
+sudo zypper install ./ephervex-VERSION-1.x86_64.rpm
+```
+
+The package installs both commands and an application menu entry. There is no
+Ephervex RPM repository; download a new RPM when you want to upgrade.
+
+## AppImage
+
+Download the x86_64 AppImage and make it executable:
+
+```bash
+chmod +x Ephervex-x86_64.AppImage
+```
+
+It runs without a package installation. Keep it in a location where you want
+to run it, and do not run it with `sudo`.
+
+### If FUSE is unavailable
+
+The AppImage needs `/dev/fuse` and a `fusermount` helper on your command path.
+If it cannot mount, install your distribution's FUSE package or use:
+
+```bash
+APPIMAGE_EXTRACT_AND_RUN=1 ./Ephervex-x86_64.AppImage
+```
+
+This extracts the AppImage into a temporary directory each time it starts and
+works without FUSE. You can also use this environment variable with the CLI
+commands below.
+
+## Start Ephervex
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+For a package installation, open **Ephervex** from your application menu, or
+run:
+
+```bash
+ephervex-gui
+```
+
+For the AppImage, run it without arguments:
+
+```bash
+./Ephervex-x86_64.AppImage
+```
+
+Use **New Instance** to create an environment, or **Import Modpack** to load
+an existing pack. The [interface tour](./interface-screenshots.mdx) shows
+these controls.
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+For a package installation:
+
+```bash
+ephervex --help
+ephervex doctor
+```
+
+For the AppImage, pass the command as an argument:
+
+```bash
+./Ephervex-x86_64.AppImage --help
+./Ephervex-x86_64.AppImage doctor
+```
+
+To make the AppImage available as `ephervex`, you can create a symlink from
+the directory containing it:
+
+```bash
+mkdir -p ~/.local/bin
+ln -s "$PWD/Ephervex-x86_64.AppImage" ~/.local/bin/ephervex
+```
+
+Ensure `~/.local/bin` is on your `PATH`. The absolute target keeps the link
+valid, and the name `ephervex` selects the command-line interface even when no
+arguments are given.
+
+</TabItem>
+</Tabs>
+
+## Check the installation
+
+Run `ephervex doctor`, or the AppImage's `doctor` command above, for a local
+health report. It checks storage locations, configuration, and the environment
+Ephervex needs. It does not download or launch Minecraft and does not change
+your configuration.
+
+A nonzero exit status means the report found a fault. Read the affected check
+and fix the reported problem before trying again. A directory reported as
+missing and created on first use is normal on a fresh installation.

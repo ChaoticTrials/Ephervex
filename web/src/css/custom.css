@@ -1,30 +1,47 @@
-/**
- * Any CSS included here will be global. The classic template
- * bundles Infima by default. Infima is a CSS framework designed to
- * work well for content-centric websites.
- */
-
-/* You can override the default Infima variables here. */
 :root {
-  --ifm-color-primary: #2e8555;
-  --ifm-color-primary-dark: #29784c;
-  --ifm-color-primary-darker: #277148;
-  --ifm-color-primary-darkest: #205d3b;
-  --ifm-color-primary-light: #33925d;
-  --ifm-color-primary-lighter: #359962;
-  --ifm-color-primary-lightest: #3cad6e;
+  --ifm-color-primary: #147485;
+  --ifm-color-primary-dark: #126979;
+  --ifm-color-primary-darker: #116373;
+  --ifm-color-primary-darkest: #0e5260;
+  --ifm-color-primary-light: #167f91;
+  --ifm-color-primary-lighter: #178597;
+  --ifm-color-primary-lightest: #1997ab;
   --ifm-code-font-size: 95%;
+  --ifm-font-family-base: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --site-bg: #f7fafb;
+  --site-surface: #fff;
+  --site-surface-alt: #edf4f6;
+  --site-image-bg: #dbe7ea;
+  --site-border: #d7e3e6;
+  --site-muted: #52666d;
+  --site-accent: #176e7d;
+  --site-shadow: rgba(24, 61, 70, 0.055);
   --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
 }
 
-/* For readability concerns, you should choose a lighter palette in dark mode. */
 [data-theme='dark'] {
-  --ifm-color-primary: #25c2a0;
-  --ifm-color-primary-dark: #21af90;
-  --ifm-color-primary-darker: #1fa588;
-  --ifm-color-primary-darkest: #1a8870;
-  --ifm-color-primary-light: #29d5b0;
-  --ifm-color-primary-lighter: #32d8b4;
-  --ifm-color-primary-lightest: #4fddbf;
+  --ifm-color-primary: #84d9e1;
+  --ifm-color-primary-dark: #65cdd7;
+  --ifm-color-primary-darker: #55c7d2;
+  --ifm-color-primary-darkest: #32adba;
+  --ifm-color-primary-light: #a3e5eb;
+  --ifm-color-primary-lighter: #b2ebef;
+  --ifm-color-primary-lightest: #ddf7f8;
+  --site-bg: #111b20;
+  --site-surface: #19252b;
+  --site-surface-alt: #142127;
+  --site-image-bg: #10191e;
+  --site-border: #34464d;
+  --site-muted: #a9bbc0;
+  --site-accent: #91dce3;
+  --site-shadow: rgba(0, 0, 0, 0.14);
   --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
 }
+
+.navbar {
+  border-bottom: 1px solid var(--site-border);
+  box-shadow: none;
+}
+
+.navbar__title { letter-spacing: -0.035em; }
+.footer { background: #14272e; }

@@ -7,18 +7,15 @@ Sources: the GUI in `crates/gui/ui`, the CLI in `crates/cli/src/main.rs`,
 `docs/`, the ADRs, and the issue tracker. Code is the source of truth where
 the README disagrees (see "Known stale sources").
 
-## 1. Site setup
+## Site setup
 
-- [ ] Replace the template placeholders in `docusaurus.config.ts`: title,
-      tagline, `url`, `organizationName`, `projectName`, `editUrl`, navbar,
-      footer, copyright, favicon, logo, social card.
-- [ ] Remove the template content: `docs/tutorial-basics`,
-      `docs/tutorial-extras`, `blog/`, `src/pages/markdown-page.mdx`, the
-      homepage features, and `docs/intro.mdx`.
-- [ ] Decide hosting, the production URL, and whether docs are versioned.
-      `DOCUSAURUS_BASE_URL` already supports a subpath.
-- [x] Add a notice that Ephervex is not affiliated with or endorsed by Mojang
-      or Microsoft (interface tour; add it to the site footer too).
+- [ ] Deploy to GitHub Pages at `https://ephervex.chaotictrials.de`.
+      The site configuration and `static/CNAME` use this domain.
+- [ ] Review package repository instructions before publishing the installation
+      page.
+
+Docs use major versions: pre-v1 and v1 releases share v1 at `/docs/v1/`.
+See `README.md` for archiving v1 when v2 work starts.
 
 ## 2. Fixture corrections (`tools/auto-screenshot-tool/src/fixtures.rs`)
 
@@ -151,9 +148,6 @@ Write only what ships. Each task page uses `Tabs` with `groupId="interface"`
 and `queryString="interface"` (GUI first, then CLI). GUI-only and CLI-only
 features show one tab or a short note.
 
-- [ ] Introduction: what Ephervex is, supported scope, limitations
-- [ ] Install: AppImage, .deb, .rpm, FUSE, `ephervex doctor` (source:
-      `docs/release.md`)
 - [ ] Interface tour (replaces `interface-screenshots.mdx`)
 - [ ] Accounts: offline and Microsoft, device code, session-only, keyring
 - [ ] Instances: temporary vs persistent, create, launch, duplicate, make
@@ -231,7 +225,7 @@ easy to update, and capture screenshots late.
 - AppImage needs FUSE or `APPIMAGE_EXTRACT_AND_RUN=1`. glibc 2.35 baseline.
   Wayland sessions without XWayland are untested, and file drag and drop
   needs X11 or XWayland.
-- Linux ARM refuses some Minecraft versions that need x86-only natives.
+- ARM (aarch64) is currently unsupported; support is deferred to a later release.
 
 ## 10. Verification before merging
 
@@ -240,5 +234,6 @@ easy to update, and capture screenshots late.
 - [ ] `cargo test --workspace`
 - [ ] `tools/licenses/generate.sh --check`
 - [ ] `cd web && npm run screenshots:check && npm run typecheck && npm run build`
-- [ ] Regenerate screenshots, run `npm run screenshots:sync`, and commit the
-      WebP assets and manifest.
+- [ ] Regenerate screenshots and run `npm run screenshots:sync` locally.
+      Keep `static/img/ephervex/` ignored until screenshot publication is
+      approved; synchronize assets during deployment before building.

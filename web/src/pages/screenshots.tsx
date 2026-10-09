@@ -34,7 +34,11 @@ function ScreenshotCard({card}: {card: Card}): ReactNode {
   const href = useBaseUrl(`/img/ephervex/${variants[variants.length - 1].file}`);
   return (
     <figure className={styles.card} id={`${card.state}-${card.region}`}>
-      <a className={styles.frame} href={href} target="_blank" rel="noreferrer">
+      <a
+        className={`${styles.frame} ${card.region === 'full' ? '' : styles.cropFrame}`}
+        href={href}
+        target="_blank"
+        rel="noreferrer">
         <ThemeScreenshot state={card.state} region={card.region} alt={card.title} />
       </a>
       <figcaption>
@@ -56,19 +60,22 @@ export default function Screenshots(): ReactNode {
     : catalogGroups;
   return (
     <Layout title="Screenshots" description="Every captured Ephervex screen, in the active color mode.">
-      <main className="container margin-vert--lg">
-        <Heading as="h1">Screenshots</Heading>
-        <p>
-          Every captured screen, built from synthetic sample data. The images follow the
-          site's color mode. Select an image to open it at full size.
-        </p>
-        <nav className={styles.toc}>
+      <main className={`container ${styles.page}`}>
+        <header className={styles.intro}>
+          <span className={styles.eyebrow}>Interface reference</span>
+          <Heading as="h1">See Ephervex in action.</Heading>
+          <p>
+            Every captured screen uses synthetic sample data. Images follow the site's
+            color mode. Select one to open it at full size.
+          </p>
+        </header>
+        <nav className={styles.toc} aria-label="Screenshot categories">
           {groups.map((group) => (
             <a key={group.id} href={`#${group.id}`}>{group.title}</a>
           ))}
         </nav>
         {groups.map((group) => (
-          <section key={group.id} id={group.id} className="margin-bottom--xl">
+          <section key={group.id} id={group.id} className={styles.group}>
             <Heading as="h2">{group.title}</Heading>
             <div className={styles.grid}>
               {group.entries.flatMap(cardsFor).map((card) => (

@@ -1,47 +1,61 @@
 ---
-sidebar_position: 1
+title: Introduction
+description: What Ephervex does, what it supports, and where its limits are.
 ---
 
-# Tutorial Intro
+# Ephervex
 
-Let's discover **Docusaurus in less than 5 minutes**.
+Ephervex is a Linux Minecraft launcher and developer tool for disposable
+bug-reproduction environments. Create an instance with exact Minecraft and
+loader versions, reproduce a problem, and discard the environment when you
+are done. Keep an instance persistent when you need to return to it.
 
-## Getting Started
+The desktop application and command-line interface use the same instance and
+server storage. Shared downloads, game assets, libraries, and managed Java
+runtimes can be reused across environments.
 
-Get started by **creating a new site**.
+These **v1** docs cover pre-v1 releases and the v1 release series.
 
-Or **try Docusaurus immediately** with **[docusaurus.new](https://docusaurus.new)**.
+## What you can do
 
-### What you'll need
+- Create Vanilla, Forge, and NeoForge instances with exact versions.
+- Import Modrinth and CurseForge packs, review optional files, and resolve
+  files that need a manual download.
+- Browse mods, change individual mod versions, and enable, disable, or remove
+  mods with dependency checks.
+- Use mod isolation to narrow down which mods are involved in a failure.
+- Create standalone or linked servers, edit server properties, and use the
+  server console.
+- Inspect logs, crash reports, and diagnostics, and take local snapshots
+  before changes.
 
-- [Node.js](https://nodejs.org/en/download/) version 20.0 or above:
-  - When installing Node.js, you are recommended to check all checkboxes related to dependencies.
+Start with [installation](./install.mdx), then read the
+[interface tour](./interface-screenshots.mdx).
 
-## Generate a new site
+## Supported scope
 
-Generate a new Docusaurus site using the **classic template**.
+Ephervex supports Linux on x86_64 and Minecraft **release versions 1.12.2 and newer**
+with Vanilla, Forge, or NeoForge. A loader must support the exact Minecraft
+release you choose. Ephervex does not substitute a different version when a
+selection is unsupported.
 
-The classic template will automatically be added to your project after you run the command:
+Fabric, Quilt, Minecraft snapshots, pre-releases, and release candidates are
+not supported. ARM (aarch64) support is deferred to a later release. Windows
+and macOS are not supported. Prism and MultiMC exports
+are recognized but refused. The desktop interface is currently English only.
 
-```bash
-npm init docusaurus@latest my-website classic
-```
+## Current limitations
 
-You can type this command into Command Prompt, Powershell, Terminal, or any other integrated terminal of your code editor.
+- CurseForge features need an API key, either supplied by the release or
+  configured in Ephervex. Pack files whose authors disable third-party
+  downloads must be downloaded manually.
+- Resource packs, shader packs, and datapacks in imported packs are not yet
+  preserved.
+- Quitting Ephervex stops running clients and servers.
+- Avoid simultaneous mod changes on the same instance or server, including
+  changes during an active mod isolation session.
+- Session-only Microsoft sign-in does not retain credentials. Persistent
+  credential storage needs a working Secret Service provider, such as GNOME
+  Keyring or KWallet.
 
-The command also installs all necessary dependencies you need to run Docusaurus.
-
-## Start your site
-
-Run the development server:
-
-```bash
-cd my-website
-npm run start
-```
-
-The `cd` command changes the directory you're working with. In order to work with your newly created Docusaurus site, you'll need to navigate the terminal there.
-
-The `npm run start` command builds your website locally and serves it through a development server, ready for you to view at http://localhost:3000/.
-
-Open `docs/intro.md` (this page) and edit some lines: the site **reloads automatically** and displays your changes.
+Ephervex is not affiliated with or endorsed by Mojang or Microsoft.

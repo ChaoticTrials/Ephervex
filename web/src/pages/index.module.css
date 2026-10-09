@@ -1,23 +1,245 @@
-/**
- * CSS files with the .module.css suffix will be treated as CSS modules
- * and scoped locally.
- */
-
-.heroBanner {
-  padding: 4rem 0;
-  text-align: center;
+.hero {
   position: relative;
   overflow: hidden;
+  padding: clamp(4rem, 7vw, 7rem) 0 0;
+  color: #f3f8fa;
+  background:
+    radial-gradient(circle at 85% 16%, rgba(49, 145, 167, 0.2), transparent 36%),
+    linear-gradient(145deg, #101b21 12%, #152d33 100%);
 }
 
-@media screen and (max-width: 996px) {
-  .heroBanner {
-    padding: 2rem;
-  }
+.hero::before {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(154, 225, 230, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(154, 225, 230, 0.035) 1px, transparent 1px);
+  background-size: 48px 48px;
+  content: '';
+  pointer-events: none;
 }
 
-.buttons {
+.heroInner { position: relative; }
+.heroCopy { max-width: 1100px; margin-bottom: 3.5rem; }
+
+.eyebrow,
+.sectionLabel,
+.cardLabel {
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.eyebrow {
+  display: inline-flex;
+  padding: 0.45rem 0.75rem;
+  border: 1px solid rgba(108, 224, 231, 0.4);
+  border-radius: 999px;
+  color: #9ce8ed;
+  background: rgba(31, 111, 126, 0.18);
+}
+
+.hero h1 {
+  margin: 1.6rem 0 1.25rem;
+  font-size: clamp(3rem, 5vw, 4.7rem);
+  line-height: 1.04;
+  letter-spacing: -0.055em;
+  color: inherit;
+}
+
+.hero h1 span { color: #8de2e8; }
+
+.heroCopy > p {
+  max-width: 660px;
+  margin: 0;
+  font-size: clamp(1.05rem, 1.5vw, 1.3rem);
+  line-height: 1.65;
+  color: #cad9dd;
+}
+
+.heroActions {
   display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 2rem;
+}
+
+.primaryAction,
+.secondaryAction {
+  display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 1.25rem;
+  min-height: 3.25rem;
+  padding: 0.75rem 1.25rem;
+  border-radius: 0.55rem;
+  font-weight: 700;
+  text-decoration: none;
+  transition: transform 150ms ease, background-color 150ms ease;
+}
+
+.primaryAction { color: #0d262b; background: #91e0e4; }
+.primaryAction:hover { color: #0d262b; background: #b4f0f0; transform: translateY(-2px); text-decoration: none; }
+.secondaryAction { border: 1px solid #6b888e; color: #f3f8fa; }
+.secondaryAction:hover { color: #fff; background: rgba(255, 255, 255, 0.08); text-decoration: none; }
+
+.supportLine {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 2rem;
+  color: #a9bec3;
+  font-size: 0.82rem;
+}
+
+.supportLine span {
+  padding: 0.25rem 0.55rem;
+  border: 1px solid #46666d;
+  border-radius: 999px;
+}
+
+.heroVisual {
+  overflow: hidden;
+  border: 1px solid #4d737a;
+  border-bottom: 0;
+  border-radius: 1rem 1rem 0 0;
+  background: #17262b;
+  box-shadow: 0 2rem 5rem rgba(0, 0, 0, 0.3);
+}
+
+.windowBar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  min-height: 2.4rem;
+  padding: 0.4rem 0.9rem;
+  color: #adc5ca;
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.7rem;
+}
+
+.windowDots { display: inline-flex; gap: 0.35rem; }
+.windowDots i { width: 0.55rem; height: 0.55rem; border: 1px solid #66858a; border-radius: 50%; }
+
+.features,
+.showcase { padding: clamp(4rem, 7vw, 6.5rem) 0; }
+.features { background: var(--site-bg); }
+.sectionIntro { max-width: 690px; margin-bottom: 2rem; }
+.sectionLabel,
+.cardLabel { color: var(--site-accent); }
+
+.sectionIntro h2,
+.cta h2 {
+  margin: 0.65rem 0 0.75rem;
+  font-size: clamp(2rem, 3.4vw, 3rem);
+  line-height: 1.16;
+  letter-spacing: -0.035em;
+}
+
+.sectionIntro p { margin: 0; color: var(--site-muted); font-size: 1.05rem; }
+
+.featureGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.featureCard {
+  min-height: 245px;
+  padding: 1.75rem;
+  border: 1px solid var(--site-border);
+  border-radius: 0.8rem;
+  background: var(--site-surface);
+  box-shadow: 0 0.75rem 2.25rem var(--site-shadow);
+}
+
+.cardAccent {
+  display: block;
+  width: 2.2rem;
+  height: 0.24rem;
+  margin-bottom: 1.5rem;
+  border-radius: 999px;
+  background: var(--site-accent);
+}
+
+.featureCard h3,
+.showcaseCard h3 {
+  margin: 0.65rem 0 0.75rem;
+  font-size: 1.35rem;
+  line-height: 1.25;
+  letter-spacing: -0.025em;
+}
+
+.featureCard p,
+.showcaseCard p { margin: 0; color: var(--site-muted); line-height: 1.65; }
+.showcase { background: var(--site-surface-alt); }
+
+.showcaseGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1.25rem;
+}
+
+.showcaseCard {
+  overflow: hidden;
+  border: 1px solid var(--site-border);
+  border-radius: 0.9rem;
+  background: var(--site-surface);
+  box-shadow: 0 0.75rem 2.25rem var(--site-shadow);
+}
+
+.showcaseImage {
+  overflow: hidden;
+  border-bottom: 1px solid var(--site-border);
+  background: var(--site-image-bg);
+}
+
+.showcaseImage :global(.themeScreenshot) {
+  width: 115%;
+  max-width: none !important;
+  transform: translate(-4%, 4%);
+}
+
+.showcaseText {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.75rem 1.5rem;
+  padding: 1.5rem;
+}
+
+.showcaseText > div { flex: 1 1 220px; }
+.showcaseText p { flex: 1 1 200px; max-width: 310px; font-size: 0.9rem; }
+
+.showcaseLinks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem 2rem;
+  margin-top: 2rem;
+  font-weight: 700;
+}
+
+.showcaseLinks a { text-decoration: none; }
+.showcaseLinks a:hover { text-decoration: underline; }
+
+.cta { padding: 3.5rem 0; color: #edf8f9; background: #18363d; }
+.ctaInner { display: flex; align-items: center; justify-content: space-between; gap: 2rem; }
+.cta .sectionLabel { color: #8de2e8; }
+.cta h2 { max-width: 650px; margin-bottom: 0; color: inherit; }
+.cta .primaryAction { flex-shrink: 0; }
+
+@media (max-width: 996px) {
+  .featureGrid { grid-template-columns: 1fr; }
+  .featureCard { min-height: 0; }
+}
+
+@media (max-width: 700px) {
+  .hero { padding-top: 3rem; }
+  .heroCopy { margin-bottom: 2.5rem; }
+  .hero h1 { font-size: clamp(2.8rem, 13vw, 4rem); }
+  .heroVisual { margin: 0 -1rem; border-radius: 0.65rem 0.65rem 0 0; }
+  .showcaseGrid { grid-template-columns: 1fr; }
+  .ctaInner { align-items: flex-start; flex-direction: column; }
 }
