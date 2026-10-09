@@ -275,6 +275,15 @@ would place the jar again on the next reapply, and a list that had dropped it
 would be wrong until then. Deleting the file is still offered, because putting a
 jar aside to find which one crashes is what this launcher is for.
 
+The same rule covers a declared file that is not a mod, such as a resource pack,
+a shader pack, or a config file. The recipe records no entry for a shipped file
+that is not a mod jar, because the layer itself is what places it, so a declared
+entry the layers win over on every side is dropped rather than converted. Left
+in place it would keep hashes for bytes that are not installed: verification
+would report the pack's own file as corrupt and repair would download the
+declared file over it. A layer that covers only some of the sides the declared
+file applies to is refused for the same reason as above.
+
 ## Consequences
 
 - The recipe format is version 5. An entry recording a shipped mod carries no

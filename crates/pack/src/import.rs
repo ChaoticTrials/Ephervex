@@ -49,7 +49,7 @@ use crate::modrinth::{self, ParsedPack};
 use crate::policy::PackPolicy;
 use crate::recipe::{
     BlockedProviderFile, DuplicateProviderFile, OptionalComponent, OptionalSelection,
-    OverrideScope, PackRecipe, PackSide, PendingProviderFile, SideRequirement, is_mod_file_path,
+    OverrideScope, PackRecipe, PackSide, PendingProviderFile, SideRequirement,
 };
 use crate::store::SourceStore;
 
@@ -397,7 +397,7 @@ pub async fn materialize(request: MaterializeRequest<'_>) -> PackResult<Material
     // progress bar that has stopped moving for no visible reason.
     reporter.set_stage(Some("operation-stage-extracting-overrides".to_owned()));
     let layers = install::apply_overrides(archive, &recipe, side, game_dir)?;
-    let mut shipped_mods: Vec<(PathBuf, OverrideScope)> = Vec::new();
+    let mut shipped_files: Vec<(PathBuf, OverrideScope)> = Vec::new();
     for applied in &layers {
         if let Some(layer) = recipe
             .override_layers
@@ -406,11 +406,12 @@ pub async fn materialize(request: MaterializeRequest<'_>) -> PackResult<Material
         {
             layer.files = applied.files;
         }
-        // The pack shipped these jars rather than declaring them, so this is
-        // the only place the desired state can learn they are its mods.
-        shipped_mods.extend(
+        // The pack shipped these files rather than declaring them, or shipped
+        // them over a declared file, so this is the only place the desired
+        // state can learn what the pack actually places.
+        shipped_files.extend(
             applied
-                .mod_files
+                .shipped_files
                 .iter()
                 .map(|path| (path.clone(), applied.layer.scope)),
         );
@@ -420,10 +421,10 @@ pub async fn materialize(request: MaterializeRequest<'_>) -> PackResult<Material
     //    import.
     reporter.set_stage(Some("operation-stage-retaining-source".to_owned()));
     let store = SourceStore::new(source_dir);
-    shipped_mods.extend(retain_source(archive, &mut recipe, side, &store)?);
+    shipped_files.extend(retain_source(archive, &mut recipe, side, &store)?);
     // Recorded once every layer is known: what a shipped path means depends on
     // all the layers that place it, and on the declared file at the same path.
-    recipe.record_layer_mods(&shipped_mods)?;
+    recipe.record_layer_files(&shipped_files)?;
     let recipe_path = store.write_recipe(&recipe)?;
 
     info!(
@@ -449,8 +450,8 @@ pub async fn materialize(request: MaterializeRequest<'_>) -> PackResult<Material
 /// A modpack's overrides are often the bulk of its bytes, so the layer already
 /// installed for this side is not duplicated.
 ///
-/// Returns the mod jars the retained layers place, for the recipe to record
-/// together with the applied layers' jars.
+/// Returns the mod jars and declared files the retained layers place, for the
+/// recipe to record together with the applied layers' files.
 fn retain_source(
     archive: &mut PackArchive,
     recipe: &mut PackRecipe,
@@ -467,7 +468,8 @@ fn retain_source(
 
     let already_applied = side.override_scope();
     // Collected while the layers are borrowed.
-    let mut retained_mods: Vec<(OverrideScope, Vec<PathBuf>)> = Vec::new();
+    let mut retained_files: Vec<(OverrideScope, Vec<PathBuf>)> = Vec::new();
+    let filter = recipe.layer_path_filter();
     for layer in &mut recipe.override_layers {
         if layer.scope == already_applied {
             // Already in the game directory, so it does not need to be
@@ -480,19 +482,19 @@ fn retain_source(
         // The same record the applied layers get. A client import retains the
         // server layer without applying it, and a server built from this
         // instance loads whatever that layer places.
-        let mut mod_files = Vec::new();
+        let mut shipped_files = Vec::new();
         let report =
             archive.extract_prefix_filtered(&layer.archive_prefix, &absolute, &mut |path| {
-                if is_mod_file_path(path) {
-                    mod_files.push(path.to_path_buf());
+                if filter.selects(path) {
+                    shipped_files.push(path.to_path_buf());
                 }
                 EntryDecision::Extract
             })?;
         layer.files = report.files;
         layer.retained_at = Some(relative);
-        retained_mods.push((layer.scope, mod_files));
+        retained_files.push((layer.scope, shipped_files));
     }
-    Ok(retained_mods
+    Ok(retained_files
         .into_iter()
         .flat_map(|(scope, paths)| paths.into_iter().map(move |path| (path, scope)))
         .collect())

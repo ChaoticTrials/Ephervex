@@ -622,6 +622,17 @@ async fn pack_declaring_a_mod_and_shipping(
     server: &MockServer,
     shipped: &[(&str, &[u8])],
 ) -> PathBuf {
+    pack_declaring_a_file_and_shipping(workspace, server, "mods/a.jar", shipped).await
+}
+
+/// Builds a `.mrpack` that declares `declared_path` (the bytes `abc`, served
+/// from `server`) and carries exactly the given archive entries.
+async fn pack_declaring_a_file_and_shipping(
+    workspace: &Path,
+    server: &MockServer,
+    declared_path: &str,
+    shipped: &[(&str, &[u8])],
+) -> PathBuf {
     use sha1::Digest as _;
     let declared: &[u8] = b"abc";
     Mock::given(method("GET"))
@@ -635,7 +646,7 @@ async fn pack_declaring_a_mod_and_shipping(
         "versionId": "1.0.0",
         "name": "Layer collision",
         "files": [{
-            "path": "mods/a.jar",
+            "path": declared_path,
             "hashes": {
                 "sha1": hex::encode(sha1::Sha1::digest(declared)),
                 "sha512": hex::encode(sha2::Sha512::digest(declared)),
@@ -754,6 +765,88 @@ async fn an_override_that_replaces_a_declared_mod_on_only_one_side_is_refused() 
 
     assert!(
         matches!(error, PackError::OverrideShadowsDeclaredFile { ref path } if path == Path::new("mods/a.jar")),
+        "{error:?}"
+    );
+}
+
+/// A declared file that is not a mod is placed by the layer that wins over it.
+/// Keeping its declared hashes would make verification call the pack's own bytes
+/// corrupt and repair download the declared file over them.
+#[tokio::test]
+async fn an_override_that_wins_over_a_declared_non_mod_file_drops_the_declared_provenance() {
+    for declared_path in ["resourcepacks/x.zip", "config/x.toml", "mods/data.json"] {
+        let server = MockServer::start().await;
+        let workspace = tempfile::tempdir().expect("temp dir");
+        let archive = pack_declaring_a_file_and_shipping(
+            workspace.path(),
+            &server,
+            declared_path,
+            &[
+                (&format!("overrides/{declared_path}"), b"common"),
+                (&format!("client-overrides/{declared_path}"), b"client"),
+                (&format!("server-overrides/{declared_path}"), b"server"),
+            ],
+        )
+        .await;
+
+        let imported = import(
+            workspace.path(),
+            &archive,
+            &loopback_policy(&server),
+            &OptionalSelection::none(),
+        )
+        .await;
+
+        assert_eq!(
+            std::fs::read(imported.game.join(declared_path)).expect("read"),
+            b"client",
+            "the later layer won on disk"
+        );
+        let recipe = retained_recipe(&imported.source).expect("the recipe was retained");
+        assert!(
+            recipe
+                .files
+                .iter()
+                .all(|file| file.display_name() != declared_path),
+            "{declared_path} no longer has declared hashes or addresses to repair from"
+        );
+        for side in [PackSide::Client, PackSide::Server] {
+            assert!(
+                recipe
+                    .plan(side, &OptionalSelection::none())
+                    .files
+                    .iter()
+                    .all(|file| file.display_name() != declared_path),
+                "{side:?} is not asked to fetch the declared file over the layer"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_override_that_replaces_a_declared_non_mod_file_on_only_one_side_is_refused() {
+    let server = MockServer::start().await;
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let archive = pack_declaring_a_file_and_shipping(
+        workspace.path(),
+        &server,
+        "resourcepacks/x.zip",
+        &[("client-overrides/resourcepacks/x.zip", b"client")],
+    )
+    .await;
+
+    let error = try_import(
+        workspace.path(),
+        &archive,
+        &loopback_policy(&server),
+        &OptionalSelection::none(),
+    )
+    .await
+    .map(|_| ())
+    .expect_err("one entry cannot describe different bytes per side");
+
+    assert!(
+        matches!(error, PackError::OverrideShadowsDeclaredFile { ref path } if path == Path::new("resourcepacks/x.zip")),
         "{error:?}"
     );
 }

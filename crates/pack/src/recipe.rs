@@ -91,6 +91,24 @@ pub fn is_mod_file_path(path: &Path) -> bool {
             .is_some_and(|extension| extension.eq_ignore_ascii_case(MOD_EXTENSION))
 }
 
+/// Which paths of an override layer the recipe has to be told about.
+///
+/// A mod jar, because the pack shipped it rather than declared it, and any file
+/// the recipe declares, because the layer's bytes win over the declared ones.
+/// Every other layer file is tracked by the layer itself.
+#[derive(Debug, Clone)]
+pub(crate) struct LayerPathFilter {
+    declared: std::collections::HashSet<PathBuf>,
+}
+
+impl LayerPathFilter {
+    /// Whether the recipe has to be told that a layer places this path.
+    #[must_use]
+    pub(crate) fn selects(&self, path: &Path) -> bool {
+        is_mod_file_path(path) || self.declared.contains(path)
+    }
+}
+
 /// Whether one side of the game needs a file.
 ///
 /// Four states rather than a boolean. "Optional" is a genuine third answer that
@@ -1215,10 +1233,27 @@ impl PackRecipe {
         true
     }
 
-    /// Records the mods the pack shipped inside its override layers.
+    /// The paths of an override layer the recipe has to be told about.
     ///
-    /// Takes every layer's jars at once, because what a path means depends on
-    /// all the layers that place it. Re-importing the same pack leaves the
+    /// Taken before a layer is extracted, because the only moment the files of a
+    /// layer are known is while it is being walked.
+    #[must_use]
+    pub(crate) fn layer_path_filter(&self) -> LayerPathFilter {
+        LayerPathFilter {
+            declared: self
+                .files
+                .iter()
+                .map(|file| file.logical_path.clone())
+                .collect(),
+        }
+    }
+
+    /// Records what the pack shipped inside its override layers.
+    ///
+    /// Takes every layer's relevant paths at once, because what a path means
+    /// depends on all the layers that place it. A path that is neither a mod jar
+    /// nor declared by the recipe is ignored, so a caller may pass more than
+    /// [`LayerPathFilter`] selects. Re-importing the same pack leaves the
     /// recipe byte-identical. No provider identity is required, because an
     /// override jar has none: the pack shipped the file rather than a
     /// reference to a catalog entry, and none can be invented from a file name.
@@ -1229,12 +1264,15 @@ impl PackRecipe {
     ///
     /// A layer's bytes win over a declared file at the same path on the sides
     /// the layer applies to. When layers win on every side a declared file
-    /// applies to, its entry stops describing the declared release and becomes
-    /// a shipped mod. Every entry declared at the path is reconciled this way
-    /// and they collapse into one. When the declared file would still be installed on some
-    /// side, one entry would have to describe different bytes per side, so the
-    /// pack is refused with [`PackError::OverrideShadowsDeclaredFile`].
-    pub fn record_layer_mods(&mut self, shipped: &[(PathBuf, OverrideScope)]) -> PackResult<()> {
+    /// applies to, its entry stops describing the declared release: a mod
+    /// becomes a shipped mod, and every entry declared at the path is reconciled
+    /// this way and collapses into one. Any other file is dropped, because the
+    /// layer itself is what places it and the recipe records no entry for a
+    /// shipped file that is not a mod. When the declared file would still be
+    /// installed on some side, one entry would have to describe different bytes
+    /// per side, so the pack is refused with
+    /// [`PackError::OverrideShadowsDeclaredFile`].
+    pub fn record_layer_files(&mut self, shipped: &[(PathBuf, OverrideScope)]) -> PackResult<()> {
         let mut sides: Vec<(&PathBuf, [bool; 2])> = Vec::new();
         let mut positions: HashMap<&PathBuf, usize> = HashMap::new();
         for (path, scope) in shipped {
@@ -1293,9 +1331,17 @@ impl PackRecipe {
                 .map(|(index, _)| index)
                 .collect();
             let Some((&first, rest)) = matching.split_first() else {
-                self.files.push(shipped_mod(path, client, server));
+                if is_mod_file_path(path) {
+                    self.files.push(shipped_mod(path, client, server));
+                }
                 continue;
             };
+            if !is_mod_file_path(path) {
+                for &index in matching.iter().rev() {
+                    self.files.remove(index);
+                }
+                continue;
+            }
             if matching
                 .iter()
                 .all(|&index| self.files[index].origin == ModOrigin::PackOverride)
@@ -1649,7 +1695,7 @@ mod tests {
         let mut recipe = recipe();
         recipe.files.clear();
         recipe
-            .record_layer_mods(&[
+            .record_layer_files(&[
                 ("mods/common.jar".into(), OverrideScope::Common),
                 ("mods/client.jar".into(), OverrideScope::Client),
                 ("mods/server.jar".into(), OverrideScope::Server),
@@ -1682,9 +1728,9 @@ mod tests {
         let mut recipe = recipe();
         recipe.files.clear();
         let shipped = [("mods/common.jar".into(), OverrideScope::Common)];
-        recipe.record_layer_mods(&shipped).unwrap();
+        recipe.record_layer_files(&shipped).unwrap();
         let after_first = recipe.files.clone();
-        recipe.record_layer_mods(&shipped).unwrap();
+        recipe.record_layer_files(&shipped).unwrap();
 
         assert_eq!(
             recipe.files, after_first,
@@ -1697,7 +1743,7 @@ mod tests {
         let mut recipe = recipe();
         recipe.files.clear();
         recipe
-            .record_layer_mods(&[
+            .record_layer_files(&[
                 ("mods/both.jar".into(), OverrideScope::Client),
                 ("mods/both.jar".into(), OverrideScope::Server),
                 ("mods/shared.jar".into(), OverrideScope::Server),
@@ -1732,7 +1778,7 @@ mod tests {
         recipe.files.push(declared);
 
         recipe
-            .record_layer_mods(&[
+            .record_layer_files(&[
                 ("mods/a.jar".into(), OverrideScope::Common),
                 ("mods/a.jar".into(), OverrideScope::Client),
             ])
@@ -1762,7 +1808,7 @@ mod tests {
         ));
 
         recipe
-            .record_layer_mods(&[("mods/a.jar".into(), OverrideScope::Client)])
+            .record_layer_files(&[("mods/a.jar".into(), OverrideScope::Client)])
             .unwrap();
 
         let entry = &recipe.files[0];
@@ -1792,7 +1838,7 @@ mod tests {
         ));
 
         recipe
-            .record_layer_mods(&[("mods/a.jar".into(), OverrideScope::Common)])
+            .record_layer_files(&[("mods/a.jar".into(), OverrideScope::Common)])
             .unwrap();
 
         let at_path: Vec<_> = recipe
@@ -1825,7 +1871,7 @@ mod tests {
         let before = recipe.files.clone();
 
         let error = recipe
-            .record_layer_mods(&[
+            .record_layer_files(&[
                 ("mods/other.jar".into(), OverrideScope::Common),
                 ("mods/a.jar".into(), OverrideScope::Client),
             ])
@@ -1868,7 +1914,7 @@ mod tests {
             let before = recipe.files.clone();
 
             let error = recipe
-                .record_layer_mods(&[("mods/a.jar".into(), scope)])
+                .record_layer_files(&[("mods/a.jar".into(), scope)])
                 .unwrap_err();
 
             assert!(
@@ -1883,6 +1929,94 @@ mod tests {
     }
 
     #[test]
+    fn a_layer_over_a_declared_non_mod_file_replaces_the_declaration() {
+        for path in [
+            "resourcepacks/x.zip",
+            "config/x.toml",
+            "mods/data.json",
+            "mods/nested/a.jar",
+        ] {
+            for scope in [OverrideScope::Common, OverrideScope::Client] {
+                let mut recipe = recipe();
+                recipe.files.clear();
+                recipe.files.push(file(
+                    path,
+                    SideRequirement::Required,
+                    SideRequirement::Unsupported,
+                ));
+                recipe.files.push(file(
+                    "mods/kept.jar",
+                    SideRequirement::Required,
+                    SideRequirement::Required,
+                ));
+
+                recipe.record_layer_files(&[(path.into(), scope)]).unwrap();
+
+                assert_eq!(
+                    recipe
+                        .files
+                        .iter()
+                        .map(PackFileRecipe::display_name)
+                        .collect::<Vec<_>>(),
+                    ["mods/kept.jar"],
+                    "{path} is placed by the layer, so the declared hashes no longer describe it"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_layer_file_nothing_declares_is_not_recorded_as_content() {
+        let mut recipe = recipe();
+        recipe.files.clear();
+
+        recipe
+            .record_layer_files(&[("config/x.toml".into(), OverrideScope::Common)])
+            .unwrap();
+
+        assert!(recipe.files.is_empty());
+    }
+
+    #[test]
+    fn a_layer_over_a_declared_non_mod_file_on_only_some_sides_is_refused() {
+        let mut recipe = recipe();
+        recipe.files.clear();
+        recipe.files.push(file(
+            "resourcepacks/x.zip",
+            SideRequirement::Required,
+            SideRequirement::Required,
+        ));
+        let before = recipe.files.clone();
+
+        let error = recipe
+            .record_layer_files(&[("resourcepacks/x.zip".into(), OverrideScope::Client)])
+            .unwrap_err();
+
+        assert!(
+            matches!(error, PackError::OverrideShadowsDeclaredFile { ref path } if path == Path::new("resourcepacks/x.zip")),
+            "{error:?}"
+        );
+        assert_eq!(recipe.files, before);
+    }
+
+    #[test]
+    fn the_layer_path_filter_selects_mod_jars_and_declared_files_only() {
+        let mut recipe = recipe();
+        recipe.files.clear();
+        recipe.files.push(file(
+            "resourcepacks/x.zip",
+            SideRequirement::Required,
+            SideRequirement::Required,
+        ));
+        let filter = recipe.layer_path_filter();
+
+        assert!(filter.selects(Path::new("mods/new.jar")));
+        assert!(filter.selects(Path::new("resourcepacks/x.zip")));
+        assert!(!filter.selects(Path::new("config/other.toml")));
+        assert!(!filter.selects(Path::new("mods/README.txt")));
+    }
+
+    #[test]
     fn a_shipped_mod_is_kept_out_of_the_plans_that_download() {
         let mut recipe = recipe();
         recipe.files.clear();
@@ -1892,7 +2026,7 @@ mod tests {
             SideRequirement::Required,
         ));
         recipe
-            .record_layer_mods(&[("mods/shipped.jar".into(), OverrideScope::Common)])
+            .record_layer_files(&[("mods/shipped.jar".into(), OverrideScope::Common)])
             .unwrap();
 
         let installed = recipe.files_for(PackSide::Client, &OptionalSelection::none());
@@ -1924,7 +2058,7 @@ mod tests {
         let mut recipe = recipe();
         recipe.files.clear();
         recipe
-            .record_layer_mods(&[("mods/shipped.jar".into(), OverrideScope::Common)])
+            .record_layer_files(&[("mods/shipped.jar".into(), OverrideScope::Common)])
             .unwrap();
         let identity = ProviderFileIdentity {
             provider: Some(ModProvider::CurseForge),
