@@ -50,6 +50,10 @@ pub struct RuntimeEvidence {
     pub supervisor: ProcessEvidence,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child: Option<ProcessEvidence>,
+    /// The directory holding the control socket. Absent in evidence written
+    /// when sockets always lived in the shared per-user `/tmp` directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_directory: Option<PathBuf>,
 }
 
 impl RuntimeEvidence {
@@ -58,6 +62,7 @@ impl RuntimeEvidence {
             generation: Uuid::new_v4(),
             supervisor: capture_process(std::process::id(), ProcessRole::Supervisor)?,
             child: None,
+            control_directory: None,
         })
     }
 
@@ -161,6 +166,7 @@ fn classify_lock_holder(server_root: &Path) -> ServerResult<RuntimeClassificatio
                 generation: Uuid::nil(),
                 supervisor: holder,
                 child: None,
+                control_directory: None,
             },
         },
         IdentityState::VerifiedAlive | IdentityState::Unverifiable => {
@@ -262,8 +268,8 @@ pub fn clear_stale_runtime(server_root: &Path) -> ServerResult<()> {
             .join(".launcher")
             .join(LEGACY_CONTROL_SOCKET_FILE),
     ];
-    if validate_control_socket_directory().is_ok() {
-        paths.push(control_socket_path(server_root, evidence.generation)?);
+    if let Ok(socket) = control_socket_path(server_root, &evidence) {
+        paths.push(socket);
     }
     for path in paths {
         if let Err(source) = std::fs::remove_file(&path)
@@ -271,6 +277,9 @@ pub fn clear_stale_runtime(server_root: &Path) -> ServerResult<()> {
         {
             return Err(ServerError::RuntimeState { path, source });
         }
+    }
+    if let Some(directory) = &evidence.control_directory {
+        remove_per_run_control_directory(directory);
     }
     Ok(())
 }
@@ -339,17 +348,63 @@ pub fn runtime_path(server_root: &Path) -> PathBuf {
     server_root.join(".launcher").join(RUNTIME_FILE)
 }
 
-pub fn control_socket_path(server_root: &Path, generation: Uuid) -> ServerResult<PathBuf> {
+/// The control socket a run recorded in `evidence`, in a directory that is
+/// still private to this account.
+///
+/// Evidence without a recorded directory predates per-run directory selection
+/// and names the shared per-user `/tmp` directory.
+pub fn control_socket_path(
+    server_root: &Path,
+    evidence: &RuntimeEvidence,
+) -> ServerResult<PathBuf> {
+    let directory = recorded_control_directory(evidence)?;
+    validate_control_directory(&directory)?;
+    control_socket_in(&directory, server_root, evidence.generation)
+}
+
+fn recorded_control_directory(evidence: &RuntimeEvidence) -> ServerResult<PathBuf> {
+    match &evidence.control_directory {
+        Some(directory) => Ok(directory.clone()),
+        None => Ok(shared_control_directory(Path::new("/tmp"), current_uid()?)),
+    }
+}
+
+/// Picks and prepares the directory for a new run's control socket.
+pub fn prepare_control_socket_path(server_root: &Path, generation: Uuid) -> ServerResult<PathBuf> {
+    ControlDirectories::from_environment().prepare(server_root, generation)
+}
+
+pub fn active_control_socket_path(server_root: &Path) -> ServerResult<Option<PathBuf>> {
+    let Some(evidence) = read_runtime_evidence(server_root)? else {
+        return Ok(None);
+    };
+    control_socket_path(server_root, &evidence).map(Some)
+}
+
+/// The file name of a run's control socket, which is keyed by the server
+/// root's filesystem identity and the run's generation.
+pub(crate) fn control_socket_file_name(
+    server_root: &Path,
+    generation: Uuid,
+) -> ServerResult<String> {
     let root = std::fs::metadata(server_root).map_err(|source| ServerError::RuntimeState {
         path: server_root.to_path_buf(),
         source,
     })?;
-    let path = control_socket_directory()?.join(format!(
+    Ok(format!(
         "s-{:x}-{:x}-{}.sock",
         root.dev(),
         root.ino(),
         generation.simple()
-    ));
+    ))
+}
+
+fn control_socket_in(
+    directory: &Path,
+    server_root: &Path,
+    generation: Uuid,
+) -> ServerResult<PathBuf> {
+    let path = directory.join(control_socket_file_name(server_root, generation)?);
     if path.as_os_str().as_bytes().len() > MAX_UNIX_SOCKET_PATH_BYTES {
         return Err(ServerError::RuntimeState {
             path,
@@ -362,49 +417,91 @@ pub fn control_socket_path(server_root: &Path, generation: Uuid) -> ServerResult
     Ok(path)
 }
 
-pub fn prepare_control_socket_path(server_root: &Path, generation: Uuid) -> ServerResult<PathBuf> {
-    let directory = control_socket_directory()?;
-    match std::fs::symlink_metadata(&directory) {
-        Ok(metadata) => {
-            let uid = current_uid()?;
-            if metadata.file_type().is_dir() && metadata.uid() == uid {
-                std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
-                    .map_err(|source| ServerError::RuntimeState {
-                        path: directory.clone(),
-                        source,
-                    })?;
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::DirBuilder::new()
-                .mode(0o700)
-                .create(&directory)
-                .map_err(|source| ServerError::RuntimeState {
-                    path: directory.clone(),
-                    source,
-                })?;
-        }
-        Err(source) => {
-            return Err(ServerError::RuntimeState {
-                path: directory,
-                source,
-            });
+/// The places a run's control socket may live, best first.
+///
+/// `$XDG_RUNTIME_DIR` is private to the account by definition. The shared
+/// `evx-<uid>` directory in the temporary directory has a predictable name in a
+/// directory everybody can write to, so another account can occupy it. A run
+/// that finds it occupied uses a directory of its own with an unpredictable
+/// name instead, so that occupying the name cannot stop any server from starting.
+#[derive(Debug, Clone)]
+pub(crate) struct ControlDirectories {
+    runtime: Option<PathBuf>,
+    temporary: PathBuf,
+}
+
+impl ControlDirectories {
+    pub(crate) fn from_environment() -> Self {
+        Self {
+            runtime: std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
+            temporary: PathBuf::from("/tmp"),
         }
     }
-    validate_control_socket_directory()?;
-    control_socket_path(server_root, generation)
+
+    pub(crate) fn prepare(&self, server_root: &Path, generation: Uuid) -> ServerResult<PathBuf> {
+        let uid = current_uid()?;
+        let fits = |directory: &Path| control_socket_in(directory, server_root, generation).is_ok();
+
+        if let Some(runtime) = &self.runtime
+            && runtime.is_absolute()
+            && is_private_directory(runtime, uid)
+            && fits(runtime)
+        {
+            return control_socket_in(runtime, server_root, generation);
+        }
+        let shared = shared_control_directory(&self.temporary, uid);
+        if secure_shared_control_directory(&shared, uid) && fits(&shared) {
+            return control_socket_in(&shared, server_root, generation);
+        }
+        let own = self
+            .temporary
+            .join(format!("evx-{uid}-{:08x}", generation.as_fields().0));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&own)
+            .map_err(|source| ServerError::RuntimeState {
+                path: own.clone(),
+                source,
+            })?;
+        validate_control_directory(&own)?;
+        control_socket_in(&own, server_root, generation)
+    }
 }
 
-pub fn active_control_socket_path(server_root: &Path) -> ServerResult<Option<PathBuf>> {
-    let Some(evidence) = read_runtime_evidence(server_root)? else {
-        return Ok(None);
+fn shared_control_directory(temporary: &Path, uid: u32) -> PathBuf {
+    temporary.join(format!("evx-{uid}"))
+}
+
+/// Creates the shared directory, or tightens it when it is already ours.
+/// Anything else occupying the name, or losing a creation race, is refused
+/// rather than followed or reused.
+fn secure_shared_control_directory(directory: &Path, uid: u32) -> bool {
+    let secured = match std::fs::symlink_metadata(directory) {
+        Ok(metadata) if metadata.file_type().is_dir() && metadata.uid() == uid => {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).is_ok()
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(directory)
+            .is_ok(),
+        Ok(_) | Err(_) => false,
     };
-    validate_control_socket_directory()?;
-    control_socket_path(server_root, evidence.generation).map(Some)
+    secured && is_private_directory(directory, uid)
 }
 
-fn control_socket_directory() -> ServerResult<PathBuf> {
-    Ok(PathBuf::from(format!("/tmp/evx-{}", current_uid()?)))
+/// Removes the directory a single run created for itself once it is empty.
+/// The shared per-user directory and a runtime directory are left alone.
+pub(crate) fn remove_per_run_control_directory(directory: &Path) {
+    let Ok(uid) = current_uid() else {
+        return;
+    };
+    let own = directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with(&format!("evx-{uid}-")));
+    if own {
+        let _ = std::fs::remove_dir(directory);
+    }
 }
 
 fn current_uid() -> ServerResult<u32> {
@@ -416,26 +513,25 @@ fn current_uid() -> ServerResult<u32> {
         })
 }
 
-fn validate_control_socket_directory() -> ServerResult<()> {
-    let directory = control_socket_directory()?;
-    let metadata =
-        std::fs::symlink_metadata(&directory).map_err(|source| ServerError::RuntimeState {
-            path: directory.clone(),
-            source,
-        })?;
-    if !metadata.file_type().is_dir()
-        || metadata.uid() != current_uid()?
-        || metadata.mode() & 0o077 != 0
-    {
-        return Err(ServerError::RuntimeState {
-            path: directory,
-            source: std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "control socket directory must be owned by the current user with mode 0700",
-            ),
-        });
+/// Whether `directory` is a real directory of ours that nobody else can enter.
+fn is_private_directory(directory: &Path, uid: u32) -> bool {
+    std::fs::symlink_metadata(directory).is_ok_and(|metadata| {
+        let others_have_access = metadata.mode() & 0o077 != 0;
+        metadata.file_type().is_dir() && metadata.uid() == uid && !others_have_access
+    })
+}
+
+fn validate_control_directory(directory: &Path) -> ServerResult<()> {
+    if directory.is_absolute() && is_private_directory(directory, current_uid()?) {
+        return Ok(());
     }
-    Ok(())
+    Err(ServerError::RuntimeState {
+        path: directory.to_path_buf(),
+        source: std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "control socket directory must be an absolute directory owned by the current user with mode 0700",
+        ),
+    })
 }
 
 fn capture_process(pid: u32, role: ProcessRole) -> ServerResult<ProcessEvidence> {
@@ -657,12 +753,9 @@ fn read_start_ticks(pid: u32) -> std::io::Result<u64> {
 }
 
 fn control_socket_responds(server_root: &Path, evidence: &RuntimeEvidence) -> bool {
-    let Ok(path) = control_socket_path(server_root, evidence.generation) else {
+    let Ok(path) = control_socket_path(server_root, evidence) else {
         return false;
     };
-    if validate_control_socket_directory().is_err() {
-        return false;
-    }
     UnixStream::connect(path).is_ok_and(|stream| {
         let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
         true
@@ -676,6 +769,232 @@ mod tests {
     use std::os::unix::net::UnixListener;
 
     use super::*;
+
+    fn private_directory(parent: &Path, name: &str) -> PathBuf {
+        let path = parent.join(name);
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .expect("directory");
+        path
+    }
+
+    fn directories(runtime: Option<PathBuf>, temporary: &Path) -> ControlDirectories {
+        ControlDirectories {
+            runtime,
+            temporary: temporary.to_path_buf(),
+        }
+    }
+
+    fn evidence_in(directory: Option<PathBuf>) -> RuntimeEvidence {
+        let mut evidence = RuntimeEvidence::for_current_supervisor().expect("evidence");
+        evidence.control_directory = directory;
+        evidence
+    }
+
+    #[test]
+    fn a_private_runtime_directory_holds_the_control_socket() {
+        let root = tempfile::tempdir().expect("root");
+        let base = tempfile::tempdir().expect("base");
+        let runtime = private_directory(base.path(), "runtime");
+        let temporary = private_directory(base.path(), "tmp");
+
+        let path = directories(Some(runtime.clone()), &temporary)
+            .prepare(root.path(), Uuid::new_v4())
+            .expect("path");
+
+        assert_eq!(path.parent(), Some(runtime.as_path()));
+        assert!(std::fs::read_dir(&temporary).expect("tmp").next().is_none());
+    }
+
+    #[test]
+    fn a_runtime_directory_others_can_enter_is_not_used() {
+        let root = tempfile::tempdir().expect("root");
+        let base = tempfile::tempdir().expect("base");
+        let runtime = base.path().join("runtime");
+        std::fs::DirBuilder::new()
+            .mode(0o755)
+            .create(&runtime)
+            .expect("runtime");
+        let temporary = private_directory(base.path(), "tmp");
+
+        let path = directories(Some(runtime), &temporary)
+            .prepare(root.path(), Uuid::new_v4())
+            .expect("path");
+
+        assert_eq!(
+            path.parent().and_then(Path::parent),
+            Some(temporary.as_path())
+        );
+    }
+
+    #[test]
+    fn a_relative_runtime_directory_is_not_used() {
+        let root = tempfile::tempdir().expect("root");
+        let base = tempfile::tempdir().expect("base");
+        let temporary = private_directory(base.path(), "tmp");
+
+        let path = directories(Some(PathBuf::from("runtime")), &temporary)
+            .prepare(root.path(), Uuid::new_v4())
+            .expect("path");
+
+        assert!(path.starts_with(&temporary));
+    }
+
+    #[test]
+    fn the_shared_directory_is_created_private_and_reused_when_it_is_ours() {
+        let root = tempfile::tempdir().expect("root");
+        let base = tempfile::tempdir().expect("base");
+        let uid = current_uid().expect("uid");
+        let shared = base.path().join(format!("evx-{uid}"));
+
+        let first = directories(None, base.path())
+            .prepare(root.path(), Uuid::new_v4())
+            .expect("first");
+        assert_eq!(first.parent(), Some(shared.as_path()));
+        assert_eq!(
+            std::fs::metadata(&shared).expect("shared").mode() & 0o777,
+            0o700
+        );
+
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).expect("loosen");
+        let second = directories(None, base.path())
+            .prepare(root.path(), Uuid::new_v4())
+            .expect("second");
+        assert_eq!(second.parent(), Some(shared.as_path()));
+        assert_eq!(
+            std::fs::metadata(&shared).expect("shared").mode() & 0o777,
+            0o700
+        );
+    }
+
+    #[test]
+    fn a_symlink_in_the_shared_directory_name_is_never_followed() {
+        let root = tempfile::tempdir().expect("root");
+        let base = tempfile::tempdir().expect("base");
+        let attacker = tempfile::tempdir().expect("attacker");
+        let uid = current_uid().expect("uid");
+        std::os::unix::fs::symlink(attacker.path(), base.path().join(format!("evx-{uid}")))
+            .expect("symlink");
+
+        let generation = Uuid::new_v4();
+        let path = directories(None, base.path())
+            .prepare(root.path(), generation)
+            .expect("a claimed name does not stop the run");
+
+        let directory = path.parent().expect("directory");
+        assert_eq!(
+            directory,
+            base.path()
+                .join(format!("evx-{uid}-{:08x}", generation.as_fields().0))
+        );
+        assert!(is_private_directory(directory, uid));
+        assert!(
+            std::fs::read_dir(attacker.path())
+                .expect("attacker")
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_file_in_the_shared_directory_name_does_not_stop_the_run() {
+        let root = tempfile::tempdir().expect("root");
+        let base = tempfile::tempdir().expect("base");
+        let uid = current_uid().expect("uid");
+        std::fs::write(base.path().join(format!("evx-{uid}")), b"").expect("file");
+
+        let path = directories(None, base.path())
+            .prepare(root.path(), Uuid::new_v4())
+            .expect("path");
+
+        assert!(is_private_directory(path.parent().expect("directory"), uid));
+    }
+
+    #[test]
+    fn a_runtime_directory_too_long_for_a_socket_falls_back() {
+        let root = tempfile::tempdir().expect("root");
+        let base = tempfile::tempdir().expect("base");
+        let long = private_directory(base.path(), &"r".repeat(120));
+        let temporary = private_directory(base.path(), "tmp");
+
+        let path = directories(Some(long), &temporary)
+            .prepare(root.path(), Uuid::new_v4())
+            .expect("path");
+
+        assert!(path.starts_with(&temporary));
+        assert!(path.as_os_str().as_bytes().len() <= MAX_UNIX_SOCKET_PATH_BYTES);
+    }
+
+    #[test]
+    fn a_later_process_finds_the_socket_in_the_directory_the_run_recorded() {
+        let root = tempfile::tempdir().expect("root");
+        let base = tempfile::tempdir().expect("base");
+        let uid = current_uid().expect("uid");
+        std::fs::write(base.path().join(format!("evx-{uid}")), b"").expect("claimed");
+        let mut evidence = evidence_in(None);
+        let prepared = directories(None, base.path())
+            .prepare(root.path(), evidence.generation)
+            .expect("path");
+        evidence.control_directory = prepared.parent().map(Path::to_path_buf);
+
+        // The consumer's environment is not consulted.
+        let found = control_socket_path(root.path(), &evidence).expect("found");
+
+        assert_eq!(found, prepared);
+    }
+
+    #[test]
+    fn a_recorded_directory_that_is_not_private_is_refused() {
+        let root = tempfile::tempdir().expect("root");
+        let base = tempfile::tempdir().expect("base");
+        let open = base.path().join("open");
+        std::fs::DirBuilder::new()
+            .mode(0o755)
+            .create(&open)
+            .expect("open");
+        let target = private_directory(base.path(), "target");
+        let link = base.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        for directory in [open, link, PathBuf::from("relative")] {
+            assert!(
+                control_socket_path(root.path(), &evidence_in(Some(directory.clone()))).is_err(),
+                "{} must not be used",
+                directory.display()
+            );
+        }
+    }
+
+    #[test]
+    fn evidence_without_a_recorded_directory_names_the_shared_directory() {
+        let uid = current_uid().expect("uid");
+        let mut body = serde_json::to_value(evidence_in(None)).expect("json");
+        assert!(body.get("control_directory").is_none());
+        body["generation"] = serde_json::json!(Uuid::nil());
+        let legacy: RuntimeEvidence = serde_json::from_value(body).expect("legacy evidence");
+        assert_eq!(legacy.control_directory, None);
+
+        let directory = recorded_control_directory(&legacy).expect("directory");
+        assert_eq!(directory, PathBuf::from(format!("/tmp/evx-{uid}")));
+    }
+
+    #[test]
+    fn only_a_directory_a_run_made_for_itself_is_removed_after_the_run() {
+        let base = tempfile::tempdir().expect("base");
+        let uid = current_uid().expect("uid");
+        let own = private_directory(base.path(), &format!("evx-{uid}-0badcafe"));
+        let shared = private_directory(base.path(), &format!("evx-{uid}"));
+        let runtime = private_directory(base.path(), "runtime");
+
+        for directory in [&own, &shared, &runtime] {
+            remove_per_run_control_directory(directory);
+        }
+
+        assert!(!own.exists());
+        assert!(shared.exists());
+        assert!(runtime.exists());
+    }
 
     #[test]
     fn listening_rows_are_matched_by_address_port_and_state() {
@@ -825,14 +1144,15 @@ mod tests {
     #[test]
     fn a_verified_supervisor_requires_a_reachable_control_socket_to_be_controlled() {
         let root = root();
-        let evidence = RuntimeEvidence::for_current_supervisor().expect("capture");
+        let mut evidence = RuntimeEvidence::for_current_supervisor().expect("capture");
+        let socket = prepare_control_socket_path(root.path(), evidence.generation).expect("path");
+        evidence.control_directory = socket.parent().map(Path::to_path_buf);
         write_runtime_evidence(root.path(), &evidence).expect("write");
         assert!(matches!(
             classify_runtime(root.path()).expect("classify"),
             RuntimeClassification::UnknownRunning { .. }
         ));
 
-        let socket = prepare_control_socket_path(root.path(), evidence.generation).expect("path");
         let listener = UnixListener::bind(&socket).expect("bind");
         assert!(matches!(
             classify_runtime(root.path()).expect("classify"),
@@ -940,8 +1260,9 @@ mod tests {
         let mut evidence = RuntimeEvidence::for_current_supervisor().expect("capture");
         evidence.supervisor = capture_process(supervisor.0.id(), ProcessRole::Supervisor)
             .expect("supervisor evidence");
-        write_runtime_evidence(root.path(), &evidence).expect("write");
         let socket = prepare_control_socket_path(root.path(), evidence.generation).expect("path");
+        evidence.control_directory = socket.parent().map(Path::to_path_buf);
+        write_runtime_evidence(root.path(), &evidence).expect("write");
         let listener = UnixListener::bind(&socket).expect("bind");
 
         let replacement = bin.path().join("launcher.new");

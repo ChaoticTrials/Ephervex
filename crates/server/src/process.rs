@@ -19,8 +19,8 @@ use crate::capture::{CaptureStream, CapturedLine, OutputCapture, ServerOutputEve
 use crate::runtime::{
     ProcessEvidence, RuntimeClassification, RuntimeEvidence, active_control_socket_path,
     capture_java_child, classify_runtime, clear_stale_runtime, create_runtime_lock,
-    prepare_control_socket_path, read_runtime_evidence, runtime_lock_path, runtime_path,
-    write_runtime_evidence,
+    prepare_control_socket_path, read_runtime_evidence, remove_per_run_control_directory,
+    runtime_lock_path, runtime_path, write_runtime_evidence,
 };
 use crate::{ServerError, ServerResult};
 
@@ -184,6 +184,7 @@ impl ServerSupervisor {
         let mut evidence = RuntimeEvidence::for_current_supervisor()?;
         let (requests, mut request_receiver) = mpsc::unbounded_channel();
         let socket = ControlSocket::open(server_root, evidence.generation, requests)?;
+        evidence.control_directory = socket.path.parent().map(Path::to_path_buf);
         let capture = Arc::new(Mutex::new(OutputCapture::new(capture_directory)));
         let mut outstanding = Outstanding::default();
         // Declared last so a canceled run withdraws its evidence before the lock is released.
@@ -311,21 +312,24 @@ impl ControlSocket {
         generation: uuid::Uuid,
         requests: mpsc::UnboundedSender<ControlRequest>,
     ) -> ServerResult<Self> {
-        let path = prepare_control_socket_path(server_root, generation)?;
-        if let Err(error) = std::fs::remove_file(&path)
+        // Owns the path from here so a failure below also releases its directory.
+        let mut socket = Self {
+            path: prepare_control_socket_path(server_root, generation)?,
+            task: None,
+        };
+        if let Err(error) = std::fs::remove_file(&socket.path)
             && error.kind() != std::io::ErrorKind::NotFound
         {
             return Err(ServerError::ControlUnavailable {
-                path,
+                path: socket.path.clone(),
                 source: error,
             });
         }
         let listener =
-            UnixListener::bind(&path).map_err(|source| ServerError::ControlUnavailable {
-                path: path.clone(),
+            UnixListener::bind(&socket.path).map_err(|source| ServerError::ControlUnavailable {
+                path: socket.path.clone(),
                 source,
             })?;
-        let mut socket = Self { path, task: None };
         std::fs::set_permissions(&socket.path, std::fs::Permissions::from_mode(0o600)).map_err(
             |source| ServerError::ControlUnavailable {
                 path: socket.path.clone(),
@@ -343,6 +347,9 @@ impl Drop for ControlSocket {
             task.abort();
         }
         let _ = std::fs::remove_file(&self.path);
+        if let Some(directory) = self.path.parent() {
+            remove_per_run_control_directory(directory);
+        }
     }
 }
 
@@ -1222,8 +1229,10 @@ impl Drop for RuntimeGuard {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+    use std::os::unix::fs::MetadataExt as _;
+
     use super::*;
-    use crate::runtime::control_socket_path;
+    use crate::runtime::control_socket_file_name;
 
     /// The process group a process belongs to, from `/proc/<pid>/stat`.
     fn process_group_of(pid: u32) -> String {
@@ -1860,23 +1869,32 @@ mod tests {
         assert!(!stopped.stop_requested);
     }
 
-    /// The control sockets a run for `root` left in the shared socket directory.
+    /// The control sockets a run for `root` left in any directory a run may use.
     fn control_sockets_of(root: &Path) -> Vec<PathBuf> {
-        let sample = control_socket_path(root, uuid::Uuid::nil()).expect("socket path");
-        let name = sample
-            .file_name()
-            .and_then(|name| name.to_str())
-            .expect("name");
+        let name = control_socket_file_name(root, uuid::Uuid::nil()).expect("name");
         let prefix = name.trim_end_matches("00000000000000000000000000000000.sock");
-        std::fs::read_dir(sample.parent().expect("directory"))
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .filter(|entry| entry.file_name().to_string_lossy().starts_with(prefix))
-                    .map(|entry| entry.path())
-                    .collect()
-            })
-            .unwrap_or_default()
+        let uid = std::fs::metadata("/proc/self").expect("self").uid();
+        let mut directories = vec![PathBuf::from(format!("/tmp/evx-{uid}"))];
+        directories.extend(std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from));
+        directories.extend(
+            std::fs::read_dir("/tmp")
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(&format!("evx-{uid}-"))
+                })
+                .map(|entry| entry.path()),
+        );
+        directories
+            .iter()
+            .flat_map(|directory| std::fs::read_dir(directory).into_iter().flatten().flatten())
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(prefix))
+            .map(|entry| entry.path())
+            .collect()
     }
 
     fn assert_released(root: &Path) {

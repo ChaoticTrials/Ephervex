@@ -52,9 +52,18 @@ Revocation blocks later starts without rewriting server files.
 
 The foreground supervisor owns the Java child, stdin, output readers, runtime
 lock, and a mode-0600 Unix control socket. The socket lives in a short
-mode-0700 per-user runtime directory so an arbitrarily long configured server
-root cannot exceed Linux's Unix-socket path limit. Its name is keyed by the
-server root's filesystem identity and the supervisor generation recorded in
+mode-0700 per-user directory so an arbitrarily long configured server
+root cannot exceed Linux's Unix-socket path limit. The directory is
+`$XDG_RUNTIME_DIR` when that is a private directory of the current user, then
+`/tmp/evx-<uid>`. When another account has occupied that predictable name, the
+run creates `/tmp/evx-<uid>-<random>` for itself and removes it afterward, so
+no other account can block a start. A directory is used only when it is an
+absolute real directory owned by the current user with mode 0700, and is never
+reached through a symlink. The chosen directory is recorded in the runtime
+evidence, which is how `stop`, `console`, and classification find the socket
+whatever their own environment; evidence without it names `/tmp/evx-<uid>`.
+The socket's name is keyed by the server root's filesystem identity and the
+supervisor generation recorded in
 `.launcher/server-runtime.json`. Runtime evidence also records separate
 supervisor and Java-child roles, Linux boot ID, PID, `/proc` start ticks,
 canonical executable, and the device/inode of the process image where
