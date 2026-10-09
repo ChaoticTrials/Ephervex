@@ -386,7 +386,7 @@ jobs:
       - name: Checkout the apt repository
         uses: actions/checkout@v4
         with:
-          repository: ChaoticTrials/apt-repo
+          repository: ChaoticTrials/package-repo
           token: ${{ secrets.APT_REPO_TOKEN }}
           path: apt-repo
 
@@ -456,6 +456,10 @@ jobs:
           aptly repo create -distribution=stable -component=main packages 2>/dev/null || true
           aptly repo add packages debs/*.deb
 
+          # The apt repository is served under the `deb` prefix of the package
+          # repository (repo.chaotictrials.de/deb); `rpm` beside it is the RPM
+          # repository, which the next job publishes.
+          #
           # Publishing a distribution that is already published is an update,
           # not a second publish. Which one applies depends on the state of a
           # repository this job does not own, so it tries the first and falls
@@ -473,12 +477,12 @@ jobs:
             -architectures=amd64,arm64 \
             -distribution=stable \
             packages \
-            filesystem:apt-repo: 2>/dev/null || \
+            filesystem:apt-repo:deb 2>/dev/null || \
           aptly publish update \
             -gpg-key="${GPG_KEY_ID}" \
             -passphrase="${GPG_PASSPHRASE}" \
             stable \
-            filesystem:apt-repo:
+            filesystem:apt-repo:deb
 
       - name: Commit the updated repository
         working-directory: apt-repo
