@@ -1019,7 +1019,16 @@ mod tests {
             .expect("client");
         let host = InstalledHost::Instance(client.id);
         let game = ephervex_storage::metadata::client_game_dir(&client.root);
-        let socket = std::os::unix::net::UnixListener::bind(game.join("socket")).expect("socket");
+        // A named pipe is a special file capture cannot clone. Unlike a socket
+        // it has no path-length limit, so the test does not depend on TMPDIR.
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            game.join("pipe"),
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+            0,
+        )
+        .expect("named pipe");
         assert!(
             app.create_snapshot(
                 host,
@@ -1029,7 +1038,7 @@ mod tests {
             )
             .is_err()
         );
-        assert!(game.join("socket").exists());
+        assert!(game.join("pipe").exists());
         assert_eq!(
             std::fs::read_dir(ephervex_storage::metadata::staging_dir(&client.root))
                 .expect("staging")
@@ -1037,7 +1046,6 @@ mod tests {
             0
         );
         assert!(app.snapshots(host).expect("snapshots").is_empty());
-        drop(socket);
     }
 
     #[test]
