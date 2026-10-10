@@ -55,7 +55,7 @@ mod workspace;
 use diagnosis_flow::DiagnosisFlowState;
 use log_views::LogViews;
 use mod_views::ModViews;
-use server_tools::{ServerAction, ServerTools};
+use server_tools::{LinkedClaim, ServerAction, ServerTools};
 use workspace::{PaneChange, WorkspaceState};
 
 pub struct Controller {
@@ -4756,6 +4756,14 @@ impl Workspace {
         }
     }
 
+    /// Starts every console and log viewer on `server` over with its new run;
+    /// a console opened afterwards reads the run from the beginning on its own.
+    fn reopen_server_console(&self, server: ephervex_model::ServerId) {
+        self.logs
+            .borrow_mut()
+            .reopen(&LiveLogSource::Server(server));
+    }
+
     /// How a fresh Launch or Start of `host` goes, claiming a pair start
     /// when its pair starts together.
     fn claim_start(&self, ui: &AppWindow, host: InstalledHost) -> HostStart {
@@ -4770,12 +4778,14 @@ impl Workspace {
         let Some(operation) = lifecycle.begin_pair_start(client, server) else {
             return HostStart::Refused;
         };
+        let mut starts_server = false;
         if let InstalledHost::Server(id) = server {
             let restarting = !lifecycle.stage_of(server).is_empty();
-            if !lifecycle.servers.claim_linked(id, restarting) {
+            let Some(claim) = lifecycle.servers.claim_linked(id, restarting) else {
                 lifecycle.settle_pair_start(operation, true);
                 return HostStart::Refused;
-            }
+            };
+            starts_server = claim == LinkedClaim::Starting;
         }
         self.forget_last_run(client);
         self.forget_last_run(server);
@@ -4784,6 +4794,7 @@ impl Workspace {
             operation,
             client,
             server,
+            starts_server,
         }
     }
 
@@ -5013,7 +5024,7 @@ fn register_linked_pair(ui: &AppWindow, workspace: &Workspace) {
         ) else {
             return;
         };
-        let operation = {
+        let (operation, claim) = {
             let mut lifecycle = connect.lifecycle.borrow_mut();
             let host = InstalledHost::Server(server);
             let restarting = !lifecycle.stage_of(host).is_empty();
@@ -5021,12 +5032,12 @@ fn register_linked_pair(ui: &AppWindow, workspace: &Workspace) {
             else {
                 return;
             };
-            if !lifecycle.servers.claim_linked(server, restarting) {
+            let Some(claim) = lifecycle.servers.claim_linked(server, restarting) else {
                 lifecycle.settle_pair_start(operation, true);
                 return;
-            }
+            };
             stamp_host_lifecycle(&ui, &lifecycle);
-            operation
+            (operation, claim)
         };
         connect.forget_last_run(InstalledHost::Instance(client));
         send(
@@ -5037,6 +5048,9 @@ fn register_linked_pair(ui: &AppWindow, workspace: &Workspace) {
                 operation,
             },
         );
+        if claim == LinkedClaim::Starting {
+            connect.reopen_server_console(server);
+        }
         connect.show_pair(
             &ui,
             InstalledHost::Instance(client),
@@ -5097,6 +5111,9 @@ enum HostStart {
         operation: u64,
         client: InstalledHost,
         server: InstalledHost,
+        /// Whether this start begins a new run of the server, as opposed to
+        /// joining one that is already running.
+        starts_server: bool,
     },
     /// A start of the host's pair is already under way.
     Refused,
@@ -5131,6 +5148,7 @@ fn register_host_starts(ui: &AppWindow, workspace: &Workspace) {
                 operation,
                 client,
                 server,
+                starts_server,
             } => {
                 send(
                     &launch.commands,
@@ -5139,6 +5157,9 @@ fn register_host_starts(ui: &AppWindow, workspace: &Workspace) {
                         operation,
                     },
                 );
+                if starts_server && let InstalledHost::Server(id) = server {
+                    launch.reopen_server_console(id);
+                }
                 launch.show_pair(&ui, client, server);
             }
             HostStart::Refused => {
@@ -5179,18 +5200,19 @@ fn register_host_starts(ui: &AppWindow, workspace: &Workspace) {
             return;
         };
         let host = InstalledHost::Server(server);
-        let pair = match start.claim_start(&ui, host) {
+        let (pair, starts_server) = match start.claim_start(&ui, host) {
             HostStart::Alone => {
                 if !claim_server_start(&ui, &start, server) {
                     return;
                 }
                 send(&start.commands, Command::StartServer(server));
-                None
+                (None, true)
             }
             HostStart::Paired {
                 operation,
                 client,
                 server,
+                starts_server,
             } => {
                 send(
                     &start.commands,
@@ -5199,19 +5221,16 @@ fn register_host_starts(ui: &AppWindow, workspace: &Workspace) {
                         operation,
                     },
                 );
-                Some((client, server))
+                (Some((client, server)), starts_server)
             }
             HostStart::Refused => {
                 ui.invoke_present_toast(lookup("gui-pair-start-busy").into(), true);
                 return;
             }
         };
-        // Views already on this server start over with the new run; a console
-        // opened below reads it from the beginning on its own.
-        start
-            .logs
-            .borrow_mut()
-            .reopen(&LiveLogSource::Server(server));
+        if starts_server {
+            start.reopen_server_console(server);
+        }
         // A pair start shows both sides beside each other instead, which never
         // moves a pane off the host it shows.
         match pair {
@@ -11345,6 +11364,7 @@ mod tests {
                     .borrow_mut()
                     .servers
                     .claim_linked(server, false)
+                    .is_some()
             );
             apply_server_tool_event(
                 &ui,
@@ -12052,6 +12072,99 @@ mod tests {
             .try_iter()
             .filter(|command| matches!(command, Command::LaunchAndConnect { .. }))
             .count()
+    }
+
+    /// Opens the server's console and has it show a line from an earlier run.
+    fn console_with_earlier_output(
+        workspace: &Workspace,
+        ui: &AppWindow,
+        server: InstalledHost,
+    ) -> PaneId {
+        workspace.open(ui, server, Surface::Console);
+        let pane = workspace
+            .state
+            .borrow()
+            .first_pane_showing(server)
+            .expect("the console is open");
+        deliver_server_line(workspace, server, "earlier run");
+        assert!(console_text(workspace, pane).contains("earlier run"));
+        pane
+    }
+
+    fn deliver_server_line(workspace: &Workspace, server: InstalledHost, text: &str) {
+        let InstalledHost::Server(id) = server else {
+            unreachable!()
+        };
+        let update = LiveLogUpdate {
+            source: LiveLogSource::Server(id),
+            reset: false,
+            missing: false,
+            source_truncated: false,
+            lines: vec![backend::LiveLogLine::Server(
+                ephervex_server::CapturedLine::from_bytes(
+                    ephervex_server::CaptureStream::Stdout,
+                    text.as_bytes(),
+                ),
+            )],
+        };
+        let mut logs = workspace.logs.borrow_mut();
+        let mut changes = HashMap::new();
+        logs.apply(&update, &mut changes);
+        logs.settle(changes);
+    }
+
+    fn console_text(workspace: &Workspace, pane: PaneId) -> String {
+        workspace.logs.borrow().text(pane).unwrap_or_default()
+    }
+
+    #[test]
+    fn launch_and_connect_starts_the_servers_console_over_with_the_new_run() {
+        let ui = test_window();
+        let (workspace, _commands, client, server) = paired_workspace(&ui);
+        let console = console_with_earlier_output(&workspace, &ui, server);
+
+        ui.invoke_launch_and_connect(client.id().into(), server.id().into());
+        assert_eq!(console_text(&workspace, console), "");
+
+        deliver_server_line(&workspace, server, "new run");
+        let text = console_text(&workspace, console);
+        assert!(text.contains("new run") && !text.contains("earlier run"));
+    }
+
+    #[test]
+    fn launching_a_client_that_starts_its_server_starts_the_console_over() {
+        let ui = test_window();
+        let (workspace, _commands, client, server) = paired_workspace_starting_together(&ui, true);
+        let console = console_with_earlier_output(&workspace, &ui, server);
+
+        ui.invoke_launch_client(client.id().into());
+        assert_eq!(console_text(&workspace, console), "");
+    }
+
+    #[test]
+    fn a_console_keeps_the_run_that_launch_and_connect_joins() {
+        let ui = test_window();
+        let (workspace, _commands, client, server) = paired_workspace(&ui);
+        let console = console_with_earlier_output(&workspace, &ui, server);
+        let (clients, rows) = paired_rows(client, server, false, true);
+        workspace.lifecycle.borrow_mut().servers.observe(&rows);
+        workspace.state.borrow_mut().set_rows(clients, rows);
+
+        ui.invoke_launch_and_connect(client.id().into(), server.id().into());
+        assert!(console_text(&workspace, console).contains("earlier run"));
+    }
+
+    #[test]
+    fn a_console_keeps_the_run_that_a_client_launch_joins() {
+        let ui = test_window();
+        let (workspace, _commands, client, server) = paired_workspace_starting_together(&ui, true);
+        let console = console_with_earlier_output(&workspace, &ui, server);
+        let (clients, rows) = paired_rows(client, server, true, true);
+        workspace.lifecycle.borrow_mut().servers.observe(&rows);
+        workspace.state.borrow_mut().set_rows(clients, rows);
+
+        ui.invoke_launch_client(client.id().into());
+        assert!(console_text(&workspace, console).contains("earlier run"));
     }
 
     #[test]

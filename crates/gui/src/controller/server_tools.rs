@@ -16,6 +16,15 @@ pub(super) enum ServerAction {
     Console,
 }
 
+/// What a linked start claimed on its server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LinkedClaim {
+    /// The server is stopped and this action starts a new run of it.
+    Starting,
+    /// The server is already running and this action joins that run.
+    Running,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Starting,
@@ -68,14 +77,18 @@ impl ServerTools {
             || self.stops.contains_key(&id)
     }
 
-    pub(super) fn claim_linked(&mut self, id: ServerId, restarting: bool) -> bool {
+    pub(super) fn claim_linked(&mut self, id: ServerId, restarting: bool) -> Option<LinkedClaim> {
         if self.busy(id) || restarting {
-            return false;
+            return None;
         }
         if self.rows.get(&id).is_some_and(|row| row.can_start) {
             self.request(id, ServerAction::Start, restarting)
+                .then_some(LinkedClaim::Starting)
         } else {
-            self.rows.get(&id).is_some_and(|row| row.can_stop)
+            self.rows
+                .get(&id)
+                .is_some_and(|row| row.can_stop)
+                .then_some(LinkedClaim::Running)
         }
     }
 
