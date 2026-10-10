@@ -76,6 +76,13 @@ impl BindingCapture {
         self.armed.get()
     }
 
+    /// Delivers a press as the windowing handler would, for tests of the
+    /// frontend's listener.
+    #[cfg(test)]
+    pub(crate) fn deliver_press(&self, input: CapturedInput) {
+        self.deliver(input);
+    }
+
     /// Delivers one press, with the listener taken out of the cell first so a
     /// listener that arms or disarms does not borrow it twice.
     fn deliver(&self, input: CapturedInput) {

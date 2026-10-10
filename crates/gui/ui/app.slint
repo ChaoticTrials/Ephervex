@@ -832,6 +832,14 @@ export component AppWindow inherits Window {
     callback present-toast(string, bool);
     callback dismiss-toast(int);
 
+    // Leaving the page that shows the capturing row destroys it without the
+    // row ever losing focus, so the capture ends here.
+    changed settings-tab => {
+        if (self.minecraft-capturing-id != "") { self.minecraft-cancel-capture(); }
+    }
+    changed page => {
+        if (self.minecraft-capturing-id != "") { self.minecraft-cancel-capture(); }
+    }
     changed create-minecraft => {
         if root.create-minecraft != "" {
             root.warm-language-catalog(root.create-minecraft);

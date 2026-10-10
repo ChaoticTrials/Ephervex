@@ -5615,39 +5615,43 @@ fn register_minecraft_defaults(
     // -- what is shown. None of these touch the draft.
     let handle = ui.as_weak();
     let state = Rc::clone(minecraft);
+    let armed = keys.clone();
     ui.on_minecraft_select_category(move |index| {
         let Some(ui) = handle.upgrade() else { return };
         if let Ok(index) = usize::try_from(index) {
             state.borrow_mut().select_category(index);
         }
-        ui.set_minecraft_capturing_id(SharedString::default());
+        end_minecraft_capture(&ui, &state, &armed);
         render_minecraft(&ui, &state);
     });
 
     let handle = ui.as_weak();
     let state = Rc::clone(minecraft);
+    let armed = keys.clone();
     ui.on_minecraft_set_query(move |query| {
         let Some(ui) = handle.upgrade() else { return };
         state.borrow_mut().set_query(&query);
-        ui.set_minecraft_capturing_id(SharedString::default());
+        end_minecraft_capture(&ui, &state, &armed);
         render_minecraft(&ui, &state);
     });
 
     let handle = ui.as_weak();
     let state = Rc::clone(minecraft);
+    let armed = keys.clone();
     ui.on_minecraft_set_show_advanced(move |show| {
         let Some(ui) = handle.upgrade() else { return };
         state.borrow_mut().set_show_advanced(show);
-        ui.set_minecraft_capturing_id(SharedString::default());
+        end_minecraft_capture(&ui, &state, &armed);
         render_minecraft(&ui, &state);
     });
 
     let handle = ui.as_weak();
     let state = Rc::clone(minecraft);
+    let armed = keys.clone();
     ui.on_minecraft_set_only_overridden(move |only| {
         let Some(ui) = handle.upgrade() else { return };
         state.borrow_mut().set_only_overridden(only);
-        ui.set_minecraft_capturing_id(SharedString::default());
+        end_minecraft_capture(&ui, &state, &armed);
         render_minecraft(&ui, &state);
     });
 
@@ -5678,7 +5682,7 @@ fn register_minecraft_defaults(
     });
 
     // -- the draft itself.
-    register_minecraft_editors(ui, commands, minecraft);
+    register_minecraft_editors(ui, commands, minecraft, keys);
     register_minecraft_capture(ui, commands, minecraft, keys);
 
     let handle = ui.as_weak();
@@ -5698,10 +5702,11 @@ fn register_minecraft_defaults(
     let handle = ui.as_weak();
     let state = Rc::clone(minecraft);
     let sender = commands.clone();
+    let armed = keys.clone();
     ui.on_minecraft_discard_defaults(move || {
         let Some(ui) = handle.upgrade() else { return };
         state.borrow_mut().discard();
-        ui.set_minecraft_capturing_id(SharedString::default());
+        end_minecraft_capture(&ui, &state, &armed);
         render_minecraft(&ui, &state);
         request_minecraft_preview(&ui, &state, &sender);
     });
@@ -5712,6 +5717,7 @@ fn register_minecraft_editors(
     ui: &AppWindow,
     commands: &Sender<Command>,
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+    keys: &BindingCapture,
 ) {
     let picker = WindowSizePicker::default();
     let handle = ui.as_weak();
@@ -5802,7 +5808,12 @@ fn register_minecraft_editors(
     let state = Rc::clone(minecraft);
     let sender = commands.clone();
     let following = picker.clone();
+    let armed = keys.clone();
     ui.on_minecraft_forget_preference(move |id| {
+        // The rows are rebuilt below, which destroys the row being captured.
+        if let Some(ui) = handle.upgrade() {
+            end_minecraft_capture(&ui, &state, &armed);
+        }
         edit_minecraft_draft(
             &handle,
             &state,
@@ -6230,9 +6241,7 @@ fn register_minecraft_capture(
     let armed = keys.clone();
     ui.on_minecraft_cancel_capture(move || {
         let Some(ui) = handle.upgrade() else { return };
-        armed.disarm();
-        state.borrow_mut().cancel_capture();
-        ui.set_minecraft_capturing_id(SharedString::default());
+        end_minecraft_capture(&ui, &state, &armed);
     });
 
     // The press itself, where the windowing layer can be reached: the key
@@ -6246,6 +6255,9 @@ fn register_minecraft_capture(
     keys.listen(move |input| {
         let Some(ui) = handle.upgrade() else { return };
         let Some(parsed) = minecraft_preference_id(&ui.get_minecraft_capturing_id()) else {
+            // Nothing is waiting for this press, so nothing may keep taking
+            // presses away from the window.
+            armed.disarm();
             return;
         };
         let outcome = match input {
@@ -6289,6 +6301,21 @@ fn register_minecraft_capture(
     });
 }
 
+/// Closes any open capture in the model, on screen, and in the press reader.
+///
+/// Every way a capture can end goes through here. The reader takes every key
+/// and mouse press away from the window while armed, so ending a capture
+/// anywhere else would leave the window deaf with no row to bind.
+fn end_minecraft_capture(
+    ui: &AppWindow,
+    minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+    keys: &BindingCapture,
+) {
+    keys.disarm();
+    minecraft.borrow_mut().cancel_capture();
+    ui.set_minecraft_capturing_id(SharedString::default());
+}
+
 /// What the screen does once a capture has resolved.
 ///
 /// A refused press leaves capture open and changes nothing, so the user can
@@ -6306,8 +6333,7 @@ fn apply_capture_outcome(
         ui.invoke_present_toast(lookup("gui-minecraft-capture-refused").into(), true);
         return;
     }
-    keys.disarm();
-    ui.set_minecraft_capturing_id(SharedString::default());
+    end_minecraft_capture(ui, minecraft, keys);
     render_minecraft(ui, minecraft);
     if outcome != CaptureOutcome::Canceled {
         request_minecraft_preview(ui, minecraft, commands);
@@ -16666,5 +16692,101 @@ mod tests {
             panic!("a turn-on sends the enable change");
         };
         assert_eq!(changes, vec![(PathBuf::from("mods/Addon.jar"), true)]);
+    }
+
+    /// A window with the Minecraft defaults wired up and a capture open on
+    /// one row, so the press reader is armed.
+    fn window_with_open_capture() -> (
+        AppWindow,
+        BindingCapture,
+        Rc<RefCell<MinecraftDefaultsModel>>,
+        std::sync::mpsc::Receiver<Command>,
+    ) {
+        let ui = test_window();
+        let (sender, commands) = std::sync::mpsc::channel();
+        let minecraft = Rc::new(RefCell::new(MinecraftDefaultsModel::new()));
+        let keys = BindingCapture::default();
+        register_minecraft_defaults(&ui, &sender, &minecraft, &keys);
+
+        ui.invoke_minecraft_begin_capture("keybind_sneak".into());
+        assert!(keys.is_armed());
+        assert_eq!(ui.get_minecraft_capturing_id(), "keybind_sneak");
+        (ui, keys, minecraft, commands)
+    }
+
+    fn assert_capture_ended(
+        ui: &AppWindow,
+        keys: &BindingCapture,
+        minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+    ) {
+        assert!(!keys.is_armed(), "the reader must stop taking presses");
+        assert_eq!(ui.get_minecraft_capturing_id(), "");
+        assert_eq!(minecraft.borrow().capturing(), None);
+    }
+
+    #[test]
+    fn changing_the_visible_rows_ends_an_open_key_capture() {
+        let (ui, keys, minecraft, _commands) = window_with_open_capture();
+        ui.invoke_minecraft_select_category(0);
+        assert_capture_ended(&ui, &keys, &minecraft);
+
+        let (ui, keys, minecraft, _commands) = window_with_open_capture();
+        ui.invoke_minecraft_set_query("sneak".into());
+        assert_capture_ended(&ui, &keys, &minecraft);
+
+        let (ui, keys, minecraft, _commands) = window_with_open_capture();
+        ui.invoke_minecraft_set_show_advanced(true);
+        assert_capture_ended(&ui, &keys, &minecraft);
+
+        let (ui, keys, minecraft, _commands) = window_with_open_capture();
+        ui.invoke_minecraft_set_only_overridden(true);
+        assert_capture_ended(&ui, &keys, &minecraft);
+    }
+
+    #[test]
+    fn discarding_the_draft_ends_an_open_key_capture() {
+        let (ui, keys, minecraft, _commands) = window_with_open_capture();
+        ui.invoke_minecraft_discard_defaults();
+        assert_capture_ended(&ui, &keys, &minecraft);
+    }
+
+    #[test]
+    fn forgetting_a_preference_ends_an_open_key_capture() {
+        let (ui, keys, minecraft, _commands) = window_with_open_capture();
+        ui.invoke_minecraft_forget_preference("keybind_sneak".into());
+        assert_capture_ended(&ui, &keys, &minecraft);
+    }
+
+    #[test]
+    fn canceling_an_open_key_capture_stops_the_reader() {
+        let (ui, keys, minecraft, _commands) = window_with_open_capture();
+        ui.invoke_minecraft_cancel_capture();
+        assert_capture_ended(&ui, &keys, &minecraft);
+    }
+
+    #[test]
+    fn a_press_with_no_capturing_row_disarms_the_reader() {
+        let (ui, keys, _minecraft, _commands) = window_with_open_capture();
+        // The row went away without any handler running.
+        ui.set_minecraft_capturing_id(SharedString::default());
+        assert!(keys.is_armed());
+
+        keys.deliver_press(CapturedInput::Mouse(ephervex_core::MouseButton::Left));
+        assert!(!keys.is_armed());
+    }
+
+    #[test]
+    fn leaving_the_page_that_shows_the_capturing_row_ends_the_capture() {
+        let markup = ui_markup();
+        let changed = |property: &str| {
+            let start = markup
+                .find(&format!("changed {property} =>"))
+                .unwrap_or_else(|| panic!("the window reacts to {property} changing"));
+            let body = &markup[start..];
+            let body = &body[..body.find("\n    }").expect("a closed handler")];
+            body.contains("minecraft-cancel-capture")
+        };
+        assert!(changed("settings-tab"));
+        assert!(changed("page"));
     }
 }
