@@ -4,13 +4,13 @@ This Docusaurus site uses screenshots of the actual Ephervex Slint window.
 The Rust generator uses synthetic fixtures and writes original PNGs locally.
 The website uses optimized WebP copies.
 
-The installation page is a standalone route at `/install`. The v1 docs sidebar
-has a Getting Started entry that redirects there, and the previous
-`/docs/v1/install` URL remains that entry's route. The page suggests a Linux
-architecture when the browser exposes one, but the visitor can always choose
-the other architecture. It reads the latest GitHub release to link versioned
-packages and falls back to the releases list when release metadata is
-unavailable.
+The installation page is a standalone route at `/install`. The v1 docs have a
+Getting Started guide at `/docs/v1/getting-started` with a link to the
+installation page. The page suggests a Linux architecture when the browser
+exposes one, but the visitor can always choose the other architecture. It
+reads the latest GitHub release to link versioned packages and falls back to
+the releases list when release metadata is unavailable.
+
 The navbar logo, favicon, and social image in `static/img/` are symlinks to
 artwork under the repository's `assets/` directory. Build from a full
 repository checkout so Docusaurus can copy those files into `build/img/`.
