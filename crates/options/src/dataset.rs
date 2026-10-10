@@ -36,6 +36,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Deserialize;
 
 use crate::codec::OptionCodec;
+use crate::file::VERSION_KEY;
 
 /// The dataset shape this build understands.
 ///
@@ -49,6 +50,11 @@ pub const DATASET_FORMAT_VERSION: u32 = 1;
 /// Guarantees that a fresh installation with no network and no cache still
 /// understands every release that was verified when this build shipped.
 const BUNDLED_DATASET: &str = include_str!("../data/minecraft-options.json");
+
+/// The only registry setting that may be stored under the options file's
+/// data-version marker key. The marker is written from the release mapping, so
+/// no other setting may share its line.
+const VERSION_MARKER_SETTING_ID: &str = "version";
 
 /// One stable setting definition retained for current and historical schemas.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -307,6 +313,7 @@ impl OptionsDataset {
                     schema.id
                 )));
             }
+            let mut writers: BTreeMap<&str, &str> = BTreeMap::new();
             for (setting, position) in &schema.supported {
                 if !ids.contains(setting.as_str()) {
                     return Err(inconsistent(format!(
@@ -314,10 +321,24 @@ impl OptionsDataset {
                         schema.id
                     )));
                 }
-                if *position >= self.representations.len() {
+                let Some(representation) = self.representations.get(*position) else {
                     return Err(inconsistent(format!(
                         "schema `{}` points past the representation table",
                         schema.id
+                    )));
+                };
+                let key = representation.key.as_str();
+                if key == VERSION_KEY && setting != VERSION_MARKER_SETTING_ID {
+                    return Err(inconsistent(format!(
+                        "schema `{}` stores `{setting}` under the reserved `{VERSION_KEY}` key",
+                        schema.id
+                    )));
+                }
+                if let Some(other) = writers.insert(key, setting) {
+                    return Err(inconsistent(format!(
+                        "schema `{}` stores both `{other}` and `{setting}` under the key `{}`",
+                        schema.id,
+                        key.escape_debug()
                     )));
                 }
             }
@@ -507,6 +528,10 @@ mod tests {
                 "an options key that would break the line format",
                 document("").replace("\"key\":\"fov\"", "\"key\":\"fov:x\""),
             ),
+            (
+                "a managed setting stored under the data-version marker key",
+                document("").replace("\"key\":\"fov\"", "\"key\":\"version\""),
+            ),
         ];
         for (why, json) in cases {
             assert!(
@@ -517,6 +542,44 @@ mod tests {
                 "{why} must be refused"
             );
         }
+    }
+
+    #[test]
+    fn only_the_marker_setting_may_use_the_data_version_key() {
+        let marker = document("")
+            .replace(
+                r#"manageable":true}]"#,
+                r#"manageable":true},{"id":"version","key":"version","type":"integer","category":null,"translation_key":null,"manageable":false}]"#,
+            )
+            .replace(
+                r#""codec":{"kind":"decimal","min":30,"max":110}}]"#,
+                r#""codec":{"kind":"decimal","min":30,"max":110}},{"key":"version","codec":{"kind":"integer","min":null,"max":null}}]"#,
+            )
+            .replace(r#""supported":{"fov":0}"#, r#""supported":{"fov":0,"version":1}"#);
+        OptionsDataset::parse(&marker).expect("the marker setting owns its own key");
+
+        let hijacked = marker.replace(r#""fov":0,"version":1"#, r#""fov":1,"version":1"#);
+        let error = OptionsDataset::parse(&hijacked).expect_err("fov must not use the marker key");
+        assert!(matches!(error, DatasetError::Inconsistent { .. }));
+    }
+
+    #[test]
+    fn two_settings_of_one_schema_cannot_share_a_stored_key() {
+        let shared = document("")
+            .replace(
+                r#"manageable":true}]"#,
+                r#"manageable":true},{"id":"fullscreen","key":"fullscreen","type":"boolean","category":null,"translation_key":null,"manageable":true}]"#,
+            )
+            .replace(r#""supported":{"fov":0}"#, r#""supported":{"fov":0,"fullscreen":0}"#);
+        let error = OptionsDataset::parse(&shared)
+            .expect_err("one key with two writers loses a write behind a reported success");
+        let DatasetError::Inconsistent { detail } = error else {
+            panic!("expected an inconsistent document");
+        };
+        assert!(
+            detail.contains("fov") && detail.contains("fullscreen"),
+            "{detail}"
+        );
     }
 
     #[test]

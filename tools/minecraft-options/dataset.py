@@ -39,6 +39,11 @@ from typing import Any
 # a higher version must refuse the document rather than guess at it.
 FORMAT_VERSION = 1
 
+# The options file's data-version marker line. Only the registry's own marker
+# setting may be stored under it; every other setting would overwrite it.
+VERSION_KEY = "version"
+VERSION_MARKER_SETTING_ID = "version"
+
 # The canonical setting ids Ephervex's own preference model is built on. The
 # generator refuses to publish a dataset that cannot describe all of them for
 # the canonical release, because that would ship a build whose settings screen
@@ -572,11 +577,22 @@ def validate(document: dict[str, Any]) -> None:
             }
         ) != schema["id"]:
             raise DatasetError(f"schema `{schema['id']}` does not match its own content")
+        writers: dict[str, str] = {}
         for setting_id, position in schema["supported"].items():
             if setting_id not in ids:
                 raise DatasetError(f"schema `{schema['id']}` names unknown setting `{setting_id}`")
             if not 0 <= position < len(table):
                 raise DatasetError(f"schema `{schema['id']}` has an out-of-range representation")
+            key = table[position]["key"]
+            if key == VERSION_KEY and setting_id != VERSION_MARKER_SETTING_ID:
+                raise DatasetError(
+                    f"schema `{schema['id']}` stores `{setting_id}` under the reserved `{VERSION_KEY}` key"
+                )
+            if key in writers:
+                raise DatasetError(
+                    f"schema `{schema['id']}` stores both `{writers[key]}` and `{setting_id}` under the key `{key}`"
+                )
+            writers[key] = setting_id
         overlap = set(schema["supported"]) & set(schema["unsupported"])
         if overlap:
             raise DatasetError(f"schema `{schema['id']}` is both supported and unsupported for {overlap}")

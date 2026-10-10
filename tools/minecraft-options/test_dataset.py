@@ -350,6 +350,48 @@ class Validation(unittest.TestCase):
         with self.assertRaises(dataset.DatasetError):
             dataset.validate(broken)
 
+    def reseal(self, document: dict) -> None:
+        """Recomputes the family id so only the edit under test can fail."""
+        schema = document["schemas"][0]
+        schema["id"] = dataset.fingerprint(
+            {
+                "supported": {
+                    setting_id: document["representations"][position]
+                    for setting_id, position in schema["supported"].items()
+                },
+                "unsupported": schema["unsupported"],
+            }
+        )
+        document["releases"][0]["schema"] = schema["id"]
+
+    def test_a_managed_setting_stored_under_the_version_marker_key_is_refused(self):
+        broken = self.build()
+        position = broken["schemas"][0]["supported"]["fullscreen"]
+        broken["representations"][position]["key"] = "version"
+        self.reseal(broken)
+        with self.assertRaisesRegex(dataset.DatasetError, "reserved"):
+            dataset.validate(broken)
+
+    def test_the_marker_setting_may_use_the_version_marker_key(self):
+        document = self.build()
+        document["setting_registry"].append(
+            {"id": "version", "key": "version", "type": "integer", "manageable": False}
+        )
+        document["representations"].append(
+            {"key": "version", "codec": {"kind": "integer", "min": None, "max": None}}
+        )
+        document["schemas"][0]["supported"]["version"] = len(document["representations"]) - 1
+        self.reseal(document)
+        dataset.validate(document)
+
+    def test_two_settings_of_one_schema_cannot_share_a_stored_key(self):
+        broken = self.build()
+        supported = broken["schemas"][0]["supported"]
+        supported["fullscreen"] = supported["fov"]
+        self.reseal(broken)
+        with self.assertRaisesRegex(dataset.DatasetError, "both"):
+            dataset.validate(broken)
+
     def test_a_canonical_release_that_is_not_mapped_is_refused(self):
         broken = self.build()
         broken["canonical_minecraft_version"] = "27.0"
