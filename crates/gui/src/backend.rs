@@ -1504,6 +1504,13 @@ impl ModalScope {
             Self::Dialogs(names) => names.contains(&modal),
         }
     }
+
+    /// Whether this scope names `modal` itself, as opposed to speaking for
+    /// whatever happens to be showing.
+    #[must_use]
+    pub fn names_dialog(self, modal: &str) -> bool {
+        matches!(self, Self::Dialogs(names) if names.contains(&modal))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -3324,7 +3331,9 @@ fn run_worker(
                             });
                             send_snapshot(&mut app, &events);
                         }
-                        Err(error) => send_modal_error(&events, &error),
+                        Err(error) => {
+                            send_scoped_modal_error(&events, ModalScope::LOADER_CHANGE, &error);
+                        }
                     }
                 });
             }
