@@ -40,14 +40,15 @@ use ephervex_core::{
     ModRelations, ModSearchQuery, ModSearchResults, NetworkAccess, NewClient, NewServer,
     OperationReporter, OptionalSelection, OutputLine, PackAnalysis, PackRecipe, PackSide, Paths,
     PlanWarning, PlannedMod, PreferenceApplication, PreferenceId, PreferenceKey, ProcessMonitor,
-    PromotionRequest, ReconciliationReport, RelatedMod, ReleaseListing, RequiredMods,
-    RequirementBasis, RoundAnswer, RuntimeClassification, RuntimeInventory, SearchOptions,
-    SecretString, ServerCommitWarning, ServerContentSource, ServerCreateOptions, ServerEvent,
-    ServerExit, ServerFolder, ServerNetworkChange, ServerObserver, ServerPersistenceHealth,
-    ServerRecord, ServerWarning, Session, SharedArtifactReport, SideRequirement, SkipReason,
-    SnapshotOrigin, SnapshotRecord, SnapshotRestoreOptions, StartedServerLifetime,
-    SuspectConfidence, SuspectReason, TerminationRequests, TextAnchor, TextView,
-    UnknownServerFiles, VerificationReport, VersionMetadata, VersionRecord, format_binary_bytes,
+    PromotionRequest, PromotionWarning, ReconciliationReport, RelatedMod, ReleaseListing,
+    RequiredMods, RequirementBasis, RoundAnswer, RuntimeClassification, RuntimeInventory,
+    SearchOptions, SecretString, ServerCommitWarning, ServerContentSource, ServerCreateOptions,
+    ServerEvent, ServerExit, ServerFolder, ServerNetworkChange, ServerObserver,
+    ServerPersistenceHealth, ServerRecord, ServerWarning, Session, SharedArtifactReport,
+    SideRequirement, SkipReason, SnapshotOrigin, SnapshotRecord, SnapshotRestoreOptions,
+    StartedServerLifetime, SuspectConfidence, SuspectReason, TerminationRequests, TextAnchor,
+    TextView, UnknownServerFiles, VerificationReport, VersionMetadata, VersionRecord,
+    format_binary_bytes,
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{
@@ -1053,6 +1054,10 @@ enum InstanceCommand {
     /// Every temporary server linked to the instance moves with it unless you
     /// say otherwise. This cannot be undone by running it in reverse: delete
     /// the instance when you no longer want to keep it.
+    ///
+    /// The command exits with an error when the instance moved but a server you
+    /// asked to keep could not be moved. It is still temporary then, and the
+    /// output says why.
     Persist {
         id: InstanceId,
         /// Move only this linked server. Repeatable, and naming any server at
@@ -2297,7 +2302,7 @@ fn run_instance_persist(
                 }))
                 .collect::<Vec<_>>(),
         }));
-        return Ok(());
+        return unmoved_servers_result(&outcome.warnings);
     }
 
     outln!(
@@ -2334,7 +2339,24 @@ fn run_instance_persist(
             )
         );
     }
-    Ok(())
+    unmoved_servers_result(&outcome.warnings)
+}
+
+/// Whether every requested server left temporary storage.
+///
+/// The instance itself has already moved by the time a server fails to, so the
+/// outcome is reported in full first. A server that stayed behind is still at
+/// risk of being cleared, which a script must not see as success.
+fn unmoved_servers_result(warnings: &[PromotionWarning]) -> anyhow::Result<()> {
+    if warnings.is_empty() {
+        return Ok(());
+    }
+    let names = warnings
+        .iter()
+        .map(|warning| warning.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    anyhow::bail!("the instance was moved, but these servers are still temporary: {names}")
 }
 
 #[allow(clippy::too_many_lines)]
@@ -8543,6 +8565,23 @@ mod tests {
             control_response_result(&ControlResponse::StartFailed("no such file".to_owned()))
                 .expect_err("a failed restart leaves the server stopped");
         assert!(failed.to_string().contains("no such file"));
+    }
+
+    #[test]
+    fn a_server_left_temporary_by_a_persist_fails_the_command() {
+        let warnings = ["alpha", "beta"].map(|name| PromotionWarning {
+            server: ServerId::new(),
+            name: name.to_owned(),
+            error: CoreError::StorageFull { path: None },
+        });
+        let error = unmoved_servers_result(&warnings)
+            .expect_err("a requested server stayed in temporary storage");
+        assert!(error.to_string().contains("alpha, beta"), "{error}");
+    }
+
+    #[test]
+    fn a_persist_that_moved_every_requested_server_succeeds() {
+        unmoved_servers_result(&[]).expect("nothing was left behind");
     }
 
     #[test]
