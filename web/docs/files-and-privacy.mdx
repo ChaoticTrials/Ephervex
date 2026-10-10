@@ -1,0 +1,140 @@
+---
+title: Files and Privacy
+description: Find Ephervex data, work offline, and keep or remove it when upgrading or uninstalling.
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+import ThemeScreenshot from '@site/src/components/ThemeScreenshot';
+
+# Files and Privacy
+
+Ephervex keeps installed clients and servers separate from settings, logs,
+and reusable downloads. Use `ephervex paths` to see the actual locations on
+your machine before moving or removing files. This page also explains what
+works offline and which data can contain private information. For an AppImage,
+run its file with the same CLI arguments, such as
+`./Ephervex-x86_64.AppImage paths`.
+
+## Find your files
+
+These are the default Linux locations. The `XDG_*` variables and `TMPDIR`
+can change them:
+
+| Purpose | Default location | What it holds |
+| --- | --- | --- |
+| Configuration | `~/.config/ephervex/config.toml` | Settings, including Minecraft defaults; no credentials |
+| Data | `~/.local/share/ephervex/` | Persistent clients and servers, managed Java, shared files, and icons |
+| Cache | `~/.cache/ephervex/` | Reusable downloads, metadata, Minecraft assets, libraries, and unpacked natives |
+| State | `~/.local/state/ephervex/` | Instance index and Ephervex logs |
+| Temporary hosts | `<system temporary directory>/ephervex-<uid>/` | Temporary clients and servers, subject to operating-system cleanup |
+
+Each client or server also has its own game files, logs, crash reports, and
+`.launcher` metadata. Snapshots stay inside the host that owns them. Cached
+files can be downloaded or rebuilt again, but deleting the cache may make an
+offline launch impossible until the missing files are fetched.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Use **Open Folder** on a client or server workspace to inspect that host.
+**Settings > Storage** shows the effective persistent root and lets you
+choose a root for future persistent environments. Existing hosts stay in
+their recorded locations. **Settings > Disk usage** measures what Ephervex
+keeps and has **Open Folder** actions for some categories.
+
+<ThemeScreenshot state="settings-storage" alt="Storage settings showing the persistent root and reusable cache" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+```bash
+ephervex paths
+ephervex doctor
+ephervex config instance-root
+```
+
+`paths` prints the resolved directories, including a relocated persistent
+root. `doctor` checks whether the directories and configuration are usable;
+it does not contact a network service. Use the [Settings guide](./settings.mdx#storage)
+to change the root.
+
+</TabItem>
+</Tabs>
+
+## Environment variables
+
+Ephervex follows the XDG locations when these variables are set before the
+app starts. Use `ephervex paths` with the same environment to verify the
+result.
+
+| Variable | Effect |
+| --- | --- |
+| `XDG_CONFIG_HOME` | Base directory for `config.toml` and custom themes |
+| `XDG_DATA_HOME` | Base directory for persistent data, unless the persistent root was changed in Settings |
+| `XDG_CACHE_HOME` | Base directory for reusable downloads and game caches |
+| `XDG_STATE_HOME` | Base directory for the instance index and launcher logs |
+| `TMPDIR` | Base directory for temporary clients and servers |
+| `XDG_RUNTIME_DIR` | Session location for process-control sockets when it is suitable |
+| `JAVA_HOME` and `PATH` | Places Java discovery looks for runtimes |
+| `EPHERVEX_LOG` | Launcher log filter, for example `EPHERVEX_LOG=ephervex_download=debug` |
+
+The persistent root setting is separate from the XDG variables. Changing it
+affects new persistent clients and servers, not existing ones.
+
+## Work offline
+
+Already installed clients and servers can be browsed and started offline when
+their required files and account session are available. You can also change
+settings, inspect logs and crash reports, use snapshots, and measure storage.
+Ephervex checks retained recipes and shared caches before fetching artifacts.
+
+An online connection is needed to sign in to Microsoft or refresh an expired
+session, browse Minecraft and loader releases, search mod catalogs, resolve
+some CurseForge pack files, or download an artifact missing from the cache.
+The included CurseForge API key needs no user setup. It does not make the
+CurseForge service available offline. A managed language preference is not
+applied when its release's language catalog cannot be resolved.
+
+## Credentials and diagnostic data
+
+Microsoft refresh tokens and any optional user-supplied CurseForge key are
+stored through the desktop's Secret Service keyring, not in `config.toml`.
+If a keyring is unavailable, the CLI offers an explicit session-only
+Microsoft sign-in that keeps its credential in memory for that process.
+There is no plaintext credential fallback. `ephervex doctor` reports
+whether a keyring backend is reachable, not which secrets it contains.
+
+Ephervex does not upload its launcher logs or diagnostic bundles. A bundle
+is written locally and shared only when you choose to send it. Game logs and
+crash reports are included as written by Minecraft and mods; they can contain
+player names, server addresses, or local paths. Review selected files before
+sharing a [diagnostic bundle](./diagnostics.mdx#prepare-a-report-or-bundle).
+
+## Upgrade or uninstall
+
+Upgrading a package through its package manager, or replacing the AppImage,
+keeps settings, clients, servers, worlds, and caches. An AppImage has the same
+file name across releases. If you use an AppImage integration tool, its
+existing entry can continue to point at the replacement file.
+
+An older Ephervex build may refuse a configuration with a newer schema
+version. Settings values it understands remain compatible across ordinary
+rewrites, but the formatting and comments in `config.toml` are not
+preserved when a setting is saved. Avoid using an older build to rewrite
+newer instance or server metadata.
+
+To uninstall the application, remove the `ephervex` package with your
+package manager, or delete the AppImage. If you registered the AppImage as
+an `ephervex://` link handler, run its `url-handler unregister` command
+before deleting it. Removing the application leaves your worlds and other
+data in place.
+
+For complete data removal, close Ephervex, check `ephervex paths` first,
+then remove the resolved configuration, data, cache, and state directories
+and any relocated persistent root. This permanently removes clients,
+servers, worlds, and snapshots there. Temporary hosts are under the
+operating system's temporary directory and may be cleared separately.
+Credentials live outside those directories: sign out of Microsoft accounts
+before uninstalling, or remove the Ephervex entries later with your desktop's
+credential manager.

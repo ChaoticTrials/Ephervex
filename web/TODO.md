@@ -163,7 +163,7 @@ features show one tab or a short note.
 - [x] Settings: General, Minecraft defaults, Java, Providers & APIs, Storage,
       Disk usage
 - [x] Themes (source: `docs/themes.md`)
-- [ ] Files and locations, environment variables, working offline,
+- [x] Files and locations, environment variables, working offline,
       credentials and privacy, upgrade and uninstall
 - [ ] Limitations and troubleshooting
 
