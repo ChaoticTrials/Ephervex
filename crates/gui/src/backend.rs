@@ -358,8 +358,10 @@ pub enum Command {
     },
     /// Works out what changing or updating one mod would do here and on every
     /// linked server, before anything is written. An empty `version` means the
-    /// newest release that fits this client.
+    /// newest release that fits this client. `request` names the ask, and the
+    /// plan that answers it carries the same number back.
     PlanModApply {
+        request: u64,
         instance: InstanceId,
         path: PathBuf,
         version: String,
@@ -382,7 +384,10 @@ pub enum Command {
         path: PathBuf,
         servers: Vec<ServerId>,
     },
+    /// Works out what removing one mod would take with it. `request` names the
+    /// ask, and the plan that answers it carries the same number back.
     PlanModRemoval {
+        request: u64,
         instance: InstanceId,
         path: PathBuf,
     },
@@ -1128,6 +1133,8 @@ pub struct ModRelationsData {
 /// What a removal would take with it, before it is carried out.
 #[derive(Debug, Clone, Default)]
 pub struct ModRemovalPlanData {
+    /// The ask this plan answers.
+    pub request: u64,
     pub instance: String,
     pub logical_path: String,
     pub name: String,
@@ -1603,8 +1610,12 @@ pub enum Event {
     ModRemovalPlan(ModRemovalPlanData),
     ModResults(ModResultsData),
     ModPlan(ModPlanData),
-    /// A change or update that has linked servers worth asking about.
-    LinkedApply(LinkedSectionData),
+    /// A change or update that has linked servers worth asking about, for the
+    /// ask `request` names.
+    LinkedApply {
+        request: u64,
+        section: LinkedSectionData,
+    },
     /// What one finished operation did to each target it touched.
     LinkedResult(LinkedResultData),
     ServerWorkspace(ServerWorkspaceData),
@@ -3318,6 +3329,7 @@ fn run_worker(
                 });
             }
             Command::PlanModApply {
+                request: ask,
                 instance,
                 path,
                 version,
@@ -3364,7 +3376,10 @@ fn run_worker(
                         }
                         Ok(plan) => {
                             drop(in_flight);
-                            let _ = events.send(Event::LinkedApply(linked_section(&plan)));
+                            let _ = events.send(Event::LinkedApply {
+                                request: ask,
+                                section: linked_section(&plan),
+                            });
                         }
                         Err(error) => {
                             send_scoped_modal_error(&events, ModalScope::MOD_MANAGE, &error);
@@ -3412,7 +3427,11 @@ fn run_worker(
                 );
             }
             Command::CancelModAcquisition { id } => acquisition_waits.cancel(id),
-            Command::PlanModRemoval { instance, path } => {
+            Command::PlanModRemoval {
+                request,
+                instance,
+                path,
+            } => {
                 let paths = app.paths().clone();
                 spawn_detached(paths, events.clone(), move |app, events, runtime| {
                     let result = runtime.block_on(app.plan_linked_mod_operation(
@@ -3423,7 +3442,10 @@ fn run_worker(
                     ));
                     match result {
                         Ok(plan) => {
-                            let _ = events.send(Event::ModRemovalPlan(removal_plan_data(&plan)));
+                            let _ = events.send(Event::ModRemovalPlan(ModRemovalPlanData {
+                                request,
+                                ..removal_plan_data(&plan)
+                            }));
                         }
                         Err(error) => {
                             send_scoped_modal_error(&events, ModalScope::MOD_MANAGE, &error);
@@ -10052,6 +10074,7 @@ fn removal_plan_data(linked: &LinkedModPlan) -> ModRemovalPlanData {
         return ModRemovalPlanData::default();
     };
     ModRemovalPlanData {
+        request: 0,
         instance: plan.instance.to_string(),
         logical_path: plan.target.display().to_string(),
         name: plan.name.clone(),

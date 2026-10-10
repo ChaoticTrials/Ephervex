@@ -2299,7 +2299,7 @@ export component AppWindow inherits Window {
                     // at one end left the dialog looking like it had run out
                     // of room, which is what it used to do.
                     HorizontalLayout { spacing: 8px;
-                        if root.mod-action-can-remove : AppButton { text: GuiI18n.text("gui-remove"); tone: "danger"; enabled: !root.mod-action-pending; clicked => { root.modal-error = ""; root.mod-remove-returns-to-manager = true; root.plan-mod-removal(root.mod-action-host, root.mod-action-path); } }
+                        if root.mod-action-can-remove : AppButton { text: GuiI18n.text("gui-remove"); tone: "danger"; enabled: !root.mod-action-pending; clicked => { root.mod-action-pending = true; root.modal-error = ""; root.mod-remove-returns-to-manager = true; root.plan-mod-removal(root.mod-action-host, root.mod-action-path); } }
                         AppButton { min-width: 124px; text: GuiI18n.text("gui-close"); clicked => { root.modal = ""; root.modal-error = ""; } }
                         Rectangle { horizontal-stretch: 1; }
                         if root.mod-action-is-pack-owned && root.mod-action-pack-original-version != "" : AppButton { text: GuiI18n.text("gui-mod-reset-to-pack-version"); enabled: !root.mod-action-pending; clicked => { root.mod-action-pending = true; root.modal-error = ""; root.plan-mod-apply(root.mod-action-host, root.mod-action-path, root.mod-action-pack-original-version); } }

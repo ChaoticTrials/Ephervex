@@ -1027,6 +1027,126 @@ struct ModBrowser {
     search_requests: Cell<u64>,
 }
 
+/// Where a mod plan was asked for, which decides where it may be shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlanAskedFrom {
+    /// The Manage dialog, in the opening numbered here.
+    Manager(u64),
+    /// A mod card, with no dialog open.
+    Card,
+}
+
+/// The one ask of a kind that a mod plan is still due for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AwaitedPlan {
+    request: u64,
+    asked_from: PlanAskedFrom,
+}
+
+/// Which plans a dialog's request may still be answered with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlanKind {
+    Removal,
+    Apply,
+}
+
+/// Whether a plan that answers the awaited ask may be shown now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlanAdmission {
+    Show,
+    /// The Manage dialog that asked has been left, so nobody is waiting.
+    Unwanted,
+    /// Another dialog is open that the plan must not replace.
+    Blocked,
+}
+
+/// The mod plans asked for and not yet shown. A plan names its ask and is shown
+/// once, only while the dialog that asked is still on screen: the host and path
+/// a dialog addresses outlive it and other flows overwrite them.
+#[derive(Debug, Default)]
+struct ModPlanRequests {
+    issued: Cell<u64>,
+    /// How many times the Manage dialog has been opened for a mod.
+    manager_openings: Cell<u64>,
+    removal: RefCell<Option<AwaitedPlan>>,
+    apply: RefCell<Option<AwaitedPlan>>,
+}
+
+impl ModPlanRequests {
+    fn slot(&self, kind: PlanKind) -> &RefCell<Option<AwaitedPlan>> {
+        match kind {
+            PlanKind::Removal => &self.removal,
+            PlanKind::Apply => &self.apply,
+        }
+    }
+
+    fn manager_opened(&self) {
+        self.manager_openings
+            .set(self.manager_openings.get().wrapping_add(1));
+    }
+
+    /// Records an ask made over `modal`; a newer ask replaces the older one.
+    fn ask(&self, kind: PlanKind, modal: &str) -> u64 {
+        let request = self.issued.get().wrapping_add(1);
+        self.issued.set(request);
+        let asked_from = if modal == "mod-manage" {
+            PlanAskedFrom::Manager(self.manager_openings.get())
+        } else {
+            PlanAskedFrom::Card
+        };
+        *self.slot(kind).borrow_mut() = Some(AwaitedPlan {
+            request,
+            asked_from,
+        });
+        request
+    }
+
+    /// Takes the awaited ask `request` names; `None` once replaced or answered.
+    fn answer(&self, kind: PlanKind, request: u64) -> Option<AwaitedPlan> {
+        let mut slot = self.slot(kind).borrow_mut();
+        if slot.as_ref().is_some_and(|ask| ask.request == request) {
+            slot.take()
+        } else {
+            None
+        }
+    }
+
+    fn admission(&self, awaited: &AwaitedPlan, modal: &str) -> PlanAdmission {
+        match awaited.asked_from {
+            PlanAskedFrom::Manager(opening) if opening != self.manager_openings.get() => {
+                PlanAdmission::Unwanted
+            }
+            PlanAskedFrom::Manager(_) => match modal {
+                "mod-manage" => PlanAdmission::Show,
+                // A download prompt took the dialog the user did not leave.
+                "mod-acquire" => PlanAdmission::Blocked,
+                _ => PlanAdmission::Unwanted,
+            },
+            PlanAskedFrom::Card if modal.is_empty() => PlanAdmission::Show,
+            PlanAskedFrom::Card => PlanAdmission::Blocked,
+        }
+    }
+
+    /// The ask a plan answers when it may be shown now; a card's ask that is
+    /// refused is announced, the rest are dropped.
+    fn admit(&self, ui: &AppWindow, kind: PlanKind, request: u64) -> Option<AwaitedPlan> {
+        let awaited = self.answer(kind, request)?;
+        match self.admission(&awaited, ui.get_modal().as_str()) {
+            PlanAdmission::Show => Some(awaited),
+            PlanAdmission::Unwanted => None,
+            PlanAdmission::Blocked => {
+                let key = if ui.get_modal() == "mod-acquire" {
+                    "gui-dialog-not-shown"
+                } else {
+                    "gui-dialog-not-shown-open-dialog"
+                };
+                ui.invoke_present_toast(lookup(key).into(), true);
+                None
+            }
+        }
+    }
+}
+
 /// One optional component's checkbox state in the import modal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ImportOptionState {
@@ -2252,6 +2372,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         isolation: Rc::clone(&isolation_flow),
         diagnosis: Rc::clone(&diagnosis_flow),
         acquisition_prompts: Rc::default(),
+        plan_requests: Rc::default(),
         commands: backend.commands.clone(),
     };
     register_i18n(ui);
@@ -3361,7 +3482,7 @@ fn register_client_actions(
 }
 
 fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>, workspace: &Workspace) {
-    register_mod_mutations(ui, commands);
+    register_mod_mutations(ui, commands, workspace);
     register_mod_browser(ui, commands, workspace);
     register_browser_install(ui, commands, workspace);
     register_favorite_versions(ui, commands);
@@ -3393,6 +3514,7 @@ fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>, workspace: &
         let Some(instance) = backend::parse_instance_id(&id) else {
             return;
         };
+        lists.plan_requests.manager_opened();
         // The modal opens on the state the list already has, then fills in.
         // Waiting for the catalog before showing anything would make an offline
         // instance feel broken.
@@ -3774,7 +3896,7 @@ fn next_mod_search_request_id(counter: &Cell<u64>) -> Option<u64> {
 
 /// The actions that change an instance's mods, kept apart from the ones that
 /// only look at them.
-fn register_mod_mutations(ui: &AppWindow, commands: &Sender<Command>) {
+fn register_mod_mutations(ui: &AppWindow, commands: &Sender<Command>, workspace: &Workspace) {
     register_loader_change(ui, commands);
 
     let sender = commands.clone();
@@ -3802,11 +3924,16 @@ fn register_mod_mutations(ui: &AppWindow, commands: &Sender<Command>) {
     });
 
     let sender = commands.clone();
+    let handle = ui.as_weak();
+    let plans = Rc::clone(&workspace.plan_requests);
     ui.on_plan_mod_apply(move |instance, path, version| {
+        let Some(ui) = handle.upgrade() else { return };
         if let Some(instance) = backend::parse_instance_id(&instance) {
+            let request = plans.ask(PlanKind::Apply, ui.get_modal().as_str());
             send(
                 &sender,
                 Command::PlanModApply {
+                    request,
                     instance,
                     path: PathBuf::from(path.as_str()),
                     version: version.to_string(),
@@ -3817,14 +3944,16 @@ fn register_mod_mutations(ui: &AppWindow, commands: &Sender<Command>) {
 
     let sender = commands.clone();
     let handle = ui.as_weak();
+    let plans = Rc::clone(&workspace.plan_requests);
     ui.on_plan_mod_removal(move |id, path| {
-        if let Some(ui) = handle.upgrade() {
-            ui.set_mod_action_host(id.clone());
-        }
+        let Some(ui) = handle.upgrade() else { return };
+        ui.set_mod_action_host(id.clone());
         if let Some(instance) = backend::parse_instance_id(&id) {
+            let request = plans.ask(PlanKind::Removal, ui.get_modal().as_str());
             send(
                 &sender,
                 Command::PlanModRemoval {
+                    request,
                     instance,
                     path: PathBuf::from(path.as_str()),
                 },
@@ -4479,6 +4608,8 @@ struct Workspace {
     diagnosis: Rc<RefCell<DiagnosisFlowState>>,
     /// Manual-download prompts waiting behind the one on screen.
     acquisition_prompts: Rc<RefCell<std::collections::VecDeque<backend::ModAcquisitionData>>>,
+    /// The mod plans asked for and not yet shown.
+    plan_requests: Rc<ModPlanRequests>,
     /// What a surface asks the worker for when a pane opens it.
     commands: Sender<Command>,
 }
@@ -7117,7 +7248,7 @@ fn apply_event(
         Event::ModAcquisitionRequired(data) => apply_mod_acquisition(ui, data, workspace),
         Event::ModAcquisitionEnded { id } => end_mod_acquisition(ui, id, workspace),
         Event::ModRelations(data) => apply_mod_relations(ui, &data),
-        Event::ModRemovalPlan(data) => apply_mod_removal_plan(ui, data),
+        Event::ModRemovalPlan(data) => apply_mod_removal_plan(ui, data, workspace),
         Event::ModResults(results) => apply_mod_results(workspace, results, commands),
         Event::ModPlan(plan) => apply_mod_install_plan(ui, plan, workspace, commands),
         Event::ModInstallFinished {
@@ -7148,7 +7279,9 @@ fn apply_event(
             let next = workspace.browser.installs.borrow_mut().finish(&abandoned);
             advance_browser_install(commands, workspace, next);
         }
-        Event::LinkedApply(section) => apply_linked_confirmation(ui, section),
+        Event::LinkedApply { request, section } => {
+            apply_linked_confirmation(ui, request, section, workspace);
+        }
         Event::LinkedResult(result) => apply_linked_result(ui, result),
         Event::ServerWorkspace(data) => apply_server_workspace(workspace, data),
         Event::LiveLog(_) => {}
@@ -8890,10 +9023,25 @@ fn apply_linked_result(ui: &AppWindow, result: backend::LinkedResultData) {
 }
 
 /// Shows what a removal would take with it, here and on each linked server.
-fn apply_mod_removal_plan(ui: &AppWindow, data: backend::ModRemovalPlanData) {
-    if !addresses_open_mod(ui, &data.instance, &data.logical_path) || !make_room_for_dialog(ui) {
+fn apply_mod_removal_plan(
+    ui: &AppWindow,
+    data: backend::ModRemovalPlanData,
+    workspace: &Workspace,
+) {
+    // A plan with no mutation behind it names no mod to remove.
+    if data.instance.is_empty() {
         return;
     }
+    let Some(awaited) = workspace
+        .plan_requests
+        .admit(ui, PlanKind::Removal, data.request)
+    else {
+        return;
+    };
+    // An install confirmation may have taken the addressing since the ask.
+    ui.set_mod_action_host(data.instance.as_str().into());
+    ui.set_mod_action_path(data.logical_path.as_str().into());
+    ui.set_mod_remove_returns_to_manager(matches!(awaited.asked_from, PlanAskedFrom::Manager(_)));
     ui.set_mod_action_name(data.name.into());
     ui.set_mod_removal_unprovable(data.dependencies_unprovable);
     ui.set_mod_removal_dependencies(model(
@@ -8909,8 +9057,17 @@ fn apply_mod_removal_plan(ui: &AppWindow, data: backend::ModRemovalPlanData) {
 
 /// Shows the exact release a change or update settled on, and which linked
 /// servers can take it.
-fn apply_linked_confirmation(ui: &AppWindow, section: backend::LinkedSectionData) {
-    if !addresses_open_mod(ui, &section.instance, &section.path) || !make_room_for_dialog(ui) {
+fn apply_linked_confirmation(
+    ui: &AppWindow,
+    request: u64,
+    section: backend::LinkedSectionData,
+    workspace: &Workspace,
+) {
+    if workspace
+        .plan_requests
+        .admit(ui, PlanKind::Apply, request)
+        .is_none()
+    {
         return;
     }
     apply_linked_section(ui, section);
@@ -10838,6 +10995,7 @@ mod tests {
             isolation: Rc::default(),
             diagnosis: Rc::default(),
             acquisition_prompts: Rc::default(),
+            plan_requests: Rc::default(),
             commands: sender,
         };
         register_workspace(ui, &workspace);
@@ -13319,7 +13477,7 @@ mod tests {
             let ui = test_window();
             let (workspace, commands) = test_workspace_sending(&ui);
             register_browser_install(&ui, &workspace.commands, &workspace);
-            register_mod_mutations(&ui, &workspace.commands);
+            register_mod_mutations(&ui, &workspace.commands, &workspace);
             let instance = ephervex_model::InstanceId::new().to_string();
             if from_diagnostics {
                 ui.invoke_install_from_diagnostics(
@@ -13540,11 +13698,11 @@ mod tests {
     #[test]
     fn a_late_answer_for_a_closed_dialog_cannot_replace_an_install_confirmation() {
         let ui = test_window();
-        let (workspace, _commands) = test_workspace_sending(&ui);
+        let (workspace, commands) = test_workspace_sending(&ui);
         register_browser_install(&ui, &workspace.commands, &workspace);
         let queued = ephervex_model::InstanceId::new().to_string();
         let closed = ephervex_model::InstanceId::new().to_string();
-        open_mod_dialog(&ui, &closed);
+        let request = ask_from_manager(&ui, &workspace, &commands, &closed, PlanKind::Apply);
         ui.set_modal(SharedString::default());
         ui.invoke_install_from_diagnostics(
             queued.as_str().into(),
@@ -13561,11 +13719,202 @@ mod tests {
 
         let mut late = plan_for(&closed, "first", 1).linked;
         late.path = "mods/m.jar".to_owned();
-        apply_linked_confirmation(&ui, late);
+        apply_linked_confirmation(&ui, request, late, &workspace);
 
         assert_eq!(ui.get_modal(), "mod-plan");
         assert_eq!(ui.get_mod_plan_instance(), queued.as_str());
         assert!(workspace.browser.installs.borrow().active.is_some());
+    }
+
+    /// Opens the Manage dialog for a mod and asks for the plan `kind` names, as
+    /// its buttons do, returning the number the plan will answer.
+    fn ask_from_manager(
+        ui: &AppWindow,
+        workspace: &Workspace,
+        commands: &std::sync::mpsc::Receiver<Command>,
+        instance: &str,
+        kind: PlanKind,
+    ) -> u64 {
+        register_mod_actions(ui, &workspace.commands, workspace);
+        ui.invoke_open_mod_manager(instance.into(), "mods/m.jar".into());
+        commands.try_iter().for_each(drop);
+        match kind {
+            PlanKind::Removal => ui.invoke_plan_mod_removal(instance.into(), "mods/m.jar".into()),
+            PlanKind::Apply => {
+                ui.invoke_plan_mod_apply(
+                    instance.into(),
+                    "mods/m.jar".into(),
+                    String::new().into(),
+                );
+            }
+        }
+        requested_plan(commands)
+    }
+
+    /// The number the next plan command carries.
+    fn requested_plan(commands: &std::sync::mpsc::Receiver<Command>) -> u64 {
+        commands
+            .try_iter()
+            .find_map(|command| match command {
+                Command::PlanModRemoval { request, .. } | Command::PlanModApply { request, .. } => {
+                    Some(request)
+                }
+                _ => None,
+            })
+            .expect("a plan was asked for")
+    }
+
+    fn removal_plan(request: u64, instance: &str) -> backend::ModRemovalPlanData {
+        backend::ModRemovalPlanData {
+            request,
+            instance: instance.to_owned(),
+            logical_path: "mods/m.jar".to_owned(),
+            name: "UtilitiX".to_owned(),
+            ..backend::ModRemovalPlanData::default()
+        }
+    }
+
+    #[test]
+    fn a_removal_plan_is_shown_once_and_a_repeat_does_not_reopen_the_dialog() {
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        let host = ephervex_model::InstanceId::new().to_string();
+        let request = ask_from_manager(&ui, &workspace, &commands, &host, PlanKind::Removal);
+
+        apply_mod_removal_plan(&ui, removal_plan(request, &host), &workspace);
+        assert_eq!(ui.get_modal(), "mod-remove");
+        assert!(ui.get_mod_remove_returns_to_manager());
+
+        // The removal was confirmed and the dialog is gone.
+        ui.set_modal(SharedString::default());
+        apply_mod_removal_plan(&ui, removal_plan(request, &host), &workspace);
+
+        assert_eq!(ui.get_modal(), "");
+    }
+
+    #[test]
+    fn only_the_newest_removal_ask_is_answered() {
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        let host = ephervex_model::InstanceId::new().to_string();
+        let first = ask_from_manager(&ui, &workspace, &commands, &host, PlanKind::Removal);
+        ui.invoke_plan_mod_removal(host.as_str().into(), "mods/m.jar".into());
+        let second = requested_plan(&commands);
+
+        apply_mod_removal_plan(&ui, removal_plan(first, &host), &workspace);
+        assert_eq!(ui.get_modal(), "mod-manage");
+        apply_mod_removal_plan(&ui, removal_plan(second, &host), &workspace);
+        assert_eq!(ui.get_modal(), "mod-remove");
+    }
+
+    #[test]
+    fn a_plan_for_a_manage_dialog_the_user_closed_is_not_shown() {
+        let ui = test_window();
+        let toasts = toasts(&ui);
+        let (workspace, commands) = test_workspace_sending(&ui);
+        let host = ephervex_model::InstanceId::new().to_string();
+        for kind in [PlanKind::Removal, PlanKind::Apply] {
+            let request = ask_from_manager(&ui, &workspace, &commands, &host, kind);
+            ui.set_modal(SharedString::default());
+
+            match kind {
+                PlanKind::Removal => {
+                    apply_mod_removal_plan(&ui, removal_plan(request, &host), &workspace);
+                }
+                PlanKind::Apply => apply_linked_confirmation(
+                    &ui,
+                    request,
+                    backend::LinkedSectionData::default(),
+                    &workspace,
+                ),
+            }
+
+            assert_eq!(ui.get_modal(), "", "{kind:?} reopened a closed dialog");
+        }
+        assert!(
+            toasts.borrow().is_empty(),
+            "leaving a dialog is not an error"
+        );
+    }
+
+    #[test]
+    fn a_plan_for_an_earlier_opening_of_the_manage_dialog_is_not_shown() {
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        let host = ephervex_model::InstanceId::new().to_string();
+        let request = ask_from_manager(&ui, &workspace, &commands, &host, PlanKind::Apply);
+
+        ui.set_modal(SharedString::default());
+        ui.invoke_open_mod_manager(host.as_str().into(), "mods/m.jar".into());
+        apply_linked_confirmation(
+            &ui,
+            request,
+            backend::LinkedSectionData::default(),
+            &workspace,
+        );
+
+        assert_eq!(ui.get_modal(), "mod-manage");
+    }
+
+    #[test]
+    fn a_confirmation_follows_the_manage_dialog_that_asked_for_it() {
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        let host = ephervex_model::InstanceId::new().to_string();
+        let request = ask_from_manager(&ui, &workspace, &commands, &host, PlanKind::Apply);
+
+        apply_linked_confirmation(
+            &ui,
+            request,
+            backend::LinkedSectionData::default(),
+            &workspace,
+        );
+
+        assert_eq!(ui.get_modal(), "mod-apply");
+    }
+
+    #[test]
+    fn a_card_removal_plan_that_finds_an_install_confirmation_open_says_it_was_not_shown() {
+        let ui = test_window();
+        let toasts = toasts(&ui);
+        let (workspace, commands) = test_workspace_sending(&ui);
+        register_mod_mutations(&ui, &workspace.commands, &workspace);
+        let host = ephervex_model::InstanceId::new().to_string();
+        ui.invoke_plan_mod_removal(host.as_str().into(), "mods/m.jar".into());
+        let request = requested_plan(&commands);
+        open_install_confirmation(&ui, &workspace);
+
+        apply_mod_removal_plan(&ui, removal_plan(request, &host), &workspace);
+
+        assert_eq!(ui.get_modal(), "mod-plan");
+        assert!(workspace.browser.installs.borrow().active.is_some());
+        assert_eq!(
+            toasts.borrow().as_slice(),
+            [(lookup("gui-dialog-not-shown-open-dialog"), true)]
+        );
+    }
+
+    #[test]
+    fn a_card_removal_plan_is_shown_for_its_own_mod_after_an_install_confirmation_took_the_addressing()
+     {
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        register_mod_mutations(&ui, &workspace.commands, &workspace);
+        let host = ephervex_model::InstanceId::new().to_string();
+        let other = ephervex_model::InstanceId::new().to_string();
+        ui.set_mod_action_path("mods/m.jar".into());
+        ui.invoke_plan_mod_removal(host.as_str().into(), "mods/m.jar".into());
+        let request = requested_plan(&commands);
+        // An install confirmation addressed its own instance, then closed.
+        ui.set_mod_action_host(other.as_str().into());
+        ui.set_mod_action_path(SharedString::default());
+
+        apply_mod_removal_plan(&ui, removal_plan(request, &host), &workspace);
+
+        assert_eq!(ui.get_modal(), "mod-remove");
+        assert_eq!(ui.get_mod_action_host(), host.as_str());
+        assert_eq!(ui.get_mod_action_path(), "mods/m.jar");
+        assert!(!ui.get_mod_remove_returns_to_manager());
     }
 
     #[test]
@@ -14227,27 +14576,20 @@ mod tests {
     fn a_late_mod_plan_never_replaces_a_manual_download_prompt() {
         let ui = test_window();
         let toasts = toasts(&ui);
-        let (workspace, _commands) = test_workspace_sending(&ui);
+        let (workspace, commands) = test_workspace_sending(&ui);
+        register_mod_mutations(&ui, &workspace.commands, &workspace);
         let host = ephervex_model::InstanceId::new().to_string();
+        ui.invoke_plan_mod_removal(host.as_str().into(), "mods/m.jar".into());
+        let card = requested_plan(&commands);
+        let apply = ask_from_manager(&ui, &workspace, &commands, &host, PlanKind::Apply);
         apply_mod_acquisition(&ui, acquisition_prompt(1, &host), &workspace);
-        ui.set_mod_action_host(host.as_str().into());
-        ui.set_mod_action_path("mods/m.jar".into());
 
-        apply_mod_removal_plan(
-            &ui,
-            backend::ModRemovalPlanData {
-                instance: host.clone(),
-                logical_path: "mods/m.jar".to_owned(),
-                ..backend::ModRemovalPlanData::default()
-            },
-        );
+        apply_mod_removal_plan(&ui, removal_plan(card, &host), &workspace);
         apply_linked_confirmation(
             &ui,
-            backend::LinkedSectionData {
-                instance: host.clone(),
-                path: "mods/m.jar".to_owned(),
-                ..backend::LinkedSectionData::default()
-            },
+            apply,
+            backend::LinkedSectionData::default(),
+            &workspace,
         );
 
         assert_eq!(ui.get_modal(), "mod-acquire");
@@ -14258,6 +14600,24 @@ mod tests {
                 (lookup("gui-dialog-not-shown"), true)
             ],
             "the user is told each request was not shown"
+        );
+    }
+
+    #[test]
+    fn a_manage_removal_plan_never_replaces_a_manual_download_prompt() {
+        let ui = test_window();
+        let toasts = toasts(&ui);
+        let (workspace, commands) = test_workspace_sending(&ui);
+        let host = ephervex_model::InstanceId::new().to_string();
+        let request = ask_from_manager(&ui, &workspace, &commands, &host, PlanKind::Removal);
+        apply_mod_acquisition(&ui, acquisition_prompt(1, &host), &workspace);
+
+        apply_mod_removal_plan(&ui, removal_plan(request, &host), &workspace);
+
+        assert_eq!(ui.get_modal(), "mod-acquire");
+        assert_eq!(
+            toasts.borrow().as_slice(),
+            [(lookup("gui-dialog-not-shown"), true)]
         );
     }
 
