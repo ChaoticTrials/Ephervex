@@ -1,0 +1,190 @@
+---
+title: Mod Isolation
+description: Narrow a reproducible problem to a smaller set of mods.
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+import ThemeScreenshot from '@site/src/components/ThemeScreenshot';
+
+# Mod Isolation
+
+Use mod isolation when a problem reliably happens with the current mod set and
+you need to find a smaller set that still reproduces it. Ephervex turns groups
+of mods on and off between test launches while keeping their known required
+dependencies together. Each round changes one client instance or local server
+in place. A safety snapshot records its state before the first round.
+
+Stop the affected game or server before starting, answering a round, undoing,
+finishing, or canceling. You can launch it while a round is waiting for an
+answer. A client isolation session leaves its linked servers unchanged; start
+a separate session on a server if its mods are also part of the problem.
+
+## Set up the test
+
+Pin mods that must stay enabled in every round, such as one needed to start
+the test. Their required dependencies stay enabled too. Pinned mods are not
+tested for removal, so the final result cannot rule them out.
+
+Dependency information may be incomplete, especially for mods imported from
+a Modrinth pack or JARs added by hand. [Refresh dependency information](./mods.mdx#review-dependency-information)
+before starting when Ephervex can identify the mods. Continuing with unknown
+relations or missing required mods reduces confidence in the result.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Open the client or server workspace, select **Isolation**, then **Set up
+isolation**. Use the switches beside candidate mods to pin any that must stay
+on. Review the missing and incomplete dependency notices. Refresh relations
+from **Mods** if possible. The setup requires a separate acknowledgement to
+continue with missing dependencies or refreshable unknown relations. Select
+**Start isolation** when the host is stopped.
+
+<ThemeScreenshot state="mod-isolation-setup" alt="Isolation setup showing candidate mods, pinned choices, and incomplete dependency notices" />
+
+Canceling the setup before **Start isolation** leaves the host unchanged.
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+Name exactly one host with `--instance` or `--server`. Repeat `--keep` for mods
+that must stay enabled:
+
+```bash
+ephervex mod isolate start --instance INSTANCE_ID --keep mods/always-on.jar
+ephervex mod isolate status --instance INSTANCE_ID
+```
+
+`start` refuses when refreshable dependency information has not been recorded.
+Refresh it with `ephervex mod refresh --instance INSTANCE_ID` first, or add
+`--accept-unrecorded` to continue with a reduced-confidence result. The CLI
+does not offer the desktop's acknowledgement for required dependencies that
+are actually missing; install those dependencies before starting.
+
+For a local server, replace `--instance INSTANCE_ID` with
+`--server SERVER_ID` on each command.
+
+</TabItem>
+</Tabs>
+
+## Test each round
+
+Ephervex shows the exact enabled and disabled mods for the current round.
+Launch that configuration, check the same problem in the same way, and stop
+the game or server. Answer **Still failing** if it reproduced; answer
+**Issue gone** if it did not. Ephervex applies the next configuration after
+each answer.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+The **Isolation** tab lists the round's enabled and disabled files. Launch
+the client or start the server with the workspace controls, run the test, then
+stop it and select **Still failing** or **Issue gone**. The active isolation
+banner keeps those actions available while you inspect **Logs** or **Mods**;
+**Detailed view** returns to the full round.
+
+<ThemeScreenshot state="mod-isolation-round" alt="Isolation round with enabled and disabled mod lists and answer controls" />
+
+Select **Undo answer** if you gave the wrong answer. If two answers cannot
+both be right, Ephervex pauses the search until you undo the latest one and
+test the restored round again.
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+Launch the saved client round with `ephervex launch INSTANCE_ID`, or start a
+server round with `ephervex server start SERVER_ID`. The server command stays
+in the foreground; stop it with Ctrl-C after testing. Once the host has
+stopped, record one of these answers:
+
+```bash
+ephervex mod isolate answer --instance INSTANCE_ID issue-still-present
+ephervex mod isolate answer --instance INSTANCE_ID issue-gone
+```
+
+Run only the command that matches what you observed. Each answer prints the
+next round or says the result is ready. Use `status` to see the current round
+again, and `undo` to reverse a mistaken answer:
+
+```bash
+ephervex mod isolate status --instance INSTANCE_ID
+ephervex mod isolate undo --instance INSTANCE_ID
+```
+
+A contradiction requires `undo` and another test before the search can
+continue. The same commands work for a server with `--server SERVER_ID`.
+
+</TabItem>
+</Tabs>
+
+## Finish or restore the original setup
+
+When the result is ready, Ephervex reports the remaining testable candidates
+separately from mods they require and mods pinned throughout. The result is
+the smallest configuration this search tested while the issue still happened.
+It does not prove that one mod alone caused the problem. Missing or unknown
+dependency information makes the result less certain.
+
+**Finish** keeps the tested configuration enabled and retains the
+pre-isolation safety snapshot in **Snapshots**. **Cancel isolation** restores
+the state from before the session. Both require the host to be stopped.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Review **Remaining testable candidates**, **Pinned throughout**, and
+**Required by the remaining candidates** on the result screen. Choose
+**Finish** to keep this setup, or **Cancel isolation** to restore the original
+one. You can also cancel during an earlier round.
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+Choose one ending:
+
+```bash
+ephervex mod isolate finish --instance INSTANCE_ID
+ephervex mod isolate cancel --instance INSTANCE_ID
+```
+
+`finish` prints the candidate groups and the retained safety snapshot.
+`cancel` restores the pre-isolation state. Use `--server SERVER_ID` for a
+server session.
+
+</TabItem>
+</Tabs>
+
+## Resume after an interruption
+
+The session survives an Ephervex or machine restart. Test answers must match
+the exact configuration recorded for the current round. Other mod changes
+are refused while the session is active; finish or cancel it before installing,
+updating, deleting, or switching mods outside isolation.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Open the host workspace and return to **Isolation**. Ephervex checks whether
+the mods match the saved round and reapplies the round when needed. If it
+cannot do that while the host is running or after an error, stop the host,
+correct the problem, and select **Try again**. Test the reapplied round before
+answering it.
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+Inspect the saved round, then reapply its configuration before testing:
+
+```bash
+ephervex mod isolate status --instance INSTANCE_ID
+ephervex mod isolate resume --instance INSTANCE_ID
+```
+
+`answer` refuses a round whose current mods differ from the saved setup. Use
+`resume`, test that setup again, and then answer. For a server, use
+`--server SERVER_ID`.
+
+</TabItem>
+</Tabs>

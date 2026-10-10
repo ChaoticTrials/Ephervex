@@ -155,7 +155,7 @@ features show one tab or a short note.
       trusted hosts, blocked files and watched folders
 - [x] Mods: browse and install, enable and disable, remove, change version,
       add your own JARs, dependencies, verify and repair
-- [ ] Mod isolation (source: `docs/mod-isolation.md`)
+- [x] Mod isolation (source: `docs/mod-isolation.md`)
 - [ ] Servers: create (standalone and linked), EULA, properties and network,
       start, stop, console, Launch Client & Connect, recovery
 - [ ] Diagnostics, logs and crash reports, diagnostic bundles
