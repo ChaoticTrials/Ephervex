@@ -198,10 +198,16 @@
 }
 
 .showcaseImage :global(.themeScreenshot) {
-  width: 115%;
+  width: 100%;
   max-width: none !important;
-  transform: translate(-4%, 4%);
 }
+
+.showcaseImage :global(.themeScreenshot picture) {
+  width: 115%;
+  transform: translateX(-4%);
+}
+
+.showcaseImage :global(.themeScreenshotZoomHint) { opacity: 1; transform: none; }
 
 .showcaseText {
   display: flex;
@@ -213,6 +219,18 @@
 
 .showcaseText > div { flex: 1 1 220px; }
 .showcaseText p { flex: 1 1 200px; max-width: 310px; font-size: 0.9rem; }
+
+.showcaseAction {
+  flex-basis: 100%;
+  margin-top: 0.15rem;
+  padding-top: 0.85rem;
+  border-top: 1px solid var(--site-border);
+  font-size: 0.9rem;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.showcaseAction:hover { text-decoration: underline; text-underline-offset: 0.2em; }
 
 .showcaseLinks {
   display: flex;

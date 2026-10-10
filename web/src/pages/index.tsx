@@ -7,9 +7,9 @@ import styles from './index.module.css';
 
 const features = [
   {
-    label: 'Exact versions',
-    title: 'Use the versions you select.',
-    description: 'Choose the Minecraft release, loader, and loader version. Ephervex keeps your selection exact.',
+    label: 'Mod isolation',
+    title: 'Narrow down a mod problem.',
+    description: 'Test smaller mod groups while Ephervex keeps known required dependencies together.',
   },
   {
     label: 'Temporary instances',
@@ -81,25 +81,27 @@ export default function Home(): ReactNode {
             <div className={styles.sectionIntro}>
               <span className={styles.sectionLabel}>Desktop interface</span>
               <Heading as="h2" id="showcase-title">Work with instances, mods, and servers.</Heading>
-              <p>These captures use synthetic sample data and follow the site's light or dark mode.</p>
+              <p>Preview the desktop tools, then open the guides for the full workflow.</p>
             </div>
             <div className={styles.showcaseGrid}>
               <article className={styles.showcaseCard}>
                 <div className={styles.showcaseImage}>
-                  <ThemeScreenshot state="client-mods" alt="Mod manager and compatible mod catalog in Ephervex" zoomable={false} />
+                  <ThemeScreenshot state="client-mods" alt="Mod manager and compatible mod catalog in Ephervex" />
                 </div>
                 <div className={styles.showcaseText}>
                   <div><span className={styles.cardLabel}>Manage mods</span><Heading as="h3">Check mod compatibility.</Heading></div>
                   <p>Browse compatible mods, review dependencies, and isolate a failure in a large mod set.</p>
+                  <Link className={styles.showcaseAction} to="/docs/v1/mods">Read the mods guide <span aria-hidden="true">→</span></Link>
                 </div>
               </article>
               <article className={styles.showcaseCard}>
                 <div className={styles.showcaseImage}>
-                  <ThemeScreenshot state="server-console" alt="Ephervex server console with live output" zoomable={false} />
+                  <ThemeScreenshot state="server-console" alt="Ephervex server console with live output" />
                 </div>
                 <div className={styles.showcaseText}>
                   <div><span className={styles.cardLabel}>Linked servers</span><Heading as="h3">Run a client and server.</Heading></div>
                   <p>Run a server beside a client and inspect its console when the problem crosses the connection.</p>
+                  <Link className={styles.showcaseAction} to="/docs/v1/servers">Read the servers guide <span aria-hidden="true">→</span></Link>
                 </div>
               </article>
             </div>
