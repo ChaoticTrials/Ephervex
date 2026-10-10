@@ -593,6 +593,33 @@ pub fn running_launches(instance_root: &Path) -> Vec<RunningLaunch> {
     launches
 }
 
+/// Clears the launch locks of an instance that is about to be moved, refusing
+/// while any launch holds it.
+///
+/// A lock describes a process, so one left behind by a launch that is over must
+/// not travel with the instance. Whether a launch still holds the instance is
+/// decided and acted on under the ownership guard, so a launch cannot take the
+/// instance between the decision and the removal.
+pub(crate) fn clear_launch_locks_of_idle_instance(instance_root: &Path) -> Result<(), LockError> {
+    let directory = metadata_dir(instance_root);
+    if !directory.is_dir() {
+        return Ok(());
+    }
+    let ownership = OwnershipGuard::take(&directory)?;
+    let path = directory.join(LAUNCH_LOCK_FILE);
+    if let Some(held) = read_state(&path)?.filter(LaunchState::holds_instance) {
+        return Err(already_running(&held));
+    }
+    if let Some(held) = live_additional_launch(&ownership, &directory)? {
+        return Err(already_running(&held));
+    }
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(LockError::unusable(&path, error)),
+    }
+}
+
 /// Whether `relative`, a path inside an instance root, is launch state: a
 /// launch lock, its staging file, or the ownership guard. It describes the
 /// instance's processes, so a copy of the instance never carries it.

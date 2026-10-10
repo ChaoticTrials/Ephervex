@@ -613,10 +613,25 @@ impl App {
         id: InstanceId,
         files: FileDisposition,
     ) -> CoreResult<Vec<ServerRecord>> {
-        self.refuse_while_running(id)?;
+        let claim = self.claim_stopped_client(id)?;
+        self.delete_claimed_client(id, files, &claim)
+    }
+
+    /// The deletion itself, for a caller that holds the instance's claim and
+    /// has found it stopped.
+    fn delete_claimed_client(
+        &self,
+        id: InstanceId,
+        files: FileDisposition,
+        _claim: &ephervex_storage::HostClaim,
+    ) -> CoreResult<Vec<ServerRecord>> {
         let mut servers = Vec::new();
         // Every server is checked before any is deleted, so a refusal removes nothing.
+        // Each stays claimed until the client is gone, so none starts in between.
         for server in self.linked_server_ids(id)? {
+            let claim = self
+                .registry()
+                .claim_host(ephervex_storage::RecordRef::Server(server))?;
             let record = self.canonical_server_for_mutation(server)?;
             let runtime = crate::server::settled_runtime(&record.root)?;
             if crate::server::stoppable_for_deletion(&runtime) {
@@ -625,13 +640,13 @@ impl App {
             if runtime.may_be_running() {
                 return Err(crate::CoreError::LinkedServerUnstoppable { name: record.name });
             }
-            servers.push(record);
+            servers.push((record, claim));
         }
-        for server in &servers {
-            self.delete_server(server.id, files)?;
+        for (server, _claim) in &servers {
+            self.delete_claimed_server(server, files)?;
         }
         self.registry().delete_client(id, files)?;
-        Ok(servers)
+        Ok(servers.into_iter().map(|(record, _)| record).collect())
     }
 
     /// Deletes a client instance like [`App::delete_client`], stopping its
@@ -646,9 +661,44 @@ impl App {
         id: InstanceId,
         files: FileDisposition,
     ) -> CoreResult<Vec<ServerRecord>> {
-        self.refuse_while_running(id)?;
+        let claim = self.claim_stopped_client(id)?;
         self.stop_linked_servers_for_deletion(id, files).await?;
-        self.delete_client(id, files)
+        self.delete_claimed_client(id, files, &claim)
+    }
+
+    /// Claims a client for a change that needs its game stopped, and refuses
+    /// while a launch holds it.
+    ///
+    /// The claim is taken before the check and the caller keeps it for the whole
+    /// change. A launch records itself under the same claim, so none can begin
+    /// between the check and the end of the change.
+    pub(crate) fn claim_stopped_client(
+        &self,
+        id: InstanceId,
+    ) -> CoreResult<ephervex_storage::HostClaim> {
+        let claim = self
+            .registry()
+            .claim_host(ephervex_storage::RecordRef::Client(id))?;
+        self.refuse_while_running(id)?;
+        Ok(claim)
+    }
+
+    /// Claims a server for a change that needs it stopped, and refuses while it
+    /// may be running. Returns the record as read under the claim.
+    ///
+    /// The claim is kept for the whole change. A start takes it before it looks
+    /// at the runtime and keeps it until the server owns its runtime lock, so
+    /// none can begin in between.
+    pub(crate) fn claim_stopped_server(
+        &self,
+        id: ServerId,
+    ) -> CoreResult<(ephervex_storage::HostClaim, ServerRecord)> {
+        let claim = self
+            .registry()
+            .claim_host(ephervex_storage::RecordRef::Server(id))?;
+        let record = self.canonical_server_for_mutation(id)?;
+        crate::server::refuse_if_running(&record)?;
+        Ok((claim, record))
     }
 
     /// Refuses a change that cannot happen under a launching or running game.
@@ -693,8 +743,8 @@ impl App {
                     })
             })
             .transpose()?;
+        let _claim = self.claim_stopped_client(id)?;
         let mut record = self.client(id)?;
-        self.refuse_while_running(id)?;
         self.validate_jvm_override(jvm_override.as_ref())?;
         record.java_override = java_override;
         record.jvm_override = jvm_override;
@@ -2045,6 +2095,36 @@ mod tests {
         assert_eq!(app.linked_server_ids(client.id).expect("linked").len(), 1);
         assert!(server.root.exists(), "the linked server stays");
         assert!(app.launch_state(client.id).expect("state").is_some());
+    }
+
+    #[test]
+    fn a_deletion_is_refused_while_another_operation_holds_the_instance_or_a_linked_server() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let client = repro_client(&app);
+        let server = linked_server(&app, base.path(), client.id, "Bug Server");
+        let delete = || {
+            app.delete_client(client.id, FileDisposition::Remove)
+                .expect_err("something else holds it")
+        };
+
+        let operation = app
+            .registry()
+            .claim_host(ephervex_storage::RecordRef::Client(client.id))
+            .expect("claim");
+        assert_eq!(delete().message_id(), "error-registry-host-busy");
+        drop(operation);
+
+        let start = app
+            .registry()
+            .claim_host(ephervex_storage::RecordRef::Server(server.id))
+            .expect("claim");
+        assert_eq!(delete().message_id(), "error-registry-host-busy");
+        drop(start);
+
+        assert!(client.root.exists(), "nothing was removed");
+        assert!(server.root.exists(), "the linked server stays");
+        assert_eq!(app.list_clients().expect("clients").len(), 1);
     }
 
     /// A copy taken while the game writes its world would mix files from

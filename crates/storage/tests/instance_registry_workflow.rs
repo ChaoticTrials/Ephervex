@@ -15,12 +15,18 @@
 //! the library behaves that way without a process boundary in the way.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use ephervex_model::{AttentionReason, LoaderKind, LoaderSelection, StorageClass};
+use ephervex_model::{AttentionReason, InstanceId, LoaderKind, LoaderSelection, StorageClass};
 use ephervex_storage::{
-    Config, NewClient, NewServer, Paths, Registry, RegistryError, SECRET_KEY_MARKERS, config,
-    reconcile,
+    ClientRecord, Config, LaunchLock, LockError, NewClient, NewServer, Paths, RecordRef, Registry,
+    RegistryError, SECRET_KEY_MARKERS, config, reconcile,
 };
 use tempfile::TempDir;
+
+/// Makes an instance persistent under its host claim, the way a caller must.
+fn promote(registry: &Registry, id: InstanceId) -> Result<ClientRecord, RegistryError> {
+    let claim = registry.claim_host(RecordRef::Client(id))?;
+    registry.relocate_client(id, &claim, StorageClass::Persistent, &mut |_| {})
+}
 
 /// Lays every application root, including the temporary one, inside a
 /// throwaway directory. No test may touch the developer's real XDG dirs.
@@ -376,9 +382,7 @@ fn a_promoted_instance_keeps_its_id_its_name_and_its_linked_servers() {
     std::fs::write(original.root.join("minecraft/options.txt"), "guiScale:2\n")
         .expect("a setting worth keeping");
 
-    let promoted = registry
-        .relocate_client(original.id, StorageClass::Persistent, &mut |_| {})
-        .expect("promote");
+    let promoted = promote(&registry, original.id).expect("promote");
 
     assert_eq!(promoted.id, original.id, "the same instance, not a copy");
     assert_eq!(promoted.name, original.name);
@@ -436,9 +440,7 @@ fn a_promotion_retried_after_an_interrupted_copy_clears_its_own_leftover() {
     .expect("the metadata the interrupted copy carried");
     std::fs::write(stage.join("half-written.bin"), b"partial").expect("partial content");
 
-    let promoted = registry
-        .relocate_client(original.id, StorageClass::Persistent, &mut |_| {})
-        .expect("the retry clears its own leftover");
+    let promoted = promote(&registry, original.id).expect("the retry clears its own leftover");
 
     assert_eq!(promoted.root, destination);
     assert!(
@@ -470,9 +472,7 @@ fn a_promotion_refuses_a_destination_another_instance_occupies() {
     std::fs::create_dir_all(&destination).expect("mkdir");
     std::fs::write(destination.join("someones-file.txt"), b"not ours").expect("write");
 
-    let error = registry
-        .relocate_client(original.id, StorageClass::Persistent, &mut |_| {})
-        .expect_err("an occupied destination is refused");
+    let error = promote(&registry, original.id).expect_err("an occupied destination is refused");
 
     assert!(
         matches!(error, RegistryError::RootOccupied { .. }),
@@ -503,9 +503,7 @@ fn a_promoted_instance_does_not_carry_its_launch_lock_to_the_new_root() {
     registry.publish_client(&original).expect("publish");
     std::fs::write(original.root.join(".launcher/launch.lock"), b"{}").expect("a stale lock");
 
-    let promoted = registry
-        .relocate_client(original.id, StorageClass::Persistent, &mut |_| {})
-        .expect("promote");
+    let promoted = promote(&registry, original.id).expect("promote");
 
     assert!(!promoted.root.join(".launcher/launch.lock").exists());
 }
@@ -524,10 +522,64 @@ fn promoting_an_instance_that_is_already_persistent_changes_nothing() {
         .expect("create");
     registry.publish_client(&original).expect("publish");
 
-    let promoted = registry
-        .relocate_client(original.id, StorageClass::Persistent, &mut |_| {})
-        .expect("a no-op rather than a refusal at this level");
+    let promoted =
+        promote(&registry, original.id).expect("a no-op rather than a refusal at this level");
 
     assert_eq!(promoted.root, original.root);
     assert_eq!(promoted.storage, StorageClass::Persistent);
+}
+
+#[test]
+fn a_move_keeps_the_launch_lock_of_a_launch_that_holds_the_instance() {
+    let base = tempfile::tempdir().expect("temp dir");
+    let registry = Registry::open(isolated_paths(&base)).expect("open registry");
+    let original = registry
+        .create_client(NewClient::new(
+            "Repro",
+            "1.20.1",
+            LoaderSelection::vanilla(),
+        ))
+        .expect("create");
+    registry.publish_client(&original).expect("publish");
+    let launch = LaunchLock::acquire(&original.root).expect("a launch holds the instance");
+
+    let error = promote(&registry, original.id).expect_err("a held instance is not moved");
+
+    assert!(
+        matches!(
+            error,
+            RegistryError::Lock(LockError::AlreadyRunning { pid, .. }) if pid == std::process::id()
+        ),
+        "{error}"
+    );
+    assert!(launch.path().is_file(), "the live lock was not removed");
+    assert!(original.root.join(".launcher/instance.json").is_file());
+    assert_eq!(
+        registry.client(original.id).expect("record").root,
+        original.root
+    );
+}
+
+#[test]
+fn a_move_is_refused_while_an_additional_launch_holds_the_instance() {
+    let base = tempfile::tempdir().expect("temp dir");
+    let registry = Registry::open(isolated_paths(&base)).expect("open registry");
+    let original = registry
+        .create_client(NewClient::new(
+            "Repro",
+            "1.20.1",
+            LoaderSelection::vanilla(),
+        ))
+        .expect("create");
+    registry.publish_client(&original).expect("publish");
+    let _alongside =
+        LaunchLock::acquire_additional(&original.root, "second").expect("an additional launch");
+
+    let error = promote(&registry, original.id).expect_err("a held instance is not moved");
+
+    assert!(
+        matches!(error, RegistryError::Lock(LockError::AlreadyRunning { .. })),
+        "{error}"
+    );
+    assert!(original.root.is_dir());
 }

@@ -235,7 +235,38 @@ impl SnapshotError {
 
 impl App {
     /// Captures the current state of a stopped client or local server.
+    ///
+    /// The host stays claimed for the whole capture, so a launch cannot begin
+    /// while its files are being read.
     pub fn create_snapshot(
+        &self,
+        host: InstalledHost,
+        label: &str,
+        origin: SnapshotOrigin,
+        cancel: &CancellationToken,
+    ) -> Result<SnapshotRecord, SnapshotError> {
+        check_canceled(cancel)?;
+        let _claim = self.claim_snapshot_host(host)?;
+        self.create_snapshot_holding_the_host(host, label, origin, cancel)
+    }
+
+    /// Claims a host for a snapshot operation.
+    fn claim_snapshot_host(
+        &self,
+        host: InstalledHost,
+    ) -> Result<ephervex_storage::HostClaim, SnapshotError> {
+        self.registry()
+            .claim_host(host.record_ref())
+            .map_err(|error| match error {
+                ephervex_storage::RegistryError::HostBusy { path } => {
+                    SnapshotError::HostBusy { path }
+                }
+                other => snapshot_core_error(crate::CoreError::from(other)),
+            })
+    }
+
+    /// The capture itself, for a caller that holds the host's claim.
+    fn create_snapshot_holding_the_host(
         &self,
         host: InstalledHost,
         label: &str,
@@ -430,19 +461,12 @@ impl App {
         cancel: &CancellationToken,
         owner: SnapshotRestoreOwner,
     ) -> Result<SnapshotRestore, SnapshotError> {
-        self.refuse_snapshot_while_running(host)?;
         // Held until the restore is finished, rolled back, or abandoned: it
-        // keeps a move from carrying the host away mid-restore and tells
+        // keeps a move from carrying the host away mid-restore, keeps a launch
+        // from starting between the running check and the swap, and tells
         // reconciliation in another launcher that this restore is running.
-        let _claim =
-            self.registry()
-                .claim_host(host.record_ref())
-                .map_err(|error| match error {
-                    ephervex_storage::RegistryError::HostBusy { path } => {
-                        SnapshotError::HostBusy { path }
-                    }
-                    other => snapshot_core_error(crate::CoreError::from(other)),
-                })?;
+        let _claim = self.claim_snapshot_host(host)?;
+        self.refuse_snapshot_while_running(host)?;
         // The restore replaces the recipe wholesale, so a background write
         // that read the previous one must not land on top of it.
         let _gate =
@@ -463,7 +487,7 @@ impl App {
         }
 
         let safety_snapshot = if options.safety_snapshot {
-            Some(self.create_snapshot(
+            Some(self.create_snapshot_holding_the_host(
                 host,
                 "Before snapshot restore",
                 SnapshotOrigin::BeforeRestore,
@@ -1217,6 +1241,41 @@ mod tests {
             )
             .expect("read safety state"),
             b"changed"
+        );
+    }
+
+    #[test]
+    fn a_host_held_by_another_operation_refuses_a_snapshot_capture() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let app = App::open_at(Paths::rooted_at(temporary.path())).expect("open app");
+        let client = app
+            .create_client_for_test(NewClient::new(
+                "busy client",
+                "1.21.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create client");
+        let operation = app
+            .registry()
+            .claim_host(ephervex_storage::RecordRef::Client(client.id))
+            .expect("claim");
+
+        let error = app
+            .create_snapshot(
+                InstalledHost::Instance(client.id),
+                "during a change",
+                SnapshotOrigin::Manual,
+                &CancellationToken::new(),
+            )
+            .expect_err("another operation holds the host");
+
+        assert!(matches!(error, SnapshotError::HostBusy { .. }), "{error}");
+        drop(operation);
+        assert!(
+            app.snapshots(InstalledHost::Instance(client.id))
+                .expect("list snapshots")
+                .is_empty(),
+            "a refused capture leaves no snapshot"
         );
     }
 

@@ -108,6 +108,9 @@ pub(super) struct PreparedServerStart {
     /// The id every launcher log line for this start carries, kept so the
     /// supervision that follows the preparation logs under the same one.
     operation: OperationId,
+    /// The server's claim, kept from the moment it was found stopped until its
+    /// supervisor owns the runtime lock.
+    claim: Option<ephervex_storage::HostClaim>,
 }
 
 /// Forwards the downloads a server start makes into the server event stream, so
@@ -333,8 +336,7 @@ impl App {
         options: &ServerCreateOptions,
         cancel: &CancellationToken,
     ) -> CoreResult<ServerCommit<ServerRecord>> {
-        let mut record = self.canonical_server_for_mutation(id)?;
-        refuse_if_running(&record)?;
+        let (_claim, mut record) = self.claim_stopped_server(id)?;
         if record.installation.is_installed() {
             return Ok(ServerCommit::clean(record));
         }
@@ -568,10 +570,21 @@ impl App {
     }
 
     pub fn delete_server(&self, id: ServerId, files: FileDisposition) -> CoreResult<()> {
-        let record = self.canonical_server_for_mutation(id)?;
-        refuse_if_running(&record)?;
-        self.forget_linked_server_list_entry(&record);
-        Ok(self.registry_for_services().delete_server(id, files)?)
+        let (_claim, record) = self.claim_stopped_server(id)?;
+        self.delete_claimed_server(&record, files)
+    }
+
+    /// The deletion itself, for a caller that holds the server's claim and has
+    /// found it stopped.
+    pub(crate) fn delete_claimed_server(
+        &self,
+        record: &ServerRecord,
+        files: FileDisposition,
+    ) -> CoreResult<()> {
+        self.forget_linked_server_list_entry(record);
+        Ok(self
+            .registry_for_services()
+            .delete_server(record.id, files)?)
     }
 
     /// Stops every running linked server of a client that is about to be deleted.
@@ -612,8 +625,7 @@ impl App {
     }
 
     pub fn set_server_property(&self, id: ServerId, key: &str, value: &str) -> CoreResult<()> {
-        let record = self.canonical_server_for_mutation(id)?;
-        refuse_if_running(&record)?;
+        let (_claim, record) = self.claim_stopped_server(id)?;
         let path = server_properties_path(&record);
         let mut document = read_properties(&path)?;
         document.set(key, value)?;
@@ -625,8 +637,7 @@ impl App {
         id: ServerId,
         network: ServerNetworkSettings,
     ) -> CoreResult<ServerCommit<ServerRecord>> {
-        let mut record = self.canonical_server_for_mutation(id)?;
-        refuse_if_running(&record)?;
+        let (_claim, mut record) = self.claim_stopped_server(id)?;
         let typed = network_properties(&network)?;
         typed.validate()?;
         merge_network_file(&server_properties_path(&record), &network)?;
@@ -646,8 +657,7 @@ impl App {
         id: ServerId,
         change: &ServerNetworkChange,
     ) -> CoreResult<ServerCommit<ServerRecord>> {
-        let mut record = self.canonical_server_for_mutation(id)?;
-        refuse_if_running(&record)?;
+        let (_claim, mut record) = self.claim_stopped_server(id)?;
         let network = change.applied_to(&record.network)?;
         network_properties(&network)?.validate()?;
         merge_network_file(&server_properties_path(&record), &network)?;
@@ -668,8 +678,7 @@ impl App {
         java_override: Option<JavaOverride>,
         jvm_override: Option<JvmSettings>,
     ) -> CoreResult<ServerCommit<ServerRecord>> {
-        let mut record = self.canonical_server_for_mutation(id)?;
-        refuse_if_running(&record)?;
+        let (_claim, mut record) = self.claim_stopped_server(id)?;
         self.validate_jvm_override(jvm_override.as_ref())?;
         record.java_override = java_override;
         record.jvm_override = jvm_override;
@@ -828,8 +837,9 @@ impl App {
         // Begun so downloads reported under it read as running, not queued.
         reporter.begin_stage("operation-stage-preparing-environment".to_owned());
 
-        let mut record = self.canonical_server_for_mutation(id)?;
-        refuse_if_running(&record)?;
+        // Held until the supervisor owns the runtime lock, which is the first
+        // thing that keeps another change out once the files below are written.
+        let (claim, mut record) = self.claim_stopped_server(id)?;
         let launch = record
             .installation
             .launch()
@@ -885,6 +895,7 @@ impl App {
             root: record.root,
             capture: self.paths().server_capture_dir(id),
             operation,
+            claim: Some(claim),
         })
     }
 
@@ -893,7 +904,8 @@ impl App {
         observer: &ServerObserver,
     ) -> CoreResult<ephervex_server::ServerExit> {
         let operation = prepared.operation;
-        let exit = ServerSupervisor::run(
+        let exit = ServerSupervisor::run_holding(
+            prepared.claim,
             &prepared.command,
             &prepared.root,
             &prepared.capture,
@@ -1697,6 +1709,7 @@ mod tests {
                 root: root.path().to_path_buf(),
                 capture: root.path().join("capture"),
                 operation: OperationReporter::silent("test-server-run").id(),
+                claim: None,
             };
             let exit = App::run_prepared_server(prepared, &observer)
                 .await
@@ -1785,6 +1798,7 @@ mod tests {
             root: root.to_path_buf(),
             capture: root.join("capture"),
             operation: OperationReporter::silent("test-server-cancel").id(),
+            claim: None,
         }
     }
 
@@ -1877,6 +1891,7 @@ mod tests {
             root: server_root.clone(),
             capture: root.path().join("capture"),
             operation: OperationReporter::silent("test-server-restart").id(),
+            claim: None,
         };
         let run = tokio::spawn(async move { App::run_prepared_server(prepared, &observer).await });
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -1915,6 +1930,102 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    fn claimed_by_another_operation(
+        app: &App,
+        server: &ServerRecord,
+    ) -> ephervex_storage::HostClaim {
+        app.registry_for_services()
+            .claim_host(ephervex_storage::RecordRef::Server(server.id))
+            .expect("claim")
+    }
+
+    #[test]
+    fn changes_to_a_server_are_refused_while_another_operation_holds_its_claim() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let server = scaffolded_server(&app);
+        let _start = claimed_by_another_operation(&app, &server);
+
+        let settings = app
+            .set_server_runtime_settings(server.id, None, None)
+            .expect_err("settings");
+        let property = app
+            .set_server_property(server.id, "motd", "changed")
+            .expect_err("property");
+        let deletion = app
+            .delete_server(server.id, FileDisposition::Remove)
+            .expect_err("deletion");
+
+        for error in [settings, property, deletion] {
+            assert_eq!(error.message_id(), "error-registry-host-busy", "{error}");
+        }
+        assert!(server.root.is_dir(), "the refused deletion removed nothing");
+    }
+
+    #[tokio::test]
+    async fn a_server_start_is_refused_while_another_operation_holds_its_claim() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let server = scaffolded_server(&app);
+        let _deletion = claimed_by_another_operation(&app, &server);
+
+        let error = app
+            .start_server(server.id, None, &ServerObserver::silent())
+            .await
+            .expect_err("a server being changed is not started");
+
+        assert_eq!(error.message_id(), "error-registry-host-busy", "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_prepared_start_keeps_its_claim_until_the_supervisor_owns_the_runtime_lock() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let server = scaffolded_server(&app);
+        std::fs::create_dir_all(server.root.join("server")).expect("server directory");
+        let mut prepared = stand_in_prepared(
+            &server.root,
+            "while read -r line; do [ \"$line\" = stop ] && exit 0; done",
+        );
+        prepared.claim = Some(claimed_by_another_operation(&app, &server));
+        assert!(
+            app.registry_for_services()
+                .claim_host(ephervex_storage::RecordRef::Server(server.id))
+                .is_err(),
+            "the prepared start holds the server"
+        );
+        let (observer, mut events) = ServerObserver::channel();
+        let run = tokio::spawn(async move { App::run_prepared_server(prepared, &observer).await });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(event) = events.recv().await {
+                if matches!(event, ephervex_server::ServerEvent::Started { .. }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("started");
+
+        drop(
+            app.registry_for_services()
+                .claim_host(ephervex_storage::RecordRef::Server(server.id))
+                .expect("the runtime lock keeps changes out now, not the claim"),
+        );
+        let error = app
+            .set_server_property(server.id, "motd", "changed")
+            .expect_err("a running server is not changed");
+        assert_eq!(
+            error.message_id(),
+            "error-server-already-running",
+            "{error}"
+        );
+
+        send_control(&server.root, &ControlAction::Stop)
+            .await
+            .expect("stop");
+        run.await.expect("join").expect("run");
     }
 
     #[tokio::test]

@@ -62,7 +62,13 @@ attempt finished but could not record, while the instance still stands at its
 source, and is replaced. Anything else there is a conflict and is refused. A
 move holds the instance's host claim for as long as it runs, so a second move
 or a snapshot restore of the same instance is refused rather than replacing or
-reading a copy that is still being made. Reconciliation skips a staging
+reading a copy that is still being made. The claim is taken before the check
+that the game is stopped, and a launch takes the same claim while it reads the
+instance's record and takes its launch lock. A launch therefore either finishes
+taking its lock before the check, and the move is refused, or is refused itself
+until the move is over. Storage clears the launch locks of an instance it is
+about to move only after finding that no launch holds it, under the same guard
+that decides who holds the instance. Reconciliation skips a staging
 directory whose claim another process holds, because that move is still
 running. A move neither writes nor clears the incomplete marker, and refuses an
 instance that carries one: it is an interrupted snapshot restore's, and

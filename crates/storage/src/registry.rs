@@ -48,7 +48,7 @@ use ephervex_model::{
 use rusqlite::{Row, params};
 
 use crate::index::{Index, IndexError};
-use crate::lock::{FileGuard, GuardError, LAUNCH_LOCK_FILE};
+use crate::lock::{FileGuard, GuardError, clear_launch_locks_of_idle_instance};
 use crate::metadata::{self, MetadataError};
 use crate::paths::{PathError, Paths, create_dir_all};
 use crate::reconcile::RecordRef;
@@ -83,9 +83,9 @@ pub enum RegistryError {
     /// rolled back yet.
     #[error("{path} has an interrupted snapshot restore that startup has not recovered")]
     RestoreUnfinished { path: PathBuf },
-    /// A snapshot restore or storage move of this instance or server is still
+    /// Another change to this instance or server, or its start, is still
     /// running.
-    #[error("{path} is being changed by a snapshot restore or a move to another storage root")]
+    #[error("{path} is being changed or started by another operation")]
     HostBusy { path: PathBuf },
     /// Another launcher process is changing this host's recipe and did not
     /// finish within the time a caller that cannot be canceled waits.
@@ -112,12 +112,18 @@ pub enum RegistryError {
         #[source]
         source: std::io::Error,
     },
+    /// The claim handed to a change names a different host.
+    #[error("the claim does not cover {path}")]
+    HostNotClaimed { path: PathBuf },
     #[error(transparent)]
     Index(#[from] IndexError),
     #[error(transparent)]
     Metadata(#[from] MetadataError),
     #[error(transparent)]
     Path(#[from] PathError),
+    /// A launch holds the instance, so it cannot be moved.
+    #[error(transparent)]
+    Lock(#[from] crate::lock::LockError),
 }
 
 impl RegistryError {
@@ -133,10 +139,12 @@ impl RegistryError {
             Self::RecipeBusy { .. } => "error-registry-recipe-busy",
             Self::HostGuardUnusable { .. } => "error-registry-host-guard-unusable",
             Self::RootMissing { .. } => "error-registry-root-missing",
+            Self::HostNotClaimed { .. } => "error-registry-host-not-claimed",
             Self::Io { .. } => "error-paths-directory-creation",
             Self::Index(error) => error.message_id(),
             Self::Metadata(error) => error.message_id(),
             Self::Path(error) => error.message_id(),
+            Self::Lock(error) => error.message_id(),
         }
     }
 }
@@ -313,24 +321,19 @@ impl Registry {
     /// where the roots are on different filesystems, which is the ordinary case
     /// between a tmpfs temporary root and a data root on disk.
     ///
-    /// Refusing while the game is running is the caller's job. Nothing here can
-    /// tell a live lock from a stale one, and the lock file itself is left
-    /// behind rather than moved, because it describes a process that is not
-    /// this one.
+    /// The caller holds the instance's [`HostClaim`] and has checked, under it,
+    /// that the game is stopped: a launch cannot begin while the claim is held.
+    /// A launch that holds the instance anyway refuses the move, and a lock left
+    /// by a launch that is over is dropped rather than carried along.
     pub fn relocate_client(
         &self,
         id: InstanceId,
+        claim: &HostClaim,
         storage: StorageClass,
         progress: &mut dyn FnMut(usize),
     ) -> Result<ClientRecord, RegistryError> {
         let record = self.client(id)?;
-        if record.storage == storage {
-            return Ok(record);
-        }
-
-        let _claim = claim_host(&self.paths, RecordRef::Client(id), &record.root)?;
-        // Another move may have finished while this one was starting.
-        let record = self.client(id)?;
+        claim.require(RecordRef::Client(id), &record.root)?;
         if record.storage == storage {
             return Ok(record);
         }
@@ -342,8 +345,13 @@ impl Registry {
         refuse_unhealthy_source(&source, &destination, |root| {
             canonical_client_at(root, id).map(drop)
         })?;
-        let (record, report) =
-            move_host(&source, &destination, names_this_instance, progress, || {
+        let (record, report) = move_host(
+            &source,
+            &destination,
+            names_this_instance,
+            clear_launch_locks_of_idle_instance,
+            progress,
+            || {
                 // Edits stored while the files moved are in the metadata, not
                 // in the record read before the move.
                 let mut current = canonical_client_at(host_files_root(&source, &destination), id)?;
@@ -351,7 +359,8 @@ impl Registry {
                 current.storage = storage;
                 self.update_client(&mut current)?;
                 Ok(current)
-            })?;
+            },
+        )?;
 
         tracing::info!(
             instance_id = %id,
@@ -369,22 +378,18 @@ impl Registry {
     ///
     /// A server's `libraries` is a link into the shared library store, which is
     /// why the move recreates links rather than copying what they point at.
+    ///
+    /// The caller holds the server's [`HostClaim`] and has checked, under it,
+    /// that the server is stopped.
     pub fn relocate_server(
         &self,
         id: ServerId,
+        claim: &HostClaim,
         storage: StorageClass,
         progress: &mut dyn FnMut(usize),
     ) -> Result<ServerCommit<ServerRecord>, RegistryError> {
         let record = self.server(id)?;
-        if record.storage == storage {
-            return Ok(ServerCommit {
-                record,
-                warnings: Vec::new(),
-            });
-        }
-
-        let _claim = claim_host(&self.paths, RecordRef::Server(id), &record.root)?;
-        let record = self.server(id)?;
+        claim.require(RecordRef::Server(id), &record.root)?;
         if record.storage == storage {
             return Ok(ServerCommit {
                 record,
@@ -402,15 +407,21 @@ impl Registry {
         })?;
         // `server.json` is the commit point: an index failure after it is a
         // warning on a recorded move, not a failed one.
-        let (commit, report) =
-            move_host(&source, &destination, names_this_server, progress, || {
+        let (commit, report) = move_host(
+            &source,
+            &destination,
+            names_this_server,
+            |_| Ok(()),
+            progress,
+            || {
                 // The canonical file wins over the index row, which can lag it
                 // (ADR 0002).
                 let mut current = canonical_server_at(host_files_root(&source, &destination), id)?;
                 current.root.clone_from(&destination);
                 current.storage = storage;
                 self.update_server_committed(&mut current)
-            })?;
+            },
+        )?;
 
         tracing::info!(
             server_id = %id,
@@ -1321,13 +1332,16 @@ fn refuse_unhealthy_source(
 /// The move both host kinds share: move the tree, record the move, then remove
 /// the old copy (ADR 0025).
 ///
-/// `record` writes the moved host's metadata and index row. A copy it fails to
-/// record is withdrawn; a renamed tree is the only copy and is kept. The caller
-/// holds the host's [`HostClaim`].
+/// `quiesce` runs on the source just before its files move, and refuses the
+/// move when something still holds the host. `record` writes the moved host's
+/// metadata and index row. A copy it fails to record is withdrawn; a renamed
+/// tree is the only copy and is kept. The caller holds the host's
+/// [`HostClaim`].
 fn move_host<T>(
     source: &Path,
     destination: &Path,
     names_this_host: impl Fn(&Path) -> bool,
+    quiesce: impl FnOnce(&Path) -> Result<(), crate::lock::LockError>,
     progress: &mut dyn FnMut(usize),
     record: impl FnOnce() -> Result<T, RegistryError>,
 ) -> Result<(T, crate::relocate::RelocationReport), RegistryError> {
@@ -1377,7 +1391,7 @@ fn move_host<T>(
         remove_tree(destination)?;
     }
     ensure_free_root(destination)?;
-    discard_launch_lock(source);
+    quiesce(source)?;
     let report =
         crate::relocate::relocate_tree(source, destination, progress).map_err(|error| {
             RegistryError::Io {
@@ -1414,16 +1428,32 @@ fn move_host<T>(
     Ok((recorded, report))
 }
 
-/// One host's exclusive claim on being changed by a snapshot restore or a
-/// storage move.
+/// One host's exclusive claim on being changed or started.
 ///
 /// Held for the whole change, so a second restore or move of the host is
 /// refused instead of publishing into, copying from, or discarding what the
 /// first one is still using, and so reconciliation can tell a change still
-/// running from one that was abandoned. The kernel drops the claim when its
-/// holder dies, which is what makes an abandoned change recoverable.
+/// running from one that was abandoned. A change that needs the host stopped
+/// takes the claim before it looks at whether the host is running. Starting a
+/// host takes the same claim while it records that it is running, so a start
+/// cannot begin between that look and the change. The kernel drops the claim
+/// when its holder dies, which is what makes an abandoned change recoverable.
 pub struct HostClaim {
+    host: RecordRef,
     _guard: FileGuard,
+}
+
+impl HostClaim {
+    /// Refuses a change to `host` under a claim that covers another.
+    fn require(&self, host: RecordRef, root: &Path) -> Result<(), RegistryError> {
+        if self.host == host {
+            Ok(())
+        } else {
+            Err(RegistryError::HostNotClaimed {
+                path: root.to_path_buf(),
+            })
+        }
+    }
 }
 
 impl std::fmt::Debug for HostClaim {
@@ -1451,7 +1481,7 @@ impl std::fmt::Debug for RecipeClaim {
 pub(crate) enum HostProbe {
     /// Nothing is changing the host; the claim is held until it is dropped.
     Idle(#[allow(dead_code)] HostClaim),
-    /// A restore or move of the host, in this process or another, is running.
+    /// A change or start of the host, in this process or another, is running.
     Mutating,
     /// The claim could not be tried, so an abandoned change cannot be told
     /// from a running one.
@@ -1459,8 +1489,8 @@ pub(crate) enum HostProbe {
 }
 
 impl Registry {
-    /// Claims an indexed host for a snapshot restore or other change that must
-    /// not overlap a move of it, refusing while another holds it.
+    /// Claims an indexed host for a change that must not overlap another change
+    /// or a start of it, refusing while another holds it.
     pub fn claim_host(&self, host: RecordRef) -> Result<HostClaim, RegistryError> {
         let root = match host {
             RecordRef::Client(id) => self.client(id)?.root,
@@ -1487,7 +1517,10 @@ impl Registry {
     /// Tries a host's claim without waiting.
     pub(crate) fn probe_host(&self, host: RecordRef) -> HostProbe {
         match try_claim_host(&self.paths, host) {
-            Ok(guard) => HostProbe::Idle(HostClaim { _guard: guard }),
+            Ok(guard) => HostProbe::Idle(HostClaim {
+                host,
+                _guard: guard,
+            }),
             Err(GuardError::Busy { .. }) => HostProbe::Mutating,
             Err(GuardError::Unusable { path, source }) => {
                 tracing::warn!(
@@ -1501,11 +1534,22 @@ impl Registry {
     }
 }
 
+/// How long taking a host's claim waits before reporting it busy.
+///
+/// A claim just released can still look held for an instant: a process forked
+/// by another thread inherits the lock's file until it execs. That is too short
+/// to wait out on purpose and long enough to refuse a launch that nothing else
+/// is competing with. A genuine holder keeps the claim far longer than this.
+const HOST_CLAIM_PATIENCE: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// Kept outside the tree being changed, so every holder finds it whichever way
 /// the tree goes.
 fn claim_host(paths: &Paths, host: RecordRef, root: &Path) -> Result<HostClaim, RegistryError> {
-    try_claim_host(paths, host)
-        .map(|guard| HostClaim { _guard: guard })
+    take_guard(paths, &host_guard_name(host), HOST_CLAIM_PATIENCE)
+        .map(|guard| HostClaim {
+            host,
+            _guard: guard,
+        })
         .map_err(|error| match error {
             GuardError::Busy { .. } => RegistryError::HostBusy {
                 path: root.to_path_buf(),
@@ -1521,12 +1565,20 @@ fn try_claim_host(paths: &Paths, host: RecordRef) -> Result<FileGuard, GuardErro
 }
 
 fn try_take_guard(paths: &Paths, name: &str) -> Result<FileGuard, GuardError> {
+    take_guard(paths, name, std::time::Duration::ZERO)
+}
+
+fn take_guard(
+    paths: &Paths,
+    name: &str,
+    patience: std::time::Duration,
+) -> Result<FileGuard, GuardError> {
     let directory = paths.move_guards_dir();
     std::fs::create_dir_all(&directory).map_err(|source| GuardError::Unusable {
         path: directory.clone(),
         source,
     })?;
-    FileGuard::take(&directory, name, std::time::Duration::ZERO)
+    FileGuard::take(&directory, name, patience)
 }
 
 pub(crate) fn host_guard_name(host: RecordRef) -> String {
@@ -1540,25 +1592,6 @@ fn recipe_guard_name(host: RecordRef) -> String {
     match host {
         RecordRef::Client(id) => format!("client-{id}.recipe.guard"),
         RecordRef::Server(id) => format!("server-{id}.recipe.guard"),
-    }
-}
-
-/// Drops the launch lock before a move.
-///
-/// It describes a process, and a moved instance is not running one: the caller
-/// has already refused while it was. Failing to remove it is not worth failing
-/// the move over, because the lock is keyed on a pid and its start time and a
-/// stale file claims nothing.
-fn discard_launch_lock(root: &Path) {
-    let path = metadata::metadata_dir(root).join(LAUNCH_LOCK_FILE);
-    if let Err(error) = std::fs::remove_file(&path)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        tracing::warn!(
-            path = %path.display(),
-            %error,
-            "could not remove a stale launch lock before moving an instance"
-        );
     }
 }
 
@@ -1581,6 +1614,25 @@ mod tests {
 
     use crate::test_support::TestEnvironment;
     use crate::{ServerOperatorIdentity, ServerOperatorProfile, ServerOperatorSetup};
+
+    /// Moves a client to the persistent root under its claim, as a caller must.
+    fn move_client(
+        registry: &Registry,
+        id: InstanceId,
+        progress: &mut dyn FnMut(usize),
+    ) -> Result<ClientRecord, RegistryError> {
+        let claim = registry.claim_host(RecordRef::Client(id))?;
+        registry.relocate_client(id, &claim, StorageClass::Persistent, progress)
+    }
+
+    fn move_server(
+        registry: &Registry,
+        id: ServerId,
+        progress: &mut dyn FnMut(usize),
+    ) -> Result<ServerCommit<ServerRecord>, RegistryError> {
+        let claim = registry.claim_host(RecordRef::Server(id))?;
+        registry.relocate_server(id, &claim, StorageClass::Persistent, progress)
+    }
 
     #[test]
     fn a_created_instance_is_readable_listable_and_on_disk() {
@@ -2248,9 +2300,7 @@ mod tests {
         write_payload(&metadata::client_game_dir(&client.root));
 
         crate::relocate::force_copy(true);
-        let promoted = registry
-            .relocate_client(client.id, StorageClass::Persistent, &mut |_| {})
-            .expect("move");
+        let promoted = move_client(&registry, client.id, &mut |_| {}).expect("move");
         crate::relocate::force_copy(false);
 
         assert_eq!(promoted.storage, StorageClass::Persistent);
@@ -2283,8 +2333,7 @@ mod tests {
         );
 
         crate::relocate::force_copy(true);
-        let promoted = registry
-            .relocate_client(client.id, StorageClass::Persistent, &mut |_| {})
+        let promoted = move_client(&registry, client.id, &mut |_| {})
             .expect("the retry replaces what the interrupted copy left");
         crate::relocate::force_copy(false);
 
@@ -2307,8 +2356,7 @@ mod tests {
         crate::test_support::interrupt_copy_after(&server.root, &destination, 2);
 
         crate::relocate::force_copy(true);
-        let promoted = registry
-            .relocate_server(server.id, StorageClass::Persistent, &mut |_| {})
+        let promoted = move_server(&registry, server.id, &mut |_| {})
             .expect("the retry replaces what the interrupted copy left")
             .record;
         crate::relocate::force_copy(false);
@@ -2329,19 +2377,18 @@ mod tests {
 
         let mut edited = false;
         crate::relocate::force_copy(true);
-        let promoted = registry
-            .relocate_client(client.id, StorageClass::Persistent, &mut |_| {
-                if !edited {
-                    edited = true;
-                    registry
-                        .modify_client(client.id, |record| {
-                            record.name = "renamed meanwhile".to_owned();
-                            record.add_attention(AttentionReason::MissingRoot);
-                        })
-                        .expect("an edit while the files copy");
-                }
-            })
-            .expect("move");
+        let promoted = move_client(&registry, client.id, &mut |_| {
+            if !edited {
+                edited = true;
+                registry
+                    .modify_client(client.id, |record| {
+                        record.name = "renamed meanwhile".to_owned();
+                        record.add_attention(AttentionReason::MissingRoot);
+                    })
+                    .expect("an edit while the files copy");
+            }
+        })
+        .expect("move");
         crate::relocate::force_copy(false);
 
         assert!(edited, "the edit ran while the copy was in progress");
@@ -2368,17 +2415,16 @@ mod tests {
 
         let mut edited = false;
         crate::relocate::force_copy(true);
-        let promoted = registry
-            .relocate_server(server.id, StorageClass::Persistent, &mut |_| {
-                if !edited {
-                    edited = true;
-                    let mut record = registry.server(server.id).expect("server");
-                    record.name = "renamed meanwhile".to_owned();
-                    registry.update_server(&mut record).expect("edit");
-                }
-            })
-            .expect("move")
-            .record;
+        let promoted = move_server(&registry, server.id, &mut |_| {
+            if !edited {
+                edited = true;
+                let mut record = registry.server(server.id).expect("server");
+                record.name = "renamed meanwhile".to_owned();
+                registry.update_server(&mut record).expect("edit");
+            }
+        })
+        .expect("move")
+        .record;
         crate::relocate::force_copy(false);
 
         assert!(edited, "the edit ran while the copy was in progress");
@@ -2409,8 +2455,7 @@ mod tests {
         metadata::write_server_metadata(&server.root, &canonical).expect("canonical write");
         assert_eq!(registry.server(server.id).expect("row").name, "indexed");
 
-        let promoted = registry
-            .relocate_server(server.id, StorageClass::Persistent, &mut |_| {})
+        let promoted = move_server(&registry, server.id, &mut |_| {})
             .expect("move")
             .record;
 
@@ -2439,8 +2484,7 @@ mod tests {
         std::fs::write(metadata::server_metadata_path(&server.root), "not json").expect("damage");
 
         crate::relocate::force_copy(true);
-        let error = registry
-            .relocate_server(server.id, StorageClass::Persistent, &mut |_| {})
+        let error = move_server(&registry, server.id, &mut |_| {})
             .expect_err("unreadable metadata is not moved");
         crate::relocate::force_copy(false);
 
@@ -2460,8 +2504,7 @@ mod tests {
             .claim_host(RecordRef::Client(client.id))
             .expect("claim");
 
-        let error = registry
-            .relocate_client(client.id, StorageClass::Persistent, &mut |_| {})
+        let error = move_client(&registry, client.id, &mut |_| {})
             .expect_err("the first move still holds the claim");
 
         assert!(matches!(error, RegistryError::HostBusy { .. }));
@@ -2528,9 +2571,8 @@ mod tests {
         std::fs::create_dir_all(destination.parent().expect("parent")).expect("mkdir");
         std::fs::rename(&client.root, &destination).expect("the earlier move's rename");
 
-        let promoted = registry
-            .relocate_client(client.id, StorageClass::Persistent, &mut |_| {})
-            .expect("the retry records the rename");
+        let promoted =
+            move_client(&registry, client.id, &mut |_| {}).expect("the retry records the rename");
 
         assert_eq!(promoted.root, destination);
         assert_eq!(
@@ -2569,8 +2611,7 @@ mod tests {
             prepare_unfinished_restore(&client.root, crate::restore::RestorePart::ClientMetadata);
 
             crate::relocate::force_copy(copy);
-            let error = registry
-                .relocate_client(client.id, StorageClass::Persistent, &mut |_| {})
+            let error = move_client(&registry, client.id, &mut |_| {})
                 .expect_err("startup recovers the restore first");
             crate::relocate::force_copy(false);
 
@@ -2609,9 +2650,8 @@ mod tests {
             .update_client(&mut stale)
             .expect("a record with the wrong class");
 
-        let promoted = registry
-            .relocate_client(client.id, StorageClass::Persistent, &mut |_| {})
-            .expect("only the record was stale");
+        let promoted =
+            move_client(&registry, client.id, &mut |_| {}).expect("only the record was stale");
 
         assert_eq!(promoted.storage, StorageClass::Persistent);
         assert_eq!(promoted.root, persistent);
@@ -2635,9 +2675,8 @@ mod tests {
         crate::relocate::relocate_tree(&other.root, &destination, &mut |_| {}).expect("copy");
         crate::relocate::force_copy(false);
 
-        let error = registry
-            .relocate_client(client.id, StorageClass::Persistent, &mut |_| {})
-            .expect_err("somebody else's files");
+        let error =
+            move_client(&registry, client.id, &mut |_| {}).expect_err("somebody else's files");
 
         assert!(matches!(error, RegistryError::RootOccupied { .. }));
         assert!(destination.join(".launcher/instance.json").is_file());

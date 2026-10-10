@@ -813,6 +813,17 @@ lock records the launcher process and kernel start time to distinguish a live
 owner from PID reuse, then records the game PID and start time after process
 creation.
 
+Starting a host and changing a stopped host are kept apart by the host's claim,
+a lock file stored outside the host's tree. A change that needs the host stopped
+(promotion, snapshot capture and restore, duplication, deletion, a loader
+change, and settings or property writes) takes the claim first, checks that no
+launch or server run holds the host, and keeps the claim until the change ends.
+A client launch takes the claim only while it reads the instance record and
+takes the launch lock. A server start takes it before it checks the runtime and
+keeps it through start preparation until the supervisor owns the runtime lock.
+After that point the launch lock or runtime lock keeps changes out. An operation
+that finds the claim held is refused with a message to try again.
+
 A launcher run can end while its game keeps running. The lock still holds the
 instance while the recorded game is alive and still has its recorded start
 time, so no second game can share its directory; the instance is shown as

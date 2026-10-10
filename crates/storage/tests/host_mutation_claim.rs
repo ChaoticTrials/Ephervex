@@ -120,10 +120,33 @@ fn a_move_is_refused_while_a_restore_holds_the_host() {
         .expect("claim");
 
     let error = registry
-        .relocate_client(client.id, StorageClass::Persistent, &mut |_| {})
+        .claim_host(RecordRef::Client(client.id))
         .expect_err("the restore holds the host");
 
     assert!(matches!(error, RegistryError::HostBusy { .. }));
+    assert!(client.root.is_dir());
+}
+
+#[test]
+fn a_move_needs_the_claim_of_the_host_it_moves() {
+    let base = tempfile::tempdir().expect("temp dir");
+    let registry = Registry::open(isolated_paths(&base)).expect("open registry");
+    let client = client_with_state(&registry, b"original");
+    let other = client_with_state(&registry, b"other");
+    let claim_of_other = registry
+        .claim_host(RecordRef::Client(other.id))
+        .expect("claim");
+
+    let error = registry
+        .relocate_client(
+            client.id,
+            &claim_of_other,
+            StorageClass::Persistent,
+            &mut |_| {},
+        )
+        .expect_err("another host's claim does not cover this one");
+
+    assert!(matches!(error, RegistryError::HostNotClaimed { .. }));
     assert!(client.root.is_dir());
 }
 

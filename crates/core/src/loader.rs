@@ -250,8 +250,9 @@ impl App {
             })
             .await?;
 
-        // The installation can take long enough for a launch to begin.
-        self.refuse_while_running(instance)?;
+        // The installation can take long enough for a launch to begin. The
+        // claim is kept to the end of the change, so none begins before it.
+        let _claim = self.claim_stopped_client(instance)?;
 
         // Held from the last check to the recipe write, so a session cannot
         // start between them.

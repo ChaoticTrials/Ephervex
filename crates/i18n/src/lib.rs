@@ -484,6 +484,7 @@ mod tests {
             "error-registry-metadata-unsupported-version",
             "error-registry-root-occupied",
             "error-registry-host-busy",
+            "error-registry-host-not-claimed",
             "error-registry-recipe-busy",
             "error-registry-restore-unfinished",
             "error-registry-host-guard-unusable",

@@ -151,6 +151,12 @@ impl App {
         request: &PromotionRequest,
         reporter: &OperationReporter,
     ) -> CoreResult<PromotionOutcome> {
+        // Claimed before anything is read or checked, and kept until the last
+        // move ends: a launch records itself under the same claim, so none can
+        // begin on a tree that is being copied and then removed.
+        let claim = self
+            .registry()
+            .claim_host(ephervex_storage::RecordRef::Client(instance))?;
         let record = self.client(instance)?;
         self.refuse_promoting(&record)?;
 
@@ -158,22 +164,29 @@ impl App {
         // refuses the whole operation rather than being discovered halfway
         // through and reported as a partial success.
         let selected = self.selected_servers(instance, request)?;
+        let mut server_claims = Vec::with_capacity(selected.len());
         for server in &selected {
+            server_claims.push(
+                self.registry()
+                    .claim_host(ephervex_storage::RecordRef::Server(server.id))?,
+            );
             crate::server::refuse_if_running(server)?;
         }
 
         reporter.set_stage(Some("operation-stage-relocating-files".to_owned()));
         let moved = self.registry_for_services().relocate_client(
             instance,
+            &claim,
             StorageClass::Persistent,
             &mut file_progress(reporter),
         )?;
 
         let mut servers = Vec::new();
         let mut warnings = Vec::new();
-        for server in selected {
+        for (server, server_claim) in selected.into_iter().zip(&server_claims) {
             match self.registry_for_services().relocate_server(
                 server.id,
+                server_claim,
                 StorageClass::Persistent,
                 &mut file_progress(reporter),
             ) {
@@ -221,6 +234,13 @@ impl App {
                     server: *id,
                     instance,
                 });
+            }
+            // Named twice, it still moves once: a second claim would refuse itself.
+            if selected
+                .iter()
+                .any(|server: &ServerRecord| server.id == *id)
+            {
+                continue;
             }
             let server = self.server(*id)?;
             // A persistent server is already where it would be moved to.
@@ -442,6 +462,114 @@ mod tests {
         assert!(
             matches!(error, CoreError::InstanceRunning { .. }),
             "expected an already-running refusal, got {error}"
+        );
+    }
+
+    #[test]
+    fn a_promotion_never_removes_the_lock_of_a_launch_that_holds_the_instance() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let client = temporary_client(&app, "Repro");
+        let first = ephervex_storage::LaunchLock::acquire(&client.root).expect("first launch");
+        let promote = || {
+            app.promote_instance(client.id, &PromotionRequest::client_only(), &silent())
+                .expect_err("a held instance is not moved")
+        };
+
+        let error = promote();
+        assert!(
+            matches!(error, CoreError::InstanceRunning { .. }),
+            "expected an already-running refusal, got {error}"
+        );
+        assert!(first.path().is_file(), "the live lock is still there");
+        drop(first);
+
+        let _alongside = ephervex_storage::LaunchLock::acquire_additional(&client.root, "bob")
+            .expect("an additional launch");
+        let error = promote();
+        assert!(
+            matches!(error, CoreError::InstanceRunning { .. }),
+            "expected an already-running refusal, got {error}"
+        );
+        let record = app.client(client.id).expect("record");
+        assert_eq!(record.storage, StorageClass::Temporary);
+        assert_eq!(record.root, client.root);
+    }
+
+    #[test]
+    fn a_promotion_is_refused_while_another_operation_holds_the_instance() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let client = temporary_client(&app, "Repro");
+        let operation = app
+            .registry()
+            .claim_host(ephervex_storage::RecordRef::Client(client.id))
+            .expect("claim");
+
+        let error = app
+            .promote_instance(client.id, &PromotionRequest::client_only(), &silent())
+            .expect_err("a launch or restore holds the instance");
+
+        assert_eq!(error.message_id(), "error-registry-host-busy", "{error}");
+        drop(operation);
+        assert_eq!(
+            app.client(client.id).expect("record").root,
+            client.root,
+            "nothing moved"
+        );
+    }
+
+    #[test]
+    fn a_promotion_moves_nothing_when_a_selected_server_is_held_by_another_operation() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let client = temporary_client(&app, "Repro");
+        let server = linked_server(&app, base.path(), client.id, "Repro Server");
+        let _start = app
+            .registry()
+            .claim_host(ephervex_storage::RecordRef::Server(server))
+            .expect("a start claims the server");
+
+        let error = app
+            .promote_instance(
+                client.id,
+                &PromotionRequest {
+                    servers: vec![server],
+                },
+                &silent(),
+            )
+            .expect_err("the server is not stopped for this promotion");
+
+        assert_eq!(error.message_id(), "error-registry-host-busy", "{error}");
+        assert_eq!(
+            app.client(client.id).expect("record").storage,
+            StorageClass::Temporary,
+            "the client stayed where it was"
+        );
+    }
+
+    #[test]
+    fn a_server_named_twice_in_a_promotion_request_moves_once() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let client = temporary_client(&app, "Repro");
+        let server = linked_server(&app, base.path(), client.id, "Repro Server");
+
+        let outcome = app
+            .promote_instance(
+                client.id,
+                &PromotionRequest {
+                    servers: vec![server, server],
+                },
+                &silent(),
+            )
+            .expect("a repeated id is not a conflict with itself");
+
+        assert_eq!(outcome.servers.len(), 1);
+        assert!(outcome.warnings.is_empty());
+        assert_eq!(
+            app.server(server).expect("record").storage,
+            StorageClass::Persistent
         );
     }
 

@@ -946,6 +946,7 @@ fn registry_failing_path(error: &ephervex_storage::RegistryError) -> Option<Path
     match error {
         RegistryError::RootOccupied { path }
         | RegistryError::HostBusy { path }
+        | RegistryError::HostNotClaimed { path }
         | RegistryError::RecipeBusy { path }
         | RegistryError::RestoreUnfinished { path }
         | RegistryError::HostGuardUnusable { path, .. }
@@ -954,6 +955,7 @@ fn registry_failing_path(error: &ephervex_storage::RegistryError) -> Option<Path
         | RegistryError::Index(IndexError::Unopenable { path, .. }) => Some(path.clone()),
         RegistryError::Metadata(inner) => metadata_failing_path(inner),
         RegistryError::Path(inner) => path_failing_path(inner),
+        RegistryError::Lock(inner) => inner.failing_path(),
         RegistryError::Index(inner) => index_failing_path(inner),
         RegistryError::InstanceUnknown { .. } | RegistryError::ServerUnknown { .. } => None,
     }

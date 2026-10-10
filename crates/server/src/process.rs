@@ -182,7 +182,25 @@ impl ServerSupervisor {
         capture_directory: &Path,
         observer: &ServerObserver,
     ) -> ServerResult<ServerExit> {
-        let guard = RuntimeGuard::acquire(server_root)?;
+        Self::run_holding((), command, server_root, capture_directory, observer).await
+    }
+
+    /// Runs like [`Self::run`], keeping `held` until the run owns the server's
+    /// runtime lock, whether or not it got it.
+    ///
+    /// For a caller that has to exclude other changes to the server from the
+    /// moment it decides the server is stopped until the lock itself keeps them
+    /// out, which is the one stretch the lock cannot cover.
+    pub async fn run_holding<H: Send>(
+        held: H,
+        command: &ServerCommand,
+        server_root: &Path,
+        capture_directory: &Path,
+        observer: &ServerObserver,
+    ) -> ServerResult<ServerExit> {
+        let guard = RuntimeGuard::acquire(server_root);
+        drop(held);
+        let guard = guard?;
         let mut evidence = RuntimeEvidence::for_current_supervisor()?;
         let (requests, mut request_receiver) = mpsc::unbounded_channel();
         let socket = ControlSocket::open(server_root, evidence.generation, requests)?;
@@ -1921,6 +1939,78 @@ mod tests {
         )
         .await
         .expect("a later start in the same process succeeds");
+    }
+
+    /// Records whether the server's runtime lock existed when it was dropped.
+    struct HeldUntilLocked {
+        root: PathBuf,
+        locked_when_dropped: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Drop for HeldUntilLocked {
+        fn drop(&mut self) {
+            self.locked_when_dropped.store(
+                runtime_lock_path(&self.root).exists(),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn what_a_run_is_given_to_hold_is_kept_until_the_run_owns_the_runtime_lock() {
+        let root = tempfile::tempdir().expect("root");
+        std::fs::create_dir_all(root.path().join(".launcher")).expect("launcher");
+        let capture = tempfile::tempdir().expect("capture");
+        let command = ServerCommand {
+            java: PathBuf::from("/bin/true"),
+            arguments: Vec::new(),
+            working_directory: root.path().join("server"),
+        };
+        let locked_when_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        ServerSupervisor::run_holding(
+            HeldUntilLocked {
+                root: root.path().to_path_buf(),
+                locked_when_dropped: Arc::clone(&locked_when_dropped),
+            },
+            &command,
+            root.path(),
+            capture.path(),
+            &ServerObserver::silent(),
+        )
+        .await
+        .expect("the run");
+
+        assert!(
+            locked_when_dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "the held value was released before the runtime lock existed"
+        );
+    }
+
+    #[tokio::test]
+    async fn what_a_refused_run_was_given_to_hold_is_released() {
+        let root = tempfile::tempdir().expect("root");
+        std::fs::create_dir_all(root.path().join(".launcher")).expect("launcher");
+        let capture = tempfile::tempdir().expect("capture");
+        let _owner = RuntimeGuard::acquire(root.path()).expect("an earlier run owns the lock");
+        let command = ServerCommand {
+            java: PathBuf::from("/bin/true"),
+            arguments: Vec::new(),
+            working_directory: root.path().join("server"),
+        };
+        let held = Arc::new(());
+
+        let refused = ServerSupervisor::run_holding(
+            Arc::clone(&held),
+            &command,
+            root.path(),
+            capture.path(),
+            &ServerObserver::silent(),
+        )
+        .await;
+
+        assert!(matches!(refused, Err(ServerError::AlreadyRunning)));
+        assert_eq!(Arc::strong_count(&held), 1, "nothing keeps the claim");
     }
 
     #[tokio::test]

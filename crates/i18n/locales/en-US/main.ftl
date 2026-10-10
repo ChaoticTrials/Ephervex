@@ -244,8 +244,10 @@ error-registry-metadata-unsupported-version = The instance metadata at { $path }
 error-registry-root-occupied = That instance directory already contains files.
 .action = Choose a different name, or remove { $path } first.
 
-error-registry-host-busy = That instance or server is being restored from a snapshot or moved to another storage location.
-.action = Wait for the other change to finish, then try again.
+error-registry-host-busy = That instance or server is being started or changed by another operation, such as a snapshot restore, a move to another storage location, or a deletion.
+.action = Wait for the other operation to finish, then try again.
+
+error-registry-host-not-claimed = That change was not reserved for this instance or server.
 
 error-registry-recipe-busy = Another { app-name } window or command is still changing the mods of that instance or server.
 .action = Wait for it to finish, then try again.
@@ -1123,7 +1125,7 @@ error-storage-full = The storage device is full.
 
 error-snapshot-host-running = { $host } is running, so its state cannot be captured or restored safely.
 .action = Stop the client or server, then try again.
-error-snapshot-host-busy = That instance or server is being restored from a snapshot or moved to another storage location.
+error-snapshot-host-busy = That instance or server is being started or changed by another operation, such as a snapshot restore, a move to another storage location, or a deletion.
 .action = Wait for the other change to finish, then try again.
 error-snapshot-isolation-active = A snapshot cannot be restored while an isolation session is active.
 .action = Finish or cancel the isolation session first. A restore would replace the mods the session is testing.

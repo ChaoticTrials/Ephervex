@@ -563,7 +563,9 @@ impl App {
         request: &DuplicateClient,
         absent_mods: AbsentModPolicy,
     ) -> CoreResult<DuplicatedClient> {
-        self.refuse_while_running(source)?;
+        // Kept until the copy is made, so a launch cannot begin and write into
+        // the instance while it is being read.
+        let _claim = self.claim_stopped_client(source)?;
         let copy = self
             .registry_for_services()
             .duplicate_client(source, request)?;

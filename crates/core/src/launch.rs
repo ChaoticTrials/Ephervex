@@ -229,6 +229,14 @@ impl App {
         // Downloads are stages of this operation and never begin it themselves.
         reporter.begin_stage("operation-stage-preparing-environment".to_owned());
 
+        // The instance's claim is held from reading its record until the launch
+        // lock is taken. A move, restore, or deletion holds the same claim for
+        // its whole run and checks for a launch under it, so this launch either
+        // finds the instance where its record says and is seen by that check,
+        // or is refused. Once the lock exists it is what keeps them out.
+        let claim = self
+            .registry()
+            .claim_host(ephervex_storage::RecordRef::Client(instance))?;
         let record = self.client(instance)?;
 
         // Taken before anything writes, and held until the game exits. A
@@ -238,6 +246,7 @@ impl App {
             Some(id) => LaunchLock::acquire_additional(&record.root, id)?,
             None => LaunchLock::acquire(&record.root)?,
         };
+        drop(claim);
 
         // Establish identity before metadata or artifacts are fetched. A
         // missing account is locally knowable and should fail without network.
@@ -582,6 +591,65 @@ mod tests {
         assert_eq!(error.message_id(), "error-launch-already-running");
 
         drop(held);
+    }
+
+    #[tokio::test]
+    async fn a_launch_is_refused_while_another_operation_holds_the_instance() {
+        // A promotion, restore, or deletion holds the claim for its whole run
+        // and has found the instance stopped; a launch must not start under it.
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.add_offline_account("Notch").expect("account");
+        let instance = vanilla(&app, "1.20.1").id;
+        let operation = app
+            .registry()
+            .claim_host(ephervex_storage::RecordRef::Client(instance))
+            .expect("an operation claims the instance");
+
+        for additional in [None, Some("bob".to_owned())] {
+            let error = app
+                .launch(
+                    instance,
+                    &LaunchOptions {
+                        additional,
+                        ..LaunchOptions::default()
+                    },
+                    &LaunchObserver::silent(),
+                    &CancellationToken::new(),
+                )
+                .await
+                .expect_err("the operation holds the instance");
+            assert_eq!(error.message_id(), "error-registry-host-busy", "{error}");
+        }
+        assert!(
+            app.launch_state(instance).expect("state").is_none(),
+            "a refused launch leaves no lock behind"
+        );
+
+        drop(operation);
+    }
+
+    #[tokio::test]
+    async fn a_launch_takes_its_lock_before_a_waiting_operation_can_look_for_one() {
+        // The claim is released once the lock exists, so an operation that
+        // claims afterwards sees the launch and refuses.
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.add_offline_account("Notch").expect("account");
+        let instance = vanilla(&app, "1.20.1").id;
+        let held = LaunchLock::acquire(&app.client(instance).expect("record").root)
+            .expect("a launch holds the instance");
+
+        let claim = app
+            .registry()
+            .claim_host(ephervex_storage::RecordRef::Client(instance))
+            .expect("the claim is free while the launch runs");
+        let error = app
+            .refuse_while_running(instance)
+            .expect_err("and the operation sees the launch");
+        assert!(matches!(error, crate::CoreError::InstanceRunning { .. }));
+
+        drop((claim, held));
     }
 
     #[test]
