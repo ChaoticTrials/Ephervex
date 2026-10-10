@@ -282,3 +282,50 @@ fn a_fabric_pack_fails_with_a_machine_readable_message_id() {
             .is_empty()
     );
 }
+
+#[test]
+fn import_errors_escape_control_characters_in_archive_paths_but_json_stays_exact() {
+    let sandbox = Sandbox::new();
+    let cases = [
+        // Rejected while validating the path itself.
+        ("unsafe-path", "../\u{1b}[2Jx.jar", "{\"sha1\":\"\"}"),
+        // A well-formed path whose entry is refused for another reason.
+        ("missing-hashes", "mods/\u{1b}[2Jx.jar", "{}"),
+    ];
+    for (name, entry, hashes) in cases {
+        let pack = sandbox.base().join(format!("{name}.mrpack"));
+        let index = serde_json::json!({
+            "formatVersion": 1,
+            "game": "minecraft",
+            "versionId": "1.0",
+            "name": "Hostile Entry",
+            "files": [{
+                "path": entry,
+                "hashes": serde_json::from_str::<serde_json::Value>(hashes).unwrap(),
+                "downloads": ["https://cdn.modrinth.com/data/x/a.jar"],
+                "fileSize": 1
+            }],
+            "dependencies": { "minecraft": "1.20.1" }
+        });
+        archive(&pack, index.to_string().as_bytes(), &[]);
+        let path = pack.to_str().expect("UTF-8 path");
+
+        let failed = sandbox.run(&["import", path, "--inspect"]);
+        assert!(!failed.status.success(), "{name}: {failed:?}");
+        let stderr = String::from_utf8(failed.stderr).expect("UTF-8 output");
+        assert!(
+            stderr.chars().all(|c| c == '\n' || !c.is_control()),
+            "{name}: raw control characters reached the terminal: {stderr:?}"
+        );
+        assert!(stderr.contains("\\u{1b}[2Jx.jar"), "{name}: {stderr:?}");
+
+        let machine = sandbox.run(&["--json", "import", path, "--inspect"]);
+        assert!(!machine.status.success(), "{name}: {machine:?}");
+        let error: serde_json::Value =
+            serde_json::from_slice(&machine.stderr).expect("JSON error output");
+        assert!(
+            error["detail"].to_string().contains("\\u001b[2Jx.jar"),
+            "{name}: {error}"
+        );
+    }
+}

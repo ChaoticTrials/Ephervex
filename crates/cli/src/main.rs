@@ -8194,15 +8194,17 @@ fn report_failure(error: &anyhow::Error, json: bool) {
         return;
     }
 
-    eprintln!("error: {summary}");
+    // Errors can quote archive-supplied paths and URLs, so every line is made
+    // terminal-safe. The JSON form above keeps the exact text.
+    eprintln!("error: {}", terminal_safe(&summary));
     if let Some(action) = action {
-        eprintln!("       {action}");
+        eprintln!("       {}", terminal_safe(&action));
     }
     // A failure that is not a `CoreError` has no localized message, so the
     // summary *is* its first technical line. Printing the chain unfiltered
     // would then say the same sentence twice.
     for line in technical.iter().filter(|line| **line != summary) {
-        eprintln!("  {line}");
+        eprintln!("  {}", terminal_safe(line));
     }
 }
 
