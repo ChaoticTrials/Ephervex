@@ -1,0 +1,144 @@
+.backdrop {
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: rgb(6 12 15 / 0.97);
+  color: #f2f7f8;
+  outline: none;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+}
+
+.caption {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  font-size: 0.95rem;
+}
+
+.caption strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.caption span {
+  color: #b7c8cd;
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.75rem;
+}
+
+.action {
+  padding: 0.45rem 0.85rem;
+  border: 1px solid rgb(255 255 255 / 0.3);
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.action:hover,
+.action:focus-visible {
+  border-color: #fff;
+  color: #fff;
+  text-decoration: none;
+}
+
+.stage {
+  position: relative;
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  padding: 0 4.25rem 1rem;
+  overflow: hidden;
+  /* Vertical pan and pinch stay with the browser; horizontal drags are swipes. */
+  touch-action: pan-y pinch-zoom;
+}
+
+.image {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: 0.4rem;
+  box-shadow: 0 1rem 3rem rgb(0 0 0 / 0.5);
+  user-select: none;
+  transition: transform 180ms ease;
+}
+
+.fromRight {
+  animation: slide-in-right 220ms ease;
+}
+
+.fromLeft {
+  animation: slide-in-left 220ms ease;
+}
+
+@keyframes slide-in-right {
+  from { opacity: 0.4; transform: translateX(10%); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes slide-in-left {
+  from { opacity: 0.4; transform: translateX(-10%); }
+  to { opacity: 1; transform: none; }
+}
+
+.nav {
+  position: absolute;
+  top: 50%;
+  z-index: 1;
+  width: 3rem;
+  height: 3rem;
+  margin-top: -2rem;
+  border: 1px solid rgb(255 255 255 / 0.3);
+  border-radius: 50%;
+  background: rgb(6 12 15 / 0.6);
+  color: inherit;
+  font-size: 2rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.nav:hover:not(:disabled),
+.nav:focus-visible {
+  border-color: #fff;
+  background: rgb(6 12 15 / 0.85);
+}
+
+.nav:disabled {
+  opacity: 0.25;
+  cursor: default;
+}
+
+.previous { left: 0.75rem; }
+.next { right: 0.75rem; }
+
+@media (max-width: 700px) {
+  /* Swiping replaces the arrows on narrow screens, so the image gets the width. */
+  .stage { padding: 0 0 1rem; }
+  .nav { display: none; }
+  .image { border-radius: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fromRight,
+  .fromLeft { animation: none; }
+  .image { transition: none; }
+}

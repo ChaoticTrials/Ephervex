@@ -51,6 +51,9 @@ for Docusaurus's selected color mode. `useBaseUrl` applies the site's
 configured base URL. Set `DOCUSAURUS_BASE_URL=/your-path/` for a subpath
 deployment. New screenshot states need only a fixture and catalog
 entry in the Rust tool; the sync command discovers their output directories.
+The `/screenshots` page lists every state in `src/components/screenshot-catalog.ts`;
+a state missing there appears under "Other". Selecting an image opens a viewer
+with previous and next buttons, the arrow keys, and swipe on touch screens.
 
 ## Site configuration and docs versions
 
