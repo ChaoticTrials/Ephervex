@@ -503,7 +503,8 @@ enum ModCommand {
     ///
     /// A catalog that cannot be reached costs only its own mods' answers. Mods
     /// it could not answer for stay unrecorded rather than being recorded as
-    /// needing nothing.
+    /// needing nothing. The other catalogs' answers are still recorded, and the
+    /// command then exits with an error naming the catalogs to retry.
     Refresh {
         #[command(flatten)]
         host: HostArgs,
@@ -4625,7 +4626,26 @@ async fn run_mod_refresh(app: &App, host: InstalledHost, json: bool) -> anyhow::
         )
         .await?;
     print_dependency_refresh(&report, json);
-    Ok(())
+    unreachable_catalogs_result(&report)
+}
+
+/// Whether every catalog the refresh needed answered.
+///
+/// The report has been printed in full by then. Mods a catalog could not answer
+/// for are still unrecorded, which a script must not see as success.
+fn unreachable_catalogs_result(report: &DependencyRefreshReport) -> anyhow::Result<()> {
+    if report.is_complete() {
+        return Ok(());
+    }
+    let names = report
+        .providers_unavailable
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    anyhow::bail!(
+        "these catalogs could not be reached, so their mods are still unrecorded: {names}"
+    )
 }
 
 /// Shows what the host's mods declare about each other.
@@ -4998,9 +5018,10 @@ fn print_verification(
 
 /// Reports what a dependency refresh learned.
 ///
-/// An unreachable catalog is named rather than folded into a count: the mods it
-/// covers are still unrecorded, and knowing which catalog to retry is the
-/// difference between running this again and giving up on it.
+/// An unreachable catalog is named in the JSON, and in the error the command
+/// then fails with, rather than folded into a count: the mods it covers are
+/// still unrecorded, and knowing which catalog to retry is the difference
+/// between running this again and giving up on it.
 fn print_dependency_refresh(report: &DependencyRefreshReport, json: bool) {
     if json {
         print_json(&serde_json::json!({
@@ -5022,9 +5043,6 @@ fn print_dependency_refresh(report: &DependencyRefreshReport, json: bool) {
         report.unchanged,
         report.unidentified
     );
-    for provider in &report.providers_unavailable {
-        outln!("{provider} could not be reached; its mods are still unrecorded");
-    }
 }
 
 /// Shows or records which catalog mod commands use when none is named.
@@ -8623,6 +8641,31 @@ mod tests {
     #[test]
     fn a_persist_that_moved_every_requested_server_succeeds() {
         unmoved_servers_result(&[]).expect("nothing was left behind");
+    }
+
+    #[test]
+    fn a_refresh_that_could_not_reach_a_catalog_fails_the_command() {
+        let report = DependencyRefreshReport {
+            recorded: 3,
+            providers_unavailable: vec![ModProvider::Modrinth, ModProvider::CurseForge],
+            ..DependencyRefreshReport::default()
+        };
+        let error = unreachable_catalogs_result(&report)
+            .expect_err("mods of an unreachable catalog stayed unrecorded");
+        assert!(
+            error.to_string().contains("Modrinth, CurseForge"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_refresh_that_reached_every_catalog_succeeds() {
+        let report = DependencyRefreshReport {
+            recorded: 3,
+            unidentified: 1,
+            ..DependencyRefreshReport::default()
+        };
+        unreachable_catalogs_result(&report).expect("every catalog answered");
     }
 
     #[test]
