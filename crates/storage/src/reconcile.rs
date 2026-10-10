@@ -306,7 +306,8 @@ fn reconcile_client(
         // Not expected. Keep everything; say so.
         if !record.attention.contains(&AttentionReason::MissingRoot) {
             record.add_attention(AttentionReason::MissingRoot);
-            registry.update_client(&mut record)?;
+            // Keeps `updated_at`, so only a user's edit makes the row newer.
+            registry.synchronize_client_index(&record)?;
         }
         tracing::warn!(
             instance_id = %record.id,
@@ -2110,6 +2111,61 @@ mod tests {
                 .name,
             "renamed while unmounted"
         );
+    }
+
+    #[test]
+    fn a_remounted_client_root_keeps_committed_metadata_over_a_stale_index_row() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let record = registry
+            .create_published_client(
+                NewClient::new("indexed", "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(StorageClass::Persistent),
+            )
+            .expect("create");
+        let mut committed = metadata::read_client_metadata(&record.root).expect("metadata");
+        committed.name = "committed to metadata".to_owned();
+        committed.updated_at = Utc::now();
+        metadata::write_client_metadata(&record.root, &committed).expect("write");
+        let backup = environment.base().join("backup");
+        std::fs::rename(&record.root, &backup).expect("unmount");
+        reconcile(&registry).expect("reconcile while missing");
+        std::fs::rename(&backup, &record.root).expect("remount");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.recovered.len(), 1);
+        assert_eq!(report.index_repaired.len(), 1);
+        let after = registry.client(record.id).expect("read");
+        assert_eq!(after.name, "committed to metadata");
+        assert!(!after.attention.contains(&AttentionReason::MissingRoot));
+        assert_eq!(
+            metadata::read_client_metadata(&record.root)
+                .expect("metadata")
+                .name,
+            "committed to metadata"
+        );
+    }
+
+    #[test]
+    fn marking_a_vanished_client_root_keeps_the_row_timestamp() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let record = registry
+            .create_published_client(
+                NewClient::new("marked", "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(StorageClass::Persistent),
+            )
+            .expect("create");
+        let before = registry.client(record.id).expect("read").updated_at;
+        let backup = environment.base().join("backup");
+        std::fs::rename(&record.root, &backup).expect("unmount");
+
+        reconcile(&registry).expect("reconcile");
+
+        let marked = registry.client(record.id).expect("kept");
+        assert!(marked.attention.contains(&AttentionReason::MissingRoot));
+        assert_eq!(marked.updated_at, before);
     }
 
     /// An interrupted restore leaves the snapshot's copy where canonical
