@@ -101,6 +101,6 @@ pub use recipe::{
 };
 pub use server_pack::{
     EULA_FILE, InstalledServerPack, LIBRARIES_DIR, ServerPackInstall, ServerPackMod,
-    install_server_pack, measure_installed_mods, server_pack_recipe,
+    install_server_pack, measure_installed_mods, server_pack_recipe, validate_server_pack,
 };
 pub use store::{RECIPE_FILE, SourceStore, provider_directory};

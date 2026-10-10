@@ -358,22 +358,26 @@ impl PackArchive {
         })
     }
 
-    /// Refuses the archive when any entry carries a name extraction would refuse.
+    /// Refuses the archive when extracting beneath `prefix` would refuse any entry.
     ///
-    /// Extraction validates every entry in the archive, including those outside
-    /// the layer being extracted, so one unsafe name anywhere fails an import
-    /// that has already created its instance. Running the same check up front
-    /// keeps that failure ahead of any side effect.
-    pub(crate) fn require_extractable_entry_names(&mut self) -> PackResult<()> {
+    /// Extraction opens and validates every entry in the archive, including
+    /// those outside the prefix being extracted, so one unsafe name, one
+    /// encrypted entry, or one compression method the reader lacks anywhere
+    /// fails an import that has already created its instance or run the loader
+    /// installer. Running the same checks up front keeps that failure ahead of
+    /// any side effect. Entries are opened the way extraction opens them, so
+    /// the two cannot disagree about what is readable.
+    pub(crate) fn require_extractable_entries(&mut self, prefix: &str) -> PackResult<()> {
+        let prefix = normalize_prefix(prefix);
         for index in 0..self.zip.len() {
-            let entry =
-                self.zip
-                    .by_index_raw(index)
-                    .map_err(|source| PackError::ArchiveInvalid {
-                        path: self.path.clone(),
-                        source,
-                    })?;
-            entry_under(entry.name_raw(), "")?;
+            let entry = self
+                .zip
+                .by_index(index)
+                .map_err(|source| PackError::ArchiveInvalid {
+                    path: self.path.clone(),
+                    source,
+                })?;
+            entry_under(entry.name_raw(), &prefix)?;
         }
         Ok(())
     }

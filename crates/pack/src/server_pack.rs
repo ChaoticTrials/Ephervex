@@ -92,6 +92,31 @@ pub struct InstalledServerPack {
     pub mods: Vec<PathBuf>,
 }
 
+/// The single wrapping directory an extraction strips, if the archive has one.
+fn wrapper_to_strip(pack: &PackArchive) -> Option<String> {
+    pack.single_root().filter(|root| {
+        !SERVER_OWNED_DIRECTORIES
+            .iter()
+            .any(|owned| root.eq_ignore_ascii_case(owned))
+    })
+}
+
+/// Refuses a server archive that [`install_server_pack`] would refuse for any
+/// entry, without writing anything.
+///
+/// Covers the archive being readable and every entry having a safe, unreserved
+/// name that can be opened (not encrypted, not stored with an unsupported
+/// compression method), measured the way the install measures them, beneath the
+/// wrapper it would strip. Callers run it before Java probing and the loader
+/// installation, which take far longer than the extraction that would
+/// otherwise reject the archive.
+#[instrument(skip(limits), fields(archive = %archive.display()))]
+pub fn validate_server_pack(archive: &Path, limits: ExtractionLimits) -> PackResult<()> {
+    let mut pack = PackArchive::open(archive, limits)?;
+    let prefix = wrapper_to_strip(&pack).unwrap_or_default();
+    pack.require_extractable_entries(&prefix)
+}
+
 /// Extracts a server archive into an installed server directory.
 ///
 /// Synchronous, like every other extraction in this crate: `zip` is a blocking
@@ -106,11 +131,7 @@ pub fn install_server_pack(request: ServerPackInstall<'_>) -> PackResult<Install
     } = request;
 
     let mut pack = PackArchive::open(archive, limits)?;
-    let stripped_root = pack.single_root().filter(|root| {
-        !SERVER_OWNED_DIRECTORIES
-            .iter()
-            .any(|owned| root.eq_ignore_ascii_case(owned))
-    });
+    let stripped_root = wrapper_to_strip(&pack);
     let prefix = stripped_root.clone().unwrap_or_default();
 
     let mut declined = Vec::new();
@@ -315,6 +336,25 @@ mod tests {
             }
             writer.start_file(*name, options).expect("entry");
             writer.write_all(body).expect("write");
+        }
+        writer.finish().expect("finish");
+    }
+
+    /// Like `zip_file`, with the entries named in `encrypted` written
+    /// AES-encrypted so that opening them without a password fails.
+    fn zip_file_with_encrypted(path: &Path, entries: &[(&str, &[u8])], encrypted: &[&str]) {
+        let file = std::fs::File::create(path).expect("create archive");
+        let mut writer = zip::ZipWriter::new(file);
+        let plain: zip::write::FileOptions<'_, ()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for (name, body) in entries {
+            let options = if encrypted.contains(name) {
+                plain.with_aes_encryption(zip::AesMode::Aes256, "secret")
+            } else {
+                plain
+            };
+            writer.start_file(*name, options).expect("start entry");
+            writer.write_all(body).expect("write entry");
         }
         writer.finish().expect("finish");
     }
@@ -549,6 +589,82 @@ mod tests {
 
         assert!(!game_dir.join(EULA_FILE).exists());
         assert!(installed.declined.contains(&PathBuf::from(EULA_FILE)));
+    }
+
+    #[test]
+    fn validation_accepts_an_archive_installation_accepts() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("pack-server.zip");
+        zip_file(
+            &archive,
+            &[
+                ("server/mods/one.jar", b"one"),
+                ("server/config/a.toml", b"a"),
+            ],
+        );
+
+        validate_server_pack(&archive, ExtractionLimits::default()).expect("valid");
+    }
+
+    #[test]
+    fn validation_refuses_every_entry_name_installation_refuses() {
+        for unsafe_name in [
+            "docs\\readme.txt",
+            "Pack: v2/readme.txt",
+            "notes/../../escape.txt",
+            "/absolute.txt",
+            ".launcher/server.json",
+        ] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let archive = dir.path().join("pack-server.zip");
+            zip_file(&archive, &[("mods/one.jar", b"one"), (unsafe_name, b"x")]);
+
+            let error =
+                validate_server_pack(&archive, ExtractionLimits::default()).expect_err(unsafe_name);
+            assert!(
+                matches!(
+                    error,
+                    PackError::EntryPathUnsafe { .. } | PackError::EntryReserved { .. }
+                ),
+                "{unsafe_name} was refused with {error:?}"
+            );
+            assert!(install(&archive, &dir.path().join("server"), &[]).is_err());
+        }
+    }
+
+    #[test]
+    fn validation_measures_names_beneath_the_wrapper_installation_strips() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("pack-server.zip");
+        zip_file(
+            &archive,
+            &[
+                ("server/mods/one.jar", b"one"),
+                ("server/.launcher/server.json", b"{}"),
+            ],
+        );
+
+        let error = validate_server_pack(&archive, ExtractionLimits::default())
+            .expect_err("reserved beneath the wrapper");
+
+        assert!(matches!(error, PackError::EntryReserved { .. }));
+    }
+
+    #[test]
+    fn validation_refuses_an_encrypted_entry_installation_cannot_open() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("pack-server.zip");
+        zip_file_with_encrypted(
+            &archive,
+            &[("mods/one.jar", b"one"), ("notes/readme.txt", b"locked")],
+            &["notes/readme.txt"],
+        );
+
+        let error =
+            validate_server_pack(&archive, ExtractionLimits::default()).expect_err("encrypted");
+
+        assert!(matches!(error, PackError::ArchiveInvalid { .. }));
+        assert!(install(&archive, &dir.path().join("server"), &[]).is_err());
     }
 
     #[test]

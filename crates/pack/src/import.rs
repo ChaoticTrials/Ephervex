@@ -209,7 +209,7 @@ pub fn analyze(path: &Path, policy: &PackPolicy) -> PackResult<(PackArchive, Pac
         });
     };
     let analysis = parse_with(format, &mut archive, policy)?;
-    archive.require_extractable_entry_names()?;
+    archive.require_extractable_entries("")?;
     info!(
         format = %analysis.format,
         pack = %analysis.recipe.original_name,
@@ -546,6 +546,25 @@ mod tests {
         writer.finish().expect("finish");
     }
 
+    /// Like `zip_file`, with the entries named in `encrypted` written
+    /// AES-encrypted so that opening them without a password fails.
+    fn zip_file_with_encrypted(path: &Path, entries: &[(&str, &[u8])], encrypted: &[&str]) {
+        let file = std::fs::File::create(path).expect("create archive");
+        let mut writer = zip::ZipWriter::new(file);
+        let plain: zip::write::FileOptions<'_, ()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for (name, body) in entries {
+            let options = if encrypted.contains(name) {
+                plain.with_aes_encryption(zip::AesMode::Aes256, "secret")
+            } else {
+                plain
+            };
+            writer.start_file(*name, options).expect("start entry");
+            writer.write_all(body).expect("write entry");
+        }
+        writer.finish().expect("finish");
+    }
+
     const INDEX: &[u8] = br#"{
         "formatVersion": 1,
         "game": "minecraft",
@@ -618,6 +637,28 @@ mod tests {
             );
             assert!(ephervex_i18n::has(error.message_id()));
         }
+    }
+
+    #[test]
+    fn analysis_refuses_an_encrypted_entry_outside_any_layer() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("pack.mrpack");
+        zip_file_with_encrypted(
+            &archive,
+            &[
+                ("modrinth.index.json", INDEX),
+                ("overrides/config/a.toml", b"a"),
+                ("notes/readme.txt", b"locked"),
+            ],
+            &["notes/readme.txt"],
+        );
+
+        let error = analyze(&archive, &PackPolicy::modrinth())
+            .map(|_| ())
+            .expect_err("refused");
+
+        assert!(matches!(error, PackError::ArchiveInvalid { .. }));
+        assert!(ephervex_i18n::has(error.message_id()));
     }
 
     #[test]

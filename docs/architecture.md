@@ -1304,6 +1304,13 @@ library reserves room for that count. The reader enforces sizes while an entry
 is inflated, not only from its declared size, and gives a manifest a much
 smaller ceiling than other entries because it is held in memory to be parsed.
 
+Pack analysis and server archive validation run extraction's per-entry checks
+over every entry before any side effect: the entry must open (not encrypted,
+not stored with a compression method the reader lacks) and its name must be one
+extraction accepts, measured beneath the wrapper directory a server install
+strips. An archive extraction would refuse is therefore refused before an
+instance is created or Java and the loader installer run.
+
 Imported pre-launch commands, post-exit commands, wrapper commands, and custom
 Java paths are never executed. Unsupported customizations are reported or
 retained as source metadata.

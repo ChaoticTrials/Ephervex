@@ -1120,14 +1120,14 @@ fn normalize_launch(
     })
 }
 
-/// Refuses an unusable archive before any expensive work starts.
+/// Refuses an archive the install would refuse before any expensive work starts.
 ///
-/// Java probing and a loader installation take minutes and megabytes. Opening
-/// the archive first means "that file is not a readable ZIP" is answered in
-/// milliseconds, which is the same reason `linked_server_recipe` validates a
-/// recipe before this point.
+/// Java probing and a loader installation take minutes and megabytes. Checking
+/// the archive first means "that file is not a readable ZIP" or "an entry name
+/// is unsafe" is answered in milliseconds, which is the same reason
+/// `linked_server_recipe` validates a recipe before this point.
 fn validate_server_archive(archive: &Path) -> CoreResult<()> {
-    ephervex_pack::PackArchive::open(archive, ephervex_pack::ExtractionLimits::default())?;
+    ephervex_pack::validate_server_pack(archive, ephervex_pack::ExtractionLimits::default())?;
     Ok(())
 }
 
@@ -1699,6 +1699,42 @@ mod tests {
     use fastnbt::Value;
 
     use super::*;
+
+    fn server_archive(path: &Path, entries: &[&str]) {
+        use std::io::Write as _;
+
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(path).expect("create"));
+        let options: zip::write::FileOptions<'_, ()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for name in entries {
+            writer.start_file(*name, options).expect("start entry");
+            writer.write_all(b"x").expect("write entry");
+        }
+        writer.finish().expect("finish");
+    }
+
+    #[test]
+    fn a_server_archive_with_an_entry_name_extraction_refuses_is_refused_up_front() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let archive = directory.path().join("server.zip");
+        server_archive(&archive, &["mods/one.jar", "docs\\readme.txt"]);
+
+        let error = validate_server_archive(&archive).expect_err("unsafe entry name");
+
+        assert!(matches!(
+            error,
+            CoreError::Pack(ephervex_pack::PackError::EntryPathUnsafe { .. })
+        ));
+    }
+
+    #[test]
+    fn a_well_formed_server_archive_passes_validation() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let archive = directory.path().join("server.zip");
+        server_archive(&archive, &["server/mods/one.jar", "server/config/a.toml"]);
+
+        validate_server_archive(&archive).expect("valid");
+    }
 
     #[test]
     fn a_properties_file_java_cannot_load_is_refused_and_left_untouched() {
