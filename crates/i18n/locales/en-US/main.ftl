@@ -555,7 +555,7 @@ error-auth-device-code-expired = The sign-in code expired before it was used.
 .action = Start the sign-in again. A code is only valid for about fifteen minutes.
 
 error-auth-timed-out = Nobody finished signing in.
-.action = Start the sign-in again and complete it in the browser window that opens.
+.action = Start the sign-in again and finish it before the time limit runs out.
 
 error-auth-state-mismatch = That sign-in response did not belong to this request.
 .action = Close any leftover sign-in tabs and start again.

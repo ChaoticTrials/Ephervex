@@ -163,12 +163,15 @@ impl MicrosoftAccountProvider {
     #[instrument(skip_all)]
     async fn device_code_login(
         &self,
+        request: &LoginRequest,
         observer: &AuthObserver,
         cancel: &CancellationToken,
     ) -> AuthResult<MicrosoftTokens> {
         let session = self.microsoft.begin_device_code(cancel).await?;
         observer.emit(AuthEvent::DeviceCode(session.prompt.clone()));
-        self.microsoft.poll_device_code(&session, cancel).await
+        self.microsoft
+            .poll_device_code(&session, request.timeout, cancel)
+            .await
     }
 
     // -- the shared tail ---------------------------------------------------
@@ -348,7 +351,7 @@ impl AccountProvider for MicrosoftAccountProvider {
         observer.stage(AuthStage::Microsoft);
         let tokens = match request.flow {
             LoginFlow::Browser => self.browser_login(request, observer, cancel).await?,
-            LoginFlow::DeviceCode => self.device_code_login(observer, cancel).await?,
+            LoginFlow::DeviceCode => self.device_code_login(request, observer, cancel).await?,
         };
         self.finish(tokens, observer, cancel).await
     }

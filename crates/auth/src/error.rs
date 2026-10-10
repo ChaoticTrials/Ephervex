@@ -106,7 +106,7 @@ pub enum AuthError {
     #[error("the device code expired before sign-in completed")]
     DeviceCodeExpired,
 
-    /// Nobody completed the browser flow within the deadline.
+    /// Nobody completed the sign-in within the deadline.
     #[error("no sign-in arrived within {seconds}s")]
     TimedOut { seconds: u64 },
 

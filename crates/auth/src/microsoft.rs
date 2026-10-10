@@ -42,6 +42,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use reqwest::Client;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tokio_util::sync::WaitForCancellationFuture;
 use tracing::{debug, instrument};
@@ -98,6 +99,10 @@ pub struct DeviceCodeSession {
     pub prompt: DeviceCodePrompt,
     device_code: SecretString,
     interval: Duration,
+    /// When the service stops honoring the code, on the monotonic clock so a
+    /// wall-clock change cannot extend or cut the wait. `None` when the
+    /// reported lifetime is too large to represent.
+    valid_until: Option<Instant>,
 }
 
 /// The Microsoft identity platform client.
@@ -198,6 +203,7 @@ impl MicrosoftClient {
         let body: DeviceCodeBody = response.parse(AuthStage::Microsoft)?;
         let interval =
             Duration::from_secs(body.interval.max(1)).clamp(MIN_POLL_INTERVAL, MAX_POLL_INTERVAL);
+        let lifetime = Duration::from_secs(u64::try_from(body.expires_in).unwrap_or(0));
         debug!(
             expires_in = body.expires_in,
             interval = interval.as_secs(),
@@ -213,10 +219,16 @@ impl MicrosoftClient {
             },
             device_code: body.device_code,
             interval,
+            valid_until: Instant::now().checked_add(lifetime),
         })
     }
 
-    /// Polls until the user finishes, declines, or the code expires.
+    /// Polls until the user finishes, declines, the code expires, or `timeout`
+    /// runs out.
+    ///
+    /// `timeout` and the code's own lifetime both bound the sleeps between
+    /// polls and the polls in flight: whichever comes first ends the login with
+    /// [`AuthError::TimedOut`] or [`AuthError::DeviceCodeExpired`].
     ///
     /// `authorization_pending` and `slow_down` are the flow working correctly,
     /// not failures: the first means "keep waiting", the second additionally
@@ -226,53 +238,91 @@ impl MicrosoftClient {
     pub async fn poll_device_code(
         &self,
         session: &DeviceCodeSession,
+        timeout: Duration,
         cancel: &CancellationToken,
     ) -> AuthResult<MicrosoftTokens> {
-        let mut interval = session.interval;
-        loop {
-            wait(interval, cancel).await?;
-
-            let response = self
-                .post_token(
-                    &[
-                        ("client_id", self.client_id.as_str()),
-                        ("grant_type", DEVICE_CODE_GRANT),
-                        ("device_code", session.device_code.expose()),
-                    ],
-                    cancel,
-                )
-                .await?;
-
-            if response.is_success() {
-                return response
-                    .parse::<TokenBody>(AuthStage::Microsoft)
-                    .map(TokenBody::into_tokens);
-            }
-
-            let error: OAuthErrorBody = response.parse(AuthStage::Microsoft)?;
-            match error.error.as_str() {
-                "authorization_pending" => {}
-                "slow_down" => {
-                    // RFC 8628 section 3.5: the increase is permanent for the rest of
-                    // this session, not a one-off pause.
-                    interval = (interval + Duration::from_secs(5)).min(MAX_POLL_INTERVAL);
-                    debug!(
-                        interval = interval.as_secs(),
-                        "device code poll backing off"
-                    );
+        // A bound too far away to represent never fires, so it is left out
+        // rather than overflowing the clock.
+        let caller_deadline = Instant::now().checked_add(timeout);
+        let limit = match (session.valid_until, caller_deadline) {
+            (Some(code), Some(caller)) if caller < code => Some((
+                caller,
+                AuthError::TimedOut {
+                    seconds: timeout.as_secs(),
+                },
+            )),
+            (Some(code), _) => Some((code, AuthError::DeviceCodeExpired)),
+            (None, Some(caller)) => Some((
+                caller,
+                AuthError::TimedOut {
+                    seconds: timeout.as_secs(),
+                },
+            )),
+            (None, None) => None,
+        };
+        let limit_reached = async {
+            match limit {
+                Some((deadline, error)) => {
+                    tokio::time::sleep_until(deadline).await;
+                    error
                 }
-                // `bad_verification_code` means the device code this process is
-                // sending is not one the service recognizes. Retrying cannot
-                // fix that, and a poll loop that never terminates is worse than
-                // a clear failure.
-                "bad_verification_code" => {
-                    return Err(AuthError::OAuth {
-                        code: error.error,
-                        description: error.error_description,
-                    });
-                }
-                _ => return Err(error.into_error()),
+                None => std::future::pending().await,
             }
+        };
+        let bounded = async {
+            let mut interval = session.interval;
+            loop {
+                wait(interval, cancel).await?;
+
+                let response = self
+                    .post_token(
+                        &[
+                            ("client_id", self.client_id.as_str()),
+                            ("grant_type", DEVICE_CODE_GRANT),
+                            ("device_code", session.device_code.expose()),
+                        ],
+                        cancel,
+                    )
+                    .await?;
+
+                if response.is_success() {
+                    return response
+                        .parse::<TokenBody>(AuthStage::Microsoft)
+                        .map(TokenBody::into_tokens);
+                }
+
+                let error: OAuthErrorBody = response.parse(AuthStage::Microsoft)?;
+                match error.error.as_str() {
+                    "authorization_pending" => {}
+                    "slow_down" => {
+                        // RFC 8628 section 3.5: the increase is permanent for the rest of
+                        // this session, not a one-off pause.
+                        interval = (interval + Duration::from_secs(5)).min(MAX_POLL_INTERVAL);
+                        debug!(
+                            interval = interval.as_secs(),
+                            "device code poll backing off"
+                        );
+                    }
+                    // `bad_verification_code` means the device code this process is
+                    // sending is not one the service recognizes. Retrying cannot
+                    // fix that, and a poll loop that never terminates is worse than
+                    // a clear failure.
+                    "bad_verification_code" => {
+                        return Err(AuthError::OAuth {
+                            code: error.error,
+                            description: error.error_description,
+                        });
+                    }
+                    _ => return Err(error.into_error()),
+                }
+            }
+        };
+
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => Err(AuthError::Canceled),
+            error = limit_reached => Err(error),
+            outcome = bounded => outcome,
         }
     }
 
@@ -384,7 +434,8 @@ struct DeviceCodeBody {
     verification_uri: String,
     #[serde(default)]
     message: String,
-    #[serde(default)]
+    // Required by RFC 8628 section 3.2. A missing value is a malformed
+    // response, not a code that never expires.
     expires_in: i64,
     #[serde(default)]
     interval: u64,

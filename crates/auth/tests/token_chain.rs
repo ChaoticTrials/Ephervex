@@ -132,6 +132,21 @@ async fn mount_device_code(server: &MockServer) {
         .await;
 }
 
+async fn mount_device_code_with_lifetime(server: &MockServer, expires_in: Option<u64>) {
+    let mut body: serde_json::Value = serde_json::from_str(DEVICE_CODE).expect("fixture parses");
+    match expires_in {
+        Some(seconds) => body["expires_in"] = seconds.into(),
+        None => {
+            body.as_object_mut().expect("object").remove("expires_in");
+        }
+    }
+    Mock::given(method("POST"))
+        .and(path("/consumers/oauth2/v2.0/devicecode"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body.to_string()))
+        .mount(server)
+        .await;
+}
+
 fn provider(server: &MockServer, store: Arc<dyn CredentialStore>) -> MicrosoftAccountProvider {
     MicrosoftAccountProvider::with_endpoints(
         CLIENT_ID,
@@ -577,6 +592,148 @@ async fn an_expired_device_code_stops_polling_and_says_so() {
         .await
         .expect_err("the fifteen minutes ran out");
     assert!(matches!(error, AuthError::DeviceCodeExpired), "{error:?}");
+}
+
+#[tokio::test]
+async fn a_device_code_login_ends_at_the_caller_timeout_while_the_user_has_not_finished() {
+    let server = MockServer::start().await;
+    mount_device_code(&server).await;
+    mount_token(&server, 400, PENDING).await;
+
+    // Longer than the one-second poll interval, so the deadline lands while the
+    // login is sleeping between polls rather than before the first one.
+    let started = std::time::Instant::now();
+    let error = provider(&server, Arc::new(MemoryStore::new()))
+        .login(
+            &LoginRequest {
+                flow: LoginFlow::DeviceCode,
+                timeout: Duration::from_millis(1500),
+            },
+            &AuthObserver::silent(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("nobody finished within the caller's deadline");
+    assert!(matches!(error, AuthError::TimedOut { .. }), "{error:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn a_device_code_login_ends_when_the_reported_code_lifetime_runs_out() {
+    let server = MockServer::start().await;
+    mount_device_code_with_lifetime(&server, Some(2)).await;
+    mount_token(&server, 400, PENDING).await;
+
+    // The service never answers `expired_token` here; the lifetime it reported
+    // is the only thing that can end the wait before the caller's deadline.
+    let started = std::time::Instant::now();
+    let error = provider(&server, Arc::new(MemoryStore::new()))
+        .login(
+            &LoginRequest {
+                flow: LoginFlow::DeviceCode,
+                timeout: Duration::from_secs(300),
+            },
+            &AuthObserver::silent(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("the code outlived its reported lifetime");
+    assert!(matches!(error, AuthError::DeviceCodeExpired), "{error:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn an_unrepresentable_timeout_or_code_lifetime_leaves_the_other_bound_in_force() {
+    // Neither value is trusted: one is a command-line number, the other a
+    // service-supplied field. Either one being enormous must not panic the
+    // clock arithmetic or lift the bound the other one provides.
+    let server = MockServer::start().await;
+    mount_token(&server, 400, PENDING).await;
+    mount_device_code_with_lifetime(&server, Some(2)).await;
+    let error = provider(&server, Arc::new(MemoryStore::new()))
+        .login(
+            &LoginRequest {
+                flow: LoginFlow::DeviceCode,
+                timeout: Duration::from_secs(u64::MAX),
+            },
+            &AuthObserver::silent(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("the code lifetime still ends the wait");
+    assert!(matches!(error, AuthError::DeviceCodeExpired), "{error:?}");
+
+    server.reset().await;
+    mount_token(&server, 400, PENDING).await;
+    mount_device_code_with_lifetime(&server, Some(i64::MAX as u64)).await;
+    let error = provider(&server, Arc::new(MemoryStore::new()))
+        .login(
+            &LoginRequest {
+                flow: LoginFlow::DeviceCode,
+                timeout: Duration::from_millis(300),
+            },
+            &AuthObserver::silent(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("the caller timeout still ends the wait");
+    assert!(matches!(error, AuthError::TimedOut { .. }), "{error:?}");
+}
+
+#[tokio::test]
+async fn a_device_code_login_can_still_be_canceled_while_waiting() {
+    let server = MockServer::start().await;
+    mount_device_code(&server).await;
+    mount_token(&server, 400, PENDING).await;
+
+    let cancel = CancellationToken::new();
+    let trigger = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        trigger.cancel();
+    });
+    let error = provider(&server, Arc::new(MemoryStore::new()))
+        .login(
+            &LoginRequest {
+                flow: LoginFlow::DeviceCode,
+                timeout: Duration::from_secs(300),
+            },
+            &AuthObserver::silent(),
+            &cancel,
+        )
+        .await
+        .expect_err("the caller canceled");
+    assert!(matches!(error, AuthError::Canceled), "{error:?}");
+}
+
+#[tokio::test]
+async fn a_device_code_response_without_a_lifetime_is_refused() {
+    let server = MockServer::start().await;
+    mount_device_code_with_lifetime(&server, None).await;
+
+    let error = provider(&server, Arc::new(MemoryStore::new()))
+        .login(
+            &LoginRequest {
+                flow: LoginFlow::DeviceCode,
+                timeout: Duration::from_secs(5),
+            },
+            &AuthObserver::silent(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("RFC 8628 requires expires_in");
+    assert!(
+        matches!(error, AuthError::MalformedResponse { .. }),
+        "{error:?}"
+    );
 }
 
 // ------------------------------------------------------------------- refresh
