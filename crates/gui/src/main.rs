@@ -162,13 +162,14 @@ fn main() -> Result<(), slint::PlatformError> {
         // Delivered onto the event loop: the listener runs on a thread of its
         // own, and a frontend does not touch widgets from one.
         let weak = ui.as_weak();
-        primary.listen(move |message| {
+        primary.listen(move |handover| {
             let weak = weak.clone();
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
                     ephervex_gui::controller::raise(&ui);
-                    if let Ok(ephervex_core::LauncherUrl::Import { url }) =
-                        ephervex_core::LauncherUrl::parse(&message)
+                    if let ephervex_core::single_instance::Handover::Link(message) = &handover
+                        && let Ok(ephervex_core::LauncherUrl::Import { url }) =
+                            ephervex_core::LauncherUrl::parse(message)
                     {
                         ephervex_gui::controller::open_pack_link(&ui, &url);
                     }

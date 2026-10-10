@@ -51,6 +51,17 @@ pub enum Startup {
     HandedOff,
 }
 
+/// What a later launch asked the running launcher to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Handover {
+    /// The launch named nothing to act on. The running launcher should bring its
+    /// window forward.
+    Raise,
+    /// The launch carried a launcher link. The running launcher should bring its
+    /// window forward and act on the link, which has not been validated.
+    Link(String),
+}
+
 /// The socket this process owns, and the file behind it.
 ///
 /// Dropping it removes the file. That is a courtesy rather than a guarantee:
@@ -88,18 +99,19 @@ impl PrimaryInstance {
         &self.path
     }
 
-    /// Answers later arrivals, calling `deliver` for each message.
+    /// Answers later arrivals, calling `deliver` for each handover.
     ///
     /// Runs on a thread of its own that keeps answering until the process ends,
     /// because a launcher that stopped listening would silently start opening
     /// second windows again. The callback is invoked off the UI thread, so a
     /// frontend hands the message to its event loop rather than touching
-    /// widgets here.
+    /// widgets here. A launch with no link is delivered as [`Handover::Raise`],
+    /// so a frontend can bring its window forward for it.
     ///
     /// Returns the means of giving the name up, or `None` when the thread could
     /// not start: the name is then already released, and is no longer ours to
     /// give up.
-    pub fn listen(self, deliver: impl Fn(String) + Send + 'static) -> Option<ListeningInstance> {
+    pub fn listen(self, deliver: impl Fn(Handover) + Send + 'static) -> Option<ListeningInstance> {
         let listening = ListeningInstance {
             path: self.path.clone(),
         };
@@ -109,9 +121,9 @@ impl PrimaryInstance {
                 for connection in self.listener.incoming() {
                     match connection {
                         Ok(stream) => {
-                            if let Some(message) = read_message(stream) {
-                                debug!("a second launcher handed over a link");
-                                deliver(message);
+                            if let Some(handover) = read_handover(stream) {
+                                debug!(?handover, "a second launcher handed over");
+                                deliver(handover);
                             }
                         }
                         // One refused connection is not a reason to stop
@@ -139,8 +151,9 @@ impl Drop for PrimaryInstance {
 /// Claims the launcher name, or hands `message` to whoever already holds it.
 ///
 /// `message` is what a running instance should act on, normally a launcher
-/// link. `None` still hands over, with an empty message, so a second launch
-/// with no link raises the existing window rather than opening a new one.
+/// link. `None` still hands over and reaches the running instance as
+/// [`Handover::Raise`], so a second launch with no link raises the existing
+/// window rather than opening a new one.
 pub fn start(message: Option<&str>) -> CoreResult<Startup> {
     let path = socket_path()?;
 
@@ -208,16 +221,24 @@ fn hand_over(mut stream: UnixStream, message: &str, path: &std::path::Path) -> C
         })
 }
 
-/// Reads one bounded line, or nothing when the sender said nothing usable.
+/// Reads one bounded line as a handover, or nothing when the connection could
+/// not be read.
+///
+/// A blank line is a launch with nothing to say, which still asks for the
+/// window to be raised.
 ///
 /// Bounded because the message originates from a web page: an unbounded read
 /// from a socket anyone on this account can connect to is a memory sink.
-fn read_message(stream: UnixStream) -> Option<String> {
+fn read_handover(stream: UnixStream) -> Option<Handover> {
     let mut reader = BufReader::new(stream).take(MAX_LAUNCHER_URL_BYTES as u64 + 1);
     let mut line = String::new();
     reader.read_line(&mut line).ok()?;
     let trimmed = line.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    Some(if trimmed.is_empty() {
+        Handover::Raise
+    } else {
+        Handover::Link(trimmed.to_owned())
+    })
 }
 
 /// Where the launcher socket lives.
@@ -408,7 +429,7 @@ mod tests {
             receiver
                 .recv_timeout(Duration::from_secs(5))
                 .expect("the running launcher is handed the link"),
-            link
+            Handover::Link(link.to_owned())
         );
     }
 
@@ -433,10 +454,10 @@ mod tests {
         assert!(claim(&path).is_ok(), "the name is free for the next launch");
     }
 
-    /// A second launch with no link still hands over, so it raises the existing
-    /// window rather than opening another one. Nothing is delivered for it.
+    /// A second launch with no link still hands over, so the running launcher
+    /// is told to raise its window rather than a second one opening.
     #[test]
-    fn a_launch_with_nothing_to_say_delivers_no_message() {
+    fn a_launch_with_nothing_to_say_asks_the_running_launcher_to_raise() {
         let base = tempfile::tempdir().expect("temp dir");
         let path = base.path().join("ephervex.sock");
         let primary = PrimaryInstance {
@@ -445,13 +466,11 @@ mod tests {
         };
 
         let (sender, receiver) = mpsc::channel();
-        primary.listen(move |message| {
-            let _ = sender.send(message);
+        primary.listen(move |handover| {
+            let _ = sender.send(handover);
         });
 
         hand_over(UnixStream::connect(&path).expect("connect"), "", &path).expect("hand over");
-        // Followed by a real one, so the assertion is not just "nothing
-        // arrived yet".
         hand_over(
             UnixStream::connect(&path).expect("connect"),
             "second",
@@ -462,10 +481,29 @@ mod tests {
         assert_eq!(
             receiver
                 .recv_timeout(Duration::from_secs(5))
-                .expect("the second message"),
-            "second",
-            "an empty handover raises the window and delivers nothing"
+                .expect("the empty handover is delivered"),
+            Handover::Raise,
+            "an empty handover raises the window"
         );
+        assert_eq!(
+            receiver
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the link that followed"),
+            Handover::Link("second".to_owned()),
+            "and does not swallow the handover after it"
+        );
+    }
+
+    #[test]
+    fn a_handover_of_only_whitespace_asks_the_running_launcher_to_raise() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let path = base.path().join("ephervex.sock");
+        let listener = claim(&path).expect("bind");
+
+        hand_over(UnixStream::connect(&path).expect("connect"), "  \t", &path).expect("hand over");
+        let (stream, _) = listener.accept().expect("accept");
+
+        assert_eq!(read_handover(stream), Some(Handover::Raise));
     }
 
     /// The message comes from a web page, so the read is bounded.
@@ -485,7 +523,10 @@ mod tests {
         });
 
         let (stream, _) = listener.accept().expect("accept");
-        let message = read_message(stream).unwrap_or_default();
+        let message = match read_handover(stream) {
+            Some(Handover::Link(message)) => message,
+            _ => String::new(),
+        };
         let _ = sender.join();
 
         assert!(
