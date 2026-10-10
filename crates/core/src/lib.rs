@@ -72,7 +72,7 @@ pub mod verify;
 
 pub use account::{
     AccountRemoval, AccountStatus, AccountSummary, ApiSettings, CredentialOutcome,
-    CurseForgeKeyState, LoginOptions, TOKEN_REFRESH_MARGIN,
+    CredentialPresence, CurseForgeKeyState, LoginOptions, TOKEN_REFRESH_MARGIN,
 };
 pub use app::{
     App, ApplicationDisplaySettings, JavaPlan, JavaPlanRequest, JavaTarget,

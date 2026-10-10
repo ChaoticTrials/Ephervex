@@ -15,10 +15,10 @@ use ephervex_core::ManagedMutationReport;
 use ephervex_core::live_diagnostics::TailedLine;
 use ephervex_core::{
     App, AuthEvent, AuthObserver, CancellationToken, ClientFolder, ClientModOutcome, ClientModPlan,
-    ConnectionTarget, CoreError, CoreResult, CrashReview, CredentialOutcome, DeclaredProject,
-    DiagnosisRequest, DiagnosticFix, DiagnosticKind, DiagnosticRequest, DiagnosticScope,
-    ErrorChain, EulaStatus, ImportRequest, InstalledHost, IsolationError, IsolationPlan,
-    IsolationReconciliation, IsolationReport, IsolationRequest, IsolationSession,
+    ConnectionTarget, CoreError, CoreResult, CrashReview, CredentialOutcome, CredentialPresence,
+    DeclaredProject, DiagnosisRequest, DiagnosticFix, DiagnosticKind, DiagnosticRequest,
+    DiagnosticScope, ErrorChain, EulaStatus, ImportRequest, InstalledHost, IsolationError,
+    IsolationPlan, IsolationReconciliation, IsolationReport, IsolationRequest, IsolationSession,
     LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions, LaunchEvent,
     LaunchFeatures, LaunchObserver, LaunchOptions, LinkedModOutcome, LinkedModPlan,
     LinkedModRequest, LinkedStart, LinkedTargetPlan, LinkedTargetResult, LinkedTargetState,
@@ -5502,14 +5502,11 @@ fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
             name: account.name,
             kind: account.kind.to_string(),
             is_default: account.is_default,
-            credential_state: if account.kind.is_authenticated() {
-                if account.has_stored_credential {
-                    lookup("gui-credential-stored")
-                } else {
-                    lookup("gui-signin-required")
-                }
-            } else {
-                lookup("gui-no-credential")
+            credential_state: match account.credential {
+                CredentialPresence::Stored => lookup("gui-credential-stored"),
+                CredentialPresence::Missing => lookup("gui-signin-required"),
+                CredentialPresence::Unknown => lookup("gui-credential-unknown"),
+                CredentialPresence::NotApplicable => lookup("gui-no-credential"),
             },
         })
         .collect();

@@ -609,8 +609,8 @@ error-auth-profile-unavailable = Your Minecraft profile could not be read.
 
 error-auth-profile-malformed = Minecraft returned a profile Ephervex could not read.
 
-error-auth-secret-storage-unavailable = Ephervex cannot store your sign-in securely on this computer.
-.action = Install and unlock a keyring such as GNOME Keyring or KWallet, or sign in for this session only. Ephervex will never write your credentials to a file.
+error-auth-secret-storage-unavailable = Ephervex cannot reach secure storage for your sign-in on this computer.
+.action = Install and unlock a keyring such as GNOME Keyring or KWallet and try again, or sign in for this session only. Ephervex will never write your credentials to a file.
 
 error-auth-credential-change-busy = Another Ephervex window or command is changing sign-in credentials right now.
 .action = Try again in a moment. If it keeps happening, check which process holds { $path }.
@@ -693,6 +693,7 @@ account-removed-credential-pending = Removed the account { $name }. The keyring 
 # degraded one. Offline accounts have no credential material to store.
 auth-storage-none-needed = No credential needed
 auth-storage-not-saved = Not saved
+auth-storage-unknown = Unknown, secret storage is unavailable
 
 error-auth-offline-name-invalid = That is not a usable Minecraft player name.
 .action = Use 3 to 16 characters: letters, digits, or underscores. Minecraft does not accept spaces or punctuation.
@@ -2897,6 +2898,7 @@ gui-starting-minecraft = Starting Minecraft for "{ $value }".
 gui-server-running = "{ $value }" is running.
 gui-credential-stored = Credential stored securely
 gui-signin-required = Sign-in required
+gui-credential-unknown = Unknown, secret storage is unavailable
 gui-no-credential = No credential
 gui-unknown-time = Unknown time
 gui-just-now = Just now

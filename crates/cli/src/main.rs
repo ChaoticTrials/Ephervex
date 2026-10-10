@@ -25,29 +25,29 @@ use ephervex_core::{
     BundledDocumentHealth, CancellationToken, CaptureHealth, CapturedLine, ClientFolder,
     ClientRecord, CloneMethod, Compatibility, Config, ConfigurationHealth, ControlResponse,
     CoreError, CrashReview, CreatedClient, CredentialBackendHealth, CredentialOutcome,
-    CredentialStorage, DEFAULT_DIAGNOSTIC_BYTES, DEFAULT_SEARCH_LIMIT, DependencyKnowledge,
-    DependencyRefreshReport, DependentMods, DiagnosticEntry, DiagnosticKind, DiagnosticRequest,
-    DiagnosticScope, DiagnosticSearch, DirectoryState, DuplicateClient, EULA_CONFIRMATION_PHRASE,
-    Entitlements, EulaStatus, FileDisposition, Freshness, GameExit, ImpactedMod, ImportRequest,
-    ImportedPack, IncompatibilityReason, InstallationHealth, InstalledHost, InstalledMods,
-    Integrity, IsolationRequest, IsolationRound, IsolationSession, IsolationStep, JavaHealth,
-    JavaPathChoice, JavaPlan, JavaPlanRequest, JavaRuntime, JavaTarget, LaunchAndConnectEvent,
-    LaunchAndConnectObserver, LaunchAndConnectOptions, LaunchAndConnectOutcome, LaunchEvent,
-    LaunchFeatures, LaunchObserver, LaunchOptions, LaunchOutcome, LaunchState, LoginFlow,
-    LoginOptions, LoginRequest, MAX_SEARCH_MATCHES, MINECRAFT_EULA_REFERENCE, ManagedInstallation,
-    ManagedMod, ManagedModSnapshot, ModInstallPlan, ModInstallRequest, ModPresence,
-    ModProjectDetails, ModRelations, ModSearchQuery, ModSearchResults, NetworkAccess, NewClient,
-    NewServer, OperationReporter, OptionalSelection, OutputLine, PackAnalysis, PackRecipe,
-    PackSide, Paths, PlanWarning, PlannedMod, PreferenceApplication, PreferenceId, PreferenceKey,
-    ProcessMonitor, PromotionRequest, ReconciliationReport, RelatedMod, ReleaseListing,
-    RequiredMods, RequirementBasis, RoundAnswer, RuntimeClassification, RuntimeInventory,
-    SearchOptions, SecretString, ServerCommitWarning, ServerContentSource, ServerCreateOptions,
-    ServerEvent, ServerExit, ServerFolder, ServerNetworkChange, ServerObserver,
-    ServerPersistenceHealth, ServerRecord, ServerWarning, Session, SharedArtifactReport,
-    SideRequirement, SkipReason, SnapshotOrigin, SnapshotRecord, SnapshotRestoreOptions,
-    StartedServerLifetime, SuspectConfidence, SuspectReason, TerminationRequests, TextAnchor,
-    TextView, UnknownServerFiles, VerificationReport, VersionMetadata, VersionRecord,
-    format_binary_bytes,
+    CredentialPresence, CredentialStorage, DEFAULT_DIAGNOSTIC_BYTES, DEFAULT_SEARCH_LIMIT,
+    DependencyKnowledge, DependencyRefreshReport, DependentMods, DiagnosticEntry, DiagnosticKind,
+    DiagnosticRequest, DiagnosticScope, DiagnosticSearch, DirectoryState, DuplicateClient,
+    EULA_CONFIRMATION_PHRASE, Entitlements, EulaStatus, FileDisposition, Freshness, GameExit,
+    ImpactedMod, ImportRequest, ImportedPack, IncompatibilityReason, InstallationHealth,
+    InstalledHost, InstalledMods, Integrity, IsolationRequest, IsolationRound, IsolationSession,
+    IsolationStep, JavaHealth, JavaPathChoice, JavaPlan, JavaPlanRequest, JavaRuntime, JavaTarget,
+    LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions,
+    LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver, LaunchOptions,
+    LaunchOutcome, LaunchState, LoginFlow, LoginOptions, LoginRequest, MAX_SEARCH_MATCHES,
+    MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod, ManagedModSnapshot, ModInstallPlan,
+    ModInstallRequest, ModPresence, ModProjectDetails, ModRelations, ModSearchQuery,
+    ModSearchResults, NetworkAccess, NewClient, NewServer, OperationReporter, OptionalSelection,
+    OutputLine, PackAnalysis, PackRecipe, PackSide, Paths, PlanWarning, PlannedMod,
+    PreferenceApplication, PreferenceId, PreferenceKey, ProcessMonitor, PromotionRequest,
+    ReconciliationReport, RelatedMod, ReleaseListing, RequiredMods, RequirementBasis, RoundAnswer,
+    RuntimeClassification, RuntimeInventory, SearchOptions, SecretString, ServerCommitWarning,
+    ServerContentSource, ServerCreateOptions, ServerEvent, ServerExit, ServerFolder,
+    ServerNetworkChange, ServerObserver, ServerPersistenceHealth, ServerRecord, ServerWarning,
+    Session, SharedArtifactReport, SideRequirement, SkipReason, SnapshotOrigin, SnapshotRecord,
+    SnapshotRestoreOptions, StartedServerLifetime, SuspectConfidence, SuspectReason,
+    TerminationRequests, TextAnchor, TextView, UnknownServerFiles, VerificationReport,
+    VersionMetadata, VersionRecord, format_binary_bytes,
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{
@@ -5906,16 +5906,15 @@ fn show_accounts(status: &AccountStatus, json: bool) {
 /// construction. Saying so avoids making it look like a degraded Microsoft
 /// account.
 fn account_storage_label(account: &AccountSummary, storage: Option<CredentialStorage>) -> String {
-    if !account.kind.has_stored_credential() {
-        return ephervex_i18n::lookup("auth-storage-none-needed");
+    match account.credential {
+        CredentialPresence::NotApplicable => ephervex_i18n::lookup("auth-storage-none-needed"),
+        CredentialPresence::Missing => ephervex_i18n::lookup("auth-storage-not-saved"),
+        CredentialPresence::Unknown => ephervex_i18n::lookup("auth-storage-unknown"),
+        CredentialPresence::Stored => storage.map_or_else(
+            || ephervex_i18n::lookup("auth-storage-unknown"),
+            |storage| ephervex_i18n::lookup(storage.message_id()),
+        ),
     }
-    if !account.has_stored_credential {
-        return ephervex_i18n::lookup("auth-storage-not-saved");
-    }
-    storage.map_or_else(
-        || ephervex_i18n::lookup("error-auth-secret-storage-unavailable"),
-        |storage| ephervex_i18n::lookup(storage.message_id()),
-    )
 }
 
 fn account_json(account: &AccountSummary) -> serde_json::Value {
@@ -5927,7 +5926,14 @@ fn account_json(account: &AccountSummary) -> serde_json::Value {
         "default": account.is_default,
         "added_at": account.added_at,
         "last_authenticated_at": account.last_authenticated_at,
-        "has_stored_credential": account.has_stored_credential,
+        "has_stored_credential": match account.credential {
+            CredentialPresence::Stored => serde_json::Value::Bool(true),
+            CredentialPresence::Missing | CredentialPresence::NotApplicable => {
+                serde_json::Value::Bool(false)
+            }
+            CredentialPresence::Unknown => serde_json::Value::Null,
+        },
+        "credential": account.credential.as_str(),
     })
 }
 
@@ -8548,5 +8554,55 @@ mod tests {
             .expect("the hangup is noticed")
             .expect("task");
         assert!(requested);
+    }
+
+    fn microsoft_summary(credential: CredentialPresence) -> AccountSummary {
+        AccountSummary {
+            id: "00000000-0000-0000-0000-000000000000"
+                .parse()
+                .expect("uuid"),
+            name: "Steve".to_owned(),
+            kind: ephervex_model::AccountKind::Microsoft,
+            is_default: true,
+            added_at: String::new(),
+            last_authenticated_at: String::new(),
+            credential,
+        }
+    }
+
+    #[test]
+    fn an_unknown_credential_is_listed_as_unknown_and_not_as_not_saved() {
+        let account = microsoft_summary(CredentialPresence::Unknown);
+
+        let label = account_storage_label(&account, None);
+
+        assert_eq!(label, ephervex_i18n::lookup("auth-storage-unknown"));
+        assert_ne!(label, ephervex_i18n::lookup("auth-storage-not-saved"));
+    }
+
+    #[test]
+    fn a_missing_credential_is_still_listed_as_not_saved() {
+        let account = microsoft_summary(CredentialPresence::Missing);
+
+        assert_eq!(
+            account_storage_label(&account, None),
+            ephervex_i18n::lookup("auth-storage-not-saved")
+        );
+    }
+
+    #[test]
+    fn the_account_json_reports_an_unknown_credential_as_null() {
+        let json = |credential| account_json(&microsoft_summary(credential));
+
+        assert!(json(CredentialPresence::Unknown)["has_stored_credential"].is_null());
+        assert_eq!(json(CredentialPresence::Unknown)["credential"], "unknown");
+        assert_eq!(
+            json(CredentialPresence::Stored)["has_stored_credential"],
+            true
+        );
+        assert_eq!(
+            json(CredentialPresence::Missing)["has_stored_credential"],
+            false
+        );
     }
 }

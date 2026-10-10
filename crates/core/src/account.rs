@@ -169,10 +169,33 @@ pub struct AccountSummary {
     pub added_at: String,
     pub last_authenticated_at: String,
     /// Whether a credential exists that would survive a restart.
-    ///
-    /// Always false for an offline account, which has no credential to store -
-    /// not a missing one.
-    pub has_stored_credential: bool,
+    pub credential: CredentialPresence,
+}
+
+/// Whether an account has a credential saved in the keyring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialPresence {
+    /// A credential is saved and would survive a restart.
+    Stored,
+    /// The keyring answered and holds no credential for the account.
+    Missing,
+    /// The keyring could not be asked, so a credential may well be saved.
+    Unknown,
+    /// The account has no credential by construction, such as an offline one.
+    NotApplicable,
+}
+
+impl CredentialPresence {
+    /// A stable machine name for scripted output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stored => "stored",
+            Self::Missing => "missing",
+            Self::Unknown => "unknown",
+            Self::NotApplicable => "not-applicable",
+        }
+    }
 }
 
 impl AccountSummary {
@@ -392,13 +415,23 @@ impl App {
 
             // Only Microsoft accounts have anything in the keyring, so an
             // offline-only installation never touches Secret Service here.
-            let has_stored_credential = match (&store, account.kind.has_stored_credential()) {
-                (Some(store), true) => ephervex_auth::CredentialStore::load(
+            let credential = if !account.kind.has_stored_credential() {
+                CredentialPresence::NotApplicable
+            } else if let Some(store) = &store {
+                match ephervex_auth::CredentialStore::load(
                     store.as_ref(),
                     &ephervex_auth::CredentialKey::MicrosoftRefreshToken(parsed),
-                )?
-                .is_some(),
-                _ => false,
+                ) {
+                    Ok(Some(_)) => CredentialPresence::Stored,
+                    Ok(None) => CredentialPresence::Missing,
+                    Err(error) => {
+                        warn!(%error, id, "could not read the saved credential of an account");
+                        CredentialPresence::Unknown
+                    }
+                }
+            } else {
+                // An unreachable keyring says nothing about what it holds.
+                CredentialPresence::Unknown
             };
 
             accounts.push(AccountSummary {
@@ -408,7 +441,7 @@ impl App {
                 is_default: default == Some(id.as_str()),
                 added_at: account.added_at.clone(),
                 last_authenticated_at: account.last_authenticated_at.clone(),
-                has_stored_credential,
+                credential,
             });
         }
 
@@ -513,7 +546,9 @@ impl App {
         }
         self.finish_keyring_cleanup();
         let id = self.active_account_id()?;
-        let provider = self.build_account_provider(true)?;
+        // A configured account lives in the keyring, so an unreachable one must
+        // fail as such instead of resuming against an empty session store.
+        let provider = self.build_account_provider(false)?;
         let session = provider.resume(id, observer, cancel).await?;
         self.adopt(session)
     }
@@ -573,7 +608,7 @@ impl App {
         if self.account_kind(id)? == AccountKind::Offline {
             return self.establish_offline_session_for(id);
         }
-        let provider = self.build_account_provider(true)?;
+        let provider = self.build_account_provider(false)?;
         let session = provider.resume(id, observer, cancel).await?;
         self.adopt(session)
     }
@@ -1975,8 +2010,9 @@ mod tests {
         assert_eq!(account.name, "Notch");
         assert_eq!(account.kind, AccountKind::Offline);
         assert!(!account.is_authenticated());
-        assert!(
-            !account.has_stored_credential,
+        assert_eq!(
+            account.credential,
+            CredentialPresence::NotApplicable,
             "there is no credential, which is not the same as one that failed to save"
         );
         // Derived, never invented — a server computes the same value.
@@ -2322,6 +2358,118 @@ mod tests {
             .expect_err("nobody is signed in");
         assert_eq!(error.message_id(), "error-auth-not-signed-in");
         assert!(error.requires_interactive_login());
+    }
+
+    fn assert_secret_storage_unavailable(error: &CoreError) {
+        assert!(
+            matches!(
+                error,
+                CoreError::Auth(AuthError::SecretStorageUnavailable { .. })
+            ),
+            "{error:?}"
+        );
+        assert!(
+            !error.requires_interactive_login(),
+            "a keyring outage is not a reason to sign in again"
+        );
+    }
+
+    #[tokio::test]
+    async fn resuming_a_recorded_account_while_the_keyring_is_unreachable_reports_the_outage() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        remember_microsoft_account(&mut app, Uuid::new_v4());
+        app.test_keyring = TestKeyring::Unreachable;
+
+        let error = app
+            .resume_account(&AuthObserver::silent(), &CancellationToken::new())
+            .await
+            .expect_err("the keyring cannot be opened");
+
+        assert_secret_storage_unavailable(&error);
+    }
+
+    #[tokio::test]
+    async fn launching_a_recorded_account_while_the_keyring_is_unreachable_reports_the_outage() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        remember_microsoft_account(&mut app, Uuid::new_v4());
+        app.test_keyring = TestKeyring::Unreachable;
+
+        let error = app
+            .authenticated_session(&AuthObserver::silent(), &CancellationToken::new())
+            .await
+            .expect_err("the keyring cannot be opened");
+
+        assert_secret_storage_unavailable(&error);
+    }
+
+    #[tokio::test]
+    async fn launching_as_a_named_account_while_the_keyring_is_unreachable_reports_the_outage() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        remember_microsoft_account(&mut app, Uuid::new_v4());
+        app.test_keyring = TestKeyring::Unreachable;
+
+        let error = app
+            .session_for_account("Steve", &AuthObserver::silent(), &CancellationToken::new())
+            .await
+            .expect_err("the keyring cannot be opened");
+
+        assert_secret_storage_unavailable(&error);
+    }
+
+    #[test]
+    fn an_account_status_with_an_unreachable_keyring_does_not_claim_the_credential_is_missing() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        remember_microsoft_account(&mut app, Uuid::new_v4());
+        app.test_keyring = TestKeyring::Unreachable;
+
+        let status = app.account_status().expect("status");
+
+        assert_eq!(status.accounts[0].credential, CredentialPresence::Unknown);
+    }
+
+    #[test]
+    fn an_account_status_distinguishes_a_stored_credential_from_a_missing_one() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let saved = Uuid::new_v4();
+        remember_microsoft_account(&mut app, saved);
+        let store = Arc::new(MemoryStore::new());
+        store
+            .store(
+                &refresh_key(saved),
+                &SecretString::new("refresh".to_owned()),
+            )
+            .expect("store");
+        app.test_keyring = TestKeyring::Store(store);
+        let unsaved = Uuid::new_v4();
+        app.mutate_config(|config| {
+            config.remember_account(
+                &unsaved.to_string(),
+                "Alex",
+                AccountKind::Microsoft,
+                "2026-01-01T00:00:00Z",
+            );
+        })
+        .expect("remember");
+        app.add_offline_account("Notch").expect("added");
+
+        let status = app.account_status().expect("status");
+        let presence = |name: &str| {
+            status
+                .accounts
+                .iter()
+                .find(|account| account.name == name)
+                .expect("listed")
+                .credential
+        };
+
+        assert_eq!(presence("Steve"), CredentialPresence::Stored);
+        assert_eq!(presence("Alex"), CredentialPresence::Missing);
+        assert_eq!(presence("Notch"), CredentialPresence::NotApplicable);
     }
 
     #[test]

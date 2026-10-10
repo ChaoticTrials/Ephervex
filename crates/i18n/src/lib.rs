@@ -694,6 +694,7 @@ mod tests {
             "auth-nothing-to-log-out-of",
             "auth-storage-none-needed",
             "auth-storage-not-saved",
+            "auth-storage-unknown",
             "account-kind-microsoft",
             "account-kind-offline",
             "accounts-list-empty",
