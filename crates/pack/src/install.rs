@@ -927,12 +927,15 @@ pub struct AppliedLayer {
 /// Extracts the override layers one side takes, in the required order.
 ///
 /// Common first, then the side-specific layer, so the later layer wins.
+///
+/// Stops with [`PackError::Canceled`] once `cancel` fires.
 #[instrument(skip_all, fields(side = side.as_str()))]
 pub fn apply_overrides(
     archive: &mut PackArchive,
     recipe: &PackRecipe,
     side: PackSide,
     game_dir: &Path,
+    cancel: &CancellationToken,
 ) -> PackResult<Vec<AppliedLayer>> {
     let layers: Vec<OverrideLayer> = recipe.layers_for(side).into_iter().cloned().collect();
     let filter = recipe.layer_path_filter();
@@ -944,13 +947,17 @@ pub fn apply_overrides(
         // then refused takes the whole extraction down with it, and the recipe
         // is only written once extraction has succeeded.
         let mut shipped_files = Vec::new();
-        let report =
-            archive.extract_layer_filtered(&layer.archive_prefix, game_dir, &mut |path| {
+        let report = archive.extract_layer_filtered(
+            &layer.archive_prefix,
+            game_dir,
+            &mut |path| {
                 if filter.selects(path) {
                     shipped_files.push(path.to_path_buf());
                 }
                 EntryDecision::Extract
-            })?;
+            },
+            cancel,
+        )?;
         debug!(
             layer = layer.scope.as_str(),
             files = report.files,

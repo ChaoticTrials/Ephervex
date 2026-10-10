@@ -30,7 +30,8 @@
 //!
 //! Extraction is synchronous. `zip` is a blocking API, and wrapping it in
 //! `spawn_blocking` is the caller's decision because only the caller knows
-//! whether it is on a runtime.
+//! whether it is on a runtime. An override layer extraction polls a
+//! cancellation token between entries and between chunks of an entry.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -39,6 +40,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument};
 use zip::ZipArchive;
 
@@ -531,20 +533,29 @@ impl PackArchive {
         decide: &mut dyn FnMut(&Path) -> EntryDecision,
     ) -> PackResult<ExtractionReport> {
         let prefix = normalize_prefix(prefix);
-        self.extract_under(&prefix, destination, decide)
+        self.extract_under(&prefix, destination, decide, None)
     }
 
     /// The same extraction for an override layer, resolved against the root
     /// detection selected. `prefix` stays the layer's own name (`overrides`),
     /// which is what a recipe records.
+    ///
+    /// Stops with [`PackError::Canceled`] once `cancel` fires, between entries
+    /// and between chunks of one entry. The entry being written is removed.
     pub(crate) fn extract_layer_filtered(
         &mut self,
         prefix: &str,
         destination: &Path,
         decide: &mut dyn FnMut(&Path) -> EntryDecision,
+        cancel: &CancellationToken,
     ) -> PackResult<ExtractionReport> {
         let prefix = self.under_pack_root(prefix).join("/");
-        self.extract_under(&normalize_prefix(&prefix), destination, decide)
+        self.extract_under(
+            &normalize_prefix(&prefix),
+            destination,
+            decide,
+            Some(cancel),
+        )
     }
 
     fn extract_under(
@@ -552,6 +563,7 @@ impl PackArchive {
         prefix: &str,
         destination: &Path,
         decide: &mut dyn FnMut(&Path) -> EntryDecision,
+        cancel: Option<&CancellationToken>,
     ) -> PackResult<ExtractionReport> {
         if !self.contains_prefix(prefix) {
             return Ok(ExtractionReport::default());
@@ -573,6 +585,7 @@ impl PackArchive {
         let mut report = ExtractionReport::default();
         let mut links = DestinationLinks::new(&root);
         for index in 0..self.zip.len() {
+            check_not_canceled(cancel)?;
             let (name, relative, is_dir, declared) = {
                 let entry =
                     self.zip
@@ -630,7 +643,7 @@ impl PackArchive {
             let allowance = self.allowance(&[("entry-size", self.limits.max_entry_bytes)]);
             self.charge_entry()?;
             allowance.check(declared)?;
-            let written = self.write_entry(index, &target, allowance)?;
+            let written = self.write_entry(index, &target, allowance, cancel)?;
             self.spend_bytes(written);
             report.files += 1;
             report.bytes = report.bytes.saturating_add(written);
@@ -653,6 +666,7 @@ impl PackArchive {
         index: usize,
         target: &Path,
         allowance: Allowance,
+        cancel: Option<&CancellationToken>,
     ) -> PackResult<u64> {
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).map_err(|source| PackError::Unwritable {
@@ -675,6 +689,7 @@ impl PackArchive {
             source,
         })?;
         let copied = stream_entry(&mut entry, allowance, &archive_path, &mut |chunk| {
+            check_not_canceled(cancel)?;
             file.write_all(chunk)
                 .map_err(|source| PackError::Unwritable {
                     path: target.to_path_buf(),
@@ -736,6 +751,13 @@ impl PackArchive {
     const fn spend_bytes(&mut self, bytes: u64) {
         self.spent_bytes = self.spent_bytes.saturating_add(bytes);
     }
+}
+
+fn check_not_canceled(cancel: Option<&CancellationToken>) -> PackResult<()> {
+    if cancel.is_some_and(CancellationToken::is_cancelled) {
+        return Err(PackError::Canceled);
+    }
+    Ok(())
 }
 
 /// Streams an entry into `sink`, stopping one byte past the allowance so an
@@ -1185,6 +1207,70 @@ mod tests {
             .extract_prefix("server-overrides", &dir.path().join("out"))
             .expect("extract");
         assert!(report.is_empty(), "a pack without a layer is normal");
+    }
+
+    #[test]
+    fn a_layer_extraction_removes_the_entry_in_flight_and_writes_no_later_one_once_canceled() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("pack.mrpack");
+        zip_file(
+            &archive,
+            &[
+                ("modrinth.index.json", b"{}"),
+                ("overrides/a.txt", b"a"),
+                ("overrides/b.txt", b"b"),
+            ],
+        );
+        let destination = dir.path().join("out");
+        let cancel = CancellationToken::new();
+
+        let error = open(&archive)
+            .extract_layer_filtered(
+                "overrides",
+                &destination,
+                &mut |_| {
+                    cancel.cancel();
+                    EntryDecision::Extract
+                },
+                &cancel,
+            )
+            .expect_err("a canceled extraction stops");
+
+        assert!(matches!(error, PackError::Canceled), "{error:?}");
+        assert!(
+            !destination.join("a.txt").exists(),
+            "the entry being written when the cancel arrives is removed"
+        );
+        assert!(
+            !destination.join("b.txt").exists(),
+            "no entry after the cancel is written"
+        );
+    }
+
+    #[test]
+    fn a_layer_extraction_with_a_fired_token_writes_nothing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("pack.mrpack");
+        let body = vec![7_u8; 256 * 1024];
+        zip_file(
+            &archive,
+            &[("modrinth.index.json", b"{}"), ("overrides/big.bin", &body)],
+        );
+        let destination = dir.path().join("out");
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let error = open(&archive)
+            .extract_layer_filtered(
+                "overrides",
+                &destination,
+                &mut |_| EntryDecision::Extract,
+                &cancel,
+            )
+            .expect_err("a token that fired before extraction starts nothing");
+
+        assert!(matches!(error, PackError::Canceled), "{error:?}");
+        assert!(!destination.join("big.bin").exists());
     }
 
     #[test]

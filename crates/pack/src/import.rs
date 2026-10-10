@@ -312,7 +312,9 @@ pub struct MaterializedPack {
 /// not know what an instance is.
 #[derive(Debug)]
 pub struct MaterializeRequest<'a> {
-    pub archive: &'a mut PackArchive,
+    /// Owned because extraction runs on a blocking thread, which cannot hold a
+    /// borrow from the async caller.
+    pub archive: PackArchive,
     pub analysis: &'a PackAnalysis,
     pub side: PackSide,
     pub selection: &'a OptionalSelection,
@@ -332,7 +334,7 @@ pub struct MaterializeRequest<'a> {
 #[instrument(skip_all, fields(side = request.side.as_str(), game_dir = %request.game_dir.display()))]
 pub async fn materialize(request: MaterializeRequest<'_>) -> PackResult<MaterializedPack> {
     let MaterializeRequest {
-        archive,
+        mut archive,
         analysis,
         side,
         selection,
@@ -397,7 +399,14 @@ pub async fn materialize(request: MaterializeRequest<'_>) -> PackResult<Material
     // Silent until now, and on a large pack that is several seconds of a
     // progress bar that has stopped moving for no visible reason.
     reporter.set_stage(Some("operation-stage-extracting-overrides".to_owned()));
-    let layers = install::apply_overrides(archive, &recipe, side, game_dir)?;
+    let (archive, mut recipe, layers) = {
+        let (cancel, game_dir) = (cancel.clone(), game_dir.to_path_buf());
+        off_runtime(move || {
+            let layers = install::apply_overrides(&mut archive, &recipe, side, &game_dir, &cancel)?;
+            Ok((archive, recipe, layers))
+        })
+        .await?
+    };
     let mut shipped_files: Vec<(PathBuf, OverrideScope)> = Vec::new();
     for applied in &layers {
         if let Some(layer) = recipe
@@ -421,12 +430,8 @@ pub async fn materialize(request: MaterializeRequest<'_>) -> PackResult<Material
     // 3. Retain the source recipe, which is mandatory even for a client-only
     //    import.
     reporter.set_stage(Some("operation-stage-retaining-source".to_owned()));
-    let store = SourceStore::new(source_dir);
-    shipped_files.extend(retain_source(archive, &mut recipe, side, &store)?);
-    // Recorded once every layer is known: what a shipped path means depends on
-    // all the layers that place it, and on the declared file at the same path.
-    recipe.record_layer_files(&shipped_files)?;
-    let recipe_path = store.write_recipe(&recipe)?;
+    let (recipe, recipe_path) =
+        retain_and_record(archive, recipe, shipped_files, side, source_dir, cancel).await?;
 
     info!(
         installed = files.installed.len(),
@@ -441,6 +446,42 @@ pub async fn materialize(request: MaterializeRequest<'_>) -> PackResult<Material
         recipe,
         recipe_path,
     })
+}
+
+/// Retains the source, records what every layer placed, and writes the recipe.
+///
+/// On a blocking thread, since retaining copies whole override layers.
+async fn retain_and_record(
+    mut archive: PackArchive,
+    mut recipe: PackRecipe,
+    mut shipped_files: Vec<(PathBuf, OverrideScope)>,
+    side: PackSide,
+    source_dir: &Path,
+    cancel: &CancellationToken,
+) -> PackResult<(PackRecipe, PathBuf)> {
+    let (cancel, source_dir) = (cancel.clone(), source_dir.to_path_buf());
+    off_runtime(move || {
+        let store = SourceStore::new(&source_dir);
+        shipped_files.extend(retain_source(
+            &mut archive,
+            &mut recipe,
+            side,
+            &store,
+            &cancel,
+        )?);
+        // Recorded once every layer is known: what a shipped path means depends
+        // on all the layers that place it, and on the declared file at the same
+        // path.
+        recipe.record_layer_files(&shipped_files)?;
+        // A cancel that arrived while the layers were copying stops short of
+        // writing the recipe.
+        if cancel.is_cancelled() {
+            return Err(PackError::Canceled);
+        }
+        let recipe_path = store.write_recipe(&recipe)?;
+        Ok((recipe, recipe_path))
+    })
+    .await
 }
 
 /// Keeps everything a server created later will need.
@@ -458,6 +499,7 @@ fn retain_source(
     recipe: &mut PackRecipe,
     side: PackSide,
     store: &SourceStore,
+    cancel: &CancellationToken,
 ) -> PackResult<Vec<(PathBuf, OverrideScope)>> {
     let kind = recipe.source_kind;
     if let Some(entry) = manifest_entry_for(kind) {
@@ -484,13 +526,17 @@ fn retain_source(
         // server layer without applying it, and a server built from this
         // instance loads whatever that layer places.
         let mut shipped_files = Vec::new();
-        let report =
-            archive.extract_layer_filtered(&layer.archive_prefix, &absolute, &mut |path| {
+        let report = archive.extract_layer_filtered(
+            &layer.archive_prefix,
+            &absolute,
+            &mut |path| {
                 if filter.selects(path) {
                     shipped_files.push(path.to_path_buf());
                 }
                 EntryDecision::Extract
-            })?;
+            },
+            cancel,
+        )?;
         layer.files = report.files;
         layer.retained_at = Some(relative);
         retained_files.push((layer.scope, shipped_files));
@@ -499,6 +545,23 @@ fn retain_source(
         .into_iter()
         .flat_map(|(scope, paths)| paths.into_iter().map(move |path| (path, scope)))
         .collect())
+}
+
+/// Runs archive and filesystem work on a blocking thread.
+///
+/// The ZIP reader is a blocking API, so extracting a large layer on an async
+/// worker would stall every other task on it for the whole extraction. A panic
+/// in `work` is resumed rather than reported as a cancellation.
+async fn off_runtime<T: Send + 'static>(
+    work: impl FnOnce() -> PackResult<T> + Send + 'static,
+) -> PackResult<T> {
+    match tokio::task::spawn_blocking(work).await {
+        Ok(result) => result,
+        Err(failure) => match failure.try_into_panic() {
+            Ok(payload) => std::panic::resume_unwind(payload),
+            Err(_) => Err(PackError::Canceled),
+        },
+    }
 }
 
 /// The manifest file name one provider's retained state keeps.
@@ -789,12 +852,12 @@ mod tests {
             )],
         );
 
-        let (mut archive, analysis) =
+        let (archive, analysis) =
             analyze(&archive_path, &PackPolicy::curseforge()).expect("analyze");
         let manager =
             DownloadManager::new(ephervex_download::DownloaderConfig::default()).expect("manager");
         let error = materialize(MaterializeRequest {
-            archive: &mut archive,
+            archive,
             analysis: &analysis,
             side: PackSide::Client,
             selection: &OptionalSelection::none(),
@@ -846,15 +909,14 @@ mod tests {
             ],
         );
 
-        let (mut archive, analysis) =
-            analyze(&archive_path, &PackPolicy::modrinth()).expect("analyze");
+        let (archive, analysis) = analyze(&archive_path, &PackPolicy::modrinth()).expect("analyze");
         let game = dir.path().join("instance/minecraft");
         let source = dir.path().join("instance/.launcher/source");
 
         let manager =
             DownloadManager::new(ephervex_download::DownloaderConfig::default()).expect("manager");
         let materialized = materialize(MaterializeRequest {
-            archive: &mut archive,
+            archive,
             analysis: &analysis,
             side: PackSide::Client,
             selection: &OptionalSelection::none(),
@@ -919,13 +981,13 @@ mod tests {
         archive_path: &Path,
         policy: &PackPolicy,
     ) -> PackResult<(MaterializedPack, PathBuf, PathBuf)> {
-        let (mut archive, analysis) = analyze(archive_path, policy)?;
+        let (archive, analysis) = analyze(archive_path, policy)?;
         let game = dir.join("instance/minecraft");
         let source = dir.join("instance/.launcher/source");
         let manager =
             DownloadManager::new(ephervex_download::DownloaderConfig::default()).expect("manager");
         let materialized = materialize(MaterializeRequest {
-            archive: &mut archive,
+            archive,
             analysis: &analysis,
             side: PackSide::Client,
             selection: &OptionalSelection::none(),
@@ -1055,5 +1117,147 @@ mod tests {
         materialize_client(dir.path(), &archive_path, &policy)
             .await
             .expect("the manifest is charged once");
+    }
+
+    /// Cancels `cancel` the moment the operation enters `stage`.
+    #[derive(Debug)]
+    struct CancelAtStage {
+        stage: &'static str,
+        cancel: CancellationToken,
+    }
+
+    impl ephervex_download::ProgressSink for CancelAtStage {
+        fn operation_changed(&self, operation: &ephervex_model::Operation) {
+            if operation.stage.as_deref() == Some(self.stage) {
+                self.cancel.cancel();
+            }
+        }
+    }
+
+    fn layered_pack(dir: &Path) -> PathBuf {
+        let archive_path = dir.join("pack.mrpack");
+        zip_file(
+            &archive_path,
+            &[
+                ("modrinth.index.json", INDEX),
+                ("overrides/config/common.toml", b"common"),
+                ("client-overrides/options.txt", b"guiScale:1\n"),
+                ("server-overrides/server.properties", b"motd=test\n"),
+            ],
+        );
+        archive_path
+    }
+
+    async fn materialize_canceling_at(
+        dir: &Path,
+        stage: &'static str,
+    ) -> (PackResult<MaterializedPack>, PathBuf) {
+        let (archive, analysis) =
+            analyze(&layered_pack(dir), &PackPolicy::modrinth()).expect("analyze");
+        let source = dir.join("instance/.launcher/source");
+        let manager =
+            DownloadManager::new(ephervex_download::DownloaderConfig::default()).expect("manager");
+        let cancel = CancellationToken::new();
+        let sink = std::sync::Arc::new(CancelAtStage {
+            stage,
+            cancel: cancel.clone(),
+        });
+        let outcome = materialize(MaterializeRequest {
+            archive,
+            analysis: &analysis,
+            side: PackSide::Client,
+            selection: &OptionalSelection::none(),
+            game_dir: &dir.join("instance/minecraft"),
+            source_dir: &source,
+            manager: &manager,
+            cache: &CacheLayout::new(dir.join("cache")),
+            credentials: &OpenArtifacts,
+            reporter: &OperationReporter::new("test-import", true, sink),
+            cancel: &cancel,
+        })
+        .await;
+        (outcome, source)
+    }
+
+    #[tokio::test]
+    async fn a_cancel_during_override_extraction_fails_the_import_and_retains_nothing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (outcome, source) =
+            materialize_canceling_at(dir.path(), "operation-stage-extracting-overrides").await;
+
+        assert!(matches!(outcome, Err(PackError::Canceled)), "{outcome:?}");
+        assert!(!has_retained_recipe(&source));
+        assert!(!dir.path().join("instance/minecraft/options.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn a_cancel_during_source_retention_fails_the_import_without_a_recipe() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (outcome, source) =
+            materialize_canceling_at(dir.path(), "operation-stage-retaining-source").await;
+
+        assert!(matches!(outcome, Err(PackError::Canceled)), "{outcome:?}");
+        assert!(!has_retained_recipe(&source));
+    }
+
+    #[tokio::test]
+    async fn override_extraction_leaves_the_runtime_free_to_run_other_tasks() {
+        // A current-thread runtime has one worker, so another task can only run
+        // while this one is suspended. Extraction on the worker itself would
+        // finish before that task was ever polled.
+        #[derive(Debug)]
+        struct RecordAtStage {
+            stage: &'static str,
+            flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+            seen: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl ephervex_download::ProgressSink for RecordAtStage {
+            fn operation_changed(&self, operation: &ephervex_model::Operation) {
+                use std::sync::atomic::Ordering;
+                if operation.stage.as_deref() == Some(self.stage) {
+                    self.seen
+                        .store(self.flag.load(Ordering::SeqCst), Ordering::SeqCst);
+                }
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (archive, analysis) =
+            analyze(&layered_pack(dir.path()), &PackPolicy::modrinth()).expect("analyze");
+        let manager =
+            DownloadManager::new(ephervex_download::DownloaderConfig::default()).expect("manager");
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let other_task = tokio::spawn({
+            let flag = std::sync::Arc::clone(&flag);
+            async move { flag.store(true, std::sync::atomic::Ordering::SeqCst) }
+        });
+        let sink = std::sync::Arc::new(RecordAtStage {
+            stage: "operation-stage-retaining-source",
+            flag,
+            seen: std::sync::Arc::clone(&seen),
+        });
+
+        materialize(MaterializeRequest {
+            archive,
+            analysis: &analysis,
+            side: PackSide::Client,
+            selection: &OptionalSelection::none(),
+            game_dir: &dir.path().join("instance/minecraft"),
+            source_dir: &dir.path().join("instance/.launcher/source"),
+            manager: &manager,
+            cache: &CacheLayout::new(dir.path().join("cache")),
+            credentials: &OpenArtifacts,
+            reporter: &OperationReporter::new("test-import", true, sink),
+            cancel: &CancellationToken::new(),
+        })
+        .await
+        .expect("materialize");
+        other_task.await.expect("the other task finished");
+
+        assert!(
+            seen.load(std::sync::atomic::Ordering::SeqCst),
+            "another task ran while the overrides were being extracted"
+        );
     }
 }

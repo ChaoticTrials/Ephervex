@@ -99,12 +99,12 @@ async fn import_into(
     source: &Path,
     cache: &Path,
 ) -> Result<PackRecipe, PackError> {
-    let (mut archive, analysis) = analyze(archive_path, &PackPolicy::curseforge())?;
+    let (archive, analysis) = analyze(archive_path, &PackPolicy::curseforge())?;
     assert_eq!(analysis.format, PackFormat::CurseForgePack);
     let manager = manager();
     let cache = CacheLayout::new(cache);
     let materialized = materialize(MaterializeRequest {
-        archive: &mut archive,
+        archive,
         analysis: &analysis,
         side: PackSide::Client,
         selection: &OptionalSelection::none(),

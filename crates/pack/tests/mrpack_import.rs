@@ -175,7 +175,7 @@ async fn try_import(
     policy: &PackPolicy,
     selection: &OptionalSelection,
 ) -> Result<Imported, PackError> {
-    let (mut opened, analysis) = analyze(archive, policy).expect("analyze");
+    let (opened, analysis) = analyze(archive, policy).expect("analyze");
     assert_eq!(analysis.format, PackFormat::ModrinthPack);
 
     let imported = Imported {
@@ -183,7 +183,7 @@ async fn try_import(
         source: workspace.join("instance/.launcher/source"),
     };
     materialize(MaterializeRequest {
-        archive: &mut opened,
+        archive: opened,
         analysis: &analysis,
         side: PackSide::Client,
         selection,
@@ -449,9 +449,9 @@ async fn importing_the_same_pack_twice_costs_no_second_download() {
     let cache = CacheLayout::new(workspace.path().join("cache"));
     let mut reused = 0;
     for run in 0..2 {
-        let (mut opened, analysis) = analyze(&archive, &policy).expect("analyze");
+        let (opened, analysis) = analyze(&archive, &policy).expect("analyze");
         let outcome = materialize(MaterializeRequest {
-            archive: &mut opened,
+            archive: opened,
             analysis: &analysis,
             side: PackSide::Client,
             selection: &OptionalSelection::none(),
@@ -498,10 +498,10 @@ async fn a_hash_mismatch_fails_the_import_rather_than_installing_the_file() {
     let archive = workspace.path().join("tampered.mrpack");
     build_archive(&archive, index.as_bytes(), &["overrides"]);
 
-    let (mut opened, analysis) = analyze(&archive, &loopback_policy(&server)).expect("analyze");
+    let (opened, analysis) = analyze(&archive, &loopback_policy(&server)).expect("analyze");
     let game = workspace.path().join("instance/minecraft");
     let error = materialize(MaterializeRequest {
-        archive: &mut opened,
+        archive: opened,
         analysis: &analysis,
         side: PackSide::Client,
         selection: &OptionalSelection::none(),

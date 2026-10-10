@@ -33,8 +33,8 @@ use ephervex_minecraft::{MinecraftError, MinecraftVersionId};
 use ephervex_model::{InstanceId, StorageClass};
 use ephervex_options::PreferenceApplication;
 use ephervex_pack::{
-    MaterializeRequest, MaterializedPack, OptionalSelection, PackAnalysis, PackArchive, PackPolicy,
-    PackRecipe, PackSide, ProviderFileIdentity, SourceStore,
+    MaterializeRequest, MaterializedPack, OptionalSelection, PackAnalysis, PackArchive, PackError,
+    PackPolicy, PackRecipe, PackSide, ProviderFileIdentity, SourceStore,
 };
 use ephervex_storage::{ClientRecord, ImportSource, NewClient};
 use tokio_util::sync::CancellationToken;
@@ -138,7 +138,7 @@ impl ImportedPack {
 /// one.
 #[derive(Debug)]
 struct MaterializePack<'a> {
-    archive: &'a mut PackArchive,
+    archive: PackArchive,
     analysis: &'a PackAnalysis,
     record: &'a ClientRecord,
     selection: &'a OptionalSelection,
@@ -198,7 +198,7 @@ impl App {
             .transpose()?;
         // Everything that can refuse the pack runs before the instance exists.
         reporter.set_stage(Some("operation-stage-reading-archive".to_owned()));
-        let (mut archive, mut analysis) = Self::open_pack(&request.archive)?;
+        let (archive, mut analysis) = Self::open_pack(&request.archive)?;
         // Including the provider lookups: a missing API key, a file the pack
         // declares that no longer exists, and a file whose author does not
         // permit third-party downloads all fail here, with nothing created.
@@ -231,7 +231,7 @@ impl App {
 
         let materialized = match self
             .materialize(MaterializePack {
-                archive: &mut archive,
+                archive,
                 analysis: &analysis,
                 record: &record,
                 selection: &request.selection,
@@ -268,6 +268,10 @@ impl App {
             }
         };
 
+        if cancel.is_cancelled() {
+            crate::app::discard_unpublished(self.registry_for_services(), &record);
+            return Err(PackError::Canceled.into());
+        }
         reporter.set_stage(Some("operation-stage-publishing".to_owned()));
         if let Err(error) = self.registry_for_services().publish_client(&record) {
             crate::app::discard_unpublished(self.registry_for_services(), &record);
@@ -510,6 +514,55 @@ mod tests {
         assert!(
             !options.contains("renderDistance:12"),
             "a later override layer replaces the earlier file wholesale: {options}"
+        );
+    }
+
+    #[derive(Debug)]
+    struct CancelAtStage(CancellationToken);
+
+    impl ephervex_download::ProgressSink for CancelAtStage {
+        fn operation_changed(&self, operation: &ephervex_model::Operation) {
+            if operation.stage.as_deref() == Some("operation-stage-applying-settings") {
+                self.0.cancel();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cancel_after_the_pack_is_laid_down_does_not_publish_the_instance() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("pack.mrpack");
+        zip_file(
+            &archive,
+            &[
+                (
+                    "modrinth.index.json",
+                    &index(r#"{"minecraft": "1.20.1", "neoforge": "47.1.106"}"#),
+                ),
+                ("overrides/config/a.toml", b"a" as &[u8]),
+            ],
+        );
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let cancel = CancellationToken::new();
+        let reporter = OperationReporter::new(
+            "test-import",
+            true,
+            std::sync::Arc::new(CancelAtStage(cancel.clone())),
+        );
+
+        let error = app
+            .import_pack(&ImportRequest::new(&archive), &reporter, &cancel)
+            .await
+            .expect_err("a canceled import fails");
+
+        assert!(
+            matches!(error, crate::error::CoreError::Pack(PackError::Canceled)),
+            "{error:?}"
+        );
+        assert!(
+            app.list_clients().expect("list").is_empty(),
+            "a canceled import leaves no instance behind"
         );
     }
 
