@@ -158,7 +158,7 @@ features show one tab or a short note.
 - [x] Mod isolation (source: `docs/mod-isolation.md`)
 - [x] Servers: create (standalone and linked), EULA, properties and network,
       start, stop, console, Launch Client & Connect, recovery
-- [ ] Diagnostics, logs and crash reports, diagnostic bundles
+- [x] Diagnostics, logs and crash reports, diagnostic bundles
 - [ ] Snapshots
 - [ ] Settings: General, Minecraft defaults, Java, Providers & APIs, Storage,
       Disk usage

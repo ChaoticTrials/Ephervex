@@ -1,0 +1,147 @@
+---
+title: Diagnostics
+description: Read logs and crash reports, diagnose a failed run, and export a diagnostic bundle.
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+import ThemeScreenshot from '@site/src/components/ThemeScreenshot';
+
+# Diagnostics
+
+Start with the **Logs** tab when a client or server behaves unexpectedly. If
+a run failed, check its crash report, then use **Diagnostics** to inspect
+likely causes. You can export a local bundle when someone else needs the
+files to investigate.
+
+## Read logs and crash reports
+
+The live view shows recent output. **Log Files** lists files Minecraft wrote;
+**Crash Reports** lists its crash reports. A server's captured output is
+separate from its Minecraft log files. A file view reads a bounded portion,
+so a very large file may be truncated on screen.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Open a client or server workspace and select **Logs**. Switch between **Live /
+Latest Log** (or **Captured output** on a server), **Log Files**, and **Crash
+Reports**. Select a saved file on the left to read it. Use **Find** to search
+the open file; in the live view, filter by log level, search retained output,
+pause following, or copy selected lines. **Folder** opens the folder for the
+current view.
+
+<ThemeScreenshot state="client-logs-live" alt="Client Logs tab with a live log, level filters, and search" />
+
+<ThemeScreenshot state="client-crash-reports" alt="Crash Reports view with a report selected" />
+
+After a failed run, the notice in the workspace can take you straight to its
+crash report, log, or **Diagnostics**.
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+Choose exactly one scope: `--instance INSTANCE_ID`, `--server SERVER_ID`, or
+`--launcher`. List files first, then use a listed filename with `show` or
+`search`:
+
+```bash
+ephervex logs list --instance INSTANCE_ID
+ephervex logs show latest.log --instance INSTANCE_ID
+ephervex logs search latest.log "ERROR" --instance INSTANCE_ID
+ephervex logs list --instance INSTANCE_ID --crash-reports
+ephervex logs show CRASH_REPORT_NAME --instance INSTANCE_ID --crash-reports
+```
+
+`show` reads the end of a log and the beginning of a crash report by default.
+Use `--head` to read from the beginning, or `--bytes N` to change the bounded
+window size. `ephervex logs open --instance INSTANCE_ID` opens the log folder;
+add `--crash-reports` for the crash-report folder. Change the scope to
+`--server SERVER_ID` to inspect a server's files, or `--launcher` to inspect
+Ephervex's own logs.
+
+</TabItem>
+</Tabs>
+
+## Diagnose a failed run
+
+Desktop **Diagnostics** checks Java and JVM settings, mod requirements, the
+latest run's log and crash reports, and recorded files. File hashing can take
+time on a large pack. The result separates problems from valid customizations
+and may suggest a likely cause after a failed run. It cannot prove every
+possible cause of a crash.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Open the affected client or server workspace, select **Diagnostics**, then
+**Diagnose**. Read the problem cards and **What was checked**. A finding can
+link to a log, crash report, Mods, or settings. If it offers a fix, select
+**Review fix** to see the proposed changes. Nothing changes until you select
+**Apply**. After changing the host yourself, select **Diagnose again** for a
+current result.
+
+<ThemeScreenshot state="client-diagnostics-result" alt="Diagnostics result showing likely problems and completed checks" />
+
+<ThemeScreenshot state="client-diagnostics-fix-preview" alt="Fix preview showing the changes before applying them" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+The CLI has log and crash-report inspection, but the interactive **Diagnose**
+and fix preview are available in the desktop app. For a server crash, this
+command reviews the newest crash report and names mods it points at without
+changing them:
+
+```bash
+ephervex server crash SERVER_ID
+```
+
+Check the report and log before changing mods; a named mod is a clue, not
+proof that it alone caused the failure.
+
+</TabItem>
+</Tabs>
+
+## Prepare a report or bundle
+
+**Copy technical report** produces a readable summary of a desktop diagnosis
+for a bug report. A diagnostic bundle is a ZIP file saved locally. Ephervex
+does not upload it. The bundle contains a manifest of included, omitted, and
+unreadable parts.
+
+Logs and crash reports are copied as they are. Minecraft and mods may have
+written player names, server addresses, or local paths into them. Review what
+you select before sharing the archive. Ephervex does not offer its
+configuration file, credentials, or tokens as bundle parts.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+In a client's or server's **Diagnostics** tab, use **Copy technical report**
+after a diagnosis if a text summary is enough. For an archive, select
+**Prepare diagnostic bundle**. The initial selection includes the newest game
+log and crash report
+when present, plus recorded contents and the host record. Older files are
+available but unselected. Review the checklist and sizes, choose the files
+you need, then select **Export bundle** and pick a save location. **Show in
+folder** opens the saved archive's location. If a selected file disappeared
+before export, the result and manifest identify it.
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+List available parts before writing an archive:
+
+```bash
+ephervex logs bundle --instance INSTANCE_ID --list
+ephervex logs bundle --instance INSTANCE_ID --output report.zip --include PART_NAME
+```
+
+Repeat `--include PART_NAME` to select more parts. Without `--include`, the
+CLI includes every offered part. Use `--server SERVER_ID` for one server's
+bundle, or `--launcher` for Ephervex's own logs. The launcher logs are a
+separate scope from a client or server bundle.
+
+</TabItem>
+</Tabs>
