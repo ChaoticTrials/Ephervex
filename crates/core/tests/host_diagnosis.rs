@@ -532,6 +532,43 @@ async fn a_crash_report_from_before_the_last_start_is_not_reviewed() {
     assert!(app.crash_review(fixture.host()).unwrap().is_none());
 }
 
+/// A module that runs on the loader's class path but is no file in `mods/`
+/// (here bundled inside another mod) is evidence, not a mod to disable.
+#[tokio::test]
+async fn a_crash_suspect_whose_jar_is_not_in_the_hosts_mods_is_not_named() {
+    let fixture = Fixture::with_mods(&[("create", &[])]).await;
+    fixture.write(
+        "minecraft/crash-reports/crash-2026-09-27_12.00.00-client.txt",
+        b"---- Minecraft Crash Report ----\nDescription: Ticking\n\n\
+java.lang.IllegalStateException: boom\n\
+\tat TRANSFORMER/create@6.0/com.simibubi.create.Create.tick(Create.java:1) ~[create.jar:6.0]\n\
+\tat TRANSFORMER/flywheel@1.0.0/dev.engine_room.flywheel.Flywheel.tick(Flywheel.java:2) ~[flywheel-1.0.0.jar:1.0.0]\n\
+\tat TRANSFORMER/minecraft@1.21.1/net.minecraft.world.level.Level.tick(Level.java:3) ~[client.jar:?]\n\n\
+-- System Details --\n\
+Details:\n\
+\tMod List: \n\
+\t\tclient.jar                |Minecraft |minecraft |1.21.1 |COMMON_SET|Manifest: NOSIGNATURE\n\
+\t\tcreate.jar                |Create    |create    |6.0    |DONE      |Manifest: NOSIGNATURE\n\
+\t\tflywheel-1.0.0.jar        |Flywheel  |flywheel  |1.0.0  |DONE      |Manifest: NOSIGNATURE\n",
+    );
+
+    let review = fixture
+        .app()
+        .crash_review(fixture.host())
+        .unwrap()
+        .expect("the crash came after the last start");
+
+    let named: Vec<&str> = review
+        .analysis
+        .suspects
+        .iter()
+        .map(|suspect| suspect.mod_id.as_str())
+        .collect();
+    assert_eq!(named, ["create"]);
+    assert_eq!(review.mods.len(), 1);
+    assert!(review.mods[0].is_actionable());
+}
+
 #[tokio::test]
 async fn the_loader_s_refusal_in_the_last_log_is_a_problem() {
     let fixture = Fixture::with_mods(&[]).await;

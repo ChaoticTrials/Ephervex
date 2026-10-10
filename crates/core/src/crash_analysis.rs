@@ -18,12 +18,17 @@
 //!   section's `Mod file:` line gives the jar it came from.
 //! - When the header carries no id, the run's log still names one:
 //!   `Mod '<id>' encountered an error in a deferred task`.
-//! - Every stack frame carries attribution twice: ModLauncher rewrites the
-//!   class loader segment as `TRANSFORMER/<id>@<version>/`, and the frame's
-//!   trailing `~[<jar>:...]` names the archive it was loaded from.
+//! - ModLauncher rewrites the class loader segment of a stack frame as
+//!   `TRANSFORMER/<id>@<version>/`. Only that segment is read; the trailing
+//!   `~[<jar>:...]` of a frame is not, because the jar comes from the mod list.
 //! - `Mod List:` under `-- System Details --` is a table of
 //!   `jar | display name | mod id | version | ...`, which turns any of the
 //!   above into a file name the mods list can act on.
+//!
+//! The game and the mod loader write their own frames and mod list rows the
+//! same way a mod does. They are evidence about the failure, never a mod that
+//! can be disabled, so they are never reported as suspects. A host's own review
+//! also drops a module whose jar is no file in its `mods/`.
 //!
 //! # What is inference, and what is not
 //!
@@ -62,6 +67,22 @@ const CLIENT_ONLY_PACKAGES: &[&str] = &[
     "com.mojang.blaze3d.",
     "com.mojang.realmsclient.",
     "org.lwjgl.",
+];
+
+/// Mod ids that name the game or the mod loader rather than a mod in `mods/`.
+///
+/// Forge and NeoForge write their frames and `Mod List:` rows under these ids
+/// exactly as they do for a mod, but none of them is a file the user can try
+/// without.
+const GAME_AND_LOADER_IDS: &[&str] = &[
+    "minecraft",
+    "forge",
+    "neoforge",
+    "fml",
+    "fmlcore",
+    "javafml",
+    "lowcodefml",
+    "mclanguage",
 ];
 
 /// Where the frames worth attributing stop.
@@ -217,10 +238,9 @@ pub fn analyze_crash_report(report: &str, log: &str) -> CrashAnalysis {
     for (mod_id, reason) in named_mods(failing, log)
         .map(|mod_id| (mod_id, SuspectReason::Named))
         .chain(attributed_frames(failing))
+        .chain(compat_triggers(failing, &mod_list))
+        .filter(|(mod_id, _)| !is_game_or_loader(mod_id))
     {
-        promote(&mut reasons, mod_id, reason);
-    }
-    for (mod_id, reason) in compat_triggers(failing, &mod_list) {
         promote(&mut reasons, mod_id, reason);
     }
 
@@ -252,6 +272,13 @@ pub fn analyze_crash_report(report: &str, log: &str) -> CrashAnalysis {
         missing_class,
         suspects,
     }
+}
+
+/// Whether an id names the game or the mod loader instead of a mod.
+fn is_game_or_loader(mod_id: &str) -> bool {
+    GAME_AND_LOADER_IDS
+        .iter()
+        .any(|id| id.eq_ignore_ascii_case(mod_id))
 }
 
 /// Keeps the strongest evidence for a mod rather than the last one seen.
@@ -306,11 +333,10 @@ fn mod_section_id(line: &str) -> Option<String> {
     (!id.is_empty() && !id.contains(char::is_whitespace)).then(|| id.to_ascii_lowercase())
 }
 
-/// Mod ids and jars named by the frames of the failing stack.
+/// Mod ids named by the `TRANSFORMER/<id>@` segment of the failing stack's frames.
 ///
-/// Both forms are read because they are not always both present: a frame from a
-/// mod loaded outside the transforming class loader has only the `~[jar:...]`
-/// suffix, and a synthetic frame has only the transformer segment.
+/// A frame's `~[jar:...]` suffix is not read: the jar a suspect belongs to
+/// comes from the mod list.
 fn attributed_frames(failing: &str) -> impl Iterator<Item = (String, SuspectReason)> + '_ {
     failing
         .lines()
@@ -635,9 +661,21 @@ impl App {
                     .with_budget(MAX_VIEW_BYTES),
             )?
             .text;
-        let analysis = analyze_crash_report(&text, &self.recent_log_text(scope));
+        let mut analysis = analyze_crash_report(&text, &self.recent_log_text(scope));
 
         let known = self.host_mod_snapshot(host)?;
+        // A module the mod list gives a jar for that is no file in this host's
+        // `mods/` (such as one bundled inside another jar) is not something
+        // to disable. A suspect the table gave no jar for stays: it
+        // may be a mod that failed before it was listed.
+        analysis.suspects.retain(|suspect| {
+            suspect.jar.as_deref().is_none_or(|jar| {
+                known
+                    .mods
+                    .iter()
+                    .any(|entry| entry.file_name.eq_ignore_ascii_case(jar))
+            })
+        });
         let mods = analysis
             .suspects
             .iter()
@@ -934,6 +972,66 @@ java.lang.NullPointerException: Ticking entity\n\
         assert!(analysis.is_empty());
         assert!(!analysis.client_code_on_server);
         assert_eq!(analysis.failure.as_deref(), Some("Ticking entity"));
+    }
+
+    /// A crash whose failing stack runs through the game and the loader on its
+    /// way into one mod, with all three listed in the mod table.
+    const GAME_AND_LOADER_FRAMES_REPORT: &str = r"---- Minecraft Crash Report ----
+
+Time: 2026-08-30 18:12:40
+Description: Ticking block entity
+
+java.lang.NullPointerException: Ticking block entity
+	at TRANSFORMER/utilitix@1.13.2/me.example.utilitix.TickingThing.tick(TickingThing.java:41) ~[utilitix-1.21.1-1.13.2.jar:1.13.2]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.level.Level.tickBlockEntities(Level.java:512) ~[client-1.21.1-20240808.144430-srg.jar:?]
+	at TRANSFORMER/neoforge@21.1.80/net.neoforged.neoforge.event.EventHooks.onTick(EventHooks.java:90) ~[neoforge-21.1.80-universal.jar:?]
+	at TRANSFORMER/FMLCORE@4.0.30/net.neoforged.fml.ModLoader.run(ModLoader.java:200) ~[fmlcore-1.21.1-4.0.30.jar:?]
+
+-- System Details --
+Details:
+	Mod List: 
+		client-1.21.1-20240808.144430-srg.jar             |Minecraft                     |minecraft                     |1.21.1              |COMMON_SET|Manifest: NOSIGNATURE
+		neoforge-21.1.80-universal.jar                    |NeoForge                      |neoforge                      |21.1.80             |COMMON_SET|Manifest: NOSIGNATURE
+		utilitix-1.21.1-1.13.2.jar                        |UtilitiX                      |utilitix                      |1.13.2              |DONE      |Manifest: NOSIGNATURE
+";
+
+    #[test]
+    fn game_and_loader_frames_are_never_reported_as_suspects() {
+        let analysis = analyze_crash_report(GAME_AND_LOADER_FRAMES_REPORT, "");
+
+        let ids: Vec<&str> = analysis
+            .suspects
+            .iter()
+            .map(|s| s.mod_id.as_str())
+            .collect();
+        assert_eq!(ids, ["utilitix"]);
+        assert_eq!(
+            analysis
+                .stated()
+                .map(|s| s.mod_id.as_str())
+                .collect::<Vec<_>>(),
+            ["utilitix"]
+        );
+    }
+
+    #[test]
+    fn a_loading_issue_section_for_the_loader_names_no_suspect() {
+        let report = "---- Minecraft Crash Report ----\n\n\
+-- Mod loading issue for: neoforge --\n\
+Details:\n\
+\tFailure message: NeoForge has failed to load correctly\n";
+        let analysis = analyze_crash_report(report, "");
+
+        assert!(analysis.is_empty());
+    }
+
+    #[test]
+    fn a_frame_in_a_mod_is_still_attributed_when_the_game_also_appears() {
+        let analysis = analyze_crash_report(GAME_AND_LOADER_FRAMES_REPORT, "");
+
+        let found = suspect(&analysis, "utilitix");
+        assert_eq!(found.reason, SuspectReason::InFailingFrames);
+        assert_eq!(found.jar.as_deref(), Some("utilitix-1.21.1-1.13.2.jar"));
     }
 
     #[test]
