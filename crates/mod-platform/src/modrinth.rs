@@ -198,7 +198,9 @@ impl ModProviderApi for ModrinthProvider {
         let annotated =
             futures_util::stream::iter(response.hits.into_iter().map(|hit| async move {
                 let project = mapping::hit_project(hit);
-                let versions = self.versions(&project.id, target, reporter, cancel).await;
+                let versions = self
+                    .project_versions(&project.id, target, reporter, cancel)
+                    .await;
                 (project, versions)
             }))
             .buffered(MAX_CONCURRENT_PROJECT_LOOKUPS)

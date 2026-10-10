@@ -193,18 +193,19 @@ async fn two_pages(server: &MockServer) {
         .mount(server)
         .await;
 
-    // One shared file listing for every project above: identity is not
-    // cross-checked on this endpoint, only on the exact-file one, so a single
-    // compatible fixture file is enough to let each project annotate.
-    let files = format!(
-        r#"{{"data":[{file}],"pagination":{{"index":0,"pageSize":50,"resultCount":1,"totalCount":1}}}}"#,
-        file = file_document(server, 9_000_000, 2001, "Fixture", 1),
-    );
-    Mock::given(method("GET"))
-        .and(path_regex(r"^/v1/mods/\d+/files$"))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(files, "application/json"))
-        .mount(server)
-        .await;
+    // Each project above lists one compatible file of its own, so every one of
+    // them can annotate.
+    for project in 2001..=2006_u32 {
+        let files = format!(
+            r#"{{"data":[{file}],"pagination":{{"index":0,"pageSize":50,"resultCount":1,"totalCount":1}}}}"#,
+            file = file_document(server, 9_000_000 + project, project, "Fixture", 1),
+        );
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/mods/{project}/files")))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(files, "application/json"))
+            .mount(server)
+            .await;
+    }
 }
 
 /// A raw page whose every project fails class confirmation, so nothing
@@ -1212,5 +1213,72 @@ async fn several_projects_are_asked_about_in_one_request() {
         projects
             .iter()
             .all(|project| project.provider == ModProvider::CurseForge)
+    );
+}
+
+#[tokio::test]
+async fn a_file_listing_leaves_out_files_owned_by_another_project() {
+    let server = MockServer::start().await;
+    serve_categories(&server).await;
+    let foreign_project = JEI_PROJECT + 1;
+    let body = format!(
+        r#"{{"data":[{foreign},{own}],"pagination":{{"index":0,"pageSize":50,"resultCount":2,"totalCount":2}}}}"#,
+        foreign = file_document(&server, JEI_FILE + 1, foreign_project, "Foreign 9.9.9", 1),
+        own = file_document(&server, JEI_FILE, JEI_PROJECT, "JEI 15.2.0.27", 1),
+    );
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/v1/mods/\d+/files$"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+        .mount(&server)
+        .await;
+
+    let versions = provider_against(&server, Some(FAKE_KEY))
+        .project_versions(
+            &JEI_PROJECT.to_string(),
+            &target(LoaderKind::NeoForge),
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("a file listing");
+
+    let ids: Vec<&str> = versions.iter().map(|version| version.id.as_str()).collect();
+    assert_eq!(ids, vec![JEI_FILE.to_string()]);
+}
+
+#[tokio::test]
+async fn a_search_hit_never_offers_a_file_owned_by_another_project() {
+    let server = MockServer::start().await;
+    // Mounted before the shared catalog so this listing answers: the only file
+    // it carries belongs to a different project.
+    let body = format!(
+        r#"{{"data":[{foreign}],"pagination":{{"index":0,"pageSize":50,"resultCount":1,"totalCount":1}}}}"#,
+        foreign = file_document(&server, JEI_FILE + 1, JEI_PROJECT + 1, "Foreign 9.9.9", 1),
+    );
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/v1/mods/\d+/files$"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+        .mount(&server)
+        .await;
+    catalog(&server).await;
+
+    let results = provider_against(&server, Some(FAKE_KEY))
+        .search(
+            &target(LoaderKind::NeoForge),
+            &ModSearchQuery::new("jei"),
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("a search");
+
+    assert!(
+        results.hits.is_empty(),
+        "a project with no file of its own for this instance is not offered: {:?}",
+        results
+            .hits
+            .iter()
+            .map(|hit| hit.best_version.as_ref().map(|version| version.id.clone()))
+            .collect::<Vec<_>>()
     );
 }

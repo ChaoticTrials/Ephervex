@@ -880,22 +880,16 @@ impl<'a> Resolver<'a> {
     }
 
     /// A project's candidate versions, limited to releases that project owns.
-    ///
-    /// An entry owned by another project would put that project's artifact and
-    /// dependencies under this project's identity.
     async fn versions(&self, project_id: &str) -> ModPlatformResult<Vec<ModVersionInfo>> {
-        let mut versions = self
-            .request
+        self.request
             .provider
-            .versions(
+            .project_versions(
                 project_id,
                 self.request.target,
                 self.request.reporter,
                 self.request.cancel,
             )
-            .await?;
-        versions.retain(|version| version.project_id == project_id);
-        Ok(versions)
+            .await
     }
 
     /// The version with exactly this id.

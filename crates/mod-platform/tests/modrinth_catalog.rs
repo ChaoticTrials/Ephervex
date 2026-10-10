@@ -1268,3 +1268,90 @@ async fn a_project_that_does_not_state_its_type_is_refused_on_both_lookup_paths(
         );
     }
 }
+
+/// The fits fixture with its newest release reported under another project, as
+/// a malformed or confused upstream answer would.
+fn fits_versions_with_a_foreign_newest_release() -> String {
+    let mut versions: serde_json::Value =
+        serde_json::from_str(&fixture("versions-fits.json")).expect("fixture is JSON");
+    let foreign = versions
+        .as_array_mut()
+        .and_then(|all| all.iter_mut().find(|version| version["id"] == "FITSNEW1"))
+        .expect("the newest release is in the fixture");
+    foreign["project_id"] = serde_json::json!("OTHERPROJ");
+    versions.to_string()
+}
+
+async fn catalog_with_a_foreign_newest_release() -> Catalog {
+    Catalog::start()
+        .await
+        .serving("/v2/search", fixture("search-mods.json"))
+        .await
+        .serving(
+            "/v2/project/FITSPROJ/version",
+            fits_versions_with_a_foreign_newest_release(),
+        )
+        .await
+        .serving("/v2/project/OLDPROJ/version", fixture("versions-old.json"))
+        .await
+        .serving(
+            "/v2/project/SPLITPROJ/version",
+            fixture("versions-split.json"),
+        )
+        .await
+}
+
+#[tokio::test]
+async fn a_version_listing_leaves_out_releases_owned_by_another_project() {
+    let catalog = catalog_with_a_foreign_newest_release().await;
+
+    let versions = catalog
+        .provider
+        .project_versions(
+            "FITSPROJ",
+            &target(),
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("versions");
+
+    let ids: Vec<&str> = versions.iter().map(|version| version.id.as_str()).collect();
+    assert!(
+        !ids.contains(&"FITSNEW1"),
+        "the release another project owns is not listed: {ids:?}"
+    );
+    assert!(ids.contains(&"FITSOLD1"));
+    assert!(
+        versions
+            .iter()
+            .all(|version| version.project_id == "FITSPROJ")
+    );
+}
+
+#[tokio::test]
+async fn a_search_hit_never_offers_a_release_owned_by_another_project() {
+    let catalog = catalog_with_a_foreign_newest_release().await;
+
+    let results = catalog
+        .provider
+        .search(
+            &target(),
+            &ModSearchQuery::new("test"),
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("search");
+
+    let hit = results
+        .hits
+        .iter()
+        .find(|hit| hit.project.id == "FITSPROJ")
+        .expect("the project still has an installable release");
+    assert_eq!(
+        hit.best_version.as_ref().expect("a version").id,
+        "FITSOLD1",
+        "the foreign newer release is not this project's"
+    );
+}

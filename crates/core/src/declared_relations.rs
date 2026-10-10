@@ -297,7 +297,7 @@ impl App {
                 continue;
             }
             answer.availability = match provider
-                .versions(project_id, target, reporter, cancel)
+                .project_versions(project_id, target, reporter, cancel)
                 .await
             {
                 Ok(versions) => newest_compatible(&versions, target, loader_name).map_or(
@@ -671,6 +671,39 @@ mod tests {
             }
         );
         assert!(!answers[SECOND_DECLARED].availability.is_installable());
+    }
+
+    #[tokio::test]
+    async fn a_release_owned_by_another_project_does_not_make_a_declared_project_installable() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let server = MockServer::start().await;
+        serve_project_classes(&server).await;
+        serve_batch(
+            &server,
+            &[
+                (FIRST_DECLARED, "Absent Library"),
+                (SECOND_DECLARED, "Absent Extra"),
+            ],
+        )
+        .await;
+        // The listing for the first project carries only a release the second
+        // project owns.
+        serve_files(
+            &server,
+            FIRST_DECLARED,
+            &file_document(&server, SECOND_DECLARED, 5002),
+        )
+        .await;
+        serve_files(&server, SECOND_DECLARED, "").await;
+        let (app, host, path) = instance_declaring_two_absent_projects(base.path(), &server);
+
+        let answers = declared(&app, host, &path).await;
+
+        assert_eq!(
+            answers[FIRST_DECLARED].availability,
+            ProjectAvailability::NoCompatibleRelease
+        );
+        assert!(!answers[FIRST_DECLARED].availability.is_installable());
     }
 
     #[tokio::test]

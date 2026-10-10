@@ -508,7 +508,7 @@ impl App {
         let loader = ephervex_mod_platform::loader_name_for(provider, &instance_target)?;
         let project = provider.project(project_id, reporter, cancel).await?;
         let versions: Vec<_> = provider
-            .versions(&project.id, &instance_target, reporter, cancel)
+            .project_versions(&project.id, &instance_target, reporter, cancel)
             .await?;
 
         let newest = newest_compatible(&versions, &instance_target, loader).map(|it| it.id);

@@ -72,8 +72,9 @@ pub trait ModProviderApi: std::fmt::Debug + Send + Sync {
     /// its own API for the release and loader in hand, at the cost of having
     /// nothing left to explain an incompatible version with.
     ///
-    /// Every version returned belongs to `project_id`; the resolver drops any
-    /// that does not.
+    /// `project_id` is the provider's own id for the project, not a slug, and
+    /// an implementation may return entries it did not check belong to it.
+    /// Callers that show or act on the list use [`Self::project_versions`].
     async fn versions(
         &self,
         project_id: &str,
@@ -81,6 +82,23 @@ pub trait ModProviderApi: std::fmt::Debug + Send + Sync {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> ModPlatformResult<Vec<ModVersionInfo>>;
+
+    /// [`Self::versions`], limited to releases `project_id` owns.
+    ///
+    /// An entry owned by another project would put that project's artifact and
+    /// dependencies under this project's identity, so every list that is shown
+    /// or resolved from goes through here.
+    async fn project_versions(
+        &self,
+        project_id: &str,
+        target: &InstanceTarget,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> ModPlatformResult<Vec<ModVersionInfo>> {
+        let mut versions = self.versions(project_id, target, reporter, cancel).await?;
+        versions.retain(|version| version.project_id == project_id);
+        Ok(versions)
+    }
 
     /// Several projects by id, in one request where the provider allows it.
     ///

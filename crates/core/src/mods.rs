@@ -1193,7 +1193,7 @@ impl App {
         let cancel = CancellationToken::new();
         let project: ModProject = provider.project(reference, &reporter, &cancel).await?;
         let versions = provider
-            .versions(&project.id, &target, &reporter, &cancel)
+            .project_versions(&project.id, &target, &reporter, &cancel)
             .await?;
 
         let default_version =

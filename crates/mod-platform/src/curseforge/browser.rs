@@ -115,7 +115,8 @@ impl CurseForgeProvider {
             })
     }
 
-    /// One project's compatible files, already narrowed to the target.
+    /// One project's compatible files, already narrowed to the target and
+    /// limited to files that project owns.
     async fn compatible_files(
         &self,
         operation: &CurseForgeOperation<'_>,
@@ -123,12 +124,15 @@ impl CurseForgeProvider {
         target: &InstanceTarget,
         cancel: &CancellationToken,
     ) -> ModPlatformResult<Vec<ModVersionInfo>> {
-        operation
+        let owner = project.to_string();
+        let mut versions: Vec<ModVersionInfo> = operation
             .project_files(project, &target.minecraft_version, target.loader, cancel)
             .await?
             .into_iter()
             .map(|document| mapping::version(document, &self.hosts))
-            .collect()
+            .collect::<ModPlatformResult<_>>()?;
+        versions.retain(|version| version.project_id == owner);
+        Ok(versions)
     }
 }
 
