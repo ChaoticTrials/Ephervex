@@ -7293,11 +7293,8 @@ fn spawn_launch(
             let killing = Arc::clone(&cancellations);
             // Keyed by the launch rather than by the instance: one instance can
             // hold two, and a single key would let stopping either stop both.
-            hold_cancellation(
-                &killing,
-                launch_key(instance, additional.as_deref()),
-                &cancel,
-            );
+            let cancellation_key = launch_key(instance, additional.as_deref());
+            hold_cancellation(&killing, cancellation_key.clone(), &cancel);
             let event_sender = events.clone();
             let entity_for_events = entity.clone();
             let paths_for_events = paths.clone();
@@ -7355,7 +7352,7 @@ fn spawn_launch(
                     let _ = confirming.await;
                 }
                 report_launch_result(&events, instance, &entity, &observed_operation, &result);
-                release_launch_cancellation(&killing, instance, &observed_operation);
+                release_launch_cancellation(&killing, &cancellation_key, &observed_operation);
                 // Announced only after everything this launch held is
                 // released, so a restart waiting on it cannot start the next
                 // launch while this one still claims the instance.
@@ -8268,7 +8265,7 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
                 if let Ok(mut settled) = settled.lock() {
                     settled.take();
                 }
-                release_launch_cancellation(&cancellations, client, &launch_operation);
+                release_launch_cancellation(&cancellations, &client.to_string(), &launch_operation);
                 // As for a plain launch: announced only once everything this
                 // one held is released, so a restart cannot start early.
                 let entry = registered.lock().ok().and_then(|mut entry| entry.take());
@@ -8607,16 +8604,17 @@ fn hold_cancellation(cancellations: &CancellationRegistry, key: String, token: &
 
 /// Drops the token a launch was filed under, by both of its keys.
 ///
-/// A launch is addressable twice: by its instance, which is what a card's Kill
-/// Instance action knows, and by the operation id it turns out to have, which is
-/// what the activity list's Cancel knows. Both go when the launch ends.
+/// A launch is addressable twice: by the key it was held under, which is what a
+/// card's Kill Instance action knows, and by the operation id it turns out to
+/// have, which is what the activity list's Cancel knows. Both go when the launch
+/// ends, and only those: an instance's other launch keeps its own.
 fn release_launch_cancellation(
     cancellations: &CancellationRegistry,
-    instance: InstanceId,
+    key: &str,
     observed_operation: &Mutex<Option<String>>,
 ) {
     if let Ok(mut entries) = cancellations.lock() {
-        entries.remove(&instance.to_string());
+        entries.remove(key);
         if let Ok(observed) = observed_operation.lock()
             && let Some(operation) = observed.as_deref()
         {
@@ -12949,5 +12947,57 @@ mod tests {
                 "unexpected event: {event:?}"
             );
         }
+    }
+
+    #[test]
+    fn ending_an_alongside_launch_keeps_the_primary_launch_cancellation() {
+        let instance = ephervex_model::InstanceId::new();
+        let cancellations = CancellationRegistry::default();
+        let primary = CancellationToken::new();
+        let alongside = CancellationToken::new();
+        let primary_key = launch_key(instance, None);
+        let alongside_key = launch_key(instance, Some("second"));
+        hold_cancellation(&cancellations, primary_key.clone(), &primary);
+        hold_cancellation(&cancellations, alongside_key.clone(), &alongside);
+        hold_cancellation(
+            &cancellations,
+            "alongside-operation".to_string(),
+            &alongside,
+        );
+
+        release_launch_cancellation(
+            &cancellations,
+            &alongside_key,
+            &Mutex::new(Some("alongside-operation".to_string())),
+        );
+
+        let entries = cancellations.lock().expect("registry lock");
+        assert!(entries.contains_key(&primary_key));
+        assert!(!entries.contains_key(&alongside_key));
+        assert!(!entries.contains_key("alongside-operation"));
+    }
+
+    #[test]
+    fn ending_the_primary_launch_keeps_an_alongside_launch_cancellation() {
+        let instance = ephervex_model::InstanceId::new();
+        let cancellations = CancellationRegistry::default();
+        let primary = CancellationToken::new();
+        let alongside = CancellationToken::new();
+        let primary_key = launch_key(instance, None);
+        let alongside_key = launch_key(instance, Some("second"));
+        hold_cancellation(&cancellations, primary_key.clone(), &primary);
+        hold_cancellation(&cancellations, alongside_key.clone(), &alongside);
+        hold_cancellation(&cancellations, "primary-operation".to_string(), &primary);
+
+        release_launch_cancellation(
+            &cancellations,
+            &primary_key,
+            &Mutex::new(Some("primary-operation".to_string())),
+        );
+
+        let entries = cancellations.lock().expect("registry lock");
+        assert!(!entries.contains_key(&primary_key));
+        assert!(!entries.contains_key("primary-operation"));
+        assert!(entries.contains_key(&alongside_key));
     }
 }
