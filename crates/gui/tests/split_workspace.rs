@@ -9,15 +9,16 @@ mod support;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use ephervex_gui::presentation;
 use ephervex_gui::ui::{
-    AppWindow, GuiI18n, HostView, InstanceRow, ServerRow, Theme, WorkspaceHostChoice,
-    WorkspaceLinkedChoice, WorkspacePaneRow,
+    AppWindow, GuiI18n, HostView, InstanceRow, PropertyRules, ServerRow, Theme,
+    WorkspaceHostChoice, WorkspaceLinkedChoice, WorkspacePaneRow,
 };
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{
     AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions,
 };
-use slint::platform::{PointerEventButton, WindowEvent};
+use slint::platform::{Key, PointerEventButton, WindowEvent};
 use slint::{
     ComponentHandle, LogicalPosition, LogicalSize, Model, ModelRc, PhysicalSize, VecModel,
 };
@@ -656,6 +657,137 @@ fn save_properties(ui: &AppWindow, pane: i32) -> (String, String, String, bool) 
     .expect("the pane's Save button")
     .invoke_accessible_default_action();
     saved.take().expect("Save reported the form")
+}
+
+/// Answers the Properties form's choice rules the way the controller does.
+fn install_choice_rules(ui: &AppWindow) {
+    let rules = ui.global::<PropertyRules>();
+    rules.on_choice_model(|key, stored| {
+        let entries: Vec<slint::SharedString> = presentation::property_choice_model(&key, &stored)
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        ModelRc::new(VecModel::from(entries))
+    });
+    rules.on_choice_index(|key, stored| presentation::property_choice_index(&key, &stored));
+    rules.on_choice_value(|key, stored, picked| {
+        presentation::property_choice_value(&key, &stored, &picked).into()
+    });
+}
+
+/// A window showing one server's Properties form, whose stored difficulty and
+/// game mode are the given text.
+fn properties_form(difficulty: &str, gamemode: &str) -> AppWindow {
+    let ui = window();
+    install_choice_rules(&ui);
+    let mut host = properties_host("aaaa", "A", "25565", true);
+    host.property_difficulty = difficulty.into();
+    host.property_gamemode = gamemode.into();
+    support::show(
+        &ui,
+        0,
+        vec![host],
+        vec![placed(1, 0, "Properties", 0, 0, false)],
+    );
+    settle(&ui);
+    ui
+}
+
+/// The difficulty and game mode combo boxes, in the order the form lays them out.
+fn choice_boxes(ui: &AppWindow) -> Vec<ElementHandle> {
+    let mut boxes: Vec<ElementHandle> = ElementHandle::find_by_element_type_name(ui, "ComboBox")
+        .filter(|element| element.accessible_role() == Some(AccessibleRole::Combobox))
+        .collect();
+    boxes.sort_by(|a, b| {
+        let (a, b) = (a.absolute_position(), b.absolute_position());
+        (a.y, a.x)
+            .partial_cmp(&(b.y, b.x))
+            .expect("finite positions")
+    });
+    // The network row's access box comes first.
+    boxes.split_off(boxes.len().saturating_sub(2))
+}
+
+fn shown_choices(ui: &AppWindow) -> Vec<String> {
+    choice_boxes(ui)
+        .iter()
+        .map(|element| element.accessible_value().expect("a value").to_string())
+        .collect()
+}
+
+/// Moves a combo box's selection down by the given number of entries from its
+/// open popup, the way the arrow keys do, and closes the popup.
+fn pick_choice_down(ui: &AppWindow, which: usize, steps: usize) {
+    choice_boxes(ui)[which].invoke_accessible_expand_action();
+    settle(ui);
+    for key in std::iter::repeat_n(Key::DownArrow, steps).chain([Key::Return]) {
+        ui.window()
+            .dispatch_event(WindowEvent::KeyPressed { text: key.into() });
+        ui.window()
+            .dispatch_event(WindowEvent::KeyReleased { text: key.into() });
+    }
+    settle(ui);
+}
+
+/// The difficulty and game mode a pane's Properties form saves when Save is pressed.
+fn save_choices(ui: &AppWindow, pane: i32) -> (String, String) {
+    let saved = Rc::new(RefCell::new(None));
+    let sink = Rc::clone(&saved);
+    ui.on_save_server_properties(move |_, _, _, difficulty, gamemode, _, _, _, _, _, _, _| {
+        *sink.borrow_mut() = Some((difficulty.to_string(), gamemode.to_string()));
+    });
+    in_pane(
+        ui,
+        pane,
+        &lookup("gui-save-changes"),
+        AccessibleRole::Button,
+    )
+    .first()
+    .expect("the pane's Save button")
+    .invoke_accessible_default_action();
+    saved.take().expect("Save reported the form")
+}
+
+/// A server that stores difficulty and game mode as numbers has them shown as
+/// the names they stand for, saves the numbers unchanged, and keeps them
+/// numbers when another name is picked.
+#[test]
+fn the_properties_form_shows_and_saves_numeric_choice_values_as_numbers() {
+    let ui = properties_form("1", "0");
+    assert_eq!(shown_choices(&ui), ["easy", "survival"]);
+    assert_eq!(save_choices(&ui, 1), ("1".to_owned(), "0".to_owned()));
+
+    pick_choice_down(&ui, 0, 2);
+    pick_choice_down(&ui, 1, 1);
+    assert_eq!(shown_choices(&ui), ["hard", "creative"]);
+    assert_eq!(save_choices(&ui, 1), ("3".to_owned(), "1".to_owned()));
+}
+
+/// A stored value no name stands for is shown as it is and saved as it is,
+/// until another entry is picked.
+#[test]
+fn the_properties_form_shows_and_saves_an_unrepresentable_choice_value_as_it_is() {
+    let ui = properties_form("hardcore", "7");
+    assert_eq!(shown_choices(&ui), ["hardcore", "7"]);
+    assert_eq!(
+        save_choices(&ui, 1),
+        ("hardcore".to_owned(), "7".to_owned())
+    );
+
+    pick_choice_down(&ui, 0, 2);
+    assert_eq!(shown_choices(&ui)[0], "easy");
+    assert_eq!(save_choices(&ui, 1).0, "easy");
+}
+
+#[test]
+fn the_properties_form_saves_named_choice_values_as_names() {
+    let ui = properties_form("normal", "survival");
+    assert_eq!(shown_choices(&ui), ["normal", "survival"]);
+    pick_choice_down(&ui, 1, 3);
+    assert_eq!(
+        save_choices(&ui, 1),
+        ("normal".to_owned(), "spectator".to_owned())
+    );
 }
 
 /// A pane's Settings form shows and saves the host the pane shows, also when

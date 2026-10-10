@@ -14,6 +14,12 @@ export global PropertyRules {
     // (address, whether a custom address is in use)
     pure callback address-error(string, bool) -> string;
     pure callback players-error(string) -> string;
+    // (property key, stored value): the entries a choice control lists, and
+    // which of them shows the stored value
+    pure callback choice-model(string, string) -> [string];
+    pure callback choice-index(string, string) -> int;
+    // (property key, stored value, entry picked): the value to save
+    pure callback choice-value(string, string, string) -> string;
 }
 
 // The name a server takes when nobody types one, derived by the same rules

@@ -5424,6 +5424,17 @@ fn register_server_property_actions(ui: &AppWindow, commands: &Sender<Command>) 
     rules.on_port_error(|port| validate_port(&port).message.into());
     rules.on_address_error(|address, custom| validate_ip(&address, custom).message.into());
     rules.on_players_error(|players| validate_player_count(&players).into());
+    rules.on_choice_model(|key, stored| {
+        let entries: Vec<SharedString> = presentation::property_choice_model(&key, &stored)
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        ModelRc::new(VecModel::from(entries))
+    });
+    rules.on_choice_index(|key, stored| presentation::property_choice_index(&key, &stored));
+    rules.on_choice_value(|key, stored, picked| {
+        presentation::property_choice_value(&key, &stored, &picked).into()
+    });
 
     let sender = commands.clone();
     let weak = ui.as_weak();
@@ -5445,16 +5456,16 @@ fn register_server_property_actions(ui: &AppWindow, commands: &Sender<Command>) 
             };
             // The form shows each field's problem as it is typed; a save with
             // one left is refused here all the same.
-            let max_players_error = validate_player_count(&max_players);
-            let max_players_valid = max_players_error.is_empty();
-            let difficulty_valid =
-                ["peaceful", "easy", "normal", "hard"].contains(&difficulty.as_str());
-            let gamemode_valid =
-                ["survival", "creative", "adventure", "spectator"].contains(&gamemode.as_str());
             let Ok(network) = parse_network(&access, &address, online_mode, &port) else {
                 return;
             };
-            if !max_players_valid || !difficulty_valid || !gamemode_valid {
+            let Some(values) = server_property_values(
+                &motd,
+                &max_players,
+                &difficulty,
+                &gamemode,
+                (allow_flight, pvp, allowlist),
+            ) else {
                 if let Some(ui) = weak.upgrade() {
                     ui.invoke_present_toast(
                         lookup("gui-server-property-values-invalid").into(),
@@ -5462,25 +5473,40 @@ fn register_server_property_actions(ui: &AppWindow, commands: &Sender<Command>) 
                     );
                 }
                 return;
-            }
+            };
             send(
                 &sender,
                 Command::SaveServerProperties {
                     server,
                     network,
-                    values: vec![
-                        ("motd".to_owned(), motd.into()),
-                        ("max-players".to_owned(), max_players.into()),
-                        ("difficulty".to_owned(), difficulty.into()),
-                        ("gamemode".to_owned(), gamemode.into()),
-                        ("allow-flight".to_owned(), allow_flight.to_string()),
-                        ("pvp".to_owned(), pvp.to_string()),
-                        ("white-list".to_owned(), allowlist.to_string()),
-                    ],
+                    values,
                 },
             );
         },
     );
+}
+
+// Difficulty and game mode are written as the form holds them: the form
+// itself keeps a stored value it has no name for, and no choice here refuses it.
+fn server_property_values(
+    motd: &str,
+    max_players: &str,
+    difficulty: &str,
+    gamemode: &str,
+    (allow_flight, pvp, allowlist): (bool, bool, bool),
+) -> Option<Vec<(String, String)>> {
+    if !validate_player_count(max_players).is_empty() {
+        return None;
+    }
+    Some(vec![
+        ("motd".to_owned(), motd.to_owned()),
+        ("max-players".to_owned(), max_players.to_owned()),
+        ("difficulty".to_owned(), difficulty.to_owned()),
+        ("gamemode".to_owned(), gamemode.to_owned()),
+        ("allow-flight".to_owned(), allow_flight.to_string()),
+        ("pvp".to_owned(), pvp.to_string()),
+        ("white-list".to_owned(), allowlist.to_string()),
+    ])
 }
 
 fn validate_player_count(value: &str) -> String {
@@ -13234,6 +13260,18 @@ mod tests {
         assert!(!validate_player_count("0").is_empty());
         assert!(!validate_player_count("2.5").is_empty());
         assert!(!validate_player_count("many").is_empty());
+    }
+
+    #[test]
+    fn saving_keeps_a_difficulty_and_game_mode_the_form_has_no_name_for() {
+        for (difficulty, gamemode) in [("1", "0"), ("hardcore", "7"), ("normal", "survival")] {
+            let values =
+                server_property_values("A", "20", difficulty, gamemode, (false, true, false))
+                    .expect("a port-only save is not refused");
+            assert!(values.contains(&("difficulty".to_owned(), difficulty.to_owned())));
+            assert!(values.contains(&("gamemode".to_owned(), gamemode.to_owned())));
+        }
+        assert!(server_property_values("A", "many", "1", "0", (false, true, false)).is_none());
     }
 
     #[test]
