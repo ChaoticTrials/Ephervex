@@ -907,6 +907,111 @@ async fn a_recognized_file_carries_what_its_version_declares() {
     );
 }
 
+/// A dependency may give a release and no project. What a recipe records has to
+/// say which project that is, so the release's owner is read from the release.
+#[tokio::test]
+async fn a_version_only_dependency_is_given_the_project_its_release_belongs_to() {
+    let catalog = Catalog::start().await;
+    let feature = "a".repeat(40);
+    Mock::given(method("POST"))
+        .and(path("/v2/version_files"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+            r#"{{"{feature}":{{"id":"vFeature","project_id":"FEATURE1","date_published":"2024-01-01T00:00:00Z","files":[],"dependencies":[{{"version_id":"vLibrary","dependency_type":"required"}},{{"version_id":"vRival","file_name":"rival.jar","dependency_type":"incompatible"}},{{"version_id":"vGone","dependency_type":"optional"}}]}}}}"#
+        )))
+        .mount(&catalog.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/versions"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"[{"id":"vLibrary","project_id":"LIBRARY1","date_published":"2024-01-01T00:00:00Z","files":[]},{"id":"vRival","project_id":"RIVAL1","date_published":"2024-01-01T00:00:00Z","files":[]}]"#,
+        ))
+        .mount(&catalog.server)
+        .await;
+
+    let digests = vec![Hash::new(HashAlgorithm::Sha1, &feature).expect("sha1")];
+    let recognized = catalog
+        .provider
+        .recognize(&digests, &CancellationToken::new())
+        .await
+        .expect("the lookup answers");
+
+    assert_eq!(
+        recognized.get(&feature).expect("recognized").dependencies,
+        [
+            ModDependency {
+                kind: ModRelationKind::Required,
+                project_id: Some("LIBRARY1".to_owned()),
+                version_id: Some("vLibrary".to_owned()),
+                file_name: None,
+            },
+            ModDependency {
+                kind: ModRelationKind::Incompatible,
+                project_id: Some("RIVAL1".to_owned()),
+                version_id: Some("vRival".to_owned()),
+                file_name: Some("rival.jar".to_owned()),
+            },
+            ModDependency {
+                kind: ModRelationKind::Optional,
+                project_id: None,
+                version_id: Some("vGone".to_owned()),
+                file_name: None,
+            },
+        ],
+        "a release the catalog does not answer for is left as stated"
+    );
+    let batches: Vec<_> = catalog
+        .requests()
+        .await
+        .into_iter()
+        .filter(|request| request.url.path() == "/v2/versions")
+        .collect();
+    assert_eq!(batches.len(), 1, "every pinned release is one request");
+}
+
+/// The same derivation applies to releases asked for by id, which is how a
+/// refresh and a mod listing read what a release requires.
+#[tokio::test]
+async fn releases_asked_for_by_id_state_the_project_of_a_version_only_dependency() {
+    let catalog = Catalog::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/versions"))
+        .and(query_param("ids", r#"["vFeature"]"#))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"[{"id":"vFeature","project_id":"FEATURE1","name":"Feature","version_number":"1","version_type":"release","game_versions":["1.20.1"],"loaders":["forge"],"date_published":"2024-01-01T00:00:00Z","files":[{"hashes":{"sha1":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"url":"https://cdn.modrinth.com/data/F/versions/vFeature/feature.jar","filename":"feature.jar","primary":true,"size":1}],"dependencies":[{"version_id":"vLibrary","dependency_type":"required"}]}]"#,
+        ))
+        .mount(&catalog.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/versions"))
+        .and(query_param("ids", r#"["vLibrary"]"#))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"[{"id":"vLibrary","project_id":"LIBRARY1","name":"Library","version_number":"1","version_type":"release","game_versions":["1.20.1"],"loaders":["forge"],"date_published":"2024-01-01T00:00:00Z","files":[{"hashes":{"sha1":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"url":"https://cdn.modrinth.com/data/L/versions/vLibrary/library.jar","filename":"library.jar","primary":true,"size":1}],"dependencies":[]}]"#,
+        ))
+        .mount(&catalog.server)
+        .await;
+
+    let versions = catalog
+        .provider
+        .versions_by_id(
+            &["vFeature".to_owned()],
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("the lookup answers");
+
+    assert_eq!(versions.len(), 1);
+    assert_eq!(
+        versions[0].dependencies,
+        [ModDependency {
+            kind: ModRelationKind::Required,
+            project_id: Some("LIBRARY1".to_owned()),
+            version_id: Some("vLibrary".to_owned()),
+            file_name: None,
+        }]
+    );
+}
+
 /// The answer is about specific bytes on disk and is asked once per server, so
 /// caching it would only risk naming a release for a file that has since gone.
 #[tokio::test]

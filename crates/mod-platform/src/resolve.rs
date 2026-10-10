@@ -445,6 +445,9 @@ struct Resolver<'a> {
     /// Optional selections that have been honored, so unmatched ones can be
     /// reported.
     honored_optional: BTreeSet<String>,
+    /// The project each release looked up for a version-only pin belongs to,
+    /// so the plan's releases can state which project such a relation names.
+    pinned_owners: BTreeMap<String, String>,
 }
 
 impl<'a> Resolver<'a> {
@@ -461,6 +464,7 @@ impl<'a> Resolver<'a> {
             embedded: Vec::new(),
             warnings: Vec::new(),
             honored_optional: BTreeSet::new(),
+            pinned_owners: BTreeMap::new(),
         }
     }
 
@@ -862,6 +866,12 @@ impl<'a> Resolver<'a> {
                 .await?
         };
 
+        self.pinned_owners.extend(
+            looked_up
+                .iter()
+                .map(|looked| (looked.id.clone(), looked.project_id.clone())),
+        );
+
         version
             .dependencies
             .iter()
@@ -934,9 +944,13 @@ impl<'a> Resolver<'a> {
                 }
             })?;
             let constraint = self.constraints.get(project_id);
+            let mut version = resolution.version.clone();
+            for dependency in &mut version.dependencies {
+                dependency.name_pinned_project(&self.pinned_owners);
+            }
             let planned = PlannedMod {
                 project,
-                version: resolution.version.clone(),
+                version,
                 origin: constraint.map_or(ModOrigin::RequiredDependency, |it| it.origin),
                 requested_by: constraint
                     .map(|it| it.requesters.iter().cloned().collect())
@@ -3348,6 +3362,30 @@ mod tests {
         let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
         assert_eq!(ids(&plan.dependencies), vec!["LIB"]);
         assert_eq!(plan.dependencies[0].version.id, "lib-v1");
+    }
+
+    #[tokio::test]
+    async fn a_planned_release_states_the_project_of_a_relation_that_only_pinned_a_version() {
+        let catalog = Catalog::default()
+            .with(
+                "ROOT",
+                vec![pins(
+                    compatible("v1", "ROOT"),
+                    ModRelationKind::Required,
+                    "lib-v1",
+                )],
+            )
+            .with("LIB", vec![compatible("lib-v1", "LIB")]);
+
+        let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+        let declared = &plan.root.version.dependencies;
+        assert_eq!(declared.len(), 1);
+        assert_eq!(declared[0].project_id.as_deref(), Some("LIB"));
+        assert_eq!(
+            declared[0].version_id.as_deref(),
+            Some("lib-v1"),
+            "the pin itself is kept beside the project it was derived for"
+        );
     }
 
     #[tokio::test]

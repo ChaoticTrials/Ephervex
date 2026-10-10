@@ -2254,6 +2254,11 @@ pub(crate) fn recipe_entry_for(
 /// only a jar: matching one of those to an installed file is a file-name
 /// comparison rather than a project lookup, which is still an answer. The only
 /// relation left out is one that names nothing to match against at all.
+///
+/// A relation that pinned a release without naming its project is recorded
+/// with the project that release belongs to, which the catalog layer states
+/// before the release reaches here (ADR 0034). One whose release the catalog
+/// would not answer for has no project to record and keeps only a jar name.
 pub(crate) fn recipe_relations(dependencies: &[ModDependency]) -> Vec<RecipeRelation> {
     dependencies
         .iter()
@@ -3498,6 +3503,30 @@ mod tests {
         let hand = &store.read_recipe().expect("recipe").files[1];
         assert_eq!(hand.client, SideRequirement::Required);
         assert_eq!(hand.server, SideRequirement::Unknown);
+    }
+
+    /// A release pin whose project the catalog layer named is recorded as that
+    /// project at that release, which is the shape the version-change guard and
+    /// incompatibility matching read.
+    #[test]
+    fn a_pin_with_its_derived_project_is_recorded_as_a_release_of_that_project() {
+        let relations = recipe_relations(&[ModDependency {
+            kind: ModRelationKind::Required,
+            project_id: Some("LIB".to_owned()),
+            version_id: Some("lib-v1".to_owned()),
+            file_name: None,
+        }]);
+
+        assert_eq!(
+            relations,
+            [RecipeRelation {
+                kind: ModRelationKind::Required,
+                target: RelationTarget::Project {
+                    project_id: "LIB".to_owned(),
+                    version_id: Some("lib-v1".to_owned()),
+                },
+            }]
+        );
     }
 
     /// The release's declared relations arrive with the answer that named it, so

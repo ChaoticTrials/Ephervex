@@ -71,6 +71,14 @@ alone, because falling back to a file name there would match a file the catalog
 never mentioned. A relation that names neither cannot be matched against anything
 and is not representable.
 
+**A pinned release is recorded with its project.** Modrinth lets a relation give
+a release and no project. The release itself states which project owns it, so
+the catalog layer reads that and the relation is recorded as
+`RelationTarget::Project` carrying the owner and the pin. A new target variant
+was rejected because an older build could not parse it (ADR 0033). A release the
+catalog does not answer for has no project to record: the relation keeps only a
+jar name where it gave one, and is otherwise left out.
+
 **The field is additive.** `RECIPE_VERSION` stays 1 (ADR 0033): an absent field
 defaults, so a recipe written by a build that predates this reads correctly and a
 build that predates it reads one written now.

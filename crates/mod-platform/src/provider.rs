@@ -125,6 +125,10 @@ pub trait ModProviderApi: std::fmt::Debug + Send + Sync {
     /// and asking for them one at a time would spend a rate-limit budget on
     /// round trips.
     ///
+    /// A relation in an answer that pinned a release and named no project
+    /// comes back naming the project that release belongs to, where the
+    /// provider can say.
+    ///
     /// Order is not significant and an id may be missing from the answer. The
     /// resolver matches each version to a requested id and ignores the rest.
     async fn versions_by_id(

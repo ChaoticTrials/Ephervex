@@ -35,8 +35,8 @@ use tracing::{instrument, warn};
 
 use crate::error::{ModPlatformError, ModPlatformResult};
 use crate::model::{
-    Compatibility, IncompatibilityReason, InstanceTarget, ModProject, ModSearchHit, ModSearchQuery,
-    ModSearchResults, ModVersionInfo, ProjectBatch, RecognizedFile,
+    Compatibility, IncompatibilityReason, InstanceTarget, ModDependency, ModProject, ModSearchHit,
+    ModSearchQuery, ModSearchResults, ModVersionInfo, ProjectBatch, RecognizedFile,
 };
 use crate::provider::ModProviderApi;
 use crate::resolve::newest_compatible;
@@ -103,7 +103,55 @@ impl ModrinthProvider {
         digests: &[Hash],
         cancel: &CancellationToken,
     ) -> ModPlatformResult<BTreeMap<String, RecognizedFile>> {
-        self.api.version_files(digests, cancel).await
+        let mut recognized = self.api.version_files(digests, cancel).await?;
+        self.name_pinned_projects(
+            recognized
+                .values_mut()
+                .map(|file| &mut file.dependencies)
+                .collect(),
+            &OperationReporter::silent("name-pinned-projects"),
+            cancel,
+        )
+        .await?;
+        Ok(recognized)
+    }
+
+    /// Names the project of every relation that pins only a release.
+    ///
+    /// Modrinth allows a dependency to give a `version_id` and no
+    /// `project_id`. What a recipe records has to say which project that is, so
+    /// the owner is read from the release itself, in one batched request for
+    /// all the lists. A release the catalog does not answer for leaves its
+    /// relation as stated.
+    async fn name_pinned_projects(
+        &self,
+        lists: Vec<&mut Vec<ModDependency>>,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> ModPlatformResult<()> {
+        let mut pinned: Vec<String> = lists
+            .iter()
+            .flat_map(|list| list.iter())
+            .filter(|dependency| dependency.pins_only_a_version())
+            .filter_map(|dependency| dependency.version_id.clone())
+            .collect();
+        pinned.sort_unstable();
+        pinned.dedup();
+        if pinned.is_empty() {
+            return Ok(());
+        }
+
+        let owners: BTreeMap<String, String> = self
+            .api
+            .versions_by_id(&pinned, reporter, cancel)
+            .await?
+            .into_iter()
+            .map(|version| (version.id, version.project_id))
+            .collect();
+        for dependency in lists.into_iter().flat_map(|list| list.iter_mut()) {
+            dependency.name_pinned_project(&owners);
+        }
+        Ok(())
     }
 }
 
@@ -251,7 +299,20 @@ impl ModProviderApi for ModrinthProvider {
             return Ok(Vec::new());
         }
         let raw = self.api.versions_by_id(ids, reporter, cancel).await?;
-        raw.into_iter().map(mapping::version).collect()
+        let mut versions = raw
+            .into_iter()
+            .map(mapping::version)
+            .collect::<ModPlatformResult<Vec<_>>>()?;
+        self.name_pinned_projects(
+            versions
+                .iter_mut()
+                .map(|version| &mut version.dependencies)
+                .collect(),
+            reporter,
+            cancel,
+        )
+        .await?;
+        Ok(versions)
     }
 }
 

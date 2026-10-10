@@ -13,6 +13,7 @@
 //! incompatible version is something a caller can display and refuse to
 //! install - rather than something it silently never sees.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use chrono::{DateTime, Utc};
@@ -208,6 +209,29 @@ pub struct ModDependency {
     pub project_id: Option<String>,
     pub version_id: Option<String>,
     pub file_name: Option<String>,
+}
+
+impl ModDependency {
+    /// Whether this relation pins a release and names no project, so the
+    /// project can only be learned from the release.
+    #[must_use]
+    pub const fn pins_only_a_version(&self) -> bool {
+        self.project_id.is_none() && self.version_id.is_some()
+    }
+
+    /// Names the project of a relation that pinned only a release, from the
+    /// project each release belongs to.
+    ///
+    /// A relation that already names a project, or whose release is not in
+    /// `owners`, is left as stated.
+    pub fn name_pinned_project(&mut self, owners: &BTreeMap<String, String>) {
+        if !self.pins_only_a_version() {
+            return;
+        }
+        if let Some(owner) = self.version_id.as_ref().and_then(|id| owners.get(id)) {
+            self.project_id = Some(owner.clone());
+        }
+    }
 }
 
 /// One version of a project, with the single file this launcher would install.
