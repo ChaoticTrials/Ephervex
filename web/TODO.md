@@ -232,7 +232,9 @@ easy to update, and capture screenshots late.
 - #13 navigation and active-state polish
 - #28 installing server mods from Modrinth and CurseForge
 - #378 sandboxed branding assets and theme packages, #379 the Haunted Pumpkin
-  theme (avoid pinning theme-list screenshots)
+  theme. Avoid fixed theme-list screenshots. During the launcher's Halloween
+  date range, show Halloween screenshots throughout the site and use a matching
+  site theme. Provide a "Disable Halloween theme" control.
 - #17 resource packs, shader packs and datapacks during import
 - #10 cache and storage maintenance
 - #341 clients and servers surviving an Ephervex restart
