@@ -142,6 +142,7 @@ impl LoaderError {
             Self::Canceled => true,
             Self::MetadataUnavailable { source, .. } => source.is_cancellation(),
             Self::Download { source, .. } => source.is_cancellation(),
+            Self::Minecraft(error) => error.is_cancellation(),
             _ => false,
         }
     }
@@ -189,6 +190,13 @@ mod tests {
         };
         assert!(metadata.is_cancellation());
         assert!(download.is_cancellation());
+    }
+
+    #[test]
+    fn a_canceled_vanilla_install_is_a_cancellation_of_the_loader_install() {
+        assert!(
+            LoaderError::Minecraft(ephervex_minecraft::LaunchError::Canceled).is_cancellation()
+        );
     }
 
     #[test]

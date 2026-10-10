@@ -499,7 +499,12 @@ impl VanillaInstaller {
 
         reporter.set_step(Some(format!("{} · assets", plan.version)));
         let assets = self.download_assets(&index, reporter, cancel).await?;
-        let natives_files = unpack_natives(&plan).await?;
+        // Cancellation governs the phases after the downloads too: nothing is
+        // published into the natives store or the launch-visible asset index
+        // once it has been seen.
+        ensure_not_canceled(cancel)?;
+        let natives_files = unpack_natives(&plan, cancel).await?;
+        ensure_not_canceled(cancel)?;
         materialize_verified(&plan.asset_index.path, &plan.asset_index_path).await?;
 
         debug!(
@@ -606,7 +611,10 @@ async fn materialize_verified(source: &Path, destination: &Path) -> LaunchResult
 /// `zip` is a synchronous reader and unpacking is CPU- and disk-bound, so doing
 /// it on the async runtime's worker would stall every other task for the
 /// duration.
-async fn unpack_natives(plan: &InstallationPlan) -> LaunchResult<usize> {
+async fn unpack_natives(
+    plan: &InstallationPlan,
+    cancel: &CancellationToken,
+) -> LaunchResult<usize> {
     if plan.natives.is_empty() {
         // 1.19 onward. The directory is still created: `-Djava.library.path`
         // and LWJGL's extract path both point at it, and LWJGL will not create
@@ -622,9 +630,11 @@ async fn unpack_natives(plan: &InstallationPlan) -> LaunchResult<usize> {
 
     let natives = plan.natives.clone();
     let destination = plan.natives_dir.clone();
+    let cancel = cancel.clone();
     task::spawn_blocking(move || {
         let mut written = 0;
         for planned in &natives {
+            ensure_not_canceled(&cancel)?;
             let report = natives::extract(&planned.artifact.path, &destination, &planned.exclude)?;
             written += report.files.len();
         }
@@ -634,6 +644,13 @@ async fn unpack_natives(plan: &InstallationPlan) -> LaunchResult<usize> {
     .map_err(|error| LaunchError::ProcessLost {
         source: std::io::Error::other(error),
     })?
+}
+
+fn ensure_not_canceled(cancel: &CancellationToken) -> LaunchResult<()> {
+    if cancel.is_cancelled() {
+        return Err(LaunchError::Canceled);
+    }
+    Ok(())
 }
 
 fn request_for(planned: &PlannedArtifact) -> LaunchResult<DownloadRequest> {

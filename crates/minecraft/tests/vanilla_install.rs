@@ -18,13 +18,15 @@
 
 use std::io::Write as _;
 use std::path::Path;
+use std::sync::Arc;
 
 use ephervex_download::{
-    CacheLayout, DownloadManager, DownloaderConfig, HttpConfig, OperationReporter,
+    CacheLayout, DownloadManager, DownloaderConfig, HttpConfig, OperationReporter, ProgressSink,
 };
 use ephervex_minecraft::{
     LaunchError, OsName, Platform, RuleContext, VanillaInstaller, VersionMetadata,
 };
+use ephervex_model::Operation;
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -229,6 +231,22 @@ fn manager() -> DownloadManager {
 
 fn linux() -> RuleContext {
     RuleContext::new(Platform::new(OsName::Linux, "x86_64", "6.8.0"))
+}
+
+/// Cancels the token once the named file is reported as the last of its batch.
+#[derive(Debug)]
+struct CancelOnBatchCompletion {
+    file: &'static str,
+    cancel: CancellationToken,
+}
+
+impl ProgressSink for CancelOnBatchCompletion {
+    fn operation_changed(&self, operation: &Operation) {
+        let batch_done = operation.items.total == Some(operation.items.current);
+        if batch_done && operation.current_step.as_deref() == Some(self.file) {
+            self.cancel.cancel();
+        }
+    }
 }
 
 fn reporter() -> OperationReporter {
@@ -458,6 +476,48 @@ async fn canceling_an_install_is_reported_as_cancellation_rather_than_a_failed_f
         .expect_err("a canceled install does not complete");
 
     assert!(error.is_cancellation(), "{error:?}");
+}
+
+#[tokio::test]
+async fn an_install_canceled_after_its_downloads_publishes_no_natives_or_asset_index() {
+    let server = MockServer::start().await;
+    let fake = Fake::new();
+    let index = Served::new("/1.12.json", fake.asset_index());
+    index.mount(&server).await;
+    fake.mount(&server).await;
+
+    let cache = tempfile::tempdir().expect("temp dir");
+    let installer = installer(cache.path(), &server);
+    let metadata = VersionMetadata::parse(&fake.legacy_document(&server, &index)).expect("parses");
+    let plan = installer.plan(&metadata, &linux()).expect("plans");
+    let natives_dir = plan.natives_dir.clone();
+    let asset_index_path = plan.asset_index_path.clone();
+
+    let cancel = CancellationToken::new();
+    let sink = Arc::new(CancelOnBatchCompletion {
+        file: "minecraft/sounds/a.ogg",
+        cancel: cancel.clone(),
+    });
+    let reporter = OperationReporter::new("vanilla-install", true, sink);
+
+    let error = installer
+        .install(plan, &reporter, &cancel)
+        .await
+        .expect_err("an install canceled once its downloads finished does not succeed");
+
+    assert!(cancel.is_cancelled(), "the sink canceled the install");
+    assert!(error.is_cancellation(), "{error:?}");
+    assert!(
+        !natives_dir.join("liblwjgl.so").exists(),
+        "no native is unpacked after cancellation"
+    );
+    assert!(
+        !asset_index_path.exists(),
+        "the launch-visible asset index is not published after cancellation"
+    );
+    let leftovers = std::fs::read_dir(asset_index_path.parent().expect("indexes directory"))
+        .map_or(0, Iterator::count);
+    assert_eq!(leftovers, 0, "no temporary file is left behind");
 }
 
 #[tokio::test]
