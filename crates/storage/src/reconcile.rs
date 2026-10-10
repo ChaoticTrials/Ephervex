@@ -495,7 +495,8 @@ fn reconcile_server(
     } else {
         if !record.attention.contains(&AttentionReason::MissingRoot) {
             record.add_attention(AttentionReason::MissingRoot);
-            registry.update_server(&mut record)?;
+            // Keeps `updated_at`, so only a user's edit makes the row newer.
+            registry.synchronize_server_index(&record)?;
         }
         tracing::warn!(
             server_id = %record.id,
@@ -515,7 +516,7 @@ fn reconcile_server(
 /// which is never adopted.
 fn reconcile_present_server(
     registry: &Registry,
-    mut record: ServerRecord,
+    record: ServerRecord,
     idle: bool,
     report: &mut ReconciliationReport,
 ) -> Result<(), RegistryError> {
@@ -527,7 +528,18 @@ fn reconcile_present_server(
     };
     let restore_unresolved = matches!(recovery, RestoreRecovery::Failed | RestoreRecovery::Unknown)
         || metadata::is_incomplete(&record.root);
+    reconcile_server_against_metadata(registry, record, restore_unresolved, report)
+}
 
+/// Applies the precedence between a server's index row and the canonical
+/// metadata standing at `record.root`, once the root's restore state is known.
+fn reconcile_server_against_metadata(
+    registry: &Registry,
+    mut record: ServerRecord,
+    restore_unresolved: bool,
+    report: &mut ReconciliationReport,
+) -> Result<(), RegistryError> {
+    let entry = server_entry(&record);
     let mut adopted = false;
     match metadata::read_server_metadata(&record.root) {
         Ok(mut canonical) if canonical.id == record.id => {
@@ -860,15 +872,13 @@ fn reindex_orphaned_servers(
                 });
                 continue;
             }
-            if indexed != record {
-                registry.synchronize_server_index(&record)?;
-                report.index_repaired.push(ReconciledRecord {
-                    reference: RecordRef::Server(record.id),
-                    name: record.name,
-                    root: record.root,
-                    storage: record.storage,
-                });
-            }
+            // The root came back under another directory, so it follows the
+            // same precedence as one that came back in place: an edit made
+            // while it was missing exists only in the index and is kept.
+            let mut relocated = indexed;
+            relocated.root.clone_from(&directory);
+            relocated.storage = StorageClass::Persistent;
+            reconcile_server_against_metadata(registry, relocated, false, report)?;
             continue;
         }
 
@@ -2832,6 +2842,83 @@ mod tests {
                 .expect("read")
                 .attention
                 .contains(&AttentionReason::MissingRoot)
+        );
+    }
+
+    #[test]
+    fn a_server_edited_while_its_root_was_missing_keeps_the_edit_when_the_root_returns_elsewhere() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = persistent_server(&registry, "original");
+        let backup = environment.base().join("backup");
+        std::fs::rename(&server.root, &backup).expect("unmount");
+        reconcile(&registry).expect("reconcile");
+        let mut edited = registry.server(server.id).expect("kept");
+        edited.name = "renamed while unmounted".to_owned();
+        registry
+            .update_server(&mut edited)
+            .expect("index-only edit");
+        let returned = registry.paths().persistent_servers_dir().join("returned");
+        std::fs::rename(&backup, &returned).expect("remount elsewhere");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.recovered.len(), 1);
+        assert!(report.index_repaired.is_empty());
+        let after = registry.server(server.id).expect("read");
+        assert_eq!(after.name, "renamed while unmounted");
+        assert_eq!(after.root, returned);
+        assert!(!after.attention.contains(&AttentionReason::MissingRoot));
+        let canonical = metadata::read_server_metadata(&returned).expect("metadata");
+        assert_eq!(canonical.name, "renamed while unmounted");
+        assert_eq!(canonical.root, returned);
+    }
+
+    #[test]
+    fn a_server_whose_root_returns_elsewhere_unedited_is_recovered_at_the_new_directory() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = persistent_server(&registry, "relocated");
+        let backup = environment.base().join("backup");
+        std::fs::rename(&server.root, &backup).expect("unmount");
+        reconcile(&registry).expect("reconcile");
+        let returned = registry.paths().persistent_servers_dir().join("returned");
+        std::fs::rename(&backup, &returned).expect("remount elsewhere");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.recovered.len(), 1);
+        assert!(report.index_repaired.is_empty());
+        let after = registry.server(server.id).expect("read");
+        assert_eq!(after.name, "relocated");
+        assert_eq!(after.root, returned);
+        assert!(!after.attention.contains(&AttentionReason::MissingRoot));
+    }
+
+    #[test]
+    fn a_moved_server_root_keeps_committed_metadata_over_a_stale_index_row() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = persistent_server(&registry, "indexed");
+        let mut committed = metadata::read_server_metadata(&server.root).expect("metadata");
+        committed.name = "committed to metadata".to_owned();
+        committed.updated_at = Utc::now();
+        metadata::write_server_metadata(&server.root, &committed).expect("write");
+        let moved = registry.paths().persistent_servers_dir().join("moved-root");
+        std::fs::rename(&server.root, &moved).expect("move");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.index_repaired.len(), 1);
+        assert_eq!(
+            registry.server(server.id).expect("read").name,
+            "committed to metadata"
+        );
+        assert_eq!(
+            metadata::read_server_metadata(&moved)
+                .expect("metadata")
+                .name,
+            "committed to metadata"
         );
     }
 
