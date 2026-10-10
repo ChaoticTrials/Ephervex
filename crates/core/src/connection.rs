@@ -267,6 +267,11 @@ impl App {
         launch_observer: &LaunchObserver,
         cancel: &CancellationToken,
     ) -> CoreResult<LaunchAndConnectOutcome> {
+        // The handle reaches a lock file name only after the server is up, so
+        // an unusable one is refused here instead of after a start and stop.
+        if let Some(handle) = options.launch.additional.as_deref() {
+            ephervex_storage::validate_launch_id(handle)?;
+        }
         let availability = self.launch_and_connect_availability(client_id, server_id)?;
         // This early read avoids starting a stopped server for a client that
         // is already known to be unavailable. The ordinary launch lock remains
@@ -818,6 +823,44 @@ mod tests {
         assert!(events.try_recv().is_err(), "the server was not prepared");
         assert!(!server.root.join("server/eula.txt").exists());
         drop(held);
+    }
+
+    #[tokio::test]
+    async fn an_unusable_additional_launch_handle_is_refused_before_server_preparation() {
+        let directory = tempfile::tempdir().expect("directory");
+        let mut app = app_rooted_at(directory.path());
+        let (client, server) = installed_linked_server(&app, ServerNetworkSettings::default());
+        for handle in ["", "bad id", "../escape", "a/b", "a.lock"] {
+            let (observer, mut events) = LaunchAndConnectObserver::channel();
+
+            let error = app
+                .launch_and_connect(
+                    client.id,
+                    server.id,
+                    &alongside_options(handle, false),
+                    &observer,
+                    &ServerObserver::silent(),
+                    &LaunchObserver::silent(),
+                    &CancellationToken::new(),
+                )
+                .await
+                .expect_err("an unusable handle is refused");
+            assert!(
+                matches!(
+                    error,
+                    CoreError::Storage(ephervex_storage::StorageError::Lock(
+                        ephervex_storage::LockError::InvalidLaunchId
+                    ))
+                ),
+                "{handle:?} gave {error}"
+            );
+            assert!(events.try_recv().is_err(), "the server was not prepared");
+            assert!(matches!(
+                classify_runtime(&server.root).expect("runtime"),
+                RuntimeClassification::Stopped
+            ));
+            assert!(!server.root.join("server/eula.txt").exists());
+        }
     }
 
     #[tokio::test]

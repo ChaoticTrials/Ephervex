@@ -67,11 +67,28 @@ const LAUNCH_LOCK_PREFIX: &str = "launch.";
 /// frontend uses to find the launch again in a list and to stop it. Validated
 /// as a single safe path segment, because it reaches a file name.
 fn additional_lock_file(id: &str) -> Option<String> {
-    let safe = !id.is_empty()
+    is_valid_launch_id(id).then(|| format!("{LAUNCH_LOCK_PREFIX}{id}.lock"))
+}
+
+fn is_valid_launch_id(id: &str) -> bool {
+    !id.is_empty()
         && id
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
-    safe.then(|| format!("{LAUNCH_LOCK_PREFIX}{id}.lock"))
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+/// Checks that `id` can name an additional launch, before anything is
+/// prepared for it.
+///
+/// This is the rule every additional-launch entry point applies, so a handle
+/// refused here is refused identically by [`LaunchLock::acquire_additional`]
+/// and [`force_release`].
+pub fn validate_launch_id(id: &str) -> Result<(), LockError> {
+    if is_valid_launch_id(id) {
+        Ok(())
+    } else {
+        Err(LockError::InvalidLaunchId)
+    }
 }
 
 /// One launch an instance currently holds.
@@ -102,6 +119,10 @@ pub enum LockError {
     /// over while the launch was still preparing.
     #[error("the launch lock at {path} no longer belongs to this launch")]
     Lost { path: PathBuf },
+    /// A launch id is empty or contains something other than ASCII letters,
+    /// digits, `-` and `_`.
+    #[error("a launch id must be non-empty and use only letters, digits, '-' and '_'")]
+    InvalidLaunchId,
     /// The lock file could not be created, read, or removed.
     #[error("the launch lock at {path} could not be used")]
     Unusable {
@@ -122,6 +143,7 @@ impl LockError {
             Self::Busy { .. } => "error-launch-lock-busy",
             Self::Lost { .. } => "error-launch-lock-lost",
             Self::Unusable { .. } => "error-launch-lock-unusable",
+            Self::InvalidLaunchId => "error-launch-id-invalid",
             Self::Path(error) => error.message_id(),
         }
     }
@@ -133,7 +155,7 @@ impl LockError {
             Self::Unusable { path, .. } | Self::Busy { path } | Self::Lost { path } => {
                 Some(path.clone())
             }
-            Self::AlreadyRunning { .. } | Self::Path(_) => None,
+            Self::AlreadyRunning { .. } | Self::InvalidLaunchId | Self::Path(_) => None,
         }
     }
 
@@ -303,12 +325,7 @@ pub enum LockDisposition {
 /// whose owner and game are both gone has its lock released at once.
 pub fn force_release(instance_root: &Path, launch: Option<&str>) -> Result<ForcedStop, LockError> {
     let name = match launch {
-        Some(id) => additional_lock_file(id).ok_or_else(|| {
-            LockError::unusable(
-                &metadata_dir(instance_root),
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, "unusable launch id"),
-            )
-        })?,
+        Some(id) => additional_lock_file(id).ok_or(LockError::InvalidLaunchId)?,
         None => LAUNCH_LOCK_FILE.to_owned(),
     };
     let directory = metadata_dir(instance_root);
@@ -389,14 +406,9 @@ impl LaunchLock {
     /// The file is named after `id`, so it can never collide with another
     /// launch's and neither can clear the other's on the way out.
     pub fn acquire_additional(instance_root: &Path, id: &str) -> Result<Self, LockError> {
+        let name = additional_lock_file(id).ok_or(LockError::InvalidLaunchId)?;
         let directory = metadata_dir(instance_root);
         create_dir_all(&directory)?;
-        let name = additional_lock_file(id).ok_or_else(|| {
-            LockError::unusable(
-                &directory.join(id),
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, "unusable launch id"),
-            )
-        })?;
         let ownership = OwnershipGuard::take(&directory)?;
         Self::take_at(&ownership, directory.join(name))
     }
@@ -1356,10 +1368,25 @@ mod tests {
         let root = instance();
         for id in ["", "../escape", "a/b", "a.lock", "with space"] {
             assert!(
-                LaunchLock::acquire_additional(root.path(), id).is_err(),
+                matches!(
+                    LaunchLock::acquire_additional(root.path(), id),
+                    Err(LockError::InvalidLaunchId)
+                ),
                 "{id:?} must not become a lock file name"
             );
+            assert!(
+                matches!(validate_launch_id(id), Err(LockError::InvalidLaunchId)),
+                "{id:?} must fail validation before any lock is attempted"
+            );
+            assert!(
+                matches!(
+                    force_release(root.path(), Some(id)),
+                    Err(LockError::InvalidLaunchId)
+                ),
+                "{id:?} must not be force-released"
+            );
         }
+        assert!(validate_launch_id("second-1_a").is_ok());
         assert!(running_launches(root.path()).is_empty());
     }
 

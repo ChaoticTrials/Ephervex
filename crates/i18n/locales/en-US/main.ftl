@@ -789,6 +789,9 @@ error-launch-lock-lost = This launch no longer holds its instance.
 error-launch-lock-unusable = Ephervex could not claim the instance for launching.
 .action = Check permissions on { $path }.
 
+error-launch-id-invalid = That launch handle cannot be used.
+.action = A handle must be one or more letters, digits, "-" or "_".
+
 error-launch-invalid-version-metadata = That version's metadata does not describe something Ephervex can launch.
 .action = The loader metadata may not match its declared Minecraft parent. Ephervex refuses rather than constructing an approximate launch.
 
