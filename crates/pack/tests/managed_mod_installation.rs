@@ -137,6 +137,7 @@ async fn install(
     install_managed(ManagedModInstall {
         recipe,
         additions,
+        side: PackSide::Client,
         game_dir: &instance.game_dir,
         store: &instance.store,
         fetch: ArtifactFetch {
@@ -1009,4 +1010,134 @@ async fn a_project_the_recipe_records_twice_is_refused_when_it_is_requested_agai
         .expect_err("must refuse");
     assert!(matches!(error, PackError::DuplicateManagedProject { .. }));
     assert!(!instance.jar("root-a.jar").exists());
+}
+
+// -- recording the side a mod is installed on ------------------------------
+
+/// Records the installed mod as one the client's own record does not take.
+fn leave_client_out(recipe: &mut PackRecipe, requirement: SideRequirement) {
+    for file in &mut recipe.files {
+        file.client = requirement;
+        file.selected = None;
+    }
+}
+
+fn recorded_root(recipe: &PackRecipe) -> &PackFileRecipe {
+    recipe
+        .managed_project(ModProvider::Modrinth, "ROOTPROJ")
+        .expect("entry")
+}
+
+async fn installed_root(server: &MockServer, instance: &Instance) -> (PackRecipe, PackFileRecipe) {
+    serve(server, "/root.jar", ROOT_JAR).await;
+    let mut recipe = recipe();
+    let root = addition(server, "/root.jar", "root-1.0.jar", ROOT_JAR, "ROOTPROJ");
+    install(instance, &mut recipe, std::slice::from_ref(&root))
+        .await
+        .expect("first install");
+    (recipe, root)
+}
+
+#[tokio::test]
+async fn a_missing_jar_put_back_on_a_client_the_record_left_out_records_the_client() {
+    for left_out in [
+        SideRequirement::Unsupported,
+        SideRequirement::Unknown,
+        SideRequirement::Optional,
+    ] {
+        let server = MockServer::start().await;
+        let instance = Instance::new();
+        let (mut recipe, root) = installed_root(&server, &instance).await;
+        leave_client_out(&mut recipe, left_out);
+        std::fs::remove_file(instance.jar("root-1.0.jar")).expect("delete the jar");
+
+        let report = install(&instance, &mut recipe, &[root])
+            .await
+            .expect("install on the client");
+
+        assert_eq!(report.repaired, [Path::new("mods/root-1.0.jar")]);
+        assert!(instance.jar("root-1.0.jar").is_file());
+        let recorded = recorded_root(&recipe);
+        assert!(
+            recorded.is_installed_on(PackSide::Client, &ephervex_pack::OptionalSelection::none()),
+            "a jar was written, so the recipe has to say the client has it ({left_out:?})"
+        );
+        assert_eq!(recorded.origin, ModOrigin::UserSelected);
+        assert_eq!(instance.store.read_recipe().expect("recipe"), recipe);
+    }
+}
+
+#[tokio::test]
+async fn a_present_jar_on_a_client_the_record_left_out_only_changes_the_record() {
+    let server = MockServer::start().await;
+    let instance = Instance::new();
+    let (mut recipe, root) = installed_root(&server, &instance).await;
+    leave_client_out(&mut recipe, SideRequirement::Unsupported);
+
+    let report = install(&instance, &mut recipe, &[root])
+        .await
+        .expect("install on the client");
+
+    assert_eq!(report.recorded, [Path::new("mods/root-1.0.jar")]);
+    assert!(report.installed.is_empty() && report.repaired.is_empty());
+    assert!(report.changed_anything());
+    assert_eq!(recorded_root(&recipe).client, SideRequirement::Required);
+    assert_eq!(instance.store.read_recipe().expect("recipe"), recipe);
+}
+
+#[tokio::test]
+async fn an_unselected_optional_mod_installed_on_the_client_is_recorded_as_selected() {
+    let server = MockServer::start().await;
+    let instance = Instance::new();
+    let (mut recipe, mut root) = installed_root(&server, &instance).await;
+    leave_client_out(&mut recipe, SideRequirement::Optional);
+    std::fs::remove_file(instance.jar("root-1.0.jar")).expect("delete the jar");
+    root.client = SideRequirement::Optional;
+    root.selected = Some(true);
+
+    install(&instance, &mut recipe, &[root])
+        .await
+        .expect("install on the client");
+
+    let recorded = recorded_root(&recipe);
+    assert_eq!(recorded.client, SideRequirement::Optional);
+    assert_eq!(recorded.selected, Some(true));
+}
+
+#[tokio::test]
+async fn a_modified_jar_is_not_recorded_as_installed_on_a_client_the_record_left_out() {
+    let server = MockServer::start().await;
+    let instance = Instance::new();
+    let (mut recipe, root) = installed_root(&server, &instance).await;
+    leave_client_out(&mut recipe, SideRequirement::Unsupported);
+    std::fs::write(instance.jar("root-1.0.jar"), b"the developer's own build").expect("modify");
+    let before = recipe.clone();
+
+    let report = install(&instance, &mut recipe, &[root])
+        .await
+        .expect("request");
+
+    assert_eq!(report.modified.len(), 1);
+    assert!(report.recorded.is_empty());
+    assert_eq!(recipe, before);
+}
+
+#[tokio::test]
+async fn a_record_that_already_takes_the_client_is_left_as_recorded_by_a_repeat_install() {
+    let server = MockServer::start().await;
+    let instance = Instance::new();
+    let (mut recipe, root) = installed_root(&server, &instance).await;
+    let before = recipe.clone();
+
+    let report = install(&instance, &mut recipe, std::slice::from_ref(&root))
+        .await
+        .expect("repeat");
+    assert!(report.recorded.is_empty());
+    assert_eq!(report.already_present.len(), 1);
+
+    std::fs::remove_file(instance.jar("root-1.0.jar")).expect("delete the jar");
+    install(&instance, &mut recipe, &[root])
+        .await
+        .expect("repair");
+    assert_eq!(recipe, before, "a plain repair does not touch the record");
 }

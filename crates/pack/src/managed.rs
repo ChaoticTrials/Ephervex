@@ -98,8 +98,13 @@ pub struct ManagedModInstallation {
     /// it.
     pub modified: Vec<PathBuf>,
     /// Recorded mods whose jar had gone missing and was restored from the
-    /// verified cache. Repair, not an update: the recipe entry is unchanged.
+    /// verified cache. Repair, not an update: the recorded entry is kept,
+    /// except that a record which did not take the instance's side now does.
     pub repaired: Vec<PathBuf>,
+    /// Requested mods whose recorded jar was already in place but whose record
+    /// did not take the instance's side. The record now does; no file was
+    /// written.
+    pub recorded: Vec<PathBuf>,
     /// How many artifacts came from the verified shared cache rather than the
     /// network.
     pub reused_from_cache: usize,
@@ -110,7 +115,7 @@ impl ManagedModInstallation {
     /// Whether this operation changed the instance at all.
     #[must_use]
     pub fn changed_anything(&self) -> bool {
-        !self.installed.is_empty() || !self.repaired.is_empty()
+        !self.installed.is_empty() || !self.repaired.is_empty() || !self.recorded.is_empty()
     }
 }
 
@@ -122,6 +127,11 @@ pub struct ManagedModInstall<'a> {
     /// The files to install, each already carrying its provider identity,
     /// hashes, and download addresses.
     pub additions: &'a [PackFileRecipe],
+    /// The side of the game this instance is. A requested mod is installed on
+    /// this side, so a recorded entry for the same release that does not take
+    /// this side is brought in line with the request rather than left to
+    /// disagree with the jar that was just written.
+    pub side: PackSide,
     /// The directory the game runs in. Logical paths are relative to it.
     pub game_dir: &'a Path,
     /// Where the updated recipe is written.
@@ -237,6 +247,9 @@ enum Disposition {
     Install,
     /// The recipe already records this exact mod and the jar is present.
     AlreadyPresent,
+    /// The recipe already records this exact mod and the jar is present, but the
+    /// record does not take the instance's side. Only the record changes.
+    Record,
     /// The recipe already records this exact mod but the jar has gone missing,
     /// under either spelling.
     Repair,
@@ -257,29 +270,35 @@ pub async fn install_managed(request: ManagedModInstall<'_>) -> PackResult<Manag
     let ManagedModInstall {
         recipe,
         additions,
+        side,
         game_dir,
         store,
         fetch,
     } = request;
     let cancel = fetch.cancel;
-    let settled = settle_recorded_paths(recipe, additions, None);
+    let settled = settle_recorded_paths(recipe, additions, Some(side));
     let additions = settled.as_slice();
 
     // Nothing below this line runs until every destination is known to be safe.
-    let dispositions = plan_destinations(recipe, additions, game_dir).await?;
+    let dispositions = plan_destinations(recipe, additions, side, game_dir).await?;
 
     let mut report = ManagedModInstallation::default();
     let mut pending: Vec<(&PackFileRecipe, Disposition)> = Vec::new();
     for (file, disposition) in additions.iter().zip(&dispositions) {
         match disposition {
             Disposition::AlreadyPresent => report.already_present.push(file.logical_path.clone()),
+            Disposition::Record => report.recorded.push(file.logical_path.clone()),
             Disposition::Altered => report.modified.push(file.logical_path.clone()),
             other => pending.push((file, *other)),
         }
     }
     if pending.is_empty() {
+        if !report.recorded.is_empty() {
+            commit(recipe, additions, &dispositions, side, store)?;
+        }
         info!(
             already_present = report.already_present.len(),
+            recorded = report.recorded.len(),
             modified = report.modified.len(),
             "nothing needed installing at the requested versions"
         );
@@ -301,7 +320,7 @@ pub async fn install_managed(request: ManagedModInstall<'_>) -> PackResult<Manag
         &mut created,
         &mut report,
     )
-    .and_then(|()| commit(recipe, additions, &dispositions, store));
+    .and_then(|()| commit(recipe, additions, &dispositions, side, store));
 
     if let Err(error) = outcome {
         return Err(error.with_recovery_issues(roll_back(&created)));
@@ -325,6 +344,7 @@ pub async fn install_managed(request: ManagedModInstall<'_>) -> PackResult<Manag
 async fn plan_destinations(
     recipe: &PackRecipe,
     additions: &[PackFileRecipe],
+    side: PackSide,
     game_dir: &Path,
 ) -> PackResult<Vec<Disposition>> {
     // Two planned mods claiming one file name is a plan that cannot be
@@ -343,7 +363,7 @@ async fn plan_destinations(
     let mut destinations = ManagedDestinations::new(game_dir);
     let mut dispositions = Vec::with_capacity(additions.len());
     for file in additions {
-        dispositions.push(disposition_for(recipe, file, game_dir, &mut destinations).await?);
+        dispositions.push(disposition_for(recipe, file, side, game_dir, &mut destinations).await?);
     }
     Ok(dispositions)
 }
@@ -387,6 +407,7 @@ pub(crate) fn require_one_entry_per_project<'a>(
 async fn disposition_for(
     recipe: &PackRecipe,
     file: &PackFileRecipe,
+    side: PackSide,
     game_dir: &Path,
     destinations: &mut ManagedDestinations<'_>,
 ) -> PackResult<Disposition> {
@@ -396,10 +417,15 @@ async fn disposition_for(
         destinations.resolve(&recorded.logical_path)?;
         return Ok(match recorded_jar(game_dir, recorded).await {
             // Gone, so restoring it from the verified cache is repair; the
-            // recipe entry does not change.
+            // recorded entry is kept, but for taking this side if it did not.
             RecordedJar::Missing => {
                 destinations.writable(&recorded.logical_path)?;
                 Disposition::Repair
+            }
+            // The jar is there but the record disowns it on this side, so only
+            // the record is brought in line.
+            RecordedJar::Intact if recording_side(recorded, file, side).is_some() => {
+                Disposition::Record
             }
             // An exactly repeated install, which does nothing rather than
             // rewriting a byte-identical file.
@@ -577,17 +603,37 @@ fn copy_all(
 
 /// Records the new mods and writes the recipe.
 ///
-/// A repair records nothing: the entry it would add is already there.
+/// A repair restores what is recorded, except that a record which did not take
+/// the instance's side takes it now, as does one whose jar was already in place.
 fn commit(
     recipe: &mut PackRecipe,
     additions: &[PackFileRecipe],
     dispositions: &[Disposition],
+    side: PackSide,
     store: &SourceStore,
 ) -> PackResult<()> {
     let mut updated = recipe.clone();
     for (file, disposition) in additions.iter().zip(dispositions) {
-        if *disposition == Disposition::Install {
-            updated.record_managed(file.clone())?;
+        match disposition {
+            Disposition::Install => updated.record_managed(file.clone())?,
+            Disposition::Repair | Disposition::Record => {
+                let project = file
+                    .identity
+                    .as_ref()
+                    .and_then(ProviderFileIdentity::project);
+                if let Some(entry) = updated.files.iter_mut().find(|entry| {
+                    project.is_some()
+                        && entry
+                            .identity
+                            .as_ref()
+                            .and_then(ProviderFileIdentity::project)
+                            == project
+                }) && let Some(recorded) = recording_side(entry, file, side)
+                {
+                    *entry = recorded;
+                }
+            }
+            Disposition::AlreadyPresent | Disposition::Altered => {}
         }
     }
 

@@ -5299,6 +5299,7 @@ fn print_installed_mods(installed: &InstalledMods, json: bool) {
             "installed": installed.installation.installed,
             "repaired": installed.installation.repaired,
             "already_present": installed.installation.already_present,
+            "recorded": installed.installation.recorded,
             "modified": installed.installation.modified,
             "reused_from_cache": installed.installation.reused_from_cache,
             "bytes": installed.installation.bytes,

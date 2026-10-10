@@ -1282,6 +1282,7 @@ impl App {
         let installation = match ephervex_pack::install_managed(ManagedModInstall {
             recipe: &mut recipe,
             additions: &additions,
+            side: PackSide::Client,
             game_dir: &game_dir,
             store: &store,
             fetch: ArtifactFetch {
@@ -1319,6 +1320,7 @@ impl App {
             instance_id = %record.id,
             installed = installation.installed.len(),
             repaired = installation.repaired.len(),
+            recorded = installation.recorded.len(),
             already_present = installation.already_present.len(),
             "installed mods"
         );
