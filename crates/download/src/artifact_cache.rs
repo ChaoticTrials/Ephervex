@@ -39,9 +39,11 @@
 //! gap, and because it is a kernel advisory lock on a file under the cache root
 //! it closes it for a second Ephervex process too.
 
+use std::collections::BTreeMap;
 use std::fs::{File, Metadata, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant, SystemTime};
 
 use ephervex_model::ArtifactCacheLimit;
 use tracing::{debug, trace, warn};
@@ -62,6 +64,29 @@ pub const MAINTENANCE_LOCK_FILE: &str = "artifact-cache.lock";
 /// report that names all of them is a report nobody reads. The count is always
 /// exact; the paths are a sample.
 const REPORTED_TROUBLES: usize = 8;
+
+/// How long an exclusive lock attempt waits for a lock that no lease of this
+/// process holds.
+///
+/// `flock` belongs to an open file description, so a child process forked by
+/// another thread keeps a just-released lock held until it execs. That window is
+/// short, and waiting it out keeps a pass from being refused.
+const FOREIGN_HOLDER_GRACE: Duration = Duration::from_millis(250);
+
+/// Pause between attempts while waiting out [`FOREIGN_HOLDER_GRACE`].
+const FOREIGN_HOLDER_POLL: Duration = Duration::from_millis(5);
+
+/// Leases this process currently holds, by lock path.
+///
+/// Contention while this process holds a lease is real and defers a collection at
+/// once; only contention from elsewhere is worth waiting for.
+static LEASES_HELD_HERE: Mutex<BTreeMap<PathBuf, usize>> = Mutex::new(BTreeMap::new());
+
+fn leases_held_here() -> std::sync::MutexGuard<'static, BTreeMap<PathBuf, usize>> {
+    LEASES_HELD_HERE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
 
 /// Which stores artifact-cache maintenance governs.
 ///
@@ -221,6 +246,21 @@ pub struct ArtifactCacheLease {
     /// `None` only where the platform has no advisory locking, in which case
     /// there is nothing to release. See [`lock`].
     _held: Option<File>,
+    lock_path: PathBuf,
+}
+
+impl Drop for ArtifactCacheLease {
+    /// Unregisters before `_held` closes, so a collector that still sees the lock
+    /// held finds no lease of this process behind it and waits it out.
+    fn drop(&mut self) {
+        let mut held = leases_held_here();
+        if let Some(count) = held.get_mut(&self.lock_path) {
+            *count -= 1;
+            if *count == 0 {
+                held.remove(&self.lock_path);
+            }
+        }
+    }
 }
 
 /// Maintenance for one cache root.
@@ -259,7 +299,12 @@ impl ArtifactCache {
     pub async fn lease(&self) -> Result<ArtifactCacheLease, ArtifactCacheError> {
         let path = self.lock_path();
         blocking(move || {
-            lock(&path, Exclusivity::Shared).map(|held| ArtifactCacheLease { _held: held })
+            let held = lock(&path, Exclusivity::Shared)?;
+            *leases_held_here().entry(path.clone()).or_insert(0) += 1;
+            Ok(ArtifactCacheLease {
+                _held: held,
+                lock_path: path,
+            })
         })
         .await
     }
@@ -298,6 +343,11 @@ impl ArtifactCache {
     ///
     /// Measuring before removing is deliberate. A collector that unlinks first
     /// and totals afterwards cannot answer "was this necessary".
+    ///
+    /// A lease of this process defers the pass immediately. A lock no lease here
+    /// holds is waited for briefly, because a forked child can still carry a
+    /// just-released one; a holder that outlasts the wait is
+    /// [`ArtifactCacheError::Busy`].
     pub async fn collect(
         &self,
         limit: ArtifactCacheLimit,
@@ -314,7 +364,7 @@ impl ArtifactCache {
         let path = self.lock_path();
 
         blocking(move || {
-            let _guard = lock(&path, Exclusivity::Exclusive)?;
+            let _guard = lock_exclusively(&path)?;
             let mut survey = survey(&layout)?;
             let mut report = std::mem::take(&mut survey.report);
             report.usage_before = survey.bytes;
@@ -348,13 +398,13 @@ impl ArtifactCache {
     /// The manual counterpart to [`Self::collect`], and subject to the same
     /// lock: a clear that ran while an installation was copying out of the cache
     /// would break the installation. A busy cache is reported as
-    /// [`ArtifactCacheError::Busy`] rather than waited on, so a frontend never
-    /// hangs on another process.
+    /// [`ArtifactCacheError::Busy`] after at most the bounded wait described on
+    /// [`Self::collect`], so a frontend never hangs on another process.
     pub async fn clear(&self) -> Result<ArtifactCacheMaintenance, ArtifactCacheError> {
         let layout = self.layout.clone();
         let path = self.lock_path();
         blocking(move || {
-            let _guard = lock(&path, Exclusivity::Exclusive)?;
+            let _guard = lock_exclusively(&path)?;
             let mut survey = survey(&layout)?;
             let mut report = std::mem::take(&mut survey.report);
             report.usage_before = survey.bytes;
@@ -743,6 +793,22 @@ fn lock(path: &Path, exclusivity: Exclusivity) -> Result<Option<File>, ArtifactC
             path: path.to_path_buf(),
         }),
         Err(errno) => Err(unusable(errno.into())),
+    }
+}
+
+/// Takes the exclusive side, waiting out a holder that is not a lease of this
+/// process for up to [`FOREIGN_HOLDER_GRACE`].
+fn lock_exclusively(path: &Path) -> Result<Option<File>, ArtifactCacheError> {
+    let deadline = Instant::now() + FOREIGN_HOLDER_GRACE;
+    loop {
+        match lock(path, Exclusivity::Exclusive) {
+            Err(ArtifactCacheError::Busy { .. })
+                if !leases_held_here().contains_key(path) && Instant::now() < deadline =>
+            {
+                std::thread::sleep(FOREIGN_HOLDER_POLL);
+            }
+            outcome => return outcome,
+        }
     }
 }
 
@@ -1273,6 +1339,94 @@ mod tests {
             .expect("collection runs once the lease is gone");
         assert_eq!(report.removed_entries, 0, "4 KiB is well inside 1 MiB");
         assert_eq!(report.usage_before, 4_000);
+    }
+
+    #[tokio::test]
+    async fn a_lease_counts_as_held_here_until_it_is_dropped() {
+        let fixture = Fixture::new();
+        let path = fixture.cache.lock_path();
+
+        let first = fixture.cache.lease().await.expect("first lease");
+        let second = fixture.cache.lease().await.expect("second lease");
+        drop(first);
+        assert!(leases_held_here().contains_key(&path));
+        drop(second);
+        assert!(!leases_held_here().contains_key(&path));
+    }
+
+    /// A child forked by another thread shares the lease's open file description
+    /// until it execs, so the lock outlives the lease. Duplicating the descriptor
+    /// stands in for that child.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn collection_waits_out_a_released_lease_that_a_forked_child_still_carries() {
+        let fixture = Fixture::new();
+        let path = fixture.publish(ContentStore::Downloads, 0x15, 2 * 1024 * 1024, hour(3));
+
+        let released = lock(&fixture.cache.lock_path(), Exclusivity::Shared)
+            .expect("shared lock")
+            .expect("advisory locking on unix");
+        let inherited = released.try_clone().expect("duplicate the descriptor");
+        drop(released);
+        let child = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            drop(inherited);
+        });
+
+        let report = fixture
+            .cache
+            .collect(ArtifactCacheLimit::Limited(MIB))
+            .await
+            .expect("the pass runs once the carried lock is gone");
+        child.join().expect("child stand-in");
+        assert_eq!(report.removed_entries, 1);
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_clear_waits_out_a_released_lock_that_a_forked_child_still_carries() {
+        let fixture = Fixture::new();
+        let path = fixture.publish(ContentStore::Downloads, 0x17, 4_000, hour(3));
+
+        let released = lock(&fixture.cache.lock_path(), Exclusivity::Shared)
+            .expect("shared lock")
+            .expect("advisory locking on unix");
+        let inherited = released.try_clone().expect("duplicate the descriptor");
+        drop(released);
+        let child = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            drop(inherited);
+        });
+
+        let report = fixture
+            .cache
+            .clear()
+            .await
+            .expect("the clear runs once the carried lock is gone");
+        child.join().expect("child stand-in");
+        assert_eq!(report.removed_entries, 1);
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_holder_outside_this_process_that_outlasts_the_wait_still_defers_collection() {
+        let fixture = Fixture::new();
+        let path = fixture.publish(ContentStore::Downloads, 0x16, 2 * 1024 * 1024, hour(3));
+
+        // Taken without registering a lease, as another process's would be.
+        let _other_process =
+            lock(&fixture.cache.lock_path(), Exclusivity::Shared).expect("shared lock");
+        let started = Instant::now();
+        let error = fixture
+            .cache
+            .collect(ArtifactCacheLimit::Limited(MIB))
+            .await
+            .expect_err("collection must not run while another holder has the lock");
+        assert!(matches!(error, ArtifactCacheError::Busy { .. }));
+        assert!(started.elapsed() >= FOREIGN_HOLDER_GRACE);
+        assert!(path.is_file());
     }
 
     #[tokio::test]

@@ -117,11 +117,12 @@ impl App {
 
     /// Removes every reusable artifact the cache safely can.
     ///
-    /// Refuses with [`ArtifactCacheError::Busy`] rather than waiting when an
-    /// operation still holds a lease, so a frontend reports "the cache is in
-    /// use" instead of hanging on another process. The report is truthful about
-    /// what is left: entries that could not be removed are counted, and the
-    /// remaining usage is not rounded down to zero for tidiness.
+    /// Refuses with [`ArtifactCacheError::Busy`] at once when an operation of
+    /// this process still holds a lease, and after a short bounded wait when
+    /// another process holds the cache, so a frontend reports "the cache is in
+    /// use" instead of hanging. The report is truthful about what is left:
+    /// entries that could not be removed are counted, and the remaining usage is
+    /// not rounded down to zero for tidiness.
     ///
     /// The configured budget is untouched — clearing is not a settings change.
     pub async fn clear_artifact_cache(&self) -> CoreResult<ArtifactCacheMaintenance> {

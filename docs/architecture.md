@@ -488,8 +488,11 @@ it may still resolve, open, copy, or launch a reusable artifact path, so
 collection cannot remove one out from under it. The lease is a kernel advisory
 lock on a fixed launcher-owned file at the cache root, which makes it hold
 between two Ephervex processes sharing one cache as well as between two tasks in
-one. Collection takes the same lock exclusively and never waits for it, so a
-manual clear reports a busy cache instead of hanging.
+one. Collection and a manual clear take the same lock exclusively. A lease held
+by this process refuses them at once. A holder this process does not know of is
+waited for a short, bounded time, because a child process forked by another
+thread keeps a just-released lock held until it execs; past that, a clear reports
+a busy cache instead of hanging.
 
 Maintenance is a housekeeping policy, not an installation precondition. It runs
 after a cache-changing operation has released its lease and when the budget is
