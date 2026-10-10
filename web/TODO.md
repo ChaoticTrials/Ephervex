@@ -159,7 +159,7 @@ features show one tab or a short note.
 - [x] Servers: create (standalone and linked), EULA, properties and network,
       start, stop, console, Launch Client & Connect, recovery
 - [x] Diagnostics, logs and crash reports, diagnostic bundles
-- [ ] Snapshots
+- [x] Snapshots
 - [ ] Settings: General, Minecraft defaults, Java, Providers & APIs, Storage,
       Disk usage
 - [ ] Themes (source: `docs/themes.md`)
