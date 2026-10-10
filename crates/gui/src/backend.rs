@@ -2324,6 +2324,26 @@ fn busy_host_message(
     })
 }
 
+/// Refuses a command that writes the metadata of `hosts` while a change is
+/// rewriting any of them, in the dialogs in `dialogs` (a toast when none is
+/// open).
+fn refuse_dialog_while_changing(
+    app: &App,
+    changing: &ChangingHosts,
+    hosts: &[InstalledHost],
+    dialogs: ModalScope,
+    events: &Sender<Event>,
+) -> bool {
+    let Some(message) = busy_host_message(app, changing, hosts) else {
+        return false;
+    };
+    let _ = events.send(Event::ModalError {
+        scope: dialogs,
+        message,
+    });
+    true
+}
+
 /// Claims `targets` for a change that runs beside the command loop, or tells
 /// the dialogs in `dialogs` (a toast when none is open) why it cannot start.
 /// The claim lasts until the returned marks are dropped.
@@ -2635,14 +2655,40 @@ fn run_worker(
                 client,
                 server,
                 start_together,
-            } => match app.set_linked_pair(client, server, start_together) {
-                Ok(_) => send_snapshot(&app, &events),
-                Err(error) => send_error(&events, &error),
-            },
-            Command::ClearLinkedPair(client) => match app.clear_linked_pair(client) {
-                Ok(()) => send_snapshot(&app, &events),
-                Err(error) => send_error(&events, &error),
-            },
+            } => {
+                let hosts = [
+                    InstalledHost::Instance(client),
+                    InstalledHost::Server(server),
+                ];
+                if refuse_dialog_while_changing(&app, &changing, &hosts, ModalScope::NONE, &events)
+                {
+                    continue;
+                }
+                match app.set_linked_pair(client, server, start_together) {
+                    Ok(_) => send_snapshot(&app, &events),
+                    Err(error) => send_error(&events, &error),
+                }
+            }
+            Command::ClearLinkedPair(client) => {
+                // The server it is paired with is a side of the pair too.
+                let hosts = match app.linked_pair_of(InstalledHost::Instance(client)) {
+                    Ok(pair) => std::iter::once(InstalledHost::Instance(client))
+                        .chain(pair.map(|pair| InstalledHost::Server(pair.server)))
+                        .collect::<Vec<_>>(),
+                    Err(error) => {
+                        send_error(&events, &error);
+                        continue;
+                    }
+                };
+                if refuse_dialog_while_changing(&app, &changing, &hosts, ModalScope::NONE, &events)
+                {
+                    continue;
+                }
+                match app.clear_linked_pair(client) {
+                    Ok(()) => send_snapshot(&app, &events),
+                    Err(error) => send_error(&events, &error),
+                }
+            }
             Command::SetAllowPackModVersionChanges { instance, allow } => {
                 // No toast. The toggle itself is the confirmation; a refusal
                 // is still reported, because then nothing on screen changed.
@@ -3088,6 +3134,17 @@ fn run_worker(
                 instance,
                 absent_mods,
             } => {
+                // Said in the dialog that asked, when one did: the copy would be
+                // taken from files a change is still rewriting.
+                if refuse_dialog_while_changing(
+                    &app,
+                    &changing,
+                    &[InstalledHost::Instance(instance)],
+                    ModalScope::ABSENT_MODS,
+                    &events,
+                ) {
+                    continue;
+                }
                 match app.duplicate_client(
                     instance,
                     &ephervex_core::DuplicateClient::default(),
@@ -4597,28 +4654,50 @@ fn run_worker(
                     Err(error) => send_scoped_modal_error(&events, ModalScope::DELETE_MOD, &error),
                 }
             }
-            Command::RenameClient { id, name } => match app.rename_client(id, &name) {
-                Ok(record) => {
-                    let _ = events.send(Event::CloseModal(ModalScope::RENAME));
-                    let _ = events.send(Event::Toast {
-                        message: localized_value("gui-renamed", &record.name),
-                        error: false,
-                    });
-                    send_snapshot(&app, &events);
+            Command::RenameClient { id, name } => {
+                if refuse_dialog_while_changing(
+                    &app,
+                    &changing,
+                    &[InstalledHost::Instance(id)],
+                    ModalScope::RENAME,
+                    &events,
+                ) {
+                    continue;
                 }
-                Err(error) => send_modal_error(&events, &error),
-            },
-            Command::RenameServer { id, name } => match app.rename_server(id, &name) {
-                Ok(committed) => {
-                    let _ = events.send(Event::CloseModal(ModalScope::RENAME));
-                    let _ = events.send(Event::Toast {
-                        message: localized_value("gui-renamed", &committed.record.name),
-                        error: false,
-                    });
-                    send_snapshot(&app, &events);
+                match app.rename_client(id, &name) {
+                    Ok(record) => {
+                        let _ = events.send(Event::CloseModal(ModalScope::RENAME));
+                        let _ = events.send(Event::Toast {
+                            message: localized_value("gui-renamed", &record.name),
+                            error: false,
+                        });
+                        send_snapshot(&app, &events);
+                    }
+                    Err(error) => send_modal_error(&events, &error),
                 }
-                Err(error) => send_modal_error(&events, &error),
-            },
+            }
+            Command::RenameServer { id, name } => {
+                if refuse_dialog_while_changing(
+                    &app,
+                    &changing,
+                    &[InstalledHost::Server(id)],
+                    ModalScope::RENAME,
+                    &events,
+                ) {
+                    continue;
+                }
+                match app.rename_server(id, &name) {
+                    Ok(committed) => {
+                        let _ = events.send(Event::CloseModal(ModalScope::RENAME));
+                        let _ = events.send(Event::Toast {
+                            message: localized_value("gui-renamed", &committed.record.name),
+                            error: false,
+                        });
+                        send_snapshot(&app, &events);
+                    }
+                    Err(error) => send_modal_error(&events, &error),
+                }
+            }
             Command::DisableSuggestedMods(server) => {
                 if refuse_mod_change_while_changing(
                     &app,
@@ -12240,6 +12319,111 @@ mod tests {
         );
         drop(in_flight);
         assert!(!refuse_save_while_changing(&hosts, host, &events));
+    }
+
+    #[test]
+    fn a_rename_or_copy_is_refused_in_its_dialog_while_the_host_changes() {
+        let root = tempfile::tempdir().expect("root");
+        let app = App::open_at(Paths::rooted_at(root.path())).expect("app");
+        let hosts: ChangingHosts = Arc::new(Mutex::new(HashMap::new()));
+        let (events, received) = mpsc::channel();
+        let client = InstalledHost::Instance(ephervex_model::InstanceId::new());
+        let server = InstalledHost::Server(ServerId::new());
+
+        for dialogs in [ModalScope::RENAME, ModalScope::ABSENT_MODS] {
+            assert!(!refuse_dialog_while_changing(
+                &app,
+                &hosts,
+                &[client],
+                dialogs,
+                &events
+            ));
+            assert!(received.try_recv().is_err(), "an idle host is not refused");
+        }
+
+        let in_flight = HostChangeInFlight::mark(&hosts, client, "gui-snapshot-busy");
+        for dialogs in [ModalScope::RENAME, ModalScope::ABSENT_MODS] {
+            assert!(refuse_dialog_while_changing(
+                &app,
+                &hosts,
+                &[client],
+                dialogs,
+                &events
+            ));
+            let refusal = received.try_recv().expect("a refusal");
+            assert!(
+                matches!(
+                    &refusal,
+                    Event::ModalError { scope, message }
+                        if *scope == dialogs && *message == lookup("gui-snapshot-busy")
+                ),
+                "the change in flight is named to the dialog that asked: {refusal:?}"
+            );
+        }
+        assert!(
+            !refuse_dialog_while_changing(&app, &hosts, &[server], ModalScope::RENAME, &events),
+            "another host is not held back by this one"
+        );
+        assert!(received.try_recv().is_err());
+        drop(in_flight);
+    }
+
+    #[test]
+    fn a_pair_change_is_refused_while_either_side_changes() {
+        let root = tempfile::tempdir().expect("root");
+        let app = App::open_at(Paths::rooted_at(root.path())).expect("app");
+        let hosts: ChangingHosts = Arc::new(Mutex::new(HashMap::new()));
+        let (events, received) = mpsc::channel();
+        let client = InstalledHost::Instance(ephervex_model::InstanceId::new());
+        let server_id = ServerId::new();
+        let server = InstalledHost::Server(server_id);
+        let pair = [client, server];
+
+        let on_client = HostChangeInFlight::mark(&hosts, client, "gui-snapshot-busy");
+        assert!(refuse_dialog_while_changing(
+            &app,
+            &hosts,
+            &pair,
+            ModalScope::NONE,
+            &events
+        ));
+        let refusal = received.try_recv().expect("a refusal");
+        assert!(
+            matches!(
+                &refusal,
+                Event::ModalError { scope, message }
+                    if *scope == ModalScope::NONE && *message == lookup("gui-snapshot-busy")
+            ),
+            "the change on the client is named: {refusal:?}"
+        );
+        drop(on_client);
+
+        let on_server = HostChangeInFlight::mark(&hosts, server, "gui-fix-busy");
+        assert!(refuse_dialog_while_changing(
+            &app,
+            &hosts,
+            &pair,
+            ModalScope::NONE,
+            &events
+        ));
+        let refusal = received.try_recv().expect("a refusal");
+        assert!(
+            matches!(
+                &refusal,
+                Event::ModalError { message, .. }
+                    if message.contains(&server_id.to_string())
+                        && message.contains(&lookup("gui-fix-busy"))
+            ),
+            "the change on the server is named: {refusal:?}"
+        );
+        drop(on_server);
+        assert!(!refuse_dialog_while_changing(
+            &app,
+            &hosts,
+            &pair,
+            ModalScope::NONE,
+            &events
+        ));
     }
 
     #[test]
