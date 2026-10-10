@@ -40,6 +40,7 @@ const config: Config = {
       logo: {alt: 'Ephervex logo', src: 'img/ephervex-logo.png'},
       items: [
         {type: 'docSidebar', sidebarId: 'docsSidebar', position: 'left', label: 'Documentation'},
+        {to: '/install', label: 'Install', position: 'left'},
         {to: '/screenshots', label: 'Screenshots', position: 'left'},
         {type: 'docsVersionDropdown', position: 'right'},
         {href: repository, label: 'GitHub', position: 'right'},
@@ -52,7 +53,7 @@ const config: Config = {
           title: 'Documentation',
           items: [
             {label: 'Introduction', to: '/docs/v1/intro'},
-            {label: 'Installation', to: '/docs/v1/install'},
+            {label: 'Installation', to: '/install'},
             {label: 'Interface tour', to: '/docs/v1/interface-tour'},
           ],
         },

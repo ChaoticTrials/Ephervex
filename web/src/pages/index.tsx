@@ -37,7 +37,7 @@ export default function Home(): ReactNode {
                 Investigate the problem, then discard the instance or keep it for later.
               </p>
               <div className={styles.heroActions}>
-                <Link className={styles.primaryAction} to="/docs/v1/install">Install Ephervex <span aria-hidden="true">↗</span></Link>
+                <Link className={styles.primaryAction} to="/install">Install Ephervex <span aria-hidden="true">↗</span></Link>
                 <Link className={styles.secondaryAction} to="/docs/v1/intro">Read the docs <span aria-hidden="true">→</span></Link>
               </div>
               <div className={styles.supportLine}>
@@ -115,7 +115,7 @@ export default function Home(): ReactNode {
               <span className={styles.sectionLabel}>Get started</span>
               <Heading as="h2">Install Ephervex for Linux.</Heading>
             </div>
-            <Link className={styles.primaryAction} to="/docs/v1/install">Installation guide <span aria-hidden="true">→</span></Link>
+            <Link className={styles.primaryAction} to="/install">Installation guide <span aria-hidden="true">→</span></Link>
           </div>
         </section>
       </main>

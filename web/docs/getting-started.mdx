@@ -1,0 +1,23 @@
+---
+title: Getting Started
+description: Install Ephervex on Linux.
+slug: /install
+---
+
+import {useEffect} from 'react';
+import Link from '@docusaurus/Link';
+import useBaseUrl from '@docusaurus/useBaseUrl';
+
+export function InstallRedirect() {
+  const destination = useBaseUrl('/install');
+
+  useEffect(() => {
+    window.location.replace(destination + window.location.hash);
+  }, [destination]);
+
+  return <p>Continue to the <Link to="/install">installation page</Link>.</p>;
+}
+
+# Getting Started
+
+<InstallRedirect />
