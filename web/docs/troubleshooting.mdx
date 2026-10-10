@@ -1,0 +1,100 @@
+---
+title: Limitations and Troubleshooting
+description: Check supported versions, diagnose launch failures, and find the right recovery steps.
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+import ThemeScreenshot from '@site/src/components/ThemeScreenshot';
+
+# Limitations and Troubleshooting
+
+Start with the error shown by Ephervex. For a failed game or server run, keep
+the log and crash report from that run before changing files. The
+[Diagnostics guide](./diagnostics.mdx) explains how to inspect them and create
+a bundle if you need to share the problem.
+
+## Check the local setup
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Open the affected client or server, then select **Diagnostics > Diagnose**.
+Read the findings and **What was checked**. A suggested fix shows its changes
+before you apply it. If Ephervex itself cannot start, use the CLI `doctor`
+command below.
+
+<ThemeScreenshot state="client-diagnostics-result" alt="Client Diagnostics showing findings and completed checks" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+Run these commands in the same environment you use to launch Ephervex:
+
+```bash
+ephervex doctor
+ephervex paths
+```
+
+`doctor` checks local storage, configuration, credentials, bundled data, and
+Java without downloading or launching Minecraft. `paths` shows the directories
+Ephervex actually uses. For an AppImage, replace `ephervex` with its file name,
+for example `./Ephervex-x86_64.AppImage doctor`.
+
+</TabItem>
+</Tabs>
+
+## Find the next step
+
+| Problem | What to check |
+| --- | --- |
+| The AppImage cannot mount or find `fusermount` | Run it with `APPIMAGE_EXTRACT_AND_RUN=1`, as shown [below](#the-appimage-or-desktop-will-not-start). |
+| A Minecraft or loader version is unavailable | Check the [supported scope](#supported-scope) and the exact release and loader pairing. Ephervex will not choose a substitute. |
+| Java is missing or the wrong version | Refresh detected runtimes and check the choice for that Minecraft release in [Java settings](./settings.mdx#java). |
+| A Microsoft account says sign-in is required | Check the [account status and credential store](./accounts.mdx#inspect-or-remove-an-account). A session-only sign-in does not persist. |
+| An import waits for a CurseForge file | Follow the [manual download flow](./import-modpacks.mdx#resolve-files-that-need-a-manual-download). The release already includes CurseForge API access. |
+| A mod file is missing or damaged | [Verify recorded files](./mods.mdx#verify-and-repair-recorded-files), then repair files with a recorded download source. |
+| A client or server crashes | Read its [logs and crash report](./diagnostics.mdx#read-logs-and-crash-reports), then diagnose the failed run. |
+| A server says it needs attention after an interruption | Check [server recovery](./servers.mdx#recover-a-server-after-an-interruption) before starting it again. |
+| A download fails or an offline launch needs a file | Check the connection and [what works offline](./files-and-privacy.mdx#work-offline). Missing artifacts must be fetched before an offline launch. |
+| Storage or configuration cannot be written | Run `ephervex doctor` and check the resolved directories with `ephervex paths`. See [file locations](./files-and-privacy.mdx#find-your-files). |
+
+## The AppImage or desktop will not start
+
+Use the build for your architecture: `x86_64` or `aarch64`, as reported by
+`uname -m`. Ephervex requires glibc 2.35 or newer (for example, Ubuntu 22.04
+or Debian 12). The desktop needs X11 or XWayland. A Wayland-only session
+without XWayland is untested; file drag and drop also needs X11 or XWayland.
+
+If the AppImage reports a FUSE mount error, run it without mounting:
+
+```bash
+APPIMAGE_EXTRACT_AND_RUN=1 ./Ephervex-x86_64.AppImage
+```
+
+Use the `aarch64` file name for the ARM build. This mode unpacks the AppImage
+on each start, so startup is slower. See [Installation](/install) for package
+options and system requirements.
+
+If an `ephervex://` link does not open an AppImage, check its handler with
+`./Ephervex-x86_64.AppImage url-handler status`. Register it again after moving
+the AppImage. The [import guide](./import-modpacks.mdx#import-from-a-link) has
+the registration command.
+
+## Supported scope
+
+Ephervex runs on Linux x86_64 and aarch64. On x86_64, it supports Minecraft
+release versions 1.12.2 and newer with Vanilla, Forge, or NeoForge. Forge or
+NeoForge must have a build for the exact Minecraft release selected. On ARM,
+the selected Minecraft version also needs compatible native libraries; ARM
+launches have not yet been tested.
+
+Fabric, Quilt, Minecraft snapshots, pre-releases, release candidates, Windows,
+and macOS are unsupported. Prism and MultiMC exports cannot be imported. The
+desktop interface is currently English only.
+
+Imported packs do not yet preserve resource packs, shader packs, or datapacks.
+Some pack files require a manual download when their authors disable
+third-party downloads. Closing Ephervex stops its running clients and servers.
+Avoid concurrent mod changes on one client or server, including changes during
+an active [mod isolation](./mod-isolation.mdx) session.

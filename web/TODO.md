@@ -165,7 +165,7 @@ features show one tab or a short note.
 - [x] Themes (source: `docs/themes.md`)
 - [x] Files and locations, environment variables, working offline,
       credentials and privacy, upgrade and uninstall
-- [ ] Limitations and troubleshooting
+- [x] Limitations and troubleshooting
 
 ## 6. CLI
 
