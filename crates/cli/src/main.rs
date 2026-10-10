@@ -35,19 +35,19 @@ use ephervex_core::{
     LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions,
     LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver, LaunchOptions,
     LaunchOutcome, LaunchState, LoginFlow, LoginOptions, LoginRequest, MAX_SEARCH_MATCHES,
-    MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod, ManagedModSnapshot, ModInstallPlan,
-    ModInstallRequest, ModPresence, ModProjectDetails, ModRelations, ModSearchQuery,
-    ModSearchResults, NetworkAccess, NewClient, NewServer, OperationReporter, OptionalSelection,
-    OutputLine, PackAnalysis, PackRecipe, PackSide, Paths, PlanWarning, PlannedMod,
-    PreferenceApplication, PreferenceId, PreferenceKey, ProcessMonitor, PromotionRequest,
-    ReconciliationReport, RelatedMod, ReleaseListing, RequiredMods, RequirementBasis, RoundAnswer,
-    RuntimeClassification, RuntimeInventory, SearchOptions, SecretString, ServerCommitWarning,
-    ServerContentSource, ServerCreateOptions, ServerEvent, ServerExit, ServerFolder,
-    ServerNetworkChange, ServerObserver, ServerPersistenceHealth, ServerRecord, ServerWarning,
-    Session, SharedArtifactReport, SideRequirement, SkipReason, SnapshotOrigin, SnapshotRecord,
-    SnapshotRestoreOptions, StartedServerLifetime, SuspectConfidence, SuspectReason,
-    TerminationRequests, TextAnchor, TextView, UnknownServerFiles, VerificationReport,
-    VersionMetadata, VersionRecord, format_binary_bytes,
+    MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod, ManagedModInstallation,
+    ManagedModSnapshot, ModInstallPlan, ModInstallRequest, ModPresence, ModProjectDetails,
+    ModRelations, ModSearchQuery, ModSearchResults, NetworkAccess, NewClient, NewServer,
+    OperationReporter, OptionalSelection, OutputLine, PackAnalysis, PackRecipe, PackSide, Paths,
+    PlanWarning, PlannedMod, PreferenceApplication, PreferenceId, PreferenceKey, ProcessMonitor,
+    PromotionRequest, ReconciliationReport, RelatedMod, ReleaseListing, RequiredMods,
+    RequirementBasis, RoundAnswer, RuntimeClassification, RuntimeInventory, SearchOptions,
+    SecretString, ServerCommitWarning, ServerContentSource, ServerCreateOptions, ServerEvent,
+    ServerExit, ServerFolder, ServerNetworkChange, ServerObserver, ServerPersistenceHealth,
+    ServerRecord, ServerWarning, Session, SharedArtifactReport, SideRequirement, SkipReason,
+    SnapshotOrigin, SnapshotRecord, SnapshotRestoreOptions, StartedServerLifetime,
+    SuspectConfidence, SuspectReason, TerminationRequests, TextAnchor, TextView,
+    UnknownServerFiles, VerificationReport, VersionMetadata, VersionRecord, format_binary_bytes,
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{
@@ -5293,6 +5293,44 @@ fn print_mod_plan(plan: &ModInstallPlan, json: bool) {
     }
 }
 
+/// What an installation did, one line each. A recorded jar left alone because
+/// its contents differ is named, since "nothing to do" would hide that the
+/// requested release was not restored.
+fn installation_lines(name: &str, installation: &ManagedModInstallation) -> Vec<String> {
+    let mut lines = Vec::new();
+    if installation.changed_anything() {
+        lines.push(ephervex_i18n::lookup_args(
+            "mod-install-completed",
+            [("name", MessageArg::from(name))],
+        ));
+        lines.extend(
+            installation
+                .installed
+                .iter()
+                .map(|path| format!("  {}", path.display())),
+        );
+        lines.extend(
+            installation
+                .recorded
+                .iter()
+                .map(|path| install_path_line("mod-install-record-updated", path)),
+        );
+    } else if installation.modified.is_empty() {
+        lines.push(ephervex_i18n::lookup("mod-install-nothing-to-do"));
+    }
+    lines.extend(
+        installation
+            .modified
+            .iter()
+            .map(|path| install_path_line("mod-install-kept-modified", path)),
+    );
+    lines
+}
+
+fn install_path_line(message_id: &str, path: &Path) -> String {
+    ephervex_i18n::lookup_args(message_id, [("path", MessageArg::from(path))])
+}
+
 fn print_installed_mods(installed: &InstalledMods, json: bool) {
     if json {
         print_json(&serde_json::json!({
@@ -5311,22 +5349,8 @@ fn print_installed_mods(installed: &InstalledMods, json: bool) {
         return;
     }
 
-    if installed.installation.changed_anything() {
-        outln!(
-            "{}",
-            ephervex_i18n::lookup_args(
-                "mod-install-completed",
-                [(
-                    "name",
-                    MessageArg::from(installed.plan.root.project.title.as_str())
-                )]
-            )
-        );
-        for path in &installed.installation.installed {
-            outln!("  {}", path.display());
-        }
-    } else {
-        outln!("{}", ephervex_i18n::lookup("mod-install-nothing-to-do"));
+    for line in installation_lines(&installed.plan.root.project.title, &installed.installation) {
+        outln!("{line}");
     }
     for warning in &installed.plan.warnings {
         eprintln!("{}", warning_text(warning));
@@ -8219,6 +8243,61 @@ mod tests {
             "a\\u{1b}[2J\\u{a}b\\u{7f}"
         );
         assert_eq!(terminal_safe("x\u{9b}y\u{202e}z"), "x\\u{9b}y\\u{202e}z");
+    }
+
+    #[test]
+    fn a_reinstall_that_keeps_a_changed_jar_names_it_instead_of_saying_nothing_to_do() {
+        let installation = ManagedModInstallation {
+            modified: vec![PathBuf::from("mods/local-build.jar")],
+            ..ManagedModInstallation::default()
+        };
+
+        let lines = installation_lines("Local Build", &installation);
+
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("mods/local-build.jar"), "{lines:?}");
+        assert!(lines[0].contains("left as it is"), "{lines:?}");
+        assert!(!lines[0].contains("already installed"), "{lines:?}");
+    }
+
+    #[test]
+    fn a_reinstall_that_only_updates_a_record_names_the_record_and_lists_no_installed_file() {
+        let installation = ManagedModInstallation {
+            recorded: vec![PathBuf::from("mods/lib.jar")],
+            ..ManagedModInstallation::default()
+        };
+
+        let lines = installation_lines("Lib", &installation);
+
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].contains("Lib"), "{lines:?}");
+        assert!(lines[1].contains("mods/lib.jar"), "{lines:?}");
+        assert!(lines[1].contains("No file was written"), "{lines:?}");
+    }
+
+    #[test]
+    fn a_reinstall_that_changes_nothing_says_there_was_nothing_to_do() {
+        let lines = installation_lines("Lib", &ManagedModInstallation::default());
+
+        assert_eq!(
+            lines,
+            vec![ephervex_i18n::lookup("mod-install-nothing-to-do")]
+        );
+    }
+
+    #[test]
+    fn an_install_reports_a_kept_jar_beside_the_files_it_wrote() {
+        let installation = ManagedModInstallation {
+            installed: vec![PathBuf::from("mods/dep.jar")],
+            modified: vec![PathBuf::from("mods/root.jar")],
+            ..ManagedModInstallation::default()
+        };
+
+        let lines = installation_lines("Root", &installation);
+
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(lines[1].contains("mods/dep.jar"), "{lines:?}");
+        assert!(lines[2].contains("mods/root.jar"), "{lines:?}");
     }
 
     /// Stop requests delivered by hand instead of by signals.

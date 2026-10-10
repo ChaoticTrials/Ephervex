@@ -1655,6 +1655,8 @@ gui-crash-disabled-count = { $count ->
     }
 
 mod-install-nothing-to-do = Everything requested is already installed at the requested version.
+mod-install-kept-modified = Kept { $path }: its contents differ from the recorded file, so it was left as it is.
+mod-install-record-updated = Updated the record for { $path }. No file was written.
 
 # Shown next to an incompatible result rather than hiding it, so a user can see
 # why the mod they are looking at is not offered.
@@ -2807,6 +2809,14 @@ gui-installed-managed-mods = { $count ->
     [one] Installed 1 managed mod with required dependencies.
    *[other] Installed { $count } managed mods with required dependencies.
 }
+gui-mod-records-updated = { $count ->
+    [one] Updated the record of 1 mod to match the jar already in place.
+   *[other] Updated the records of { $count } mods to match the jars already in place.
+}
+gui-mod-kept-modified = { $count ->
+    [one] Kept { $names }: its contents differ from the recorded file, so it was left as it is.
+   *[other] Kept { $names }: their contents differ from the recorded files, so they were left as they are.
+}
 gui-stop-requested = Stop requested.
 gui-state-restarting = Restarting
 gui-settings-disk-usage = Disk usage
@@ -2969,6 +2979,15 @@ gui-linked-removes = { $count ->
     [one] 1 mod removed
    *[other] { $count } mods removed
 }
+gui-linked-recorded = { $count ->
+    [one] 1 record updated
+   *[other] { $count } records updated
+}
+gui-linked-kept-modified = { $count ->
+    [one] 1 changed jar kept
+   *[other] { $count } changed jars kept
+}
+gui-linked-nothing-changed = Nothing needed changing.
 gui-linked-dependencies-unprovable = Dependencies could not be confirmed, so none will be collected.
 # One word for every reason a server cannot take part. The reason itself is the
 # sentence beside it, so the row reads as one state plus one explanation.

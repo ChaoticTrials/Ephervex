@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use ephervex_core::ControlResponse;
+use ephervex_core::ManagedModInstallation;
 use ephervex_core::ManagedMutationReport;
 use ephervex_core::live_diagnostics::TailedLine;
 use ephervex_core::{
@@ -10505,12 +10506,56 @@ fn finish_linked(
 /// What the client half of a linked operation did.
 fn client_outcome_message(outcome: &LinkedModOutcome) -> String {
     match &outcome.client {
-        ClientModOutcome::Installed(installed) => localized_count(
-            "gui-installed-managed-mods",
-            installed.plan.all_mods().len(),
-        ),
+        ClientModOutcome::Installed(installed) => {
+            installed_message(&installed.installation, installed.plan.all_mods().len())
+        }
+        // A jar kept because its bytes differ is the whole outcome of a
+        // request for the release it already has, so the plan's wording
+        // ("already newest", "version changed") would misdescribe it.
+        ClientModOutcome::Mutated(mutation) if !mutation.report.modified.is_empty() => {
+            kept_modified_message(&mutation.report.modified)
+        }
         ClientModOutcome::Mutated(mutation) => mutation_message(mutation),
     }
+}
+
+/// Names each jar that was left alone because its contents differ from the
+/// recorded file.
+fn kept_modified_message(paths: &[PathBuf]) -> String {
+    let names = paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    lookup_args(
+        "gui-mod-kept-modified",
+        [
+            ("count", Arg::from(paths.len())),
+            ("names", Arg::from(names)),
+        ],
+    )
+}
+
+/// What an installation did, naming every part of the outcome the user would
+/// otherwise have to infer from a bare "installed".
+fn installed_message(installation: &ManagedModInstallation, planned: usize) -> String {
+    let mut parts = Vec::new();
+    if !installation.installed.is_empty() || !installation.repaired.is_empty() {
+        parts.push(localized_count("gui-installed-managed-mods", planned));
+    }
+    if !installation.recorded.is_empty() {
+        parts.push(localized_count(
+            "gui-mod-records-updated",
+            installation.recorded.len(),
+        ));
+    }
+    if !installation.modified.is_empty() {
+        parts.push(kept_modified_message(&installation.modified));
+    }
+    if parts.is_empty() {
+        return lookup("mod-install-nothing-to-do");
+    }
+    parts.join(" ")
 }
 
 /// Every target's own result, so a partial success is visibly partial.
@@ -10564,7 +10609,9 @@ fn linked_result_row(target: &ephervex_core::LinkedTargetOutcome) -> LinkedTarge
     }
 }
 
-/// What one target's transaction actually wrote.
+/// What one target's transaction did, including the outcomes that wrote
+/// nothing: a record brought in line with a jar already on disk, a changed jar
+/// that was kept, and a target that already had everything.
 fn applied_summary(report: &ManagedMutationReport) -> String {
     let written = report.installed.len() + report.replaced.len() + report.repaired.len();
     let mut parts = Vec::new();
@@ -10573,6 +10620,21 @@ fn applied_summary(report: &ManagedMutationReport) -> String {
     }
     if !report.removed.is_empty() {
         parts.push(localized_count("gui-linked-removes", report.removed.len()));
+    }
+    if !report.recorded.is_empty() {
+        parts.push(localized_count(
+            "gui-linked-recorded",
+            report.recorded.len(),
+        ));
+    }
+    if !report.modified.is_empty() {
+        parts.push(localized_count(
+            "gui-linked-kept-modified",
+            report.modified.len(),
+        ));
+    }
+    if parts.is_empty() {
+        return lookup("gui-linked-nothing-changed");
     }
     parts.join(", ")
 }
@@ -11182,6 +11244,95 @@ mod tests {
 
     fn logical(paths: &[&str]) -> Vec<PathBuf> {
         paths.iter().map(PathBuf::from).collect()
+    }
+
+    #[test]
+    fn a_linked_target_that_only_updated_its_record_says_so() {
+        let report = ManagedMutationReport {
+            recorded: logical(&["mods/lib.jar"]),
+            ..ManagedMutationReport::default()
+        };
+
+        assert_eq!(applied_summary(&report), "1 record updated");
+    }
+
+    #[test]
+    fn a_linked_target_that_kept_a_changed_jar_says_so() {
+        let report = ManagedMutationReport {
+            modified: logical(&["mods/a.jar", "mods/b.jar"]),
+            ..ManagedMutationReport::default()
+        };
+
+        assert_eq!(applied_summary(&report), "2 changed jars kept");
+    }
+
+    #[test]
+    fn a_linked_target_that_changed_nothing_does_not_show_an_empty_explanation() {
+        let report = ManagedMutationReport {
+            unchanged: logical(&["mods/a.jar"]),
+            ..ManagedMutationReport::default()
+        };
+
+        assert_eq!(applied_summary(&report), "Nothing needed changing.");
+    }
+
+    #[test]
+    fn a_linked_target_summary_lists_written_removed_recorded_and_kept_outcomes_together() {
+        let report = ManagedMutationReport {
+            installed: logical(&["mods/new.jar"]),
+            removed: logical(&["mods/old.jar"]),
+            recorded: logical(&["mods/lib.jar"]),
+            modified: logical(&["mods/local.jar"]),
+            ..ManagedMutationReport::default()
+        };
+
+        assert_eq!(
+            applied_summary(&report),
+            "1 mod, 1 mod removed, 1 record updated, 1 changed jar kept"
+        );
+    }
+
+    #[test]
+    fn an_install_that_kept_a_changed_jar_does_not_claim_it_installed_the_mod() {
+        let installation = ManagedModInstallation {
+            modified: logical(&["mods/local.jar"]),
+            ..ManagedModInstallation::default()
+        };
+
+        let message = installed_message(&installation, 1);
+
+        assert!(message.contains("mods/local.jar"), "{message}");
+        assert!(message.starts_with("Kept "), "{message}");
+        assert!(!message.contains("Installed"), "{message}");
+    }
+
+    #[test]
+    fn an_install_that_wrote_a_file_and_kept_another_reports_both() {
+        let installation = ManagedModInstallation {
+            installed: logical(&["mods/dep.jar"]),
+            modified: logical(&["mods/local.jar"]),
+            ..ManagedModInstallation::default()
+        };
+
+        let message = installed_message(&installation, 2);
+
+        assert!(message.starts_with("Installed 2 managed mods"), "{message}");
+        assert!(message.contains("Kept mods/local.jar"), "{message}");
+    }
+
+    #[test]
+    fn a_kept_jar_message_names_every_kept_jar() {
+        let message = kept_modified_message(&logical(&["mods/a.jar", "mods/b.jar"]));
+
+        assert!(message.contains("mods/a.jar, mods/b.jar"), "{message}");
+        assert!(message.contains("they were left"), "{message}");
+    }
+
+    #[test]
+    fn an_install_that_changed_nothing_says_everything_was_already_installed() {
+        let message = installed_message(&ManagedModInstallation::default(), 1);
+
+        assert_eq!(message, lookup("mod-install-nothing-to-do"));
     }
 
     /// This process's kernel start time, so it can stand in for a live game.
