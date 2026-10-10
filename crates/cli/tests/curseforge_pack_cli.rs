@@ -144,3 +144,29 @@ fn inspect_reports_a_curseforge_export_without_a_key_or_network_access() {
         "--inspect must not write an instance"
     );
 }
+
+#[test]
+fn text_inspect_escapes_control_characters_in_the_manifest_author() {
+    let sandbox = Sandbox::new();
+    let pack = sandbox.base().join("spoofed-author.zip");
+    let manifest = String::from_utf8(MANIFEST.to_vec())
+        .expect("UTF-8 manifest")
+        .replace("A CLI Tester", "A\\u001b[2J\\nsource:    Trusted");
+    archive(&pack, manifest.as_bytes(), &[]);
+    let path = pack.to_str().expect("UTF-8 path");
+
+    let inspected = sandbox.run(&["import", path, "--inspect"]);
+    assert!(inspected.status.success(), "{inspected:?}");
+    let text = String::from_utf8(inspected.stdout).expect("UTF-8 output");
+    assert!(
+        text.contains("author:    A\\u{1b}[2J\\u{a}source:    Trusted\n"),
+        "{text:?}"
+    );
+    assert!(
+        text.chars().all(|c| c == '\n' || !c.is_control()),
+        "raw control characters reached the terminal: {text:?}"
+    );
+
+    let machine = sandbox.json(&["--json", "import", path, "--inspect"]);
+    assert_eq!(machine["author"], "A\u{1b}[2J\nsource:    Trusted");
+}

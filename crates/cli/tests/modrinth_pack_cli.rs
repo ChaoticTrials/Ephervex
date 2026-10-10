@@ -168,6 +168,87 @@ fn an_overrides_only_import_retains_a_server_recipe_after_the_archive_is_deleted
 }
 
 #[test]
+fn text_output_escapes_control_characters_in_archive_supplied_pack_text() {
+    let sandbox = Sandbox::new();
+    let pack = sandbox.base().join("spoofed.mrpack");
+    let index = br#"{
+        "formatVersion": 1,
+        "game": "minecraft",
+        "versionId": "1.0\u001b[31m",
+        "name": "Spoof\u001b[2J\nsource:    Trusted",
+        "files": [],
+        "dependencies": { "minecraft": "1.20.1" }
+    }"#;
+    archive(&pack, index, &[]);
+    let path = pack.to_str().expect("UTF-8 path");
+
+    let inspected = sandbox.run(&["import", path, "--inspect"]);
+    assert!(inspected.status.success(), "{inspected:?}");
+    let text = String::from_utf8(inspected.stdout).expect("UTF-8 output");
+    assert!(
+        text.contains("pack:      Spoof\\u{1b}[2J\\u{a}source:    Trusted\n"),
+        "{text:?}"
+    );
+    assert!(text.contains("version:   1.0\\u{1b}[31m\n"), "{text:?}");
+    assert!(
+        text.chars().all(|c| c == '\n' || !c.is_control()),
+        "raw control characters reached the terminal: {text:?}"
+    );
+    assert_eq!(text.matches("source:").count(), 2, "{text:?}");
+
+    let machine = sandbox.json(&["--json", "import", path, "--inspect"]);
+    assert_eq!(machine["name"], "Spoof\u{1b}[2J\nsource:    Trusted");
+    assert_eq!(machine["version"], "1.0\u{1b}[31m");
+
+    let imported = sandbox.run(&["import", path, "--persistent"]);
+    assert!(imported.status.success(), "{imported:?}");
+    let summary = String::from_utf8(imported.stdout).expect("UTF-8 output");
+    assert!(
+        summary.chars().all(|c| c == '\n' || !c.is_control()),
+        "raw control characters reached the terminal: {summary:?}"
+    );
+    assert!(
+        summary.contains("pack:      Spoof\\u{1b}[2J"),
+        "{summary:?}"
+    );
+}
+
+#[test]
+fn text_output_escapes_control_characters_in_refused_download_addresses() {
+    let sandbox = Sandbox::new();
+    let pack = sandbox.base().join("refused-address.mrpack");
+    let index = br#"{
+        "formatVersion": 1,
+        "game": "minecraft",
+        "versionId": "1.0",
+        "name": "Refused Address",
+        "files": [{
+            "path": "mods/a.jar",
+            "hashes": {
+                "sha1": "1726b9210f6a517b654e0fec81091468d30b688f",
+                "sha512": "e348a4a3405b631429af878201d448d9b50eeb28cbb07143d5c52ec587b35a30e7a8d6e3e89a0f3c9c4d647622957d358c5d9c6b7403796552a307bc7c0a7f59"
+            },
+            "downloads": [
+                "https://cdn.modrinth.com/data/x/a.jar",
+                "\u001b[2Jevil"
+            ],
+            "fileSize": 201
+        }],
+        "dependencies": { "minecraft": "1.20.1" }
+    }"#;
+    archive(&pack, index, &[]);
+
+    let inspected = sandbox.run(&["import", pack.to_str().expect("UTF-8 path"), "--inspect"]);
+    assert!(inspected.status.success(), "{inspected:?}");
+    let stderr = String::from_utf8(inspected.stderr).expect("UTF-8 output");
+    assert!(stderr.contains("  \\u{1b}[2Jevil\n"), "{stderr:?}");
+    assert!(
+        stderr.chars().all(|c| c == '\n' || !c.is_control()),
+        "raw control characters reached the terminal: {stderr:?}"
+    );
+}
+
+#[test]
 fn a_fabric_pack_fails_with_a_machine_readable_message_id() {
     let sandbox = Sandbox::new();
     let pack = sandbox.base().join("fabric.mrpack");

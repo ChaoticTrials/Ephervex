@@ -6951,6 +6951,39 @@ fn resolve_redirect_consent(
     }
 }
 
+/// Makes text that came from an archive safe to print on a terminal.
+///
+/// Control characters and bidirectional formatting characters are replaced by
+/// a visible `\u{..}` escape, so a pack name cannot clear the screen, recolor
+/// the output, or add lines of its own. Everything else is left exact.
+fn terminal_safe(text: &str) -> std::borrow::Cow<'_, str> {
+    fn needs_escape(character: char) -> bool {
+        character.is_control()
+            || matches!(
+                character,
+                '\u{200e}'
+                    | '\u{200f}'
+                    | '\u{2028}'
+                    | '\u{2029}'
+                    | '\u{202a}'..='\u{202e}'
+                    | '\u{2066}'..='\u{2069}'
+            )
+    }
+
+    if !text.chars().any(needs_escape) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut safe = String::with_capacity(text.len());
+    for character in text.chars() {
+        if needs_escape(character) {
+            let _ = write!(safe, "\\u{{{:x}}}", u32::from(character));
+        } else {
+            safe.push(character);
+        }
+    }
+    std::borrow::Cow::Owned(safe)
+}
+
 /// Prints what a pack is, without importing it.
 fn print_analysis(analysis: &PackAnalysis, json: bool) {
     if json {
@@ -6958,16 +6991,19 @@ fn print_analysis(analysis: &PackAnalysis, json: bool) {
         return;
     }
 
-    outln!("pack:      {}", analysis.name());
+    outln!("pack:      {}", terminal_safe(analysis.name()));
     if let Some(version) = &analysis.recipe.original_version {
-        outln!("version:   {version}");
+        outln!("version:   {}", terminal_safe(version));
     }
     if let Some(author) = analysis.author() {
-        outln!("author:    {author}");
+        outln!("author:    {}", terminal_safe(author));
     }
     outln!("source:    {}", analysis.format);
-    outln!("minecraft: {}", analysis.minecraft_version());
-    outln!("loader:    {}", analysis.loader());
+    outln!("minecraft: {}", terminal_safe(analysis.minecraft_version()));
+    outln!(
+        "loader:    {}",
+        terminal_safe(&analysis.loader().to_string())
+    );
     outln!(
         "files:     {} required, {} optional",
         analysis.required_file_count(PackSide::Client),
@@ -6985,7 +7021,7 @@ fn print_analysis(analysis: &PackAnalysis, json: bool) {
     for component in analysis.optional_components(PackSide::Client) {
         outln!(
             "optional:  {} [{}]",
-            component.display_name(),
+            terminal_safe(&component.display_name()),
             if component.starts_selected() {
                 "x"
             } else {
@@ -7032,7 +7068,7 @@ fn print_imported(app: &App, imported: &ImportedPack, json: bool) -> anyhow::Res
     }
 
     print_instance(app, &imported.record, json)?;
-    outln!("pack:      {}", imported.analysis.name());
+    outln!("pack:      {}", terminal_safe(imported.analysis.name()));
     outln!(
         "installed: {} files",
         imported.materialized.files.installed.len()
@@ -7094,17 +7130,17 @@ fn print_recipe(recipe: &PackRecipe, side: PackSide, selection: &OptionalSelecti
         return;
     }
 
-    outln!("pack:      {}", recipe.original_name);
+    outln!("pack:      {}", terminal_safe(&recipe.original_name));
     outln!("source:    {}", recipe.source_kind);
     outln!("side:      {}", side.as_str());
-    outln!("minecraft: {}", plan.minecraft_version);
-    outln!("loader:    {}", plan.loader);
+    outln!("minecraft: {}", terminal_safe(plan.minecraft_version));
+    outln!("loader:    {}", terminal_safe(&plan.loader.to_string()));
     for file in &plan.files {
-        outln!("file:      {}", file.display_name());
+        outln!("file:      {}", terminal_safe(&file.display_name()));
     }
     for file in &recipe.files {
         if file.requirement(side) == SideRequirement::Unsupported {
-            outln!("excluded:  {}", file.display_name());
+            outln!("excluded:  {}", terminal_safe(&file.display_name()));
         }
     }
     for layer in &plan.layers {
@@ -7172,7 +7208,7 @@ fn report_rejected_addresses(rejected: &[String], json: bool) {
         )
     );
     for address in rejected {
-        eprintln!("  {address}");
+        eprintln!("  {}", terminal_safe(address));
     }
 }
 
@@ -8167,6 +8203,23 @@ fn localized_failure(error: &CoreError) -> (String, Option<String>) {
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_safe_escapes_control_and_bidirectional_characters_only() {
+        assert_eq!(
+            terminal_safe("Plain Pack 1.2 \u{e9}\u{4e2d}"),
+            "Plain Pack 1.2 \u{e9}\u{4e2d}"
+        );
+        assert!(matches!(
+            terminal_safe("plain"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        assert_eq!(
+            terminal_safe("a\u{1b}[2J\nb\u{7f}"),
+            "a\\u{1b}[2J\\u{a}b\\u{7f}"
+        );
+        assert_eq!(terminal_safe("x\u{9b}y\u{202e}z"), "x\\u{9b}y\\u{202e}z");
+    }
 
     /// Stop requests delivered by hand instead of by signals.
     struct ScriptedRequests(tokio::sync::mpsc::UnboundedReceiver<()>);
