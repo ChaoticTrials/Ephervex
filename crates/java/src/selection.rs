@@ -40,7 +40,9 @@ use tracing::debug;
 use crate::discovery::{JavaRuntime, RuntimeInventory};
 use crate::error::JavaError;
 use crate::requirement::RequiredJava;
-use crate::rules::{JavaCompatibilityRule, RejectionReason, RuleRejection, RuleVerdict};
+use crate::rules::{
+    HostArchitecture, JavaCompatibilityRule, RejectionReason, RuleRejection, RuleVerdict,
+};
 
 /// The global half of global Java settings, independent of how they are stored.
 ///
@@ -295,7 +297,8 @@ fn major_rule(required: &RequiredJava) -> crate::rules::VersionBound {
     crate::rules::VersionBound::new("minecraft-java-major").major(required.major)
 }
 
-/// Picks the best runtime satisfying the requirement and every rule.
+/// Picks the best runtime satisfying the requirement, the host architecture and
+/// every rule.
 ///
 /// Ranking among the survivors is newest-first, with a managed runtime
 /// preferred over a system one at equal version - Ephervex installed the
@@ -308,13 +311,23 @@ pub fn select(
     required: &RequiredJava,
     rules: &[&dyn JavaCompatibilityRule],
 ) -> Result<Selection, JavaError> {
+    select_for_host(inventory, required, rules, &HostArchitecture::current())
+}
+
+fn select_for_host(
+    inventory: &RuntimeInventory,
+    required: &RequiredJava,
+    rules: &[&dyn JavaCompatibilityRule],
+    host: &HostArchitecture,
+) -> Result<Selection, JavaError> {
     let base = major_rule(required);
     let mut accepted: Vec<&JavaRuntime> = Vec::new();
     let mut rejected: Vec<RejectedRuntime> = Vec::new();
 
     'candidate: for runtime in &inventory.runtimes {
-        for rule in
-            std::iter::once(&base as &dyn JavaCompatibilityRule).chain(rules.iter().copied())
+        for rule in [&base as &dyn JavaCompatibilityRule, host]
+            .into_iter()
+            .chain(rules.iter().copied())
         {
             if let RuleVerdict::Reject(rejection) = rule.evaluate(runtime) {
                 rejected.push(RejectedRuntime {
@@ -361,7 +374,8 @@ pub fn select(
     }
 }
 
-/// Checks a pinned runtime against the requirement and the loader rules.
+/// Checks a pinned runtime against the requirement, the host architecture and
+/// the loader rules.
 ///
 /// A pin says *which* runtime, not *whether it works*. Skipping the rules here
 /// would make an override a way to silently launch something that crashes.
@@ -371,8 +385,27 @@ pub fn check_pinned(
     rules: &[&dyn JavaCompatibilityRule],
     source: PinSource,
 ) -> Result<(), JavaError> {
+    check_pinned_for_host(
+        runtime,
+        required,
+        rules,
+        source,
+        &HostArchitecture::current(),
+    )
+}
+
+fn check_pinned_for_host(
+    runtime: &JavaRuntime,
+    required: &RequiredJava,
+    rules: &[&dyn JavaCompatibilityRule],
+    source: PinSource,
+    host: &HostArchitecture,
+) -> Result<(), JavaError> {
     let base = major_rule(required);
-    for rule in std::iter::once(&base as &dyn JavaCompatibilityRule).chain(rules.iter().copied()) {
+    for rule in [&base as &dyn JavaCompatibilityRule, host]
+        .into_iter()
+        .chain(rules.iter().copied())
+    {
         if let RuleVerdict::Reject(rejection) = rule.evaluate(runtime) {
             return Err(JavaError::PinnedRuntimeIncompatible {
                 path: runtime.executable.clone(),
@@ -409,7 +442,7 @@ mod tests {
             version_string: version.to_string(),
             runtime_version: version.to_string(),
             vendor: "Ubuntu".to_owned(),
-            arch: "amd64".to_owned(),
+            arch: std::env::consts::ARCH.to_owned(),
             origins: vec![JavaOrigin {
                 kind,
                 path: PathBuf::from(path),
@@ -640,6 +673,174 @@ mod tests {
             JavaSourceKind::UserSupplied,
         );
         check_pinned(&pinned, &required(21), &[], PinSource::ExplicitRequest).expect("compatible");
+    }
+
+    // -- host architecture  -------------------------------------------
+
+    fn runtime_built_for(path: &str, version: JavaVersion, arch: &str) -> JavaRuntime {
+        JavaRuntime {
+            arch: arch.to_owned(),
+            ..runtime(path, version, JavaSourceKind::System)
+        }
+    }
+
+    fn x86_64_host() -> HostArchitecture {
+        HostArchitecture::new("x86_64")
+    }
+
+    #[test]
+    fn a_matching_architecture_beats_a_newer_runtime_built_for_another() {
+        let inventory = RuntimeInventory {
+            runtimes: vec![
+                runtime_built_for(
+                    "/usr/lib/jvm/java-21-openjdk-i386/bin/java",
+                    JavaVersion::new(21, 0, 6),
+                    "i386",
+                ),
+                runtime_built_for(
+                    "/usr/lib/jvm/java-21-openjdk-amd64/bin/java",
+                    JavaVersion::new(21, 0, 5),
+                    "amd64",
+                ),
+            ],
+            failures: Vec::new(),
+            probed: 2,
+            candidates: 2,
+            scanned_at: Utc::now(),
+        };
+        let selection =
+            select_for_host(&inventory, &required(21), &[], &x86_64_host()).expect("selects");
+        assert_eq!(
+            selection.runtime.executable,
+            PathBuf::from("/usr/lib/jvm/java-21-openjdk-amd64/bin/java")
+        );
+        assert_eq!(selection.rejected.len(), 1);
+        assert_eq!(
+            selection.rejected[0].rejection.reason,
+            RejectionReason::ArchitectureMismatch {
+                expected: "x64".to_owned(),
+                found: "x86".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn only_foreign_architecture_runtimes_leave_nothing_to_select() {
+        let inventory = RuntimeInventory {
+            runtimes: vec![runtime_built_for(
+                "/usr/lib/jvm/java-21-openjdk-i386/bin/java",
+                JavaVersion::new(21, 0, 6),
+                "i386",
+            )],
+            failures: Vec::new(),
+            probed: 1,
+            candidates: 1,
+            scanned_at: Utc::now(),
+        };
+        let error = select_for_host(&inventory, &required(21), &[], &x86_64_host())
+            .expect_err("no runtime fits this host");
+        assert!(
+            matches!(
+                &error,
+                JavaError::NoCompatibleRuntime { rejections, .. }
+                    if matches!(
+                        rejections[0].reason,
+                        RejectionReason::ArchitectureMismatch { .. }
+                    )
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn the_jvm_rust_and_adoptium_spellings_of_one_architecture_agree() {
+        for (host, runtime_arch) in [
+            ("x86_64", "amd64"),
+            ("x86_64", "x86_64"),
+            ("x86_64", "x64"),
+            ("aarch64", "aarch64"),
+            ("aarch64", "arm64"),
+            ("x86", "i386"),
+            ("x86", "i686"),
+            ("sparc64", "sparc64"),
+        ] {
+            let pinned = runtime_built_for(
+                "/opt/jdk/bin/java",
+                JavaVersion::new(21, 0, 5),
+                runtime_arch,
+            );
+            check_pinned_for_host(
+                &pinned,
+                &required(21),
+                &[],
+                PinSource::ExplicitRequest,
+                &HostArchitecture::new(host),
+            )
+            .unwrap_or_else(|error| panic!("{host} vs {runtime_arch}: {error:?}"));
+        }
+    }
+
+    #[test]
+    fn a_pinned_runtime_for_another_architecture_is_refused() {
+        let pinned = runtime_built_for(
+            "/usr/lib/jvm/java-21-openjdk-i386/bin/java",
+            JavaVersion::new(21, 0, 6),
+            "i386",
+        );
+        let error = check_pinned_for_host(
+            &pinned,
+            &required(21),
+            &[],
+            PinSource::GlobalPreference,
+            &x86_64_host(),
+        )
+        .expect_err("a 32-bit runtime cannot serve a 64-bit host");
+        match error {
+            JavaError::PinnedRuntimeIncompatible {
+                pinned_by,
+                rejection,
+                ..
+            } => {
+                assert_eq!(pinned_by, PinSource::GlobalPreference);
+                assert!(matches!(
+                    rejection.reason,
+                    RejectionReason::ArchitectureMismatch { .. }
+                ));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_runtime_that_did_not_report_its_architecture_is_refused_as_unknown() {
+        let unverifiable = runtime_built_for("/opt/odd/bin/java", JavaVersion::new(21, 0, 5), "");
+        let inventory = RuntimeInventory {
+            runtimes: vec![unverifiable.clone()],
+            failures: Vec::new(),
+            probed: 1,
+            candidates: 1,
+            scanned_at: Utc::now(),
+        };
+        assert!(select_for_host(&inventory, &required(21), &[], &x86_64_host()).is_err());
+
+        let error = check_pinned_for_host(
+            &unverifiable,
+            &required(21),
+            &[],
+            PinSource::ExplicitRequest,
+            &x86_64_host(),
+        )
+        .expect_err("an unverifiable architecture is not assumed to match");
+        match error {
+            JavaError::PinnedRuntimeIncompatible { rejection, .. } => assert_eq!(
+                rejection.reason,
+                RejectionReason::ArchitectureMismatch {
+                    expected: "x64".to_owned(),
+                    found: "unknown".to_owned(),
+                }
+            ),
+            other => panic!("{other:?}"),
+        }
     }
 
     // -- jvm settings layering  ---------------------------------------

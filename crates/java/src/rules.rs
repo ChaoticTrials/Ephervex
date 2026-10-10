@@ -28,6 +28,7 @@
 
 use std::fmt;
 
+use crate::adoptium::AdoptiumArchitecture;
 use crate::discovery::JavaRuntime;
 use crate::version::JavaVersion;
 
@@ -205,6 +206,76 @@ impl JavaCompatibilityRule for VersionBound {
             return reject(RejectionReason::TooNew { maximum, found });
         }
         RuleVerdict::Accept
+    }
+}
+
+/// The spelling both sides of an architecture comparison are reduced to.
+///
+/// A JVM says `amd64`, Rust says `x86_64` and Adoptium says `x64`, so a raw
+/// string comparison would call the same processor a mismatch. An architecture
+/// Adoptium does not publish is compared by its own lowercased spelling.
+fn canonical_architecture(arch: &str) -> String {
+    AdoptiumArchitecture::from_java_arch(arch).map_or_else(
+        || arch.trim().to_ascii_lowercase(),
+        |known| known.as_str().to_owned(),
+    )
+}
+
+/// Requires a runtime to be built for the architecture the launcher runs on.
+///
+/// A runtime for another architecture is not a slower choice, it is a broken
+/// one: natives are resolved for the host, and a 32-bit JVM on a 64-bit host
+/// cannot reserve the default heap. The plan would succeed and the launch fail
+/// late, so the runtime is refused up front.
+///
+/// A runtime that did not report `os.arch` is refused too. Its architecture
+/// cannot be verified, and accepting it would be the silent approximation a
+/// selection must not make. The rejection names it as `unknown`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostArchitecture {
+    expected: String,
+}
+
+impl HostArchitecture {
+    /// The id used in logs and in the rejection.
+    pub const RULE_ID: &'static str = "host-architecture";
+
+    /// The architecture this build of Ephervex is running on.
+    #[must_use]
+    pub fn current() -> Self {
+        Self::new(std::env::consts::ARCH)
+    }
+
+    /// A host architecture in any of the JVM, Rust or Adoptium spellings.
+    #[must_use]
+    pub fn new(host: &str) -> Self {
+        Self {
+            expected: canonical_architecture(host),
+        }
+    }
+}
+
+impl JavaCompatibilityRule for HostArchitecture {
+    fn id(&self) -> &str {
+        Self::RULE_ID
+    }
+
+    fn evaluate(&self, runtime: &JavaRuntime) -> RuleVerdict {
+        let found = canonical_architecture(&runtime.arch);
+        if !found.is_empty() && found == self.expected {
+            return RuleVerdict::Accept;
+        }
+        RuleVerdict::Reject(RuleRejection {
+            rule: Self::RULE_ID.to_owned(),
+            reason: RejectionReason::ArchitectureMismatch {
+                expected: self.expected.clone(),
+                found: if found.is_empty() {
+                    "unknown".to_owned()
+                } else {
+                    found
+                },
+            },
+        })
     }
 }
 

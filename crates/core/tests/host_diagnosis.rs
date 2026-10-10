@@ -114,7 +114,12 @@ impl Fixture {
 
     /// Pins this host to a fake runtime reporting `version`.
     fn pin_java(&self, version: &str, jvm: Option<JvmSettings>) -> PathBuf {
-        let java = fake_java(&self.root.join(format!("jdk-{version}")), version);
+        self.pin_java_built_for(version, jvm_arch(), jvm)
+    }
+
+    /// Pins this host to a fake runtime reporting `version` and `arch`.
+    fn pin_java_built_for(&self, version: &str, arch: &str, jvm: Option<JvmSettings>) -> PathBuf {
+        let java = fake_java_for(&self.root.join(format!("jdk-{version}")), version, arch);
         self.app()
             .set_client_runtime_settings(self.id, Some(JavaOverride::new(&java)), jvm)
             .unwrap();
@@ -139,6 +144,11 @@ impl Fixture {
 
 /// An executable that answers the property probe as a JVM of `version` would.
 fn fake_java(home: &Path, version: &str) -> PathBuf {
+    fake_java_for(home, version, jvm_arch())
+}
+
+/// Like [`fake_java`], reporting `arch` as its `os.arch`.
+fn fake_java_for(home: &Path, version: &str, arch: &str) -> PathBuf {
     let executable = home.join("bin/java");
     std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
     std::fs::write(
@@ -148,7 +158,7 @@ fn fake_java(home: &Path, version: &str) -> PathBuf {
              java.runtime.version = {version}+7\n    java.vendor = Eclipse Adoptium\n    \
              java.version = {version}\n    os.arch = {arch}\nEOF\n",
             home = home.display(),
-            arch = jvm_arch(),
+            arch = arch,
         ),
     )
     .unwrap();
@@ -253,6 +263,34 @@ async fn a_pinned_java_of_the_wrong_major_is_a_problem() {
         diagnosis
             .technical_report()
             .contains("needs Java 21, found 17")
+    );
+}
+
+#[tokio::test]
+async fn a_pinned_java_built_for_another_architecture_is_a_problem() {
+    let fixture = Fixture::with_mods(&[]).await;
+    let foreign = if cfg!(target_arch = "aarch64") {
+        "amd64"
+    } else {
+        "aarch64"
+    };
+    fixture.pin_java_built_for("21.0.8", foreign, None);
+
+    let diagnosis = fixture.diagnose(false).await;
+
+    assert!(!diagnosis.is_healthy());
+    assert!(
+        matches!(
+            kinds(&diagnosis, FindingClass::Problem).as_slice(),
+            [FindingKind::JavaIncompatible {
+                layer: JavaLayer::Host,
+                required_major: 21,
+                mismatch: JavaMismatch::Architecture { .. },
+                ..
+            }]
+        ),
+        "{:?}",
+        diagnosis.findings
     );
 }
 

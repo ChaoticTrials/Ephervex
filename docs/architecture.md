@@ -612,7 +612,10 @@ overrides over global defaults. The layered heap range must be positive with
 the minimum no greater than the maximum: saving an override that cannot form a
 valid range is refused, and planning checks again because the global settings
 can change afterward. Compatibility is checked during installation
-and every start, including the legacy Forge Java 8 update ceiling.
+and every start, including the legacy Forge Java 8 update ceiling. A runtime
+built for another processor architecture than the host, or one that did not
+report its architecture, is refused for both automatic selection and a pinned
+path.
 
 A start first merges canonical typed network settings and validates global EULA
 consent. Only then may it atomically merge `eula=true`. The foreground

@@ -36,6 +36,11 @@
 //! `amd64`; Adoptium says `x64`, and asking for `amd64` returns an empty list
 //! rather than an error. See [`adoptium`].
 //!
+//! **A runtime for another architecture is refused, not ranked.** Selection and
+//! pinned-runtime checks compare the probed `os.arch` with the host's through one
+//! shared normalization, and a runtime that reported none is refused as unknown.
+//! See [`rules::HostArchitecture`].
+//!
 //! # What this crate does not do
 //!
 //! * **It does not know about loaders.** `ephervex-loaders` depends on this
@@ -80,8 +85,8 @@ pub use managed::{ManagedInstallation, ManagedJavaProvider};
 pub use probe::{PROBE_TIMEOUT, ProbeReport, probe};
 pub use requirement::{RequiredJava, RequirementBasis, fallback_major};
 pub use rules::{
-    JavaCompatibilityRule, LEGACY_FORGE_MAX_JAVA_8_UPDATE, RejectionReason, RuleRejection,
-    RuleVerdict, VersionBound,
+    HostArchitecture, JavaCompatibilityRule, LEGACY_FORGE_MAX_JAVA_8_UPDATE, RejectionReason,
+    RuleRejection, RuleVerdict, VersionBound,
 };
 pub use selection::{
     EffectiveJvmSettings, GlobalJavaSettings, JavaPathChoice, JavaPreference, JvmField,
