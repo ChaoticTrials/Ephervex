@@ -153,7 +153,7 @@ features show one tab or a short note.
       persistent, delete, per-instance Java and memory, change loader build
 - [x] Import: Modrinth and CurseForge, optional files, `ephervex://` links,
       trusted hosts, blocked files and watched folders
-- [ ] Mods: browse and install, enable and disable, remove, change version,
+- [x] Mods: browse and install, enable and disable, remove, change version,
       add your own JARs, dependencies, verify and repair
 - [ ] Mod isolation (source: `docs/mod-isolation.md`)
 - [ ] Servers: create (standalone and linked), EULA, properties and network,
