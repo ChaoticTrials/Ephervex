@@ -209,6 +209,7 @@ pub fn analyze(path: &Path, policy: &PackPolicy) -> PackResult<(PackArchive, Pac
         });
     };
     let analysis = parse_with(format, &mut archive, policy)?;
+    archive.require_extractable_entry_names()?;
     info!(
         format = %analysis.format,
         pack = %analysis.recipe.original_name,
@@ -583,6 +584,58 @@ mod tests {
             .map(|entry| entry.file_name())
             .collect();
         assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn analysis_refuses_an_entry_name_that_extraction_would_refuse_outside_any_layer() {
+        for unsafe_name in [
+            "docs\\readme.txt",
+            "Pack: v2/readme.txt",
+            "notes/../../escape.txt",
+            "/absolute.txt",
+            ".launcher/instance.json",
+        ] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let archive = dir.path().join("pack.mrpack");
+            zip_file(
+                &archive,
+                &[
+                    ("modrinth.index.json", INDEX),
+                    ("overrides/config/a.toml", b"a"),
+                    (unsafe_name, b"x"),
+                ],
+            );
+
+            let error = analyze(&archive, &PackPolicy::modrinth())
+                .map(|_| ())
+                .expect_err(unsafe_name);
+            assert!(
+                matches!(
+                    error,
+                    PackError::EntryPathUnsafe { .. } | PackError::EntryReserved { .. }
+                ),
+                "{unsafe_name} was refused with {error:?}"
+            );
+            assert!(ephervex_i18n::has(error.message_id()));
+        }
+    }
+
+    #[test]
+    fn analysis_refuses_an_unsafe_entry_name_in_a_curseforge_export() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("repro.zip");
+        zip_file(
+            &archive,
+            &[
+                ("manifest.json", &curseforge_manifest("")),
+                ("docs\\readme.txt", b"x" as &[u8]),
+            ],
+        );
+
+        let error = analyze(&archive, &PackPolicy::curseforge())
+            .map(|_| ())
+            .expect_err("refused");
+        assert!(matches!(error, PackError::EntryPathUnsafe { .. }));
     }
 
     #[test]

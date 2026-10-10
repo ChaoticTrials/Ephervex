@@ -358,6 +358,26 @@ impl PackArchive {
         })
     }
 
+    /// Refuses the archive when any entry carries a name extraction would refuse.
+    ///
+    /// Extraction validates every entry in the archive, including those outside
+    /// the layer being extracted, so one unsafe name anywhere fails an import
+    /// that has already created its instance. Running the same check up front
+    /// keeps that failure ahead of any side effect.
+    pub(crate) fn require_extractable_entry_names(&mut self) -> PackResult<()> {
+        for index in 0..self.zip.len() {
+            let entry =
+                self.zip
+                    .by_index_raw(index)
+                    .map_err(|source| PackError::ArchiveInvalid {
+                        path: self.path.clone(),
+                        source,
+                    })?;
+            entry_under(entry.name_raw(), "")?;
+        }
+        Ok(())
+    }
+
     /// `relative` placed beneath the directory the pack's own files sit in.
     fn under_pack_root(&self, relative: &str) -> Vec<String> {
         let wrapper = self
