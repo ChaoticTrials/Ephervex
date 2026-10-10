@@ -32,7 +32,7 @@ import {
     TooltipCard
 } from "components/text.slint";
 import { ServerFiles, ServerCommandInput } from "workspace/server-tools.slint";
-import { GuiI18n } from "globals.slint";
+import { GuiI18n, NameRules } from "globals.slint";
 import { ActivityCard, RunningCard } from "home/activity-cards.slint";
 import {
     InspectorLabel,
@@ -79,7 +79,7 @@ import { ImpactList, LinkedTargetsPanel, ModCard, RelationList } from "workspace
 import { SnapshotPanel } from "workspace/snapshots.slint";
 
 export { GuiI18n } from "globals.slint";
-export { PropertyRules } from "globals.slint";
+export { NameRules, PropertyRules } from "globals.slint";
 export { BuiltInPalettes, ThemePalette } from "palettes.slint";
 export { Theme } from "theme.slint";
 export { WindowSizePreview } from "settings/minecraft-defaults.slint";
@@ -963,7 +963,7 @@ export component AppWindow inherits Window {
                                         kill(id) => { root.kill-instance(id, ""); }
                                         open-workspace(id) => { root.selected-instance-id = id; root.selected-instance-index = index; root.select-instance(id); root.open-workspace("client", id, "Overview"); }
                                         open-folder(id) => { root.open-client-folder(id); }
-                                        create-server(id, name) => { root.create-server-client-id = id; root.create-server-name = ""; root.create-server-name-suggestion = name + " Server"; root.create-server-pack = ""; root.create-server-pack-name = ""; root.modal = "create-server"; }
+                                        create-server(id, name) => { root.create-server-client-id = id; root.create-server-name = ""; root.create-server-name-suggestion = NameRules.linked-server-name(name); root.create-server-pack = ""; root.create-server-pack-name = ""; root.modal = "create-server"; }
                                         duplicate(id) => { root.duplicate-client(id); }
                                         make-persistent(id) => { root.open-make-persistent(id); }
                                         rename(id, name) => { root.pending-action-kind = "client"; root.pending-action-id = id; root.pending-rename-text = name; root.modal-error = ""; root.modal = "rename"; }
@@ -986,7 +986,7 @@ export component AppWindow inherits Window {
                         connect(client, server) => { root.launch-and-connect(client, server); }
                         open-folder(id) => { root.open-client-folder(id); }
                         workspace(id) => { root.open-workspace("client", id, "Overview"); }
-                        create-server(id, name) => { root.create-server-client-id = id; root.create-server-name = ""; root.create-server-name-suggestion = name + " Server"; root.create-server-pack = ""; root.create-server-pack-name = ""; root.modal = "create-server"; }
+                        create-server(id, name) => { root.create-server-client-id = id; root.create-server-name = ""; root.create-server-name-suggestion = NameRules.linked-server-name(name); root.create-server-pack = ""; root.create-server-pack-name = ""; root.modal = "create-server"; }
                         diagnostics(id) => { root.open-workspace("client", id, "Logs"); }
                     }
                 }
@@ -1170,7 +1170,7 @@ export component AppWindow inherits Window {
                                         }
                                         BodyText { text: host.client.storage-kind == "temporary" ? GuiI18n.text("gui-temporary-lifecycle") : GuiI18n.text("gui-persistent-lifecycle"); color: Theme.text-muted; wrap: word-wrap; }
                                         Divider { }
-                                        HorizontalLayout { spacing: 10px; Heading { text: GuiI18n.text("gui-linked-server"); font-size: Theme.section-size; overflow: elide; horizontal-stretch: 1; } if host.linked-servers.length == 0 && host.pending-servers.length == 0 : AppButton { text: GuiI18n.text("gui-create-linked-server"); clicked => { root.create-server-client-id = host.id; root.create-server-name = ""; root.create-server-name-suggestion = host.client.name + " Server"; root.create-server-pack = ""; root.create-server-pack-name = ""; root.modal = "create-server"; } } }
+                                        HorizontalLayout { spacing: 10px; Heading { text: GuiI18n.text("gui-linked-server"); font-size: Theme.section-size; overflow: elide; horizontal-stretch: 1; } if host.linked-servers.length == 0 && host.pending-servers.length == 0 : AppButton { text: GuiI18n.text("gui-create-linked-server"); clicked => { root.create-server-client-id = host.id; root.create-server-name = ""; root.create-server-name-suggestion = NameRules.linked-server-name(host.client.name); root.create-server-pack = ""; root.create-server-pack-name = ""; root.modal = "create-server"; } } }
                                         if host.linked-servers.length == 0 && host.pending-servers.length == 0 : BodyText { text: GuiI18n.text("gui-no-linked-server-detail"); color: Theme.text-muted; wrap: word-wrap; }
                                         for pending in host.pending-servers : PendingCard { item: pending; }
                                         for server in host.linked-servers : Rectangle { border-radius: 8px; border-width: 1px; border-color: server.needs-attention ? Theme.warning : Theme.border; background: Theme.surface; card := VerticalLayout { padding: 14px; spacing: 8px;

@@ -119,7 +119,7 @@ pub use health::{
 pub use import::{ImportRequest, ImportedPack, suggested_instance_name};
 pub use instance::{
     CreatedClient, MAX_ENTITY_NAME_CHARS, NameRefusal, PreferenceContext,
-    global_minecraft_preferences, validated_entity_name,
+    global_minecraft_preferences, name_with_suffix, validated_entity_name,
 };
 pub use isolation::{
     IsolationCandidate, IsolationConfidence, IsolationError, IsolationLinkedServer,

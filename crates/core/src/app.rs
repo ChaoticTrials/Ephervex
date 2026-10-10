@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 
-use crate::instance::{CreatedClient, PreferenceContext};
+use crate::instance::{CreatedClient, PreferenceContext, validated_entity_name};
 use ephervex_download::{
     CacheLayout, DownloadManager, DownloaderConfig, MetadataCacheError, OperationReporter,
 };
@@ -477,7 +477,13 @@ impl App {
     /// on first run. Undoing a successful creation over a GUI scale would be a
     /// far worse trade - and leaving it half-created would be worse still.
     #[instrument(skip(self, request))]
-    pub async fn create_client_reporting(&self, request: NewClient) -> CoreResult<CreatedClient> {
+    pub async fn create_client_reporting(
+        &self,
+        mut request: NewClient,
+    ) -> CoreResult<CreatedClient> {
+        // Before the catalog lookups, since a refused name costs nothing to
+        // find out and nothing is published until it passes.
+        request.name = validated_entity_name(&request.name)?;
         let validation = self.validate_client_target(&request).await;
         let preferences = after_successful_validation(
             validation,
@@ -1746,6 +1752,40 @@ mod tests {
             app.publish_client_after_validation(request, validation, &PreferenceContext::offline());
 
         assert!(result.is_err());
+        assert!(app.list_clients().expect("list").is_empty());
+        assert_eq!(
+            std::fs::read_dir(app.paths().temporary_instances_dir())
+                .expect("temporary instance root")
+                .count(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn a_client_name_a_rename_would_refuse_is_refused_before_anything_is_created() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let too_long = "n".repeat(crate::instance::MAX_ENTITY_NAME_CHARS + 1);
+        let refused = [
+            ("   ", crate::NameRefusal::Empty),
+            ("two\nlines", crate::NameRefusal::ControlCharacters),
+            ("esc\u{1b}[31m", crate::NameRefusal::ControlCharacters),
+            (too_long.as_str(), crate::NameRefusal::TooLong),
+        ];
+
+        for (name, reason) in refused {
+            // An unknown release would fail later, so reaching this error
+            // proves the name was checked before the catalog was asked.
+            let error = app
+                .create_client_reporting(NewClient::new(name, "1.21.f", LoaderSelection::vanilla()))
+                .await
+                .expect_err("the name is refused");
+            assert!(
+                matches!(&error, crate::CoreError::EntityNameInvalid { reason: found } if *found == reason),
+                "{name:?}: {error:?}"
+            );
+        }
+
         assert!(app.list_clients().expect("list").is_empty());
         assert_eq!(
             std::fs::read_dir(app.paths().temporary_instances_dir())

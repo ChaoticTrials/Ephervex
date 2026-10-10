@@ -15,3 +15,9 @@ export global PropertyRules {
     pure callback address-error(string, bool) -> string;
     pure callback players-error(string) -> string;
 }
+
+// The name a server takes when nobody types one, derived by the same rules
+// creation applies so accepting the suggestion never fails.
+export global NameRules {
+    pure callback linked-server-name(string) -> string;
+}

@@ -40,8 +40,8 @@ use crate::ui::{
     AccountRow, ActivityRow, AppWindow, BlockedFileRow, DiagnosticRow, DiskUsageRow, GuiI18n,
     HostView, ImpactRow, ImportDuplicateRow, ImportOptionRow, InstanceRow, IsolationCandidateRow,
     JavaRow, LicenseRow, LinkedTargetRow, LocalModClashRow, LogChunk, ModRow, ModSearchRow,
-    ModVersionRow, PendingEntityRow, PromoteServerRow, PropertyRules, RelationRow, RunningRow,
-    ServerRow, SnapshotRow, Theme, WindowSizePreview, WorkflowActionRow,
+    ModVersionRow, NameRules, PendingEntityRow, PromoteServerRow, PropertyRules, RelationRow,
+    RunningRow, ServerRow, SnapshotRow, Theme, WindowSizePreview, WorkflowActionRow,
 };
 use crate::window_aspect;
 use crate::workspace_layout::{PaneId, Revealed, Surface, WorkspaceLayout};
@@ -5294,6 +5294,7 @@ fn register_server_actions(ui: &AppWindow, commands: &Sender<Command>, workspace
         }
     });
 
+    register_name_rules(ui);
     register_server_property_actions(ui, commands);
 
     let sender = commands.clone();
@@ -5409,6 +5410,13 @@ fn register_server_console(
         }
         queued
     });
+}
+
+/// The name suggested for a server linked to a client, answered here so the
+/// markup never composes it and cannot drift from what creation accepts.
+fn register_name_rules(ui: &AppWindow) {
+    ui.global::<NameRules>()
+        .on_linked_server_name(|client| backend::suggested_server_name(&client).into());
 }
 
 fn register_server_property_actions(ui: &AppWindow, commands: &Sender<Command>) {
@@ -7750,7 +7758,7 @@ fn recompute_create_server_name(ui: &AppWindow) {
     let suggestion = if target.is_empty() {
         String::new()
     } else {
-        format!("{target} Server")
+        backend::suggested_server_name(&target)
     };
     ui.set_create_server_name_suggestion(suggestion.into());
 }
@@ -10715,6 +10723,38 @@ mod tests {
             ui.get_create_server_name_suggestion(),
             "1.21.1-NeoForge-21.1.77 Server"
         );
+    }
+
+    #[test]
+    fn a_standalone_servers_suggested_name_never_exceeds_the_name_limit() {
+        let ui = test_window();
+        ui.set_create_server_client_id(SharedString::default());
+        ui.set_create_server_minecraft("1.21.1".into());
+        ui.set_create_server_loader("NeoForge".into());
+        ui.set_create_server_loader_version("9".repeat(200).into());
+        recompute_create_server_name(&ui);
+
+        let suggestion = ui.get_create_server_name_suggestion();
+        assert!(suggestion.ends_with(" Server"), "{suggestion}");
+        ephervex_core::validated_entity_name(suggestion.as_str())
+            .expect("a suggestion the user accepts is a name creation accepts");
+    }
+
+    #[test]
+    fn a_linked_servers_suggested_name_is_one_creation_accepts_for_any_client_name() {
+        let ui = test_window();
+        register_name_rules(&ui);
+        let rules = ui.global::<NameRules>();
+
+        assert_eq!(
+            rules.invoke_linked_server_name("Repro".into()),
+            "Repro Server"
+        );
+        let long = "c".repeat(ephervex_core::MAX_ENTITY_NAME_CHARS);
+        let suggestion = rules.invoke_linked_server_name(long.into());
+        assert!(suggestion.ends_with(" Server"), "{suggestion}");
+        ephervex_core::validated_entity_name(suggestion.as_str())
+            .expect("accepting the suggestion must not fail creation");
     }
 
     /// The same name a new instance would take, so the two dialogs cannot drift
@@ -15550,7 +15590,7 @@ mod tests {
         // Scoped by the model it renders rather than by hiding rows, which
         // would leave the room they would have taken behind them.
         assert!(source.contains("for pending in host.pending-servers"));
-        assert!(source.contains("name + \" Server\""));
+        assert!(source.contains("NameRules.linked-server-name(name)"));
     }
 
     #[test]

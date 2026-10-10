@@ -29,6 +29,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::app::{App, JavaPlanRequest, JavaTarget};
+use crate::instance::validated_entity_name;
 use crate::server_pack::{
     ServerArchiveInstall, ServerContentSource, archive_import_source, launch_reserved,
 };
@@ -203,10 +204,12 @@ impl App {
     /// final root is published.
     pub async fn create_server(
         &self,
-        request: NewServer,
+        mut request: NewServer,
         options: &ServerCreateOptions,
         cancel: &CancellationToken,
     ) -> CoreResult<ServerCommit<ServerRecord>> {
+        // Before the artifact cache is taken, and before any staging root exists.
+        request.name = validated_entity_name(&request.name)?;
         self.with_artifact_cache(Box::pin(
             self.create_server_holding_the_cache(request, options, cancel),
         ))
@@ -2435,6 +2438,38 @@ mod tests {
         ));
         app.revoke_server_eula().expect("revoke");
         assert_eq!(app.server_eula_status(), EulaStatus::NotAccepted);
+    }
+
+    #[tokio::test]
+    async fn a_server_name_a_rename_would_refuse_is_refused_before_a_root_is_made() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let too_long = "n".repeat(crate::instance::MAX_ENTITY_NAME_CHARS + 1);
+
+        for name in ["", "two\nlines", too_long.as_str()] {
+            let error = app
+                .create_server(
+                    NewServer::new(name, "1.20.1", LoaderSelection::vanilla()),
+                    &ServerCreateOptions::default(),
+                    &CancellationToken::new(),
+                )
+                .await
+                .expect_err("the name is refused");
+            assert!(
+                matches!(error, CoreError::EntityNameInvalid { .. }),
+                "{name:?}: {error:?}"
+            );
+        }
+
+        assert!(app.list_servers().expect("list").is_empty());
+        for class in [
+            ephervex_model::StorageClass::Persistent,
+            ephervex_model::StorageClass::Temporary,
+        ] {
+            let root = app.paths().servers_dir(class);
+            let leftovers = std::fs::read_dir(&root).map_or(0, Iterator::count);
+            assert_eq!(leftovers, 0, "{}", root.display());
+        }
     }
 
     #[tokio::test]

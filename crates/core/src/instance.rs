@@ -33,8 +33,8 @@ use ephervex_options::{
 };
 use ephervex_pack::{PackSide, SourceStore};
 use ephervex_storage::{
-    ClientFolder, ClientRecord, Config, DuplicateClient, DuplicatedClient, ServerCommit,
-    ServerFolder, ServerRecord,
+    ClientFolder, ClientRecord, Config, DUPLICATE_NAME_SUFFIX, DuplicateClient, DuplicatedClient,
+    ServerCommit, ServerFolder, ServerRecord,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{instrument, warn};
@@ -494,6 +494,21 @@ pub(crate) fn sanitized_entity_name(raw: &str) -> Option<String> {
     (!name.is_empty()).then(|| name.to_owned())
 }
 
+/// `base` followed by `suffix`, with the base shortened so the whole name
+/// passes [`validated_entity_name`].
+///
+/// For names the user did not type, such as a server named after its client.
+/// The suffix is kept whole and the base gives up the room, so the part that
+/// says what the new entity is never disappears. A base with nothing usable
+/// left yields the suffix alone, trimmed.
+#[must_use]
+pub fn name_with_suffix(base: &str, suffix: &str) -> String {
+    let room = MAX_ENTITY_NAME_CHARS.saturating_sub(suffix.chars().count());
+    let base = sanitized_entity_name(base).unwrap_or_default();
+    let kept: String = base.chars().take(room).collect();
+    sanitized_entity_name(&format!("{}{suffix}", kept.trim_end())).unwrap_or_default()
+}
+
 impl App {
     // -- renaming ----------------------------------------------------------
 
@@ -563,12 +578,25 @@ impl App {
         request: &DuplicateClient,
         absent_mods: AbsentModPolicy,
     ) -> CoreResult<DuplicatedClient> {
+        let chosen_name = request
+            .name
+            .as_deref()
+            .map(validated_entity_name)
+            .transpose()?;
         // Kept until the copy is made, so a launch cannot begin and write into
         // the instance while it is being read.
         let _claim = self.claim_stopped_client(source)?;
+        let name = match chosen_name {
+            Some(name) => name,
+            None => name_with_suffix(&self.client(source)?.name, DUPLICATE_NAME_SUFFIX),
+        };
+        let request = DuplicateClient {
+            name: Some(name),
+            ..request.clone()
+        };
         let copy = self
             .registry_for_services()
-            .duplicate_client(source, request)?;
+            .duplicate_client(source, &request)?;
         if absent_mods.drops_them() {
             // After the copy and only ever on the copy. The original still
             // wants those mods, and a duplication is not a decision about it.
@@ -845,6 +873,78 @@ mod tests {
             ),
             "{error:?}"
         );
+    }
+
+    #[test]
+    fn a_suffixed_name_gives_up_base_characters_to_keep_the_suffix() {
+        assert_eq!(name_with_suffix("Repro", " Server"), "Repro Server");
+
+        let long = "a".repeat(MAX_ENTITY_NAME_CHARS);
+        let name = name_with_suffix(&long, " Server");
+        assert_eq!(name.chars().count(), MAX_ENTITY_NAME_CHARS);
+        assert!(name.ends_with("a Server"), "{name}");
+        validated_entity_name(&name).expect("the result passes the rules");
+
+        let wide = "\u{00e4}".repeat(MAX_ENTITY_NAME_CHARS);
+        let name = name_with_suffix(&wide, " (copy)");
+        assert_eq!(name.chars().count(), MAX_ENTITY_NAME_CHARS);
+        assert!(name.ends_with(" (copy)"), "{name}");
+    }
+
+    #[test]
+    fn a_suffixed_name_repairs_the_base_and_survives_one_with_nothing_usable() {
+        assert_eq!(name_with_suffix("a\nb", " Server"), "a b Server");
+        assert_eq!(name_with_suffix(" \n ", " Server"), "Server");
+    }
+
+    #[test]
+    fn duplicating_an_instance_with_a_name_a_rename_would_refuse_changes_nothing() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let original = create(&app, "Repro", "1.20.1");
+
+        for name in ["", "two\nlines", &"n".repeat(MAX_ENTITY_NAME_CHARS + 1)] {
+            let error = app
+                .duplicate_client(
+                    original.id,
+                    &DuplicateClient::named(name),
+                    AbsentModPolicy::default(),
+                )
+                .expect_err("the name is refused");
+            assert!(
+                matches!(error, CoreError::EntityNameInvalid { .. }),
+                "{name:?}: {error:?}"
+            );
+        }
+
+        assert_eq!(app.list_clients().expect("list").len(), 1);
+    }
+
+    #[test]
+    fn the_default_name_of_a_duplicate_stays_within_the_name_limit() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let original = create(&app, &"n".repeat(MAX_ENTITY_NAME_CHARS), "1.20.1");
+
+        let copy = app
+            .duplicate_client(
+                original.id,
+                &DuplicateClient::default(),
+                AbsentModPolicy::default(),
+            )
+            .expect("duplicate");
+
+        validated_entity_name(&copy.record.name).expect("a rename would accept the copy's name");
+        assert!(copy.record.name.ends_with(DUPLICATE_NAME_SUFFIX));
+        let short = create(&app, "Repro", "1.20.1");
+        let copy = app
+            .duplicate_client(
+                short.id,
+                &DuplicateClient::default(),
+                AbsentModPolicy::default(),
+            )
+            .expect("duplicate");
+        assert_eq!(copy.record.name, "Repro (copy)");
     }
 
     #[test]

@@ -9491,6 +9491,12 @@ struct ImportSubmission {
     server_pack: Option<PathBuf>,
 }
 
+/// The name a server takes when nobody types one: its client's or target's
+/// name with "Server" after it, shortened so a rename would accept it.
+pub(crate) fn suggested_server_name(base: &str) -> String {
+    ephervex_core::name_with_suffix(base, " Server")
+}
+
 /// Runs an `ImportPack` submission on a thread of its own and, on every
 /// terminal path, including a setup failure that never reaches
 /// [`App::import_pack`], reports back which attempt finished.
@@ -9561,7 +9567,7 @@ fn spawn_import_submission(
                     // own: the import the user asked for did happen.
                     if create_linked_server {
                         let request = NewServer::linked(
-                            format!("{} Server", pack.record.name),
+                            suggested_server_name(&pack.record.name),
                             pack.record.id,
                         )
                         .with_storage(pack.record.storage);
