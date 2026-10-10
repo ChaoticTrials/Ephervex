@@ -87,7 +87,8 @@ pub fn materialize_eula_file(path: &Path, status: &EulaStatus) -> ServerResult<(
             });
         }
     };
-    let mut document = PropertiesDocument::parse(&original);
+    let mut document =
+        PropertiesDocument::parse(&original).map_err(|malformed| malformed.in_file(path))?;
     document.merge_eula_accepted();
     atomic_write(path, document.render().as_bytes())
 }
@@ -164,6 +165,22 @@ mod tests {
             .expect_err("consent is required");
         assert!(matches!(error, ServerError::EulaNotAccepted));
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn eula_file_java_cannot_load_is_refused_and_left_untouched() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("eula.txt");
+        let source = "# generated\neula=false\nnote=\\u00\n";
+        std::fs::write(&path, source).expect("seed");
+        let status = EulaStatus::from_record(&accepted_record(Utc::now()));
+        let error = materialize_eula_file(&path, &status).expect_err("malformed escape");
+        assert!(matches!(
+            error,
+            ServerError::MalformedPropertiesEscape { line: 3, .. }
+        ));
+        assert_eq!(error.failing_path().as_deref(), Some(path.as_path()));
+        assert_eq!(std::fs::read_to_string(path).expect("read"), source);
     }
 
     #[test]

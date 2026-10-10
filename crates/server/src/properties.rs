@@ -2,6 +2,7 @@
 
 use std::fmt::Write as _;
 use std::net::IpAddr;
+use std::path::Path;
 
 use crate::{ServerError, ServerResult};
 
@@ -71,6 +72,24 @@ impl NetworkProperties {
     }
 }
 
+/// A `\uXXXX` escape that `java.util.Properties.load` rejects, which makes Java refuse the whole file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MalformedEscape {
+    /// One-based physical line where the offending entry starts.
+    pub line: usize,
+}
+
+impl MalformedEscape {
+    /// Attaches the file the escape was read from.
+    #[must_use]
+    pub fn in_file(self, path: &Path) -> ServerError {
+        ServerError::MalformedPropertiesEscape {
+            path: path.to_path_buf(),
+            line: self.line,
+        }
+    }
+}
+
 /// A Java-properties document that leaves every unchanged byte intact.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PropertiesDocument {
@@ -79,8 +98,8 @@ pub struct PropertiesDocument {
 }
 
 impl PropertiesDocument {
-    #[must_use]
-    pub fn parse(text: &str) -> Self {
+    /// Parses `text`, refusing an entry whose `\uXXXX` escape Java cannot decode.
+    pub fn parse(text: &str) -> Result<Self, MalformedEscape> {
         let lines = split_lines_preserving(text);
         let preferred_ending = if text.contains("\r\n") {
             "\r\n"
@@ -90,10 +109,16 @@ impl PropertiesDocument {
             "\n"
         }
         .to_owned();
-        Self {
+        let document = Self {
             lines,
             preferred_ending,
+        };
+        for (start, end) in document.logical_entries() {
+            if parse_entry(&document.lines[start..end]).is_err() {
+                return Err(MalformedEscape { line: start + 1 });
+            }
         }
+        Ok(document)
     }
 
     #[must_use]
@@ -106,7 +131,7 @@ impl PropertiesDocument {
     pub fn get(&self, key: &str) -> Option<String> {
         self.logical_entries()
             .into_iter()
-            .filter_map(|(start, end)| parse_entry(&self.lines[start..end]))
+            .filter_map(|(start, end)| parse_entry(&self.lines[start..end]).ok().flatten())
             .filter(|(candidate, _)| candidate == key)
             .map(|(_, value)| value)
             .next_back()
@@ -144,7 +169,10 @@ impl PropertiesDocument {
     fn set_unrestricted(&mut self, key: &str, value: &str) {
         let replacement = format!("{}={}", escape_key(key), escape_value(value));
         let effective = self.logical_entries().into_iter().rfind(|(start, end)| {
-            parse_entry(&self.lines[*start..*end]).is_some_and(|(candidate, _)| candidate == key)
+            parse_entry(&self.lines[*start..*end])
+                .ok()
+                .flatten()
+                .is_some_and(|(candidate, _)| candidate == key)
         });
 
         if let Some((start, end)) = effective {
@@ -209,7 +237,10 @@ impl PropertiesDocument {
 
 impl Default for PropertiesDocument {
     fn default() -> Self {
-        Self::parse("")
+        Self {
+            lines: Vec::new(),
+            preferred_ending: "\n".to_owned(),
+        }
     }
 }
 
@@ -304,14 +335,17 @@ fn logical_part(line: &str) -> &str {
     }
 }
 
-/// Parses one logical entry as `java.util.Properties.load` does.
-fn parse_entry(lines: &[String]) -> Option<(String, String)> {
-    if is_comment(lines.first()?) {
-        return None;
+/// Marker for an entry that Java's decoder rejects.
+struct Malformed;
+
+/// Parses one logical entry as `java.util.Properties.load` does; comments and blanks yield `None`.
+fn parse_entry(lines: &[String]) -> Result<Option<(String, String)>, Malformed> {
+    if lines.first().is_none_or(|line| is_comment(line)) {
+        return Ok(None);
     }
     let logical: String = lines.iter().map(|line| logical_part(line)).collect();
     if logical.is_empty() {
-        return None;
+        return Ok(None);
     }
     let logical = logical.as_str();
 
@@ -349,16 +383,16 @@ fn parse_entry(lines: &[String]) -> Option<(String, String)> {
             continue;
         }
         value_start += offset;
-        return Some((
+        return Ok(Some((
             unescape(&logical[..key_end])?,
             unescape(&logical[value_start..])?,
-        ));
+        )));
     }
-    Some((unescape(&logical[..key_end])?, String::new()))
+    Ok(Some((unescape(&logical[..key_end])?, String::new())))
 }
 
-/// Decodes escapes; a malformed `\uXXXX` makes Java reject the file, so the entry yields nothing.
-fn unescape(value: &str) -> Option<String> {
+/// Decodes escapes; a malformed `\uXXXX` makes Java reject the whole file.
+fn unescape(value: &str) -> Result<String, Malformed> {
     let mut result = String::new();
     let mut characters = value.chars();
     while let Some(character) = characters.next() {
@@ -372,7 +406,7 @@ fn unescape(value: &str) -> Option<String> {
             Some('r') => result.push('\r'),
             Some('f') => result.push('\u{c}'),
             Some('u') => {
-                let unit = unicode_unit(&mut characters)?;
+                let unit = unicode_unit(&mut characters).ok_or(Malformed)?;
                 result.push(match char::from_u32(u32::from(unit)) {
                     Some(decoded) => decoded,
                     None => decode_surrogate(unit, &mut characters),
@@ -382,7 +416,7 @@ fn unescape(value: &str) -> Option<String> {
             None => result.push('\\'),
         }
     }
-    Some(result)
+    Ok(result)
 }
 
 fn unicode_unit(characters: &mut std::str::Chars<'_>) -> Option<u16> {
@@ -461,23 +495,26 @@ mod tests {
 
     use super::*;
 
+    fn parse(source: &str) -> PropertiesDocument {
+        PropertiesDocument::parse(source).expect("well-formed properties")
+    }
+
     #[test]
     fn unchanged_properties_round_trip_byte_for_byte() {
         let source = "# heading\r\nweird\\=key : first\r\ncontinued=one\\\r\n  two\r\n";
-        assert_eq!(PropertiesDocument::parse(source).render(), source);
+        assert_eq!(parse(source).render(), source);
     }
 
     #[test]
     fn carriage_return_line_endings_are_preserved_when_editing() {
-        let mut document = PropertiesDocument::parse("first=one\rsecond=two\r");
+        let mut document = parse("first=one\rsecond=two\r");
         document.set("second", "changed").expect("set");
         assert_eq!(document.render(), "first=one\rsecond=changed\r");
     }
 
     #[test]
     fn updates_the_effective_duplicate_and_preserves_the_earlier_one() {
-        let mut document =
-            PropertiesDocument::parse("motd=first\n# keep\nmotd=second\nunknown=x\n");
+        let mut document = parse("motd=first\n# keep\nmotd=second\nunknown=x\n");
         document.set("motd", "updated").expect("set");
         assert_eq!(
             document.render(),
@@ -488,7 +525,7 @@ mod tests {
 
     #[test]
     fn escaped_separators_and_continuations_are_understood() {
-        let document = PropertiesDocument::parse("a\\=b=one\\\n  two\n");
+        let document = parse("a\\=b=one\\\n  two\n");
         assert_eq!(document.get("a=b").as_deref(), Some("onetwo"));
     }
 
@@ -508,7 +545,7 @@ mod tests {
     }
 
     fn merged(source: &str) -> PropertiesDocument {
-        let mut document = PropertiesDocument::parse(source);
+        let mut document = parse(source);
         document
             .merge_network(&NetworkProperties::default())
             .expect("merge");
@@ -518,7 +555,7 @@ mod tests {
     #[test]
     fn comment_lines_never_continue_onto_the_next_line() {
         let source = "server-ip=10.0.0.1\n# note \\\nserver-ip=\n";
-        let document = PropertiesDocument::parse(source);
+        let document = parse(source);
         assert_eq!(document.get(SERVER_IP_KEY).as_deref(), Some(""));
 
         let document = merged(source);
@@ -560,14 +597,14 @@ mod tests {
 
     #[test]
     fn carriage_return_terminated_last_line_is_not_given_an_extra_line_break() {
-        let mut document = PropertiesDocument::parse("first=one\r");
+        let mut document = parse("first=one\r");
         document.set("second", "two").expect("set");
         assert_eq!(document.render(), "first=one\rsecond=two\r");
     }
 
     #[test]
     fn eula_is_not_joined_to_a_dangling_continuation() {
-        let mut document = PropertiesDocument::parse("motd=hello\\");
+        let mut document = parse("motd=hello\\");
         document.merge_eula_accepted();
         assert_eq!(document.get("motd").as_deref(), Some("hello"));
         assert_eq!(document.get(EULA_KEY).as_deref(), Some("true"));
@@ -575,23 +612,44 @@ mod tests {
 
     #[test]
     fn unicode_escapes_are_decoded_and_surrogate_pairs_are_combined() {
-        let document = PropertiesDocument::parse("motd=\\u00A7aHello\nface=\\uD83D\\uDE00\n");
+        let document = parse("motd=\\u00A7aHello\nface=\\uD83D\\uDE00\n");
         assert_eq!(document.get("motd").as_deref(), Some("\u{a7}aHello"));
         assert_eq!(document.get("face").as_deref(), Some("\u{1f600}"));
     }
 
     #[test]
-    fn malformed_unicode_escapes_yield_no_entry() {
-        let document = PropertiesDocument::parse("motd=\\u12G4\nshort=\\u12\n");
-        assert_eq!(document.get("motd"), None);
-        assert_eq!(document.get("short"), None);
+    fn malformed_unicode_escapes_are_refused_with_the_entry_line() {
+        for (source, line) in [
+            ("motd=\\u12G4\n", 1),
+            ("a=b\nshort=\\u12\n", 2),
+            ("a=b\nbad\\uZZZZkey=v\n", 2),
+            ("a=b\nkey-only\\u00\n", 2),
+            ("a=b\nmotd=one\\\n  two\\u12\n", 2),
+            ("a=\\uD83D\\u12\n", 1),
+        ] {
+            assert_eq!(
+                PropertiesDocument::parse(source),
+                Err(MalformedEscape { line }),
+                "{source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_unicode_escapes_in_comments_do_not_matter() {
+        let document = parse("# \\u12G4\n! \\u\nmotd=ok\n");
+        assert_eq!(document.get("motd").as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn escaped_backslash_before_u_is_not_a_unicode_escape() {
+        let document = parse("path=C:\\\\users\\\\u\n");
+        assert_eq!(document.get("path").as_deref(), Some("C:\\users\\u"));
     }
 
     #[test]
     fn separator_is_whitespace_then_at_most_one_delimiter_then_whitespace() {
-        let document = PropertiesDocument::parse(
-            "a==x\nb = = y\nc:d\ne\tf\ng \\\n  h\n  i=j\nk\\ l=m\nn\\\n\\ o\n",
-        );
+        let document = parse("a==x\nb = = y\nc:d\ne\tf\ng \\\n  h\n  i=j\nk\\ l=m\nn\\\n\\ o\n");
         assert_eq!(document.get("a").as_deref(), Some("=x"));
         assert_eq!(document.get("b").as_deref(), Some("= y"));
         assert_eq!(document.get("c").as_deref(), Some("d"));
@@ -604,9 +662,9 @@ mod tests {
 
     #[test]
     fn dangling_backslash_at_end_of_input_is_dropped() {
-        let document = PropertiesDocument::parse("a=b\\");
+        let document = parse("a=b\\");
         assert_eq!(document.get("a").as_deref(), Some("b"));
-        let document = PropertiesDocument::parse("a=b\\\\\\");
+        let document = parse("a=b\\\\\\");
         assert_eq!(document.get("a").as_deref(), Some("b\\"));
     }
 
@@ -624,10 +682,10 @@ mod tests {
             "",
         ];
         for value in values {
-            let mut document = PropertiesDocument::parse("motd=old\n");
+            let mut document = parse("motd=old\n");
             document.set("motd", value).expect("set");
             assert_eq!(document.get("motd").as_deref(), Some(value), "{value:?}");
-            let reparsed = PropertiesDocument::parse(&document.render());
+            let reparsed = parse(&document.render());
             assert_eq!(reparsed.get("motd").as_deref(), Some(value), "{value:?}");
         }
     }
@@ -637,7 +695,7 @@ mod tests {
         for key in ["#hash", "!bang", "a=b", "a:b", "a b", "a\tb", "a\\b"] {
             let mut document = PropertiesDocument::default();
             document.set(key, "value").expect("set");
-            let reparsed = PropertiesDocument::parse(&document.render());
+            let reparsed = parse(&document.render());
             assert_eq!(reparsed.get(key).as_deref(), Some("value"), "{key:?}");
         }
     }
@@ -645,8 +703,8 @@ mod tests {
     #[test]
     fn saving_an_untouched_motd_does_not_change_what_java_reads() {
         for source in ["motd=\\u00A7aHello\n", "motd=\\ \\ centered\n", "motd==x\n"] {
-            let before = PropertiesDocument::parse(source).get("motd").expect("motd");
-            let mut document = PropertiesDocument::parse(source);
+            let before = parse(source).get("motd").expect("motd");
+            let mut document = parse(source);
             document.set("motd", &before).expect("set");
             assert_eq!(document.get("motd").as_deref(), Some(before.as_str()));
         }
@@ -660,9 +718,7 @@ mod tests {
             "server-ip=127.0.0.1\n\\\n \\\n#\\\nserver-ip=\n",
         ] {
             assert_eq!(
-                PropertiesDocument::parse(source)
-                    .get(SERVER_IP_KEY)
-                    .as_deref(),
+                parse(source).get(SERVER_IP_KEY).as_deref(),
                 Some(""),
                 "{source:?}"
             );
@@ -673,7 +729,7 @@ mod tests {
                     .contains("\nserver-ip=127.0.0.1\nonline-mode"),
                 "{source:?}"
             );
-            let reparsed = PropertiesDocument::parse(&document.render());
+            let reparsed = parse(&document.render());
             assert_eq!(
                 reparsed.get(SERVER_IP_KEY).as_deref(),
                 Some("127.0.0.1"),
@@ -689,7 +745,7 @@ mod tests {
             document.render(),
             "a=1\nmotd=hello\\\r\ronline-mode=false\nserver-ip=127.0.0.1\nserver-port=25565\n"
         );
-        let reparsed = PropertiesDocument::parse(&document.render());
+        let reparsed = parse(&document.render());
         assert_eq!(reparsed.get("motd").as_deref(), Some("hello"));
         assert_eq!(reparsed.get(ONLINE_MODE_KEY).as_deref(), Some("false"));
         assert_eq!(reparsed.get(SERVER_IP_KEY).as_deref(), Some("127.0.0.1"));

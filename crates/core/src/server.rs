@@ -1337,7 +1337,9 @@ const fn operator_profile_matches_network(
 
 fn read_properties(path: &Path) -> CoreResult<PropertiesDocument> {
     match std::fs::read_to_string(path) {
-        Ok(text) => Ok(PropertiesDocument::parse(&text)),
+        Ok(text) => {
+            PropertiesDocument::parse(&text).map_err(|malformed| malformed.in_file(path).into())
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             Ok(PropertiesDocument::default())
         }
@@ -1697,6 +1699,33 @@ mod tests {
     use fastnbt::Value;
 
     use super::*;
+
+    #[test]
+    fn a_properties_file_java_cannot_load_is_refused_and_left_untouched() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join(SERVER_PROPERTIES_FILE);
+        std::fs::write(&path, b"motd=ok\nlevel-name=bad\\u12G4\n").expect("seed");
+
+        let merge = merge_network_file(&path, &ServerNetworkSettings::default());
+        assert!(matches!(
+            merge,
+            Err(CoreError::Server(
+                ephervex_server::ServerError::MalformedPropertiesEscape { line: 2, .. }
+            ))
+        ));
+        assert!(matches!(
+            read_properties(&path),
+            Err(CoreError::Server(
+                ephervex_server::ServerError::MalformedPropertiesEscape { line: 2, .. }
+            ))
+        ));
+        let error = read_properties(&path).expect_err("malformed escape");
+        assert_eq!(error.failing_path().as_deref(), Some(path.as_path()));
+        assert_eq!(
+            std::fs::read(&path).expect("read"),
+            b"motd=ok\nlevel-name=bad\\u12G4\n"
+        );
+    }
 
     #[tokio::test]
     async fn server_observers_receive_one_terminal_result_for_the_complete_run() {

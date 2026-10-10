@@ -31,8 +31,8 @@ pub use process::{
     ServerSupervisor, ServerWarning, send_control,
 };
 pub use properties::{
-    EULA_KEY, NetworkProperties, ONLINE_MODE_KEY, PropertiesDocument, SERVER_IP_KEY,
-    SERVER_PORT_KEY, ServerBind,
+    EULA_KEY, MalformedEscape, NetworkProperties, ONLINE_MODE_KEY, PropertiesDocument,
+    SERVER_IP_KEY, SERVER_PORT_KEY, ServerBind,
 };
 pub use runtime::{
     ProcessEvidence, ProcessRole, RUNTIME_FILE, RUNTIME_LOCK_FILE, RuntimeClassification,

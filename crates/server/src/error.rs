@@ -8,6 +8,8 @@ pub enum ServerError {
     InvalidProperty { key: String, reason: &'static str },
     #[error("server property `{key}` is managed by a typed server setting")]
     ProtectedProperty { key: String },
+    #[error("{path} has a malformed \\uXXXX escape on line {line}")]
+    MalformedPropertiesEscape { path: PathBuf, line: usize },
     #[error("global Minecraft EULA consent has not been accepted")]
     EulaNotAccepted,
     #[error("the recorded Minecraft EULA consent is malformed")]
@@ -67,6 +69,7 @@ impl ServerError {
         match self {
             Self::InvalidProperty { .. } => "error-server-property-invalid",
             Self::ProtectedProperty { .. } => "error-server-property-protected",
+            Self::MalformedPropertiesEscape { .. } => "error-server-properties-escape-malformed",
             Self::EulaNotAccepted => "error-server-eula-not-accepted",
             Self::EulaConsentMalformed => "error-server-eula-consent-malformed",
             Self::RuntimeState { .. } => "error-server-runtime-state",
@@ -96,6 +99,7 @@ impl ServerError {
                 ("target", target.clone()),
                 ("timeout_seconds", timeout_seconds.to_string()),
             ],
+            Self::MalformedPropertiesEscape { line, .. } => vec![("line", line.to_string())],
             _ => Vec::new(),
         }
     }
@@ -105,6 +109,7 @@ impl ServerError {
         match self {
             Self::RuntimeState { path, .. }
             | Self::Io { path, .. }
+            | Self::MalformedPropertiesEscape { path, .. }
             | Self::ControlUnavailable { path, .. } => Some(path.clone()),
             Self::ProcessStart { executable, .. } => Some(executable.clone()),
             _ => None,
