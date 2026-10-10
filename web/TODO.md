@@ -162,7 +162,7 @@ features show one tab or a short note.
 - [x] Snapshots
 - [x] Settings: General, Minecraft defaults, Java, Providers & APIs, Storage,
       Disk usage
-- [ ] Themes (source: `docs/themes.md`)
+- [x] Themes (source: `docs/themes.md`)
 - [ ] Files and locations, environment variables, working offline,
       credentials and privacy, upgrade and uninstall
 - [ ] Limitations and troubleshooting

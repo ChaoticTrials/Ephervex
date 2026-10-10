@@ -1,0 +1,118 @@
+---
+title: Themes
+description: Choose a built-in theme or add a custom Ephervex color theme.
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+import ThemeScreenshot from '@site/src/components/ThemeScreenshot';
+
+# Themes
+
+Ephervex ships **Dark** and **Light** interface themes. A custom theme is a
+TOML file that starts from either built-in theme and changes the colors you
+choose. Themes affect Ephervex, not Minecraft. Interface text size and the
+separate diagnostics and console text size are set in [General settings](./settings.mdx#general);
+themes do not change fonts or layout.
+
+## Choose a theme
+
+Open **Settings > General > Interface theme** and select **Dark**, **Light**,
+or a custom theme listed there. The change is saved when selected.
+
+<ThemeScreenshot state="settings-general" alt="General settings with the Interface theme selector" />
+
+The CLI has no theme selector. Use the desktop app to choose a theme.
+
+## Add a custom theme
+
+Create a TOML file in the folder shown below. The folder does not exist until
+you create it:
+
+```text
+~/.config/ephervex/themes/my-theme.toml
+```
+
+If `XDG_CONFIG_HOME` is set, use
+`$XDG_CONFIG_HOME/ephervex/themes/my-theme.toml` instead. **Settings >
+General > Interface theme** shows the exact themes folder for this
+installation.
+
+Start with a small file:
+
+```toml
+format_version = 1
+name = "My Theme"
+parent = "dark"
+
+[colors]
+accent = "#1bd96a"
+background = "#16181c"
+surface = "#1d1f23"
+```
+
+For a complete example, see the [Modrinth theme on GitHub](https://github.com/ChaoticTrials/Ephervex/blob/main/docs/themes/modrinth.toml).
+It sets every available color. Copy it into your themes folder as
+`modrinth.toml`, then select **Modrinth** under **Interface theme**.
+
+The file name, without `.toml`, is the theme's ID. Use lowercase letters,
+digits, `-`, or `_` in the name. The `name` field is the label shown in the
+selector. Set `parent` to `"dark"` or `"light"`; omitted colors come from
+that parent, including the color scheme used by standard controls.
+`format_version`, `name`, `parent`, and `[colors]` may all be omitted. The
+defaults are format 1, the file name, Dark, and no overrides.
+
+Colors must be quoted hexadecimal values in `"#rrggbb"` form. Use
+`"#rrggbbaa"` when a color needs transparency. Edit the file, then select
+**Refresh** in the app's top bar or restart Ephervex. Choose **My Theme**
+under **Interface theme**. Renaming the file changes its ID, so select the
+renamed theme again.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Create the themes folder and TOML file with your file manager and text editor.
+Return to **Settings > General**, refresh, and choose the new theme. The
+selector also shows any problems found while loading theme files.
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+`ephervex paths` shows the resolved configuration directory. Create its
+`themes` subfolder and save the TOML file there. Theme selection remains a
+desktop setting; there is no `ephervex theme` command.
+
+</TabItem>
+</Tabs>
+
+## Color names
+
+Only colors can be overridden. Use token names exactly as written under
+`[colors]`. You can start with `accent`, `background`, and `surface` and
+add more when a control needs a different color.
+
+| Tokens | What they color |
+| --- | --- |
+| `background`, `surface`, `elevated`, `overlay`, `border`, `bar`, `well` | Page floors, cards, popovers, borders, bars, and technical views |
+| `selection`, `selection-card`, `selection-strong`, `toggle-on`, `capture-active` | Selected rows, cards, chips, switches, and key capture |
+| `accent`, `accent-secondary`, `success`, `warning`, `danger` | Focus, links, highlights, and status messages |
+| `primary-fill`, `primary-fill-hover`, `danger-fill`, `danger-fill-hover` | Filled buttons and their hover states |
+| `text`, `text-secondary`, `text-muted`, `on-danger`, `log-error` | Text, button captions, and error lines in logs |
+| `server`, `modrinth`, `curseforge`, `vanilla`, `forge`, `neoforge` | Server, catalog, and loader marks |
+| `shadow`, `scrim` | Popover shadows and the wash behind dialogs |
+
+Keep text readable against `background`, `surface`, and `elevated`. A
+primary button uses `text` over `primary-fill`; a destructive button uses
+`on-danger` over `danger-fill`.
+
+## Fix a theme that does not load
+
+Check **Settings > General > Interface theme** for a message naming the file
+and problem. Ephervex skips a file with invalid TOML, an unsupported parent,
+a newer format version, a wrong field type, or an invalid color. Unknown color
+names and other unknown keys are reported and ignored while the rest of the
+theme loads.
+
+Theme files are limited to 64 KiB each, and Ephervex reads at most 100 of
+them. If the selected file cannot be read, Ephervex uses Dark while keeping
+the choice; fix the file and refresh to bring it back.
