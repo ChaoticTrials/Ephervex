@@ -1,11 +1,12 @@
 (function () {
   const now = new Date();
-  const localPreview = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+  const previewHost = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname)
+    || /^(?:10\.\d+\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+)$/.test(location.hostname);
   const previewKey = 'ephervex-halloween-preview';
   const previewQuery = new URLSearchParams(location.search).get('halloweenPreview');
   let preview = false;
 
-  if (localPreview) {
+  if (previewHost) {
     try {
       if (previewQuery === '1' || previewQuery === '0') {
         sessionStorage.setItem(previewKey, previewQuery);

@@ -18,8 +18,8 @@ The Halloween logo and favicon in `static/img/` are resized from
 `ephervex_logos_x4.zip` supplied by the project. On October 31 in the visitor's
 local time, the site switches to warm orange and purple colors and those two
 icons. It keeps the default launcher screenshots until matching GUI captures
-exist. On `localhost` or `127.0.0.1`, add `?halloweenPreview=1` to preview the
-theme in the current tab; `?halloweenPreview=0` clears that preview.
+exist. On localhost or a private network address, add `?halloweenPreview=1` to
+preview the theme in the current tab; `?halloweenPreview=0` clears that preview.
 
 From the repository root, regenerate and synchronize the default 1080p assets:
 
