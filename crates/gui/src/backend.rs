@@ -77,13 +77,14 @@ pub enum Command {
     /// Records the Minecraft releases to offer first, in the order given.
     SetFavoriteMinecraftVersions(Vec<String>),
     CancelOperation(String),
-    /// Replace one instance's own Java and JVM settings. `None` on a field
-    /// restores the global one. `jvm_args` is the typed argument line.
+    /// Replace one instance's own Java and JVM settings. `None` on `java` and
+    /// a blank memory field restore the global setting. `jvm_args` and the
+    /// memory fields are the typed text.
     SaveInstanceRuntime {
         instance: InstanceId,
         java: Option<PathBuf>,
-        min_memory_mib: Option<u32>,
-        max_memory_mib: Option<u32>,
+        min_memory_mib: String,
+        max_memory_mib: String,
         jvm_args: String,
     },
     /// Turns pack-owned mod mutation on or off for one instance.
@@ -2621,6 +2622,20 @@ fn run_worker(
                         });
                         continue;
                     }
+                };
+                // A memory field that is not a plain number is refused too,
+                // never saved as following the global setting.
+                let memory =
+                    crate::memory_input::parse_optional_mib(&min_memory_mib).and_then(|minimum| {
+                        crate::memory_input::parse_optional_mib(&max_memory_mib)
+                            .map(|maximum| (minimum, maximum))
+                    });
+                let Ok((min_memory_mib, max_memory_mib)) = memory else {
+                    let _ = events.send(Event::ModalError {
+                        scope: ModalScope::Anywhere,
+                        message: lookup(crate::memory_input::NotANumber::MESSAGE_ID),
+                    });
+                    continue;
                 };
                 let jvm = ephervex_model::JvmSettings {
                     min_memory_mib,

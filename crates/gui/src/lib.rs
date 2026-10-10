@@ -6,6 +6,7 @@ pub mod controller;
 pub mod diagnosis_view;
 pub mod file_drop;
 mod jvm_arguments;
+mod memory_input;
 pub mod minecraft_defaults;
 pub mod monospace;
 mod palette;

@@ -3600,15 +3600,6 @@ fn optional_path(value: &str) -> Option<PathBuf> {
     (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
 }
 
-/// A typed number, or `None` where the field was left to the global setting.
-///
-/// Something that is not a number is also `None`: the field is numeric, and
-/// refusing to save the rest of the form over one stray character would be
-/// worse than the value it could not read staying inherited.
-fn optional_number(value: &str) -> Option<u32> {
-    value.trim().parse().ok()
-}
-
 fn favorite_versions(ui: &AppWindow) -> Vec<String> {
     ui.get_favorite_minecraft_versions()
         .iter()
@@ -5128,8 +5119,8 @@ fn register_instance_runtime_actions(ui: &AppWindow, commands: &Sender<Command>)
             Command::SaveInstanceRuntime {
                 instance,
                 java: optional_path(&java),
-                min_memory_mib: optional_number(&min),
-                max_memory_mib: optional_number(&max),
+                min_memory_mib: min.to_string(),
+                max_memory_mib: max.to_string(),
                 jvm_args: args.to_string(),
             },
         );
@@ -5143,8 +5134,8 @@ fn register_instance_runtime_actions(ui: &AppWindow, commands: &Sender<Command>)
                 Command::SaveInstanceRuntime {
                     instance,
                     java: None,
-                    min_memory_mib: None,
-                    max_memory_mib: None,
+                    min_memory_mib: String::new(),
+                    max_memory_mib: String::new(),
                     jvm_args: String::new(),
                 },
             );
