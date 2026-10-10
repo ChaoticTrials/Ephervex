@@ -539,6 +539,41 @@ async fn a_fingerprint_match_carries_what_its_file_declares() {
     );
 }
 
+/// A file whose relation names no project cannot be described honestly, so it
+/// stays unidentified; it must not be recognized as declaring nothing, and it
+/// must not stop the rest of the batch from being recognized.
+#[tokio::test]
+async fn a_match_with_an_unusable_relation_is_left_unrecognized_without_failing_the_batch() {
+    let broken = "a".repeat(40);
+    let sound = "b".repeat(40);
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/fingerprints"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+            r#"{{"data":{{"exactMatches":[{{"id":238222,"file":{{"id":4712354,"modId":238222,"isAvailable":true,"fileName":"broken.jar","hashes":[{{"value":"{broken}","algo":1}}],"dependencies":[{{"modId":0,"relationType":3}}]}}}},{{"id":306612,"file":{{"id":4593548,"modId":306612,"isAvailable":true,"fileName":"sound.jar","hashes":[{{"value":"{sound}","algo":1}}],"dependencies":[]}}}}]}}}}"#
+        )))
+        .mount(&server)
+        .await;
+
+    let api = configured(&server);
+    let operation = api.begin_operation().expect("an operation begins");
+    let wanted = vec![
+        (
+            1_u32,
+            Hash::new(HashAlgorithm::Sha1, &broken).expect("sha1"),
+        ),
+        (2_u32, Hash::new(HashAlgorithm::Sha1, &sound).expect("sha1")),
+    ];
+
+    let recognized = operation
+        .fingerprints(&wanted, &CancellationToken::new())
+        .await
+        .expect("the lookup answers");
+
+    assert!(!recognized.contains_key(&broken));
+    assert!(recognized.contains_key(&sound));
+}
+
 /// A fingerprint is a lookup key, not a digest. An answer whose own SHA-1 is
 /// not the file's is a collision or the wrong file, and identifying the jar
 /// from it would put a made-up release in the server's recipe.

@@ -952,6 +952,46 @@ async fn each_listed_file_carries_its_own_side_declaration() {
 }
 
 #[tokio::test]
+async fn a_listed_release_declaring_a_relation_to_no_project_is_refused_rather_than_listed_without_it()
+ {
+    const PROJECT: u32 = 391_382;
+
+    for relation_type in [3, 5] {
+        let server = MockServer::start().await;
+        serve_categories(&server).await;
+        let body = format!(
+            r#"{{"data":[{{"id":7951520,"gameId":432,"modId":{PROJECT},
+                "isAvailable":true,"displayName":"Guarded 1.0.0","fileName":"guarded-1.0.0.jar",
+                "releaseType":1,"fileDate":"2023-07-01T10:00:00Z","fileLength":10,"downloadUrl":null,
+                "hashes":[{{"value":"da39a3ee5e6b4b0d3255bfef95601890afd80709","algo":1}}],
+                "gameVersions":["1.20.1","NeoForge"],
+                "dependencies":[{{"modId":0,"relationType":{relation_type}}}]}}],
+                "pagination":{{"totalCount":1}}}}"#
+        );
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/v1/mods/\d+/files$"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+            .mount(&server)
+            .await;
+
+        let error = provider_against(&server, Some(FAKE_KEY))
+            .versions(
+                &PROJECT.to_string(),
+                &target(LoaderKind::NeoForge),
+                &reporter(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("a lost requirement or incompatibility must not read as none declared");
+
+        assert!(
+            matches!(error, ModPlatformError::ResponseInvalid { .. }),
+            "relation type {relation_type}: {error}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_project_whose_author_disabled_third_party_downloads_still_lists_its_releases() {
     // A download restriction is about acquisition, not about what CurseForge
     // told us. The release stays in the list, complete, so a version picker

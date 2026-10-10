@@ -32,7 +32,7 @@ use ephervex_model::{
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderName, HeaderValue};
 use reqwest::{Client, Method, Response, StatusCode};
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::credential::{CurseForgeCredentialSource, missing};
 use super::dto::{
@@ -723,7 +723,17 @@ impl CurseForgeOperation<'_> {
         let expected: BTreeSet<&str> = wanted.iter().map(|(_, hash)| hash.digest()).collect();
         let mut recognized = BTreeMap::new();
         for matched in matches.exact_matches {
-            let dependencies = file_relations(&matched.file.dependencies);
+            // One file whose relations cannot be trusted stays unidentified
+            // rather than being reported as a file with no relations, and
+            // does not stop the rest of the batch from being recognized.
+            let Ok(dependencies) = file_relations(&matched.file.dependencies) else {
+                warn!(
+                    project = %matched.id,
+                    file = %matched.file.id,
+                    "left a fingerprint match unrecognized because its relations name a project with id 0"
+                );
+                continue;
+            };
             for digest in supported_hashes(&matched.file.hashes) {
                 if !expected.contains(digest.digest()) {
                     continue;
@@ -1184,6 +1194,7 @@ fn normalize_file(
     let (client_side, server_side) = file_declared_sides(&document.game_versions);
     let (game_versions, _loaders) = split_declared_support(&document.game_versions);
     let published = published_at(document.file_date.as_deref());
+    let dependencies = file_relations(&document.dependencies)?;
 
     Ok(CurseForgeFileRelease {
         project,
@@ -1198,7 +1209,7 @@ fn normalize_file(
         server_side,
         game_versions,
         published_at: published,
-        dependencies: file_relations(&document.dependencies),
+        dependencies,
     })
 }
 
@@ -1598,6 +1609,54 @@ mod tests {
             ],
             "a download restriction must not turn declared relations into unknown"
         );
+    }
+
+    fn file_declaring(relations: &str) -> CurseForgeFileDocument {
+        serde_json::from_str(&format!(
+            r#"{{"id":7951520,"gameId":432,"modId":391382,"isAvailable":true,
+                "fileName":"declaring-1.0.0.jar","gameVersions":["1.20.1","NeoForge"],
+                "hashes":[{{"value":"da39a3ee5e6b4b0d3255bfef95601890afd80709","algo":1}}],
+                "dependencies":{relations}}}"#
+        ))
+        .expect("a documented file response")
+    }
+
+    fn normalized(relations: &str) -> ModPlatformResult<CurseForgeFileRelease> {
+        normalize_file(
+            CurseForgeProjectId::new(391_382).expect("a project id"),
+            CurseForgeFileId::new(7_951_520).expect("a file id"),
+            file_declaring(relations),
+        )
+    }
+
+    #[test]
+    fn a_recognized_relation_to_a_project_with_id_zero_refuses_the_file() {
+        for (label, relation_type) in [
+            ("embedded", 1),
+            ("optional", 2),
+            ("required", 3),
+            ("incompatible", 5),
+            ("include", 6),
+        ] {
+            let error = normalized(&format!(
+                r#"[{{"modId":238222,"relationType":3}},{{"modId":0,"relationType":{relation_type}}}]"#
+            ))
+            .expect_err(label);
+            assert!(
+                matches!(error, ModPlatformError::ResponseInvalid { .. }),
+                "{label}: the file must not read as declaring fewer relations: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_relation_kind_this_build_ignores_is_skipped_whatever_its_target() {
+        let release = normalized(
+            r#"[{"modId":0,"relationType":4},{"modId":0,"relationType":99},{"modId":238222,"relationType":3}]"#,
+        )
+        .expect("unrecognized relation kinds are not part of the contract");
+        assert_eq!(release.dependencies.len(), 1);
+        assert_eq!(release.dependencies[0].kind, ModRelationKind::Required);
     }
 
     #[tokio::test]

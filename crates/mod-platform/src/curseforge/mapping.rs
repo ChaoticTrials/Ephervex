@@ -188,6 +188,7 @@ pub(super) fn version(
 
     let (game_versions, loaders) = split_declared_support(&document.game_versions);
     let (client_side, server_side) = file_declared_sides(&document.game_versions);
+    let dependencies = file_relations(&document.dependencies)?;
     // CurseForge publishes one label for a release and no separate version
     // number. Both fields carry it rather than one of them carrying something
     // parsed out of the other.
@@ -215,7 +216,7 @@ pub(super) fn version(
             size: document.file_length,
             hashes,
         },
-        dependencies: file_relations(&document.dependencies),
+        dependencies,
         client_side,
         server_side,
     })
@@ -256,22 +257,38 @@ fn distribution(
 ///
 /// Shared by the mod browser and by pack import, which read the same document
 /// and must agree about what it declared.
-pub(super) fn file_relations(relations: &[CurseForgeFileRelation]) -> Vec<ModDependency> {
-    relations
-        .iter()
-        .filter_map(|relation| {
-            Some(ModDependency {
-                kind: dependency_kind(relation.relation_type)?,
-                project_id: Some(CurseForgeProjectId::new(relation.mod_id)?.to_string()),
-                // CurseForge states relations project to project. There is no
-                // file to pin and none is invented: the dependency is resolved
-                // against this instance's own exact target, the same way the
-                // mod that declared it was.
-                version_id: None,
-                file_name: None,
-            })
-        })
-        .collect()
+///
+/// A relation kind this build does not act on is skipped on purpose. A relation
+/// of a recognized kind whose target names nothing is not: dropping it would
+/// report that no such relation exists, and a lost requirement or
+/// incompatibility removes a guard from the plan. The document is refused.
+pub(super) fn file_relations(
+    relations: &[CurseForgeFileRelation],
+) -> ModPlatformResult<Vec<ModDependency>> {
+    let mut dependencies = Vec::new();
+    for relation in relations {
+        let Some(kind) = dependency_kind(relation.relation_type) else {
+            continue;
+        };
+        let project = CurseForgeProjectId::new(relation.mod_id).ok_or_else(|| {
+            ModPlatformError::ResponseInvalid {
+                provider: ModProvider::CurseForge,
+                detail: "a file document declared a relation to a project with id 0, which names nothing"
+                    .to_owned(),
+            }
+        })?;
+        dependencies.push(ModDependency {
+            kind,
+            project_id: Some(project.to_string()),
+            // CurseForge states relations project to project. There is no
+            // file to pin and none is invented: the dependency is resolved
+            // against this instance's own exact target, the same way the
+            // mod that declared it was.
+            version_id: None,
+            file_name: None,
+        });
+    }
+    Ok(dependencies)
 }
 
 /// Splits one `gameVersions` array into Minecraft releases and loader names.
