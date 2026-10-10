@@ -36,6 +36,7 @@ use crate::presentation::{
     ModRequirementPresentation, ThirdPartyLicenses, ToastStack, parse_network, validate_ip,
     validate_port,
 };
+use crate::settings_drafts::{DraftField, SettingsDrafts, SettingsSave};
 use crate::ui::{
     AccountRow, ActivityRow, AppWindow, BlockedFileRow, DiagnosticRow, DiskUsageRow, GuiI18n,
     HostView, ImpactRow, ImportDuplicateRow, ImportOptionRow, InstanceRow, IsolationCandidateRow,
@@ -2357,6 +2358,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
     let creations = Rc::new(RefCell::new(CreationTracker::default()));
     let import_flow = Rc::new(RefCell::new(ImportFlowState::default()));
     let minecraft = Rc::new(RefCell::new(MinecraftDefaultsModel::new()));
+    let settings_drafts = Rc::new(RefCell::new(SettingsDrafts::default()));
     let browser = Rc::new(ModBrowser::default());
     let local_mods = Rc::new(RefCell::new(LocalModDrop::default()));
     let isolation_flow = Rc::new(RefCell::new(IsolationFlowState::default()));
@@ -2383,6 +2385,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         &creations,
         &import_flow,
         &minecraft,
+        &settings_drafts,
         &local_mods,
         &lifecycle,
         &disk_usage,
@@ -2396,6 +2399,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
     let poll_creations = Rc::clone(&creations);
     let poll_import_flow = Rc::clone(&import_flow);
     let poll_minecraft = Rc::clone(&minecraft);
+    let poll_settings_drafts = Rc::clone(&settings_drafts);
     let poll_local_mods = Rc::clone(&local_mods);
     let poll_lifecycle = Rc::clone(&lifecycle);
     let poll_disk_usage = Rc::clone(&disk_usage);
@@ -2432,6 +2436,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
                     &poll_creations,
                     &poll_import_flow,
                     &poll_minecraft,
+                    &poll_settings_drafts,
                     &poll_local_mods,
                     &poll_lifecycle,
                     &poll_disk_usage,
@@ -2729,6 +2734,7 @@ fn register_callbacks(
     creations: &Rc<RefCell<CreationTracker>>,
     import_flow: &Rc<RefCell<ImportFlowState>>,
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+    settings_drafts: &Rc<RefCell<SettingsDrafts>>,
     local_mods: &Rc<RefCell<LocalModDrop>>,
     lifecycle: &Rc<RefCell<HostLifecycle>>,
     disk_usage: &Rc<RefCell<DiskUsageState>>,
@@ -2755,7 +2761,7 @@ fn register_callbacks(
     register_restart_actions(ui, commands, lifecycle);
     register_disk_usage_actions(ui, commands, disk_usage);
     log_views::register(ui, &workspace.logs);
-    register_settings(ui, commands);
+    register_settings(ui, commands, settings_drafts);
     register_minecraft_defaults(ui, commands, minecraft, keys);
 
     let weak = ui.as_weak();
@@ -5572,7 +5578,11 @@ fn validate_player_count(value: &str, unset: bool) -> String {
     }
 }
 
-fn register_settings(ui: &AppWindow, commands: &Sender<Command>) {
+fn register_settings(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    drafts: &Rc<RefCell<SettingsDrafts>>,
+) {
     register_general_settings(ui, commands);
 
     let sender = commands.clone();
@@ -5589,18 +5599,29 @@ fn register_settings(ui: &AppWindow, commands: &Sender<Command>) {
     let sender = commands.clone();
     ui.on_begin_microsoft_login(move || send(&sender, Command::MicrosoftLogin));
 
-    register_provider_identifiers(ui, commands);
+    register_provider_identifiers(ui, commands, drafts);
     register_curseforge_credential(ui, commands);
 
     let sender = commands.clone();
+    let held = Rc::clone(drafts);
     ui.on_save_storage_settings(move |root| {
+        held.borrow_mut().persistent_root.submit(root.to_string());
         send(&sender, Command::SaveStorageRoot(root.into()));
     });
-    register_artifact_cache(ui, commands);
+    register_artifact_cache(ui, commands, drafts);
     let sender = commands.clone();
     ui.on_choose_storage_root(move || send(&sender, Command::PickStorageRoot));
     let sender = commands.clone();
-    ui.on_reset_storage_root(move || send(&sender, Command::SaveStorageRoot(String::new())));
+    let held = Rc::clone(drafts);
+    let weak = ui.as_weak();
+    ui.on_reset_storage_root(move || {
+        if let Some(ui) = weak.upgrade() {
+            held.borrow_mut()
+                .persistent_root
+                .submit(ui.get_persistent_root().to_string());
+        }
+        send(&sender, Command::SaveStorageRoot(String::new()));
+    });
     register_watched_folders(ui, commands);
 
     let sender = commands.clone();
@@ -5616,6 +5637,7 @@ fn register_settings(ui: &AppWindow, commands: &Sender<Command>) {
 
     let sender = commands.clone();
     let weak = ui.as_weak();
+    let held = Rc::clone(drafts);
     ui.on_save_java_settings(
         move |auto_detect, auto_download, minimum, maximum, preferred_path| {
             let (minimum_mib, maximum_mib) = match parse_java_memory(&minimum, &maximum) {
@@ -5627,6 +5649,14 @@ fn register_settings(ui: &AppWindow, commands: &Sender<Command>) {
                     return;
                 }
             };
+            {
+                let mut held = held.borrow_mut();
+                held.java_auto_detect.submit(auto_detect);
+                held.java_auto_download.submit(auto_download);
+                held.java_memory_min.submit(minimum.to_string());
+                held.java_memory_max.submit(maximum.to_string());
+                held.java_preferred_path.submit(preferred_path.to_string());
+            }
             send(
                 &sender,
                 Command::SaveJavaSettings {
@@ -6780,9 +6810,10 @@ fn apply_snapshot_event(
     snapshot: Snapshot,
     creations: &Rc<RefCell<CreationTracker>>,
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+    settings_drafts: &Rc<RefCell<SettingsDrafts>>,
     commands: &Sender<Command>,
 ) -> (Vec<InstanceRow>, Vec<ServerRow>) {
-    let rows = apply_snapshot(ui, snapshot, minecraft);
+    let rows = apply_snapshot(ui, snapshot, minecraft, &mut settings_drafts.borrow_mut());
     apply_pending_creations(ui, &creations.borrow());
     request_minecraft_preview(ui, minecraft, commands);
     request_minecraft_languages(ui, minecraft, commands, false);
@@ -7228,6 +7259,7 @@ fn apply_event(
     creations: &Rc<RefCell<CreationTracker>>,
     import_flow: &Rc<RefCell<ImportFlowState>>,
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+    settings_drafts: &Rc<RefCell<SettingsDrafts>>,
     local_mods: &Rc<RefCell<LocalModDrop>>,
     lifecycle: &Rc<RefCell<HostLifecycle>>,
     disk_usage: &Rc<RefCell<DiskUsageState>>,
@@ -7259,14 +7291,23 @@ fn apply_event(
             apply_server_tool_event(ui, workspace, server, event);
         }
         Event::Snapshot(snapshot) => {
-            let (clients, servers) =
-                apply_snapshot_event(ui, *snapshot, creations, minecraft, commands);
+            let (clients, servers) = apply_snapshot_event(
+                ui,
+                *snapshot,
+                creations,
+                minecraft,
+                settings_drafts,
+                commands,
+            );
             lifecycle.borrow_mut().servers.observe(&servers);
             workspace.state.borrow_mut().set_rows(clients, servers);
             workspace.refresh(ui);
             // A snapshot rebuilds the rows from records that know nothing of
             // restarts, so their stages are stamped again.
             stamp_host_lifecycle(ui, &lifecycle.borrow());
+        }
+        Event::SettingsSaveFinished { save, succeeded } => {
+            finish_settings_save(ui, &mut settings_drafts.borrow_mut(), save, succeeded);
         }
         Event::MinecraftPreferencesSaveFinished { .. }
         | Event::MinecraftPreferencePreview { .. }
@@ -8121,9 +8162,19 @@ fn attach_creating_servers(ui: &AppWindow) {
 
 /// The non-secret provider identifiers: the Microsoft Client ID and the
 /// advanced User-Agent override, both of which round-trip through the view.
-fn register_provider_identifiers(ui: &AppWindow, commands: &Sender<Command>) {
+fn register_provider_identifiers(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    drafts: &Rc<RefCell<SettingsDrafts>>,
+) {
     let sender = commands.clone();
+    let held = Rc::clone(drafts);
     ui.on_save_api_settings(move |client_id, user_agent| {
+        {
+            let mut held = held.borrow_mut();
+            held.microsoft_client_id.submit(client_id.to_string());
+            held.user_agent.submit(user_agent.to_string());
+        }
         send(
             &sender,
             Command::SaveApiSettings {
@@ -8134,9 +8185,27 @@ fn register_provider_identifiers(ui: &AppWindow, commands: &Sender<Command>) {
     });
 
     let sender = commands.clone();
-    ui.on_reset_microsoft_client_id(move || send(&sender, Command::ResetMicrosoftClientId));
+    let held = Rc::clone(drafts);
+    let weak = ui.as_weak();
+    ui.on_reset_microsoft_client_id(move || {
+        if let Some(ui) = weak.upgrade() {
+            held.borrow_mut()
+                .microsoft_client_id
+                .submit(ui.get_microsoft_client_id().to_string());
+        }
+        send(&sender, Command::ResetMicrosoftClientId);
+    });
     let sender = commands.clone();
-    ui.on_reset_user_agent(move || send(&sender, Command::ResetUserAgent));
+    let held = Rc::clone(drafts);
+    let weak = ui.as_weak();
+    ui.on_reset_user_agent(move || {
+        if let Some(ui) = weak.upgrade() {
+            held.borrow_mut()
+                .user_agent
+                .submit(ui.get_user_agent().to_string());
+        }
+        send(&sender, Command::ResetUserAgent);
+    });
 
     let sender = commands.clone();
     ui.on_choose_default_mod_catalog(move |catalog| {
@@ -8196,11 +8265,24 @@ fn register_curseforge_credential(ui: &AppWindow, commands: &Sender<Command>) {
 }
 
 /// The three artifact-cache actions the storage settings offer.
-fn register_artifact_cache(ui: &AppWindow, commands: &Sender<Command>) {
+fn register_artifact_cache(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    drafts: &Rc<RefCell<SettingsDrafts>>,
+) {
     let sender = commands.clone();
     ui.on_measure_artifact_cache(move || send(&sender, Command::MeasureArtifactCache));
     let sender = commands.clone();
+    let held = Rc::clone(drafts);
     ui.on_save_artifact_cache_limit(move |selection, custom_value, custom_unit| {
+        {
+            let mut held = held.borrow_mut();
+            held.artifact_cache_limit_index.submit(selection);
+            held.artifact_cache_custom_value
+                .submit(custom_value.to_string());
+            held.artifact_cache_custom_unit
+                .submit(custom_unit.to_string());
+        }
         send(
             &sender,
             Command::SaveArtifactCacheLimit {
@@ -8222,7 +8304,11 @@ fn register_artifact_cache(ui: &AppWindow, commands: &Sender<Command>) {
 /// Deliberately separate from [`apply_artifact_cache_status`]: the limit is cheap
 /// and arrives with every snapshot, while the usage figure costs a walk of the
 /// cache and arrives only when something asked for one.
-fn apply_artifact_cache_settings(ui: &AppWindow, settings: &SettingsData) {
+fn apply_artifact_cache_settings(
+    ui: &AppWindow,
+    settings: &SettingsData,
+    drafts: &mut SettingsDrafts,
+) {
     ui.set_artifact_cache_limit_labels(model(
         settings
             .artifact_cache_limit_labels
@@ -8238,9 +8324,24 @@ fn apply_artifact_cache_settings(ui: &AppWindow, settings: &SettingsData) {
             .collect(),
     ));
     ui.set_artifact_cache_custom_index(index_for_view(settings.artifact_cache_custom_index));
-    ui.set_artifact_cache_limit_index(index_for_view(settings.artifact_cache_limit_index));
-    ui.set_artifact_cache_custom_value(settings.artifact_cache_custom_value.as_str().into());
-    ui.set_artifact_cache_custom_unit(settings.artifact_cache_custom_unit.as_str().into());
+    fold_draft(
+        &mut drafts.artifact_cache_limit_index,
+        &ui.get_artifact_cache_limit_index(),
+        index_for_view(settings.artifact_cache_limit_index),
+        |index| ui.set_artifact_cache_limit_index(index),
+    );
+    fold_draft(
+        &mut drafts.artifact_cache_custom_value,
+        &ui.get_artifact_cache_custom_value().to_string(),
+        settings.artifact_cache_custom_value.clone(),
+        |value| ui.set_artifact_cache_custom_value(value.into()),
+    );
+    fold_draft(
+        &mut drafts.artifact_cache_custom_unit,
+        &ui.get_artifact_cache_custom_unit().to_string(),
+        settings.artifact_cache_custom_unit.clone(),
+        |unit| ui.set_artifact_cache_custom_unit(unit.into()),
+    );
     if !ui.get_artifact_cache_usage_known() {
         // Nothing has been measured yet, so the only honest total to show beside
         // "measuring" is the budget itself.
@@ -8295,10 +8396,171 @@ fn apply_theme_settings(
     crate::palette::apply_theme(ui, theme, &user_themes.themes);
 }
 
+/// Shows `incoming` unless the field holds an edit the user has not saved.
+fn fold_draft<T: PartialEq + Clone>(
+    field: &mut DraftField<T>,
+    shown: &T,
+    incoming: T,
+    show: impl FnOnce(T),
+) {
+    if let Some(value) = field.fold(shown, incoming) {
+        show(value);
+    }
+}
+
+/// Puts the stored value back in each field a finished save covers that still shows what was submitted.
+fn finish_settings_save(
+    ui: &AppWindow,
+    drafts: &mut SettingsDrafts,
+    save: SettingsSave,
+    succeeded: bool,
+) {
+    match save {
+        SettingsSave::JavaSettings => {
+            finish_draft(
+                &mut drafts.java_auto_detect,
+                &ui.get_java_auto_detect(),
+                succeeded,
+                |value| ui.set_java_auto_detect(value),
+            );
+            finish_draft(
+                &mut drafts.java_auto_download,
+                &ui.get_java_auto_download(),
+                succeeded,
+                |value| ui.set_java_auto_download(value),
+            );
+            finish_draft(
+                &mut drafts.java_memory_min,
+                &ui.get_java_memory_min().to_string(),
+                succeeded,
+                |value| ui.set_java_memory_min(value.into()),
+            );
+            finish_draft(
+                &mut drafts.java_memory_max,
+                &ui.get_java_memory_max().to_string(),
+                succeeded,
+                |value| ui.set_java_memory_max(value.into()),
+            );
+            finish_draft(
+                &mut drafts.java_preferred_path,
+                &ui.get_java_preferred_path().to_string(),
+                succeeded,
+                |value| ui.set_java_preferred_path(value.into()),
+            );
+        }
+        SettingsSave::StorageRoot => finish_draft(
+            &mut drafts.persistent_root,
+            &ui.get_persistent_root().to_string(),
+            succeeded,
+            |value| ui.set_persistent_root(value.into()),
+        ),
+        SettingsSave::MicrosoftClientId => finish_draft(
+            &mut drafts.microsoft_client_id,
+            &ui.get_microsoft_client_id().to_string(),
+            succeeded,
+            |value| ui.set_microsoft_client_id(value.into()),
+        ),
+        SettingsSave::UserAgent => finish_draft(
+            &mut drafts.user_agent,
+            &ui.get_user_agent().to_string(),
+            succeeded,
+            |value| ui.set_user_agent(value.into()),
+        ),
+        SettingsSave::ArtifactCacheLimit => {
+            finish_draft(
+                &mut drafts.artifact_cache_limit_index,
+                &ui.get_artifact_cache_limit_index(),
+                succeeded,
+                |value| ui.set_artifact_cache_limit_index(value),
+            );
+            finish_draft(
+                &mut drafts.artifact_cache_custom_value,
+                &ui.get_artifact_cache_custom_value().to_string(),
+                succeeded,
+                |value| ui.set_artifact_cache_custom_value(value.into()),
+            );
+            finish_draft(
+                &mut drafts.artifact_cache_custom_unit,
+                &ui.get_artifact_cache_custom_unit().to_string(),
+                succeeded,
+                |value| ui.set_artifact_cache_custom_unit(value.into()),
+            );
+        }
+    }
+}
+
+fn finish_draft<T: PartialEq + Clone>(
+    field: &mut DraftField<T>,
+    shown: &T,
+    succeeded: bool,
+    show: impl FnOnce(T),
+) {
+    if let Some(value) = field.finish(shown, succeeded) {
+        show(value);
+    }
+}
+
+/// The fields that hold what the user is typing until they save.
+///
+/// A snapshot arrives for reasons unrelated to these fields, so each shows the
+/// stored value only while it holds no unsaved edit.
+fn apply_settings_fields(ui: &AppWindow, settings: &SettingsData, drafts: &mut SettingsDrafts) {
+    apply_artifact_cache_settings(ui, settings, drafts);
+    fold_draft(
+        &mut drafts.persistent_root,
+        &ui.get_persistent_root().to_string(),
+        settings.persistent_root.clone(),
+        |root| ui.set_persistent_root(root.into()),
+    );
+    fold_draft(
+        &mut drafts.microsoft_client_id,
+        &ui.get_microsoft_client_id().to_string(),
+        settings.microsoft_client_id.clone(),
+        |id| ui.set_microsoft_client_id(id.into()),
+    );
+    fold_draft(
+        &mut drafts.user_agent,
+        &ui.get_user_agent().to_string(),
+        settings.user_agent.clone(),
+        |agent| ui.set_user_agent(agent.into()),
+    );
+    fold_draft(
+        &mut drafts.java_auto_detect,
+        &ui.get_java_auto_detect(),
+        settings.java_auto_detect,
+        |value| ui.set_java_auto_detect(value),
+    );
+    fold_draft(
+        &mut drafts.java_auto_download,
+        &ui.get_java_auto_download(),
+        settings.java_auto_download,
+        |value| ui.set_java_auto_download(value),
+    );
+    fold_draft(
+        &mut drafts.java_memory_min,
+        &ui.get_java_memory_min().to_string(),
+        settings.java_memory_min.to_string(),
+        |value| ui.set_java_memory_min(value.into()),
+    );
+    fold_draft(
+        &mut drafts.java_memory_max,
+        &ui.get_java_memory_max().to_string(),
+        settings.java_memory_max.to_string(),
+        |value| ui.set_java_memory_max(value.into()),
+    );
+    fold_draft(
+        &mut drafts.java_preferred_path,
+        &ui.get_java_preferred_path().to_string(),
+        settings.java_preferred_path.clone(),
+        |path| ui.set_java_preferred_path(path.into()),
+    );
+}
+
 fn apply_snapshot(
     ui: &AppWindow,
     snapshot: Snapshot,
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+    drafts: &mut SettingsDrafts,
 ) -> (Vec<InstanceRow>, Vec<ServerRow>) {
     let Snapshot {
         instances,
@@ -8321,9 +8583,8 @@ fn apply_snapshot(
     // folds the confirmed state under whatever is unsaved rather than over it.
     minecraft.borrow_mut().apply_snapshot(minecraft_preferences);
     render_minecraft(ui, minecraft);
-    apply_artifact_cache_settings(ui, &settings);
+    apply_settings_fields(ui, &settings, drafts);
     ui.set_storage_root(settings.storage_root.into());
-    ui.set_persistent_root(settings.persistent_root.into());
     ui.set_default_persistent_root(settings.default_persistent_root.into());
     ui.set_persistent_root_is_custom(settings.persistent_root_origin.is_override());
     ui.set_watched_download_folders(model(
@@ -8333,10 +8594,8 @@ fn apply_snapshot(
             .map(SharedString::from)
             .collect(),
     ));
-    ui.set_microsoft_client_id(settings.microsoft_client_id.into());
     ui.set_effective_microsoft_client_id(settings.effective_microsoft_client_id.into());
     ui.set_microsoft_client_id_is_custom(settings.microsoft_client_id_origin.is_override());
-    ui.set_user_agent(settings.user_agent.into());
     ui.set_effective_user_agent(settings.effective_user_agent.into());
     ui.set_user_agent_is_custom(settings.user_agent_origin.is_override());
     // Presence only. There is deliberately no `set_curseforge_api_key` here:
@@ -8359,11 +8618,6 @@ fn apply_snapshot(
         &settings.user_themes,
         &settings.themes_folder,
     );
-    ui.set_java_auto_detect(settings.java_auto_detect);
-    ui.set_java_auto_download(settings.java_auto_download);
-    ui.set_java_memory_min(settings.java_memory_min.to_string().into());
-    ui.set_java_memory_max(settings.java_memory_max.to_string().into());
-    ui.set_java_preferred_path(settings.java_preferred_path.into());
     ui.set_eula_accepted(eula.accepted);
     ui.set_eula_status(eula.status.into());
     ui.set_loading(false);
@@ -13696,6 +13950,121 @@ mod tests {
                 .collect::<Vec<SharedString>>(),
             vec![SharedString::from("1.16.3")]
         );
+    }
+
+    fn stored_settings(root: &str, memory_min: u32, path: &str) -> SettingsData {
+        SettingsData {
+            persistent_root: root.to_owned(),
+            java_memory_min: memory_min,
+            java_memory_max: 4096,
+            java_preferred_path: path.to_owned(),
+            microsoft_client_id: String::new(),
+            user_agent: String::new(),
+            artifact_cache_custom_value: "500".to_owned(),
+            artifact_cache_custom_unit: "GiB".to_owned(),
+            ..SettingsData::default()
+        }
+    }
+
+    #[test]
+    fn an_unrelated_snapshot_keeps_unsaved_settings_input() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().expect("window");
+        let mut drafts = SettingsDrafts::default();
+        apply_settings_fields(&ui, &stored_settings("/data", 512, ""), &mut drafts);
+
+        ui.set_java_memory_min("1024".into());
+        ui.set_java_preferred_path("/opt/java".into());
+        ui.set_persistent_root("/elsewhere".into());
+        ui.set_java_auto_detect(!ui.get_java_auto_detect());
+        ui.set_user_agent("custom/1".into());
+        ui.set_artifact_cache_custom_value("750".into());
+        let detect = ui.get_java_auto_detect();
+        apply_settings_fields(&ui, &stored_settings("/data", 512, ""), &mut drafts);
+
+        assert_eq!(ui.get_java_memory_min(), "1024");
+        assert_eq!(ui.get_java_preferred_path(), "/opt/java");
+        assert_eq!(ui.get_persistent_root(), "/elsewhere");
+        assert_eq!(ui.get_java_auto_detect(), detect);
+        assert_eq!(ui.get_user_agent(), "custom/1");
+        assert_eq!(ui.get_artifact_cache_custom_value(), "750");
+    }
+
+    #[test]
+    fn untouched_settings_fields_follow_the_stored_values() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().expect("window");
+        let mut drafts = SettingsDrafts::default();
+        apply_settings_fields(&ui, &stored_settings("/data", 512, ""), &mut drafts);
+        ui.set_java_memory_max("8192".into());
+
+        apply_settings_fields(
+            &ui,
+            &stored_settings("/moved", 768, "/usr/bin/java"),
+            &mut drafts,
+        );
+
+        assert_eq!(ui.get_persistent_root(), "/moved");
+        assert_eq!(ui.get_java_memory_min(), "768");
+        assert_eq!(ui.get_java_preferred_path(), "/usr/bin/java");
+        // The one field that was edited stays as typed.
+        assert_eq!(ui.get_java_memory_max(), "8192");
+    }
+
+    #[test]
+    fn a_completed_save_shows_the_stored_form_of_what_was_typed() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().expect("window");
+        let mut drafts = SettingsDrafts::default();
+        apply_settings_fields(&ui, &stored_settings("/data", 512, ""), &mut drafts);
+
+        ui.set_persistent_root("  /data/new  ".into());
+        ui.set_java_memory_min("0768".into());
+        drafts.persistent_root.submit("  /data/new  ".to_owned());
+        drafts.java_memory_min.submit("0768".to_owned());
+        apply_settings_fields(&ui, &stored_settings("/data/new", 768, ""), &mut drafts);
+        assert_eq!(ui.get_persistent_root(), "  /data/new  ");
+
+        finish_settings_save(&ui, &mut drafts, SettingsSave::StorageRoot, true);
+        finish_settings_save(&ui, &mut drafts, SettingsSave::JavaSettings, true);
+
+        assert_eq!(ui.get_persistent_root(), "/data/new");
+        assert_eq!(ui.get_java_memory_min(), "768");
+        // Later snapshots follow the stored value again.
+        apply_settings_fields(&ui, &stored_settings("/data/later", 768, ""), &mut drafts);
+        assert_eq!(ui.get_persistent_root(), "/data/later");
+    }
+
+    #[test]
+    fn text_typed_while_a_save_runs_is_not_replaced_when_it_completes() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().expect("window");
+        let mut drafts = SettingsDrafts::default();
+        apply_settings_fields(&ui, &stored_settings("/data", 512, ""), &mut drafts);
+
+        ui.set_java_preferred_path("/opt/a".into());
+        drafts.java_preferred_path.submit("/opt/a".to_owned());
+        ui.set_java_preferred_path("/opt/b".into());
+        apply_settings_fields(&ui, &stored_settings("/data", 512, "/opt/a"), &mut drafts);
+        finish_settings_save(&ui, &mut drafts, SettingsSave::JavaSettings, true);
+
+        assert_eq!(ui.get_java_preferred_path(), "/opt/b");
+    }
+
+    #[test]
+    fn a_refused_save_leaves_the_typed_input_in_place() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().expect("window");
+        let mut drafts = SettingsDrafts::default();
+        apply_settings_fields(&ui, &stored_settings("/data", 512, ""), &mut drafts);
+
+        ui.set_persistent_root("/not/allowed".into());
+        drafts.persistent_root.submit("/not/allowed".to_owned());
+        finish_settings_save(&ui, &mut drafts, SettingsSave::StorageRoot, false);
+        apply_settings_fields(&ui, &stored_settings("/data", 512, ""), &mut drafts);
+        apply_settings_fields(&ui, &stored_settings("/data", 512, ""), &mut drafts);
+
+        assert_eq!(ui.get_persistent_root(), "/not/allowed");
     }
 
     #[test]

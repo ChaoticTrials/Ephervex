@@ -48,6 +48,7 @@ use crate::presentation::{
     ModImpactPresentation, ModRequirementPresentation, PairPresentation,
     SERVER_PROPERTY_DEFINITIONS, ServerPresentation, diagnostic_kind_label, diagnostic_scope_label,
 };
+use crate::settings_drafts::SettingsSave;
 
 type CancellationRegistry = Arc<Mutex<HashMap<String, CancellationToken>>>;
 
@@ -1542,6 +1543,14 @@ pub enum Event {
     /// and there is no snapshot to send, so the draft the user still has is
     /// the correct thing to keep.
     MinecraftPreferencesSaveFinished {
+        succeeded: bool,
+    },
+    /// A settings save ended, whatever the outcome.
+    ///
+    /// `succeeded` also means the follow-up snapshot was sent, so the fields the
+    /// save covers can show the stored value, which a snapshot alone leaves as typed.
+    SettingsSaveFinished {
+        save: SettingsSave,
         succeeded: bool,
     },
     /// What one exact release would do with the draft that was previewed.
@@ -5057,9 +5066,15 @@ fn run_worker(
                             message: lookup("gui-provider-settings-saved"),
                             error: false,
                         });
-                        send_snapshot(&mut app, &events);
+                        let sent = send_snapshot_reporting(&mut app, &events);
+                        finish_settings_save(&events, SettingsSave::MicrosoftClientId, sent);
+                        finish_settings_save(&events, SettingsSave::UserAgent, sent);
                     }
-                    Err(error) => send_error(&events, &error),
+                    Err(error) => {
+                        send_error(&events, &error);
+                        finish_settings_save(&events, SettingsSave::MicrosoftClientId, false);
+                        finish_settings_save(&events, SettingsSave::UserAgent, false);
+                    }
                 }
             }
             Command::ResetMicrosoftClientId => match app.set_microsoft_client_id(None) {
@@ -5068,9 +5083,13 @@ fn run_worker(
                         message: lookup("gui-client-id-reset"),
                         error: false,
                     });
-                    send_snapshot(&mut app, &events);
+                    let sent = send_snapshot_reporting(&mut app, &events);
+                    finish_settings_save(&events, SettingsSave::MicrosoftClientId, sent);
                 }
-                Err(error) => send_error(&events, &error),
+                Err(error) => {
+                    send_error(&events, &error);
+                    finish_settings_save(&events, SettingsSave::MicrosoftClientId, false);
+                }
             },
             Command::ResetUserAgent => match app.set_custom_user_agent(None) {
                 Ok(()) => {
@@ -5078,9 +5097,13 @@ fn run_worker(
                         message: lookup("gui-user-agent-reset"),
                         error: false,
                     });
-                    send_snapshot(&mut app, &events);
+                    let sent = send_snapshot_reporting(&mut app, &events);
+                    finish_settings_save(&events, SettingsSave::UserAgent, sent);
                 }
-                Err(error) => send_error(&events, &error),
+                Err(error) => {
+                    send_error(&events, &error);
+                    finish_settings_save(&events, SettingsSave::UserAgent, false);
+                }
             },
             Command::SaveCurseForgeApiKey(key) => {
                 // The value is moved into the credential store and dropped
@@ -5126,9 +5149,13 @@ fn run_worker(
                             message: lookup("gui-storage-root-saved"),
                             error: false,
                         });
-                        send_snapshot(&mut app, &events);
+                        let sent = send_snapshot_reporting(&mut app, &events);
+                        finish_settings_save(&events, SettingsSave::StorageRoot, sent);
                     }
-                    Err(error) => send_error(&events, &error),
+                    Err(error) => {
+                        send_error(&events, &error);
+                        finish_settings_save(&events, SettingsSave::StorageRoot, false);
+                    }
                 }
             }
             Command::SaveWatchedDownloadFolders(folders) => {
@@ -5166,27 +5193,54 @@ fn run_worker(
                     &custom_unit,
                 );
                 match limit {
-                    Ok(limit) => spawn_in_lane(
-                        &cache_lane,
-                        app.paths().clone(),
-                        events.clone(),
-                        move |mut app, events, runtime| match runtime
-                            .block_on(app.set_artifact_cache_limit(limit))
-                        {
-                            Ok(status) => {
-                                let _ = events.send(Event::Toast {
-                                    message: lookup("gui-artifact-cache-limit-saved"),
-                                    error: false,
-                                });
-                                let _ = events.send(Event::ArtifactCacheStatus(
-                                    artifact_cache_status_data(&status),
-                                ));
-                                send_snapshot(&mut app, &events);
-                            }
-                            Err(error) => send_error(&events, &error),
-                        },
-                    ),
-                    Err(error) => send_error(&events, &CoreError::from(error)),
+                    Ok(limit) => {
+                        let paths = app.paths().clone();
+                        let lane_events = events.clone();
+                        cache_lane.submit(Box::new(move || {
+                            run_detached(
+                                paths,
+                                lane_events,
+                                |events| {
+                                    finish_settings_save(
+                                        events,
+                                        SettingsSave::ArtifactCacheLimit,
+                                        false,
+                                    );
+                                },
+                                move |mut app, events, runtime| match runtime
+                                    .block_on(app.set_artifact_cache_limit(limit))
+                                {
+                                    Ok(status) => {
+                                        let _ = events.send(Event::Toast {
+                                            message: lookup("gui-artifact-cache-limit-saved"),
+                                            error: false,
+                                        });
+                                        let _ = events.send(Event::ArtifactCacheStatus(
+                                            artifact_cache_status_data(&status),
+                                        ));
+                                        let sent = send_snapshot_reporting(&mut app, &events);
+                                        finish_settings_save(
+                                            &events,
+                                            SettingsSave::ArtifactCacheLimit,
+                                            sent,
+                                        );
+                                    }
+                                    Err(error) => {
+                                        send_error(&events, &error);
+                                        finish_settings_save(
+                                            &events,
+                                            SettingsSave::ArtifactCacheLimit,
+                                            false,
+                                        );
+                                    }
+                                },
+                            );
+                        }));
+                    }
+                    Err(error) => {
+                        send_error(&events, &CoreError::from(error));
+                        finish_settings_save(&events, SettingsSave::ArtifactCacheLimit, false);
+                    }
                 }
             }
             Command::ClearArtifactCache => {
@@ -5331,9 +5385,13 @@ fn run_worker(
                             message: lookup("gui-java-settings-saved"),
                             error: false,
                         });
-                        send_snapshot(&mut app, &events);
+                        let sent = send_snapshot_reporting(&mut app, &events);
+                        finish_settings_save(&events, SettingsSave::JavaSettings, sent);
                     }
-                    Err(error) => send_error(&events, &error),
+                    Err(error) => {
+                        send_error(&events, &error);
+                        finish_settings_save(&events, SettingsSave::JavaSettings, false);
+                    }
                 }
             }
             Command::SaveMinecraftPreferences { edits } => {
@@ -5484,19 +5542,32 @@ fn describe_runtimes(inventory: &ephervex_core::RuntimeInventory) -> Vec<JavaDat
         .collect()
 }
 
+fn finish_settings_save(events: &Sender<Event>, save: SettingsSave, succeeded: bool) {
+    let _ = events.send(Event::SettingsSaveFinished { save, succeeded });
+}
+
 /// Sends the state as it is stored now. `app` rereads the configuration first,
 /// since another `App` or process may have saved settings since it was opened
 /// and a snapshot older than them would be saved back by the next grouped
 /// settings change.
 fn send_snapshot(app: &mut App, events: &Sender<Event>) {
+    send_snapshot_reporting(app, events);
+}
+
+/// Sends a snapshot and says whether it could be built.
+fn send_snapshot_reporting(app: &mut App, events: &Sender<Event>) -> bool {
     if let Err(error) = app.reload_config() {
         tracing::warn!(%error, "kept the configuration read earlier");
     }
     match snapshot(app) {
         Ok(snapshot) => {
             let _ = events.send(Event::Snapshot(Box::new(snapshot)));
+            true
         }
-        Err(error) => send_error(events, &error),
+        Err(error) => {
+            send_error(events, &error);
+            false
+        }
     }
 }
 
