@@ -141,6 +141,60 @@ interact):
 - Add an `accessible-label` to dialogs, pending cards and toasts if crops of
   them are wanted.
 
+## Screenshot coverage for task guides
+
+Place existing captures beside the steps they illustrate before adding new
+fixtures. Keep the images focused on the action or decision described there.
+
+- [ ] Getting Started and Accounts: use `accounts-settings/offline-profile` for
+      adding an offline account, `accounts-device-code` for Microsoft sign-in,
+      and `instance-launching` or `running-page` for the first launch.
+- [ ] Import Modpacks: use `file-drop-overlay` for dropping an archive,
+      `import-modpack-running` and `activity-import-in-progress` for progress.
+- [ ] Diagnostics and Troubleshooting: use `client-run-failure-notice` and
+      `server-crash-notice` to show the routes into logs and diagnosis.
+- [ ] Files and Privacy: use `settings-disk-usage` beside the storage guidance.
+
+Capture the missing decisions and recovery views with synthetic data:
+
+- [ ] Instances: `instance-actions-menu`, `instance-make-persistent-dialog`,
+      `instance-delete-confirmation`, and `instance-change-loader-dialog`.
+      Show where each action starts and what the confirmation changes.
+- [ ] Import Modpacks: `import-link-trust-prompt` for the HTTPS host approval
+      shown after opening an `ephervex://` link.
+- [ ] Mods: `mod-update-available` with the Update action, and
+      `mod-missing-file` with Restore. The current `mod-manager` capture shows
+      an up-to-date release and cannot explain the Update action.
+- [ ] Mod Isolation: `mod-isolation-result` with Finish and Cancel, and
+      `mod-isolation-recovery` with the failed recovery notice and Try again.
+- [ ] Servers: `create-server-standalone`, `create-server-linked`,
+      `server-eula-review`, and `server-needs-recovery`. Keep the standalone
+      version and loader choices distinct from the linked server's inherited
+      selection.
+- [ ] Diagnostics: `diagnostic-bundle-selection` showing selected parts,
+      privacy guidance, and Export bundle.
+- [ ] Accounts: `account-launch-picker` showing how to choose another account
+      for one launch.
+- [ ] Snapshots: `snapshot-create-dialog` showing the label and confirmation.
+- [ ] Themes: `theme-selector-open` and `theme-load-error` to show selection
+      and where a rejected custom theme reports its problem.
+
+Add focused crops and numbered callouts where full-window captures make
+controls too small. Keep the source captures clean and describe every marker
+in nearby text and alt text.
+
+- [ ] Crop and mark the Minecraft release, loader build, and persistent-storage
+      choice in `create-instance-dialog`.
+- [ ] Crop and mark Open in Browser in `import-modpack-manual-download`, the
+      result and action in `client-diagnostics-result`, and the answer buttons
+      in `mod-isolation-round`.
+- [ ] Crop and mark Access, Online mode, and the EULA action in
+      `server-properties`; show the account and instance action menus beside
+      the instructions that name them.
+- [ ] Extend the capture tool to open menus, dropdowns, and the folded
+      diagnostic bundle panel before capturing those states. Add labeled dialog
+      or control regions where an accessible-element crop is possible.
+
 ## 5. Documentation pages
 
 Write only what ships. Each task page uses `Tabs` with `groupId="interface"`
