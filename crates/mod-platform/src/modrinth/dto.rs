@@ -59,7 +59,8 @@ pub(super) struct RawProject {
     pub(super) title: String,
     #[serde(default)]
     pub(super) description: String,
-    #[serde(default = "default_project_type")]
+    /// Required: a project that does not say what it is cannot be shown to be a
+    /// mod.
     pub(super) project_type: String,
     #[serde(default)]
     pub(super) client_side: RawSide,
@@ -67,10 +68,6 @@ pub(super) struct RawProject {
     pub(super) server_side: RawSide,
     #[serde(default)]
     pub(super) icon_url: Option<String>,
-}
-
-fn default_project_type() -> String {
-    super::PROJECT_TYPE.to_owned()
 }
 
 /// The four values Modrinth publishes for a side.

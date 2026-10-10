@@ -235,7 +235,12 @@ impl ModProviderApi for ModrinthProvider {
             return Ok(Vec::new());
         }
         let raw = self.api.projects_by_id(ids, reporter, cancel).await?;
-        Ok(raw.into_iter().map(mapping::project).collect())
+        raw.into_iter()
+            .map(|raw| {
+                let reference = raw.id.clone();
+                mapping::checked_project(raw, &reference)
+            })
+            .collect()
     }
 
     async fn versions_by_id(

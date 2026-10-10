@@ -85,6 +85,9 @@ pub trait ModProviderApi: std::fmt::Debug + Send + Sync {
     /// A finished plan needs each mod's declared client and server support, and
     /// asking for them one at a time would spend a rate-limit budget on round
     /// trips for a graph the resolver has already settled.
+    ///
+    /// Every project returned is a mod. One that is not is refused as
+    /// `ProjectTypeUnsupported`, as a single lookup refuses it.
     async fn projects_by_id(
         &self,
         ids: &[String],

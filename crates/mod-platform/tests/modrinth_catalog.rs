@@ -958,3 +958,166 @@ async fn an_empty_recognition_batch_contacts_nobody() {
             .is_empty()
     );
 }
+
+fn project_document(id: &str, project_type: &str) -> String {
+    format!(
+        r#"{{"id":"{id}","title":"{id}","description":"","project_type":"{project_type}",
+            "client_side":"required","server_side":"required"}}"#
+    )
+}
+
+#[tokio::test]
+async fn a_batch_lookup_refuses_a_project_that_is_not_a_mod_like_a_single_lookup() {
+    for project_type in ["modpack", "resourcepack", "shader"] {
+        let catalog = Catalog::start().await;
+        let ids = vec!["FITSPROJ".to_owned(), "LIBPROJ".to_owned()];
+        Mock::given(method("GET"))
+            .and(path("/v2/projects"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    "[{},{}]",
+                    project_document("FITSPROJ", "mod"),
+                    project_document("LIBPROJ", project_type)
+                ),
+                "application/json",
+            ))
+            .mount(&catalog.server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v2/project/LIBPROJ"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                project_document("LIBPROJ", project_type),
+                "application/json",
+            ))
+            .mount(&catalog.server)
+            .await;
+
+        let single = catalog
+            .provider
+            .project("LIBPROJ", &reporter(), &CancellationToken::new())
+            .await
+            .expect_err("a single lookup refuses it");
+        let batch = catalog
+            .provider
+            .projects_by_id(&ids, &reporter(), &CancellationToken::new())
+            .await
+            .expect_err("a batch lookup refuses it too");
+
+        for error in [single, batch] {
+            assert!(
+                matches!(
+                    &error,
+                    ModPlatformError::ProjectTypeUnsupported { reference, project_type: found }
+                        if reference == "LIBPROJ" && found == project_type
+                ),
+                "{project_type}: {error:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_batch_lookup_returns_every_project_when_all_are_mods() {
+    let catalog = Catalog::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/projects"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            format!(
+                "[{},{}]",
+                project_document("FITSPROJ", "mod"),
+                project_document("LIBPROJ", "mod")
+            ),
+            "application/json",
+        ))
+        .mount(&catalog.server)
+        .await;
+
+    let projects = catalog
+        .provider
+        .projects_by_id(
+            &["FITSPROJ".to_owned(), "LIBPROJ".to_owned()],
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("both are mods");
+    assert_eq!(projects.len(), 2);
+}
+
+#[tokio::test]
+async fn a_dependency_that_is_not_a_mod_fails_resolution_instead_of_being_planned() {
+    let catalog = Catalog::full().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/projects"))
+        .and(query_param("ids", r#"["FITSPROJ","LIBPROJ"]"#))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            format!(
+                "[{},{}]",
+                project_document("FITSPROJ", "mod"),
+                project_document("LIBPROJ", "modpack")
+            ),
+            "application/json",
+        ))
+        .mount(&catalog.server)
+        .await;
+
+    let error = resolve(ResolveRequest {
+        provider: &catalog.provider,
+        target: &target(),
+        loader_name: "neoforge",
+        selection: &InstallSelection::new("FITSPROJ"),
+        installed: &[],
+        installed_policy: ephervex_mod_platform::InstalledPolicy::Preserve,
+        reporter: &reporter(),
+        cancel: &CancellationToken::new(),
+    })
+    .await
+    .expect_err("a modpack is not installed into mods as a dependency");
+    assert!(
+        matches!(
+            &error,
+            ModPlatformError::ProjectTypeUnsupported { project_type, .. }
+                if project_type == "modpack"
+        ),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_project_that_does_not_state_its_type_is_refused_on_both_lookup_paths() {
+    let catalog = Catalog::start().await;
+    let untyped = r#"{"id":"NOTYPE","title":"No type","description":""}"#;
+    Mock::given(method("GET"))
+        .and(path("/v2/project/NOTYPE"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(untyped, "application/json"))
+        .mount(&catalog.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/projects"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(format!("[{untyped}]"), "application/json"),
+        )
+        .mount(&catalog.server)
+        .await;
+
+    let single = catalog
+        .provider
+        .project("NOTYPE", &reporter(), &CancellationToken::new())
+        .await
+        .expect_err("an untyped project is not shown to be a mod");
+    let batch = catalog
+        .provider
+        .projects_by_id(
+            &["NOTYPE".to_owned()],
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("an untyped project is not shown to be a mod");
+    for error in [single, batch] {
+        assert!(
+            matches!(error, ModPlatformError::ResponseInvalid { .. }),
+            "{error:?}"
+        );
+    }
+}
