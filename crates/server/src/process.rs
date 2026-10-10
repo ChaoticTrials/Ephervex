@@ -17,8 +17,7 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::capture::{CaptureStream, CapturedLine, OutputCapture, ServerOutputEvent};
 use crate::runtime::{
-    ProcessEvidence, RuntimeClassification, RuntimeEvidence, active_control_socket_path,
-    capture_java_child, classify_runtime, clear_stale_runtime, create_runtime_lock,
+    ProcessEvidence, RuntimeEvidence, RuntimeLock, active_control_socket_path, capture_java_child,
     prepare_control_socket_path, read_runtime_evidence, remove_per_run_control_directory,
     runtime_lock_path, runtime_path, write_runtime_evidence,
 };
@@ -368,6 +367,11 @@ async fn supervise_commands(
     let mut last_exit = None;
     loop {
         let finished_starting = Arc::new(AtomicBool::new(false));
+        // A supervisor that dies between the spawn and the child's record would
+        // otherwise look as if it had started nothing.
+        evidence.child = None;
+        evidence.child_pending = true;
+        write_runtime_evidence(server_root, evidence)?;
         let spawned = spawn_child(command, observer, capture, &finished_starting);
         let (mut child, stdin, readers, pid) = match spawned {
             Ok(spawned) => spawned,
@@ -429,6 +433,7 @@ async fn record_spawned_child(
     evidence: &mut RuntimeEvidence,
 ) -> ServerResult<()> {
     evidence.child = capture_spawned_child(child, pid).await?;
+    evidence.child_pending = false;
     write_runtime_evidence(server_root, evidence)
 }
 
@@ -1182,49 +1187,21 @@ fn exit_from_status(status: std::process::ExitStatus) -> ServerExit {
 
 #[derive(Debug)]
 struct RuntimeGuard {
-    path: PathBuf,
-    _file: std::fs::File,
+    _lock: RuntimeLock,
 }
 
 impl RuntimeGuard {
     fn acquire(server_root: &Path) -> ServerResult<Self> {
-        match classify_runtime(server_root)? {
-            RuntimeClassification::Stopped => {}
-            RuntimeClassification::ProvenStale { .. } => clear_stale_runtime(server_root)?,
-            _ => return Err(ServerError::AlreadyRunning),
-        }
-        let path = runtime_lock_path(server_root);
-        let parent = path.parent().unwrap_or(server_root);
-        std::fs::create_dir_all(parent).map_err(|source| ServerError::RuntimeState {
-            path: parent.to_path_buf(),
+        let parent = runtime_lock_path(server_root)
+            .parent()
+            .map_or_else(|| server_root.to_path_buf(), Path::to_path_buf);
+        std::fs::create_dir_all(&parent).map_err(|source| ServerError::RuntimeState {
+            path: parent,
             source,
         })?;
-        match create_runtime_lock(server_root) {
-            Ok(file) => Ok(Self { path, _file: file }),
-            Err(ServerError::RuntimeState { source, .. })
-                if source.kind() == std::io::ErrorKind::AlreadyExists =>
-            {
-                // A stale lock is removable only when runtime evidence proves
-                // the former owner and child are gone.
-                if matches!(
-                    classify_runtime(server_root)?,
-                    RuntimeClassification::ProvenStale { .. }
-                ) {
-                    clear_stale_runtime(server_root)?;
-                    let file = create_runtime_lock(server_root)?;
-                    Ok(Self { path, _file: file })
-                } else {
-                    Err(ServerError::AlreadyRunning)
-                }
-            }
-            Err(error) => Err(error),
-        }
-    }
-}
-
-impl Drop for RuntimeGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        Ok(Self {
+            _lock: RuntimeLock::acquire(server_root)?,
+        })
     }
 }
 
@@ -1235,7 +1212,7 @@ mod tests {
     use std::os::unix::fs::MetadataExt as _;
 
     use super::*;
-    use crate::runtime::control_socket_file_name;
+    use crate::runtime::{RuntimeClassification, classify_runtime, control_socket_file_name};
 
     /// The process group a process belongs to, from `/proc/<pid>/stat`.
     fn process_group_of(pid: u32) -> String {
@@ -1944,6 +1921,30 @@ mod tests {
         )
         .await
         .expect("a later start in the same process succeeds");
+    }
+
+    #[tokio::test]
+    async fn a_leftover_lock_with_no_holder_does_not_stop_a_server_from_starting() {
+        let root = tempfile::tempdir().expect("root");
+        std::fs::create_dir_all(root.path().join(".launcher")).expect("launcher");
+        std::fs::write(runtime_lock_path(root.path()), b"").expect("leftover");
+        let capture = tempfile::tempdir().expect("capture");
+        let command = ServerCommand {
+            java: PathBuf::from("/bin/true"),
+            arguments: Vec::new(),
+            working_directory: root.path().join("server"),
+        };
+
+        ServerSupervisor::run(
+            &command,
+            root.path(),
+            capture.path(),
+            &ServerObserver::silent(),
+        )
+        .await
+        .expect("the leftover lock is taken over");
+
+        assert_released(root.path());
     }
 
     #[tokio::test]

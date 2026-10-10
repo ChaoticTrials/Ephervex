@@ -628,7 +628,10 @@ Linux boot ID, PID, and start ticks identify a process; the recorded
 executable is informational, so a replaced or exec'd binary never counts as an
 exit. They distinguish a controlled process, an orphan, an unverifiable
 process, and proven-stale state. An orphan is reported but never adopted or
-signaled.
+signaled. The runtime lock is an exclusive `flock`, so a leftover lock file no
+process holds does not block a start, and starts racing for one cannot both
+take it. The record is marked while a child is being started, so a supervisor
+that dies before the child is recorded is not proven stale until the machine restarts.
 
 Launcher capture is separate from Minecraft's own `server/logs/` and
 `server/crash-reports/`. A bounded memory ring feeds frontends while rotated

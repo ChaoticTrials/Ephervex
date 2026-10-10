@@ -1,6 +1,6 @@
 //! Conservative Linux process identity and orphan classification.
 
-use std::io::Write as _;
+use std::io::{Read as _, Seek as _, Write as _};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::DirBuilderExt as _;
@@ -54,6 +54,10 @@ pub struct RuntimeEvidence {
     /// when sockets always lived in the shared per-user `/tmp` directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_directory: Option<PathBuf>,
+    /// A child is being started and `child` does not name it yet. While set,
+    /// a dead supervisor is not proof that nothing it started is alive.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub child_pending: bool,
 }
 
 impl RuntimeEvidence {
@@ -63,6 +67,7 @@ impl RuntimeEvidence {
             supervisor: capture_process(std::process::id(), ProcessRole::Supervisor)?,
             child: None,
             control_directory: None,
+            child_pending: false,
         })
     }
 
@@ -116,159 +121,300 @@ enum IdentityState {
 
 /// Classifies runtime evidence without signaling or adopting any process.
 pub fn classify_runtime(server_root: &Path) -> ServerResult<RuntimeClassification> {
-    let Some(evidence) = read_runtime_evidence(server_root)? else {
-        return classify_lock_holder(server_root);
-    };
+    match read_runtime_evidence(server_root)? {
+        Some(evidence) => Ok(classify_evidence(server_root, evidence)),
+        None => classify_lock_holder(server_root),
+    }
+}
+
+fn classify_evidence(server_root: &Path, evidence: RuntimeEvidence) -> RuntimeClassification {
     let supervisor = verify_process(&evidence.supervisor);
     let child = evidence.child.as_ref().map(verify_process);
 
     match (supervisor, child) {
         (IdentityState::VerifiedAlive, _) if control_socket_responds(server_root, &evidence) => {
-            Ok(RuntimeClassification::Controlled {
+            RuntimeClassification::Controlled {
                 supervisor: evidence.supervisor,
                 child: evidence.child,
-            })
+            }
         }
         (IdentityState::VerifiedAlive | IdentityState::Unverifiable, _)
         | (IdentityState::ProvenDead, Some(IdentityState::Unverifiable)) => {
-            Ok(RuntimeClassification::UnknownRunning {
+            RuntimeClassification::UnknownRunning {
                 supervisor: evidence.supervisor,
                 child: evidence.child,
-            })
+            }
         }
-        (IdentityState::ProvenDead, Some(IdentityState::VerifiedAlive)) => {
-            let child = evidence.child.ok_or(ServerError::RuntimeMayBeAlive)?;
-            Ok(RuntimeClassification::Orphaned { child })
+        (IdentityState::ProvenDead, Some(IdentityState::VerifiedAlive)) => match evidence.child {
+            Some(child) => RuntimeClassification::Orphaned { child },
+            None => RuntimeClassification::UnknownRunning {
+                supervisor: evidence.supervisor,
+                child: None,
+            },
+        },
+        // A child started just before the supervisor died has no evidence to
+        // check, unless the machine has restarted since.
+        (IdentityState::ProvenDead, None | Some(IdentityState::ProvenDead))
+            if evidence.child_pending && recorded_in_current_boot(&evidence.supervisor) =>
+        {
+            RuntimeClassification::UnknownRunning {
+                supervisor: evidence.supervisor,
+                child: None,
+            }
         }
         (IdentityState::ProvenDead, None | Some(IdentityState::ProvenDead)) => {
-            Ok(RuntimeClassification::ProvenStale { evidence })
+            RuntimeClassification::ProvenStale { evidence }
         }
     }
 }
 
+/// How long a reader waits for a lock that is held but not yet written.
+const LOCK_HOLDER_PATIENCE: Duration = Duration::from_millis(50);
+const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(10);
+/// Times a start follows a lock file its former owner removed while it was being opened.
+const LOCK_REOPEN_ATTEMPTS: usize = 16;
+
 /// A supervisor holds its lock before it writes evidence and after it clears it.
+///
+/// Whether the lock is held is the kernel's answer, so a lock no live process
+/// holds never counts as running, whatever it contains.
 fn classify_lock_holder(server_root: &Path) -> ServerResult<RuntimeClassification> {
+    use rustix::fs::{FlockOperation, flock};
+    use rustix::io::Errno;
+
     let path = runtime_lock_path(server_root);
-    let body = match std::fs::read(&path) {
-        Ok(body) => body,
+    let mut file = match std::fs::File::open(&path) {
+        Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(RuntimeClassification::Stopped);
         }
         Err(source) => return Err(ServerError::RuntimeState { path, source }),
     };
-    // A lock written before holders were recorded names nobody to check.
-    let Ok(holder) = serde_json::from_slice::<ProcessEvidence>(&body) else {
-        return Ok(RuntimeClassification::Stopped);
+    let held = match flock(&file, FlockOperation::NonBlockingLockShared) {
+        Ok(()) => false,
+        Err(Errno::WOULDBLOCK) => true,
+        Err(errno) => {
+            return Err(ServerError::RuntimeState {
+                path,
+                source: errno.into(),
+            });
+        }
     };
-    Ok(match verify_process(&holder) {
-        IdentityState::ProvenDead => RuntimeClassification::ProvenStale {
-            evidence: RuntimeEvidence {
-                generation: Uuid::nil(),
-                supervisor: holder,
-                child: None,
-                control_directory: None,
+    let deadline = std::time::Instant::now() + LOCK_HOLDER_PATIENCE;
+    let holder = loop {
+        let holder = read_lock_holder(&mut file, &path)?;
+        if holder.is_some() || !held || std::time::Instant::now() >= deadline {
+            break holder;
+        }
+        std::thread::sleep(LOCK_RETRY_INTERVAL);
+    };
+    match (held, holder) {
+        (true, Some(supervisor)) => Ok(RuntimeClassification::UnknownRunning {
+            supervisor,
+            child: None,
+        }),
+        (true, None) => Err(ServerError::RuntimeMayBeAlive),
+        (false, None) => Ok(RuntimeClassification::Stopped),
+        (false, Some(holder)) => Ok(match verify_process(&holder) {
+            IdentityState::ProvenDead => RuntimeClassification::ProvenStale {
+                evidence: RuntimeEvidence {
+                    generation: Uuid::nil(),
+                    supervisor: holder,
+                    child: None,
+                    control_directory: None,
+                    child_pending: false,
+                },
             },
-        },
-        IdentityState::VerifiedAlive | IdentityState::Unverifiable => {
-            RuntimeClassification::UnknownRunning {
-                supervisor: holder,
-                child: None,
+            // Locks written before they were flocked name a supervisor that is still alive.
+            IdentityState::VerifiedAlive | IdentityState::Unverifiable => {
+                RuntimeClassification::UnknownRunning {
+                    supervisor: holder,
+                    child: None,
+                }
+            }
+        }),
+    }
+}
+
+/// The supervisor a lock file names, or `None` when it is empty or unreadable as one.
+fn read_lock_holder(
+    file: &mut std::fs::File,
+    path: &Path,
+) -> ServerResult<Option<ProcessEvidence>> {
+    let mut body = Vec::new();
+    file.rewind()
+        .and_then(|()| file.read_to_end(&mut body))
+        .map_err(|source| ServerError::RuntimeState {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    Ok(serde_json::from_slice(&body).ok())
+}
+
+/// The exclusive `flock` on a server root's runtime lock file.
+///
+/// The kernel drops the lock with its holder, and only one process can take
+/// it, so taking it is also how a leftover lock is claimed. The file is
+/// removed while it is held, and a start that opened it meanwhile checks that
+/// it still holds the file at the path.
+#[derive(Debug)]
+pub(crate) struct RuntimeLock {
+    server_root: PathBuf,
+    path: PathBuf,
+    file: std::fs::File,
+    /// Whether dropping the lock removes the file. A lock that found a run
+    /// which may be alive leaves the file for that run's own cleanup.
+    remove_on_drop: bool,
+}
+
+impl RuntimeLock {
+    /// Takes the lock for the current supervisor and records it as the holder.
+    /// Fails with `AlreadyRunning` when a run may still own the server root.
+    pub(crate) fn acquire(server_root: &Path) -> ServerResult<Self> {
+        let mut lock = Self::take(server_root)?;
+        match lock.take_over() {
+            Ok(()) => {}
+            Err(ServerError::RuntimeMayBeAlive) => return Err(ServerError::AlreadyRunning),
+            Err(error) => return Err(error),
+        }
+        let holder = capture_process(std::process::id(), ProcessRole::Supervisor)?;
+        let body = serde_json::to_vec(&holder).map_err(|error| lock.state_error(error.into()))?;
+        lock.file
+            .set_len(0)
+            .and_then(|()| lock.file.rewind())
+            .and_then(|()| lock.file.write_all(&body))
+            .and_then(|()| lock.file.sync_all())
+            .map_err(|source| lock.state_error(source))?;
+        lock.remove_on_drop = true;
+        Ok(lock)
+    }
+
+    fn state_error(&self, source: std::io::Error) -> ServerError {
+        ServerError::RuntimeState {
+            path: self.path.clone(),
+            source,
+        }
+    }
+
+    /// Opens or creates the lock file and takes its `flock`.
+    fn take(server_root: &Path) -> ServerResult<Self> {
+        use rustix::fs::{FlockOperation, flock};
+        use rustix::io::Errno;
+
+        let path = runtime_lock_path(server_root);
+        for _ in 0..LOCK_REOPEN_ATTEMPTS {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)
+                .map_err(|source| ServerError::RuntimeState {
+                    path: path.clone(),
+                    source,
+                })?;
+            // A reader probing the lock holds it for an instant, so a refusal is retried briefly.
+            let deadline = std::time::Instant::now() + LOCK_HOLDER_PATIENCE;
+            loop {
+                match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+                    Ok(()) => break,
+                    Err(Errno::WOULDBLOCK) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(LOCK_RETRY_INTERVAL);
+                    }
+                    Err(Errno::WOULDBLOCK) => return Err(ServerError::AlreadyRunning),
+                    Err(errno) => {
+                        return Err(ServerError::RuntimeState {
+                            path,
+                            source: errno.into(),
+                        });
+                    }
+                }
+            }
+            if names_same_file(&file, &path) {
+                return Ok(Self {
+                    server_root: server_root.to_path_buf(),
+                    path,
+                    file,
+                    remove_on_drop: false,
+                });
             }
         }
-    })
-}
-
-/// The prefix of the file a lock is written in before it is published.
-const RUNTIME_LOCK_STAGING_PREFIX: &str = "server-runtime.lock.tmp.";
-/// How old a staged lock must be to count as left behind by a dead supervisor.
-const ABANDONED_STAGING_AGE: Duration = Duration::from_secs(60);
-
-/// Creates the runtime lock with its holder already in it, so no reader finds
-/// it empty. Fails with `AlreadyExists` when another lock is there.
-pub(crate) fn create_runtime_lock(server_root: &Path) -> ServerResult<std::fs::File> {
-    let path = runtime_lock_path(server_root);
-    if let Some(directory) = path.parent() {
-        remove_abandoned_staging(directory);
+        Err(ServerError::AlreadyRunning)
     }
-    let holder = capture_process(std::process::id(), ProcessRole::Supervisor)?;
-    let body = serde_json::to_vec(&holder).map_err(|error| ServerError::RuntimeState {
-        path: path.clone(),
-        source: std::io::Error::new(std::io::ErrorKind::InvalidData, error),
-    })?;
-    let temporary = path.with_file_name(format!("{RUNTIME_LOCK_STAGING_PREFIX}{}", Uuid::new_v4()));
-    let staged = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
-        file.write_all(&body)?;
-        file.sync_all()?;
-        Ok::<_, std::io::Error>(file)
-    })();
-    let result = staged.and_then(|file| match std::fs::hard_link(&temporary, &path) {
-        Ok(()) => Ok(file),
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::NotFound
-            ) =>
+
+    /// Checks that nothing a former run left behind may still be alive, and
+    /// clears what is left of it. Fails with `RuntimeMayBeAlive` otherwise.
+    fn take_over(&mut self) -> ServerResult<()> {
+        let server_root = self.server_root.clone();
+        let holder = read_lock_holder(&mut self.file, &self.path)?;
+        if holder
+            .as_ref()
+            .is_some_and(|holder| verify_process(holder) != IdentityState::ProvenDead)
         {
-            Err(error)
+            return Err(ServerError::RuntimeMayBeAlive);
         }
-        // A filesystem without working hard links gets the lock created in place instead.
-        Err(_) => {
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)?;
-            file.write_all(&body)?;
-            file.sync_all()?;
-            Ok(file)
+        match read_runtime_evidence(&server_root)? {
+            None => {}
+            Some(evidence) => match classify_evidence(&server_root, evidence) {
+                RuntimeClassification::ProvenStale { evidence } => {
+                    remove_runtime_artifacts(&server_root, Some(&evidence))?;
+                }
+                _ => return Err(ServerError::RuntimeMayBeAlive),
+            },
         }
-    });
-    let _ = std::fs::remove_file(&temporary);
-    result.map_err(|source| ServerError::RuntimeState { path, source })
+        Ok(())
+    }
 }
 
-/// Removes staged locks old enough that no live supervisor is still writing them.
-fn remove_abandoned_staging(directory: &Path) {
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let staged = entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| name.starts_with(RUNTIME_LOCK_STAGING_PREFIX));
-        let abandoned = entry
-            .metadata()
-            .and_then(|metadata| metadata.modified())
-            .is_ok_and(|modified| {
-                modified
-                    .elapsed()
-                    .is_ok_and(|age| age >= ABANDONED_STAGING_AGE)
-            });
-        if staged && abandoned {
-            let _ = std::fs::remove_file(entry.path());
+impl Drop for RuntimeLock {
+    fn drop(&mut self) {
+        if self.remove_on_drop {
+            let _ = std::fs::remove_file(&self.path);
         }
+    }
+}
+
+fn names_same_file(file: &std::fs::File, path: &Path) -> bool {
+    match (file.metadata(), std::fs::metadata(path)) {
+        (Ok(held), Ok(named)) => held.dev() == named.dev() && held.ino() == named.ino(),
+        _ => false,
     }
 }
 
 /// Clears runtime artifacts only when every recorded process is proven gone.
+///
+/// Holds the runtime lock throughout, so a start cannot publish its own state
+/// between the check and the removal.
 pub fn clear_stale_runtime(server_root: &Path) -> ServerResult<()> {
-    let evidence = match classify_runtime(server_root)? {
-        RuntimeClassification::Stopped => return Ok(()),
-        RuntimeClassification::ProvenStale { evidence } => evidence,
-        _ => return Err(ServerError::RuntimeMayBeAlive),
+    let mut lock = match RuntimeLock::take(server_root) {
+        Ok(lock) => lock,
+        Err(ServerError::AlreadyRunning) => return Err(ServerError::RuntimeMayBeAlive),
+        Err(ServerError::RuntimeState { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            return Ok(());
+        }
+        Err(error) => return Err(error),
     };
+    lock.take_over()?;
+    lock.remove_on_drop = true;
+    Ok(())
+}
+
+/// Removes what a stopped run leaves besides its lock: the evidence and the control socket.
+fn remove_runtime_artifacts(
+    server_root: &Path,
+    evidence: Option<&RuntimeEvidence>,
+) -> ServerResult<()> {
     let mut paths = vec![
         runtime_path(server_root),
-        runtime_lock_path(server_root),
         server_root
             .join(".launcher")
             .join(LEGACY_CONTROL_SOCKET_FILE),
     ];
-    if let Ok(socket) = control_socket_path(server_root, &evidence) {
+    if let Some(evidence) = evidence
+        && let Ok(socket) = control_socket_path(server_root, evidence)
+    {
         paths.push(socket);
     }
     for path in paths {
@@ -278,7 +424,7 @@ pub fn clear_stale_runtime(server_root: &Path) -> ServerResult<()> {
             return Err(ServerError::RuntimeState { path, source });
         }
     }
-    if let Some(directory) = &evidence.control_directory {
+    if let Some(directory) = evidence.and_then(|evidence| evidence.control_directory.as_ref()) {
         remove_per_run_control_directory(directory);
     }
     Ok(())
@@ -582,6 +728,12 @@ fn verify_process(evidence: &ProcessEvidence) -> IdentityState {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => IdentityState::ProvenDead,
         Err(_) => IdentityState::Unverifiable,
     }
+}
+
+/// Whether the process was recorded since the machine last started. An
+/// unreadable boot ID counts as the current boot.
+fn recorded_in_current_boot(evidence: &ProcessEvidence) -> bool {
+    read_boot_id().map_or(true, |current| current == evidence.boot_id)
 }
 
 /// Whether the pid still names the process that was recorded, by boot and
@@ -1080,19 +1232,67 @@ mod tests {
     }
 
     /// A supervisor holds its lock before it writes evidence and after it
-    /// clears it, and the lock names it so a dead one is not waited on.
+    /// clears it, and the lock names it.
     #[test]
-    fn a_held_runtime_lock_is_running_until_its_holder_is_proven_dead() {
+    fn a_held_runtime_lock_is_running_until_its_holder_releases_it() {
         let root = root();
-        create_runtime_lock(root.path()).expect("lock");
+        let lock = RuntimeLock::acquire(root.path()).expect("lock");
         assert!(matches!(
             classify_runtime(root.path()).expect("classify"),
             RuntimeClassification::UnknownRunning { child: None, .. }
         ));
+        assert!(matches!(
+            RuntimeLock::acquire(root.path()),
+            Err(ServerError::AlreadyRunning)
+        ));
+        assert!(matches!(
+            clear_stale_runtime(root.path()),
+            Err(ServerError::RuntimeMayBeAlive)
+        ));
+        assert!(
+            runtime_lock_path(root.path()).exists(),
+            "a refused clear leaves the holder's lock"
+        );
 
+        drop(lock);
+        assert!(!runtime_lock_path(root.path()).exists());
+        assert!(matches!(
+            classify_runtime(root.path()).expect("classify"),
+            RuntimeClassification::Stopped
+        ));
+    }
+
+    #[test]
+    fn a_leftover_runtime_lock_no_process_holds_does_not_block_a_start() {
+        for leftover in [&b""[..], b"not a holder", b"{\"pid\":1}"] {
+            let root = root();
+            let path = runtime_lock_path(root.path());
+            std::fs::write(&path, leftover).expect("leftover");
+            assert!(matches!(
+                classify_runtime(root.path()).expect("classify"),
+                RuntimeClassification::Stopped
+            ));
+
+            let lock = RuntimeLock::acquire(root.path()).expect("the leftover is taken over");
+            let body = std::fs::read(&path).expect("read");
+            assert!(
+                serde_json::from_slice::<ProcessEvidence>(&body)
+                    .is_ok_and(|holder| holder.pid == std::process::id()),
+                "the new holder is recorded"
+            );
+            drop(lock);
+
+            std::fs::write(&path, leftover).expect("leftover");
+            clear_stale_runtime(root.path()).expect("recovery clears it");
+            assert!(!path.exists());
+        }
+    }
+
+    #[test]
+    fn a_runtime_lock_naming_a_dead_holder_is_stale_and_cleared() {
+        let root = root();
         let lock = runtime_lock_path(root.path());
-        let mut holder: ProcessEvidence =
-            serde_json::from_slice(&std::fs::read(&lock).expect("read")).expect("holder");
+        let mut holder = capture_process(std::process::id(), ProcessRole::Supervisor).expect("me");
         holder.start_ticks = 0;
         std::fs::write(&lock, serde_json::to_vec(&holder).expect("holder")).expect("write");
         assert!(matches!(
@@ -1107,38 +1307,109 @@ mod tests {
         ));
     }
 
+    /// A lock written before locks were flocked holds nothing, so only its
+    /// holder says whether a supervisor still owns it.
     #[test]
-    fn creating_a_runtime_lock_clears_only_abandoned_staged_locks() {
+    fn a_runtime_lock_naming_a_live_holder_is_never_taken_over() {
         let root = root();
-        let launcher = root.path().join(".launcher");
-        let abandoned = launcher.join(format!("{RUNTIME_LOCK_STAGING_PREFIX}abandoned"));
-        let fresh = launcher.join(format!("{RUNTIME_LOCK_STAGING_PREFIX}fresh"));
-        std::fs::write(&fresh, b"").expect("fresh");
-        std::fs::File::create(&abandoned)
-            .expect("abandoned")
-            .set_modified(std::time::SystemTime::now() - ABANDONED_STAGING_AGE * 2)
-            .expect("age");
-
-        create_runtime_lock(root.path()).expect("lock");
-
-        assert!(
-            !abandoned.exists(),
-            "a dead supervisor's staging is cleared"
-        );
-        assert!(fresh.exists(), "a live supervisor's staging is left alone");
+        let lock = runtime_lock_path(root.path());
+        let holder = capture_process(std::process::id(), ProcessRole::Supervisor).expect("me");
+        std::fs::write(&lock, serde_json::to_vec(&holder).expect("holder")).expect("write");
+        assert!(matches!(
+            classify_runtime(root.path()).expect("classify"),
+            RuntimeClassification::UnknownRunning { .. }
+        ));
+        assert!(matches!(
+            RuntimeLock::acquire(root.path()),
+            Err(ServerError::AlreadyRunning)
+        ));
+        assert!(matches!(
+            clear_stale_runtime(root.path()),
+            Err(ServerError::RuntimeMayBeAlive)
+        ));
+        assert!(lock.exists());
     }
 
     #[test]
-    fn a_runtime_lock_is_created_once_and_never_empty() {
+    fn starts_racing_for_a_leftover_runtime_lock_yield_one_owner() {
+        const STARTS: usize = 8;
         let root = root();
-        create_runtime_lock(root.path()).expect("lock");
-        let body = std::fs::read(runtime_lock_path(root.path())).expect("read");
-        assert!(serde_json::from_slice::<ProcessEvidence>(&body).is_ok());
+        let mut holder = capture_process(std::process::id(), ProcessRole::Supervisor).expect("me");
+        holder.start_ticks = 0;
+        std::fs::write(
+            runtime_lock_path(root.path()),
+            serde_json::to_vec(&holder).expect("holder"),
+        )
+        .expect("leftover");
+        let barrier = std::sync::Barrier::new(STARTS);
+
+        let outcomes: Vec<_> = std::thread::scope(|scope| {
+            let starts: Vec<_> = (0..STARTS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        RuntimeLock::acquire(root.path())
+                    })
+                })
+                .collect();
+            starts
+                .into_iter()
+                .map(|start| start.join().expect("join"))
+                .collect()
+        });
+
+        assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+        assert!(
+            outcomes
+                .iter()
+                .filter_map(|outcome| outcome.as_ref().err())
+                .all(|error| matches!(error, ServerError::AlreadyRunning))
+        );
+    }
+
+    #[test]
+    fn a_supervisor_that_died_while_starting_a_child_is_not_proven_stale() {
+        let root = root();
+        let mut evidence = RuntimeEvidence::for_current_supervisor().expect("capture");
+        evidence.supervisor.start_ticks = 0;
+        evidence.child_pending = true;
+        write_runtime_evidence(root.path(), &evidence).expect("write");
         assert!(matches!(
-            create_runtime_lock(root.path()),
-            Err(ServerError::RuntimeState { source, .. })
-                if source.kind() == std::io::ErrorKind::AlreadyExists
+            classify_runtime(root.path()).expect("classify"),
+            RuntimeClassification::UnknownRunning { child: None, .. }
         ));
+        assert!(matches!(
+            RuntimeLock::acquire(root.path()),
+            Err(ServerError::AlreadyRunning)
+        ));
+        assert!(matches!(
+            clear_stale_runtime(root.path()),
+            Err(ServerError::RuntimeMayBeAlive)
+        ));
+        assert!(runtime_path(root.path()).exists());
+
+        evidence.child_pending = false;
+        write_runtime_evidence(root.path(), &evidence).expect("write");
+        assert!(matches!(
+            classify_runtime(root.path()).expect("classify"),
+            RuntimeClassification::ProvenStale { .. }
+        ));
+        drop(RuntimeLock::acquire(root.path()).expect("a proven stale run is taken over"));
+    }
+
+    #[test]
+    fn a_spawn_in_progress_before_a_restart_of_the_machine_is_proven_stale() {
+        let root = root();
+        let mut evidence = RuntimeEvidence::for_current_supervisor().expect("capture");
+        evidence.supervisor.boot_id = "an earlier boot".to_owned();
+        evidence.child_pending = true;
+        write_runtime_evidence(root.path(), &evidence).expect("write");
+        assert!(matches!(
+            classify_runtime(root.path()).expect("classify"),
+            RuntimeClassification::ProvenStale { .. }
+        ));
+        clear_stale_runtime(root.path()).expect("recovery clears it");
+        assert!(!runtime_path(root.path()).exists());
     }
 
     #[test]

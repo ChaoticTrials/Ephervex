@@ -76,8 +76,18 @@ A verified supervisor with a reachable socket is controlled. A verified
 supervisor without a reachable socket is unknown-running. A dead supervisor
 with the same verified live child is orphaned. Unverifiable identity is
 unknown-running. Evidence is stale only after both recorded processes are
-proven dead or the boot ID changed. Ephervex never adopts, writes stdin to, or
-signals an orphan. Recovery clears evidence only when it is proven stale.
+proven dead or the boot ID changed. The supervisor records that a child is
+being started before it spawns it, and clears that mark when the child is
+recorded, so a supervisor that dies in between leaves evidence that is not
+proven stale until the machine restarts. Ephervex never adopts, writes stdin to, or signals an orphan.
+Recovery clears evidence only when it is proven stale.
+
+The runtime lock is an exclusive `flock` on `.launcher/server-runtime.lock`,
+held for the whole run and dropped by the kernel with its holder. A lock file
+that no process holds never blocks a start, whatever it contains. A start and
+recovery both take the `flock` before they check or clear anything, so only one
+of several racing starts can take over a leftover lock. A lock file written
+before locks were flocked is respected while the supervisor it names is alive.
 
 The `server stop`, `server restart`, `server kill`, and `server console`
 commands print the supervisor's response and exit with a non-zero status when
