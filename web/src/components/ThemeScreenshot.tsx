@@ -20,12 +20,22 @@ type Capture = {
 
 const captures = manifest.captures as Record<string, Capture>;
 
+export type ScreenshotCallout = {
+  number: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  badgeSide?: 'left' | 'right';
+};
+
 export type ThemeScreenshotProps = {
   state: string;
   region?: string;
   alt: string;
   className?: string;
   zoomable?: boolean;
+  callouts?: ScreenshotCallout[];
 };
 
 /** Displays only the capture for the site's selected color mode. */
@@ -35,6 +45,7 @@ export default function ThemeScreenshot({
   alt,
   className,
   zoomable = true,
+  callouts = [],
 }: ThemeScreenshotProps): React.JSX.Element {
   const [viewing, setViewing] = React.useState(false);
   const base = useBaseUrl('/img/ephervex/');
@@ -89,10 +100,25 @@ export default function ThemeScreenshot({
           className={`themeScreenshot themeScreenshotZoomable ${className ?? ''}`}
           style={frameStyle}
           aria-label={`Enlarge screenshot: ${alt}`}
+          title="View larger"
           disabled={!activeFallback}
           onClick={() => setViewing(true)}>
           {picture}
-          <span className="themeScreenshotZoomHint" aria-hidden="true">View larger</span>
+          {callouts.map((callout) => (
+            <span
+              key={callout.number}
+              className={`themeScreenshotCallout ${callout.badgeSide === 'right' ? 'themeScreenshotCalloutRight' : ''}`}
+              aria-hidden="true"
+              style={{
+                left: `${callout.x}%`,
+                top: `${callout.y}%`,
+                width: `${callout.width}%`,
+                height: `${callout.height}%`,
+              }}>
+              <span className="themeScreenshotCalloutNumber">{callout.number}</span>
+            </span>
+          ))}
+          {callouts.length === 0 && <span className="themeScreenshotZoomHint" aria-hidden="true">View larger</span>}
         </button>
       ) : (
         <span className={`themeScreenshot ${className ?? ''}`} style={frameStyle}>

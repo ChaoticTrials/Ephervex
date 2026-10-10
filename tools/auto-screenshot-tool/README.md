@@ -53,9 +53,8 @@ component in MDX, for example:
 <ThemeScreenshot state="instances-overview" region="client-card" alt="CaveStone" />
 ```
 
-The component uses Docusaurus's selected color mode after hydration. The
-server renders a sized placeholder, so the inactive theme does not download
-and there is no wrong-theme image during hydration. It reads the manifest and
+The component renders the light capture in static HTML, then follows
+Docusaurus's selected color mode after hydration. It reads the manifest and
 uses responsive sources only for resolutions that were synchronized.
 
 Generate review contact sheets with `cd web && npm run screenshots:contact-sheet`.

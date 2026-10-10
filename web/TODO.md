@@ -160,11 +160,11 @@ Add focused crops and numbered callouts where full-window captures make
 controls too small. Keep the source captures clean and describe every marker
 in nearby text and alt text.
 
-- [ ] Crop and mark the Minecraft release, loader build, and persistent-storage
+- [x] Crop and mark the Minecraft release, loader build, and persistent-storage
       choice in `create-instance-dialog`.
-- [ ] Crop and mark Open in Browser in `import-modpack-manual-download`, the
-      result and action in `client-diagnostics-result`, and the answer buttons
-      in `mod-isolation-round`.
+- [x] Crop and mark Open in Browser in `import-modpack-manual-download` and the
+      answer buttons in `mod-isolation-round`.
+- [ ] Crop and mark the result and action in `client-diagnostics-result`.
 - [ ] Crop and mark Access, Online mode, and the EULA action in
       `server-properties`; show the account and instance action menus beside
       the instructions that name them.

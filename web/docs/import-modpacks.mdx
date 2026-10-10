@@ -6,6 +6,7 @@ description: Import Modrinth and CurseForge packs from files or links.
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 import ThemeScreenshot from '@site/src/components/ThemeScreenshot';
+import {manualDownloadCallouts} from '@site/src/components/screenshot-callouts';
 
 # Import Modpacks
 
@@ -153,13 +154,16 @@ import dialog lists each blocked file with its project and file name.
 <Tabs groupId="interface" queryString="interface">
 <TabItem value="gui" label="Desktop" default>
 
-Select **Open in Browser** beside a blocked file and download the exact file
-from its provider page. Place it in a watched download folder. Ephervex
-matches the file by hash and continues when it finds a verified copy. You can
-manage these folders under **Settings > Storage > Watched download folders**;
-the Downloads folder is watched by default until you configure the list.
+1. Select **Open in Browser** beside the blocked file, marked in the image.
+2. Download the exact file from its provider page and place it in a watched
+   download folder. Ephervex matches the file by hash and continues when it
+   finds a verified copy.
 
-<ThemeScreenshot state="import-modpack-manual-download" region="blocked-file" alt="Blocked CurseForge file with Open in Browser and Skip actions" />
+<ThemeScreenshot state="import-modpack-manual-download" region="blocked-file" callouts={manualDownloadCallouts} alt="Blocked CurseForge file: 1 marks Open in Browser, beside the Skip action" />
+
+Manage watched folders under **Settings > Storage > Watched download
+folders**. The Downloads folder is watched by default until you configure the
+list.
 
 **Skip** leaves that file out and records that it needs attention. Use it only
 when you intend to import without the file.

@@ -6,6 +6,7 @@ description: Narrow a reproducible problem to a smaller set of mods.
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 import ThemeScreenshot from '@site/src/components/ThemeScreenshot';
+import {isolationAnswerCallouts} from '@site/src/components/screenshot-callouts';
 
 # Mod Isolation
 
@@ -86,6 +87,13 @@ banner keeps those actions available while you inspect **Logs** or **Mods**;
 **Detailed view** returns to the full round.
 
 <ThemeScreenshot state="mod-isolation-round" alt="Isolation round with enabled and disabled mod lists and answer controls" />
+
+After testing and stopping the game or server, use the answer controls:
+
+1. Select **Issue gone** if the problem did not happen in this round.
+2. Select **Still failing** if the problem happened again.
+
+<ThemeScreenshot state="mod-isolation-round" region="answer-controls" callouts={isolationAnswerCallouts} alt="Isolation answer controls: 1 marks Issue gone and 2 marks Still failing" />
 
 Select **Undo answer** if you gave the wrong answer. If two answers cannot
 both be right, Ephervex pauses the search until you undo the latest one and

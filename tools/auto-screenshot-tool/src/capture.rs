@@ -295,7 +295,11 @@ fn perform(ui: &AppWindow, interaction: Interaction) -> Result<()> {
     Ok(())
 }
 
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 fn crop_region(ui: &AppWindow, image: &RgbaImage, region: &Region) -> Result<RgbaImage> {
     let Some(label) = region.accessible_label else {
         return Ok(image.clone());
@@ -310,17 +314,20 @@ fn crop_region(ui: &AppWindow, image: &RgbaImage, region: &Region) -> Result<Rgb
             && size.height.is_finite(),
         "UI region {label:?} has invalid geometry"
     );
-    // The checked window is at most 3840x2160. Converting its logical
-    // coordinates to integer pixel bounds intentionally drops fractions.
-    let padding = region.padding;
-    let x = (position.x - padding).max(0.0).floor() as u32;
-    let y = (position.y - padding).max(0.0).floor() as u32;
-    let right = (position.x + size.width + padding).ceil() as u32;
-    let bottom = (position.y + size.height + padding).ceil() as u32;
     ensure!(
-        right <= image.width() && bottom <= image.height(),
+        position.x >= 0.0
+            && position.y >= 0.0
+            && position.x + size.width <= image.width() as f32
+            && position.y + size.height <= image.height() as f32,
         "UI region {label:?} exceeds the window"
     );
+    // The checked window is at most 3840x2160. Converting its logical
+    // coordinates to integer pixel bounds intentionally drops fractions.
+    let (padding_x, padding_y) = region.padding;
+    let x = (position.x - padding_x).max(0.0).floor() as u32;
+    let y = (position.y - padding_y).max(0.0).floor() as u32;
+    let right = ((position.x + size.width + padding_x).ceil() as u32).min(image.width());
+    let bottom = ((position.y + size.height + padding_y).ceil() as u32).min(image.height());
     ensure!(right > x && bottom > y, "UI region {label:?} has no area");
     Ok(image::imageops::crop_imm(image, x, y, right - x, bottom - y).to_image())
 }

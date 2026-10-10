@@ -2890,6 +2890,8 @@ export component AppWindow inherits Window {
             radius: Theme.dialog-radius;
             lift: Theme.shadow-offset-dialog;
             fill: Theme.elevated;
+            accessible-role: groupbox;
+            accessible-label: root.modal == "create-instance" ? GuiI18n.text("gui-modal-new-instance") : "";
             // A header in the color of what is being made, for the dialogs
             // that make something.
             if root.modal == "create-instance" || root.modal == "create-server" || root.modal == "add-mods" : Rectangle {

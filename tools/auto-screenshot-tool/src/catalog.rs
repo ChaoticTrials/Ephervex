@@ -8,7 +8,8 @@ use crate::fixtures;
 pub(crate) struct Region {
     pub(crate) name: &'static str,
     pub(crate) accessible_label: Option<&'static str>,
-    pub(crate) padding: f32,
+    /// Horizontal and vertical crop padding in source pixels.
+    pub(crate) padding: (f32, f32),
 }
 
 #[derive(Clone, Copy)]
@@ -34,79 +35,105 @@ const INSTANCE_REGIONS: &[Region] = &[
     Region {
         name: "full",
         accessible_label: None,
-        padding: 0.0,
+        padding: (0.0, 0.0),
     },
     Region {
         name: "client-card",
         accessible_label: Some("CaveStone"),
-        padding: 12.0,
+        padding: (12.0, 12.0),
     },
 ];
 const SERVER_REGIONS: &[Region] = &[
     Region {
         name: "full",
         accessible_label: None,
-        padding: 0.0,
+        padding: (0.0, 0.0),
     },
     Region {
         name: "server-card",
         accessible_label: Some("CaveStone Server"),
-        padding: 12.0,
+        padding: (12.0, 12.0),
     },
 ];
 const ACCOUNT_REGIONS: &[Region] = &[
     Region {
         name: "full",
         accessible_label: None,
-        padding: 0.0,
+        padding: (0.0, 0.0),
     },
     Region {
         name: "offline-profile",
         accessible_label: Some("MelanX"),
-        padding: 12.0,
+        padding: (12.0, 12.0),
     },
 ];
 const FULL_ONLY: &[Region] = &[Region {
     name: "full",
     accessible_label: None,
-    padding: 0.0,
+    padding: (0.0, 0.0),
 }];
 
 const MANUAL_DOWNLOAD_REGIONS: &[Region] = &[
     Region {
         name: "full",
         accessible_label: None,
-        padding: 0.0,
+        padding: (0.0, 0.0),
     },
     Region {
         name: "blocked-file",
         accessible_label: Some("Obsidian Mirror"),
-        padding: 0.0,
+        padding: (0.0, 0.0),
+    },
+];
+
+const CREATE_INSTANCE_REGIONS: &[Region] = &[
+    Region {
+        name: "full",
+        accessible_label: None,
+        padding: (0.0, 0.0),
+    },
+    Region {
+        name: "dialog",
+        accessible_label: Some("New Instance"),
+        padding: (4.0, 4.0),
+    },
+];
+
+const ISOLATION_ROUND_REGIONS: &[Region] = &[
+    Region {
+        name: "full",
+        accessible_label: None,
+        padding: (0.0, 0.0),
+    },
+    Region {
+        name: "answer-controls",
+        accessible_label: Some("Still failing"),
+        padding: (140.0, 22.0),
     },
 ];
 
 const CLIENT_HOSTS_REGIONS: &[Region] = &[Region {
     name: "full",
     accessible_label: None,
-    padding: 0.0,
+    padding: (0.0, 0.0),
 }];
 
 const SETTINGS_REGIONS: &[Region] = &[Region {
     name: "full",
     accessible_label: None,
-    padding: 0.0,
+    padding: (0.0, 0.0),
 }];
 
 const MODS_FULL_WINDOW_REGIONS: &[Region] = &[Region {
     name: "full",
     accessible_label: None,
-    padding: 0.0,
+    padding: (0.0, 0.0),
 }];
 
 const DIAGNOSTICS_SERVERS_REGIONS: &[Region] = &[Region {
     name: "full",
     accessible_label: None,
-    padding: 0.0,
+    padding: (0.0, 0.0),
 }];
 
 pub(crate) const STATES: &[State] = &[
@@ -148,7 +175,7 @@ pub(crate) const STATES: &[State] = &[
     State {
         name: "create-instance-dialog",
         show: fixtures::getting_started::create_instance_dialog,
-        regions: FULL_ONLY,
+        regions: CREATE_INSTANCE_REGIONS,
         same_layout_at_both_sizes: false,
         interaction: None,
     },
@@ -365,7 +392,7 @@ pub(crate) const STATES: &[State] = &[
     State {
         name: "mod-isolation-round",
         show: fixtures::mods::mod_isolation_round,
-        regions: MODS_FULL_WINDOW_REGIONS,
+        regions: ISOLATION_ROUND_REGIONS,
         same_layout_at_both_sizes: false,
         interaction: None,
     },

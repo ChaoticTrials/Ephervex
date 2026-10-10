@@ -625,7 +625,13 @@ mod tests {
             derive_1080: false,
         })
         .expect("render the states");
-        assert_eq!(files.len(), names.len());
+        assert_eq!(
+            files.len(),
+            states
+                .iter()
+                .map(|state| state.regions.len())
+                .sum::<usize>()
+        );
         assert!(files.iter().all(|file| file.is_file()));
     }
 }

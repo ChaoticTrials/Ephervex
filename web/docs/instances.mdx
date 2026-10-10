@@ -6,6 +6,7 @@ description: Create, launch, copy, and manage Minecraft instances.
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 import ThemeScreenshot from '@site/src/components/ThemeScreenshot';
+import {createInstanceCallouts} from '@site/src/components/screenshot-callouts';
 
 # Instances
 
@@ -40,11 +41,15 @@ does not replace an unsupported selection with another version.
 <Tabs groupId="interface" queryString="interface">
 <TabItem value="gui" label="Desktop" default>
 
-On **Instances**, select **New Instance**. Enter a name, choose the Minecraft
-release and loader, then choose a loader build for Forge or NeoForge. Select
-temporary or persistent storage and create the instance.
+On **Instances**, select **New Instance** and enter a name. Then:
 
-<ThemeScreenshot state="create-instance-dialog" alt="New Instance dialog showing Minecraft, loader, and storage choices" />
+1. Choose the Minecraft release you need.
+2. Choose Vanilla, Forge, or NeoForge. For Forge or NeoForge, select the exact
+   loader build below the loader choice.
+3. Choose temporary storage for a disposable test, or turn on **Store
+   persistently** to keep the instance. Select **Create Instance**.
+
+<ThemeScreenshot state="create-instance-dialog" region="dialog" callouts={createInstanceCallouts} alt="New Instance dialog: 1 marks the Minecraft release, 2 marks the loader build, and 3 marks the persistent storage choice" />
 
 </TabItem>
 <TabItem value="cli" label="CLI">

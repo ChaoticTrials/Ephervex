@@ -7,6 +7,7 @@ import Link from '@docusaurus/Link';
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 import ThemeScreenshot from '@site/src/components/ThemeScreenshot';
+import {createInstanceCallouts} from '@site/src/components/screenshot-callouts';
 import styles from './getting-started.module.css';
 
 # Getting Started
@@ -70,13 +71,16 @@ as an offline account with no credential.
 
 <ThemeScreenshot state="accounts-settings" region="offline-profile" alt="Offline account row marked Default and No credential" />
 
-Return to **Instances** and select **New Instance**. Enter a name and choose an
-exact Minecraft release.
-Vanilla is the simplest first choice; Forge and NeoForge also need an exact
-loader version. New instances are temporary unless you choose persistent
-storage.
+Return to **Instances**, select **New Instance**, and enter a name. In the
+dialog shown below:
 
-<ThemeScreenshot state="create-instance-dialog" alt="The New Instance dialog with Minecraft and loader version choices" />
+1. Choose the exact Minecraft release.
+2. Choose Vanilla, or choose Forge or NeoForge and an exact loader build. The
+   example shows Forge.
+3. Leave **Store persistently** off for a disposable test, or turn it on to
+   keep the instance.
+
+<ThemeScreenshot state="create-instance-dialog" region="dialog" callouts={createInstanceCallouts} alt="New Instance dialog: 1 marks the Minecraft release, 2 marks the Forge loader build, and 3 marks the persistent storage choice" />
 
 Select **Launch** on the new instance card. The first launch downloads any
 missing game files and may need a compatible Java runtime.
