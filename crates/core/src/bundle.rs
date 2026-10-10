@@ -37,6 +37,9 @@ use crate::diagnostics::DiagnosticScope;
 use crate::error::{CoreError, CoreResult};
 use ephervex_storage::diagnostics::DiagnosticKind;
 
+/// How much of a part is read and written at a time.
+const COPY_BUFFER_BYTES: usize = 64 * 1024;
+
 /// One thing a bundle could carry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BundlePart {
@@ -241,12 +244,20 @@ impl App {
                 let options = SimpleFileOptions::default()
                     .compression_method(zip::CompressionMethod::Deflated);
                 for part in &chosen {
-                    match std::fs::read(&part.path) {
-                        Ok(bytes) => {
-                            write_entry(&mut archive, &part.name, &bytes, options)?;
-                            included.push(part.name.clone());
-                        }
+                    let source = match std::fs::File::open(&part.path) {
+                        Ok(source) => source,
                         Err(error) => {
+                            warn!(%error, part = %part.name, "a diagnostic file could not be read");
+                            unreadable.push(part.name.clone());
+                            continue;
+                        }
+                    };
+                    // A log can still be growing while it is copied, so its
+                    // size when it was listed does not bound the entry.
+                    let part_options = options.large_file(true);
+                    match copy_entry(&mut archive, &part.name, source, part_options)? {
+                        EntryCopy::Complete => included.push(part.name.clone()),
+                        EntryCopy::Unreadable(error) => {
                             warn!(%error, part = %part.name, "a diagnostic file could not be read");
                             unreadable.push(part.name.clone());
                         }
@@ -303,6 +314,41 @@ fn write_entry<W: std::io::Write + std::io::Seek>(
         .start_file(name, options)
         .map_err(std::io::Error::other)?;
     archive.write_all(bytes)
+}
+
+/// How one streamed entry ended.
+enum EntryCopy {
+    Complete,
+    /// The source failed after the entry started. The partial entry has been
+    /// removed from the archive.
+    Unreadable(std::io::Error),
+}
+
+/// Streams `source` into a new entry without holding the whole file in memory.
+///
+/// A failure to write the archive is an error. A failure to read the source
+/// drops the partial entry, so a truncated copy is never listed as included.
+fn copy_entry<R: std::io::Read, W: std::io::Write + std::io::Seek>(
+    archive: &mut zip::ZipWriter<W>,
+    name: &str,
+    mut source: R,
+    options: SimpleFileOptions,
+) -> std::io::Result<EntryCopy> {
+    archive
+        .start_file(name, options)
+        .map_err(std::io::Error::other)?;
+    let mut buffer = vec![0_u8; COPY_BUFFER_BYTES];
+    loop {
+        match source.read(&mut buffer) {
+            Ok(0) => return Ok(EntryCopy::Complete),
+            Ok(read) => archive.write_all(&buffer[..read])?,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => {
+                archive.abort_file().map_err(std::io::Error::other)?;
+                return Ok(EntryCopy::Unreadable(error));
+            }
+        }
+    }
 }
 
 /// What the archive says about itself.
@@ -552,6 +598,147 @@ mod tests {
         assert_eq!(report.unreadable, [vanishing.name.as_str()]);
         assert!(!report.included.is_empty(), "the rest was still written");
         assert!(read_entry(&archive, "bundle.txt").contains("could not be read"));
+    }
+
+    /// Yields `good` bytes and then fails, as a disk error part way through would.
+    struct FailsAfter {
+        good: usize,
+    }
+
+    impl std::io::Read for FailsAfter {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if self.good == 0 {
+                return Err(std::io::Error::other("a read failed"));
+            }
+            let count = buffer.len().min(self.good);
+            buffer[..count].fill(b'x');
+            self.good -= count;
+            Ok(count)
+        }
+    }
+
+    #[test]
+    fn a_part_larger_than_the_copy_buffer_goes_in_byte_for_byte() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, scope) = instance(base.path());
+        let log = part_path(&app, scope, "logs/latest.log");
+        let content: Vec<u8> = (0..COPY_BUFFER_BYTES * 3 + 17)
+            .map(|index| u8::try_from(index % 251).expect("fits"))
+            .collect();
+        std::fs::write(&log, &content).expect("grow the log");
+
+        let contents = app.plan_diagnostic_bundle(scope).expect("plan");
+        let archive = base.path().join("bundle.zip");
+        app.export_diagnostic_bundle(scope, &contents.everything(), &archive)
+            .expect("export");
+
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(&archive).expect("open"))
+            .expect("read archive");
+        let mut copied = Vec::new();
+        zip.by_name("logs/latest.log")
+            .expect("entry")
+            .read_to_end(&mut copied)
+            .expect("read");
+        assert_eq!(copied, content);
+    }
+
+    #[test]
+    fn a_read_failure_part_way_through_drops_the_partial_entry() {
+        let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default();
+        write_entry(&mut archive, "kept.txt", b"kept", options).expect("first entry");
+
+        let outcome = copy_entry(
+            &mut archive,
+            "logs/broken.log",
+            FailsAfter {
+                good: COPY_BUFFER_BYTES + 5,
+            },
+            options,
+        )
+        .expect("a read failure is not a write failure");
+        assert!(matches!(outcome, EntryCopy::Unreadable(_)));
+        write_entry(&mut archive, "after.txt", b"after", options).expect("later entry");
+
+        let mut zip = zip::ZipArchive::new(archive.finish().expect("finish")).expect("read");
+        let names: Vec<_> = zip.file_names().map(str::to_owned).collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+        assert!(names.iter().all(|name| name != "logs/broken.log"));
+        let mut text = String::new();
+        zip.by_name("after.txt")
+            .expect("entry")
+            .read_to_string(&mut text)
+            .expect("read");
+        assert_eq!(text, "after", "the entry after the dropped one is intact");
+    }
+
+    #[test]
+    fn a_part_that_cannot_be_opened_is_unreadable_and_leaves_no_entry() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, scope) = instance(base.path());
+        let log = part_path(&app, scope, "logs/latest.log");
+        std::fs::set_permissions(&log, std::os::unix::fs::PermissionsExt::from_mode(0o000))
+            .expect("revoke read access");
+        if std::fs::File::open(&log).is_ok() {
+            // Running as a user that ignores file modes.
+            return;
+        }
+
+        let contents = app.plan_diagnostic_bundle(scope).expect("plan");
+        let archive = base.path().join("bundle.zip");
+        let report = app
+            .export_diagnostic_bundle(scope, &contents.everything(), &archive)
+            .expect("export");
+
+        assert_eq!(report.unreadable, ["logs/latest.log"]);
+        assert!(!entries(&archive).contains(&"logs/latest.log".to_owned()));
+    }
+
+    #[test]
+    fn every_copied_part_is_declared_large_enough_for_a_growing_log() {
+        // The sizes in an entry's local header are the 0xFFFFFFFF marker
+        // exactly when the entry was started as a zip64 entry.
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, scope) = instance(base.path());
+        let contents = app.plan_diagnostic_bundle(scope).expect("plan");
+        let archive = base.path().join("bundle.zip");
+        app.export_diagnostic_bundle(scope, &contents.everything(), &archive)
+            .expect("export");
+
+        let bytes = std::fs::read(&archive).expect("read");
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).expect("read archive");
+        let mut start = |name: &str| {
+            usize::try_from(zip.by_name(name).expect("entry").header_start()).expect("offset")
+        };
+        let log = start("logs/latest.log");
+        assert_eq!(bytes[log + 18..log + 26], [0xFF; 8], "a part is zip64");
+        let manifest = start("bundle.txt");
+        assert_ne!(bytes[manifest + 18..manifest + 26], [0xFF; 8]);
+    }
+
+    /// Writes a part past 4 GiB, which a plain entry cannot hold. Slow, so it
+    /// runs only when asked for.
+    #[test]
+    #[ignore = "writes and compresses more than 4 GiB"]
+    fn a_part_larger_than_four_gibibytes_is_exported() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, scope) = instance(base.path());
+        let log = part_path(&app, scope, "logs/latest.log");
+        let size = u64::from(u32::MAX) + 4096;
+        std::fs::File::create(&log)
+            .and_then(|file| file.set_len(size))
+            .expect("sparse log");
+
+        let contents = app.plan_diagnostic_bundle(scope).expect("plan");
+        let archive = base.path().join("bundle.zip");
+        let report = app
+            .export_diagnostic_bundle(scope, &contents.everything(), &archive)
+            .expect("export");
+
+        assert!(report.unreadable.is_empty());
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(&archive).expect("open"))
+            .expect("read archive");
+        assert_eq!(zip.by_name("logs/latest.log").expect("entry").size(), size);
     }
 
     fn part_path(app: &App, scope: DiagnosticScope, name: &str) -> PathBuf {
