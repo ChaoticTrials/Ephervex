@@ -148,7 +148,7 @@ and `queryString="interface"` (GUI first, then CLI). GUI-only and CLI-only
 features show one tab or a short note.
 
 - [x] Interface tour
-- [ ] Accounts: offline and Microsoft, device code, session-only, keyring
+- [x] Accounts: offline and Microsoft, device code, session-only, keyring
 - [ ] Instances: temporary vs persistent, create, launch, duplicate, make
       persistent, delete, per-instance Java and memory, change loader build
 - [ ] Import: Modrinth and CurseForge, optional files, `ephervex://` links,

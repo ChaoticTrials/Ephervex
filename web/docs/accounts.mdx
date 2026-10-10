@@ -1,0 +1,147 @@
+---
+title: Accounts
+description: Add offline accounts, sign in with Microsoft, and choose an account for a launch.
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+import ThemeScreenshot from '@site/src/components/ThemeScreenshot';
+
+# Accounts
+
+Ephervex can keep several offline and Microsoft accounts. One is the default
+for client launches, and you can choose another account for a single launch.
+The desktop app and CLI use the same saved accounts.
+
+## Add an offline account
+
+An offline account needs no network connection or credential. Use it for local
+single-player games and servers that do not require authenticated accounts.
+The name must have 3 to 16 letters, digits, or underscores. Ephervex derives
+the account's UUID the same way a Minecraft server in offline mode does.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Open **Settings > Accounts**, enter a player name, and select **Add Offline
+Account**. The account appears in the list below the buttons.
+
+<ThemeScreenshot state="accounts-settings" alt="Offline and Microsoft accounts in Settings" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+```bash
+ephervex account add-offline ExamplePlayer
+ephervex account list
+```
+
+</TabItem>
+</Tabs>
+
+## Sign in with Microsoft
+
+Microsoft sign-in requires network access and a Microsoft account that can
+play Minecraft. Ephervex stores its refresh token in the system keyring through
+Secret Service. It does not write the token to its configuration file.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Open **Settings > Accounts** and select **Sign in with Microsoft**. Complete the
+prompt in your browser. Ephervex shows the account in the list after sign-in.
+If it cannot open the browser, it shows an error.
+
+The desktop sign-in requires an available Secret Service provider. If one is
+unavailable, use the CLI's explicit session-only option or set up a provider
+such as GNOME Keyring or KWallet.
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+```bash
+ephervex account login
+```
+
+The command normally opens a browser. Over SSH or without a desktop, use a
+code that you enter on another device:
+
+```bash
+ephervex account login --device-code
+```
+
+To print the browser address without opening it, use
+`ephervex account login --no-open`. Sign-in waits up to five minutes by
+default; change that limit with `--timeout SECONDS`.
+
+If Secret Service is unavailable, sign-in normally stops with an error. To
+keep the credential in memory for this CLI process only, choose:
+
+```bash
+ephervex account login --session-only
+```
+
+The credential is forgotten when the command exits. Use a working keyring for
+an account that should remain signed in across launches.
+
+</TabItem>
+</Tabs>
+
+## Choose an account
+
+The default account is used for ordinary launches. Choosing an account for one
+launch does not change the default.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+In **Settings > Accounts**, select **Make Default** beside the account you
+want. On an instance card, use the account menu beside **Launch** to start a
+client as another account for that launch.
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+```bash
+ephervex account list
+ephervex account use ExamplePlayer
+ephervex instance launch INSTANCE --account ExamplePlayer
+```
+
+`account list` marks the default with `*`. `account use` changes that default.
+`instance launch --account` changes only that launch. Where a command accepts
+an account, use its UUID or an unambiguous display name from `account list`.
+
+</TabItem>
+</Tabs>
+
+## Inspect or remove an account
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+**Settings > Accounts** shows each account's type, credential state, and
+default marker. Select **Remove** beside an account to remove it. Removing a
+Microsoft account also deletes that account's stored credential.
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+```bash
+ephervex account status
+ephervex account refresh
+ephervex account logout
+ephervex account remove ExamplePlayer
+```
+
+`status` reads the local account state without contacting Microsoft. `refresh`
+checks and refreshes the default account's stored credential. `logout` removes
+the default account and its credential. `remove` does the same for the named
+account.
+
+</TabItem>
+</Tabs>
+
+If a Microsoft account shows **Sign-in required**, sign in again before using
+it for an authenticated launch. Run `ephervex doctor` to check whether the
+credential store is reachable; it does not reveal stored credentials.
