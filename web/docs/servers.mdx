@@ -107,9 +107,12 @@ before recording consent. Use `ephervex server eula revoke` to revoke it.
 
 **Localhost** limits the server to this computer. Choose **LAN** for other
 devices on the local network, or **Custom** to bind to a specific IP address.
-Custom bind addresses must be IP addresses, not hostnames. Keep **Online mode**
-on when exposing a server beyond localhost; Ephervex flags an exposed
-offline-mode server as unsafe.
+Custom bind addresses must be IP addresses, not hostnames.
+
+:::warning
+Keep **Online mode** on when exposing a server beyond localhost. Ephervex
+flags an exposed offline-mode server as unsafe.
+:::
 
 <Tabs groupId="interface" queryString="interface">
 <TabItem value="gui" label="Desktop" default>

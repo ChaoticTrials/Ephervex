@@ -51,11 +51,11 @@ Replace `--instance INSTANCE_ID` with `--server SERVER_ID` for a local server.
 
 ## Restore a saved state
 
+:::warning
 Restore replaces the captured parts of the live host. Files created after
-the snapshot are removed from those parts; restore does not merge them. By
-default, Ephervex first captures the current state as a **Before restore**
-safety snapshot, so you can return to it if needed. Leave that option on
-unless you intentionally do not want the safety copy.
+the snapshot are removed from those parts; restore does not merge them. Keep
+the default **Before restore** safety snapshot if you may need the current state.
+:::
 
 <Tabs groupId="interface" queryString="interface">
 <TabItem value="gui" label="Desktop" default>

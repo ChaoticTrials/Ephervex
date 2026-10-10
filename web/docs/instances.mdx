@@ -21,6 +21,11 @@ system's temporary directory. Closing the game does not delete them, but the
 operating system can clear that directory at any time. Use temporary storage
 for a test you can discard.
 
+:::note
+Choose persistent storage for worlds or test results you need to keep. The
+operating system can remove temporary instances without asking Ephervex.
+:::
+
 Choose **persistent** storage when you want the instance to remain in your
 configured instance folder. You can also move a stopped temporary instance
 there later with **Make Persistent**. Its mods, saves, logs, and name move with
@@ -192,9 +197,11 @@ failing.
 
 ## Delete an instance
 
+:::warning
 Deleting an instance also removes its linked servers from Ephervex. Decide
-whether to keep their directories before confirming. Deleting files also
+whether to keep their directories before confirming. **Delete Files** also
 removes saves and server worlds in those directories.
+:::
 
 <Tabs groupId="interface" queryString="interface">
 <TabItem value="gui" label="Desktop" default>

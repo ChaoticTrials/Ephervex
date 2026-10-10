@@ -1,39 +1,24 @@
 .installCard {
-  position: relative;
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
   gap: 2rem;
-  overflow: hidden;
   margin: 2rem 0 2.5rem;
   padding: clamp(1.5rem, 4vw, 2.5rem);
+  border: 1px solid var(--site-border);
   border-radius: 1rem;
-  color: #f2f8f9;
-  background: radial-gradient(circle at 90% 12%, #2a6874, transparent 40%), linear-gradient(140deg, #10232a, #173941);
+  color: var(--site-hero-text);
+  background: var(--site-hero-bg);
 }
 
-.installCard::after {
-  position: absolute;
-  right: -5rem;
-  top: -7rem;
-  width: 22rem;
-  height: 22rem;
-  border: 1px solid #85dbe53b;
-  border-radius: 50%;
-  box-shadow: 0 0 0 4rem #85dbe50c;
-  content: '';
-  pointer-events: none;
-}
-
-.installCopy, .installMethods { position: relative; z-index: 1; }
 .installCopy { max-width: 580px; }
-.eyebrow { color: #9ce4ea; font-family: var(--ifm-font-family-monospace); font-size: 0.76rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
+.eyebrow { color: var(--site-accent); font-family: var(--ifm-font-family-monospace); font-size: 0.76rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
 .installCard h2 { margin: 0.6rem 0 0.7rem; color: inherit; font-size: clamp(1.8rem, 3vw, 2.4rem); letter-spacing: -0.04em; }
-.installCard p { margin: 0; color: #c8dce0; line-height: 1.6; }
-.installButton { display: inline-flex; align-items: center; justify-content: center; gap: 1.5rem; min-height: 3rem; margin-top: 1.5rem; padding: 0.6rem 1rem; border-radius: 0.5rem; color: #0b252a; background: #9ee7e9; font-weight: 700; text-decoration: none; }
-.installButton:hover { color: #0b252a; background: #b9f1f0; text-decoration: none; }
+.installCard p { margin: 0; color: var(--site-hero-muted); line-height: 1.6; }
+.installButton { display: inline-flex; align-items: center; justify-content: center; gap: 1.5rem; min-height: 3rem; margin-top: 1.5rem; padding: 0.6rem 1rem; border-radius: 0.5rem; color: var(--site-button-text); background: var(--site-button-bg); font-weight: 700; text-decoration: none; }
+.installButton:hover { color: var(--site-button-text); background: var(--site-button-hover); text-decoration: none; }
 .installMethods { display: grid; grid-template-columns: repeat(2, max-content); gap: 0.5rem; }
-.installMethods span { padding: 0.4rem 0.65rem; border: 1px solid #63949c; border-radius: 0.4rem; color: #d5eff1; font-family: var(--ifm-font-family-monospace); font-size: 0.72rem; }
+.installMethods span { padding: 0.4rem 0.65rem; border: 1px solid var(--site-border); border-radius: 0.4rem; color: var(--site-accent); background: var(--site-surface); font-family: var(--ifm-font-family-monospace); font-size: 0.72rem; }
 
 @media (max-width: 750px) {
   .installMethods { display: none; }

@@ -69,7 +69,7 @@ const config: Config = {
       ],
       copyright: `Copyright &copy; ${new Date().getFullYear()} Ephervex contributors. Ephervex is not affiliated with or endorsed by Mojang or Microsoft.`,
     },
-    prism: {theme: prismThemes.github, darkTheme: prismThemes.dracula},
+    prism: {theme: prismThemes.dracula, darkTheme: prismThemes.dracula},
   } satisfies Preset.ThemeConfig,
 };
 

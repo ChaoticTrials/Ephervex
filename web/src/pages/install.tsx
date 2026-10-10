@@ -165,7 +165,10 @@ export default function Install(): ReactNode {
 
         <section className={styles.architecture} aria-labelledby="choose-architecture">
           <div><span className={styles.overline}>02 / ARCHITECTURE</span><Heading as="h2" id="choose-architecture">Check your machine.</Heading>
-            <p>{suggestedArchitecture ? `Your browser suggests ${suggestedArchitecture}. Confirm it on the Linux machine with ` : 'Choose the architecture of the Linux machine you will use. Check it with '}<code>uname -m</code>.</p>
+            <p>{suggestedArchitecture
+              ? <>Your browser suggests <code>{suggestedArchitecture}</code>. Confirm it on the Linux machine with </>
+              : <>Choose the architecture of the Linux machine you will use. Check it with </>}
+              <code>uname -m</code>.</p>
           </div>
           <fieldset className={styles.archChoices}>
             <legend className={styles.visuallyHidden}>Linux architecture</legend>
@@ -258,9 +261,9 @@ export default function Install(): ReactNode {
         <section className={styles.requirements} id="requirements" aria-labelledby="requirements-title">
           <div><span className={styles.overline}>BEFORE YOU BEGIN</span><Heading as="h2" id="requirements-title">Requirements & help</Heading></div>
           <div className={styles.requirementGrid}>
-            <div><strong>Linux, 64-bit</strong><p>x86_64 or aarch64 with glibc 2.35 or newer, such as Ubuntu 22.04 or Debian 12. X11 or XWayland is needed for the desktop app.</p></div>
+            <div><strong>Linux, 64-bit</strong><p><code>x86_64</code> or <code>aarch64</code> with glibc 2.35 or newer, such as Ubuntu 22.04 or Debian 12. X11 or XWayland is needed for the desktop app.</p></div>
             <div><strong>AppImage & FUSE</strong><p>The AppImage needs FUSE. If it cannot mount, run it with <code>APPIMAGE_EXTRACT_AND_RUN=1</code> before the command instead.</p></div>
-            <div><strong>ARM game launches</strong><p>On aarch64, the Minecraft version must provide compatible native libraries. Some versions cannot launch on ARM.</p></div>
+            <div><strong>ARM game launches</strong><p>On <code>aarch64</code>, the Minecraft version must provide compatible native libraries. Some versions cannot launch on ARM.</p></div>
           </div>
           <p className={styles.helpLine}>Need another package or an older release? <a href={releasesUrl}>Browse all releases</a>.</p>
         </section>

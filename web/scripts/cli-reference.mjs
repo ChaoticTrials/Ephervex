@@ -47,12 +47,16 @@ function help(args) {
   return run(binary, args);
 }
 
-function subcommands(output) {
+function commandSummaries(output) {
   const section = output.match(/^Commands:\n((?:  [^\n]*\n)+)/m)?.[1];
   if (!section) return [];
-  return [...section.matchAll(/^  ([a-z][a-z0-9-]*) {2,}/gm)]
-    .map((match) => match[1])
-    .filter((name) => name !== 'help');
+  return [...section.matchAll(/^  ([a-z][a-z0-9-]*) {2,}(.+)$/gm)]
+    .map(([, name, description]) => ({name, description: description.trim()}))
+    .filter(({name}) => name !== 'help');
+}
+
+function subcommands(output) {
+  return commandSummaries(output).map(({name}) => name);
 }
 
 function commandHelp(parts, seen) {
@@ -65,14 +69,19 @@ function commandHelp(parts, seen) {
 }
 
 const rootHelp = help(['--help']);
-const commands = subcommands(rootHelp);
+const summaries = commandSummaries(rootHelp);
+const commands = summaries.map(({name}) => name);
 if (commands.length === 0) throw new Error('No top-level CLI commands found.');
+const rootHelpWithoutCommands = rootHelp
+  .replace(/^Commands:\n(?:  [^\n]*\n)+/m, '')
+  .replace(/\n{3,}/g, '\n\n')
+  .trimEnd();
 
 const expected = new Map();
 expected.set('index.md', [
   '---',
   'title: "CLI Reference"',
-  'sidebar_position: 1',
+  'custom_edit_url: null',
   '---',
   '',
   '# CLI Reference',
@@ -80,27 +89,36 @@ expected.set('index.md', [
   'Use the task guides for workflows. These pages contain the CLI help for this build of Ephervex.',
   'Run `ephervex help COMMAND` for the same information in your terminal.',
   '',
+  '## Commands',
+  '',
+  '| Command | Description |',
+  '| --- | --- |',
+  ...summaries.map(({name, description}) =>
+    `| [\`${name}\`](./commands/${name}.md) | ${description.replaceAll('|', '\\|')} |`),
+  '',
+  '## Usage and global options',
+  '',
   '```text',
-  rootHelp.trimEnd(),
+  rootHelpWithoutCommands,
   '```',
   '',
 ].join('\n'));
 
 const seen = new Set();
 commands.forEach((name, index) => {
-  const sections = commandHelp([name], seen).map(({parts, output}) => [
-    `${'#'.repeat(Math.min(parts.length, 6))} \`ephervex ${parts.join(' ')}\``,
-    '',
-    '```text',
-    output.trimEnd(),
-    '```',
-    '',
-  ].join('\n'));
-  expected.set(`${name}.md`, [
+  const sections = commandHelp([name], seen).map(({parts, output}) => {
+    const heading = parts.length === 1
+      ? `# ephervex ${name}\n\n${summaries[index].description}\n\n## Usage and options`
+      : `${'#'.repeat(Math.min(parts.length, 6))} \`ephervex ${parts.join(' ')}\``;
+    return [heading, '', '```text', output.trimEnd(), '```', ''].join('\n');
+  });
+  expected.set(`commands/${name}.md`, [
     '---',
     `title: "ephervex ${name}"`,
     `sidebar_label: "${name}"`,
     `sidebar_position: ${index + 2}`,
+    `slug: /reference/cli/${name}`,
+    'custom_edit_url: null',
     '---',
     '',
     sections.join('\n'),
@@ -108,7 +126,14 @@ commands.forEach((name, index) => {
 });
 
 await mkdir(destination, {recursive: true});
-const existing = (await readdir(destination)).filter((name) => name.endsWith('.md'));
+const commandsDestination = path.join(destination, 'commands');
+await mkdir(commandsDestination, {recursive: true});
+const existing = [
+  ...(await readdir(destination)).filter((name) => name.endsWith('.md')),
+  ...(await readdir(commandsDestination))
+    .filter((name) => name.endsWith('.md'))
+    .map((name) => `commands/${name}`),
+];
 const stale = [];
 
 for (const [name, content] of expected) {
@@ -118,7 +143,10 @@ for (const [name, content] of expected) {
   });
   if (current !== content) {
     stale.push(name);
-    if (mode === 'sync') await writeFile(path.join(destination, name), content);
+    if (mode === 'sync') {
+      await mkdir(path.dirname(path.join(destination, name)), {recursive: true});
+      await writeFile(path.join(destination, name), content);
+    }
   }
 }
 
