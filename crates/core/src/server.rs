@@ -2083,14 +2083,9 @@ mod tests {
             &std::fs::read_to_string(directory.path().join(OPERATORS_FILE)).expect("ops"),
         )
         .expect("parse");
-        assert_eq!(operators.entries().len(), 2);
-        assert!(
-            operators
-                .entries()
-                .iter()
-                .any(|entry| entry.uuid == unrelated)
-        );
-        assert!(operators.entries().iter().any(|entry| {
+        assert_eq!(operators.entries().count(), 2);
+        assert!(operators.entries().any(|entry| entry.uuid == unrelated));
+        assert!(operators.entries().any(|entry| {
             entry.uuid == selected && entry.level() == Some(4) && entry.name == "OnlineDeveloper"
         }));
         let operator_json: serde_json::Value = serde_json::from_str(
@@ -2141,6 +2136,43 @@ mod tests {
         assert_eq!(operators[1]["bypassesPlayerLimit"], true);
         assert_eq!(operators[2]["level"], 3);
         assert!(operators[2].get("bypassesPlayerLimit").is_none());
+        assert_eq!(operators[3]["uuid"], selected.to_string());
+        assert_eq!(operators[3]["level"], 4);
+    }
+
+    #[test]
+    fn operator_setup_keeps_elements_minecraft_skips_and_still_adds_the_operator() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let selected = Uuid::new_v4();
+        std::fs::write(
+            directory.path().join(OPERATORS_FILE),
+            r#"[{"name":"NoUuid"},{"uuid":"not-a-uuid","name":"BadUuid"},{"uuid":"44444444-4444-4444-8444-444444444444"}]"#,
+        )
+        .expect("fixture");
+
+        materialize_operator_setup(
+            directory.path(),
+            &ServerNetworkSettings::default(),
+            Some(&ServerOperatorSetup {
+                permission_level: ephervex_model::OperatorPermissionLevel::default(),
+                profile: Some(ServerOperatorProfile {
+                    id: selected,
+                    name: "Developer".to_owned(),
+                    identity: ServerOperatorIdentity::Offline,
+                }),
+            }),
+        )
+        .expect("elements Minecraft skips must not block the start");
+
+        let operators: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(directory.path().join(OPERATORS_FILE)).expect("ops"),
+        )
+        .expect("JSON");
+        assert_eq!(operators[0], serde_json::json!({"name": "NoUuid"}));
+        assert_eq!(
+            operators[1],
+            serde_json::json!({"uuid": "not-a-uuid", "name": "BadUuid"})
+        );
         assert_eq!(operators[3]["uuid"], selected.to_string());
         assert_eq!(operators[3]["level"], 4);
     }

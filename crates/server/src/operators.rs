@@ -63,17 +63,65 @@ pub enum OperatorUpdate {
     Unchanged,
 }
 
+/// One element of the `ops.json` array.
+///
+/// An object is an operator only with a canonical hyphenated `uuid` and a string
+/// `name`. Minecraft skips an object without a usable `uuid` or `name` and loads
+/// the rest of the file, so any other object is kept exactly as read and never
+/// matched or rewritten.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+enum Element {
+    Operator(OperatorEntry),
+    Unrecognized(Value),
+}
+
+impl Element {
+    fn classify(value: Value) -> Self {
+        if !is_operator_object(&value) {
+            return Self::Unrecognized(value);
+        }
+        match serde_json::from_value::<OperatorEntry>(value.clone()) {
+            Ok(entry) => Self::Operator(entry),
+            Err(_) => Self::Unrecognized(value),
+        }
+    }
+}
+
+/// Whether an element has the `uuid` and `name` Minecraft requires.
+///
+/// Java's `UUID.fromString` takes the hyphenated 36-character form, while the
+/// `uuid` crate also reads simple, braced, and URN forms that Minecraft skips.
+fn is_operator_object(value: &Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    let canonical_uuid = object
+        .get("uuid")
+        .and_then(Value::as_str)
+        .is_some_and(|text| text.len() == 36 && Uuid::parse_str(text).is_ok());
+    canonical_uuid && object.get("name").is_some_and(Value::is_string)
+}
+
 /// A parsed `ops.json` array.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct OperatorsDocument {
-    entries: Vec<OperatorEntry>,
+    elements: Vec<Element>,
 }
 
 impl OperatorsDocument {
     /// Parses an existing `ops.json` document.
+    ///
+    /// Elements Minecraft would skip are kept untouched. The text must still be
+    /// a JSON array of objects, which is what Minecraft's reader requires.
     pub fn parse(text: &str) -> Result<Self, OperatorsDocumentError> {
-        let entries = serde_json::from_str(text).map_err(OperatorsDocumentError::Invalid)?;
-        Ok(Self { entries })
+        let values: Vec<Value> =
+            serde_json::from_str(text).map_err(OperatorsDocumentError::Invalid)?;
+        if let Some(index) = values.iter().position(|value| !value.is_object()) {
+            return Err(OperatorsDocumentError::NotAnObject { index });
+        }
+        let elements = values.into_iter().map(Element::classify).collect();
+        Ok(Self { elements })
     }
 
     /// Serializes a complete `ops.json` document using JSON escaping.
@@ -82,15 +130,18 @@ impl OperatorsDocument {
     /// the Minecraft server, which writes it indented itself and whose operators
     /// routinely edit it by hand. Rewriting it compactly would fight both.
     pub fn render(&self) -> Result<String, OperatorsDocumentError> {
-        let mut rendered = serde_json::to_string_pretty(&self.entries)
+        let mut rendered = serde_json::to_string_pretty(&self.elements)
             .map_err(OperatorsDocumentError::Serialization)?;
         rendered.push('\n');
         Ok(rendered)
     }
 
-    #[must_use]
-    pub fn entries(&self) -> &[OperatorEntry] {
-        &self.entries
+    /// The operator entries, in file order, without the elements Minecraft skips.
+    pub fn entries(&self) -> impl Iterator<Item = &OperatorEntry> {
+        self.elements.iter().filter_map(|element| match element {
+            Element::Operator(entry) => Some(entry),
+            Element::Unrecognized(_) => None,
+        })
     }
 
     /// Adds or updates the operator identified by `uuid`.
@@ -108,7 +159,14 @@ impl OperatorsDocument {
         let name = name.into();
         let mut found = false;
         let mut changed = false;
-        for entry in self.entries.iter_mut().filter(|entry| entry.uuid == uuid) {
+        for entry in self
+            .elements
+            .iter_mut()
+            .filter_map(|element| match element {
+                Element::Operator(entry) if entry.uuid == uuid => Some(entry),
+                _ => None,
+            })
+        {
             found = true;
             if entry.name != name || entry.level() != Some(i64::from(level.value())) {
                 entry.name.clone_from(&name);
@@ -117,7 +175,8 @@ impl OperatorsDocument {
             }
         }
         if !found {
-            self.entries.push(OperatorEntry::new(uuid, name, level));
+            self.elements
+                .push(Element::Operator(OperatorEntry::new(uuid, name, level)));
             OperatorUpdate::Inserted
         } else if changed {
             OperatorUpdate::Updated
@@ -132,6 +191,8 @@ impl OperatorsDocument {
 pub enum OperatorsDocumentError {
     #[error("the Minecraft operator list is not valid JSON")]
     Invalid(#[source] serde_json::Error),
+    #[error("element {index} of the Minecraft operator list is not an object")]
+    NotAnObject { index: usize },
     #[error("the Minecraft operator list could not be serialized")]
     Serialization(#[source] serde_json::Error),
 }
@@ -194,8 +255,18 @@ mod tests {
 
         let rendered = document.render().expect("render");
         let reparsed = OperatorsDocument::parse(&rendered).expect("reparse");
-        assert_eq!(reparsed.entries()[0].name, "quoted\"name\\value");
-        assert_eq!(reparsed.entries()[0].bypasses_player_limit(), Some(false));
+        assert_eq!(
+            reparsed.entries().next().expect("entry").name,
+            "quoted\"name\\value"
+        );
+        assert_eq!(
+            reparsed
+                .entries()
+                .next()
+                .expect("entry")
+                .bypasses_player_limit(),
+            Some(false)
+        );
     }
 
     #[test]
@@ -225,10 +296,11 @@ mod tests {
             r#"[{{"uuid":"{id}","name":"Zero","level":0}},{{"uuid":"{id}","name":"NoLevel","bypassesPlayerLimit":true}},{{"uuid":"{id}","name":"Five","level":5,"bypassesPlayerLimit":false}}]"#
         );
         let document = OperatorsDocument::parse(&text).expect("parse");
-        assert_eq!(document.entries()[0].level(), Some(0));
-        assert_eq!(document.entries()[0].bypasses_player_limit(), None);
-        assert_eq!(document.entries()[1].level(), None);
-        assert_eq!(document.entries()[2].level(), Some(5));
+        let entries: Vec<_> = document.entries().collect();
+        assert_eq!(entries[0].level(), Some(0));
+        assert_eq!(entries[0].bypasses_player_limit(), None);
+        assert_eq!(entries[1].level(), None);
+        assert_eq!(entries[2].level(), Some(5));
 
         let rendered: Value =
             serde_json::from_str(&document.render().expect("render")).expect("valid JSON");
@@ -257,5 +329,85 @@ mod tests {
             serde_json::from_str(&document.render().expect("render")).expect("valid JSON");
         assert_eq!(rendered[0]["level"], 4);
         assert!(rendered[0].get("bypassesPlayerLimit").is_none());
+    }
+
+    const SKIPPED_ELEMENTS: &str = r#"[
+  {"name":"NoUuid","level":4},
+  {"uuid":"44444444-4444-4444-8444-444444444444","level":4},
+  {"uuid":"not-a-uuid","name":"BadUuid"},
+  {"uuid":"55555555555555555555555555555555","name":"SimpleUuid"},
+  {"uuid":"{66666666-6666-4666-8666-666666666666}","name":"BracedUuid"},
+  {"uuid":"77777777-7777-4777-8777-777777777777","name":7},
+  {"uuid":12,"name":"NumericUuid"},
+  {}
+]"#;
+
+    #[test]
+    fn elements_minecraft_skips_are_accepted_and_survive_render_unchanged() {
+        let document = OperatorsDocument::parse(SKIPPED_ELEMENTS).expect("parse");
+        assert_eq!(document.entries().count(), 0);
+
+        let rendered: Value =
+            serde_json::from_str(&document.render().expect("render")).expect("valid JSON");
+        let original: Value = serde_json::from_str(SKIPPED_ELEMENTS).expect("valid JSON");
+        assert_eq!(rendered, original);
+    }
+
+    #[test]
+    fn upsert_ignores_skipped_elements_and_keeps_their_position() {
+        let selected = uuid("22222222-2222-4222-8222-222222222222");
+        let text = format!(
+            r#"[{{"name":"NoUuid"}},{{"uuid":"{selected}","name":"Developer","level":1}},{{"uuid":"22222222222222222222222222222222","name":"SimpleForm"}}]"#
+        );
+        let mut document = OperatorsDocument::parse(&text).expect("parse");
+
+        assert_eq!(
+            document.upsert(
+                selected,
+                "Developer",
+                OperatorPermissionLevel::new(4).expect("level")
+            ),
+            OperatorUpdate::Updated
+        );
+
+        let rendered: Value =
+            serde_json::from_str(&document.render().expect("render")).expect("valid JSON");
+        assert_eq!(rendered.as_array().expect("array").len(), 3);
+        assert_eq!(rendered[0], serde_json::json!({"name": "NoUuid"}));
+        assert_eq!(rendered[1]["level"], 4);
+        assert_eq!(
+            rendered[2],
+            serde_json::json!({"uuid": "22222222222222222222222222222222", "name": "SimpleForm"})
+        );
+    }
+
+    #[test]
+    fn upsert_appends_the_operator_after_skipped_elements() {
+        let selected = uuid("22222222-2222-4222-8222-222222222222");
+        let mut document = OperatorsDocument::parse(SKIPPED_ELEMENTS).expect("parse");
+
+        assert_eq!(
+            document.upsert(
+                selected,
+                "Developer",
+                OperatorPermissionLevel::new(4).expect("level")
+            ),
+            OperatorUpdate::Inserted
+        );
+
+        let rendered: Value =
+            serde_json::from_str(&document.render().expect("render")).expect("valid JSON");
+        assert_eq!(rendered.as_array().expect("array").len(), 9);
+        assert_eq!(rendered[8]["uuid"], selected.to_string());
+    }
+
+    #[test]
+    fn documents_that_are_not_an_array_of_objects_are_rejected() {
+        assert!(OperatorsDocument::parse(r#"{"uuid":"x"}"#).is_err());
+        assert!(matches!(
+            OperatorsDocument::parse(r#"[{"name":"A"}, 3]"#),
+            Err(OperatorsDocumentError::NotAnObject { index: 1 })
+        ));
+        assert!(OperatorsDocument::parse("[null]").is_err());
     }
 }
