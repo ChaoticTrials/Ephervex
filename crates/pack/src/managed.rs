@@ -41,7 +41,9 @@ use crate::error::{PackError, PackResult};
 use crate::install::{ArtifactFetch, copy_into_instance, fetch_all};
 use crate::mutate::{MutationRecoveryAction, MutationRecoveryIssue};
 use crate::path::{DestinationLinks, contained_join, is_reserved, safe_relative_path};
-use crate::recipe::{PackFileRecipe, PackRecipe, ProviderFileIdentity};
+use crate::recipe::{
+    OptionalSelection, PackFileRecipe, PackRecipe, PackSide, ProviderFileIdentity,
+};
 use crate::store::SourceStore;
 
 /// The directory managed mods are installed into, relative to the game
@@ -260,7 +262,7 @@ pub async fn install_managed(request: ManagedModInstall<'_>) -> PackResult<Manag
         fetch,
     } = request;
     let cancel = fetch.cancel;
-    let settled = settle_recorded_paths(recipe, additions);
+    let settled = settle_recorded_paths(recipe, additions, None);
     let additions = settled.as_slice();
 
     // Nothing below this line runs until every destination is known to be safe.
@@ -455,9 +457,13 @@ pub(crate) fn recorded_entry<'a>(
 /// the provider being asked serves the recorded bytes. Every address is still
 /// verified against the recorded hashes, so an address serving anything else
 /// fails rather than installs.
+///
+/// When the request is for an instance's own `side`, a recorded entry that does
+/// not take that side takes it from the request (see [`recording_side`]).
 pub(crate) fn settle_recorded_paths(
     recipe: &PackRecipe,
     requested: &[PackFileRecipe],
+    side: Option<PackSide>,
 ) -> Vec<PackFileRecipe> {
     requested
         .iter()
@@ -465,7 +471,9 @@ pub(crate) fn settle_recorded_paths(
             let Some(recorded) = recorded_entry(recipe, file) else {
                 return file.clone();
             };
-            let mut settled = recorded.clone();
+            let mut settled = side
+                .and_then(|side| recording_side(recorded, file, side))
+                .unwrap_or_else(|| recorded.clone());
             for address in &file.downloads {
                 if !settled.downloads.contains(address) {
                     settled.downloads.push(address.clone());
@@ -474,6 +482,32 @@ pub(crate) fn settle_recorded_paths(
             settled
         })
         .collect()
+}
+
+/// The recorded entry as it must read once the request installs it on `side`,
+/// or nothing when the record already takes that side.
+///
+/// Only that side's requirement and the optional choice move. The path, origin,
+/// identity, relations and the other side's requirement stay as recorded.
+pub(crate) fn recording_side(
+    current: &PackFileRecipe,
+    request: &PackFileRecipe,
+    side: PackSide,
+) -> Option<PackFileRecipe> {
+    let none = OptionalSelection::none();
+    if !request.is_installed_on(side, &none) || current.is_installed_on(side, &none) {
+        return None;
+    }
+    let requirement = request.requirement(side);
+    let mut recorded = current.clone();
+    match side {
+        PackSide::Client => recorded.client = requirement,
+        PackSide::Server => recorded.server = requirement,
+    }
+    if requirement.needs_decision() {
+        recorded.selected = request.selected;
+    }
+    Some(recorded)
 }
 
 /// What a recorded mod's jar is on disk.

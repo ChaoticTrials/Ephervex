@@ -1074,6 +1074,7 @@ impl App {
             recipe: &mut context.recipe,
             upserts,
             removals,
+            side: ephervex_pack::PackSide::Client,
             game_dir: &ephervex_storage::metadata::client_game_dir(&context.record.root),
             retired_dir: &retired,
             store: &context.store,

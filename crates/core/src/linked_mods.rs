@@ -1223,6 +1223,7 @@ impl App {
             recipe: &mut recipe,
             upserts: &upserts,
             removals: &removals,
+            side: PackSide::Server,
             game_dir: &game_dir,
             retired_dir: &retired_dir,
             store: &store,
@@ -3041,6 +3042,44 @@ Details:\n\
                 .and_then(|identity| identity.version_id.as_deref()),
             Some("ROOTV2"),
             "a repair changes nothing about what the server records"
+        );
+    }
+
+    #[tokio::test]
+    async fn installing_a_release_the_server_recipe_lists_but_does_not_take_records_the_server_side()
+     {
+        let world = world().await;
+        let server = world.link_server("Reproduction Server", MINECRAFT);
+        apply(&world, &install("ROOTPROJ"), &[server]).await;
+
+        // The state reconstruction leaves behind: the release is listed and
+        // the entry says the server does not take it.
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(
+            &world.server_root(server),
+        ));
+        let mut recipe = store.read_recipe().expect("recipe");
+        for file in &mut recipe.files {
+            if file.logical_path == Path::new("mods/rootproj-ROOTV2.jar") {
+                file.server = SideRequirement::Unsupported;
+                file.selected = None;
+            }
+        }
+        store.write_recipe(&recipe).expect("write recipe");
+        let jar = ephervex_storage::metadata::server_game_dir(&world.server_root(server))
+            .join("mods/rootproj-ROOTV2.jar");
+        std::fs::remove_file(&jar).expect("delete the jar");
+
+        let outcome = apply(&world, &install("ROOTPROJ"), &[server]).await;
+
+        assert!(result_for(&outcome, server).succeeded());
+        assert!(jar.is_file());
+        let recorded = world.server_recipe(server);
+        let entry = recorded
+            .managed_project(ModProvider::Modrinth, "ROOTPROJ")
+            .expect("entry");
+        assert!(
+            entry.is_installed_on(PackSide::Server, &OptionalSelection::none()),
+            "a jar on the server has to be a mod the server's record takes"
         );
     }
 

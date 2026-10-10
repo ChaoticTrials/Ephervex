@@ -55,10 +55,10 @@ use tracing::{info, instrument, warn};
 use crate::error::{PackError, PackResult};
 use crate::install::{ArtifactFetch, copy_into_instance, fetch_all};
 use crate::managed::{
-    ManagedDestinations, RecordedJar, disabled_path, occupant, recorded_jar,
+    ManagedDestinations, RecordedJar, disabled_path, occupant, recorded_jar, recording_side,
     require_one_entry_per_project, settle_recorded_paths,
 };
-use crate::recipe::{PackFileRecipe, PackRecipe, ProviderFileIdentity};
+use crate::recipe::{PackFileRecipe, PackRecipe, PackSide, ProviderFileIdentity};
 use crate::store::SourceStore;
 
 /// One provider project, which is how a mutation names what it acts on.
@@ -95,6 +95,11 @@ pub struct ManagedMutation<'a> {
     pub upserts: &'a [PackFileRecipe],
     /// Projects the instance must not have afterwards.
     pub removals: &'a [ManagedProject],
+    /// The side of the game this instance is. A requested mod is installed on
+    /// this side, so a recorded entry for the same release that does not take
+    /// this side is brought in line with the request rather than left to
+    /// disagree with the jar that was just written.
+    pub side: PackSide,
     /// The directory the game runs in. Logical paths are relative to it.
     pub game_dir: &'a Path,
     /// Launcher-owned scratch inside the same instance, where replaced files
@@ -124,6 +129,9 @@ pub struct ManagedMutationReport {
     /// bytes than the recorded ones. They were left exactly as they are: a
     /// changed jar is very often the local build the instance exists to test.
     pub modified: Vec<PathBuf>,
+    /// Requested mods whose recorded jar was already in place but whose record
+    /// did not take this side. The record now does; no file was written.
+    pub recorded: Vec<PathBuf>,
     pub reused_from_cache: usize,
     pub bytes: u64,
     /// Cleanup that could not finish after the new recipe was published.
@@ -141,6 +149,7 @@ impl ManagedMutationReport {
             || !self.replaced.is_empty()
             || !self.removed.is_empty()
             || !self.repaired.is_empty()
+            || !self.recorded.is_empty()
     }
 }
 
@@ -180,6 +189,9 @@ enum Action {
     Install,
     /// The same version is already recorded and its jar is present.
     Unchanged,
+    /// The same version is recorded with its jar present, but the record does
+    /// not take the instance's side. Only the record changes.
+    Record,
     /// The same version is recorded and its jar has gone missing.
     Repair,
     /// The same version is recorded and a jar is there, but not the recorded
@@ -204,19 +216,20 @@ pub async fn mutate_managed(request: ManagedMutation<'_>) -> PackResult<ManagedM
         recipe,
         upserts,
         removals,
+        side,
         game_dir,
         retired_dir,
         store,
         fetch,
     } = request;
     let cancel = fetch.cancel;
-    let settled = settle_recorded_paths(recipe, upserts);
+    let settled = settle_recorded_paths(recipe, upserts, Some(side));
     let upserts = settled.as_slice();
 
     // Nothing below this line runs until the whole desired state is known to be
     // reachable: every destination safe, every removal something Ephervex
     // actually installed.
-    let actions = plan(recipe, upserts, removals, game_dir).await?;
+    let actions = plan(recipe, upserts, removals, side, game_dir).await?;
     let retirements = retirements(recipe, upserts, &actions, removals, game_dir);
     // The replacements whose predecessor was turned off, so the new build can
     // be written the same way round.
@@ -242,11 +255,15 @@ pub async fn mutate_managed(request: ManagedMutation<'_>) -> PackResult<ManagedM
                 report.modified.push(file.logical_path.clone());
                 false
             }
+            Action::Record => {
+                report.recorded.push(file.logical_path.clone());
+                false
+            }
             _ => true,
         })
         .collect();
 
-    if pending.is_empty() && retirements.is_empty() {
+    if pending.is_empty() && retirements.is_empty() && report.recorded.is_empty() {
         info!("the instance already matches the requested mod state");
         return Ok(report);
     }
@@ -273,7 +290,7 @@ pub async fn mutate_managed(request: ManagedMutation<'_>) -> PackResult<ManagedM
                 &mut report,
             )
         })
-        .and_then(|()| publish(recipe, upserts, &actions, removals, store));
+        .and_then(|()| publish(recipe, upserts, &actions, removals, side, store));
 
     if let Err(error) = outcome {
         return Err(error.with_recovery_issues(journal.undo()));
@@ -296,6 +313,7 @@ pub async fn mutate_managed(request: ManagedMutation<'_>) -> PackResult<ManagedM
         removed = report.removed.len(),
         repaired = report.repaired.len(),
         unchanged = report.unchanged.len(),
+        recorded = report.recorded.len(),
         modified = report.modified.len(),
         "mutated managed mods"
     );
@@ -308,6 +326,7 @@ async fn plan(
     recipe: &PackRecipe,
     upserts: &[PackFileRecipe],
     removals: &[ManagedProject],
+    side: PackSide,
     game_dir: &Path,
 ) -> PackResult<Vec<Action>> {
     // Two requested mods claiming one file name is a plan that cannot be
@@ -360,7 +379,7 @@ async fn plan(
 
     let mut actions = Vec::with_capacity(upserts.len());
     for file in upserts {
-        actions.push(action_for(recipe, file, game_dir, &mut destinations, &freed).await?);
+        actions.push(action_for(recipe, file, side, game_dir, &mut destinations, &freed).await?);
     }
     Ok(actions)
 }
@@ -392,6 +411,7 @@ fn freed_paths(
 async fn action_for(
     recipe: &PackRecipe,
     file: &PackFileRecipe,
+    side: PackSide,
     game_dir: &Path,
     destinations: &mut ManagedDestinations<'_>,
     freed: &BTreeSet<PathBuf>,
@@ -410,10 +430,15 @@ async fn action_for(
             // The same mod at the same version. Present with the recorded bytes
             // is a no-op - including present but turned off, which is a state
             // to leave alone rather than a jar to put back. Absent is a repair,
-            // which restores the recorded jar without changing what is
-            // recorded. Present with other bytes is left alone and reported.
+            // which restores the recorded jar. Present with other bytes is left
+            // alone and reported. A record that does not take this side is
+            // brought in line with the request, so a jar is never written
+            // while the recipe still says the instance does not have it.
             destinations.resolve(&entry.logical_path)?;
             Ok(match recorded_jar(game_dir, entry).await {
+                RecordedJar::Intact if recording_side(entry, file, side).is_some() => {
+                    Action::Record
+                }
                 RecordedJar::Intact => Action::Unchanged,
                 RecordedJar::Missing => {
                     destinations.writable(&entry.logical_path)?;
@@ -628,7 +653,7 @@ fn write_new_files(
                 version: version_of(file).map(ToOwned::to_owned),
             }),
             Action::Install => report.installed.push(file.logical_path.clone()),
-            Action::Unchanged | Action::Altered => {}
+            Action::Unchanged | Action::Altered | Action::Record => {}
         }
     }
     Ok(())
@@ -706,6 +731,7 @@ fn publish(
     upserts: &[PackFileRecipe],
     actions: &[Action],
     removals: &[ManagedProject],
+    side: PackSide,
     store: &SourceStore,
 ) -> PackResult<()> {
     let mut updated = recipe.clone();
@@ -739,27 +765,28 @@ fn publish(
                     .ok_or_else(|| PackError::ManagedIdentityMissing {
                         path: file.display_name(),
                     })?;
-                // The origin is a fact about why the instance has this mod and
-                // survives a version change. Rewriting it would turn a
-                // dependency into a root, or a pack's own mod into a manual
-                // one, on the strength of an unrelated operation.
-                let mut replacement = file.clone();
-                replacement.origin = updated.files[position].origin;
-                // A pack-owned entry's first move away from what the pack
-                // declared is the only chance to remember what that was; every
-                // later move must not overwrite it.
-                if updated.files[position].origin == ModOrigin::PackDeclared {
-                    replacement.original_identity = updated.files[position]
-                        .original_identity
-                        .clone()
-                        .or_else(|| updated.files[position].identity.clone());
-                }
-                updated.files[position] = replacement;
+                updated.files[position] = replacement_for(&updated.files[position], file);
             }
-            // A repair changes nothing about the record, and an unchanged mod
-            // is already exactly what is asked for. A modified one is left as
-            // it is, record included.
-            Action::Repair | Action::Unchanged | Action::Altered => {}
+            // Putting a jar back restores what is recorded, except that a
+            // record which did not take this side takes it now.
+            Action::Repair | Action::Record => {
+                let Some((provider, project_id)) = project_of(file) else {
+                    return Err(PackError::ManagedIdentityMissing {
+                        path: file.display_name(),
+                    });
+                };
+                if let Some(entry) = updated
+                    .files
+                    .iter_mut()
+                    .find(|existing| project_of(existing) == Some((provider, project_id)))
+                    && let Some(recorded) = recording_side(entry, file, side)
+                {
+                    *entry = recorded;
+                }
+            }
+            // An unchanged mod is already exactly what is asked for. A modified
+            // one is left as it is, record included.
+            Action::Unchanged | Action::Altered => {}
         }
     }
     for addition in additions {
@@ -792,16 +819,40 @@ fn version_of(file: &PackFileRecipe) -> Option<&str> {
         .and_then(|identity| identity.version_id.as_deref())
 }
 
+/// The entry that stands in for `current` when the request names another version.
+fn replacement_for(current: &PackFileRecipe, request: &PackFileRecipe) -> PackFileRecipe {
+    // The origin is a fact about why the instance has this mod and survives a
+    // version change. Rewriting it would turn a dependency into a root, or a
+    // pack's own mod into a manual one, on the strength of an unrelated
+    // operation.
+    let mut replacement = request.clone();
+    replacement.origin = current.origin;
+    // A pack-owned entry's first move away from what the pack declared is the
+    // only chance to remember what that was; every later move must not
+    // overwrite it.
+    if current.origin == ModOrigin::PackDeclared {
+        replacement.original_identity = current
+            .original_identity
+            .clone()
+            .or_else(|| current.identity.clone());
+    }
+    replacement
+}
+
 /// The mods an instance would have if this mutation succeeded, without doing it.
 ///
 /// Exists so a caller can show the outcome before committing to it, using the
 /// same rules the mutation itself applies rather than a second description of
 /// them.
+///
+/// The disk is not consulted, so a recorded jar that holds other bytes (which
+/// the mutation leaves, record included) is previewed as though it were intact.
 #[must_use]
 pub fn projected(
     recipe: &PackRecipe,
     upserts: &[PackFileRecipe],
     removals: &[ManagedProject],
+    side: PackSide,
 ) -> PackRecipe {
     let mut projected = recipe.clone();
     let dropped: BTreeSet<(ModProvider, String)> = removals
@@ -826,12 +877,15 @@ pub fn projected(
         };
         match positions.get(&(provider, project_id.to_owned())) {
             // The recorded version is what the mutation keeps, whatever path or
-            // sides the request spelled.
-            Some(&index) if version_of(&projected.files[index]) == version_of(file) => {}
+            // sides the request spelled. Only the instance's own side is
+            // taken from the request, and only when the record did not take it.
+            Some(&index) if version_of(&projected.files[index]) == version_of(file) => {
+                if let Some(recorded) = recording_side(&projected.files[index], file, side) {
+                    projected.files[index] = recorded;
+                }
+            }
             Some(&index) => {
-                let mut replacement = file.clone();
-                replacement.origin = projected.files[index].origin;
-                projected.files[index] = replacement;
+                projected.files[index] = replacement_for(&projected.files[index], file);
             }
             None => projected.files.push(file.clone()),
         }
