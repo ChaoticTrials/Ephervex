@@ -1779,18 +1779,60 @@ mod tests {
         let task = tokio::spawn(async move {
             ServerSupervisor::run(&command, &server_root, &capture_path, &observer).await
         });
-        tokio::time::timeout(Duration::from_secs(5), async {
+        wait_for_output(&mut events, ready).await;
+        (root, capture, events, task)
+    }
+
+    /// Waits until the child prints `text` on a line of its own.
+    async fn wait_for_output(events: &mut mpsc::UnboundedReceiver<ServerEvent>, text: &str) {
+        tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if let Some(ServerEvent::Output(line)) = events.recv().await
-                    && line.text == ready
+                    && line.text == text
                 {
                     break;
                 }
             }
         })
         .await
-        .expect("child became ready");
-        (root, capture, events, task)
+        .unwrap_or_else(|_| panic!("the child printed {text:?}"));
+    }
+
+    /// A file a shell script waits for, so a test releases the script once the
+    /// supervisor has been given what the scenario needs instead of after a delay.
+    struct Gate {
+        dir: tempfile::TempDir,
+    }
+
+    impl Gate {
+        fn new() -> Self {
+            Self {
+                dir: tempfile::tempdir().expect("gate"),
+            }
+        }
+
+        /// The script command that returns once the gate is open.
+        fn wait_command(&self) -> String {
+            format!(
+                "while [ ! -e '{}' ]; do sleep 0.02; done",
+                self.dir.path().join("open").display()
+            )
+        }
+
+        fn open(&self) {
+            std::fs::write(self.dir.path().join("open"), b"").expect("open the gate");
+        }
+    }
+
+    /// A request the supervisor answers even while a console line is being written,
+    /// so a request sent just before it has normally reached supervision by then.
+    async fn answer_a_status_request(root: &Path) {
+        assert_eq!(
+            send_control(root, &ControlAction::Status)
+                .await
+                .expect("status answered"),
+            ControlResponse::Running
+        );
     }
 
     #[tokio::test]
@@ -1830,20 +1872,60 @@ mod tests {
 
     #[tokio::test]
     async fn a_stop_that_meets_a_child_already_exiting_reports_the_real_exit() {
-        let (root, _capture, _events, task) = supervise_script(
-            "exec 0<&-; echo input-closed; sleep 0.35; exit 3",
-            "input-closed",
-        )
-        .await;
-        let response = send_control(root.path(), &ControlAction::Stop)
+        // The child keeps its input closed and stays alive until the stop write has failed,
+        // so the exit the supervisor waits for is always one that follows the stop.
+        let gate = Gate::new();
+        let script = format!(
+            "exec 0<&-; echo input-closed; {}; exit 3",
+            gate.wait_command()
+        );
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", &script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn");
+        let stdin = child.stdin.take().expect("stdin");
+        let mut output = BufReader::new(child.stdout.take().expect("stdout"));
+        let mut marker = String::new();
+        tokio::time::timeout(Duration::from_secs(10), output.read_line(&mut marker))
             .await
-            .expect("answered");
-        let ControlResponse::Exited(exit) = response else {
-            panic!("the stop settles with the exit: {response:?}");
-        };
+            .expect("the child closed its input")
+            .expect("marker");
+        assert_eq!(marker.trim_end(), "input-closed");
+
+        let mut control = ChildControl::new(stdin);
+        let mut waiters = Vec::new();
+        let (response, _answer) = oneshot::channel();
+        control
+            .handle_request(
+                &mut child,
+                &mut waiters,
+                ControlRequest {
+                    action: ControlAction::Stop,
+                    response,
+                },
+            )
+            .expect("stop handled");
+        let write = control.pending_write.as_mut().expect("the stop is written");
+        let (stdin, result) = (&mut write.delivery).await;
+        assert_eq!(
+            result.as_ref().expect_err("a closed input").kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+        gate.open();
+
+        let status = control
+            .write_finished(&mut child, &mut waiters, stdin, result)
+            .await
+            .expect("the exit that follows the closed input");
+        let (exit, restart) = control.conclude(status, &mut waiters);
+
         assert_eq!(exit.code, Some(3));
         assert!(exit.stop_requested);
-        assert_eq!(task.await.expect("join").expect("supervise"), exit);
+        assert!(!restart);
+        assert_eq!(waiters.len(), 1, "the stop waits for the real exit");
     }
 
     #[tokio::test]
@@ -2421,22 +2503,29 @@ mod tests {
 
     #[tokio::test]
     async fn a_stop_sent_during_a_console_write_is_carried_out_after_it() {
-        // The shell reads nothing for a while, so the console line is still being written.
-        let (root, _capture, _events, task) = supervise_script(
-            "echo ready; sleep 0.6; while IFS= read -r line; do [ \"$line\" = stop ] && exit 0; done",
-            "ready",
-        )
-        .await;
+        // The shell takes one byte of the console line, which shows the write has begun,
+        // and reads nothing more until released, so the line is still being written.
+        let gate = Gate::new();
+        let script = format!(
+            "echo ready; dd bs=1 count=1 of=/dev/null 2>/dev/null; echo write-begun; {}; \
+             while IFS= read -r line; do [ \"$line\" = stop ] && exit 0; done",
+            gate.wait_command()
+        );
+        let (root, _capture, mut events, task) = supervise_script(&script, "ready").await;
         let console = tokio::spawn({
             let root = root.path().to_path_buf();
             let line = "a".repeat(512 * 1024);
             async move { send_control(&root, &ControlAction::Console(line)).await }
         });
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        wait_for_output(&mut events, "write-begun").await;
 
-        let stop = send_control(root.path(), &ControlAction::Stop)
-            .await
-            .expect("stop answered");
+        let stop = tokio::spawn({
+            let root = root.path().to_path_buf();
+            async move { send_control(&root, &ControlAction::Stop).await }
+        });
+        answer_a_status_request(root.path()).await;
+        gate.open();
+        let stop = stop.await.expect("join").expect("stop answered");
 
         let ControlResponse::Exited(exit) = stop else {
             panic!("the stop settles with the exit: {stop:?}");
