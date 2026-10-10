@@ -1,4 +1,4 @@
-import {useCallback, useEffect, useRef, useState, type PointerEvent, type ReactNode} from 'react';
+import {useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent, type ReactNode} from 'react';
 
 import styles from './ScreenshotLightbox.module.css';
 
@@ -13,7 +13,7 @@ export type LightboxSlide = {
 type Props = {
   slides: LightboxSlide[];
   index: number;
-  onIndexChange: (index: number) => void;
+  onIndexChange?: (index: number) => void;
   onClose: () => void;
 };
 
@@ -30,11 +30,13 @@ export default function ScreenshotLightbox({
   onClose,
 }: Props): ReactNode {
   const dialog = useRef<HTMLDivElement>(null);
+  const stage = useRef<HTMLDivElement>(null);
   const start = useRef<{x: number; y: number; captured: boolean} | null>(null);
   const dragged = useRef(false);
   const previousIndex = useRef(index);
   const [dragX, setDragX] = useState(0);
   const slide = slides[index];
+  const showNavigation = slides.length > 1;
   const hasPrevious = index > 0;
   const hasNext = index < slides.length - 1;
   const direction = index === previousIndex.current ? 0 : index > previousIndex.current ? 1 : -1;
@@ -43,11 +45,17 @@ export default function ScreenshotLightbox({
     previousIndex.current = index;
   }, [index]);
 
+  useEffect(() => {
+    if (!showNavigation && stage.current) {
+      stage.current.scrollLeft = (stage.current.scrollWidth - stage.current.clientWidth) / 2;
+    }
+  }, [showNavigation, slide?.key]);
+
   const go = useCallback(
     (step: number) => {
       const target = index + step;
       if (target >= 0 && target < slides.length) {
-        onIndexChange(target);
+        onIndexChange?.(target);
       }
     },
     [index, slides.length, onIndexChange],
@@ -164,9 +172,9 @@ export default function ScreenshotLightbox({
       <header className={styles.bar}>
         <span className={styles.caption} aria-live="polite">
           <strong>{slide.title}</strong>
-          <span>
-            {index + 1} of {slides.length}
-          </span>
+          {showNavigation
+            ? <span>{index + 1} of {slides.length}</span>
+            : <span className={styles.singleHint}>Swipe to inspect</span>}
         </span>
         <a className={styles.action} href={slide.src} target="_blank" rel="noreferrer">
           Open original
@@ -176,24 +184,28 @@ export default function ScreenshotLightbox({
         </button>
       </header>
       <div
-        className={styles.stage}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerEnd}
-        onPointerCancel={onPointerEnd}
+        ref={stage}
+        className={`${styles.stage} ${showNavigation ? '' : styles.singleStage}`}
+        style={{'--image-native-width': `${slide.width}px`} as CSSProperties}
+        onPointerDown={showNavigation ? onPointerDown : undefined}
+        onPointerMove={showNavigation ? onPointerMove : undefined}
+        onPointerUp={showNavigation ? onPointerEnd : undefined}
+        onPointerCancel={showNavigation ? onPointerEnd : undefined}
         onClick={(event) => {
           if (event.target === event.currentTarget && !dragged.current) {
             onClose();
           }
         }}>
-        <button
-          type="button"
-          className={`${styles.nav} ${styles.previous}`}
-          onClick={() => go(-1)}
-          disabled={!hasPrevious}
-          aria-label="Previous screenshot">
-          <span aria-hidden="true">&#8249;</span>
-        </button>
+        {showNavigation && (
+          <button
+            type="button"
+            className={`${styles.nav} ${styles.previous}`}
+            onClick={() => go(-1)}
+            disabled={!hasPrevious}
+            aria-label="Previous screenshot">
+            <span aria-hidden="true">&#8249;</span>
+          </button>
+        )}
         <img
           key={slide.key}
           className={`${styles.image} ${direction > 0 ? styles.fromRight : direction < 0 ? styles.fromLeft : ''}`}
@@ -204,14 +216,16 @@ export default function ScreenshotLightbox({
           alt={slide.title}
           draggable={false}
         />
-        <button
-          type="button"
-          className={`${styles.nav} ${styles.next}`}
-          onClick={() => go(1)}
-          disabled={!hasNext}
-          aria-label="Next screenshot">
-          <span aria-hidden="true">&#8250;</span>
-        </button>
+        {showNavigation && (
+          <button
+            type="button"
+            className={`${styles.nav} ${styles.next}`}
+            onClick={() => go(1)}
+            disabled={!hasNext}
+            aria-label="Next screenshot">
+            <span aria-hidden="true">&#8250;</span>
+          </button>
+        )}
       </div>
     </div>
   );

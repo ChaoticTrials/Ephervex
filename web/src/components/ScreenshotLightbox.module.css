@@ -4,7 +4,8 @@
   inset: 0;
   display: flex;
   flex-direction: column;
-  background: rgb(6 12 15 / 0.97);
+  background: rgb(6 12 15 / 0.72);
+  backdrop-filter: blur(12px);
   color: #f2f7f8;
   outline: none;
 }
@@ -35,6 +36,8 @@
   font-family: var(--ifm-font-family-monospace);
   font-size: 0.75rem;
 }
+
+.singleHint { display: none; }
 
 .action {
   padding: 0.45rem 0.85rem;
@@ -68,6 +71,8 @@
   /* Vertical pan and pinch stay with the browser; horizontal drags are swipes. */
   touch-action: pan-y pinch-zoom;
 }
+
+.singleStage { padding-inline: 1rem; }
 
 .image {
   display: block;
@@ -135,6 +140,20 @@
   .stage { padding: 0 0 1rem; }
   .nav { display: none; }
   .image { border-radius: 0; }
+  .singleHint { display: block; }
+  .singleStage {
+    padding: 0;
+    overflow: auto;
+    align-items: safe center;
+    justify-content: safe center;
+    touch-action: pan-x pan-y pinch-zoom;
+  }
+  .singleStage .image {
+    flex: none;
+    width: min(var(--image-native-width), 200vw);
+    max-width: none;
+    max-height: none;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

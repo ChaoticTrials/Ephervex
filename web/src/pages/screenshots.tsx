@@ -59,7 +59,7 @@ function ScreenshotCard({card, onOpen}: {card: Card; onOpen: () => void}): React
         onClick={open}
         target="_blank"
         rel="noreferrer">
-        <ThemeScreenshot state={card.state} region={card.region} alt={card.title} />
+        <ThemeScreenshot state={card.state} region={card.region} alt={card.title} zoomable={false} />
       </a>
       <figcaption>
         <strong>{card.title}</strong>

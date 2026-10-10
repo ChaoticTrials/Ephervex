@@ -50,7 +50,7 @@ export default function Home(): ReactNode {
                 <span className={styles.windowDots} aria-hidden="true"><i /><i /><i /></span>
                 <span>Ephervex / Instances</span>
               </div>
-              <ThemeScreenshot state="instances-overview" alt="Ephervex instance list with a selected Minecraft environment" />
+              <ThemeScreenshot state="instances-overview" alt="Ephervex instance list with a selected Minecraft environment" zoomable={false} />
             </div>
           </div>
         </section>
@@ -86,7 +86,7 @@ export default function Home(): ReactNode {
             <div className={styles.showcaseGrid}>
               <article className={styles.showcaseCard}>
                 <div className={styles.showcaseImage}>
-                  <ThemeScreenshot state="client-mods" alt="Mod manager and compatible mod catalog in Ephervex" />
+                  <ThemeScreenshot state="client-mods" alt="Mod manager and compatible mod catalog in Ephervex" zoomable={false} />
                 </div>
                 <div className={styles.showcaseText}>
                   <div><span className={styles.cardLabel}>Manage mods</span><Heading as="h3">Check mod compatibility.</Heading></div>
@@ -95,7 +95,7 @@ export default function Home(): ReactNode {
               </article>
               <article className={styles.showcaseCard}>
                 <div className={styles.showcaseImage}>
-                  <ThemeScreenshot state="server-console" alt="Ephervex server console with live output" />
+                  <ThemeScreenshot state="server-console" alt="Ephervex server console with live output" zoomable={false} />
                 </div>
                 <div className={styles.showcaseText}>
                   <div><span className={styles.cardLabel}>Linked servers</span><Heading as="h3">Run a client and server.</Heading></div>
