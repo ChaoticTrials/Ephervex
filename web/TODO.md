@@ -121,13 +121,14 @@ Settings:
 - [x] `settings-providers` (catalog, CurseForge key states)
 - [x] `settings-storage`, `settings-disk-usage`
 
-Not capturable without extending the tool (an interaction step): hover
-tooltips and disabled-button reasons, context menus, open dropdowns, the
-workspace "More" popup, the diagnostic bundle panel (folded by default),
-`WindowSizePreview`. Do not add product UI just to make a screenshot.
+Menus, dropdowns, and the folded diagnostic bundle panel are captured by an
+`interaction` on the state (a click or right-click on an accessible label before
+the frame is taken). Not capturable yet: hover tooltips and disabled-button
+reasons, the workspace "More" popup, `WindowSizePreview`. Do not add product UI
+just to make a screenshot.
 
-Limits of the captured states (the tool renders one frame and cannot scroll or
-interact):
+Limits of the captured states (the tool renders one frame and cannot scroll, and
+interacts only to open a menu or dropdown):
 - Tall dialogs and pages show only their top: `import-modpack-duplicates` and the lower part of
   `client-diagnostics-result` at 1080p (all of it fits at 1440p).
 - `mod-impact` shows only the breaks group, and `mod-manager` shows Reset to
@@ -155,30 +156,6 @@ fixtures. Keep the images focused on the action or decision described there.
       `server-crash-notice` to show the routes into logs and diagnosis.
 - [ ] Files and Privacy: use `settings-disk-usage` beside the storage guidance.
 
-Capture the missing decisions and recovery views with synthetic data:
-
-- [ ] Instances: `instance-actions-menu`, `instance-make-persistent-dialog`,
-      `instance-delete-confirmation`, and `instance-change-loader-dialog`.
-      Show where each action starts and what the confirmation changes.
-- [ ] Import Modpacks: `import-link-trust-prompt` for the HTTPS host approval
-      shown after opening an `ephervex://` link.
-- [ ] Mods: `mod-update-available` with the Update action, and
-      `mod-missing-file` with Restore. The current `mod-manager` capture shows
-      an up-to-date release and cannot explain the Update action.
-- [ ] Mod Isolation: `mod-isolation-result` with Finish and Cancel, and
-      `mod-isolation-recovery` with the failed recovery notice and Try again.
-- [ ] Servers: `create-server-standalone`, `create-server-linked`,
-      `server-eula-review`, and `server-needs-recovery`. Keep the standalone
-      version and loader choices distinct from the linked server's inherited
-      selection.
-- [ ] Diagnostics: `diagnostic-bundle-selection` showing selected parts,
-      privacy guidance, and Export bundle.
-- [ ] Accounts: `account-launch-picker` showing how to choose another account
-      for one launch.
-- [ ] Snapshots: `snapshot-create-dialog` showing the label and confirmation.
-- [ ] Themes: `theme-selector-open` and `theme-load-error` to show selection
-      and where a rejected custom theme reports its problem.
-
 Add focused crops and numbered callouts where full-window captures make
 controls too small. Keep the source captures clean and describe every marker
 in nearby text and alt text.
@@ -191,9 +168,8 @@ in nearby text and alt text.
 - [ ] Crop and mark Access, Online mode, and the EULA action in
       `server-properties`; show the account and instance action menus beside
       the instructions that name them.
-- [ ] Extend the capture tool to open menus, dropdowns, and the folded
-      diagnostic bundle panel before capturing those states. Add labeled dialog
-      or control regions where an accessible-element crop is possible.
+- [ ] Add labeled dialog or control regions where an accessible-element crop
+      is possible.
 
 ## 5. Documentation pages
 

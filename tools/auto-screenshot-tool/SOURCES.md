@@ -34,3 +34,9 @@ state.
 Blocked-file links use the reserved `example.invalid` host. Activity rows,
 running processes, toasts, and the sign-in code `ABCD1234` are synthetic; the
 sign-in address is the public Microsoft device-login page.
+The dialog, menu, and recovery states reuse those synthetic instances, servers,
+and accounts. Their extra values are synthetic as well: the link-approval
+address on the reserved `example.invalid` host, snapshot and diagnostic-bundle
+file names and sizes, the Redstone Rabbit Holes release list, the isolation
+result and its missing-jar message, the skipped theme file names and their
+reasons, and the NeoForge builds shown for a standalone server.

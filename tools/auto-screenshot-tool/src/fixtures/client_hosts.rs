@@ -12,10 +12,11 @@ use super::{FORGE_1_20, rows, running_server, server};
 
 /// The states this module adds to the catalog.
 #[cfg(test)]
-const STATE_NAMES: [&str; 6] = [
+const STATE_NAMES: [&str; 7] = [
     "client-overview-linked-server",
     "client-settings",
     "snapshots",
+    "snapshot-create-dialog",
     "snapshot-restore-dialog",
     "client-logs-live",
     "client-crash-reports",
@@ -253,6 +254,17 @@ fn show_snapshots(ui: &AppWindow) {
 /// The client's snapshots, one of them a full copy.
 pub(crate) fn snapshots(ui: &AppWindow) {
     show_snapshots(ui);
+}
+
+/// The label prompt for a new snapshot, with the suggested label as its placeholder.
+pub(crate) fn snapshot_create_dialog(ui: &AppWindow) {
+    show_snapshots(ui);
+    ui.set_snapshot_host_kind("client".into());
+    ui.set_snapshot_host_id("cavestone".into());
+    ui.set_snapshot_action_label(SharedString::default());
+    ui.set_snapshot_label_suggestion("CaveStone 2026-10-10 14:20".into());
+    ui.set_modal_error(SharedString::default());
+    ui.set_modal("snapshot-create".into());
 }
 
 /// The confirmation to restore a snapshot, with the safety copy on.

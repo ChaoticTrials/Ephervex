@@ -12,6 +12,7 @@ pub(crate) mod client_hosts;
 pub(crate) mod diagnostics_servers;
 pub(crate) mod getting_started;
 pub(crate) mod in_progress;
+pub(crate) mod instance_dialogs;
 pub(crate) mod mods;
 pub(crate) mod notices;
 pub(crate) mod settings;

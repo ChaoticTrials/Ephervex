@@ -7,9 +7,10 @@ use ephervex_gui::ui::{AppWindow, BuiltInPalettes, GuiI18n, Theme};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
 use image::{ImageBuffer, RgbaImage, imageops::FilterType};
-use slint::{ComponentHandle, PhysicalSize};
+use slint::platform::{PointerEventButton, WindowEvent};
+use slint::{ComponentHandle, LogicalPosition, PhysicalSize};
 
-use crate::catalog::{Region, State};
+use crate::catalog::{Interaction, Region, State};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ThemeName {
@@ -111,24 +112,23 @@ pub(crate) fn render_session() -> std::sync::MutexGuard<'static, ()> {
 pub(crate) fn generate(options: &CaptureOptions<'_>) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     for state in options.states {
-        let ui = AppWindow::new().context("create the Ephervex window")?;
-        if let Some(family) = ephervex_gui::monospace::resolve_monospace_family() {
-            ui.global::<Theme>().set_mono_family(family.into());
-        }
-        install_i18n(&ui);
-        fixtures_for_state(&ui, state);
-
         for size in options.sizes {
             let derive_full =
                 options.derive_1080 && state.same_layout_at_both_sizes && *size == Dimensions::HD;
             if derive_full && state.regions.iter().all(|region| region.name == "full") {
                 continue;
             }
+            // Each size starts from a fresh window, so a menu or panel an
+            // interaction opened never carries into the next size.
+            let ui = new_window(state)?;
             // The testing backend converts this to logical coordinates at a
             // fixed 1.0 scale factor. No desktop compositor is involved.
             ui.window()
                 .set_size(PhysicalSize::new(size.width, size.height));
             ui.show().context("show the headless Ephervex window")?;
+            if let Some(interaction) = state.interaction {
+                perform(&ui, interaction)?;
+            }
 
             for theme in options.themes {
                 let palettes = ui.global::<BuiltInPalettes>();
@@ -186,6 +186,16 @@ pub(crate) fn generate(options: &CaptureOptions<'_>) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+fn new_window(state: &State) -> Result<AppWindow> {
+    let ui = AppWindow::new().context("create the Ephervex window")?;
+    if let Some(family) = ephervex_gui::monospace::resolve_monospace_family() {
+        ui.global::<Theme>().set_mono_family(family.into());
+    }
+    install_i18n(&ui);
+    fixtures_for_state(&ui, state);
+    Ok(ui)
+}
+
 fn fixtures_for_state(ui: &AppWindow, state: &State) {
     crate::fixtures::install_base(ui);
     (state.show)(ui);
@@ -212,19 +222,85 @@ fn install_i18n(ui: &AppWindow) {
     });
 }
 
+/// The largest visible element with this accessible label.
+fn find_visible(ui: &AppWindow, label: &str) -> Result<ElementHandle> {
+    find_visible_by(ui, label, |left, right| left.total_cmp(&right))
+}
+
+/// The visible element with this label that `order` ranks last by area.
+fn find_visible_by(
+    ui: &AppWindow,
+    label: &str,
+    order: impl Fn(f32, f32) -> std::cmp::Ordering,
+) -> Result<ElementHandle> {
+    ElementHandle::find_by_accessible_label(ui, label)
+        .filter(|element| element.size().width > 0.0 && element.size().height > 0.0)
+        .max_by(|left, right| {
+            let left_area = left.size().width * left.size().height;
+            let right_area = right.size().width * right.size().height;
+            order(left_area, right_area)
+        })
+        .with_context(|| format!("find visible UI region {label:?}"))
+}
+
+/// Opens the menu or dropdown a state documents by pressing the real control.
+// Window sizes are capped at 3840x2160, well inside f32 precision.
+#[allow(clippy::cast_precision_loss)]
+fn perform(ui: &AppWindow, interaction: Interaction) -> Result<()> {
+    let (label, button) = match interaction {
+        Interaction::Click(label) => (label, PointerEventButton::Left),
+        Interaction::RightClick(label) => (label, PointerEventButton::Right),
+    };
+    let element = match interaction {
+        // A click targets the control itself, which sits inside the larger
+        // card that may share its label. A context menu belongs to the card.
+        Interaction::Click(_) => find_visible_by(ui, label, |left, right| right.total_cmp(&left)),
+        Interaction::RightClick(_) => find_visible(ui, label),
+    }?;
+    let position = element.absolute_position();
+    let size = element.size();
+    let at = LogicalPosition::new(
+        position.x + size.width / 2.0,
+        position.y + size.height / 2.0,
+    );
+    let window = ui.window();
+    let window_size = window.size();
+    ensure!(
+        at.x >= 0.0
+            && at.y >= 0.0
+            && at.x < window_size.width as f32
+            && at.y < window_size.height as f32,
+        "UI element {label:?} is outside the window"
+    );
+    let before = window
+        .take_snapshot()
+        .context("render the window before the interaction")?;
+    window.dispatch_event(WindowEvent::PointerMoved { position: at });
+    window.dispatch_event(WindowEvent::PointerPressed {
+        position: at,
+        button,
+    });
+    window.dispatch_event(WindowEvent::PointerReleased {
+        position: at,
+        button,
+    });
+    slint::platform::update_timers_and_animations();
+    let after = window
+        .take_snapshot()
+        .context("render the window after the interaction")?;
+    ensure!(
+        before.as_bytes() != after.as_bytes(),
+        "interacting with {label:?} changed nothing"
+    );
+    Ok(())
+}
+
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn crop_region(ui: &AppWindow, image: &RgbaImage, region: &Region) -> Result<RgbaImage> {
     let Some(label) = region.accessible_label else {
         return Ok(image.clone());
     };
-    let element = ElementHandle::find_by_accessible_label(ui, label)
-        .filter(|element| element.size().width > 0.0 && element.size().height > 0.0)
-        .max_by(|left, right| {
-            let left_area = left.size().width * left.size().height;
-            let right_area = right.size().width * right.size().height;
-            left_area.total_cmp(&right_area)
-        })
-        .with_context(|| format!("find visible UI region {label:?}"))?;
+    let element = find_visible(ui, label)?;
     let position = element.absolute_position();
     let size = element.size();
     ensure!(

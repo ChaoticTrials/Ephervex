@@ -192,6 +192,61 @@ pub(crate) fn mod_manager(ui: &AppWindow) {
     ui.set_modal("mod-manage".into());
 }
 
+/// Manage Mod for an added mod whose catalog has a newer release, offering Update.
+pub(crate) fn mod_update_available(ui: &AppWindow) {
+    cavestone_workspace(ui, Surface::Mods, |_| {});
+    ui.set_mod_action_host("cavestone".into());
+    ui.set_mod_action_path("mods/redstone-rabbit-holes-1.20.1-1.4.0.jar".into());
+    ui.set_mod_action_name("Redstone Rabbit Holes".into());
+    ui.set_mod_action_project_url("https://example.invalid/mod/redstone-rabbit-holes".into());
+    ui.set_mod_action_installed("rrh-1-4-0".into());
+    ui.set_mod_action_notice(SharedString::default());
+    ui.set_mod_action_loading(false);
+    ui.set_mod_action_pending(false);
+    ui.set_mod_action_can_change(true);
+    ui.set_mod_action_can_update(true);
+    ui.set_mod_action_can_remove(true);
+    ui.set_mod_action_up_to_date(false);
+    ui.set_mod_action_is_pack_owned(false);
+    ui.set_mod_action_pack_original_version(SharedString::default());
+    ui.set_mod_action_selected("rrh-1-5-0".into());
+    let release =
+        |id: &str, number: &str, published: &str, installed: bool, newest: bool| ModVersionRow {
+            name: format!("Redstone Rabbit Holes {number}").into(),
+            ..version(id, number, "release", published, installed, newest, false)
+        };
+    ui.set_mod_versions(rows(vec![
+        release("rrh-1-5-0", "1.5.0", "2026-09-14", false, true),
+        release("rrh-1-4-1", "1.4.1", "2026-08-02", false, false),
+        release("rrh-1-4-0", "1.4.0", "2026-06-21", true, false),
+        release("rrh-1-3-2", "1.3.2", "2026-04-09", false, false),
+    ]));
+    ui.set_mod_action_requires(rows(vec![relation(
+        "Ender Pearl Pager",
+        "ender-pearl-pager",
+        "gui-mod-relation-required",
+        "",
+        false,
+    )]));
+    ui.set_mod_action_required_by(rows(Vec::new()));
+    ui.set_mod_action_requires_note(SharedString::default());
+    ui.set_mod_action_relations_refreshable(false);
+    ui.set_modal("mod-manage".into());
+}
+
+/// A pack mod whose jar was deleted outside Ephervex, offering Restore.
+pub(crate) fn mod_missing_file(ui: &AppWindow) {
+    cavestone_workspace(ui, Surface::Mods, |view| {
+        let mods = client_mod_rows();
+        let missing = mods
+            .iter()
+            .filter(|row| matches!(row.title.as_str(), "Create" | "Pocket Piglin" | "Jade"))
+            .cloned()
+            .collect::<Vec<_>>();
+        view.mods = rows(missing);
+    });
+}
+
 fn mod_manager_relations(ui: &AppWindow) {
     ui.set_mod_action_requires(rows(vec![
         relation(
@@ -480,6 +535,60 @@ pub(crate) fn mod_isolation_round(ui: &AppWindow) {
     });
 }
 
+/// The isolation result waiting to be finished or canceled.
+pub(crate) fn mod_isolation_result(ui: &AppWindow) {
+    let summary = lookup("gui-isolation-ready-summary");
+    cavestone_workspace(ui, Surface::Isolation, |view| {
+        view.isolation_phase = "ready".into();
+        view.isolation_active = true;
+        view.isolation_round = 5;
+        view.isolation_confidence = "one_minimal".into();
+        view.isolation_summary = summary.clone().into();
+        view.isolation_remaining_candidates = strings(&["creeper-confetti-1.20.1-forge-0.3.2.jar"]);
+        view.isolation_pinned = strings(&[
+            "create-1.20.1-0.5.1.j.jar",
+            "jei-1.20.1-forge-15.20.0.130.jar",
+        ]);
+        view.isolation_required_dependencies = strings(&["ender-pearl-pager-forge-2.1.7.jar"]);
+        view.isolation_history = rows(
+            [
+                history_entry(5, "gui-isolation-issue-present", "subset", 1),
+                history_entry(4, "gui-isolation-issue-gone", "complement", 3),
+                history_entry(3, "gui-isolation-issue-present", "complement", 7),
+            ]
+            .into_iter()
+            .map(SharedString::from)
+            .collect(),
+        );
+        view.workflow_id = ISOLATION_WORKFLOW.into();
+        view.workflow_surface = Surface::Isolation.id().into();
+        view.workflow_title = lookup("gui-isolation-active").into();
+        view.workflow_summary = summary.into();
+        view.workflow_actions = rows(vec![
+            workflow_action("details", "gui-isolation-detailed-view", "secondary", false),
+            workflow_action("undo", "gui-isolation-undo", "secondary", true),
+            workflow_action("finish", "gui-isolation-finish", "primary", true),
+        ]);
+    });
+}
+
+/// A round whose mod setup could not be reapplied, so it cannot be answered yet.
+pub(crate) fn mod_isolation_recovery(ui: &AppWindow) {
+    mod_isolation_round(ui);
+    let mut view = ui.get_host_views().row_data(0).unwrap_or_default();
+    view.isolation_recovery = "failed".into();
+    view.isolation_recovery_detail =
+        "The jar mods/jei-1.20.1-forge-15.20.0.130.jar is missing from the mods folder.".into();
+    view.workflow_summary = lookup("gui-isolation-recovery-summary").into();
+    view.workflow_actions = rows(vec![workflow_action(
+        "details",
+        "gui-isolation-detailed-view",
+        "secondary",
+        false,
+    )]);
+    ui.get_host_views().set_row_data(0, view);
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
@@ -495,6 +604,10 @@ mod tests {
             "mod-install-plan",
             "mod-isolation-setup",
             "mod-isolation-round",
+            "mod-update-available",
+            "mod-missing-file",
+            "mod-isolation-result",
+            "mod-isolation-recovery",
         ];
         let states: Vec<_> = STATES
             .iter()

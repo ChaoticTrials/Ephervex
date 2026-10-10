@@ -48,6 +48,36 @@ pub(crate) fn general(ui: &AppWindow) {
     ui.set_favorite_minecraft_versions(strings(&["1.21.1"]));
 }
 
+/// The interface theme list, with a custom theme beside the two built in.
+pub(crate) fn theme_selector_open(ui: &AppWindow) {
+    general(ui);
+}
+
+/// A theme file that was skipped, with the reason shown under the theme setting.
+pub(crate) fn theme_load_error(ui: &AppWindow) {
+    general(ui);
+    let skipped = |file: &str, reason: String| {
+        lookup_args(
+            "gui-theme-problem",
+            [("file", Arg::from(file)), ("value", Arg::from(reason))],
+        )
+    };
+    let problems = [
+        skipped(
+            "midnight-blueprint-v2.toml",
+            lookup_args(
+                "gui-theme-problem-syntax",
+                [
+                    ("line", Arg::Count(7)),
+                    ("value", Arg::from("expected a string, found a number")),
+                ],
+            ),
+        ),
+        skipped("Haunted Night.toml", lookup("gui-theme-problem-file-name")),
+    ];
+    ui.set_theme_problems(problems.join("\n").into());
+}
+
 const GENERAL_RELEASES: [&str; 7] = [
     "26.2", "1.21.1", "1.20.1", "1.19.4", "1.18.2", "1.16.5", "1.12.2",
 ];

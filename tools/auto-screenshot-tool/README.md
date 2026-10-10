@@ -73,7 +73,9 @@ using `--derive-1080`.
 Add new screens by adding a named `State` and regions in `src/catalog.rs`, then
 populate the existing Slint model properties in `src/fixtures.rs`. The state
 catalog is the complete set of screenshots this documentation tool promises to
-regenerate. Do not add unfinished product screens to satisfy a screenshot.
+regenerate. A state that documents an open menu or dropdown sets an
+`interaction` in its catalog entry: the tool right-clicks or clicks the element
+with that accessible label in the shown window before it captures. Do not add unfinished product screens to satisfy a screenshot.
 
 ## Platform requirements
 

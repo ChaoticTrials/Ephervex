@@ -1,8 +1,8 @@
 //! Diagnostics, failed-run notices, and server workspace surfaces.
 
 use ephervex_gui::ui::{
-    AppWindow, DiagnosticCheckRow, DiagnosticFindingRow, FixChangeRow, HostView, InstanceRow,
-    LogChunk, LogView, ServerRow, WorkspacePaneRow, WorkspaceSurfaceRow,
+    AppWindow, BundlePartRow, DiagnosticCheckRow, DiagnosticFindingRow, FixChangeRow, HostView,
+    InstanceRow, LogChunk, LogView, ServerRow, WorkspacePaneRow, WorkspaceSurfaceRow,
 };
 use ephervex_gui::workspace_layout::Surface;
 use ephervex_i18n::{Arg, lookup, lookup_args};
@@ -579,6 +579,137 @@ pub(crate) fn server_properties(ui: &AppWindow) {
     open_server(ui, view, "Properties", None);
 }
 
+fn servers_page(ui: &AppWindow) {
+    ui.set_workspace_open(false);
+    ui.set_page(1);
+    ui.set_modal_error(SharedString::default());
+}
+
+fn release_versions(ui: &AppWindow) {
+    ui.set_minecraft_releases(rows(
+        [
+            "26.2", "1.21.1", "1.20.1", "1.19.4", "1.18.2", "1.16.5", "1.12.2",
+        ]
+        .map(SharedString::from)
+        .to_vec(),
+    ));
+}
+
+/// The New Server dialog with its own Minecraft release and loader build to choose.
+pub(crate) fn create_server_standalone(ui: &AppWindow) {
+    servers_page(ui);
+    release_versions(ui);
+    ui.set_create_server_client_id(SharedString::default());
+    ui.set_create_server_name(SharedString::default());
+    ui.set_create_server_name_suggestion("Minecraft 1.21.1 NeoForge Server".into());
+    ui.set_create_server_minecraft("1.21.1".into());
+    ui.set_create_server_loader("NeoForge".into());
+    ui.set_create_server_loader_versions(strings(&["21.1.249", "21.1.248", "21.1.246"]));
+    ui.set_create_server_loader_version("21.1.249".into());
+    ui.set_create_server_persistent(false);
+    ui.set_create_server_automatic_port(true);
+    ui.set_create_server_pack(SharedString::default());
+    ui.set_create_server_pack_name(SharedString::default());
+    ui.set_modal("create-server".into());
+}
+
+/// The New Linked Server dialog, which takes its version and loader from the client.
+pub(crate) fn create_server_linked(ui: &AppWindow) {
+    ui.set_workspace_open(false);
+    ui.set_page(0);
+    ui.set_modal_error(SharedString::default());
+    release_versions(ui);
+    ui.set_create_server_client_id("cavestone".into());
+    ui.set_create_server_name(SharedString::default());
+    ui.set_create_server_name_suggestion("CaveStone Server".into());
+    ui.set_create_server_persistent(false);
+    ui.set_create_server_automatic_port(true);
+    ui.set_create_server_pack(SharedString::default());
+    ui.set_create_server_pack_name(SharedString::default());
+    ui.set_modal("create-server".into());
+}
+
+/// The EULA review a server needs before its first start.
+pub(crate) fn server_eula_review(ui: &AppWindow) {
+    let view = HostView {
+        property_motd: "CaveStone reproduction server".into(),
+        property_max_players: "8".into(),
+        property_difficulty: "normal".into(),
+        property_gamemode: "survival".into(),
+        property_pvp: true,
+        property_access: "LAN".into(),
+        property_port: "25565".into(),
+        properties_revision: 1,
+        ..server_view(named_server(ui, "cavestone-server"))
+    };
+    ui.set_eula_accepted(false);
+    ui.set_eula_status(lookup("gui-eula-not-accepted").into());
+    open_server(ui, view, "Properties", None);
+    ui.set_modal("eula".into());
+}
+
+/// A server whose recorded processes have exited, which blocks Start until it is repaired.
+pub(crate) fn server_needs_recovery(ui: &AppWindow) {
+    let server = ServerRow {
+        state: lookup("gui-state-needs-recovery").into(),
+        state_kind: "needs-recovery".into(),
+        state_detail: lookup("gui-state-needs-recovery-detail").into(),
+        can_start: false,
+        ..named_server(ui, "cavestone-server")
+    };
+    open_server(ui, server_view(server), "Overview", None);
+}
+
+fn bundle_part(name: &str, kind: &str, size: &str, selected: bool) -> BundlePartRow {
+    BundlePartRow {
+        name: name.into(),
+        kind: lookup(kind).into(),
+        size: size.into(),
+        selected,
+    }
+}
+
+/// The bundle panel opened on a client with a crash report, newest files chosen.
+pub(crate) fn diagnostic_bundle_selection(ui: &AppWindow) {
+    let parts = vec![
+        bundle_part("latest.log", "gui-bundle-kind-game-log", "1.0 MiB", true),
+        bundle_part(
+            "crash-2026-10-08_09.41.17-client.txt",
+            "gui-bundle-kind-crash-report",
+            "48 KiB",
+            true,
+        ),
+        bundle_part("recipe.json", "gui-bundle-kind-recipe", "18 KiB", true),
+        bundle_part("client.json", "gui-bundle-kind-record", "2 KiB", true),
+        bundle_part(
+            "crash-2026-10-05_17.12.40-client.txt",
+            "gui-bundle-kind-crash-report",
+            "51 KiB",
+            false,
+        ),
+        bundle_part(
+            "ephervex.log",
+            "gui-bundle-kind-launcher-log",
+            "212 KiB",
+            false,
+        ),
+    ];
+    let view = HostView {
+        bundle_selection: lookup_args(
+            "gui-bundle-selection",
+            [
+                ("count", Arg::from(4_usize)),
+                ("size", Arg::from("1.1 MiB")),
+            ],
+        )
+        .into(),
+        bundle_selected_count: 4,
+        bundle_parts: rows(parts),
+        ..client_view(cavestone(ui))
+    };
+    open_client(ui, view, "Diagnostics");
+}
+
 /// The Overview of a server that failed to start, with its crash review.
 pub(crate) fn server_crash_notice(ui: &AppWindow) {
     let view = HostView {
@@ -819,6 +950,11 @@ mod tests {
         "server-properties",
         "server-crash-notice",
         "split-workspace",
+        "create-server-standalone",
+        "create-server-linked",
+        "server-eula-review",
+        "server-needs-recovery",
+        "diagnostic-bundle-selection",
     ];
 
     #[test]
