@@ -1303,6 +1303,9 @@ end record that declares more entries than the limit is refused before the ZIP
 library reserves room for that count. The reader enforces sizes while an entry
 is inflated, not only from its declared size, and gives a manifest a much
 smaller ceiling than other entries because it is held in memory to be parsed.
+A manifest's declared artifact list has its own count ceiling, independent of
+the entry count, enforced while the list is deserialized so a compact manifest
+cannot make the importer build or look up an unbounded number of files.
 
 Pack analysis and server archive validation run extraction's per-entry checks
 over every entry before any side effect: the entry must open (not encrypted,

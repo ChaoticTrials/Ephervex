@@ -60,6 +60,7 @@ use serde::Deserialize;
 use tracing::debug;
 
 use crate::archive::PackArchive;
+use crate::declared_files::require_declared_files_within;
 use crate::detect::CURSEFORGE_MANIFEST;
 use crate::error::{PackError, PackResult};
 use crate::path::safe_file_name;
@@ -108,7 +109,7 @@ pub struct ParsedExport {
 pub fn read(archive: &mut PackArchive) -> PackResult<ParsedExport> {
     let manifest = archive.read_manifest(CURSEFORGE_MANIFEST)?;
     let archive_name = archive.file_name().map(ToOwned::to_owned);
-    let mut parsed = parse(&manifest, archive_name)?;
+    let mut parsed = parse(&manifest, archive_name, archive.limits().max_declared_files)?;
     // The manifest names the directory; the archive decides whether it is
     // there. A pack whose whole content is declared files carries none.
     parsed
@@ -121,8 +122,14 @@ pub fn read(archive: &mut PackArchive) -> PackResult<ParsedExport> {
 /// Parses the manifest document itself.
 ///
 /// Split out from [`read`] so manifest validation is testable against a fixture
-/// without building an archive around it.
-pub fn parse(manifest: &[u8], archive_name: Option<String>) -> PackResult<ParsedExport> {
+/// without building an archive around it. A manifest declaring more than
+/// `max_declared_files` files is refused.
+pub fn parse(
+    manifest: &[u8],
+    archive_name: Option<String>,
+    max_declared_files: u64,
+) -> PackResult<ParsedExport> {
+    require_declared_files_within(CURSEFORGE_MANIFEST, manifest, max_declared_files)?;
     let raw: RawManifest =
         serde_json::from_slice(manifest).map_err(|source| PackError::ManifestInvalid {
             entry: CURSEFORGE_MANIFEST.to_owned(),
@@ -416,6 +423,7 @@ const fn default_required() -> bool {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
+    use crate::archive::ExtractionLimits;
 
     fn manifest(minecraft: &str, files: &str) -> String {
         format!(
@@ -433,7 +441,11 @@ mod tests {
     }
 
     fn parse_manifest(document: &str) -> PackResult<ParsedExport> {
-        parse(document.as_bytes(), Some("report.zip".to_owned()))
+        parse(
+            document.as_bytes(),
+            Some("report.zip".to_owned()),
+            ExtractionLimits::default().max_declared_files,
+        )
     }
 
     const FORGE: &str =
@@ -869,5 +881,102 @@ mod tests {
         let document = manifest(FORGE, "");
         let parsed = parse_manifest(&document).expect("valid");
         assert_eq!(parsed.manifest, document.as_bytes());
+    }
+
+    fn declared(count: u32) -> String {
+        (1..=count)
+            .map(|id| format!(r#"{{"projectID": {id}, "fileID": {id}, "required": true}}"#))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    fn parse_with_ceiling(files: &str, ceiling: u64) -> PackResult<ParsedExport> {
+        parse(
+            manifest(r#"{"version": "1.20.1", "modLoaders": []}"#, files).as_bytes(),
+            None,
+            ceiling,
+        )
+    }
+
+    #[test]
+    fn a_manifest_declaring_more_files_than_the_ceiling_is_refused() {
+        let error = parse_with_ceiling(&declared(3), 2).expect_err("over the ceiling");
+        assert!(
+            matches!(
+                error,
+                PackError::LimitExceeded {
+                    limit: "declared-files",
+                    allowed: 2,
+                    reached: 3
+                }
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_manifest_declaring_exactly_the_ceiling_is_accepted() {
+        let parsed = parse_with_ceiling(&declared(3), 3).expect("at the ceiling");
+        assert_eq!(parsed.pending.len(), 3);
+    }
+
+    #[test]
+    fn the_declaration_past_the_ceiling_is_counted_without_being_read() {
+        let files = format!("{}, \"not a declaration\"", declared(2));
+        let error = parse_with_ceiling(&files, 2).expect_err("over the ceiling");
+        assert!(
+            matches!(error, PackError::LimitExceeded { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_files_member_that_is_not_an_array_is_an_unreadable_manifest() {
+        let document = r#"{"manifestType": "minecraftModpack", "manifestVersion": 1,
+            "minecraft": {"version": "1.20.1"}, "files": null}"#;
+        let error = parse(document.as_bytes(), None, 10).expect_err("null files");
+        assert!(
+            matches!(error, PackError::ManifestInvalid { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_manifest_far_over_the_ceiling_reports_how_many_files_it_declared() {
+        let error = parse_with_ceiling(&declared(7), 2).expect_err("over the ceiling");
+        assert!(
+            matches!(
+                error,
+                PackError::LimitExceeded {
+                    limit: "declared-files",
+                    allowed: 2,
+                    reached: 7
+                }
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_malformed_declaration_is_reported_where_it_sits_in_the_manifest() {
+        let document = "{\n  \"manifestType\": \"minecraftModpack\",\n  \"manifestVersion\": 1,\n  \"minecraft\": {\"version\": \"1.20.1\"},\n  \"files\": [\n    {\"projectID\": 1, \"fileID\": 1},\n    {\"projectID\": \"x\", \"fileID\": 2}\n  ]\n}";
+        let error = parse(document.as_bytes(), None, 10).expect_err("malformed declaration");
+        assert!(
+            matches!(&error, PackError::ManifestInvalid { source, .. } if source.line() == 7),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_manifest_written_as_an_array_is_refused_rather_than_read_by_position() {
+        let document = format!(
+            r#"[1, "minecraftModpack", "Test Pack", null, null, {{"version": "1.20.1"}}, [{}], "overrides"]"#,
+            declared(3)
+        );
+        let error = parse(document.as_bytes(), None, 2).expect_err("array form");
+        assert!(
+            matches!(error, PackError::ManifestInvalid { .. }),
+            "{error:?}"
+        );
     }
 }

@@ -36,6 +36,7 @@ use serde::Deserialize;
 use tracing::{debug, warn};
 
 use crate::archive::PackArchive;
+use crate::declared_files::require_declared_files_within;
 use crate::detect::MODRINTH_INDEX;
 use crate::error::{PackError, PackResult};
 use crate::path::{is_reserved, safe_relative_path};
@@ -86,7 +87,12 @@ pub fn read(archive: &mut PackArchive, allowlist: &DomainAllowlist) -> PackResul
     let manifest = archive.read_manifest(MODRINTH_INDEX)?;
     let archive_name = archive.file_name().map(ToOwned::to_owned);
     let layers = present_layers(archive);
-    let mut parsed = parse(&manifest, allowlist, archive_name)?;
+    let mut parsed = parse(
+        &manifest,
+        allowlist,
+        archive_name,
+        archive.limits().max_declared_files,
+    )?;
     parsed.recipe.override_layers = layers;
     Ok(parsed)
 }
@@ -115,12 +121,15 @@ fn present_layers(archive: &PackArchive) -> Vec<OverrideLayer> {
 /// Parses the index document itself.
 ///
 /// Split out from [`read`] so manifest validation is testable against a fixture
-/// without building an archive around it.
+/// without building an archive around it. A manifest declaring more than
+/// `max_declared_files` files is refused.
 pub fn parse(
     manifest: &[u8],
     allowlist: &DomainAllowlist,
     archive_name: Option<String>,
+    max_declared_files: u64,
 ) -> PackResult<ParsedPack> {
+    require_declared_files_within(MODRINTH_INDEX, manifest, max_declared_files)?;
     let index: RawIndex =
         serde_json::from_slice(manifest).map_err(|source| PackError::ManifestInvalid {
             entry: MODRINTH_INDEX.to_owned(),
@@ -519,6 +528,7 @@ impl From<RawRequirement> for SideRequirement {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
+    use crate::archive::ExtractionLimits;
 
     fn allowlist() -> DomainAllowlist {
         DomainAllowlist::modrinth_pack_defaults()
@@ -555,6 +565,7 @@ mod tests {
             document.as_bytes(),
             &allowlist(),
             Some("test.mrpack".to_owned()),
+            ExtractionLimits::default().max_declared_files,
         )
     }
 
@@ -1015,5 +1026,109 @@ mod tests {
             error,
             PackError::ManifestInvalid { ref entry,.. } if entry == "modrinth.index.json"
         ));
+    }
+
+    fn declared(count: u32) -> String {
+        (1..=count)
+            .map(|id| {
+                file_entry(
+                    &format!("mods/{id}.jar"),
+                    r#"{"client":"required","server":"required"}"#,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    fn parse_with_ceiling(files: &str, ceiling: u64) -> PackResult<ParsedPack> {
+        parse(
+            index(r#"{"minecraft": "1.20.1", "neoforge": "47.1.106"}"#, files).as_bytes(),
+            &allowlist(),
+            None,
+            ceiling,
+        )
+    }
+
+    #[test]
+    fn an_index_declaring_more_files_than_the_ceiling_is_refused() {
+        let error = parse_with_ceiling(&declared(3), 2).expect_err("over the ceiling");
+        assert!(
+            matches!(
+                error,
+                PackError::LimitExceeded {
+                    limit: "declared-files",
+                    allowed: 2,
+                    reached: 3
+                }
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn an_index_declaring_exactly_the_ceiling_is_accepted() {
+        let parsed = parse_with_ceiling(&declared(3), 3).expect("at the ceiling");
+        assert_eq!(parsed.recipe.files.len(), 3);
+    }
+
+    #[test]
+    fn the_declaration_past_the_ceiling_is_counted_without_being_read() {
+        let files = format!("{}, \"not a declaration\"", declared(2));
+        let error = parse_with_ceiling(&files, 2).expect_err("over the ceiling");
+        assert!(
+            matches!(error, PackError::LimitExceeded { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_files_member_that_is_not_an_array_is_an_unreadable_index() {
+        let document = r#"{"formatVersion": 1, "game": "minecraft", "versionId": "1",
+            "name": "Test Pack", "files": null,
+            "dependencies": {"minecraft": "1.20.1", "neoforge": "47.1.106"}}"#;
+        let error = parse(document.as_bytes(), &allowlist(), None, 10).expect_err("null files");
+        assert!(
+            matches!(error, PackError::ManifestInvalid { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn an_index_far_over_the_ceiling_reports_how_many_files_it_declared() {
+        let error = parse_with_ceiling(&declared(7), 2).expect_err("over the ceiling");
+        assert!(
+            matches!(
+                error,
+                PackError::LimitExceeded {
+                    limit: "declared-files",
+                    allowed: 2,
+                    reached: 7
+                }
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_malformed_declaration_is_reported_where_it_sits_in_the_index() {
+        let document = "{\n  \"formatVersion\": 1,\n  \"game\": \"minecraft\",\n  \"versionId\": \"1\",\n  \"name\": \"Test Pack\",\n  \"dependencies\": {\"minecraft\": \"1.20.1\", \"neoforge\": \"47.1.106\"},\n  \"files\": [\n    {\"path\": 3}\n  ]\n}";
+        let error = parse(document.as_bytes(), &allowlist(), None, 10).expect_err("malformed");
+        assert!(
+            matches!(&error, PackError::ManifestInvalid { source, .. } if source.line() == 8),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn an_index_written_as_an_array_is_refused_rather_than_read_by_position() {
+        let document = format!(
+            r#"[1, "minecraft", "1", "Test Pack", null, [{}], {{"minecraft": "1.20.1", "neoforge": "47.1.106"}}]"#,
+            declared(3)
+        );
+        let error = parse(document.as_bytes(), &allowlist(), None, 2).expect_err("array form");
+        assert!(
+            matches!(error, PackError::ManifestInvalid { .. }),
+            "{error:?}"
+        );
     }
 }

@@ -65,6 +65,10 @@ pub struct ExtractionLimits {
     /// The largest manifest read into memory. A large real-world index is a
     /// few megabytes.
     pub max_manifest_bytes: u64,
+    /// The most artifacts one manifest may declare. Independent of
+    /// `max_entries`: a compact manifest names far more files than its
+    /// archive has entries, and each one costs a provider request.
+    pub max_declared_files: u64,
 }
 
 impl Default for ExtractionLimits {
@@ -74,6 +78,7 @@ impl Default for ExtractionLimits {
             max_total_bytes: 8 * 1024 * 1024 * 1024,
             max_entry_bytes: 2 * 1024 * 1024 * 1024,
             max_manifest_bytes: 64 * 1024 * 1024,
+            max_declared_files: 10_000,
         }
     }
 }
@@ -305,6 +310,12 @@ impl PackArchive {
             spent_bytes: 0,
             spent_entries: 0,
         })
+    }
+
+    /// The limits this archive was opened with.
+    #[must_use]
+    pub(crate) const fn limits(&self) -> &ExtractionLimits {
+        &self.limits
     }
 
     /// The archive's own path on disk.

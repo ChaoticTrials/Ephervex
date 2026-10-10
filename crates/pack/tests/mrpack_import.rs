@@ -585,6 +585,42 @@ async fn every_refusal_fixture_is_refused_by_the_rule_it_was_written_for() {
     }
 }
 
+#[test]
+fn a_compact_index_declaring_more_files_than_the_default_ceiling_is_refused_at_analysis() {
+    let ceiling = ExtractionLimits::default().max_declared_files;
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let archive = workspace.path().join("declares-everything.mrpack");
+    let hash = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
+    let files = (1..=ceiling + 5)
+        .map(|id| {
+            format!(
+                r#"{{"path":"mods/{id}.jar","hashes":{{"sha1":"{hash}"}},"downloads":["https://cdn.modrinth.com/data/AABB/versions/{id}/{id}.jar"],"fileSize":1}}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let index = format!(
+        r#"{{"formatVersion":1,"game":"minecraft","versionId":"1","name":"Wide",
+            "files":[{files}],"dependencies":{{"minecraft":"1.20.1","neoforge":"47.1.106"}}}}"#
+    );
+    build_archive(&archive, index.as_bytes(), &[]);
+
+    let error = analyze(&archive, &PackPolicy::modrinth())
+        .map(|_| ())
+        .expect_err("must refuse");
+    assert!(
+        matches!(
+            error,
+            PackError::LimitExceeded {
+                limit: "declared-files",
+                reached,
+                ..
+            } if reached == ceiling + 5
+        ),
+        "{error:?}"
+    );
+}
+
 #[tokio::test]
 async fn a_pack_whose_archive_carries_a_traversing_override_is_refused_before_it_writes() {
     // The index is clean and the *archive* is hostile, which is the other half

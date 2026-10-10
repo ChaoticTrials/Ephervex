@@ -26,10 +26,11 @@ use ephervex_model::{
     Hash, HashAlgorithm, ImportSourceKind, LoaderKind, LoaderSelection, ModOrigin, ModProvider,
 };
 use ephervex_pack::{
-    ArtifactFetch, MaterializeRequest, OpenArtifacts, OptionalSelection, OverrideScope, PackError,
-    PackFileRecipe, PackFormat, PackPolicy, PackRecipe, PackSide, ProviderFileIdentity,
-    ProviderRecipeMetadata, RECIPE_VERSION, ServerMaterializeRequest, SideRequirement, SourceStore,
-    UnknownServerFiles, analyze, materialize, materialize_server_recipe,
+    ArtifactFetch, ExtractionLimits, MaterializeRequest, OpenArtifacts, OptionalSelection,
+    OverrideScope, PackError, PackFileRecipe, PackFormat, PackPolicy, PackRecipe, PackSide,
+    ProviderFileIdentity, ProviderRecipeMetadata, RECIPE_VERSION, ServerMaterializeRequest,
+    SideRequirement, SourceStore, UnknownServerFiles, analyze, materialize,
+    materialize_server_recipe,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -246,6 +247,36 @@ async fn an_unrelated_zip_carrying_a_manifest_json_is_not_read_as_a_curseforge_p
     let error = analyze(&archive, &PackPolicy::curseforge()).expect_err("must refuse");
     assert!(
         matches!(error, PackError::ManifestInvalid { ref entry, .. } if entry == "manifest.json"),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn a_compact_manifest_declaring_more_files_than_the_default_ceiling_is_refused_at_analysis() {
+    let ceiling = ExtractionLimits::default().max_declared_files;
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let archive = workspace.path().join("declares-everything.zip");
+    let files = (1..=ceiling + 5)
+        .map(|id| format!(r#"{{"projectID":{id},"fileID":{id},"required":true}}"#))
+        .collect::<Vec<_>>()
+        .join(",");
+    let manifest = format!(
+        r#"{{"manifestType":"minecraftModpack","manifestVersion":1,"name":"Wide",
+            "minecraft":{{"version":"1.20.1","modLoaders":[{{"id":"forge-47.1.0","primary":true}}]}},
+            "files":[{files}],"overrides":"overrides"}}"#
+    );
+    zip_file(&archive, &[("manifest.json", manifest.as_bytes())]);
+
+    let error = analyze(&archive, &PackPolicy::curseforge()).expect_err("must refuse");
+    assert!(
+        matches!(
+            error,
+            PackError::LimitExceeded {
+                limit: "declared-files",
+                reached,
+                ..
+            } if reached == ceiling + 5
+        ),
         "{error:?}"
     );
 }

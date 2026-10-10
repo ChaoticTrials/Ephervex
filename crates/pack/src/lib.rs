@@ -53,6 +53,7 @@
 pub mod archive;
 pub mod credentials;
 pub mod curseforge;
+mod declared_files;
 pub mod detect;
 pub mod error;
 pub mod import;
