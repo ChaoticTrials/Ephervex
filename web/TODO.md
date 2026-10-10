@@ -147,14 +147,14 @@ interacts only to open a menu or dropdown):
 Place existing captures beside the steps they illustrate before adding new
 fixtures. Keep the images focused on the action or decision described there.
 
-- [ ] Getting Started and Accounts: use `accounts-settings/offline-profile` for
+- [x] Getting Started and Accounts: use `accounts-settings/offline-profile` for
       adding an offline account, `accounts-device-code` for Microsoft sign-in,
       and `instance-launching` or `running-page` for the first launch.
-- [ ] Import Modpacks: use `file-drop-overlay` for dropping an archive,
+- [x] Import Modpacks: use `file-drop-overlay` for dropping an archive,
       `import-modpack-running` and `activity-import-in-progress` for progress.
-- [ ] Diagnostics and Troubleshooting: use `client-run-failure-notice` and
+- [x] Diagnostics and Troubleshooting: use `client-run-failure-notice` and
       `server-crash-notice` to show the routes into logs and diagnosis.
-- [ ] Files and Privacy: use `settings-disk-usage` beside the storage guidance.
+- [x] Files and Privacy: use `settings-disk-usage` beside the storage guidance.
 
 Add focused crops and numbered callouts where full-window captures make
 controls too small. Keep the source captures clean and describe every marker

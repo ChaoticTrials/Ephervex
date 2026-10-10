@@ -16,6 +16,8 @@ are not supported. The archive is identified by its contents, so changing its
 file extension does not change its format. Release builds include the
 CurseForge API access needed for imports; no key setup is required.
 
+<ThemeScreenshot state="import-modpack-ready" alt="Desktop import review showing the pack, Minecraft release, loader, optional files, and storage choices" />
+
 :::note
 Some CurseForge files still need a manual download when their authors disable
 third-party downloads. Ephervex guides you through those files during import.
@@ -32,15 +34,23 @@ unless you choose persistent storage.
 <TabItem value="gui" label="Desktop" default>
 
 On **Instances**, select **Import Modpack**. Choose an archive with **Browse**,
-or drop it onto the Instances page. Review the detected pack, Minecraft
-release, loader, and file counts. Turn on any optional files you want. You can
-change the instance name, select **Store persistently**, and optionally create
-a linked server from the same pack. Select **Import Modpack** to begin.
+or drop it onto the Instances page.
 
-<ThemeScreenshot state="import-modpack-ready" alt="Import dialog showing the detected pack and optional file choices" />
+<ThemeScreenshot state="file-drop-overlay" alt="Instances page showing the Drop to import target while an archive is dragged over Ephervex" />
 
-The new instance appears on **Instances** while the import runs. **Activity**
-shows progress and the result.
+Review the detected pack, Minecraft release, loader, and file counts. Turn on
+any optional files you want. You can change the instance name, select **Store
+persistently**, and optionally create a linked server from the same pack.
+Select **Import Modpack** to begin.
+
+The new instance appears on **Instances** with a progress bar while the import
+runs.
+
+<ThemeScreenshot state="import-modpack-running" alt="Instances page showing a modpack import in progress with the download stage and file count" />
+
+Open **Activity** to see current work and the result.
+
+<ThemeScreenshot state="activity-import-in-progress" alt="Activity page with the modpack import running, a queued operation, and recent results" />
 
 </TabItem>
 <TabItem value="cli" label="CLI">
