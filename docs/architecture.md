@@ -1462,6 +1462,12 @@ provider IDs remain exact technical values.
 CLI JSON output is written to stdout. Logs and human progress are written to
 stderr so machine-readable output remains valid.
 
+JSON strings are UTF-8 and a Unix path is any byte string. A path in CLI JSON
+output is written as its UTF-8 text, with each byte that is not valid UTF-8
+replaced by U+FFFD. The text names the entry for a person or a script, but a
+path that contained such bytes cannot be reopened from it. Human-readable
+output is unaffected.
+
 ## Third-party licenses
 
 What Ephervex depends on, and under what terms, is generated from the real

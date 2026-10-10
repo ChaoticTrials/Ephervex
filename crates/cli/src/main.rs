@@ -2278,14 +2278,14 @@ fn run_instance_persist(
     if json {
         print_json(&serde_json::json!({
             "instance": outcome.instance.id.to_string(),
-            "root": outcome.instance.root.to_string_lossy(),
+            "root": json_path(&outcome.instance.root),
             "storage": outcome.instance.storage.to_string(),
             "servers": outcome
                 .servers
                 .iter()
                 .map(|server| serde_json::json!({
                     "id": server.id.to_string(),
-                    "root": server.root.to_string_lossy(),
+                    "root": json_path(&server.root),
                 }))
                 .collect::<Vec<_>>(),
             "warnings": outcome
@@ -2582,7 +2582,7 @@ fn run_logs_command(app: &App, command: &LogsCommand, json: bool) -> anyhow::Res
             if *path {
                 let resolved = app.diagnostic_path(scope, kind, name)?;
                 if json {
-                    print_json(&serde_json::json!({ "name": name, "path": resolved }));
+                    print_json(&serde_json::json!({ "name": name, "path": json_path(&resolved) }));
                 } else {
                     outln!("{}", resolved.display());
                 }
@@ -2593,7 +2593,7 @@ fn run_logs_command(app: &App, command: &LogsCommand, json: bool) -> anyhow::Res
             if json {
                 print_json(&serde_json::json!({
                     "name": name,
-                    "path": view.path,
+                    "path": json_path(&view.path),
                     "anchor": view.anchor.as_str(),
                     "file_bytes": view.file_bytes,
                     "returned_bytes": view.returned_bytes,
@@ -2691,7 +2691,7 @@ fn print_diagnostic_entries(entries: &[DiagnosticEntry], json: bool) {
 fn diagnostic_entry_json(entry: &DiagnosticEntry) -> serde_json::Value {
     serde_json::json!({
         "name": entry.name,
-        "path": entry.path,
+        "path": json_path(&entry.path),
         "kind": entry.kind.as_str(),
         "size_bytes": entry.size_bytes,
         "modified": entry.modified,
@@ -2708,7 +2708,7 @@ fn diagnostic_entry_json(entry: &DiagnosticEntry) -> serde_json::Value {
 fn print_diagnostic_search(found: &DiagnosticSearch, json: bool) -> anyhow::Result<()> {
     if json {
         print_json(&serde_json::json!({
-            "path": found.view.path,
+            "path": json_path(&found.view.path),
             "lines_searched": found.outcome.lines_searched,
             "truncated": found.outcome.truncated,
             "matches": found.outcome.matches.iter().map(|found| serde_json::json!({
@@ -2928,7 +2928,7 @@ fn run_instance_root(
     let overridden = app.paths().persistent_instance_root_is_overridden();
     if json {
         print_json(&serde_json::json!({
-            "persistent_instance_root": root,
+            "persistent_instance_root": json_path(&root),
             "overridden": overridden,
         }));
     } else {
@@ -3127,7 +3127,7 @@ fn report_connected_launch(outcome: &LaunchAndConnectOutcome, json: bool) {
             "connection_target": outcome.target.to_string(),
             "server_started": outcome.server_started,
             "minecraft_version": outcome.launch.minecraft_version,
-            "java": outcome.launch.java.runtime.executable,
+            "java": json_path(&outcome.launch.java.runtime.executable),
             "account": outcome.launch.account,
             "authenticated": outcome.launch.authenticated,
             "command": outcome.launch.command.redacted_arguments(),
@@ -3285,11 +3285,11 @@ fn report_launch(outcome: &LaunchOutcome, json: bool) {
             "operation": outcome.operation.to_string(),
             "instance": outcome.instance.to_string(),
             "minecraft_version": outcome.minecraft_version,
-            "java": outcome.java.runtime.executable,
+            "java": json_path(&outcome.java.runtime.executable),
             "account": outcome.account,
             "authenticated": outcome.authenticated,
             "classpath_entries": outcome.installation.plan.classpath().len(),
-            "natives_directory": outcome.installation.plan.natives_dir,
+            "natives_directory": json_path(&outcome.installation.plan.natives_dir),
             "assets": outcome.installation.assets,
             // Never the real arguments: one of them is an access token.
             "command": outcome.command.redacted_arguments(),
@@ -3519,17 +3519,17 @@ fn show_license_listing(inventory: &ephervex_core::LicenseInventory, all: bool, 
 fn show_paths(paths: &Paths, json: bool) {
     if json {
         let value = serde_json::json!({
-            "config": paths.config_dir(),
-            "config_file": paths.config_file(),
-            "data": paths.data_dir(),
-            "cache": paths.cache_dir(),
-            "state": paths.state_dir(),
-            "database": paths.database_file(),
-            "logs": paths.logs_dir(),
-            "temp": paths.temp_dir(),
-            "temporary_instances": paths.temporary_instances_dir(),
-            "persistent_instances": paths.persistent_instances_dir(),
-            "persistent_servers": paths.persistent_servers_dir(),
+            "config": json_path(paths.config_dir()),
+            "config_file": json_path(&paths.config_file()),
+            "data": json_path(paths.data_dir()),
+            "cache": json_path(paths.cache_dir()),
+            "state": json_path(paths.state_dir()),
+            "database": json_path(&paths.database_file()),
+            "logs": json_path(&paths.logs_dir()),
+            "temp": json_path(paths.temp_dir()),
+            "temporary_instances": json_path(&paths.temporary_instances_dir()),
+            "persistent_instances": json_path(&paths.persistent_instances_dir()),
+            "persistent_servers": json_path(&paths.persistent_servers_dir()),
             "persistent_instance_root_overridden": paths.persistent_instance_root_is_overridden(),
         });
         print_json(&value);
@@ -3585,7 +3585,7 @@ fn run_logs_bundle(
     let report = app.export_diagnostic_bundle(scope, &selection, &destination)?;
     if json {
         print_json(&serde_json::json!({
-            "path": report.path,
+            "path": json_path(&report.path),
             "bytes": report.bytes,
             "included": report.included,
             "omitted": report.omitted,
@@ -3867,7 +3867,7 @@ fn health_json(health: &InstallationHealth) -> serde_json::Value {
                 };
                 serde_json::json!({
                     "purpose": directory.purpose,
-                    "path": directory.path,
+                    "path": json_path(&directory.path),
                     "state": state,
                     "detail": detail,
                 })
@@ -3877,16 +3877,16 @@ fn health_json(health: &InstallationHealth) -> serde_json::Value {
             None => serde_json::Value::Null,
             Some(ConfigurationHealth::Absent { path }) => serde_json::json!({
                 "status": "absent",
-                "path": path,
+                "path": json_path(path),
             }),
             Some(ConfigurationHealth::Loaded { path, schema_version }) => serde_json::json!({
                 "status": "loaded",
-                "path": path,
+                "path": json_path(path),
                 "schema_version": schema_version,
             }),
             Some(ConfigurationHealth::Unusable { path, message_id, detail }) => serde_json::json!({
                 "status": "unusable",
-                "path": path,
+                "path": json_path(path),
                 "message_id": message_id,
                 "detail": detail,
             }),
@@ -3957,7 +3957,7 @@ fn bundled_document_json(document: &BundledDocumentHealth) -> serde_json::Value 
 fn show_config(config: &Config, paths: &Paths, json: bool) -> anyhow::Result<()> {
     if json {
         print_json(&serde_json::json!({
-            "path": paths.config_file(),
+            "path": json_path(&paths.config_file()),
             "exists": paths.config_file().is_file(),
             "schema_version": config.schema_version,
             "language": config.language,
@@ -4371,7 +4371,7 @@ fn print_deleted_mods(deleted: &[PathBuf], json: bool) {
     if json {
         let rows: Vec<serde_json::Value> = deleted
             .iter()
-            .map(|path| serde_json::json!({ "path": path, "deleted": true }))
+            .map(|path| serde_json::json!({ "path": json_path(path), "deleted": true }))
             .collect();
         print_json(&serde_json::Value::Array(rows));
         return;
@@ -4547,7 +4547,7 @@ fn print_dependency_impact(impact: &DependentMods, json: bool) {
     if json {
         print_json(&serde_json::json!({
             "mod": impact.target.name,
-            "path": impact.target.logical_path,
+            "path": json_path(&impact.target.logical_path),
             "breaks": impacted_json(&impact.breaks),
             "degrades": impacted_json(&impact.degrades),
             "unknown": impacted_json(&impact.unknown),
@@ -4575,7 +4575,7 @@ fn print_required_mods(needs: &RequiredMods, json: bool) {
     if json {
         print_json(&serde_json::json!({
             "mod": needs.target.name,
-            "path": needs.target.logical_path,
+            "path": json_path(&needs.target.logical_path),
             "disabled": impacted_json(&needs.disabled),
             "absent": impacted_json(&needs.absent),
             "incompatible": impacted_json(&needs.incompatible),
@@ -4637,7 +4637,7 @@ fn print_mod_relations(relations: &[ModRelations], json: bool) {
             .map(|entry| {
                 serde_json::json!({
                     "mod": entry.target.name,
-                    "path": entry.target.logical_path,
+                    "path": json_path(&entry.target.logical_path),
                     "presence": entry.target.presence.as_str(),
                     "knowledge": entry.target.knowledge.as_str(),
                     "requires": related_json(&entry.requires),
@@ -4696,7 +4696,7 @@ fn related_json(relations: &[RelatedMod]) -> Vec<serde_json::Value> {
             serde_json::json!({
                 "kind": related.kind.as_str(),
                 "name": related.name,
-                "path": related.logical_path,
+                "path": related.logical_path.as_deref().map(json_path),
                 "presence": related.presence.map(ModPresence::as_str),
                 "project_id": related.project_id,
             })
@@ -4709,7 +4709,7 @@ fn impacted_json(mods: &[ImpactedMod]) -> Vec<serde_json::Value> {
         .map(|entry| {
             serde_json::json!({
                 "name": entry.name,
-                "path": entry.logical_path,
+                "path": json_path(&entry.logical_path),
                 "distance": entry.distance,
                 "knowledge": entry.knowledge.as_str(),
             })
@@ -4724,7 +4724,7 @@ fn print_mod_states(applied: &[(PathBuf, ModPresence)], json: bool) {
             .iter()
             .map(|(path, presence)| {
                 serde_json::json!({
-                    "path": path,
+                    "path": json_path(path),
                     "presence": presence.as_str(),
                     "enabled": presence.is_enabled(),
                 })
@@ -4844,10 +4844,10 @@ async fn run_mod_repair(app: &App, host: InstalledHost, json: bool) -> anyhow::R
     if json {
         print_json(&serde_json::json!({
             "complete": report.is_complete(),
-            "repaired": report.repaired,
-            "failed": report.failed,
-            "skipped": report.skipped,
-            "unrepairable": report.unrepairable,
+            "repaired": json_paths(&report.repaired),
+            "failed": json_paths(&report.failed),
+            "skipped": json_paths(&report.skipped),
+            "unrepairable": json_paths(&report.unrepairable),
         }));
     } else {
         for path in &report.repaired {
@@ -4886,7 +4886,7 @@ fn shared_artifacts_json(report: &SharedArtifactReport) -> serde_json::Value {
             .files
             .iter()
             .map(|file| serde_json::json!({
-                "artifact": file.logical_path,
+                "artifact": json_path(&file.logical_path),
                 "integrity": file.integrity.as_str(),
             }))
             .collect::<Vec<_>>(),
@@ -4935,7 +4935,7 @@ fn print_verification(
                 .files
                 .iter()
                 .map(|file| serde_json::json!({
-                    "path": file.logical_path,
+                    "path": json_path(&file.logical_path),
                     "integrity": file.integrity.as_str(),
                     "repairable": file.integrity.is_repairable() && file.has_source,
                 }))
@@ -5334,11 +5334,11 @@ fn install_path_line(message_id: &str, path: &Path) -> String {
 fn print_installed_mods(installed: &InstalledMods, json: bool) {
     if json {
         print_json(&serde_json::json!({
-            "installed": installed.installation.installed,
-            "repaired": installed.installation.repaired,
-            "already_present": installed.installation.already_present,
-            "recorded": installed.installation.recorded,
-            "modified": installed.installation.modified,
+            "installed": json_paths(&installed.installation.installed),
+            "repaired": json_paths(&installed.installation.repaired),
+            "already_present": json_paths(&installed.installation.already_present),
+            "recorded": json_paths(&installed.installation.recorded),
+            "modified": json_paths(&installed.installation.modified),
             "reused_from_cache": installed.installation.reused_from_cache,
             "bytes": installed.installation.bytes,
             "plan": {
@@ -5369,7 +5369,7 @@ fn print_host_mods(snapshot: &ManagedModSnapshot, json: bool) {
             "host": snapshot.host.id(),
             "host_kind": snapshot.host.kind(),
             "mods": snapshot.mods.iter().map(|entry| serde_json::json!({
-                "path": entry.logical_path,
+                "path": json_path(&entry.logical_path),
                 "file_name": entry.file_name,
                 "name": entry.display_name(),
                 "version": entry.installed_version(),
@@ -5428,7 +5428,7 @@ fn print_crash_review(review: Option<&CrashReview>, json: bool) {
                 "mod_id": entry.suspect.mod_id,
                 "name": entry.suspect.label(),
                 "jar": entry.suspect.jar,
-                "path": entry.logical_path,
+                "path": entry.logical_path.as_deref().map(json_path),
                 "presence": entry.presence.map(ModPresence::as_str),
                 "reason": entry.suspect.reason.as_str(),
                 "triggered_by": match &entry.suspect.reason {
@@ -6079,7 +6079,7 @@ fn show_runtimes(inventory: &RuntimeInventory, json: bool) {
         .failures
         .iter()
         .map(|failure| serde_json::json!({
-                            "path": failure.origin.path,
+                            "path": json_path(&failure.origin.path),
                             "source": failure.origin.kind.as_str(),
                             "error": failure.error.to_string(),
                         }))
@@ -6170,7 +6170,7 @@ fn show_java_plan(plan: &JavaPlan, json: bool) {
         .rejected
         .iter()
         .map(|rejected| serde_json::json!({
-                            "path": rejected.executable,
+                            "path": json_path(&rejected.executable),
                             "version": rejected.version.to_string(),
                             "rule": rejected.rejection.rule,
                             "reason": rejected.rejection.reason.to_string(),
@@ -6251,7 +6251,7 @@ fn show_managed_install(installed: &ManagedInstallation, json: bool) {
             "release": installed.release.release_name,
             "vendor": installed.release.vendor,
             "architecture": installed.release.architecture.as_str(),
-            "directory": installed.directory,
+            "directory": json_path(&installed.directory),
             "newly_installed": installed.newly_installed,
             "runtime": runtime_json(&installed.runtime),
         }));
@@ -6272,13 +6272,13 @@ fn show_managed_install(installed: &ManagedInstallation, json: bool) {
 
 fn runtime_json(runtime: &JavaRuntime) -> serde_json::Value {
     serde_json::json!({
-            "path": runtime.executable,
+            "path": json_path(&runtime.executable),
             "major": runtime.version.major,
             "version": runtime.version_string,
             "runtime_version": runtime.runtime_version,
             "vendor": runtime.vendor,
             "arch": runtime.arch,
-            "home": runtime.home,
+            "home": runtime.home.as_deref().map(json_path),
             "managed": runtime.is_managed(),
             "source": runtime.primary_source().as_str(),
             "origins": runtime
@@ -6286,7 +6286,7 @@ fn runtime_json(runtime: &JavaRuntime) -> serde_json::Value {
     .iter()
     .map(|origin| serde_json::json!({
                     "source": origin.kind.as_str(),
-                    "path": origin.path,
+                    "path": json_path(&origin.path),
                 }))
     .collect::<Vec<_>>(),
         })
@@ -6296,7 +6296,7 @@ fn java_choice_json(choice: &JavaPathChoice) -> serde_json::Value {
     match choice {
         JavaPathChoice::Pinned { path, source } => serde_json::json!({
             "kind": "pinned",
-            "path": path,
+            "path": json_path(path),
             "pinned_by": source.as_str(),
         }),
         JavaPathChoice::Automatic => serde_json::json!({"kind": "automatic"}),
@@ -6773,7 +6773,7 @@ fn print_url_handler(status: &ephervex_core::UrlHandlerStatus, json: bool) {
     if json {
         print_json(&serde_json::json!({
             "registered": status.registered,
-            "entry": status.entry.to_string_lossy(),
+            "entry": json_path(&status.entry),
             "command": status.command,
             "command_exists": status.command_exists(),
             "scheme": ephervex_core::scheme_mime_type(),
@@ -7071,10 +7071,10 @@ fn print_imported(app: &App, imported: &ImportedPack, json: bool) -> anyhow::Res
         let mut value = instance_json(app, &imported.record)?;
         value["preferences"] = preferences_applied_json(imported.preferences.as_ref());
         value["pack"] = analysis_json(&imported.analysis);
-        value["installed"] = serde_json::json!(imported.materialized.files.installed);
-        value["preserved"] = serde_json::json!(imported.materialized.files.skipped);
+        value["installed"] = json_paths(&imported.materialized.files.installed);
+        value["preserved"] = json_paths(&imported.materialized.files.skipped);
         value["recipe"] = serde_json::json!({
-                    "path": imported.materialized.recipe_path,
+                    "path": json_path(&imported.materialized.recipe_path),
                     "files": imported.recipe().files.len(),
                     "layers": imported
         .recipe()
@@ -7133,7 +7133,7 @@ fn print_recipe(recipe: &PackRecipe, side: PackSide, selection: &OptionalSelecti
         .files
         .iter()
         .map(|file| serde_json::json!({
-                            "path": file.logical_path,
+                            "path": json_path(&file.logical_path),
                             "client": file.client.as_str(),
                             "server": file.server.as_str(),
                             "selected": file.selected,
@@ -7204,7 +7204,7 @@ fn analysis_json(analysis: &PackAnalysis) -> serde_json::Value {
     .optional_components(PackSide::Client)
     .iter()
     .map(|component| serde_json::json!({
-                    "path": component.logical_path,
+                    "path": json_path(&component.logical_path),
                     "size": component.size,
                     "selected": component.starts_selected(),
                     "server": component.opposite_side.as_str(),
@@ -7460,7 +7460,7 @@ fn print_instance_runtime(record: &ClientRecord, json: bool) {
 fn print_folder(path: Option<&Path>, folder: &str, json: bool) -> anyhow::Result<()> {
     if let Some(path) = path {
         if json {
-            print_json(&serde_json::json!({ "folder": folder, "path": path }));
+            print_json(&serde_json::json!({ "folder": folder, "path": json_path(path) }));
         } else {
             outln!("{}", path.display());
         }
@@ -7969,7 +7969,7 @@ fn instance_json(app: &App, record: &ClientRecord) -> anyhow::Result<serde_json:
                 "kind": record.loader.kind.to_string(),
                 "version": record.loader.version,
             },
-            "root": record.root,
+            "root": json_path(&record.root),
             "source": record.source,
             "attention": record.attention,
             "needs_attention": record.needs_attention(),
@@ -8000,12 +8000,12 @@ fn server_json(record: &ServerRecord) -> serde_json::Value {
             "kind": record.loader.kind.to_string(),
             "version": record.loader.version,
         },
-        "root": record.root,
+        "root": json_path(&record.root),
         "linked_client_id": record.linked_client_id.map(|id| id.to_string()),
         "network": record.network,
         "installation": record.installation,
         "source": record.source,
-        "java_override": record.java_override,
+        "java_override": record.java_override.as_ref().map(|java| serde_json::json!({ "path": json_path(&java.path) })),
         "jvm_override": record.jvm_override,
         "attention": record.attention,
         "created_at": record.created_at,
@@ -8079,7 +8079,7 @@ fn conflicts_json<'a>(
 ) -> serde_json::Value {
     serde_json::Value::Array(
         conflicts
-            .map(|(id, roots)| serde_json::json!({ "id": id, "roots": roots }))
+            .map(|(id, roots)| serde_json::json!({ "id": id, "roots": json_paths(roots) }))
             .collect(),
     )
 }
@@ -8092,10 +8092,29 @@ fn reconciled_json(records: &[ephervex_core::ReconciledRecord]) -> serde_json::V
                 serde_json::json!({
                     "id": entry.reference.to_string(),
                     "name": entry.name,
-                    "root": entry.root,
+                    "root": json_path(&entry.root),
                     "storage": entry.storage.to_string(),
                 })
             })
+            .collect(),
+    )
+}
+
+/// A path as a JSON string.
+///
+/// JSON strings are UTF-8 and a path need not be, so bytes that are not valid
+/// UTF-8 are written as U+FFFD. The text names the entry for a person or a
+/// script but is not guaranteed to reopen it.
+fn json_path(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+/// A list of paths as JSON strings, each encoded by [`json_path`].
+fn json_paths<P: AsRef<Path>>(paths: &[P]) -> serde_json::Value {
+    serde_json::Value::Array(
+        paths
+            .iter()
+            .map(|path| serde_json::Value::String(json_path(path.as_ref())))
             .collect(),
     )
 }
