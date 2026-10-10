@@ -185,6 +185,10 @@ pub struct VersionMetadata {
     pub libraries: Vec<Library>,
     pub arguments: Arguments,
     pub logging: Option<LoggingConfig>,
+    /// Whether the document carries a `logging` object at all, even one with no
+    /// client entry. Forge declares `"logging": {}` to say it wants no vanilla
+    /// client configuration, which is different from leaving the key out.
+    declares_logging: bool,
     /// The parent this document extends, for loader JSONs. Always `None` for
     /// vanilla and for metadata returned by [`Self::inherit`].
     pub inherits_from: Option<String>,
@@ -314,7 +318,14 @@ impl VersionMetadata {
             downloads,
             libraries,
             arguments: Arguments::inherit(&parent.arguments, &child.arguments),
-            logging: child.logging.clone().or_else(|| parent.logging.clone()),
+            // Only a missing `logging` key inherits. A declared object with no
+            // client entry drops the parent's configuration.
+            logging: if child.declares_logging {
+                child.logging.clone()
+            } else {
+                parent.logging.clone()
+            },
+            declares_logging: child.declares_logging || parent.declares_logging,
             inherits_from: None,
         })
     }
@@ -458,6 +469,7 @@ impl RawVersion {
             None => None,
         };
 
+        let declares_logging = self.logging.is_some();
         let logging = match self.logging.and_then(|logging| logging.client) {
             Some(entry) => Some(LoggingConfig {
                 argument: entry.argument,
@@ -534,6 +546,7 @@ impl RawVersion {
             libraries,
             arguments,
             logging,
+            declares_logging,
             inherits_from: self.inherits_from,
         })
     }
@@ -606,6 +619,40 @@ mod tests {
             assert!(!version.libraries.is_empty(), "{name}");
             assert!(version.logging.is_some(), "{name}");
         }
+    }
+
+    #[test]
+    fn only_a_missing_logging_key_inherits_the_parents_client_configuration() {
+        let parent = parse("1.20.1.json");
+        let parent_logging = parent.logging.clone().expect("vanilla logging");
+        let child_with = |logging: &str| {
+            child(&format!(
+                r#"{{
+                    "id":"1.20.1-loader-test","inheritsFrom":"1.20.1","type":"release",
+                    "releaseTime":"2026-08-08T00:00:00Z","time":"2026-08-08T00:00:00Z",
+                    "mainClass":"example.Loader"{logging}
+                }}"#
+            ))
+        };
+        let inherited = |logging: &str| {
+            VersionMetadata::inherit(&parent, &child_with(logging))
+                .expect("merge")
+                .logging
+        };
+
+        assert_eq!(inherited(""), Some(parent_logging.clone()));
+        assert_eq!(inherited(r#","logging":null"#), Some(parent_logging));
+        assert_eq!(inherited(r#","logging":{}"#), None);
+        assert_eq!(
+            inherited(r#","logging":{"server":{}}"#),
+            None,
+            "a declared object without a client entry still overrides the parent"
+        );
+
+        let own = format!(
+            r#","logging":{{"client":{{"argument":"-Dlog4j.configurationFile=${{path}}","type":"log4j2-xml","file":{{"id":"own.xml","url":"https://example.invalid/own.xml","sha1":"{EMPTY_SHA1}","size":0}}}}}}"#
+        );
+        assert_eq!(inherited(&own).expect("own logging").id, "own.xml");
     }
 
     #[test]

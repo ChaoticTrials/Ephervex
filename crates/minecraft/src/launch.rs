@@ -810,6 +810,43 @@ mod tests {
         assert!(arguments.contains(&format!("-Dpair=a{CLASSPATH_SEPARATOR}b")));
     }
 
+    fn loader_child_with_logging(logging: &str) -> VersionMetadata {
+        VersionMetadata::parse(&format!(
+            r#"{{
+              "id":"1.20.1-forge-test","inheritsFrom":"1.20.1","type":"release",
+              "releaseTime":"2026-08-08T00:00:00Z","time":"2026-08-08T00:00:00Z",
+              "mainClass":"example.Loader"{logging}
+            }}"#
+        ))
+        .expect("child")
+    }
+
+    fn log4j_argument_count(child: &VersionMetadata) -> (bool, usize) {
+        let parent = metadata("1.20.1.json");
+        let merged = VersionMetadata::inherit(&parent, child).expect("merge");
+        let settings = settings(offline());
+        let context = settings.features.rule_context(platform());
+        let plan = InstallationPlan::resolve(&merged, &context, &layout()).expect("plan");
+        let arguments = all(&build_command(&merged, &plan, &settings).expect("command"));
+        let count = arguments
+            .iter()
+            .filter(|argument| argument.starts_with("-Dlog4j.configurationFile="))
+            .count();
+        (plan.logging.is_some(), count)
+    }
+
+    #[test]
+    fn an_empty_logging_object_on_a_child_launches_without_the_vanilla_log4j_configuration() {
+        let child = loader_child_with_logging(r#","logging":{}"#);
+        assert_eq!(log4j_argument_count(&child), (false, 0));
+    }
+
+    #[test]
+    fn a_child_without_a_logging_key_launches_with_the_parent_log4j_configuration() {
+        let child = loader_child_with_logging("");
+        assert_eq!(log4j_argument_count(&child), (true, 1));
+    }
+
     #[test]
     fn forge_1_20_ignore_list_covers_the_content_addressed_client_jar() {
         let parent = metadata("1.20.1.json");
