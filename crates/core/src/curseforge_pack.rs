@@ -743,6 +743,9 @@ async fn resolve_files(
         .collect::<Vec<_>>()
         .await;
 
+    // Every resolved release, restricted or not: the one-file-per-project
+    // choice (ADR 0031) must see a restricted duplicate too, or a discarded
+    // copy would still be installed from the cache or requested by hand.
     let mut by_identity: BTreeMap<(CurseForgeProjectId, CurseForgeFileId), CurseForgeFileRelease> =
         BTreeMap::new();
     let mut blocked_reasons: BTreeMap<(CurseForgeProjectId, CurseForgeFileId), BlockedFileDetail> =
@@ -769,7 +772,6 @@ async fn resolve_files(
                     relations: crate::mods::recipe_relations(&release.dependencies),
                 },
             );
-            continue;
         }
         by_identity.insert((project, file), release);
     }
@@ -803,12 +805,23 @@ fn assemble_resolved_files(
     let mut resolved = Vec::with_capacity(by_identity.len());
     let mut blocked = Vec::with_capacity(blocked_reasons.len());
     for (entry, identity) in pending.iter().zip(wanted) {
-        if by_identity.contains_key(identity) && winners.get(&identity.0) != Some(&identity.1) {
+        if winners.get(&identity.0) != Some(&identity.1) {
             // Superseded by a better candidate for the same project; already
             // named in `resolve_duplicate_projects`'s report.
             continue;
         }
-        if let Some(release) = by_identity.get(identity) {
+        if let Some(detail) = blocked_reasons.get(identity) {
+            blocked.push(BlockedProviderFile {
+                identity: provider_identity(identity.0, identity.1),
+                project_name: detail.project_name.clone(),
+                file_name: detail.file_name.clone(),
+                browser_url: detail.browser_url.clone(),
+                hashes: detail.hashes.clone(),
+                relations: Some(detail.relations.clone()),
+                client: entry.client,
+                server: entry.server,
+            });
+        } else if let Some(release) = by_identity.get(identity) {
             let content_class = classes
                 .get(&identity.0)
                 .map(|classified| classified.content)
@@ -824,20 +837,9 @@ fn assemble_resolved_files(
                     })
                 })?;
             resolved.push(recipe_entry(entry, release, content_class, hosts)?);
-        } else if let Some(detail) = blocked_reasons.get(identity) {
-            blocked.push(BlockedProviderFile {
-                identity: provider_identity(identity.0, identity.1),
-                project_name: detail.project_name.clone(),
-                file_name: detail.file_name.clone(),
-                browser_url: detail.browser_url.clone(),
-                hashes: detail.hashes.clone(),
-                relations: Some(detail.relations.clone()),
-                client: entry.client,
-                server: entry.server,
-            });
         } else {
             // Unreachable: every distinct identity was requested and landed
-            // in exactly one of the two maps above.
+            // in the release map.
             return Err(CoreError::from(ModPlatformError::FileUnknown {
                 provider: ModProvider::CurseForge,
                 project_id: identity.0.to_string(),
@@ -1294,6 +1296,42 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(200).set_body_raw(body.to_vec(), "application/java-archive"),
             )
+            .mount(server)
+            .await;
+    }
+
+    /// Serves one exact file's metadata for a file whose author forbids
+    /// third-party downloads (no `downloadUrl`), with declared Minecraft
+    /// versions and a publish date. Its bytes are never served.
+    async fn serve_restricted_file_with_game_versions_and_date(
+        server: &MockServer,
+        project: u32,
+        file: u32,
+        name: &str,
+        body: &[u8],
+        game_versions: &[&str],
+        file_date: &str,
+    ) {
+        let game_versions = game_versions
+            .iter()
+            .map(|version| format!("\"{version}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/mods/{project}/files/{file}")))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"{{"data":{{"id":{file},"gameId":432,"modId":{project},
+                        "isAvailable":true,"fileName":"{name}","fileLength":{length},
+                        "downloadUrl":null,
+                        "gameVersions":[{game_versions}],
+                        "fileDate":"{file_date}",
+                        "hashes":[{{"value":"{digest}","algo":1}}]}}}}"#,
+                    length = body.len(),
+                    digest = sha1_of(body),
+                ),
+                "application/json",
+            ))
             .mount(server)
             .await;
     }
@@ -3479,6 +3517,195 @@ mod tests {
                 .iter()
                 .all(|file| !file.ends_with("older.jar")),
         );
+    }
+
+    /// Serves the required project's two declared files, each either
+    /// restricted or downloadable, and returns the manifest declaring both.
+    /// The newer file is the one the duplicate rule keeps.
+    async fn serve_a_duplicate_declaration_with_restrictions(
+        server: &MockServer,
+        older_restricted: bool,
+        newer_restricted: bool,
+    ) -> Vec<u8> {
+        serve_pack_as_mods(server).await;
+        for (file, name, restricted, date) in [
+            (
+                REQUIRED_FILE,
+                "older.jar",
+                older_restricted,
+                "2022-01-01T00:00:00.000Z",
+            ),
+            (
+                REQUIRED_FILE + 1,
+                "newer.jar",
+                newer_restricted,
+                "2023-06-01T00:00:00.000Z",
+            ),
+        ] {
+            if restricted {
+                serve_restricted_file_with_game_versions_and_date(
+                    server,
+                    REQUIRED_PROJECT,
+                    file,
+                    name,
+                    REQUIRED_BODY,
+                    &["1.19.2", "Forge"],
+                    date,
+                )
+                .await;
+            } else {
+                serve_file_with_game_versions_and_date(
+                    server,
+                    REQUIRED_PROJECT,
+                    file,
+                    name,
+                    REQUIRED_BODY,
+                    &["1.19.2", "Forge"],
+                    date,
+                )
+                .await;
+            }
+        }
+        serve_file(
+            server,
+            OPTIONAL_PROJECT,
+            OPTIONAL_FILE,
+            "optional-1.0.0.jar",
+            OPTIONAL_BODY,
+        )
+        .await;
+        export_manifest_with_files(&format!(
+            r#"{{"projectID": {REQUIRED_PROJECT}, "fileID": {older}, "required": true}},
+               {{"projectID": {REQUIRED_PROJECT}, "fileID": {newer}, "required": true}},
+               {{"projectID": {OPTIONAL_PROJECT}, "fileID": {OPTIONAL_FILE}, "required": false}}"#,
+            older = REQUIRED_FILE,
+            newer = REQUIRED_FILE + 1,
+        ))
+    }
+
+    #[tokio::test]
+    async fn a_restricted_duplicate_of_a_downloadable_winner_is_discarded_without_a_manual_download()
+     {
+        let server = MockServer::start().await;
+        let manifest = serve_a_duplicate_declaration_with_restrictions(&server, true, false).await;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_with_manifest(dir.path(), "repro.zip", &manifest);
+        let app = app_against(dir.path(), &server);
+
+        let mut analysis = app.analyze_pack(&archive).expect("analyzed locally");
+        app.resolve_pack(&mut analysis, &[], &CancellationToken::new())
+            .await
+            .expect("a duplicate declaration does not fail resolution");
+
+        assert!(
+            analysis.blocked.is_empty(),
+            "the discarded restricted copy is never requested by hand"
+        );
+        assert_eq!(analysis.duplicate_files.len(), 1);
+        assert_eq!(
+            analysis.duplicate_files[0].discarded_file_name.as_deref(),
+            Some("older.jar")
+        );
+        assert_eq!(
+            analysis.duplicate_files[0].kept_file_name.as_deref(),
+            Some("newer.jar")
+        );
+        let required_entries = analysis
+            .recipe
+            .files
+            .iter()
+            .filter(|file| {
+                file.logical_path.ends_with("newer.jar") || file.logical_path.ends_with("older.jar")
+            })
+            .count();
+        assert_eq!(required_entries, 1, "exactly one file per project survives");
+    }
+
+    #[tokio::test]
+    async fn a_cached_restricted_duplicate_of_a_downloadable_winner_is_not_installed_beside_it() {
+        let server = MockServer::start().await;
+        let manifest = serve_a_duplicate_declaration_with_restrictions(&server, true, false).await;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_with_manifest(dir.path(), "repro.zip", &manifest);
+        let app = app_against(dir.path(), &server);
+
+        // A verified copy of the discarded restricted file already sits in the
+        // shared cache, as if an earlier import had put it there.
+        let hash = Hash::new(HashAlgorithm::Sha1, &sha1_of(REQUIRED_BODY)).expect("valid sha1");
+        let extension = FileExtension::new("jar").expect("jar");
+        let cache_path =
+            app.artifact_cache()
+                .layout()
+                .content(ContentStore::Downloads, &hash, Some(&extension));
+        std::fs::create_dir_all(cache_path.parent().expect("shard")).expect("shard");
+        std::fs::write(&cache_path, REQUIRED_BODY).expect("pre-populate the cache");
+
+        let imported = import(&app, &archive)
+            .await
+            .expect("a duplicate declaration does not fail the import");
+
+        let installed: Vec<_> = imported
+            .materialized
+            .files
+            .installed
+            .iter()
+            .filter(|file| file.ends_with("newer.jar") || file.ends_with("older.jar"))
+            .collect();
+        assert_eq!(
+            installed.len(),
+            1,
+            "two jars of one project would be refused by the game"
+        );
+        assert!(installed[0].ends_with("newer.jar"));
+        assert!(imported.record.attention.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_restricted_winner_over_a_downloadable_duplicate_is_the_only_blocked_file() {
+        let server = MockServer::start().await;
+        let manifest = serve_a_duplicate_declaration_with_restrictions(&server, false, true).await;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_with_manifest(dir.path(), "repro.zip", &manifest);
+        let app = app_against(dir.path(), &server);
+
+        let mut analysis = app.analyze_pack(&archive).expect("analyzed locally");
+        app.resolve_pack(&mut analysis, &[], &CancellationToken::new())
+            .await
+            .expect("a duplicate declaration does not fail resolution");
+
+        assert_eq!(analysis.blocked.len(), 1);
+        assert_eq!(analysis.blocked[0].file_name.as_deref(), Some("newer.jar"));
+        assert_eq!(analysis.duplicate_files.len(), 1);
+        assert_eq!(
+            analysis.duplicate_files[0].discarded_file_name.as_deref(),
+            Some("older.jar")
+        );
+        assert!(
+            analysis
+                .recipe
+                .files
+                .iter()
+                .all(|file| !file.logical_path.ends_with("older.jar")),
+            "the downloadable loser is not installed beside the blocked winner"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_restricted_duplicates_of_one_project_block_only_the_kept_file() {
+        let server = MockServer::start().await;
+        let manifest = serve_a_duplicate_declaration_with_restrictions(&server, true, true).await;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_with_manifest(dir.path(), "repro.zip", &manifest);
+        let app = app_against(dir.path(), &server);
+
+        let mut analysis = app.analyze_pack(&archive).expect("analyzed locally");
+        app.resolve_pack(&mut analysis, &[], &CancellationToken::new())
+            .await
+            .expect("a duplicate declaration does not fail resolution");
+
+        assert_eq!(analysis.blocked.len(), 1, "one manual download, not two");
+        assert_eq!(analysis.blocked[0].file_name.as_deref(), Some("newer.jar"));
+        assert_eq!(analysis.duplicate_files.len(), 1);
     }
 
     #[tokio::test]

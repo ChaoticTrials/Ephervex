@@ -48,6 +48,11 @@ through `ImportPresentation` the same way `blocked` files already do, so the
 choice is visible *before* the user presses Import, and it is discarded once
 the import completes rather than following the instance around afterward.
 
+A file whose author forbids third-party downloads takes part in the choice like
+any other. Only the winner follows the restricted-file path (resolved from the
+shared cache, or listed as a manual download); a restricted loser is never
+installed and never requested by hand.
+
 **A pinned single file id is never second-guessed.** This is narrowly about a
 manifest declaring the same project twice. A recipe entry, an ordinary
 managed-mod update, or any other single `project P, file F` reference still
