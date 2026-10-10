@@ -309,6 +309,33 @@ pub(super) fn split_declared_support(declared: &[String]) -> (Vec<String>, Vec<S
     (versions, loaders)
 }
 
+/// The Minecraft releases and loader names a project's latest files declare,
+/// each listed once in the order first seen.
+///
+/// Only the files a search response carries, so this describes what the
+/// project recently published rather than everything it ever supported.
+pub(super) fn project_declared_support(raw: &CurseForgeProject) -> (Vec<String>, Vec<String>) {
+    let mut versions: Vec<String> = Vec::new();
+    let mut loaders: Vec<String> = Vec::new();
+    for file in &raw.latest_files {
+        let (file_versions, file_loaders) = split_declared_support(&file.game_versions);
+        for version in file_versions {
+            if !versions.contains(&version) {
+                versions.push(version);
+            }
+        }
+        for loader in file_loaders {
+            if !loaders
+                .iter()
+                .any(|seen| seen.eq_ignore_ascii_case(&loader))
+            {
+                loaders.push(loader);
+            }
+        }
+    }
+    (versions, loaders)
+}
+
 /// How stable a file claims to be.
 ///
 /// The documented `releaseType` values are 1 for a release and 2 for a beta.

@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use ephervex_download::{DomainAllowlist, HttpConfig, OperationReporter};
 use ephervex_mod_platform::{
-    ConfiguredApiKey, CurseForgeApi, CurseForgeProvider, InstanceTarget, ModPlatformError,
-    ModProviderApi, ModSearchQuery, ReleaseChannel, SideSupport,
+    Compatibility, ConfiguredApiKey, CurseForgeApi, CurseForgeProvider, IncompatibilityReason,
+    InstanceTarget, ModPlatformError, ModProviderApi, ModSearchQuery, ReleaseChannel, SideSupport,
 };
 use ephervex_model::{LoaderKind, ModProvider, ModRelationKind, SecretString};
 use tokio_util::sync::CancellationToken;
@@ -305,6 +305,196 @@ async fn a_search_narrows_on_the_instances_exact_minecraft_release() {
     search(&server, LoaderKind::NeoForge, ModSearchQuery::new("jei")).await;
     let sent = sent_search(&server).await;
     assert!(sent.contains("gameVersion=1.20.1"), "{sent}");
+}
+
+/// A search that finds one project fitting the instance, one that publishes
+/// only for another Minecraft release, and one that publishes only for another
+/// loader. Its file listing answers only for the first, as the real filtered
+/// listing would.
+async fn widened_catalog(server: &MockServer) {
+    serve_categories(server).await;
+    let project = |id: u32, name: &str, declared: &str| {
+        format!(
+            r#"{{"id":{id},"gameId":432,"name":"{name}","slug":"{name}","summary":"A test mod",
+                "classId":{MODS_CLASS},"authors":[{{"id":1,"name":"mezz"}}],
+                "latestFiles":[{{"gameVersions":[{declared}]}}]}}"#
+        )
+    };
+    let body = format!(
+        r#"{{"data":[{fits},{old_release},{other_loader}],
+            "pagination":{{"index":0,"pageSize":10,"resultCount":3,"totalCount":3}}}}"#,
+        fits = project(5001, "fits", r#""1.20.1","NeoForge""#),
+        old_release = project(5002, "old-release", r#""1.19.2","NeoForge""#),
+        other_loader = project(5003, "other-loader", r#""1.20.1","Fabric""#),
+    );
+    Mock::given(method("GET"))
+        .and(path("/v1/mods/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+        .mount(server)
+        .await;
+    let fitting = format!(
+        r#"{{"data":[{file}],"pagination":{{"index":0,"pageSize":50,"resultCount":1,"totalCount":1}}}}"#,
+        file = file_document(server, 7_000_001, 5001, "Fits", 1),
+    );
+    Mock::given(method("GET"))
+        .and(path("/v1/mods/5001/files"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(fitting, "application/json"))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/v1/mods/500[23]/files$"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"{"data":[],"pagination":{"index":0,"pageSize":50,"resultCount":0,"totalCount":0}}"#,
+            "application/json",
+        ))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn asking_for_incompatible_results_leaves_the_release_and_loader_filters_off() {
+    let server = MockServer::start().await;
+    catalog(&server).await;
+    search(
+        &server,
+        LoaderKind::NeoForge,
+        ModSearchQuery::new("jei").including_incompatible(true),
+    )
+    .await;
+    let sent = sent_search(&server).await;
+    assert!(!sent.contains("gameVersion"), "{sent}");
+    assert!(!sent.contains("modLoaderType"), "{sent}");
+    assert!(sent.contains("gameId=432"), "{sent}");
+    assert!(sent.contains(&format!("classId={MODS_CLASS}")), "{sent}");
+    assert!(sent.contains("searchFilter=jei"), "{sent}");
+}
+
+#[tokio::test]
+async fn a_compatible_only_search_keeps_the_release_and_loader_filters() {
+    let server = MockServer::start().await;
+    catalog(&server).await;
+    search(
+        &server,
+        LoaderKind::NeoForge,
+        ModSearchQuery::new("jei").including_incompatible(false),
+    )
+    .await;
+    let sent = sent_search(&server).await;
+    assert!(sent.contains("gameVersion=1.20.1"), "{sent}");
+    assert!(sent.contains("modLoaderType=6"), "{sent}");
+}
+
+#[tokio::test]
+async fn incompatible_results_still_ask_each_file_listing_about_the_instance() {
+    let server = MockServer::start().await;
+    widened_catalog(&server).await;
+    provider_against(&server, Some(FAKE_KEY))
+        .search(
+            &target(LoaderKind::NeoForge),
+            &ModSearchQuery::new("").including_incompatible(true),
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("a search");
+    let listings: Vec<String> = server
+        .received_requests()
+        .await
+        .expect("recorded requests")
+        .into_iter()
+        .filter(|request: &Request| request.url.path().ends_with("/files"))
+        .map(|request| request.url.query().unwrap_or_default().to_owned())
+        .collect();
+    assert_eq!(listings.len(), 3, "one listing per hit, no more");
+    for listing in listings {
+        assert!(listing.contains("gameVersion=1.20.1"), "{listing}");
+        assert!(listing.contains("modLoaderType=6"), "{listing}");
+    }
+}
+
+#[tokio::test]
+async fn projects_the_provider_would_have_filtered_out_come_back_marked_incompatible() {
+    let server = MockServer::start().await;
+    widened_catalog(&server).await;
+    let results = provider_against(&server, Some(FAKE_KEY))
+        .search(
+            &target(LoaderKind::NeoForge),
+            &ModSearchQuery::new("").including_incompatible(true),
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("a search");
+    assert_eq!(results.hits.len(), 3);
+
+    let fits = &results.hits[0];
+    assert!(fits.best_version.is_some());
+    assert_eq!(fits.compatibility, Compatibility::Compatible);
+
+    let old_release = &results.hits[1];
+    assert!(old_release.best_version.is_none());
+    assert_eq!(
+        old_release.compatibility,
+        Compatibility::Incompatible(vec![IncompatibilityReason::MinecraftVersion {
+            required: "1.20.1".to_owned(),
+            supported: vec!["1.19.2".to_owned()],
+        }])
+    );
+
+    let other_loader = &results.hits[2];
+    assert!(other_loader.best_version.is_none());
+    assert_eq!(
+        other_loader.compatibility,
+        Compatibility::Incompatible(vec![IncompatibilityReason::Loader {
+            required: LoaderKind::NeoForge,
+            supported: vec!["Fabric".to_owned()],
+        }])
+    );
+}
+
+#[tokio::test]
+async fn a_compatible_only_search_leaves_incompatible_projects_out() {
+    let server = MockServer::start().await;
+    widened_catalog(&server).await;
+    let results = provider_against(&server, Some(FAKE_KEY))
+        .search(
+            &target(LoaderKind::NeoForge),
+            &ModSearchQuery::new(""),
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("a search");
+    assert_eq!(results.hits.len(), 1);
+    assert_eq!(results.hits[0].project.title, "fits");
+}
+
+#[tokio::test]
+async fn an_unsupported_loader_is_refused_before_a_widened_search_spends_a_request() {
+    let server = MockServer::start().await;
+    catalog(&server).await;
+    let error = provider_against(&server, Some(FAKE_KEY))
+        .search(
+            &target(LoaderKind::Vanilla),
+            &ModSearchQuery::new("jei").including_incompatible(true),
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("vanilla cannot host mods");
+    assert!(matches!(
+        error,
+        ModPlatformError::LoaderCannotHostMods {
+            loader: LoaderKind::Vanilla
+        }
+    ));
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("recorded requests")
+            .is_empty()
+    );
 }
 
 #[tokio::test]

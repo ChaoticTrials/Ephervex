@@ -492,11 +492,15 @@ impl CurseForgeOperation<'_> {
 
     /// One page of the game's Mods, narrowed to what an instance can run.
     ///
-    /// `GET /v1/mods/search`. Four constraints always travel with it: the
-    /// game, the provider-discovered Mods class, the exact Minecraft release,
-    /// and the loader. The class filter is what keeps resource packs, worlds,
-    /// and modpacks out of a mod browser; it is not treated as proof, and each
-    /// returned project is classified again by the caller.
+    /// `GET /v1/mods/search`. The game and the provider-discovered Mods class
+    /// always travel with it, and so do the exact Minecraft release and the
+    /// loader unless the search asks for incompatible results. The class filter
+    /// is what keeps resource packs, worlds, and modpacks out of a mod browser;
+    /// it is not treated as proof, and each returned project is classified
+    /// again by the caller.
+    ///
+    /// Asking for incompatible results drops the release and loader filters:
+    /// a filter would remove the very rows that need annotating.
     ///
     /// A loader this launcher does not support has no filter to send, and the
     /// search is refused rather than widened.
@@ -515,9 +519,13 @@ impl CurseForgeOperation<'_> {
             let mut query = url.query_pairs_mut();
             query
                 .append_pair("gameId", &game_id.to_string())
-                .append_pair("classId", &search.class_id.to_string())
-                .append_pair("gameVersion", search.minecraft_version)
-                .append_pair("modLoaderType", &loader.to_string())
+                .append_pair("classId", &search.class_id.to_string());
+            if !search.include_incompatible {
+                query
+                    .append_pair("gameVersion", search.minecraft_version)
+                    .append_pair("modLoaderType", &loader.to_string());
+            }
+            query
                 .append_pair("sortField", SORT_FIELD_POPULARITY)
                 .append_pair("sortOrder", "desc")
                 .append_pair("index", &search.index.to_string())
@@ -860,10 +868,15 @@ pub(super) struct CurseForgeSearch<'a> {
     /// Free text, as the user typed it. Empty is a valid search and means
     /// "everything that fits", which is what an empty field asks for.
     pub text: &'a str,
-    /// The exact Minecraft release the instance runs. Never widened.
+    /// The exact Minecraft release the instance runs. Sent as a filter unless
+    /// `include_incompatible` is set; never replaced by a neighboring release.
     pub minecraft_version: &'a str,
-    /// The instance's loader.
+    /// The instance's loader. Sent as a filter unless `include_incompatible`
+    /// is set, but still required so an unsupported loader is refused.
     pub loader: LoaderKind,
+    /// Whether projects the release and loader filters would exclude are
+    /// wanted too, so the query leaves both filters off.
+    pub include_incompatible: bool,
     /// The provider-discovered Mods class. Never a hard-coded number.
     pub class_id: u32,
     pub index: u32,

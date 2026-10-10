@@ -128,9 +128,12 @@ inferred from a filename or a category.
 
 **Compatibility is what the provider publishes, scoped to the exact target.**
 CurseForge pages its file listings, so a project's whole release history cannot
-be enumerated to answer one question: a search and a version list are filtered
-server-side on the instance's exact Minecraft release and on the loader family,
-and neither is ever widened. Forge and NeoForge map to their own documented
+be enumerated to answer one question: a version list, and a search for
+compatible mods, are filtered server-side on the instance's exact Minecraft
+release and on the loader family, and neither is ever replaced by a neighboring
+value. A search that asks for incompatible results leaves both filters off so
+the rows that need annotating are not removed, and each row is classified from
+its own narrowed file listing. Forge and NeoForge map to their own documented
 `modLoaderType` values and never to each other's or to a loader this launcher
 does not support. The cost is stated rather than hidden: a file that does not fit
 is not returned at all, so nothing explains an incompatible release the way

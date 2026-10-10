@@ -8,11 +8,13 @@
 //!
 //! # Every answer is scoped to one instance
 //!
-//! CurseForge's search and file listings are filtered server-side by the exact
-//! Minecraft release and the loader family. That is not an optimization: the
-//! file listing is paged, and a project with a decade of releases cannot be
-//! enumerated to answer "what fits this instance". The exact release is passed
-//! through untouched and the loader is never crossed.
+//! CurseForge's file listings, and its searches for compatible mods, are
+//! filtered server-side by the exact Minecraft release and the loader family.
+//! That is not an optimization: the file listing is paged, and a project with a
+//! decade of releases cannot be enumerated to answer "what fits this instance".
+//! The exact release is passed through untouched and the loader is never
+//! crossed. A search that asks for incompatible results leaves both filters
+//! off, and each row is still classified from its own narrowed file listing.
 //!
 //! # What the class filter is, and what it is not
 //!
@@ -130,6 +132,48 @@ impl CurseForgeProvider {
     }
 }
 
+/// Why a search row has no file for the instance, read from the releases and
+/// loaders its latest files declare.
+///
+/// The row's own file listing was filtered to the instance, so it cannot say
+/// which part failed. A part the declarations do not list is reported; when
+/// they list both, no single file fits both and the loader is named, as the
+/// narrower claim. A project that declares nothing is reported against the
+/// release with nothing to list.
+fn search_incompatibility(
+    target: &InstanceTarget,
+    loader: &str,
+    declared: &(Vec<String>, Vec<String>),
+) -> Compatibility {
+    let (versions, loaders) = declared;
+    if versions.is_empty() && loaders.is_empty() {
+        return Compatibility::Incompatible(vec![IncompatibilityReason::MinecraftVersion {
+            required: target.minecraft_version.clone(),
+            supported: Vec::new(),
+        }]);
+    }
+    let mut reasons = Vec::new();
+    if !versions.contains(&target.minecraft_version) {
+        reasons.push(IncompatibilityReason::MinecraftVersion {
+            required: target.minecraft_version.clone(),
+            supported: versions.clone(),
+        });
+    }
+    if !loaders.iter().any(|name| name.eq_ignore_ascii_case(loader)) {
+        reasons.push(IncompatibilityReason::Loader {
+            required: target.loader,
+            supported: loaders.clone(),
+        });
+    }
+    if reasons.is_empty() {
+        reasons.push(IncompatibilityReason::Loader {
+            required: target.loader,
+            supported: Vec::new(),
+        });
+    }
+    Compatibility::Incompatible(reasons)
+}
+
 /// The project id a neutral reference carries, or a refusal naming it.
 fn project_id_of(reference: &str) -> ModPlatformResult<CurseForgeProjectId> {
     CurseForgeProjectId::parse(reference.trim()).ok_or_else(|| ModPlatformError::ProjectUnknown {
@@ -173,6 +217,7 @@ impl ModProviderApi for CurseForgeProvider {
                     text: &query.text,
                     minecraft_version: &target.minecraft_version,
                     loader: target.loader,
+                    include_incompatible: query.include_incompatible,
                     class_id: classes.mods_class_id(),
                     index: query.offset,
                     page_size: u32::from(query.limit),
@@ -189,8 +234,9 @@ impl ModProviderApi for CurseForgeProvider {
         let mut projects = Vec::new();
         for raw in page.items {
             let id = raw.id;
+            let declared = mapping::project_declared_support(&raw);
             match mapping::checked_project(raw, &classes) {
-                Ok(project) => projects.push(project),
+                Ok(project) => projects.push((project, declared)),
                 Err(error) => {
                     warn!(
                         project = id,
@@ -204,23 +250,24 @@ impl ModProviderApi for CurseForgeProvider {
         // Each hit needs its own file listing: a search response cannot show
         // that one file supports both this Minecraft release and this loader.
         // Bounded so a page of results is not a burst of requests.
-        let annotated = futures_util::stream::iter(projects.into_iter().map(|project| {
-            let operation = &operation;
-            async move {
-                let versions = match project_id_of(&project.id) {
-                    Ok(id) => self.compatible_files(operation, id, target, cancel).await,
-                    Err(error) => Err(error),
-                };
-                (project, versions)
-            }
-        }))
-        .buffered(MAX_CONCURRENT_PROJECT_LOOKUPS)
-        .collect::<Vec<_>>()
-        .await;
+        let annotated =
+            futures_util::stream::iter(projects.into_iter().map(|(project, declared)| {
+                let operation = &operation;
+                async move {
+                    let versions = match project_id_of(&project.id) {
+                        Ok(id) => self.compatible_files(operation, id, target, cancel).await,
+                        Err(error) => Err(error),
+                    };
+                    (project, declared, versions)
+                }
+            }))
+            .buffered(MAX_CONCURRENT_PROJECT_LOOKUPS)
+            .collect::<Vec<_>>()
+            .await;
 
         let loader = crate::provider::loader_name_for(self, target)?;
         let mut hits = Vec::new();
-        for (project, versions) in annotated {
+        for (project, declared, versions) in annotated {
             if cancel.is_cancelled() {
                 return Err(ModPlatformError::Canceled);
             }
@@ -238,15 +285,7 @@ impl ModProviderApi for CurseForgeProvider {
             let best = newest_compatible(&versions, target, loader);
             let compatibility = match &best {
                 Some(_) => Compatibility::Compatible,
-                // The listing was already narrowed to this instance, so there
-                // is nothing left to name as the reason beyond the target
-                // itself.
-                None => {
-                    Compatibility::Incompatible(vec![IncompatibilityReason::MinecraftVersion {
-                        required: target.minecraft_version.clone(),
-                        supported: Vec::new(),
-                    }])
-                }
+                None => search_incompatibility(target, loader, &declared),
             };
             if !query.include_incompatible && !compatibility.is_compatible() {
                 continue;
