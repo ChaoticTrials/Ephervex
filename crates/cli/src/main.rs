@@ -6053,27 +6053,60 @@ fn run_api_command(app: &mut App, command: &ApiCommand, json: bool) -> anyhow::R
             std::io::Read::read_to_string(&mut std::io::stdin(), &mut key)?;
             app.set_curseforge_api_key(&SecretString::new(key))?;
             // Never echo it back, not even truncated.
-            outln!("stored the CurseForge API key in the system keyring");
+            write_out(
+                curseforge_key_change_output(
+                    json,
+                    "stored the CurseForge API key in the system keyring",
+                    || Ok(app.api_settings()?),
+                )?
+                .as_bytes(),
+            );
         }
         ApiCommand::ClearCurseforgeKey => {
             app.clear_curseforge_api_key()?;
-            outln!("removed the CurseForge API key from the system keyring");
+            write_out(
+                curseforge_key_change_output(
+                    json,
+                    "removed the CurseForge API key from the system keyring",
+                    || Ok(app.api_settings()?),
+                )?
+                .as_bytes(),
+            );
         }
     }
     Ok(())
 }
 
+/// The non-secret API settings as `--json` reports them.
+fn api_settings_document(settings: &ApiSettings) -> serde_json::Value {
+    serde_json::json!({
+        "microsoft_client_id": settings.effective_microsoft_client_id,
+        "microsoft_client_id_is_custom": settings.microsoft_client_id_is_custom,
+        "user_agent": settings.effective_user_agent,
+        "user_agent_is_custom": !settings.user_agent.is_empty(),
+        "curseforge_api_key": settings.curseforge_key.as_str(),
+        "curseforge_default_key_available": settings.curseforge_default_key_available,
+        "credential_storage": settings.credential_storage.map(CredentialStorage::as_str),
+    })
+}
+
+/// What a CurseForge key change prints: the resulting settings under `--json`,
+/// otherwise one sentence. The settings are read only when they are printed.
+fn curseforge_key_change_output(
+    json: bool,
+    sentence: &str,
+    settings: impl FnOnce() -> anyhow::Result<ApiSettings>,
+) -> anyhow::Result<String> {
+    if !json {
+        return Ok(format!("{sentence}\n"));
+    }
+    let text = serde_json::to_string_pretty(&api_settings_document(&settings()?))?;
+    Ok(format!("{text}\n"))
+}
+
 fn show_api_settings(settings: &ApiSettings, json: bool) {
     if json {
-        print_json(&serde_json::json!({
-            "microsoft_client_id": settings.effective_microsoft_client_id,
-            "microsoft_client_id_is_custom": settings.microsoft_client_id_is_custom,
-            "user_agent": settings.effective_user_agent,
-            "user_agent_is_custom": !settings.user_agent.is_empty(),
-            "curseforge_api_key": settings.curseforge_key.as_str(),
-            "curseforge_default_key_available": settings.curseforge_default_key_available,
-            "credential_storage": settings.credential_storage.map(CredentialStorage::as_str),
-        }));
+        print_json(&api_settings_document(settings));
         return;
     }
 
@@ -8302,6 +8335,42 @@ fn localized_failure(error: &CoreError) -> (String, Option<String>) {
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    fn settings_with(key: ephervex_core::CurseForgeKeyState) -> ApiSettings {
+        ApiSettings {
+            microsoft_client_id: String::new(),
+            effective_microsoft_client_id: "client".to_owned(),
+            microsoft_client_id_is_custom: false,
+            user_agent: String::new(),
+            effective_user_agent: "agent".to_owned(),
+            curseforge_key: key,
+            curseforge_default_key_available: false,
+            credential_storage: Some(CredentialStorage::Keyring),
+        }
+    }
+
+    #[test]
+    fn a_key_change_under_json_reports_the_resulting_settings() {
+        let output = curseforge_key_change_output(true, "stored", || {
+            Ok(settings_with(ephervex_core::CurseForgeKeyState::Configured))
+        })
+        .expect("output");
+
+        let document: serde_json::Value = serde_json::from_str(&output).expect("JSON output");
+        assert_eq!(document["curseforge_api_key"], "configured");
+        assert_eq!(document["credential_storage"], "keyring");
+        assert!(!output.contains("stored"), "no sentence under --json");
+    }
+
+    #[test]
+    fn a_key_change_without_json_prints_one_sentence_and_reads_no_settings() {
+        let output = curseforge_key_change_output(false, "removed the key", || {
+            panic!("the settings are not needed for a sentence")
+        })
+        .expect("output");
+
+        assert_eq!(output, "removed the key\n");
+    }
 
     #[test]
     fn an_unanswered_entitlement_lookup_is_reported_as_unknown_ownership() {
