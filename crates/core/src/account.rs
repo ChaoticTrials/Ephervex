@@ -510,6 +510,25 @@ impl App {
         self.session().is_some()
     }
 
+    /// Whether the cached session is usable and is the one a launch with no
+    /// account named runs as.
+    ///
+    /// The cache holds whichever account signed in or launched last, so it is
+    /// the default's only when it names the default account. A session-only
+    /// login is recorded nowhere, so with no default configured it is the only
+    /// identity this process can launch as.
+    fn session_is_default_launch(&self) -> bool {
+        let Some(session) = self.session() else {
+            return false;
+        };
+        match self.config().active_account_config() {
+            Some((default, _)) => session.account.id.to_string() == default,
+            None => session
+                .storage()
+                .is_some_and(|storage| !storage.is_persistent()),
+        }
+    }
+
     // -- operations --------------------------------------------------------
 
     /// Signs in, storing the refresh credential and remembering the account.
@@ -563,7 +582,7 @@ impl App {
         observer: &AuthObserver,
         cancel: &CancellationToken,
     ) -> CoreResult<&Session> {
-        if self.session_is_usable() {
+        if self.session_is_default_launch() {
             // Borrowck cannot see that the branch above proves this is `Some`,
             // so the check is repeated rather than the session held across it.
             return self
@@ -2252,6 +2271,66 @@ mod tests {
 
         assert_ne!(default, chosen);
         assert_eq!(chosen, second.id);
+    }
+
+    async fn default_launch_account(app: &mut App) -> Uuid {
+        app.authenticated_session(&AuthObserver::silent(), &CancellationToken::new())
+            .await
+            .expect("session")
+            .account
+            .id
+    }
+
+    #[tokio::test]
+    async fn a_default_launch_after_launching_as_another_account_runs_as_the_default() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let default = app.add_offline_account("Alice").expect("added");
+        app.add_offline_account("Bob").expect("added");
+
+        app.session_for_account("Bob", &AuthObserver::silent(), &CancellationToken::new())
+            .await
+            .expect("session");
+
+        assert_eq!(default_launch_account(&mut app).await, default.id);
+    }
+
+    #[tokio::test]
+    async fn a_default_launch_after_a_non_default_sign_in_runs_as_the_default() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let default = app.add_offline_account("Alice").expect("added");
+        app.hold_session(microsoft_session(Uuid::new_v4()))
+            .expect("held");
+
+        assert_eq!(default_launch_account(&mut app).await, default.id);
+    }
+
+    #[tokio::test]
+    async fn a_default_launch_reuses_the_cached_session_of_the_default_account() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let id = Uuid::new_v4();
+        remember_microsoft_account(&mut app, id);
+        app.hold_session(microsoft_session(id)).expect("held");
+
+        // The keyring is unreachable, so resuming would fail.
+        assert_eq!(default_launch_account(&mut app).await, id);
+    }
+
+    #[tokio::test]
+    async fn a_session_only_login_serves_default_launches_when_no_account_is_configured() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let id = Uuid::new_v4();
+        let mut session = microsoft_session(id);
+        if let ephervex_auth::Credentials::Microsoft { storage, .. } = &mut session.credentials {
+            *storage = CredentialStorage::SessionOnly;
+        }
+        assert_eq!(session.storage(), Some(CredentialStorage::SessionOnly));
+        app.hold_session(session).expect("held");
+
+        assert_eq!(default_launch_account(&mut app).await, id);
     }
 
     #[tokio::test]
