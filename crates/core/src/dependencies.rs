@@ -975,6 +975,8 @@ pub(crate) struct GraphEntry {
     pub(crate) mod_entry: ImpactedMod,
     /// The catalog this mod's relations were stated by.
     provider: Option<ModProvider>,
+    /// The catalog release installed, when the recipe records an exact one.
+    version_id: Option<String>,
     /// What this mod's catalog said it needs, when anything asked.
     relations: Option<Vec<RecipeRelation>>,
 }
@@ -1107,6 +1109,7 @@ impl ModGraph {
             by_file_name.insert(entry.file_name.to_ascii_lowercase(), entries.len());
             entries.push(GraphEntry {
                 provider: entry.identity.provider(),
+                version_id: entry.identity.version_id().map(ToOwned::to_owned),
                 mod_entry: ImpactedMod {
                     logical_path: entry.logical_path.clone(),
                     name: entry.display_name().to_owned(),
@@ -1339,6 +1342,33 @@ impl ModGraph {
             }
         }
         .copied()
+        .filter(|&found| self.release_matches(relation, found))
+    }
+
+    /// Whether the release installed at `index` is one `relation` is about.
+    ///
+    /// An incompatibility pinned to a release holds against that release only,
+    /// as it does when the resolver plans an install. A release the recipe does
+    /// not record cannot be shown to be the pinned one, so it never matches.
+    /// Every other relation is about its project as a whole.
+    fn release_matches(&self, relation: &RecipeRelation, index: usize) -> bool {
+        match &relation.target {
+            RelationTarget::Project {
+                version_id: Some(pinned),
+                ..
+            } if relation.kind == ModRelationKind::Incompatible => {
+                self.entries[index].version_id.as_deref() == Some(pinned.as_str())
+            }
+            _ => true,
+        }
+    }
+
+    /// Whether `relation` is about the mod at `index`.
+    fn names_entry(&self, relation: &RecipeRelation, index: usize, file_name: &str) -> bool {
+        relation.names(
+            self.entries[index].mod_entry.project_id.as_deref(),
+            file_name,
+        ) && self.release_matches(relation, index)
     }
 
     /// Where a mod sits, by the path a frontend named it with.
@@ -1439,7 +1469,7 @@ impl ModGraph {
             .as_ref()
             .is_some_and(|relations| {
                 relations.iter().any(|relation| {
-                    relation.kind == kind && relation.names(target.project_id.as_deref(), file_name)
+                    relation.kind == kind && self.names_entry(relation, about, file_name)
                 })
             })
     }
@@ -1485,7 +1515,7 @@ impl ModGraph {
                 continue;
             }
             for relation in entry.relations.iter().flatten() {
-                if relation.names(target.project_id.as_deref(), file_name) {
+                if self.names_entry(relation, index, file_name) {
                     required_by.push(RelatedMod {
                         kind: relation.kind,
                         name: entry.mod_entry.name.clone(),
@@ -2259,6 +2289,140 @@ mod tests {
         assert_eq!(problems.conflicts.len(), 1);
         assert_eq!(problems.conflicts[0].declared_by.name, "Rival.jar");
         assert_eq!(problems.conflicts[0].conflicts_with.name, "Create.jar");
+    }
+
+    /// `Rival.jar` declares an incompatibility with `CreateId` pinned to `pinned`.
+    fn rival_incompatible_with_create_release(pinned: &str) -> PackFileRecipe {
+        let mut rival = with_relations(recorded("Rival.jar", "RivalId", "v1"), &[]);
+        rival.relations = Some(vec![RecipeRelation {
+            kind: ModRelationKind::Incompatible,
+            target: RelationTarget::Project {
+                project_id: "CreateId".to_owned(),
+                version_id: Some(pinned.to_owned()),
+            },
+        }]);
+        rival
+    }
+
+    #[test]
+    fn an_incompatibility_pinned_to_another_release_is_not_a_declared_conflict() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, host) = requirement_host(
+            base.path(),
+            vec![
+                with_relations(recorded("Registrate.jar", REGISTRATE, "r1"), &[]),
+                rival_incompatible_with_create_release("c0"),
+            ],
+            &[],
+        );
+
+        let problems = app.requirement_problems(host).expect("problems");
+
+        assert!(problems.conflicts.is_empty());
+    }
+
+    #[test]
+    fn an_incompatibility_pinned_to_the_installed_release_is_a_declared_conflict() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, host) = requirement_host(
+            base.path(),
+            vec![
+                with_relations(recorded("Registrate.jar", REGISTRATE, "r1"), &[]),
+                rival_incompatible_with_create_release("c1"),
+            ],
+            &[],
+        );
+
+        let problems = app.requirement_problems(host).expect("problems");
+
+        assert_eq!(problems.conflicts.len(), 1);
+        assert_eq!(problems.conflicts[0].declared_by.name, "Rival.jar");
+        assert_eq!(problems.conflicts[0].conflicts_with.name, "Create.jar");
+    }
+
+    #[test]
+    fn an_incompatibility_pinned_to_a_release_the_recipe_does_not_record_is_not_a_conflict() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut create = with_relations(
+            recorded("Create.jar", "CreateId", "c1"),
+            &[("FlywheelId", ModRelationKind::Required)],
+        );
+        create.identity.as_mut().expect("identity").version_id = None;
+        let (app, host) = requirement_host(
+            base.path(),
+            vec![
+                with_relations(recorded("Registrate.jar", REGISTRATE, "r1"), &[]),
+                rival_incompatible_with_create_release("c1"),
+            ],
+            &[],
+        );
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(
+            &app.host_layout(host).expect("layout").root,
+        ));
+        let mut recipe = store.read_recipe().expect("recipe");
+        recipe.files[0] = create;
+        store.write_recipe(&recipe).expect("write");
+
+        let problems = app.requirement_problems(host).expect("problems");
+
+        assert!(problems.conflicts.is_empty());
+    }
+
+    #[test]
+    fn the_enable_closure_lists_an_incompatible_mod_only_when_its_release_is_the_pinned_one() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, host) = requirement_host(
+            base.path(),
+            vec![
+                with_relations(recorded("Registrate.jar", REGISTRATE, "r1"), &[]),
+                rival_incompatible_with_create_release("c0"),
+            ],
+            &[],
+        );
+        let rival = Path::new("mods").join("Rival.jar");
+        assert!(
+            app.dependencies_of(host, &rival)
+                .expect("closure")
+                .incompatible
+                .is_empty()
+        );
+
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, host) = requirement_host(
+            base.path(),
+            vec![
+                with_relations(recorded("Registrate.jar", REGISTRATE, "r1"), &[]),
+                rival_incompatible_with_create_release("c1"),
+            ],
+            &[],
+        );
+        let closure = app.dependencies_of(host, &rival).expect("closure");
+        assert_eq!(names(&closure.incompatible), ["Create.jar"]);
+    }
+
+    #[test]
+    fn a_pinned_incompatibility_is_listed_against_the_pinned_release_only() {
+        let declared_against = |pinned: &str| {
+            let base = tempfile::tempdir().expect("temp dir");
+            let (app, host) = requirement_host(
+                base.path(),
+                vec![
+                    with_relations(recorded("Registrate.jar", REGISTRATE, "r1"), &[]),
+                    rival_incompatible_with_create_release(pinned),
+                ],
+                &[],
+            );
+            let relations = app
+                .relations_of(host, &Path::new("mods").join("Create.jar"))
+                .expect("relations");
+            relations
+                .required_by
+                .iter()
+                .any(|related| related.kind == ModRelationKind::Incompatible)
+        };
+
+        assert!(!declared_against("c0"));
+        assert!(declared_against("c1"));
     }
 
     #[test]
