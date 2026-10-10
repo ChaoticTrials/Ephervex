@@ -4846,6 +4846,7 @@ async fn run_mod_repair(app: &App, host: InstalledHost, json: bool) -> anyhow::R
             "complete": report.is_complete(),
             "repaired": report.repaired,
             "failed": report.failed,
+            "skipped": report.skipped,
             "unrepairable": report.unrepairable,
         }));
     } else {
@@ -4868,6 +4869,9 @@ async fn run_mod_repair(app: &App, host: InstalledHost, json: bool) -> anyhow::R
     }
     for path in &report.failed {
         eprintln!("could not be replaced: {}", path.display());
+    }
+    for path in &report.skipped {
+        eprintln!("not reached: {}", path.display());
     }
     anyhow::bail!("this instance still does not hold what it recorded")
 }

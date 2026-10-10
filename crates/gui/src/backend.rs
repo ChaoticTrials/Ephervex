@@ -3857,12 +3857,9 @@ fn run_worker(
                     move |app, reporter, cancel| async move {
                         let _in_flight = in_flight;
                         let outcome = match app.apply_fix(host, &fix, &reporter, &cancel).await {
-                            Ok(outcome) => diagnosis_view::outcome_view(
-                                &fix,
-                                &outcome,
-                                cancel.is_cancelled(),
-                                &localized_error,
-                            ),
+                            Ok(outcome) => {
+                                diagnosis_view::outcome_view(&fix, &outcome, &localized_error)
+                            }
                             Err(error) => {
                                 let _ = reports.send(Event::FixApplied {
                                     host,

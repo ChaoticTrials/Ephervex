@@ -893,7 +893,6 @@ pub fn preview_view(preview: &FixPreview) -> PreviewView {
 pub fn outcome_view(
     fix: &DiagnosticFix,
     outcome: &FixOutcome,
-    stopped: bool,
     localized: &dyn Fn(&CoreError) -> String,
 ) -> OutcomeView {
     let mut lines: Vec<String> = outcome
@@ -901,7 +900,23 @@ pub fn outcome_view(
         .iter()
         .map(|(name, error)| format!("{name}: {}", localized(error)))
         .collect();
+    let stopped = outcome.was_canceled();
     let message = match fix {
+        DiagnosticFix::EnableMods(_) if stopped => {
+            lines.extend(outcome.skipped.iter().cloned());
+            lookup_args(
+                "gui-fix-enable-stopped",
+                [
+                    ("count", Arg::from(outcome.applied.len())),
+                    (
+                        "total",
+                        Arg::from(
+                            outcome.applied.len() + outcome.failed.len() + outcome.skipped.len(),
+                        ),
+                    ),
+                ],
+            )
+        }
         DiagnosticFix::EnableMods(_) if outcome.failed.is_empty() => {
             count("gui-fix-enabled", outcome.applied.len())
         }
@@ -934,6 +949,7 @@ pub fn outcome_view(
                 message.push_str(&count("gui-integrity-repair-failed", repair.failed.len()));
             }
             lines.extend(repair.failed.iter().map(|path| path.display().to_string()));
+            lines.extend(repair.skipped.iter().map(|path| path.display().to_string()));
             if !repair.recovery_issues.is_empty() {
                 lines.push(lookup("gui-integrity-recovery"));
                 lines.extend(
@@ -948,7 +964,7 @@ pub fn outcome_view(
     };
     OutcomeView {
         message,
-        failed: !outcome.is_complete() || stopped,
+        failed: !outcome.is_complete(),
         changed: !outcome.applied.is_empty(),
         lines,
     }
@@ -960,7 +976,9 @@ mod tests {
 
     use std::path::PathBuf;
 
-    use ephervex_core::{ImpactedMod, JavaRuntimeSummary, ModPresence, UnmetRequirement};
+    use ephervex_core::{
+        ImpactedMod, JavaRuntimeSummary, ModPresence, RepairReport, UnmetRequirement,
+    };
     use ephervex_model::ModOrigin;
 
     use super::*;
@@ -1163,17 +1181,64 @@ mod tests {
                     path: PathBuf::from("mods/b.jar"),
                 },
             )],
+            skipped: Vec::new(),
             repair: None,
         };
 
-        let view = outcome_view(
-            &DiagnosticFix::EnableMods(Vec::new()),
-            &outcome,
-            false,
-            &|_| "gone".to_owned(),
-        );
+        let view = outcome_view(&DiagnosticFix::EnableMods(Vec::new()), &outcome, &|_| {
+            "gone".to_owned()
+        });
 
         assert!(view.failed);
         assert_eq!(view.lines, ["B: gone"]);
+    }
+
+    #[test]
+    fn a_canceled_enable_names_the_mods_it_never_reached() {
+        let outcome = FixOutcome {
+            applied: vec!["A".to_owned()],
+            failed: Vec::new(),
+            skipped: vec!["B".to_owned(), "C".to_owned()],
+            repair: None,
+        };
+
+        let view = outcome_view(&DiagnosticFix::EnableMods(Vec::new()), &outcome, &|_| {
+            String::new()
+        });
+
+        assert!(view.failed, "a canceled run is not a successful one");
+        assert!(view.changed, "the mod enabled before the cancel did change");
+        assert_eq!(view.lines, ["B", "C"]);
+        assert_eq!(
+            view.message,
+            lookup_args(
+                "gui-fix-enable-stopped",
+                [("count", Arg::from(1_usize)), ("total", Arg::from(3_usize))],
+            )
+        );
+    }
+
+    #[test]
+    fn a_canceled_restore_names_the_files_it_never_reached() {
+        let repair = RepairReport {
+            repaired: vec![PathBuf::from("mods/a.jar")],
+            skipped: vec![PathBuf::from("mods/b.jar")],
+            ..RepairReport::default()
+        };
+        let outcome = FixOutcome {
+            applied: vec!["mods/a.jar".to_owned()],
+            failed: Vec::new(),
+            skipped: vec!["mods/b.jar".to_owned()],
+            repair: Some(repair),
+        };
+
+        let view = outcome_view(&DiagnosticFix::RestoreFiles(Vec::new()), &outcome, &|_| {
+            String::new()
+        });
+
+        assert!(view.failed);
+        assert!(view.changed);
+        assert_eq!(view.lines, ["mods/b.jar"]);
+        assert_eq!(view.message, count("gui-integrity-repair-stopped", 1));
     }
 }

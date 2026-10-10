@@ -1517,6 +1517,7 @@ gui-fix-enabled = { $count ->
    *[other] Enabled { $count } mods.
 }
 gui-fix-enabled-partly = Enabled { $count } of { $total } mods. These did not change:
+gui-fix-enable-stopped = Stopped after enabling { $count } of { $total } mods. These did not change:
 gui-fix-java-applied = This host now uses automatic Java selection.
 gui-fix-java-not-applied = The Java selection did not change:
 gui-run-failed-client = The last launch failed

@@ -529,6 +529,9 @@ pub struct FixOutcome {
     pub applied: Vec<String>,
     /// What was asked for and did not change, with why.
     pub failed: Vec<(String, CoreError)>,
+    /// What the fix would have changed but never reached because the run was
+    /// canceled, by the name the preview showed.
+    pub skipped: Vec<String>,
     /// For a restore: the repair's own report.
     pub repair: Option<RepairReport>,
 }
@@ -536,7 +539,16 @@ pub struct FixOutcome {
 impl FixOutcome {
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        self.failed.is_empty() && self.repair.as_ref().is_none_or(RepairReport::is_complete)
+        self.failed.is_empty()
+            && self.skipped.is_empty()
+            && self.repair.as_ref().is_none_or(RepairReport::is_complete)
+    }
+
+    /// Whether the run was canceled before it reached everything it was asked
+    /// to change.
+    #[must_use]
+    pub fn was_canceled(&self) -> bool {
+        !self.skipped.is_empty()
     }
 }
 
@@ -734,6 +746,9 @@ impl App {
 
     /// Applies a fix a preview showed. Reports each change on its own, so a
     /// fix that partly failed says exactly what did and did not change.
+    ///
+    /// A canceled fix returns what it had already changed together with what it
+    /// never reached, in [`FixOutcome::skipped`].
     #[instrument(skip(self, reporter, cancel), fields(host = %host.id()))]
     pub async fn apply_fix(
         &self,
@@ -749,18 +764,24 @@ impl App {
         match fix {
             DiagnosticFix::EnableMods(paths) => {
                 let snapshot = self.host_mod_snapshot(host)?;
-                for path in paths {
-                    if cancel.is_cancelled() {
-                        break;
-                    }
-                    let name = snapshot
+                let name_of = |path: &PathBuf| {
+                    snapshot
                         .mods
                         .iter()
                         .find(|entry| &entry.logical_path == path)
                         .map_or_else(
                             || path.display().to_string(),
                             |entry| entry.display_name().to_owned(),
-                        );
+                        )
+                };
+                let mut pending = paths.iter();
+                while let Some(path) = pending.next() {
+                    if cancel.is_cancelled() {
+                        outcome.skipped.push(name_of(path));
+                        outcome.skipped.extend(pending.map(name_of));
+                        break;
+                    }
+                    let name = name_of(path);
                     match self.set_mod_enabled(host, path, true) {
                         Ok(_) => outcome.applied.push(name),
                         Err(error) => outcome.failed.push((name, error)),
@@ -794,12 +815,18 @@ impl App {
                     .iter()
                     .map(|path| path.display().to_string())
                     .collect();
+                outcome.skipped = report
+                    .skipped
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect();
                 outcome.repair = Some(report);
             }
         }
         info!(
             applied = outcome.applied.len(),
             failed = outcome.failed.len(),
+            skipped = outcome.skipped.len(),
             "applied a diagnostic fix"
         );
         Ok(outcome)

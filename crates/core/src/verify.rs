@@ -239,6 +239,9 @@ pub struct RepairReport {
     /// Kept apart from the ones nothing could have fixed, because one says the
     /// catalog or the network was the problem and the other says the pack was.
     pub failed: Vec<PathBuf>,
+    /// Files a repair would have attempted but never reached because the run
+    /// was canceled. They are still as they were.
+    pub skipped: Vec<PathBuf>,
     /// Scratch files that could not be removed or restored.
     pub recovery_issues: Vec<MutationRecoveryIssue>,
 }
@@ -247,7 +250,13 @@ impl RepairReport {
     /// Whether the instance now holds what it recorded.
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        self.unrepairable.is_empty() && self.failed.is_empty()
+        self.unrepairable.is_empty() && self.failed.is_empty() && self.skipped.is_empty()
+    }
+
+    /// Whether the run was canceled before it reached every file.
+    #[must_use]
+    pub fn was_canceled(&self) -> bool {
+        !self.skipped.is_empty()
     }
 
     /// Whether anything about the instance changed.
@@ -428,6 +437,10 @@ impl App {
     ///
     /// Refused while the host runs or an isolation session is active, the same
     /// states that refuse a snapshot restore and an isolation start.
+    ///
+    /// Canceling after verification returns the files already replaced along
+    /// with the ones never reached, so a partial run cannot pass for a
+    /// complete one.
     pub async fn repair_host(
         &self,
         host: InstalledHost,
@@ -470,8 +483,55 @@ impl App {
             .filter(asked)
             .map(|file| file.logical_path.clone())
             .collect();
-        for path in wanted {
+        self.repair_listed_files(host, &layout, wanted, &mut report, reporter, cancel)
+            .await;
+
+        if !report.recovery_issues.is_empty() {
+            match host {
+                InstalledHost::Instance(id) => {
+                    let mut record = self.client(id)?;
+                    record.add_attention(AttentionReason::InterruptedMutation);
+                    self.registry().update_client(&mut record)?;
+                }
+                InstalledHost::Server(id) => {
+                    if let Err(error) =
+                        self.add_server_attention(id, AttentionReason::InterruptedMutation)
+                    {
+                        warn!(%error, "an interrupted repair could not be recorded on the server");
+                    }
+                }
+            }
+        }
+
+        info!(
+            repaired = report.repaired.len(),
+            failed = report.failed.len(),
+            skipped = report.skipped.len(),
+            unrepairable = report.unrepairable.len(),
+            "replaced what this host was missing or holding wrongly"
+        );
+        Ok(report)
+    }
+
+    /// Replaces each of `wanted` in turn, recording the outcome in `report`.
+    ///
+    /// A cancellation, whether seen between files or raised while one is being
+    /// fetched, leaves that file and every later one in `report.skipped`, so
+    /// the files already replaced stay reported next to the ones never reached.
+    async fn repair_listed_files(
+        &self,
+        host: InstalledHost,
+        layout: &crate::mods::HostLayout,
+        wanted: Vec<PathBuf>,
+        report: &mut RepairReport,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) {
+        let mut pending = wanted.into_iter();
+        while let Some(path) = pending.next() {
             if cancel.is_cancelled() {
+                report.skipped.push(path);
+                report.skipped.extend(pending);
                 break;
             }
             // A file that is present, and wrong, has to move out of the way
@@ -480,7 +540,7 @@ impl App {
             // put there. Moving rather than deleting is what makes the failure
             // path recoverable (ADR 0020) - the bytes go back if the
             // replacement cannot be obtained.
-            let retired = match retire(&layout, &path) {
+            let retired = match retire(layout, &path) {
                 Ok(retired) => retired,
                 Err(error) => {
                     warn!(%error, path = %path.display(), "a broken file could not be moved aside");
@@ -523,35 +583,16 @@ impl App {
                             report.recovery_issues.push(issue);
                         }
                     }
-                    report.failed.push(path);
-                }
-            }
-        }
-
-        if !report.recovery_issues.is_empty() {
-            match host {
-                InstalledHost::Instance(id) => {
-                    let mut record = self.client(id)?;
-                    record.add_attention(AttentionReason::InterruptedMutation);
-                    self.registry().update_client(&mut record)?;
-                }
-                InstalledHost::Server(id) => {
-                    if let Err(error) =
-                        self.add_server_attention(id, AttentionReason::InterruptedMutation)
-                    {
-                        warn!(%error, "an interrupted repair could not be recorded on the server");
+                    // Stopped rather than defeated: the file was never
+                    // replaced, and it is not a fault to try again for.
+                    if error.is_cancellation() {
+                        report.skipped.push(path);
+                    } else {
+                        report.failed.push(path);
                     }
                 }
             }
         }
-
-        info!(
-            repaired = report.repaired.len(),
-            failed = report.failed.len(),
-            unrepairable = report.unrepairable.len(),
-            "replaced what this host was missing or holding wrongly"
-        );
-        Ok(report)
     }
 }
 
@@ -1040,6 +1081,93 @@ mod tests {
         assert!(
             !report.failed.contains(&PathBuf::from("mods/shipped.jar")),
             "it is not something a repair attempted and failed at"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_canceled_repair_lists_the_files_it_never_reached_beside_the_ones_it_replaced() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, id, root) = instance(base.path());
+        let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+        seed_cache(&app);
+        let host = InstalledHost::Instance(id);
+        let layout = app.host_layout(host).expect("layout");
+        let reporter = OperationReporter::silent("test-repair");
+        let cancel = CancellationToken::new();
+        let mut report = RepairReport::default();
+
+        app.repair_listed_files(
+            host,
+            &layout,
+            vec![PathBuf::from("mods/truncated.jar")],
+            &mut report,
+            &reporter,
+            &cancel,
+        )
+        .await;
+        cancel.cancel();
+        app.repair_listed_files(
+            host,
+            &layout,
+            vec![PathBuf::from("mods/gone.jar")],
+            &mut report,
+            &reporter,
+            &cancel,
+        )
+        .await;
+
+        assert_eq!(report.repaired, [PathBuf::from("mods/truncated.jar")]);
+        assert_eq!(report.skipped, [PathBuf::from("mods/gone.jar")]);
+        assert!(report.failed.is_empty());
+        assert!(report.was_canceled());
+        assert!(!report.is_complete(), "{report:?}");
+        assert!(
+            report.changed_anything(),
+            "the earlier repair is not hidden"
+        );
+        assert!(
+            !mods.join("gone.jar").exists(),
+            "the skipped file was not touched"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repair_canceled_before_its_first_file_skips_every_file() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, id, root) = instance(base.path());
+        let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+        let host = InstalledHost::Instance(id);
+        let layout = app.host_layout(host).expect("layout");
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let mut report = RepairReport::default();
+
+        app.repair_listed_files(
+            host,
+            &layout,
+            vec![
+                PathBuf::from("mods/truncated.jar"),
+                PathBuf::from("mods/gone.jar"),
+            ],
+            &mut report,
+            &OperationReporter::silent("test-repair"),
+            &cancel,
+        )
+        .await;
+
+        assert_eq!(
+            report.skipped,
+            [
+                PathBuf::from("mods/truncated.jar"),
+                PathBuf::from("mods/gone.jar")
+            ]
+        );
+        assert!(report.repaired.is_empty());
+        assert!(!report.is_complete());
+        assert_eq!(
+            std::fs::read(mods.join("truncated.jar")).expect("read"),
+            b"a ja",
+            "a file the run never reached stays as it was"
         );
     }
 

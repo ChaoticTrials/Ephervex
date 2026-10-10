@@ -394,6 +394,37 @@ async fn a_turned_off_requirement_is_enabled_only_after_its_preview_is_applied()
 }
 
 #[tokio::test]
+async fn a_canceled_enable_lists_the_mods_it_never_reached_instead_of_reporting_success() {
+    let fixture = Fixture::with_mods(&[("create", &["flywheel"]), ("flywheel", &[])]).await;
+    fixture.disable("flywheel");
+    fixture.disable("create");
+    let app = fixture.app();
+    let fix = DiagnosticFix::EnableMods(vec![
+        PathBuf::from("mods/flywheel.jar"),
+        PathBuf::from("mods/create.jar"),
+    ]);
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    let outcome = app
+        .apply_fix(
+            fixture.host(),
+            &fix,
+            &OperationReporter::silent("fixing"),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+    assert!(outcome.was_canceled());
+    assert!(!outcome.is_complete(), "{outcome:?}");
+    assert!(outcome.applied.is_empty());
+    assert_eq!(outcome.skipped, ["flywheel.jar", "create.jar"]);
+    assert!(!fixture.enabled("flywheel"));
+    assert!(!fixture.enabled("create"));
+}
+
+#[tokio::test]
 async fn a_fix_is_held_back_while_the_host_runs() {
     let fixture = Fixture::with_mods(&[("create", &["flywheel"]), ("flywheel", &[])]).await;
     fixture.disable("flywheel");
