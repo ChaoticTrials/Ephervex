@@ -15,10 +15,11 @@
 use std::time::Duration;
 
 use ephervex_download::{
-    CacheLayout, DownloadManager, DownloaderConfig, Freshness, HttpConfig, MetadataCache,
-    OperationReporter,
+    CacheLayout, ContentStore, DownloadManager, DownloaderConfig, FileExtension, Freshness,
+    HttpConfig, MetadataCache, OperationReporter,
 };
 use ephervex_minecraft::{MinecraftError, VersionCatalog};
+use ephervex_model::{Hash, HashAlgorithm};
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -390,4 +391,113 @@ async fn a_manifest_that_is_not_a_manifest_is_reported_as_such() {
         .expect_err("a well-formed but wrong document is not a version manifest");
 
     assert!(matches!(error, MinecraftError::ManifestInvalid { .. }));
+}
+
+/// The digest the manifest fixture publishes for the 1.12.2 version document.
+const V1_12_2_SHA1: &str = "4cb18237b1ae67d67ce1d537926a552453c91d57";
+
+/// Where `resolve` stored the 1.12.2 version document, found the same way the
+/// catalog finds it: by the digest the manifest published.
+fn cached_document_path(cache: &tempfile::TempDir) -> std::path::PathBuf {
+    CacheLayout::new(cache.path()).content(
+        ContentStore::Metadata,
+        &Hash::new(HashAlgorithm::Sha1, V1_12_2_SHA1).expect("fixture digest"),
+        Some(&FileExtension::new("json").expect("json extension")),
+    )
+}
+
+#[tokio::test]
+async fn a_cached_version_document_is_returned_offline_when_it_matches_its_digest() {
+    let server = MockServer::start().await;
+    mount_manifest(&server).await;
+    mount_versions(&server).await;
+    let cache = tempfile::tempdir().expect("temp dir");
+    let catalog = catalog(&server, &cache);
+    catalog
+        .resolve("1.12.2", &reporter(), &CancellationToken::new())
+        .await
+        .expect("resolve");
+
+    let cached = catalog
+        .cached_metadata("1.12.2")
+        .await
+        .expect("an intact cached document is trusted")
+        .expect("the document was cached by resolve");
+
+    assert_eq!(cached.main_class, "net.minecraft.client.main.Main");
+}
+
+#[tokio::test]
+async fn a_cached_version_document_that_was_altered_in_place_is_reported_corrupt() {
+    let server = MockServer::start().await;
+    mount_manifest(&server).await;
+    mount_versions(&server).await;
+    let cache = tempfile::tempdir().expect("temp dir");
+    let catalog = catalog(&server, &cache);
+    catalog
+        .resolve("1.12.2", &reporter(), &CancellationToken::new())
+        .await
+        .expect("resolve");
+    let stored = cached_document_path(&cache);
+    // Still valid metadata under the same file name; only the digest can tell.
+    let original = std::fs::read_to_string(&stored).expect("cached document");
+    std::fs::write(
+        &stored,
+        original.replace("net.minecraft.client.main.Main", "evil.Main"),
+    )
+    .expect("tamper with the cached document");
+
+    let error = catalog
+        .cached_metadata("1.12.2")
+        .await
+        .expect_err("an altered document must not be returned as metadata");
+
+    assert!(matches!(
+        error,
+        MinecraftError::VersionMetadataCorrupt { .. }
+    ));
+}
+
+#[tokio::test]
+async fn an_oversized_cached_version_document_is_reported_corrupt_without_being_parsed() {
+    let server = MockServer::start().await;
+    mount_manifest(&server).await;
+    mount_versions(&server).await;
+    let cache = tempfile::tempdir().expect("temp dir");
+    let catalog = catalog(&server, &cache);
+    catalog
+        .resolve("1.12.2", &reporter(), &CancellationToken::new())
+        .await
+        .expect("resolve");
+    std::fs::write(cached_document_path(&cache), vec![b' '; 9 * 1024 * 1024])
+        .expect("replace the cached document");
+
+    let error = catalog
+        .cached_metadata("1.12.2")
+        .await
+        .expect_err("a document past the size ceiling cannot be the published one");
+
+    assert!(matches!(
+        error,
+        MinecraftError::VersionMetadataCorrupt { .. }
+    ));
+}
+
+#[tokio::test]
+async fn a_version_document_that_was_never_cached_is_reported_as_not_cached() {
+    let server = MockServer::start().await;
+    mount_manifest(&server).await;
+    let cache = tempfile::tempdir().expect("temp dir");
+    let catalog = catalog(&server, &cache);
+    catalog
+        .supported_releases(&reporter(), &CancellationToken::new())
+        .await
+        .expect("listing caches the manifest");
+
+    let cached = catalog
+        .cached_metadata("1.12.2")
+        .await
+        .expect("a missing document is not an error");
+
+    assert!(cached.is_none());
 }

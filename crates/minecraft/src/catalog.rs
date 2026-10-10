@@ -37,10 +37,11 @@
 use chrono::{DateTime, Utc};
 use ephervex_download::{
     CacheLayout, ContentStore, DownloadError, DownloadManager, DownloadRequest, FileExtension,
-    Freshness, MetadataCache, MetadataKey, OperationReporter, UrlPolicyError,
+    Freshness, HashVerifier, MetadataCache, MetadataKey, OperationReporter, UrlPolicyError,
 };
 use reqwest::Url;
 use tokio::fs;
+use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument};
 
@@ -227,8 +228,10 @@ impl VersionCatalog {
     /// what a version needs, and say "not cached" when nobody has asked yet,
     /// instead of quietly becoming an operation that needs a connection.
     ///
-    /// The version document is addressed by its own digest, so a cached one is
-    /// read straight off disk and a tampered one is not read at all.
+    /// The version document is addressed by its manifest digest, but its name
+    /// proves nothing about its bytes: the bytes read are hashed against that
+    /// digest before they are parsed, and a document that no longer matches is
+    /// reported as corrupt instead of being trusted.
     #[instrument(skip(self))]
     pub async fn cached_metadata(&self, id: &str) -> MinecraftResult<Option<VersionMetadata>> {
         let Some(document) = self.cache.peek(&self.manifest_key).await else {
@@ -240,19 +243,34 @@ impl VersionCatalog {
             return Ok(None);
         };
 
-        // The digest names the file, exactly as it does when one is fetched,
-        // so this reads the same bytes a resolve would have verified.
         let destination =
             self.layout
                 .content(ContentStore::Metadata, &record.sha1, Some(&self.json));
-        let Ok(json) = tokio::fs::read_to_string(&destination).await else {
+        let Ok(file) = fs::File::open(&destination).await else {
             return Ok(None);
         };
-        Ok(Some(VersionMetadata::parse(&json).map_err(|_| {
-            MinecraftError::VersionMetadataCorrupt {
-                id: record.id.clone(),
-            }
-        })?))
+        let corrupt = || MinecraftError::VersionMetadataCorrupt {
+            id: record.id.clone(),
+        };
+        // One read feeds both the digest check and the parser, so the bytes
+        // that were verified are the bytes that are used.
+        let mut bytes = Vec::new();
+        if file
+            .take(MAX_VERSION_DOCUMENT_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .await
+            .is_err()
+        {
+            return Ok(None);
+        }
+        if bytes.len() as u64 > MAX_VERSION_DOCUMENT_BYTES {
+            return Err(corrupt());
+        }
+        let mut verifier = HashVerifier::new(std::slice::from_ref(&record.sha1));
+        verifier.update(&bytes);
+        verifier.finish().map_err(|_| corrupt())?;
+        let json = std::str::from_utf8(&bytes).map_err(|_| corrupt())?;
+        Ok(Some(VersionMetadata::parse(json).map_err(|_| corrupt())?))
     }
 
     /// Resolves one supported release's complete metadata.

@@ -192,3 +192,52 @@ fn json_output_without_shared_has_no_shared_report() {
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("one document");
     assert!(value.get("shared").is_none());
 }
+
+/// The digest the manifest fixture publishes for the 1.20.1 version document.
+const V1_20_1_SHA1: &str = "8789eb9a3eb37911774a2e5552377d3460a57593";
+
+fn find_file(directory: &Path, name: &str) -> Option<std::path::PathBuf> {
+    for entry in std::fs::read_dir(directory).ok()?.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_file(&path, name) {
+                return Some(found);
+            }
+        } else if path.file_name().is_some_and(|file| file == name) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+#[test]
+fn shared_verification_refuses_a_cached_version_document_that_no_longer_matches_its_digest() {
+    let sandbox = Sandbox::new();
+    let id = sandbox.instance_with_an_unproven_jar();
+    let cached = find_file(
+        &sandbox.directory.path().join("cache"),
+        &format!("{V1_20_1_SHA1}.json"),
+    )
+    .expect("the seeded version document");
+    let original = std::fs::read_to_string(&cached).expect("cached document");
+    assert!(original.contains("net.minecraft.client.main.Main"));
+    // Still valid metadata under the same file name; only its digest differs.
+    std::fs::write(
+        &cached,
+        original.replace("net.minecraft.client.main.Main", "evil.Main"),
+    )
+    .expect("tamper with the cached document");
+
+    let output = sandbox.run(&["mod", "verify", "--instance", &id, "--shared"]);
+
+    assert!(
+        !output.status.success(),
+        "an altered document was trusted: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("shared files checked"),
+        "integrity was reported from altered metadata: {stdout}"
+    );
+}
