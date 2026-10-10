@@ -3,14 +3,16 @@ import type {Config} from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
 
 const repository = 'https://github.com/ChaoticTrials/Ephervex';
+const baseUrl = process.env.DOCUSAURUS_BASE_URL ?? '/';
 
 const config: Config = {
   title: 'Ephervex',
   tagline: 'Disposable Minecraft environments for reproducing bugs.',
   favicon: 'img/favicon.png',
+  scripts: [{src: `${baseUrl}halloween-theme.js`}],
   future: {v4: true},
   url: 'https://ephervex.chaotictrials.de',
-  baseUrl: process.env.DOCUSAURUS_BASE_URL ?? '/',
+  baseUrl,
   organizationName: 'ChaoticTrials',
   projectName: 'Ephervex',
   onBrokenLinks: 'throw',

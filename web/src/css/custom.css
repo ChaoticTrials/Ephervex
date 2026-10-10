@@ -197,3 +197,96 @@
 @media (max-width: 996px) {
   .theme-doc-markdown > header:first-child { min-height: 10rem; }
 }
+
+html[data-season='halloween'] {
+  --ifm-color-primary: #a94410;
+  --ifm-color-primary-dark: #983b0e;
+  --ifm-color-primary-darker: #8d370c;
+  --ifm-color-primary-darkest: #712b09;
+  --ifm-color-primary-light: #bc5018;
+  --ifm-color-primary-lighter: #c6591e;
+  --ifm-color-primary-lightest: #df7437;
+  --ifm-font-color-base: #302138;
+  --ifm-heading-color: #28192f;
+  --ifm-navbar-background-color: #29172e;
+  --ifm-navbar-link-color: #f7eadc;
+  --ifm-navbar-link-hover-color: #ffc47d;
+  --site-bg: #fff7eb;
+  --site-surface: #fffcf7;
+  --site-surface-alt: #f8ead9;
+  --site-image-bg: #ead9c5;
+  --site-border: #e6ceb6;
+  --site-muted: #66546b;
+  --site-accent: #9d3d0a;
+  --site-shadow: rgba(71, 35, 45, 0.1);
+  --site-hero-bg: #3a203d;
+  --site-hero-text: #fff1dc;
+  --site-hero-muted: #ead1c3;
+  --site-button-bg: #a94410;
+  --site-button-hover: #873407;
+  --site-button-text: #fffaf3;
+  --docs-sidebar-bg: #29172e;
+  --docs-sidebar-text: #efd9c9;
+  --docs-sidebar-accent: #ffc47d;
+  --docs-note-bg: #fff0d9;
+  --docs-warning-bg: #ffead4;
+  --docs-warning-border: #a94410;
+}
+
+html[data-theme='dark'][data-season='halloween'] {
+  --ifm-color-primary: #ffae60;
+  --ifm-color-primary-dark: #ff9d40;
+  --ifm-color-primary-darker: #ff922f;
+  --ifm-color-primary-darkest: #ee7712;
+  --ifm-color-primary-light: #ffc080;
+  --ifm-color-primary-lighter: #ffcb97;
+  --ifm-color-primary-lightest: #ffdec0;
+  --ifm-font-color-base: #f3e8e3;
+  --ifm-heading-color: #fff0e0;
+  --ifm-navbar-background-color: #1d1124;
+  --site-bg: #1b1221;
+  --site-surface: #281b2f;
+  --site-surface-alt: #322239;
+  --site-image-bg: #211728;
+  --site-border: #604258;
+  --site-muted: #d3bfc9;
+  --site-accent: #ffb86e;
+  --site-shadow: rgba(0, 0, 0, 0.24);
+  --site-hero-bg: #321d39;
+  --site-hero-text: #fff0df;
+  --site-hero-muted: #e0c4c7;
+  --site-button-bg: #ffae60;
+  --site-button-hover: #ffc47d;
+  --site-button-text: #2b172c;
+  --docs-sidebar-bg: #1d1124;
+  --docs-note-bg: #3a2a37;
+  --docs-warning-bg: #422b2c;
+  --docs-warning-border: #ffae60;
+}
+
+html[data-season='halloween'] .navbar__title,
+html[data-season='halloween'] .navbar__toggle,
+html[data-season='halloween'] .navbar .clean-btn { color: #fff0e0; }
+html[data-season='halloween'] .navbar__title:hover { color: #ffc47d; }
+html[data-season='halloween'] .theme-doc-sidebar-container { border-right-color: #68415c; }
+html[data-season='halloween'] .theme-doc-sidebar-menu::before { border-bottom-color: #68415c; }
+html[data-season='halloween'] .theme-doc-markdown > header:first-child {
+  color: #fff0df;
+  background:
+    linear-gradient(rgba(255, 183, 105, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 183, 105, 0.045) 1px, transparent 1px),
+    radial-gradient(circle at 88% 12%, rgba(238, 113, 28, 0.31), transparent 42%),
+    #2c1931;
+  background-size: 48px 48px, 48px 48px, auto, auto;
+}
+html[data-season='halloween'] .theme-doc-markdown > header:first-child::before,
+html[data-season='halloween'] .theme-doc-markdown > header:first-child + p a { color: #ffc47d; }
+html[data-season='halloween'] .theme-doc-markdown > header:first-child + p {
+  color: #efd8d0;
+  background: #2c1931;
+}
+html[data-season='halloween'] .theme-doc-markdown > header:first-child + p code {
+  border-color: rgba(255, 196, 125, 0.3);
+  color: #ffd19b;
+  background: rgba(255, 196, 125, 0.12);
+}

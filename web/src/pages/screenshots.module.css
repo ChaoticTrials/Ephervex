@@ -102,3 +102,5 @@
   border-color: var(--site-accent);
   color: var(--site-accent);
 }
+
+:global(html[data-season='halloween']) .intro .eyebrow { color: #ffc47d; }

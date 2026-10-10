@@ -262,3 +262,33 @@
   .showcaseGrid { grid-template-columns: 1fr; }
   .ctaInner { align-items: flex-start; flex-direction: column; }
 }
+
+:global(html[data-season='halloween']) .hero {
+  color: #fff1df;
+  background:
+    radial-gradient(circle at 84% 12%, rgba(244, 116, 23, 0.3), transparent 34%),
+    linear-gradient(145deg, #201426 10%, #442341 100%);
+}
+:global(html[data-season='halloween']) .hero::before {
+  background-image:
+    linear-gradient(rgba(255, 190, 116, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 190, 116, 0.045) 1px, transparent 1px);
+}
+:global(html[data-season='halloween']) .eyebrow {
+  border-color: rgba(255, 184, 110, 0.48);
+  color: #ffd49a;
+  background: rgba(255, 158, 60, 0.12);
+}
+:global(html[data-season='halloween']) .hero h1 span { color: #ffb965; }
+:global(html[data-season='halloween']) .heroCopy > p { color: #ebd6d2; }
+:global(html[data-season='halloween']) .primaryAction { color: #28172c; background: #ffb965; }
+:global(html[data-season='halloween']) .primaryAction:hover { color: #28172c; background: #ffd08b; }
+:global(html[data-season='halloween']) .secondaryAction { border-color: #bd8a94; color: #fff0e0; }
+:global(html[data-season='halloween']) .secondaryAction:hover { color: #fff; background: rgba(255, 190, 116, 0.12); }
+:global(html[data-season='halloween']) .supportLine { color: #e0c6ca; }
+:global(html[data-season='halloween']) .supportLine span { border-color: #8f6877; }
+:global(html[data-season='halloween']) .heroVisual { border-color: #885477; background: #2b1b31; }
+:global(html[data-season='halloween']) .windowBar { color: #e8c5c6; }
+:global(html[data-season='halloween']) .windowDots i { border-color: #ad7b86; }
+:global(html[data-season='halloween']) .cta { color: #fff0df; background: #39203d; }
+:global(html[data-season='halloween']) .cta .sectionLabel { color: #ffc47d; }

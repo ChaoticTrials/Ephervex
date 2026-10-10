@@ -94,3 +94,23 @@
   .groups { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2rem 1rem; }
   .bottom { flex-direction: column; }
 }
+
+:global(html[data-season='halloween']) .footer {
+  color: #f1ddcf;
+  background:
+    radial-gradient(circle at 90% 0%, rgba(234, 106, 29, 0.2), transparent 38%),
+    #221428;
+}
+:global(html[data-season='halloween']) .footer::before {
+  background-image:
+    linear-gradient(rgba(255, 190, 116, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 190, 116, 0.04) 1px, transparent 1px);
+}
+:global(html[data-season='halloween']) .brand { color: #fff0df; }
+:global(html[data-season='halloween']) .brand:hover,
+:global(html[data-season='halloween']) .group a:hover { color: #ffc47d; }
+:global(html[data-season='halloween']) .identity p { color: #dbc3c7; }
+:global(html[data-season='halloween']) .group h2 { color: #ffc47d; }
+:global(html[data-season='halloween']) .group a { color: #f1ddcf; }
+:global(html[data-season='halloween']) .footer a:focus-visible { outline-color: #ffc47d; }
+:global(html[data-season='halloween']) .bottom { border-top-color: rgba(255, 196, 125, 0.25); color: #cbb3bd; }
