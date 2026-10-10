@@ -160,7 +160,7 @@ features show one tab or a short note.
       start, stop, console, Launch Client & Connect, recovery
 - [x] Diagnostics, logs and crash reports, diagnostic bundles
 - [x] Snapshots
-- [ ] Settings: General, Minecraft defaults, Java, Providers & APIs, Storage,
+- [x] Settings: General, Minecraft defaults, Java, Providers & APIs, Storage,
       Disk usage
 - [ ] Themes (source: `docs/themes.md`)
 - [ ] Files and locations, environment variables, working offline,
