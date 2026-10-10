@@ -233,8 +233,9 @@ pub fn open_containing_folder(path: &std::path::Path) -> bool {
 /// `ReleaseListing`.
 pub use ephervex_auth::{
     Account, AuthError, AuthEvent, AuthObserver, AuthStage, CredentialStorage,
-    DEFAULT_MICROSOFT_CLIENT_ID, DeviceCodePrompt, Entitlements, LoginFlow, LoginRequest,
-    MINECRAFT_API_REVIEW_FORM, OfflineAccount, SecretString, Session, XstsDenial, offline_uuid,
+    DEFAULT_MICROSOFT_CLIENT_ID, DeviceCodePrompt, EntitlementLookup, Entitlements, LoginFlow,
+    LoginRequest, MINECRAFT_API_REVIEW_FORM, OfflineAccount, SecretString, Session, XstsDenial,
+    offline_uuid,
 };
 /// The artifact-cache maintenance results a settings screen renders.
 ///

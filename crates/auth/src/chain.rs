@@ -49,7 +49,7 @@ use crate::endpoints::Endpoints;
 use crate::error::{AuthError, AuthResult};
 use crate::loopback::{LoopbackReceiver, Redirect};
 use crate::microsoft::{MicrosoftClient, MicrosoftTokens};
-use crate::minecraft::{Entitlements, MinecraftServicesClient};
+use crate::minecraft::{EntitlementLookup, MinecraftServicesClient};
 use crate::order::{CredentialChangeGuard, CredentialChangeOrder, ProcessChangeOrder};
 use crate::pkce::Pkce;
 use crate::provider::{
@@ -199,9 +199,10 @@ impl MicrosoftAccountProvider {
         // A failing entitlement store must not block a login on its own: the
         // profile is what decides, and this call exists to explain a refusal.
         // Treating an outage here as "you do not own the game" would lock a
-        // paying user out of their own instances.
+        // paying user out of their own instances, so it stays unknown rather
+        // than becoming an empty answer.
         let entitlements = match self.minecraft.entitlements(&minecraft.access, cancel).await {
-            Ok(entitlements) => entitlements,
+            Ok(entitlements) => EntitlementLookup::Answered(entitlements),
             // Two failures are not outages and must not be swallowed: the user
             // asking to stop, and the application not being approved for the
             // API at all. The second would otherwise be reported one call later
@@ -211,17 +212,21 @@ impl MicrosoftAccountProvider {
             }
             Err(error) => {
                 warn!(%error, "could not read the entitlement store; relying on the profile");
-                Entitlements::default()
+                EntitlementLookup::Unavailable
             }
         };
 
         observer.stage(AuthStage::Profile);
         let Some(profile) = self.minecraft.profile(&minecraft.access, cancel).await? else {
             // No Java Edition profile. Which refusal this is depends on what
-            // the store said, and the two need different instructions.
-            return Err(AuthError::GameNotOwned {
-                game_pass: entitlements.has_game_pass(),
-                entitlements: entitlements.items,
+            // the store said, and each needs different instructions. When the
+            // store said nothing, ownership is unconfirmed, not denied.
+            return Err(match entitlements {
+                EntitlementLookup::Answered(entitlements) => AuthError::GameNotOwned {
+                    game_pass: entitlements.has_game_pass(),
+                    entitlements: entitlements.items,
+                },
+                EntitlementLookup::Unavailable => AuthError::GameOwnershipUnconfirmed,
             });
         };
 
@@ -234,7 +239,7 @@ impl MicrosoftAccountProvider {
 
         debug!(
             account = %account.id,
-            entitlements = ?entitlements.items,
+            entitlements = ?entitlements.answered().map(|answered| &answered.items),
             storage = self.credentials.storage().as_str(),
             "authentication chain completed"
         );

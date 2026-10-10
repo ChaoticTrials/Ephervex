@@ -28,27 +28,27 @@ use ephervex_core::{
     CredentialPresence, CredentialStorage, DEFAULT_DIAGNOSTIC_BYTES, DEFAULT_SEARCH_LIMIT,
     DependencyKnowledge, DependencyRefreshReport, DependentMods, DiagnosticEntry, DiagnosticKind,
     DiagnosticRequest, DiagnosticScope, DiagnosticSearch, DirectoryState, DuplicateClient,
-    EULA_CONFIRMATION_PHRASE, Entitlements, EulaStatus, FileDisposition, Freshness, GameExit,
-    ImpactedMod, ImportRequest, ImportedPack, IncompatibilityReason, InstallationHealth,
-    InstalledHost, InstalledMods, Integrity, IsolationRequest, IsolationRound, IsolationSession,
-    IsolationStep, JavaHealth, JavaPathChoice, JavaPlan, JavaPlanRequest, JavaRuntime, JavaTarget,
-    LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions,
-    LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver, LaunchOptions,
-    LaunchOutcome, LaunchState, LoginFlow, LoginOptions, LoginRequest, MAX_SEARCH_MATCHES,
-    MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod, ManagedModInstallation,
-    ManagedModSnapshot, ModInstallPlan, ModInstallRequest, ModPresence, ModProjectDetails,
-    ModRelations, ModSearchQuery, ModSearchResults, NetworkAccess, NewClient, NewServer,
-    OperationReporter, OptionalSelection, OutputLine, PackAnalysis, PackRecipe, PackSide, Paths,
-    PlanWarning, PlannedMod, PreferenceApplication, PreferenceId, PreferenceKey, ProcessMonitor,
-    PromotionRequest, PromotionWarning, ReconciliationReport, RelatedMod, ReleaseListing,
-    RequiredMods, RequirementBasis, RoundAnswer, RuntimeClassification, RuntimeInventory,
-    SearchOptions, SecretString, ServerCommitWarning, ServerContentSource, ServerCreateOptions,
-    ServerEvent, ServerExit, ServerFolder, ServerNetworkChange, ServerObserver,
-    ServerPersistenceHealth, ServerRecord, ServerWarning, Session, SharedArtifactReport,
-    SideRequirement, SkipReason, SnapshotOrigin, SnapshotRecord, SnapshotRestoreOptions,
-    StartedServerLifetime, SuspectConfidence, SuspectReason, TerminationRequests, TextAnchor,
-    TextView, UnknownServerFiles, VerificationReport, VersionMetadata, VersionRecord,
-    format_binary_bytes,
+    EULA_CONFIRMATION_PHRASE, EntitlementLookup, Entitlements, EulaStatus, FileDisposition,
+    Freshness, GameExit, ImpactedMod, ImportRequest, ImportedPack, IncompatibilityReason,
+    InstallationHealth, InstalledHost, InstalledMods, Integrity, IsolationRequest, IsolationRound,
+    IsolationSession, IsolationStep, JavaHealth, JavaPathChoice, JavaPlan, JavaPlanRequest,
+    JavaRuntime, JavaTarget, LaunchAndConnectEvent, LaunchAndConnectObserver,
+    LaunchAndConnectOptions, LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver,
+    LaunchOptions, LaunchOutcome, LaunchState, LoginFlow, LoginOptions, LoginRequest,
+    MAX_SEARCH_MATCHES, MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod,
+    ManagedModInstallation, ManagedModSnapshot, ModInstallPlan, ModInstallRequest, ModPresence,
+    ModProjectDetails, ModRelations, ModSearchQuery, ModSearchResults, NetworkAccess, NewClient,
+    NewServer, OperationReporter, OptionalSelection, OutputLine, PackAnalysis, PackRecipe,
+    PackSide, Paths, PlanWarning, PlannedMod, PreferenceApplication, PreferenceId, PreferenceKey,
+    ProcessMonitor, PromotionRequest, PromotionWarning, ReconciliationReport, RelatedMod,
+    ReleaseListing, RequiredMods, RequirementBasis, RoundAnswer, RuntimeClassification,
+    RuntimeInventory, SearchOptions, SecretString, ServerCommitWarning, ServerContentSource,
+    ServerCreateOptions, ServerEvent, ServerExit, ServerFolder, ServerNetworkChange,
+    ServerObserver, ServerPersistenceHealth, ServerRecord, ServerWarning, Session,
+    SharedArtifactReport, SideRequirement, SkipReason, SnapshotOrigin, SnapshotRecord,
+    SnapshotRestoreOptions, StartedServerLifetime, SuspectConfidence, SuspectReason,
+    TerminationRequests, TextAnchor, TextView, UnknownServerFiles, VerificationReport,
+    VersionMetadata, VersionRecord, format_binary_bytes,
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{
@@ -5984,6 +5984,21 @@ fn account_json(account: &AccountSummary) -> serde_json::Value {
     })
 }
 
+/// One ownership fact about a session, `null` when the entitlement lookup did
+/// not answer: an unknown must not read as a definite `false`.
+fn ownership_json(
+    lookup: Option<&EntitlementLookup>,
+    fact: fn(&Entitlements) -> bool,
+) -> serde_json::Value {
+    match lookup {
+        Some(EntitlementLookup::Unavailable) => serde_json::Value::Null,
+        Some(EntitlementLookup::Answered(entitlements)) => {
+            serde_json::Value::Bool(fact(entitlements))
+        }
+        None => serde_json::Value::Bool(false),
+    }
+}
+
 /// A session as JSON. Carries the account and the expiry, never the token.
 fn session_json(session: &Session) -> serde_json::Value {
     serde_json::json!({
@@ -5996,8 +6011,8 @@ fn session_json(session: &Session) -> serde_json::Value {
             "entitlements": session
     .entitlements()
     .map(|entitlements| entitlements.items.clone()),
-            "owns_game": session.entitlements().is_some_and(Entitlements::owns_game),
-            "game_pass": session.entitlements().is_some_and(Entitlements::has_game_pass),
+            "owns_game": ownership_json(session.entitlement_lookup(), Entitlements::owns_game),
+            "game_pass": ownership_json(session.entitlement_lookup(), Entitlements::has_game_pass),
             "credential_storage": session.storage().map(CredentialStorage::as_str),
             "persistent": session.storage().is_some_and(CredentialStorage::is_persistent),
         })
@@ -8270,6 +8285,30 @@ fn localized_failure(error: &CoreError) -> (String, Option<String>) {
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unanswered_entitlement_lookup_is_reported_as_unknown_ownership() {
+        let unavailable = EntitlementLookup::Unavailable;
+        assert!(ownership_json(Some(&unavailable), Entitlements::owns_game).is_null());
+        assert!(ownership_json(Some(&unavailable), Entitlements::has_game_pass).is_null());
+
+        let none = EntitlementLookup::Answered(Entitlements::default());
+        assert_eq!(
+            ownership_json(Some(&none), Entitlements::owns_game),
+            serde_json::Value::Bool(false)
+        );
+        let bought = EntitlementLookup::Answered(Entitlements {
+            items: vec!["product_minecraft".to_owned()],
+        });
+        assert_eq!(
+            ownership_json(Some(&bought), Entitlements::owns_game),
+            serde_json::Value::Bool(true)
+        );
+        assert_eq!(
+            ownership_json(None, Entitlements::owns_game),
+            serde_json::Value::Bool(false)
+        );
+    }
 
     #[test]
     fn terminal_safe_escapes_control_and_bidirectional_characters_only() {

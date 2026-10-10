@@ -24,6 +24,11 @@ That fails for a specific reason: it makes "no token" mean two different things
 - *offline* and *expired* - and the launch pipeline must never confuse them. One
 of them wants a refresh, the other wants a different command line.
 
+The same rule applies to `entitlements`: it is an `EntitlementLookup`, either
+the store's answer (possibly an empty list) or `Unavailable`. A failed lookup is
+never turned into an empty answer, so an outage cannot be reported as "does not
+own the game".
+
 Because `Credentials` is an enum, the launch pipeline must handle both arms.
 `Session::access_token()` returns `Option<&SecretString>` and
 `Session::is_authenticated()` reads the credentials rather than the account's

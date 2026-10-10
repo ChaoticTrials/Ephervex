@@ -679,7 +679,9 @@ mod tests {
             credentials: Credentials::Microsoft {
                 token: ephervex_auth::SecretString::new("a-real-token"),
                 expires_at: chrono::Utc::now() + chrono::TimeDelta::hours(24),
-                entitlements: ephervex_auth::Entitlements::default(),
+                entitlements: ephervex_auth::EntitlementLookup::Answered(
+                    ephervex_auth::Entitlements::default(),
+                ),
                 storage: ephervex_auth::CredentialStorage::Keyring,
             },
         });

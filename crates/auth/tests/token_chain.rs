@@ -28,8 +28,9 @@ use std::time::Duration;
 
 use ephervex_auth::{
     AccountProvider, AuthError, AuthEvent, AuthObserver, CredentialChangeOrder, CredentialKey,
-    CredentialRemoval, CredentialStorage, CredentialStore, Endpoints, LoginFlow, LoginRequest,
-    MemoryStore, MicrosoftAccountProvider, ProcessChangeOrder, SecretString, XstsDenial,
+    CredentialRemoval, CredentialStorage, CredentialStore, Endpoints, EntitlementLookup, LoginFlow,
+    LoginRequest, MemoryStore, MicrosoftAccountProvider, ProcessChangeOrder, SecretString,
+    XstsDenial,
 };
 use ephervex_download::HttpConfig;
 use tokio_util::sync::CancellationToken;
@@ -1357,7 +1358,43 @@ async fn an_entitlement_store_outage_does_not_lock_a_paying_user_out() {
     .await
     .expect("a profile is enough to launch");
     assert_eq!(session.account.id, account());
-    assert!(session.entitlements().expect("present").items.is_empty());
+    // The store did not answer, so nothing is known: not an empty list.
+    assert!(session.entitlements().is_none());
+    assert!(matches!(
+        session.entitlement_lookup(),
+        Some(EntitlementLookup::Unavailable)
+    ));
+}
+
+#[tokio::test]
+async fn a_missing_profile_during_an_entitlement_outage_is_not_a_definite_refusal() {
+    let server = MockServer::start().await;
+    mount_token(&server, 200, TOKEN).await;
+    mount_xbox(&server, 200, XBOX).await;
+    mount_xsts(&server, 200, XSTS).await;
+    mount_minecraft_login(&server, 200, MC_LOGIN).await;
+    mount_entitlements(&server, 503, "{}").await;
+    mount_profile(&server, 404, PROFILE_MISSING).await;
+
+    let store = Arc::new(MemoryStore::new());
+    let error = drive_browser_login(&provider(&server, store.clone()), |redirect, state| {
+        format!("{redirect}/?code=THE-AUTH-CODE&state={state}")
+    })
+    .await
+    .expect_err("no profile means no launch");
+
+    assert!(
+        matches!(error, AuthError::GameOwnershipUnconfirmed),
+        "{error:?}"
+    );
+    assert_eq!(error.message_id(), "error-auth-game-ownership-unconfirmed");
+    assert!(error.is_transient());
+    assert!(
+        store
+            .load(&CredentialKey::MicrosoftRefreshToken(account()))
+            .expect("load")
+            .is_none()
+    );
 }
 
 // ------------------------------------------------------- secret handling

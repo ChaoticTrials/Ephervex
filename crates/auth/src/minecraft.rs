@@ -76,6 +76,30 @@ pub struct Entitlements {
     pub items: Vec<String>,
 }
 
+/// What the entitlement lookup produced.
+///
+/// A lookup that failed is not an empty answer: "the store did not respond"
+/// and "the store lists nothing" lead to different refusals and different
+/// reports, so they are different values.
+#[derive(Debug, Clone)]
+pub enum EntitlementLookup {
+    /// The store answered, possibly with an empty list.
+    Answered(Entitlements),
+    /// The store could not be read. Ownership is unknown.
+    Unavailable,
+}
+
+impl EntitlementLookup {
+    /// The store's answer, or `None` when it could not be read.
+    #[must_use]
+    pub const fn answered(&self) -> Option<&Entitlements> {
+        match self {
+            Self::Answered(entitlements) => Some(entitlements),
+            Self::Unavailable => None,
+        }
+    }
+}
+
 impl Entitlements {
     /// Whether the account bought Minecraft Java Edition.
     #[must_use]

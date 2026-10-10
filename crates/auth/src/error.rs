@@ -182,6 +182,14 @@ pub enum AuthError {
         game_pass: bool,
     },
 
+    /// There is no Java Edition profile and the entitlement store could not be
+    /// read, so whether the account owns the game is unknown.
+    ///
+    /// Not [`AuthError::GameNotOwned`]: that is a definite answer with purchase
+    /// advice, and an outage must not produce one.
+    #[error("minecraft ownership could not be confirmed because the entitlement store failed")]
+    GameOwnershipUnconfirmed,
+
     /// The profile endpoint failed for a reason other than "no such profile".
     #[error("the minecraft profile could not be read (http {status})")]
     ProfileUnavailable { status: u16 },
@@ -416,6 +424,7 @@ impl AuthError {
                     "error-auth-game-not-owned"
                 }
             }
+            Self::GameOwnershipUnconfirmed => "error-auth-game-ownership-unconfirmed",
             Self::ProfileUnavailable { status } => {
                 if status_is_transient(*status) {
                     "error-auth-minecraft-unavailable"
@@ -486,7 +495,7 @@ impl AuthError {
     #[must_use]
     pub fn is_transient(&self) -> bool {
         match self {
-            Self::Transport { .. } => true,
+            Self::Transport { .. } | Self::GameOwnershipUnconfirmed => true,
             Self::HttpStatus { status, .. }
             | Self::XboxAuthenticationFailed { status }
             | Self::MinecraftLoginRejected { status }
@@ -630,6 +639,21 @@ mod tests {
     }
 
     #[test]
+    fn unconfirmed_ownership_is_not_reported_as_not_owning_the_game() {
+        let unconfirmed = AuthError::GameOwnershipUnconfirmed;
+        assert_ne!(
+            unconfirmed.message_id(),
+            AuthError::GameNotOwned {
+                entitlements: Vec::new(),
+                game_pass: false,
+            }
+            .message_id()
+        );
+        assert!(unconfirmed.is_transient());
+        assert!(!unconfirmed.requires_interactive_login());
+    }
+
+    #[test]
     fn no_two_variants_share_a_message_id_by_accident() {
         let ids = [
             AuthError::ClientIdMissing.message_id(),
@@ -640,6 +664,7 @@ mod tests {
             AuthError::NotSignedIn.message_id(),
             AuthError::XboxUserHashMissing.message_id(),
             AuthError::ProfileMalformed.message_id(),
+            AuthError::GameOwnershipUnconfirmed.message_id(),
         ];
         let mut sorted = ids.to_vec();
         sorted.sort_unstable();

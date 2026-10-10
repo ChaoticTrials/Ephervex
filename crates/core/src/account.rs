@@ -1181,7 +1181,9 @@ mod tests {
             credentials: ephervex_auth::Credentials::Microsoft {
                 token: SecretString::new("access".to_owned()),
                 expires_at: Utc::now() + TimeDelta::hours(1),
-                entitlements: ephervex_auth::Entitlements::default(),
+                entitlements: ephervex_auth::EntitlementLookup::Answered(
+                    ephervex_auth::Entitlements::default(),
+                ),
                 storage: CredentialStorage::Keyring,
             },
         }

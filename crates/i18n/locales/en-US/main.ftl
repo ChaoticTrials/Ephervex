@@ -606,6 +606,11 @@ error-auth-game-not-owned = This Microsoft account does not own Minecraft: Java 
 error-auth-game-pass-setup-required = This account reaches Minecraft through Game Pass but has no Java Edition profile yet.
 .action = Open the official Minecraft Launcher once and start Java Edition to create the profile, then sign in here again.
 
+# No Java Edition profile was found and the entitlement store did not answer, so
+# nothing is known about ownership. This must not advise buying the game.
+error-auth-game-ownership-unconfirmed = Ephervex could not confirm whether this account owns Minecraft: Java Edition.
+.action = The Minecraft entitlement service did not respond. Try again in a few minutes.
+
 error-auth-profile-unavailable = Your Minecraft profile could not be read.
 .action = Check your network connection and try again.
 

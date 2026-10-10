@@ -666,6 +666,7 @@ mod tests {
             "error-auth-minecraft-api-not-approved",
             "error-auth-game-not-owned",
             "error-auth-game-pass-setup-required",
+            "error-auth-game-ownership-unconfirmed",
             "error-auth-profile-unavailable",
             "error-auth-profile-malformed",
             "error-auth-secret-storage-unavailable",
@@ -905,6 +906,16 @@ mod tests {
                 .expect("a next step")
                 .contains("official Minecraft Launcher")
         );
+    }
+
+    #[test]
+    fn unconfirmed_ownership_does_not_advise_buying_the_game() {
+        let unconfirmed = lookup("error-auth-game-ownership-unconfirmed");
+        assert_ne!(unconfirmed, lookup("error-auth-game-not-owned"));
+        let action = lookup_attribute("error-auth-game-ownership-unconfirmed", "action")
+            .expect("a next step");
+        assert!(action.contains("Try again"), "{action}");
+        assert!(!action.contains("buy"), "{action}");
     }
 
     #[test]

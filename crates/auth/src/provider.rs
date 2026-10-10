@@ -32,7 +32,7 @@ use uuid::Uuid;
 
 use crate::error::AuthResult;
 use crate::microsoft::DeviceCodePrompt;
-use crate::minecraft::Entitlements;
+use crate::minecraft::{EntitlementLookup, Entitlements};
 use crate::order::CredentialChangeGuard;
 use crate::secret::SecretString;
 use crate::stage::AuthStage;
@@ -132,9 +132,10 @@ pub enum Credentials {
     Microsoft {
         token: SecretString,
         expires_at: DateTime<Utc>,
-        /// What the account is entitled to. Kept so a frontend can say *why* a
-        /// launch is allowed, and so a Game Pass account is recognizable.
-        entitlements: Entitlements,
+        /// What the account is entitled to, or that the store could not be
+        /// read. Kept so a frontend can say *why* a launch is allowed, and so a
+        /// Game Pass account is recognizable.
+        entitlements: EntitlementLookup,
         /// Where the refresh token was put. `SessionOnly` means this login does
         /// not survive a restart, and the user was told so before it started.
         storage: CredentialStorage,
@@ -209,10 +210,20 @@ impl Session {
         }
     }
 
-    /// What the account is entitled to. Empty for an offline account, which is
-    /// entitled to nothing and needs to be.
+    /// What the account is entitled to. `None` for an offline account, which
+    /// is entitled to nothing and needs to be, and for a Microsoft session
+    /// whose entitlement lookup failed; [`Session::entitlement_lookup`]
+    /// tells those apart.
     #[must_use]
     pub fn entitlements(&self) -> Option<&Entitlements> {
+        self.entitlement_lookup()
+            .and_then(EntitlementLookup::answered)
+    }
+
+    /// The entitlement lookup behind a Microsoft session, or `None` for an
+    /// offline account, which has no store to ask.
+    #[must_use]
+    pub const fn entitlement_lookup(&self) -> Option<&EntitlementLookup> {
         match &self.credentials {
             Credentials::Microsoft { entitlements, .. } => Some(entitlements),
             Credentials::Offline => None,
@@ -433,7 +444,7 @@ mod tests {
             credentials: Credentials::Microsoft {
                 token: SecretString::new(token),
                 expires_at: Utc::now() + chrono::TimeDelta::seconds(expires_in),
-                entitlements: Entitlements::default(),
+                entitlements: EntitlementLookup::Answered(Entitlements::default()),
                 storage: CredentialStorage::SessionOnly,
             },
         }

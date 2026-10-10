@@ -142,7 +142,7 @@ pub use error::{
     AuthError, AuthResult, CredentialOperation, MINECRAFT_API_REVIEW_FORM, XstsDenial,
 };
 pub use microsoft::{DeviceCodePrompt, MicrosoftClient};
-pub use minecraft::{Entitlements, MinecraftProfile};
+pub use minecraft::{EntitlementLookup, Entitlements, MinecraftProfile};
 pub use offline::{OfflineAccount, offline_uuid};
 pub use order::{CredentialChangeGuard, CredentialChangeOrder, ProcessChangeOrder};
 pub use pkce::Pkce;
