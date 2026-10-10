@@ -2453,7 +2453,7 @@ fn run_worker(
     if let Err(error) = app.reconcile() {
         send_error(&events, &error);
     }
-    send_snapshot(&app, &events);
+    send_snapshot(&mut app, &events);
     // One tail per client log being read, each stopped on its own, so two
     // views can follow two clients at once.
     let mut client_tails: HashMap<InstanceId, Arc<AtomicBool>> = HashMap::new();
@@ -2508,7 +2508,7 @@ fn run_worker(
             runtime.block_on(app.reload_cached_minecraft_options());
         }
         match command {
-            Command::Refresh => send_snapshot(&app, &events),
+            Command::Refresh => send_snapshot(&mut app, &events),
             Command::LoadMinecraftReleases => {
                 let refreshed = Arc::clone(&options_refreshed);
                 spawn_in_lane(
@@ -2575,7 +2575,7 @@ fn run_worker(
                 // a message per click would be noise. A refused write is still
                 // reported, because then nothing on screen would have changed.
                 match app.set_favorite_minecraft_versions(versions) {
-                    Ok(()) => send_snapshot(&app, &events),
+                    Ok(()) => send_snapshot(&mut app, &events),
                     Err(error) => send_error(&events, &error),
                 }
             }
@@ -2595,7 +2595,7 @@ fn run_worker(
                     // cancel. The proven force stop is the one way to end it,
                     // and it signals nothing it cannot prove is that game.
                     KillTarget::ForceStop(launch) => {
-                        force_stop_launch(&app, &events, instance, launch.as_deref());
+                        force_stop_launch(&mut app, &events, instance, launch.as_deref());
                     }
                 }
             }
@@ -2638,7 +2638,7 @@ fn run_worker(
                             message: lookup("gui-instance-runtime-saved"),
                             error: false,
                         });
-                        send_snapshot(&app, &events);
+                        send_snapshot(&mut app, &events);
                         // The form starts over from what was stored, which
                         // also says whether anything is pinned now.
                         if let Ok(runtime) = instance_runtime_data(&app, instance) {
@@ -2665,7 +2665,7 @@ fn run_worker(
                     continue;
                 }
                 match app.set_linked_pair(client, server, start_together) {
-                    Ok(_) => send_snapshot(&app, &events),
+                    Ok(_) => send_snapshot(&mut app, &events),
                     Err(error) => send_error(&events, &error),
                 }
             }
@@ -2685,7 +2685,7 @@ fn run_worker(
                     continue;
                 }
                 match app.clear_linked_pair(client) {
-                    Ok(()) => send_snapshot(&app, &events),
+                    Ok(()) => send_snapshot(&mut app, &events),
                     Err(error) => send_error(&events, &error),
                 }
             }
@@ -2695,7 +2695,7 @@ fn run_worker(
                 if !refuse_while_changing(&changing, InstalledHost::Instance(instance), &events) {
                     match app.set_allow_pack_mod_version_changes(instance, allow) {
                         Ok(_) => {
-                            send_snapshot(&app, &events);
+                            send_snapshot(&mut app, &events);
                             // The setting decides what each row may have done
                             // to it, so the list it decides for is re-read
                             // here rather than at the next time the tab
@@ -2729,7 +2729,7 @@ fn run_worker(
                     }
                     Err(error) => send_error(&events, &error),
                 }
-                send_snapshot(&app, &events);
+                send_snapshot(&mut app, &events);
             }
             Command::PickImport { generation } => {
                 // The attempt begins here, at the controller's request, not
@@ -3128,7 +3128,7 @@ fn run_worker(
                 Err(error) => send_error(&events, &error),
             },
             Command::PromoteInstance { instance, servers } => {
-                promote_instance(&app, &changing, instance, servers, &events);
+                promote_instance(&mut app, &changing, instance, servers, &events);
             }
             Command::DuplicateClient {
                 instance,
@@ -3159,7 +3159,7 @@ fn run_worker(
                             message: localized_value("gui-created-entity", &copy.record.name),
                             error: false,
                         });
-                        send_snapshot(&app, &events);
+                        send_snapshot(&mut app, &events);
                     }
                     Err(error) => send_error(&events, &error),
                 }
@@ -3220,7 +3220,7 @@ fn run_worker(
                             message: lookup("gui-instance-deleted"),
                             error: false,
                         });
-                        send_snapshot(&app, &events);
+                        send_snapshot(&mut app, &events);
                     }
                     Err(error) => send_modal_error(&events, &error),
                 }
@@ -3245,7 +3245,7 @@ fn run_worker(
                             message: lookup("gui-server-deleted"),
                             error: false,
                         });
-                        send_snapshot(&app, &events);
+                        send_snapshot(&mut app, &events);
                     }
                     Err(error) => send_modal_error(&events, &error),
                 }
@@ -3261,7 +3261,7 @@ fn run_worker(
                     continue;
                 };
                 let paths = app.paths().clone();
-                spawn_detached(paths, events.clone(), move |app, events, runtime| {
+                spawn_detached(paths, events.clone(), move |mut app, events, runtime| {
                     let _in_flight = in_flight;
                     let result = runtime.block_on(app.change_loader_version(
                         instance,
@@ -3282,7 +3282,7 @@ fn run_worker(
                                 ),
                                 error: false,
                             });
-                            send_snapshot(&app, &events);
+                            send_snapshot(&mut app, &events);
                         }
                         Err(error) => send_modal_error(&events, &error),
                     }
@@ -3313,7 +3313,7 @@ fn run_worker(
                     continue;
                 };
                 let paths = app.paths().clone();
-                spawn_detached(paths, events.clone(), move |app, events, runtime| {
+                spawn_detached(paths, events.clone(), move |mut app, events, runtime| {
                     let request = version_change_request(&path, &version);
                     let reporter = OperationReporter::silent("planning-mod-change");
                     let cancel = CancellationToken::new();
@@ -3331,7 +3331,13 @@ fn run_worker(
                                 &reporter,
                                 &cancel,
                             ));
-                            finish_linked(&app, &events, instance, ModalScope::MOD_MANAGE, result);
+                            finish_linked(
+                                &mut app,
+                                &events,
+                                instance,
+                                ModalScope::MOD_MANAGE,
+                                result,
+                            );
                             drop(in_flight);
                         }
                         Ok(plan) => {
@@ -3418,7 +3424,7 @@ fn run_worker(
                     continue;
                 };
                 let paths = app.paths().clone();
-                spawn_detached(paths, events.clone(), move |app, events, runtime| {
+                spawn_detached(paths, events.clone(), move |mut app, events, runtime| {
                     let _in_flight = in_flight;
                     let result = runtime.block_on(app.apply_linked_mod_operation(
                         instance,
@@ -3427,7 +3433,7 @@ fn run_worker(
                         &OperationReporter::silent("removing-mod"),
                         &CancellationToken::new(),
                     ));
-                    finish_linked(&app, &events, instance, ModalScope::NONE, result);
+                    finish_linked(&mut app, &events, instance, ModalScope::NONE, result);
                 });
             }
             Command::LoadInstanceWorkspace(instance) => {
@@ -4543,7 +4549,7 @@ fn run_worker(
                     // cancellation, which also releases its lock on the way out.
                     kill_instance(&cancellations, &events, instance, launch.as_deref());
                 } else {
-                    force_stop_launch(&app, &events, instance, launch.as_deref());
+                    force_stop_launch(&mut app, &events, instance, launch.as_deref());
                 }
             }
             Command::RefreshMods(host) => {
@@ -4671,7 +4677,7 @@ fn run_worker(
                             message: localized_value("gui-renamed", &record.name),
                             error: false,
                         });
-                        send_snapshot(&app, &events);
+                        send_snapshot(&mut app, &events);
                     }
                     Err(error) => send_modal_error(&events, &error),
                 }
@@ -4693,7 +4699,7 @@ fn run_worker(
                             message: localized_value("gui-renamed", &committed.record.name),
                             error: false,
                         });
-                        send_snapshot(&app, &events);
+                        send_snapshot(&mut app, &events);
                     }
                     Err(error) => send_modal_error(&events, &error),
                 }
@@ -4725,14 +4731,14 @@ fn run_worker(
                 if let Err(error) = app.set_warn_on_dependency_impact(warn) {
                     send_error(&events, &error);
                 } else {
-                    send_snapshot(&app, &events);
+                    send_snapshot(&mut app, &events);
                 }
             }
             Command::SaveDependencyFollowing(follow) => {
                 if let Err(error) = app.set_follow_mod_dependencies(follow) {
                     send_error(&events, &error);
                 } else {
-                    send_snapshot(&app, &events);
+                    send_snapshot(&mut app, &events);
                 }
             }
             Command::LoadModRelations { host, path } => {
@@ -4869,7 +4875,7 @@ fn run_worker(
                             error: false,
                         });
                         send_server_workspace(&app, server, &events);
-                        send_snapshot(&app, &events);
+                        send_snapshot(&mut app, &events);
                     }
                     Err(error) => send_error(&events, &error),
                 }
@@ -4881,7 +4887,7 @@ fn run_worker(
                         message: lookup("gui-eula-consent-recorded"),
                         error: false,
                     });
-                    send_snapshot(&app, &events);
+                    send_snapshot(&mut app, &events);
                 }
                 Err(error) => send_error(&events, &error),
             },
@@ -4892,7 +4898,7 @@ fn run_worker(
                         message: lookup("gui-eula-consent-revoked"),
                         error: false,
                     });
-                    send_snapshot(&app, &events);
+                    send_snapshot(&mut app, &events);
                 }
                 Err(error) => send_error(&events, &error),
             },
@@ -4937,7 +4943,7 @@ fn run_worker(
                         message: localized_value("gui-offline-account-added", &account.name),
                         error: false,
                     });
-                    send_snapshot(&app, &events);
+                    send_snapshot(&mut app, &events);
                 }
                 Err(error) => send_error(&events, &error),
             },
@@ -4947,7 +4953,7 @@ fn run_worker(
                         message: localized_value("gui-default-account-set", &account.name),
                         error: false,
                     });
-                    send_snapshot(&app, &events);
+                    send_snapshot(&mut app, &events);
                 }
                 Err(error) => send_error(&events, &error),
             },
@@ -4963,7 +4969,7 @@ fn run_worker(
                         }),
                         error: false,
                     });
-                    send_snapshot(&app, &events);
+                    send_snapshot(&mut app, &events);
                 }
                 Err(error) => send_error(&events, &error),
             },
@@ -4984,7 +4990,7 @@ fn run_worker(
                             message: lookup("gui-provider-settings-saved"),
                             error: false,
                         });
-                        send_snapshot(&app, &events);
+                        send_snapshot(&mut app, &events);
                     }
                     Err(error) => send_error(&events, &error),
                 }
@@ -4995,7 +5001,7 @@ fn run_worker(
                         message: lookup("gui-client-id-reset"),
                         error: false,
                     });
-                    send_snapshot(&app, &events);
+                    send_snapshot(&mut app, &events);
                 }
                 Err(error) => send_error(&events, &error),
             },
@@ -5005,7 +5011,7 @@ fn run_worker(
                         message: lookup("gui-user-agent-reset"),
                         error: false,
                     });
-                    send_snapshot(&app, &events);
+                    send_snapshot(&mut app, &events);
                 }
                 Err(error) => send_error(&events, &error),
             },
@@ -5019,7 +5025,7 @@ fn run_worker(
                             message: lookup("gui-curseforge-key-saved"),
                             error: false,
                         });
-                        send_snapshot(&app, &events);
+                        send_snapshot(&mut app, &events);
                     }
                     Err(error) => send_error(&events, &error),
                 }
@@ -5030,7 +5036,7 @@ fn run_worker(
                         message: lookup("gui-curseforge-key-removed"),
                         error: false,
                     });
-                    send_snapshot(&app, &events);
+                    send_snapshot(&mut app, &events);
                 }
                 Err(error) => send_error(&events, &error),
             },
@@ -5053,7 +5059,7 @@ fn run_worker(
                             message: lookup("gui-storage-root-saved"),
                             error: false,
                         });
-                        send_snapshot(&app, &events);
+                        send_snapshot(&mut app, &events);
                     }
                     Err(error) => send_error(&events, &error),
                 }
@@ -5061,7 +5067,7 @@ fn run_worker(
             Command::SaveWatchedDownloadFolders(folders) => {
                 let folders: Vec<PathBuf> = folders.into_iter().map(PathBuf::from).collect();
                 match app.set_watched_download_folders(Some(&folders)) {
-                    Ok(()) => send_snapshot(&app, &events),
+                    Ok(()) => send_snapshot(&mut app, &events),
                     Err(error) => send_error(&events, &error),
                 }
             }
@@ -5097,27 +5103,20 @@ fn run_worker(
                         &cache_lane,
                         app.paths().clone(),
                         events.clone(),
-                        move |mut app, events, runtime| {
-                            match runtime.block_on(app.set_artifact_cache_limit(limit)) {
-                                Ok(status) => {
-                                    let _ = events.send(Event::Toast {
-                                        message: lookup("gui-artifact-cache-limit-saved"),
-                                        error: false,
-                                    });
-                                    let _ = events.send(Event::ArtifactCacheStatus(
-                                        artifact_cache_status_data(&status),
-                                    ));
-                                    // Enforcing the new budget can take long
-                                    // enough for other settings to have been
-                                    // saved meanwhile, and the snapshot must
-                                    // not show the older ones.
-                                    if let Err(error) = app.reload_config() {
-                                        tracing::warn!(%error, "kept the configuration read earlier");
-                                    }
-                                    send_snapshot(&app, &events);
-                                }
-                                Err(error) => send_error(&events, &error),
+                        move |mut app, events, runtime| match runtime
+                            .block_on(app.set_artifact_cache_limit(limit))
+                        {
+                            Ok(status) => {
+                                let _ = events.send(Event::Toast {
+                                    message: lookup("gui-artifact-cache-limit-saved"),
+                                    error: false,
+                                });
+                                let _ = events.send(Event::ArtifactCacheStatus(
+                                    artifact_cache_status_data(&status),
+                                ));
+                                send_snapshot(&mut app, &events);
                             }
+                            Err(error) => send_error(&events, &error),
                         },
                     ),
                     Err(error) => send_error(&events, &CoreError::from(error)),
@@ -5149,7 +5148,7 @@ fn run_worker(
                 // leaves the previous choice selected rather than the one that
                 // was asked for.
                 if confirmed {
-                    send_snapshot(&app, &events);
+                    send_snapshot(&mut app, &events);
                 }
             }
             Command::SaveGeneralSettings {
@@ -5170,7 +5169,7 @@ fn run_worker(
                         app.set_linked_server_settings(show_globally, make_operator, operator_level)
                     });
                 match saved {
-                    Ok(()) => send_snapshot(&app, &events),
+                    Ok(()) => send_snapshot(&mut app, &events),
                     Err(error) => send_error(&events, &error),
                 }
             }
@@ -5265,7 +5264,7 @@ fn run_worker(
                             message: lookup("gui-java-settings-saved"),
                             error: false,
                         });
-                        send_snapshot(&app, &events);
+                        send_snapshot(&mut app, &events);
                     }
                     Err(error) => send_error(&events, &error),
                 }
@@ -5281,7 +5280,7 @@ fn run_worker(
                         });
                         // The snapshot first, so the confirmed baseline is in
                         // place before the draft is reconciled against it.
-                        send_snapshot(&app, &events);
+                        send_snapshot(&mut app, &events);
                     }
                     // The batch is validated before anything is written, so a
                     // refusal leaves the configuration exactly as it was and
@@ -5418,7 +5417,14 @@ fn describe_runtimes(inventory: &ephervex_core::RuntimeInventory) -> Vec<JavaDat
         .collect()
 }
 
-fn send_snapshot(app: &App, events: &Sender<Event>) {
+/// Sends the state as it is stored now. `app` rereads the configuration first,
+/// since another `App` or process may have saved settings since it was opened
+/// and a snapshot older than them would be saved back by the next grouped
+/// settings change.
+fn send_snapshot(app: &mut App, events: &Sender<Event>) {
+    if let Err(error) = app.reload_config() {
+        tracing::warn!(%error, "kept the configuration read earlier");
+    }
     match snapshot(app) {
         Ok(snapshot) => {
             let _ = events.send(Event::Snapshot(Box::new(snapshot)));
@@ -5921,7 +5927,7 @@ fn send_host_mods(
 /// operation: the instance is already persistent by then, and saying so is more
 /// use than reporting the whole thing as broken.
 fn promote_instance(
-    app: &App,
+    app: &mut App,
     changing: &ChangingHosts,
     instance: InstanceId,
     servers: Vec<ServerId>,
@@ -7357,8 +7363,8 @@ fn spawn_launch(
                     unregister_launch(&launches, &events, instance, generation);
                     let _ = finished.send(true);
                 }
-                if let Ok(app) = App::open_at(paths) {
-                    send_snapshot(&app, &events);
+                if let Ok(mut app) = App::open_at(paths) {
+                    send_snapshot(&mut app, &events);
                 }
                 let failure = launch_failure(&result, cancel.is_cancelled());
                 explain_failed_run(
@@ -7890,8 +7896,8 @@ fn spawn_server(
                 drop(observer);
                 let _ = forward.await;
                 report_server_run(&events, server, &entity, &observed_operation, &result);
-                if let Ok(app) = App::open_at(paths) {
-                    send_snapshot(&app, &events);
+                if let Ok(mut app) = App::open_at(paths) {
+                    send_snapshot(&mut app, &events);
                     send_server_workspace(&app, server, &events);
                 }
                 let _ = events.send(Event::ServerTool {
@@ -8270,8 +8276,8 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
                     unregister_launch(&launches, &events, client, generation);
                     let _ = finished.send(true);
                 }
-                if let Ok(app) = App::open_at(paths.clone()) {
-                    send_snapshot(&app, &events);
+                if let Ok(mut app) = App::open_at(paths.clone()) {
+                    send_snapshot(&mut app, &events);
                 }
                 explain_failed_run(
                     &app,
@@ -8285,8 +8291,8 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
                 // task on this runtime. Keep the runtime alive until that
                 // server exits instead of canceling it when the client closes.
                 let _ = server_forward.await;
-                if let Ok(app) = App::open_at(paths) {
-                    send_snapshot(&app, &events);
+                if let Ok(mut app) = App::open_at(paths) {
+                    send_snapshot(&mut app, &events);
                 }
             });
         },
@@ -8387,7 +8393,7 @@ fn spawn_login(paths: Paths, events: &Sender<Event>) {
                         message: localized_value("gui-signed-in", &login.account.name),
                         error: false,
                     });
-                    send_snapshot(&app, &events);
+                    send_snapshot(&mut app, &events);
                 }
                 Err(error) => send_error(&events, &error),
             }
@@ -8425,8 +8431,8 @@ struct AsyncOperationRequest {
 }
 
 fn refresh_snapshot(paths: &Paths, events: &Sender<Event>) {
-    if let Ok(app) = App::open_at(paths.clone()) {
-        send_snapshot(&app, events);
+    if let Ok(mut app) = App::open_at(paths.clone()) {
+        send_snapshot(&mut app, events);
     }
 }
 
@@ -8503,8 +8509,8 @@ fn spawn_async_operation<F, Fut>(
             if let Some(finished) = finished {
                 let _ = events.send(finished);
             }
-            if let Ok(app) = App::open_at(paths) {
-                send_snapshot(&app, &events);
+            if let Ok(mut app) = App::open_at(paths) {
+                send_snapshot(&mut app, &events);
             }
         },
     );
@@ -8577,8 +8583,8 @@ fn spawn_creation_operation<F, Fut>(
                 }
             }
             let _ = events.send(Event::CreationFinished { request_id });
-            if let Ok(app) = App::open_at(paths) {
-                send_snapshot(&app, &events);
+            if let Ok(mut app) = App::open_at(paths) {
+                send_snapshot(&mut app, &events);
             }
         },
     );
@@ -8783,7 +8789,7 @@ fn force_stop_message(outcome: ephervex_core::ForcedStop) -> (&'static str, bool
 
 /// Ends a launch this process is not supervising and reports what happened.
 fn force_stop_launch(
-    app: &App,
+    app: &mut App,
     events: &Sender<Event>,
     instance: InstanceId,
     launch: Option<&str>,
@@ -8943,7 +8949,7 @@ fn apply_mod_operation(
         return;
     };
     let waits = waits.clone();
-    spawn_detached(paths, events.clone(), move |app, events, runtime| {
+    spawn_detached(paths, events.clone(), move |mut app, events, runtime| {
         let _in_flight = in_flight;
         let reporter = OperationReporter::silent(operation.operation);
         let instance = operation.instance;
@@ -8970,7 +8976,7 @@ fn apply_mod_operation(
             {
                 Acquisition::Acquired => {}
                 Acquisition::NotNeeded => {
-                    finish_linked(&app, &events, instance, ModalScope::NONE, result);
+                    finish_linked(&mut app, &events, instance, ModalScope::NONE, result);
                     return;
                 }
                 Acquisition::Abandoned => return,
@@ -8988,7 +8994,7 @@ fn apply_mod_operation(
                     &CancellationToken::new(),
                 )
                 .await;
-            finish_linked(&app, &events, instance, ModalScope::NONE, result);
+            finish_linked(&mut app, &events, instance, ModalScope::NONE, result);
         });
     });
 }
@@ -9475,8 +9481,8 @@ fn spawn_import_submission(
                 succeeded,
                 request_id,
             });
-            if let Ok(app) = App::open_at(paths) {
-                send_snapshot(&app, &events);
+            if let Ok(mut app) = App::open_at(paths) {
+                send_snapshot(&mut app, &events);
             }
         },
     );
@@ -9627,7 +9633,7 @@ fn spawn_client_deletion_stopping_servers(
         paths,
         events.clone(),
         |_| {},
-        move |app, events, runtime| {
+        move |mut app, events, runtime| {
             let result = runtime.block_on(app.delete_client_stopping_linked_servers(id, files));
             drop(in_flight);
             match result {
@@ -9639,7 +9645,7 @@ fn spawn_client_deletion_stopping_servers(
                 }
                 Err(error) => send_error(&events, &error),
             }
-            send_snapshot(&app, &events);
+            send_snapshot(&mut app, &events);
         },
     );
 }
@@ -9660,7 +9666,7 @@ fn spawn_server_control(
                 event: completion,
             });
         },
-        move |app, events, runtime| {
+        move |mut app, events, runtime| {
             let result = runtime.block_on(async {
                 match &control {
                     ServerControl::Stop => app.stop_server(server).await,
@@ -9700,7 +9706,7 @@ fn spawn_server_control(
                 ),
                 error,
             });
-            send_snapshot(&app, &events);
+            send_snapshot(&mut app, &events);
             let _ = events.send(Event::ServerTool {
                 server,
                 event: completion,
@@ -10181,7 +10187,7 @@ fn refresh_enriched_host_mods(paths: Paths, events: &Sender<Event>, host: Instal
 /// confirmation closed as it was given. Its result and its failure then reach
 /// the user without touching whatever else the window shows.
 fn finish_linked(
-    app: &App,
+    app: &mut App,
     events: &Sender<Event>,
     instance: InstanceId,
     dialogs: ModalScope,
@@ -11588,6 +11594,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_snapshot_from_an_app_opened_earlier_shows_the_settings_saved_since() {
+        let base = tempfile::tempdir().expect("a disposable root");
+        let paths = ephervex_core::Paths::rooted_at(base.path());
+        let mut detached = App::open_at(paths.clone()).expect("the detached app opens");
+        let before = application_settings(&detached).expect("settings");
+
+        // A change saved by another `App` while the detached operation ran.
+        let mut other = App::open_at(paths).expect("another app opens");
+        let theme =
+            ephervex_core::ApplicationTheme::BuiltIn(ephervex_core::ApplicationColorScheme::Light);
+        other
+            .set_linked_server_settings(
+                !before.show_linked_servers,
+                !before.make_default_account_operator,
+                if before.operator_permission_level
+                    == ephervex_model::OperatorPermissionLevel::MINIMUM.value()
+                {
+                    ephervex_model::OperatorPermissionLevel::MAXIMUM
+                } else {
+                    ephervex_model::OperatorPermissionLevel::MINIMUM
+                },
+            )
+            .expect("linked server settings");
+        other
+            .set_application_display_settings(
+                ephervex_core::ApplicationTextScale::Large,
+                ephervex_core::TechnicalTextSize::Compact,
+                &theme,
+            )
+            .expect("display settings");
+
+        let (events, received) = mpsc::channel();
+        send_snapshot(&mut detached, &events);
+
+        let snapshot = received
+            .try_iter()
+            .find_map(|event| match event {
+                Event::Snapshot(snapshot) => Some(snapshot),
+                _ => None,
+            })
+            .expect("a snapshot is sent");
+        assert_eq!(
+            snapshot.settings.show_linked_servers,
+            !before.show_linked_servers
+        );
+        assert_eq!(
+            snapshot.settings.make_default_account_operator,
+            !before.make_default_account_operator
+        );
+        assert_ne!(
+            snapshot.settings.operator_permission_level,
+            before.operator_permission_level
+        );
+        assert_eq!(snapshot.settings.theme, theme);
+        assert_eq!(
+            snapshot.settings.text_scale_percent,
+            ephervex_core::ApplicationTextScale::Large.percent()
+        );
+    }
+
     fn settles(received: &std::sync::mpsc::Receiver<Event>) -> Vec<u64> {
         received
             .try_iter()
@@ -11881,7 +11948,7 @@ mod tests {
         assert!(source.contains("while lines.len() < 256"));
         assert!(source.contains("let _ = launch_forward.await"));
         assert!(source.contains("let _ = server_forward.await"));
-        assert!(source.matches("send_snapshot(&app, &events)").count() >= 2);
+        assert!(source.matches("send_snapshot(&mut app, &events)").count() >= 2);
     }
     #[test]
     fn a_recorded_catalog_is_confirmed_once() {
@@ -12255,7 +12322,7 @@ mod tests {
     #[test]
     fn making_an_instance_persistent_is_refused_while_it_or_a_selected_server_changes() {
         let root = tempfile::tempdir().expect("root");
-        let app = App::open_at(Paths::rooted_at(root.path())).expect("app");
+        let mut app = App::open_at(Paths::rooted_at(root.path())).expect("app");
         let hosts: ChangingHosts = Arc::new(Mutex::new(HashMap::new()));
         let (events, received) = mpsc::channel();
         let instance = ephervex_model::InstanceId::new();
@@ -12266,7 +12333,7 @@ mod tests {
             InstalledHost::Instance(instance),
             "gui-snapshot-busy",
         );
-        promote_instance(&app, &hosts, instance, Vec::new(), &events);
+        promote_instance(&mut app, &hosts, instance, Vec::new(), &events);
         let refusal = received.try_recv().expect("a refusal");
         assert!(
             matches!(
@@ -12282,7 +12349,7 @@ mod tests {
 
         let on_server =
             HostChangeInFlight::mark(&hosts, InstalledHost::Server(server), "gui-fix-busy");
-        promote_instance(&app, &hosts, instance, vec![server], &events);
+        promote_instance(&mut app, &hosts, instance, vec![server], &events);
         let refusal = received.try_recv().expect("a refusal");
         assert!(
             matches!(
