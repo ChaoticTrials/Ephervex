@@ -154,9 +154,9 @@ ephervex instance runtime INSTANCE_ID --java /path/to/java --min-memory 1024 --m
 ephervex instance runtime INSTANCE_ID --clear
 ```
 
-Each change replaces the previous set of overrides. Include every value you
-want to keep in the same command. Repeat `--jvm-arg ARG` for multiple JVM
-arguments.
+Each option changes only its own override and keeps the other pinned values.
+If you specify `--jvm-arg ARG`, that option replaces the pinned JVM argument
+list; repeat it for every argument you want in the list.
 
 </TabItem>
 </Tabs>
@@ -172,6 +172,23 @@ mods are left in place, so check their compatibility with the new build.
 
 Changing a loader build is currently available in the desktop app. It does
 not switch between Vanilla, Forge, and NeoForge.
+
+## Inspect a retained pack recipe
+
+An imported instance retains its pack recipe. The CLI can show the client file
+plan or the server plan used when creating a linked server. This reads the
+retained recipe in the instance; it does not change files or need the original
+archive.
+
+```bash
+ephervex instance recipe INSTANCE_ID
+ephervex instance recipe INSTANCE_ID --side server
+```
+
+Optional files that were not selected during import are left out of the
+default plan. Add `--all-optional` to include them in the displayed plan. A
+manually created instance has no pack recipe; the command reports that without
+failing.
 
 ## Delete an instance
 

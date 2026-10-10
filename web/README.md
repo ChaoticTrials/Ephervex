@@ -42,8 +42,17 @@ WebPs.
 `npm run screenshots:contact-sheet` writes local review sheets grouped by
 resolution and region type. `npm run screenshots:check` validates the published
 assets and runs automatically before `npm run build`. An ordinary local build
-does not run Rust or recompress images. The Pages workflow regenerates the
+does not regenerate or recompress images. The Pages workflow regenerates the
 screenshots before publishing `web/build/`.
+
+The CLI reference under `docs/reference/cli/` is generated from the CLI's
+`--help` output and every `help <path>` command. It is gitignored. The
+`prebuild` and `prestart` scripts run `npm run cli:reference:sync`, which builds
+the CLI and writes the pages before Docusaurus reads them. Run the sync command
+directly if you need the pages without starting or building the site.
+`npm run cli:reference:check` verifies an existing generated copy. Set
+`EPHERVEX_CLI_BIN` to an already built Ephervex CLI binary when generating
+the reference for a specific build.
 
 `ThemeScreenshot` reads the synchronized manifest. It renders a sized
 placeholder for server rendering and hydration, then mounts only the image

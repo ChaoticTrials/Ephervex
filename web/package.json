@@ -4,8 +4,9 @@
   "private": true,
   "scripts": {
     "docusaurus": "docusaurus",
+    "prestart": "npm run cli:reference:sync",
     "start": "docusaurus start",
-    "prebuild": "npm run screenshots:check",
+    "prebuild": "npm run screenshots:check && npm run cli:reference:sync",
     "build": "docusaurus build",
     "swizzle": "docusaurus swizzle",
     "deploy": "docusaurus deploy",
@@ -16,7 +17,9 @@
     "typecheck": "tsc",
     "screenshots:sync": "node scripts/screenshots.mjs sync",
     "screenshots:check": "node scripts/screenshots.mjs check",
-    "screenshots:contact-sheet": "node scripts/screenshots.mjs contact-sheet"
+    "screenshots:contact-sheet": "node scripts/screenshots.mjs contact-sheet",
+    "cli:reference:sync": "node scripts/cli-reference.mjs sync",
+    "cli:reference:check": "node scripts/cli-reference.mjs check"
   },
   "dependencies": {
     "@docusaurus/core": "3.10.2",

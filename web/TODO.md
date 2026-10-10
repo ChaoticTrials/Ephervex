@@ -199,15 +199,15 @@ features show one tab or a short note.
 
 ## 6. CLI
 
-- [ ] Hand-written CLI tabs on the task pages, using real flags and noting
+- [x] Hand-written CLI tabs on the task pages, using real flags and noting
       confirmation prompts and exit behavior.
-- [ ] Generated CLI reference under `docs/reference/cli/`, one page per
+- [x] Generated CLI reference under `docs/reference/cli/`, one page per
       top-level command, produced from `ephervex --help` and
-      `ephervex help <path>`. A script runs before the build and a check fails
-      when the committed output is stale, as for the screenshots.
+      `ephervex help <path>`. The build generates gitignored pages before
+      Docusaurus reads them.
 - [ ] Hold the `--json` shape and exit-code reference until the open CLI
       output fixes land (#271, #272, #274, #275, #277, #294).
-- [ ] CLI-only features that need a mention on their own pages: `server
+- [x] CLI-only features that need a mention on their own pages: `server
       recover`, `java select`, `instance recipe`, `url-handler`, `doctor`,
       `completions`.
 

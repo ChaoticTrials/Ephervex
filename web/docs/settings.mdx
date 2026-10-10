@@ -124,8 +124,10 @@ ephervex java select 1.21.1
 ```
 
 `ephervex java select 1.21.1 --instance INSTANCE_ID` also considers that
-instance's Java override. Global detection, download, memory, and preferred
-path settings are edited in the desktop app.
+instance's Java override. Add `--install` to download a managed runtime if no
+installed runtime is compatible. Without `--install`, `select` only reports
+the selection. Global detection, download, memory, and preferred path settings
+are edited in the desktop app.
 
 </TabItem>
 </Tabs>

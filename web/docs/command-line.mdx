@@ -1,0 +1,74 @@
+---
+title: Command Line
+description: Find CLI help, check the installation, set up completions, and locate command-only workflows.
+---
+
+# Command Line
+
+The CLI and desktop app use the same Ephervex accounts, instances, servers,
+and settings. Package installations provide the `ephervex` command. With an
+AppImage, run its file with the same arguments, for example
+`./Ephervex-x86_64.AppImage doctor`. Use the `aarch64` file name on ARM.
+
+## Find a command
+
+Start with the command list, then ask for help at the path you need:
+
+```bash
+ephervex --help
+ephervex help instance
+ephervex help instance recipe
+```
+
+The [CLI Reference](./reference/cli/index.md) contains the help output for
+every top-level command and its subcommands. The task guides explain how to
+use those commands in context. An AppImage accepts `help` in the same way.
+
+## Check this installation
+
+```bash
+ephervex doctor
+ephervex paths
+```
+
+`doctor` checks local directories, configuration, credential storage, bundled
+data, and Java. It does not contact a network service or reveal credentials.
+It prints the full report and exits unsuccessfully if it finds a fault, so a
+script can use its exit status. `paths` prints the directories Ephervex uses
+in the current environment. See [Files and Privacy](./files-and-privacy.mdx)
+before moving or removing data.
+
+## Enable shell completions
+
+`completions` writes a script to standard output. Choose a shell from `bash`,
+`elvish`, `fish`, `powershell`, or `zsh`. For the current Bash session:
+
+```bash
+source <(ephervex completions bash)
+```
+
+That does not change future shell sessions. To keep completions, save the
+generated output where your shell loads completion scripts. For other shells,
+replace `bash` with the name shown by `ephervex help completions` and use that
+shell's installation instructions.
+
+## Work with command-only features
+
+| Task | Command | Guide |
+| --- | --- | --- |
+| Inspect an imported pack's retained file plan | `ephervex instance recipe INSTANCE_ID` | [Instances](./instances.mdx#inspect-a-retained-pack-recipe) |
+| Check which Java runtime a version would use | `ephervex java select VERSION` | [Settings](./settings.mdx#java) |
+| Check or clear interrupted server runtime state | `ephervex server recover status SERVER_ID` | [Servers](./servers.mdx#recover-a-server-after-an-interruption) |
+| Register an AppImage for `ephervex://` links | `ephervex url-handler register` | [Import Modpacks](./import-modpacks.mdx#import-from-a-link) |
+
+Some commands ask for confirmation before changing files. `instance delete`
+asks before deleting files; a noninteractive run needs `--yes` for that choice.
+`snapshot restore` and `snapshot delete` require `--yes`. `server eula accept`
+requires an interactive terminal. Read the affected task guide before using
+these commands in a script.
+
+`launch` and `server start` stay in the foreground while the game or server
+runs. Ctrl-C ends the supervised run. A failed `launch` reports a failure
+status; `mod verify` also exits unsuccessfully when it finds a recorded-file
+fault. See [Diagnostics](./diagnostics.mdx) to inspect the result before
+changing files.
