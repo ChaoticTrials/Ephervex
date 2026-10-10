@@ -151,8 +151,8 @@ features show one tab or a short note.
 - [x] Accounts: offline and Microsoft, device code, session-only, keyring
 - [x] Instances: temporary vs persistent, create, launch, duplicate, make
       persistent, delete, per-instance Java and memory, change loader build
-- [ ] Import: Modrinth and CurseForge, optional files, `ephervex://` links,
-      trusted hosts, blocked files and watched folders, CurseForge key
+- [x] Import: Modrinth and CurseForge, optional files, `ephervex://` links,
+      trusted hosts, blocked files and watched folders
 - [ ] Mods: browse and install, enable and disable, remove, change version,
       add your own JARs, dependencies, verify and repair
 - [ ] Mod isolation (source: `docs/mod-isolation.md`)
@@ -212,7 +212,7 @@ easy to update, and capture screenshots late.
 
 - Linux only. Vanilla, Forge and NeoForge only. Release versions 1.12.2 and
   newer. No snapshots, Fabric, Quilt, Windows or macOS.
-- CurseForge pack import needs an API key. Files whose authors disable
+- Release builds include CurseForge API access. Files whose authors disable
   third-party downloads cannot be fetched automatically.
 - Resource packs, shader packs and datapacks in imported packs are not yet
   preserved (#17).

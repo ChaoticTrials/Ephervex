@@ -1,0 +1,162 @@
+---
+title: Import Modpacks
+description: Import Modrinth and CurseForge packs from files or links.
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+import ThemeScreenshot from '@site/src/components/ThemeScreenshot';
+
+# Import Modpacks
+
+Ephervex imports Modrinth `.mrpack` archives and CurseForge modpack exports.
+It reads the pack's Minecraft release and loader selection rather than choosing
+newer versions for you. Other launcher exports, including Prism and MultiMC,
+are not supported. The archive is identified by its contents, so changing its
+file extension does not change its format. Release builds include the
+CurseForge API access needed for imports; no key setup is required.
+
+## Import an archive
+
+Inspect the pack before importing. Required files are included automatically;
+optional files start off until you select them. New imported instances use
+[temporary storage](./instances.mdx#choose-temporary-or-persistent-storage)
+unless you choose persistent storage.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+On **Instances**, select **Import Modpack**. Choose an archive with **Browse**,
+or drop it onto the Instances page. Review the detected pack, Minecraft
+release, loader, and file counts. Turn on any optional files you want. You can
+change the instance name, select **Store persistently**, and optionally create
+a linked server from the same pack. Select **Import Modpack** to begin.
+
+<ThemeScreenshot state="import-modpack-ready" alt="Import dialog showing the detected pack and optional file choices" />
+
+The new instance appears on **Instances** while the import runs. **Activity**
+shows progress and the result.
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+Inspect a local archive without creating an instance:
+
+```bash
+ephervex import pack.mrpack --inspect
+```
+
+Import it with the pack's own name, or choose a name and persistent storage:
+
+```bash
+ephervex import pack.mrpack
+ephervex import pack.mrpack --name "Pack Test" --persistent
+```
+
+Optional files are off by default. `--inspect` lists their paths. Select one
+by repeating `--optional` with its path inside the game directory, or use
+`--all-optional` to include them all:
+
+```bash
+ephervex import pack.mrpack --optional mods/example.jar
+```
+
+`--temporary` explicitly selects the default storage. The CLI import command
+creates a client instance; create a linked server separately if you need one.
+
+</TabItem>
+</Tabs>
+
+## Import from a link
+
+A pack address must use HTTPS. Ephervex asks before downloading an archive
+from a host you have not approved. You can allow one download or remember that
+host for later. A redirect to another host needs its own approval. Trusting a
+pack host only permits it to serve the archive; it does not change which hosts
+may serve files listed inside the pack.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+A website can offer an **Open in Ephervex** link using the
+`ephervex://import?url=...` scheme. The pack's HTTPS address is percent-encoded
+in the `url` parameter. For example,
+[DumpViewer](https://dumps.chaotictrials.de/) ([source](https://github.com/ChaoticTrials/DumpViewer))
+can export a stored dump as a Modrinth pack and open it directly in Ephervex.
+Confirm the browser's request to open Ephervex, review the pack address and
+choose whether to remember its host, then review the normal import dialog.
+
+Linux packages install the link handler. For an AppImage, register it once
+from the command line, using the path to the AppImage you downloaded:
+
+```bash
+./Ephervex-x86_64.AppImage url-handler register
+./Ephervex-x86_64.AppImage url-handler status
+```
+
+Use the `aarch64` file name for the ARM build. Register again if you move the
+AppImage. To remove the AppImage's registered handler, run
+`url-handler unregister` with the same AppImage command.
+
+You can review or forget remembered hosts under **Settings > General > Sites
+allowed to serve modpacks**.
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+Pass the HTTPS archive address directly:
+
+```bash
+ephervex import 'https://example.com/pack.mrpack'
+```
+
+An interactive terminal asks about a new host. `--trust once` allows just this
+import; `--trust always` remembers the host. In a noninteractive command, one
+of these flags is required for a host you have not approved. Neither flag
+approves a redirect to a different host in a noninteractive command.
+
+```bash
+ephervex import 'https://example.com/pack.mrpack' --trust once
+ephervex config pack-hosts
+ephervex config pack-hosts --forget example.com
+```
+
+`--inspect` on a URL downloads the archive and asks for host approval before
+reporting its contents; it does not create an instance.
+
+</TabItem>
+</Tabs>
+
+## Resolve files that need a manual download
+
+Some CurseForge authors disable third-party downloads. Ephervex will not
+fetch those files automatically or substitute another release. The desktop
+import dialog lists each blocked file with its project and file name.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Select **Open in Browser** beside a blocked file and download the exact file
+from its provider page. Place it in a watched download folder. Ephervex
+matches the file by hash and continues when it finds a verified copy. You can
+manage these folders under **Settings > Storage > Watched download folders**;
+the Downloads folder is watched by default until you configure the list.
+
+<ThemeScreenshot state="import-modpack-manual-download" region="blocked-file" alt="Blocked CurseForge file with Open in Browser and Skip actions" />
+
+**Skip** leaves that file out and records that it needs attention. Use it only
+when you intend to import without the file.
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+The CLI does not offer the desktop's browser, watcher, and Skip controls. If
+a required CurseForge file is blocked and no verified copy is already in the
+shared cache, the import fails. Open the pack in the desktop app to resolve or
+skip the file, then import there.
+
+</TabItem>
+</Tabs>
+
+Imported packs retain their recipe, including server-side files. You can
+create a [linked server](./interface-tour.mdx#servers) from the instance later.
