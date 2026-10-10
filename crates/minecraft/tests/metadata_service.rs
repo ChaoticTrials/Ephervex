@@ -428,7 +428,7 @@ async fn a_cached_version_document_is_returned_offline_when_it_matches_its_diges
 }
 
 #[tokio::test]
-async fn a_cached_version_document_that_was_altered_in_place_is_reported_corrupt() {
+async fn a_cached_version_document_that_was_altered_in_place_is_reported_damaged() {
     let server = MockServer::start().await;
     mount_manifest(&server).await;
     mount_versions(&server).await;
@@ -454,12 +454,42 @@ async fn a_cached_version_document_that_was_altered_in_place_is_reported_corrupt
 
     assert!(matches!(
         error,
-        MinecraftError::VersionMetadataCorrupt { .. }
+        MinecraftError::CachedVersionMetadataDamaged { .. }
     ));
 }
 
 #[tokio::test]
-async fn an_oversized_cached_version_document_is_reported_corrupt_without_being_parsed() {
+async fn resolving_again_replaces_a_damaged_cached_version_document() {
+    let server = MockServer::start().await;
+    mount_manifest(&server).await;
+    mount_versions(&server).await;
+    let cache = tempfile::tempdir().expect("temp dir");
+    let catalog = catalog(&server, &cache);
+    catalog
+        .resolve("1.12.2", &reporter(), &CancellationToken::new())
+        .await
+        .expect("resolve");
+    std::fs::write(cached_document_path(&cache), b"{}").expect("damage the cached document");
+    catalog
+        .cached_metadata("1.12.2")
+        .await
+        .expect_err("the damaged copy is reported");
+
+    catalog
+        .resolve("1.12.2", &reporter(), &CancellationToken::new())
+        .await
+        .expect("resolving again fetches a fresh copy");
+
+    let cached = catalog
+        .cached_metadata("1.12.2")
+        .await
+        .expect("the replaced document is trusted")
+        .expect("the document is cached");
+    assert_eq!(cached.main_class, "net.minecraft.client.main.Main");
+}
+
+#[tokio::test]
+async fn an_oversized_cached_version_document_is_reported_damaged_without_being_parsed() {
     let server = MockServer::start().await;
     mount_manifest(&server).await;
     mount_versions(&server).await;
@@ -479,7 +509,7 @@ async fn an_oversized_cached_version_document_is_reported_corrupt_without_being_
 
     assert!(matches!(
         error,
-        MinecraftError::VersionMetadataCorrupt { .. }
+        MinecraftError::CachedVersionMetadataDamaged { .. }
     ));
 }
 

@@ -575,6 +575,7 @@ mod tests {
             "error-minecraft-version-not-a-release",
             "error-minecraft-version-metadata-unavailable",
             "error-minecraft-version-metadata-corrupt",
+            "error-minecraft-cached-version-metadata-damaged",
             "error-minecraft-version-metadata-invalid",
             "error-minecraft-version-metadata-unreadable",
             "error-minecraft-language-catalog-unavailable",

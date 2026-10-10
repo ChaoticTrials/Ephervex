@@ -69,6 +69,13 @@ pub enum MinecraftError {
     #[error("metadata for minecraft `{id}` failed its integrity check")]
     VersionMetadataCorrupt { id: String },
 
+    /// A version document already in the local cache no longer matches the
+    /// digest the manifest published for it, is too large, or cannot be
+    /// parsed. Nothing was fetched, so no upstream is at fault: the cached
+    /// copy is damaged and fetching the version again replaces it.
+    #[error("cached metadata for minecraft `{id}` is damaged")]
+    CachedVersionMetadataDamaged { id: String },
+
     /// The document was fetched and verified but could not be parsed.
     #[error("metadata for minecraft `{id}` could not be understood")]
     VersionMetadataInvalid {
@@ -124,6 +131,9 @@ impl MinecraftError {
                 "error-minecraft-version-metadata-unavailable"
             }
             Self::VersionMetadataCorrupt { .. } => "error-minecraft-version-metadata-corrupt",
+            Self::CachedVersionMetadataDamaged { .. } => {
+                "error-minecraft-cached-version-metadata-damaged"
+            }
             Self::VersionMetadataInvalid { .. } => "error-minecraft-version-metadata-invalid",
             Self::VersionMetadataUnreadable { .. } => "error-minecraft-version-metadata-unreadable",
             Self::LanguageCatalogUnavailable { .. } => {
@@ -143,6 +153,13 @@ impl MinecraftError {
             Self::VersionMetadataUnreadable { path, .. } => Some(path.clone()),
             _ => None,
         }
+    }
+
+    /// Whether the failure is a damaged copy in the local cache rather than
+    /// anything a provider served or a check that could not run.
+    #[must_use]
+    pub const fn is_damaged_local_data(&self) -> bool {
+        matches!(self, Self::CachedVersionMetadataDamaged { .. })
     }
 
     /// Whether the caller canceled rather than the provider failing, as
@@ -402,6 +419,7 @@ mod tests {
             MinecraftError::UnknownVersion { id: String::new() }.message_id(),
             MinecraftError::unsupported("x").message_id(),
             MinecraftError::VersionMetadataCorrupt { id: String::new() }.message_id(),
+            MinecraftError::CachedVersionMetadataDamaged { id: String::new() }.message_id(),
             MinecraftError::not_a_release("x", &ReleaseType::Snapshot).message_id(),
         ];
         let mut unique = ids;

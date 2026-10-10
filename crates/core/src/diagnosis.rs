@@ -1404,12 +1404,20 @@ fn write_integrity(out: &mut String, integrity: Option<&IntegrityCheck>, home: O
                     out.push_str("- Shared launch files: not checked, release not launched yet\n");
                 }
                 Some(Ok(shared)) => {
+                    let waiting = shared.not_yet_fetched().count();
                     let _ = writeln!(
                         *out,
                         "- Shared launch files: {} checked, {} damaged, {} not downloaded yet",
-                        shared.files.len(),
+                        shared.files.len() - waiting,
                         shared.faults().count(),
-                        shared.not_yet_fetched().count()
+                        waiting
+                    );
+                }
+                Some(Err(error)) if error.is_damaged_local_data() => {
+                    let _ = writeln!(
+                        *out,
+                        "- Shared launch files: damaged ({})",
+                        redact_text(&error.to_string(), home)
                     );
                 }
                 Some(Err(error)) => {
@@ -1657,6 +1665,67 @@ mod tests {
             redact_home(Path::new("/home/someone-else/java"), Some(home)),
             "/home/someone-else/java",
             "a sibling that shares the prefix is not under home"
+        );
+    }
+
+    fn shared_file(name: &str, integrity: crate::verify::Integrity) -> crate::verify::VerifiedFile {
+        crate::verify::VerifiedFile {
+            logical_path: PathBuf::from(name),
+            integrity,
+            has_source: true,
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    fn shared_line(shared: Result<crate::verify::SharedArtifactReport, Box<CoreError>>) -> String {
+        let mut out = String::new();
+        write_integrity(
+            &mut out,
+            Some(&IntegrityCheck {
+                files: crate::verify::VerificationReport { files: Vec::new() },
+                shared: Some(shared),
+            }),
+            None,
+        );
+        out.lines()
+            .find(|line| line.starts_with("- Shared launch files"))
+            .expect("the shared launch files line")
+            .to_owned()
+    }
+
+    #[test]
+    fn the_report_does_not_count_shared_files_that_are_not_downloaded_as_checked() {
+        use crate::verify::{Integrity, SharedArtifactReport};
+
+        let line = shared_line(Ok(SharedArtifactReport {
+            metadata_cached: true,
+            files: vec![
+                shared_file("client.jar", Integrity::Intact),
+                shared_file("a.jar", Integrity::Absent),
+                shared_file("b.jar", Integrity::Absent),
+            ],
+            loader_libraries_uncovered: false,
+        }));
+
+        assert_eq!(
+            line,
+            "- Shared launch files: 1 checked, 0 damaged, 2 not downloaded yet"
+        );
+    }
+
+    #[test]
+    fn the_report_calls_a_damaged_cached_version_document_damaged_not_unchecked() {
+        let damaged = CoreError::from(
+            ephervex_minecraft::MinecraftError::CachedVersionMetadataDamaged {
+                id: "1.21.1".to_owned(),
+            },
+        );
+
+        let line = shared_line(Err(Box::new(damaged)));
+
+        assert!(
+            line.starts_with("- Shared launch files: damaged ("),
+            "{line}"
         );
     }
 }

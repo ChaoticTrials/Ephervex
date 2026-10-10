@@ -728,6 +728,17 @@ fn java_check(java: &JavaCheck, localized: &dyn Fn(&CoreError) -> String) -> Che
     }
 }
 
+/// A damaged local copy is a problem to fix; any other failure means the check
+/// could not run.
+fn shared_failure(damaged_local_data: bool, error: &str) -> (String, &'static str) {
+    let (message, state) = if damaged_local_data {
+        ("gui-integrity-shared-damaged", "problem")
+    } else {
+        ("gui-diagnosis-check-failed", "skipped")
+    };
+    (lookup_args(message, [("error", Arg::from(error))]), state)
+}
+
 fn integrity_checks(
     integrity: Option<&IntegrityCheck>,
     localized: &dyn Fn(&CoreError) -> String,
@@ -767,33 +778,34 @@ fn integrity_checks(
     }];
     if let Some(shared) = &check.shared {
         let (value, state) = match shared {
-            Err(error) => (
-                lookup_args(
-                    "gui-diagnosis-check-failed",
-                    [("error", Arg::from(localized(error)))],
-                ),
-                "skipped",
-            ),
+            Err(error) => shared_failure(error.is_damaged_local_data(), &localized(error)),
             Ok(shared) if !shared.metadata_cached => {
                 (lookup("gui-integrity-shared-not-cached"), "skipped")
             }
             Ok(shared) => {
                 let faults = shared.faults().count();
-                let mut value = if faults > 0 {
-                    count("gui-integrity-shared-faults", faults)
-                } else {
-                    count("gui-integrity-shared-sound", shared.files.len())
-                };
                 let waiting = shared.not_yet_fetched().count();
+                let checked = shared.files.len() - waiting;
+                let mut parts = Vec::new();
+                if faults > 0 {
+                    parts.push(count("gui-integrity-shared-faults", faults));
+                } else if checked > 0 {
+                    parts.push(count("gui-integrity-shared-sound", checked));
+                }
                 if waiting > 0 {
-                    value.push(' ');
-                    value.push_str(&count("gui-integrity-shared-waiting", waiting));
+                    parts.push(count("gui-integrity-shared-waiting", waiting));
                 }
                 if shared.loader_libraries_uncovered {
-                    value.push(' ');
-                    value.push_str(&lookup("gui-integrity-shared-loader"));
+                    parts.push(lookup("gui-integrity-shared-loader"));
                 }
-                (value, if faults > 0 { "problem" } else { "ok" })
+                let state = if faults > 0 {
+                    "problem"
+                } else if checked == 0 {
+                    "skipped"
+                } else {
+                    "ok"
+                };
+                (parts.join(" "), state)
             }
         };
         checks.push(CheckView {
@@ -1240,5 +1252,114 @@ mod tests {
         assert!(view.changed);
         assert_eq!(view.lines, ["mods/b.jar"]);
         assert_eq!(view.message, count("gui-integrity-repair-stopped", 1));
+    }
+
+    fn shared_row(files: Vec<(&str, Integrity)>, loader_libraries_uncovered: bool) -> CheckView {
+        let check = IntegrityCheck {
+            files: ephervex_core::VerificationReport { files: Vec::new() },
+            shared: Some(Ok(ephervex_core::SharedArtifactReport {
+                metadata_cached: true,
+                files: files
+                    .into_iter()
+                    .map(|(name, integrity)| ephervex_core::VerifiedFile {
+                        logical_path: PathBuf::from(name),
+                        integrity,
+                        has_source: true,
+                    })
+                    .collect(),
+                loader_libraries_uncovered,
+            })),
+        };
+        integrity_checks(Some(&check), &|error| error.to_string())
+            .into_iter()
+            .find(|row| row.label == lookup("gui-integrity-shared-title"))
+            .expect("the shared launch files row")
+    }
+
+    #[test]
+    fn shared_files_not_downloaded_yet_are_left_out_of_the_checked_count() {
+        let row = shared_row(
+            vec![
+                ("client.jar", Integrity::Intact),
+                ("a.jar", Integrity::Absent),
+                ("b.jar", Integrity::Absent),
+            ],
+            false,
+        );
+
+        assert_eq!(row.state, "ok");
+        assert!(row.value.contains(&count("gui-integrity-shared-sound", 1)));
+        assert!(
+            row.value
+                .contains(&count("gui-integrity-shared-waiting", 2))
+        );
+    }
+
+    #[test]
+    fn a_shared_row_with_nothing_downloaded_claims_no_check_and_is_not_graded_ok() {
+        let row = shared_row(
+            vec![("a.jar", Integrity::Absent), ("b.jar", Integrity::Absent)],
+            true,
+        );
+
+        assert_eq!(row.state, "skipped");
+        assert_eq!(
+            row.value,
+            format!(
+                "{} {}",
+                count("gui-integrity-shared-waiting", 2),
+                lookup("gui-integrity-shared-loader")
+            )
+        );
+        assert!(!row.value.contains(&count("gui-integrity-shared-sound", 0)));
+    }
+
+    #[test]
+    fn a_damaged_shared_file_is_a_problem_and_still_counts_the_waiting_ones_separately() {
+        let row = shared_row(
+            vec![
+                ("client.jar", Integrity::Corrupt),
+                ("a.jar", Integrity::Absent),
+            ],
+            false,
+        );
+
+        assert_eq!(row.state, "problem");
+        assert!(
+            row.value
+                .starts_with(&count("gui-integrity-shared-faults", 1))
+        );
+        assert!(
+            row.value
+                .contains(&count("gui-integrity-shared-waiting", 1))
+        );
+    }
+
+    #[test]
+    fn a_damaged_local_copy_is_a_problem_that_does_not_claim_the_check_could_not_run() {
+        let (value, state) = shared_failure(true, "the saved copy is damaged");
+
+        assert_eq!(state, "problem");
+        assert_eq!(
+            value,
+            lookup_args(
+                "gui-integrity-shared-damaged",
+                [("error", Arg::from("the saved copy is damaged"))]
+            )
+        );
+    }
+
+    #[test]
+    fn any_other_shared_check_failure_is_a_skipped_check() {
+        let (value, state) = shared_failure(false, "offline");
+
+        assert_eq!(state, "skipped");
+        assert_eq!(
+            value,
+            lookup_args(
+                "gui-diagnosis-check-failed",
+                [("error", Arg::from("offline"))]
+            )
+        );
     }
 }

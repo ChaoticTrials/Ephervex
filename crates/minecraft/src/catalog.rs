@@ -231,7 +231,7 @@ impl VersionCatalog {
     /// The version document is addressed by its manifest digest, but its name
     /// proves nothing about its bytes: the bytes read are hashed against that
     /// digest before they are parsed, and a document that no longer matches is
-    /// reported as corrupt instead of being trusted.
+    /// reported as damaged instead of being trusted.
     #[instrument(skip(self))]
     pub async fn cached_metadata(&self, id: &str) -> MinecraftResult<Option<VersionMetadata>> {
         let Some(document) = self.cache.peek(&self.manifest_key).await else {
@@ -249,7 +249,7 @@ impl VersionCatalog {
         let Ok(file) = fs::File::open(&destination).await else {
             return Ok(None);
         };
-        let corrupt = || MinecraftError::VersionMetadataCorrupt {
+        let corrupt = || MinecraftError::CachedVersionMetadataDamaged {
             id: record.id.clone(),
         };
         // One read feeds both the digest check and the parser, so the bytes

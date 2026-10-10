@@ -645,6 +645,14 @@ impl CoreError {
         matches!(self, Self::Auth(error) if error.session_only_would_help())
     }
 
+    /// Whether a copy in the local cache or store is damaged, as opposed to a
+    /// provider failing or a check being unable to run. A frontend grades
+    /// this as a problem to fix rather than a check it had to skip.
+    #[must_use]
+    pub const fn is_damaged_local_data(&self) -> bool {
+        matches!(self, Self::Minecraft(error) if error.is_damaged_local_data())
+    }
+
     /// Whether the user canceled rather than something failing.
     #[must_use]
     pub fn is_cancellation(&self) -> bool {
@@ -1104,6 +1112,23 @@ mod tests {
     }
 
     #[test]
+    fn only_a_damaged_local_copy_is_reported_as_damaged_local_data() {
+        let damaged = CoreError::from(MinecraftError::CachedVersionMetadataDamaged {
+            id: "1.21.1".to_owned(),
+        });
+        let served = CoreError::from(MinecraftError::VersionMetadataCorrupt {
+            id: "1.21.1".to_owned(),
+        });
+
+        assert!(damaged.is_damaged_local_data());
+        assert!(
+            !served.is_damaged_local_data(),
+            "a document a provider served wrong is not a damaged local copy"
+        );
+        assert!(!CoreError::from(MinecraftError::unsupported("1.7.10")).is_damaged_local_data());
+    }
+
+    #[test]
     fn every_message_id_core_can_hand_out_exists_in_the_bundled_resources() {
         // The frontend resolves these through `ephervex-i18n`; an id with no
         // message renders as a placeholder in the user's face.
@@ -1111,6 +1136,7 @@ mod tests {
             MinecraftError::unsupported("x").message_id(),
             MinecraftError::UnknownVersion { id: String::new() }.message_id(),
             MinecraftError::VersionMetadataCorrupt { id: String::new() }.message_id(),
+            MinecraftError::CachedVersionMetadataDamaged { id: String::new() }.message_id(),
             ephervex_storage::PathError::NoHomeDirectory.message_id(),
             ServerError::ReadinessTimeout {
                 target: "127.0.0.1:25565".to_owned(),

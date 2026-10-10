@@ -405,6 +405,9 @@ error-minecraft-version-metadata-unavailable = The metadata for that Minecraft v
 error-minecraft-version-metadata-corrupt = The metadata Mojang served for that version did not match the checksum Mojang published for it.
 .action = Ephervex refused the file rather than using it. If this repeats, something between you and Mojang is rewriting the response.
 
+error-minecraft-cached-version-metadata-damaged = The copy of that Minecraft version's metadata saved on this computer is damaged.
+.action = Nothing was downloaded to cause this. Launch the version or create an instance with it again so Ephervex fetches a fresh copy, or delete the file from the metadata cache.
+
 error-minecraft-version-metadata-invalid = The metadata for that Minecraft version could not be understood.
 
 error-minecraft-version-metadata-unreadable = The cached metadata for that Minecraft version could not be read.
@@ -1318,6 +1321,7 @@ gui-integrity-shared-waiting = { $count ->
     [one] One is not downloaded yet. Launching downloads it, so this is not damage.
    *[other] { $count } are not downloaded yet. Launching downloads them, so this is not damage.
 }
+gui-integrity-shared-damaged = Damaged: { $error }
 gui-integrity-shared-loader = The loader's own libraries are not part of this check.
 operation-exporting-diagnostic-bundle = Writing the diagnostic bundle
 gui-bundle-detail = Collects the files you choose into one zip file saved on this computer, to attach to a bug report yourself. Nothing is uploaded.
