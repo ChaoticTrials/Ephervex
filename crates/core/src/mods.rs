@@ -259,7 +259,9 @@ struct IdentifiedJar {
 ///
 /// A refusal from `record_managed` is left alone on purpose: it means this
 /// project is already recorded at another version, which is two jars for one
-/// mod and a thing to tell somebody about rather than to overwrite.
+/// mod and a thing to tell somebody about rather than to overwrite. A path the
+/// recipe already records is left alone for the same reason: a path holds one
+/// record, and the jar stays unrecorded rather than displacing it.
 ///
 /// The recipe is read here, not taken from the caller, because the lookups that
 /// produced `adopted` ran over the network. An install, a removal or a restored
@@ -334,6 +336,21 @@ fn record_identified(root: &Path, side: PackSide, adopted: &[IdentifiedJar]) {
         // (an earlier identification), which `record_managed` leaves alone.
         if align_recorded_hand_placed(&mut recipe, side, &file) {
             changed = true;
+            continue;
+        }
+        // `record_managed` keys on the project, so it would add a second record
+        // for a path another record already holds. That record can describe a
+        // file this host does not list, such as the other side of a linked
+        // server, and rewriting it would change what that side recorded.
+        if recipe
+            .files
+            .iter()
+            .any(|recorded| recorded.logical_path == file.logical_path)
+        {
+            debug!(
+                path = %file.logical_path.display(),
+                "a hand-placed jar sits at a path the recipe already records; it was not recorded"
+            );
             continue;
         }
         let recorded = recipe.files.len();
@@ -3408,6 +3425,49 @@ mod tests {
             std::fs::read(store.recipe_path()).expect("recipe bytes"),
             bytes
         );
+    }
+
+    /// A record this host does not list, such as a linked server's copy of a
+    /// client record, still holds its path. A jar identified there as another
+    /// project must not add a second record for the same file.
+    #[test]
+    fn identifying_a_jar_never_adds_a_second_record_at_an_occupied_path() {
+        for origin in [
+            ModOrigin::HandPlaced,
+            ModOrigin::UserSelected,
+            ModOrigin::PackDeclared,
+        ] {
+            let root = tempfile::tempdir().expect("temp dir");
+            let store = recipe_with_one_mod(root.path());
+            let mut excluded = pack_mod("hand.jar", "OTHER", "OTHER-1");
+            excluded.origin = origin;
+            excluded.client = SideRequirement::Required;
+            excluded.server = SideRequirement::Unknown;
+            excluded.selected = Some(false);
+            excluded.identity = Some(ProviderFileIdentity {
+                provider: Some(ModProvider::Modrinth),
+                project_id: Some("OTHER".to_owned()),
+                version_id: Some("OTHER-1".to_owned()),
+                file_id: None,
+            });
+            let mut recipe = store.read_recipe().expect("recipe");
+            recipe.files.push(excluded.clone());
+            store.write_recipe(&recipe).expect("write the recipe");
+
+            record_identified(
+                root.path(),
+                PackSide::Server,
+                &[identified(hand_placed_find("hand.jar"))],
+            );
+
+            let recipe = store.read_recipe().expect("recipe");
+            let at_path: Vec<_> = recipe
+                .files
+                .iter()
+                .filter(|file| file.logical_path == Path::new("mods/hand.jar"))
+                .collect();
+            assert_eq!(at_path, [&excluded], "{origin:?}");
+        }
     }
 
     /// A jar found on a client is not assumed to belong on a server.
