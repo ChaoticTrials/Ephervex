@@ -149,7 +149,7 @@ features show one tab or a short note.
 
 - [x] Interface tour
 - [x] Accounts: offline and Microsoft, device code, session-only, keyring
-- [ ] Instances: temporary vs persistent, create, launch, duplicate, make
+- [x] Instances: temporary vs persistent, create, launch, duplicate, make
       persistent, delete, per-instance Java and memory, change loader build
 - [ ] Import: Modrinth and CurseForge, optional files, `ephervex://` links,
       trusted hosts, blocked files and watched folders, CurseForge key

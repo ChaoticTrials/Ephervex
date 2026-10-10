@@ -1,0 +1,197 @@
+---
+title: Instances
+description: Create, launch, copy, and manage Minecraft instances.
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+import ThemeScreenshot from '@site/src/components/ThemeScreenshot';
+
+# Instances
+
+An instance is a Minecraft game directory with an exact Minecraft version and
+loader selection. Each instance has its own mods, saves, configuration, and
+logs. Ephervex reuses downloaded game files, libraries, assets, and managed
+Java runtimes across instances.
+
+## Choose temporary or persistent storage
+
+New instances are **temporary** by default. They live in the operating
+system's temporary directory. Closing the game does not delete them, but the
+operating system can clear that directory at any time. Use temporary storage
+for a test you can discard.
+
+Choose **persistent** storage when you want the instance to remain in your
+configured instance folder. You can also move a stopped temporary instance
+there later with **Make Persistent**. Its mods, saves, logs, and name move with
+it. Linked temporary servers move too unless you choose to leave them behind.
+
+## Create an instance
+
+Choose the exact Minecraft release you need. Vanilla needs no loader build;
+Forge and NeoForge need an exact build that supports that release. Ephervex
+does not replace an unsupported selection with another version.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+On **Instances**, select **New Instance**. Enter a name, choose the Minecraft
+release and loader, then choose a loader build for Forge or NeoForge. Select
+temporary or persistent storage and create the instance.
+
+<ThemeScreenshot state="create-instance-dialog" alt="New Instance dialog showing Minecraft, loader, and storage choices" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+Replace `VERSION` with an exact Minecraft release:
+
+```bash
+ephervex instance create "Test World" --minecraft VERSION
+```
+
+For Forge or NeoForge, supply the exact loader build. Add `--persistent` if
+you want to keep the instance under the persistent instance root:
+
+```bash
+ephervex instance create "Mod Test" --minecraft VERSION --loader neoforge --loader-version LOADER_BUILD --persistent
+```
+
+`--temporary` explicitly selects the default temporary storage.
+
+</TabItem>
+</Tabs>
+
+## Find and launch an instance
+
+You need an [account](./accounts.mdx) before launching. The first launch
+downloads missing game files. Ephervex selects a compatible Java runtime from
+your settings; it can report that a runtime is needed.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Find the instance on **Instances** and select **Launch** on its card. Select
+the card or **Open Workspace** to inspect its mods, settings, logs, and other
+details. The **Running** page shows active clients and their controls.
+
+<ThemeScreenshot state="instances-overview" region="client-card" alt="Instance card with its version, storage type, state, and Launch button" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+```bash
+ephervex instances list
+ephervex instance show INSTANCE_ID
+ephervex launch INSTANCE_ID
+```
+
+Use the ID from `instances list`. The launch command stays attached to the
+game process and reports its exit status when it ends.
+
+</TabItem>
+</Tabs>
+
+## Copy or keep an instance
+
+Duplicate an instance when you want a separate copy to change or test. The
+copy starts with the original's storage type. Make Persistent instead when you
+want to keep the same temporary instance without leaving a copy behind. Stop
+the game before either action.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Open an instance card's menu and select **Duplicate** or **Make Persistent**.
+The latter is also available in the instance workspace's **Overview**. When
+making an instance persistent, choose which linked temporary servers to move
+with it. Duplicate asks whether to retain records of mods missing from the
+original's mods folder.
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+```bash
+ephervex instance duplicate INSTANCE_ID
+ephervex instance persist INSTANCE_ID
+```
+
+`duplicate` uses the original's storage type. Add `--name "Copy Name"` or
+`--persistent` to choose a different name or storage type. `persist` moves all
+linked temporary servers by default; use `--no-servers` to leave them in
+temporary storage, or repeat `--server SERVER_ID` to select specific servers.
+
+</TabItem>
+</Tabs>
+
+## Set Java and memory for one instance
+
+An instance normally follows the global Java, memory, and JVM settings. Pin
+values here only when this instance needs different ones. Memory values are
+in MiB.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Open the instance workspace, then **Settings**. Under **Java and memory**,
+enter the values to override and select **Save**. Empty fields follow the
+global settings. **Clear Overrides** removes all instance-specific values.
+
+<ThemeScreenshot state="client-settings" alt="Instance Settings with Java path, memory, and JVM argument overrides" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+View the current overrides, set the ones you need, or clear them:
+
+```bash
+ephervex instance runtime INSTANCE_ID
+ephervex instance runtime INSTANCE_ID --java /path/to/java --min-memory 1024 --max-memory 4096
+ephervex instance runtime INSTANCE_ID --clear
+```
+
+Each change replaces the previous set of overrides. Include every value you
+want to keep in the same command. Repeat `--jvm-arg ARG` for multiple JVM
+arguments.
+
+</TabItem>
+</Tabs>
+
+## Change a loader build
+
+For a Forge or NeoForge instance, open its workspace **Overview** and select
+**Change Build**. Choose another offered build of the same loader for the
+instance's Minecraft release, then select **Install and Switch**. Installed
+mods are left in place, so check their compatibility with the new build.
+
+Changing a loader build is currently available in the desktop app. It does
+not switch between Vanilla, Forge, and NeoForge.
+
+## Delete an instance
+
+Deleting an instance also removes its linked servers from Ephervex. Decide
+whether to keep their directories before confirming. Deleting files also
+removes saves and server worlds in those directories.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Stop the game, open the instance card's menu, and select **Delete Instance**.
+The dialog lists affected linked servers. Choose **Remove from Ephervex** to
+leave files on disk, or **Delete Files** to remove the managed directories.
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+```bash
+ephervex instance delete INSTANCE_ID
+```
+
+The command asks for confirmation before deleting files and names every
+linked server. Use `--keep-files` to remove the records while leaving the
+directories on disk. In a noninteractive command, use `--yes` to confirm file
+deletion. Running linked servers block deletion unless you add
+`--stop-linked-servers`.
+
+</TabItem>
+</Tabs>
