@@ -15,9 +15,20 @@
 //! else holds it, so acquiring the name and finding the running instance are
 //! the same operation and cannot disagree.
 //!
-//! A refused connection on a path that exists means the last owner died without
+//! A refused connection to a socket file means the last owner died without
 //! cleaning up. That is a stale name to remove, not an error to report: it is
-//! the normal state after a crash or a reboot that left `/tmp` alone.
+//! the normal state after a crash or a reboot that left `/tmp` alone. Any other
+//! failure to connect, or a path that is not a socket of ours, proves nothing
+//! about the owner and is reported instead of removed.
+//!
+//! # Taking over a name
+//!
+//! Removing a stale name and binding it again is two steps, so two launchers
+//! doing it at once could each remove the other's live socket and both believe
+//! they are the launcher. Every bind, takeover, and release therefore happens
+//! under an exclusive `flock` on a lock file beside the socket. The kernel
+//! drops that lock with the process, and the lock file itself is never removed,
+//! because removing a lock file reopens the race it exists to close.
 //!
 //! # The 108-byte limit
 //!
@@ -28,10 +39,12 @@
 //! same reason.
 
 use std::io::{BufRead, BufReader, Read as _, Write};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+use std::os::fd::OwnedFd;
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use rustix::fs::{FlockOperation, Mode, OFlags, flock};
 use tracing::{debug, info, warn};
 
 use crate::error::{CoreError, CoreResult};
@@ -39,6 +52,9 @@ use crate::pack_url::MAX_LAUNCHER_URL_BYTES;
 
 /// The longest a `sun_path` may be, including its terminator.
 const MAX_UNIX_SOCKET_PATH_BYTES: usize = 107;
+
+/// How many times a claim re-reads the name before giving up on it settling.
+const MAX_CLAIM_ATTEMPTS: u32 = 4;
 
 /// What starting up found.
 #[derive(Debug)]
@@ -62,21 +78,83 @@ pub enum Handover {
     Link(String),
 }
 
+/// Which file a socket name pointed at when this process bound it.
+///
+/// Giving a name up removes only the file that was bound, so a name another
+/// launcher has since taken is never removed out from under it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SocketIdentity {
+    device: u64,
+    inode: u64,
+}
+
+impl SocketIdentity {
+    fn of(path: &Path) -> std::io::Result<Self> {
+        let metadata = std::fs::symlink_metadata(path)?;
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+}
+
+/// An exclusive lock on the launcher name, held while it is claimed, taken
+/// over, or given up.
+#[derive(Debug)]
+struct NameLock {
+    _file: OwnedFd,
+}
+
+impl NameLock {
+    /// Waits for the lock beside `socket`. Holders keep it for a few system
+    /// calls, so the wait is short.
+    fn acquire(socket: &Path) -> CoreResult<Self> {
+        let path = socket.with_extension("lock");
+        let unavailable =
+            |action: &str, error: &dyn std::fmt::Display| CoreError::SingleInstanceUnavailable {
+                detail: format!("{} could not be {action}: {error}", path.display()),
+            };
+        let file = rustix::fs::open(
+            &path,
+            OFlags::CREATE | OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::RUSR | Mode::WUSR,
+        )
+        .map_err(|error| unavailable("opened", &error))?;
+        flock(&file, FlockOperation::LockExclusive)
+            .map_err(|error| unavailable("locked", &error))?;
+        Ok(Self { _file: file })
+    }
+}
+
+/// Removes `path` if it is still the socket file `identity` names.
+fn remove_if_owned(path: &Path, identity: SocketIdentity) -> std::io::Result<()> {
+    let _lock =
+        NameLock::acquire(path).map_err(|error| std::io::Error::other(error.to_string()))?;
+    match SocketIdentity::of(path) {
+        Ok(current) if current == identity => std::fs::remove_file(path),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 /// The socket this process owns, and the file behind it.
 ///
-/// Dropping it removes the file. That is a courtesy rather than a guarantee:
-/// a process that dies without unwinding leaves the name behind, which is
-/// exactly the stale case [`start`] already handles.
+/// Dropping it removes the file if it is still ours. That is a courtesy rather
+/// than a guarantee: a process that dies without unwinding leaves the name
+/// behind, which is exactly the stale case [`start`] already handles.
 #[derive(Debug)]
 pub struct PrimaryInstance {
     listener: UnixListener,
     path: PathBuf,
+    identity: SocketIdentity,
 }
 
 /// The launcher name a listening instance still holds.
 #[derive(Debug)]
 pub struct ListeningInstance {
     path: PathBuf,
+    identity: SocketIdentity,
 }
 
 impl ListeningInstance {
@@ -84,15 +162,28 @@ impl ListeningInstance {
     /// instead of handing over to this one. For a launcher that is quitting but
     /// has no window to show for the time that takes.
     pub fn release(self) {
-        if let Err(error) = std::fs::remove_file(&self.path)
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
+        if let Err(error) = remove_if_owned(&self.path, self.identity) {
             warn!(path = %self.path.display(), %error, "could not release the launcher socket");
         }
     }
 }
 
 impl PrimaryInstance {
+    fn new(listener: UnixListener, path: PathBuf) -> CoreResult<Self> {
+        let identity =
+            SocketIdentity::of(&path).map_err(|error| CoreError::SingleInstanceUnavailable {
+                detail: format!(
+                    "{} could not be read after binding: {error}",
+                    path.display()
+                ),
+            })?;
+        Ok(Self {
+            listener,
+            path,
+            identity,
+        })
+    }
+
     /// Where the socket is, for logs and tests.
     #[must_use]
     pub fn path(&self) -> &std::path::Path {
@@ -114,6 +205,7 @@ impl PrimaryInstance {
     pub fn listen(self, deliver: impl Fn(Handover) + Send + 'static) -> Option<ListeningInstance> {
         let listening = ListeningInstance {
             path: self.path.clone(),
+            identity: self.identity,
         };
         std::thread::Builder::new()
             .name("ephervex-single-instance".to_owned())
@@ -140,9 +232,7 @@ impl PrimaryInstance {
 
 impl Drop for PrimaryInstance {
     fn drop(&mut self) {
-        if let Err(error) = std::fs::remove_file(&self.path)
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
+        if let Err(error) = remove_if_owned(&self.path, self.identity) {
             warn!(path = %self.path.display(), %error, "could not remove the launcher socket");
         }
     }
@@ -155,61 +245,89 @@ impl Drop for PrimaryInstance {
 /// [`Handover::Raise`], so a second launch with no link raises the existing
 /// window rather than opening a new one.
 pub fn start(message: Option<&str>) -> CoreResult<Startup> {
-    let path = socket_path()?;
+    start_at(&socket_path()?, message)
+}
 
-    match UnixListener::bind(&path) {
-        Ok(listener) => {
+fn start_at(path: &Path, message: Option<&str>) -> CoreResult<Startup> {
+    let lock = NameLock::acquire(path)?;
+    match claim_name(path)? {
+        Claim::Bound(listener) => {
             info!(path = %path.display(), "this process is the launcher");
-            return Ok(Startup::Primary(Box::new(PrimaryInstance {
+            Ok(Startup::Primary(Box::new(PrimaryInstance::new(
                 listener,
-                path,
-            })));
+                path.to_owned(),
+            )?)))
         }
-        Err(error) if error.kind() != std::io::ErrorKind::AddrInUse => {
-            return Err(CoreError::SingleInstanceUnavailable {
-                detail: format!("{} could not be bound: {error}", path.display()),
-            });
-        }
-        Err(_) => {}
-    }
-
-    // The name is taken. Either somebody is listening, or the last owner died
-    // without cleaning up.
-    match UnixStream::connect(&path) {
-        Ok(stream) => {
-            hand_over(stream, message.unwrap_or_default(), &path)?;
+        Claim::Running(stream) => {
+            drop(lock);
+            hand_over(stream, message.unwrap_or_default(), path)?;
             Ok(Startup::HandedOff)
-        }
-        Err(error) => {
-            debug!(
-                path = %path.display(),
-                %error,
-                "the launcher socket is stale; taking it over"
-            );
-            // Removing a name nobody answers, then binding it. A second process
-            // racing here loses the bind and connects instead, which is the
-            // same outcome by the other route.
-            if let Err(error) = std::fs::remove_file(&path)
-                && error.kind() != std::io::ErrorKind::NotFound
-            {
-                return Err(CoreError::SingleInstanceUnavailable {
-                    detail: format!("{} could not be cleared: {error}", path.display()),
-                });
-            }
-            let listener = UnixListener::bind(&path).map_err(|error| {
-                CoreError::SingleInstanceUnavailable {
-                    detail: format!("{} could not be bound: {error}", path.display()),
-                }
-            })?;
-            Ok(Startup::Primary(Box::new(PrimaryInstance {
-                listener,
-                path,
-            })))
         }
     }
 }
 
-fn hand_over(mut stream: UnixStream, message: &str, path: &std::path::Path) -> CoreResult<()> {
+enum Claim {
+    Bound(UnixListener),
+    Running(UnixStream),
+}
+
+/// Binds the name, or connects to whoever holds it. Called with the name lock
+/// held.
+fn claim_name(path: &Path) -> CoreResult<Claim> {
+    let unavailable =
+        |action: &str, error: &dyn std::fmt::Display| CoreError::SingleInstanceUnavailable {
+            detail: format!("{} could not be {action}: {error}", path.display()),
+        };
+
+    for _ in 0..MAX_CLAIM_ATTEMPTS {
+        match UnixListener::bind(path) {
+            Ok(listener) => return Ok(Claim::Bound(listener)),
+            Err(error) if error.kind() != std::io::ErrorKind::AddrInUse => {
+                return Err(unavailable("bound", &error));
+            }
+            Err(_) => {}
+        }
+
+        // The name is taken. Either somebody is listening, or the last owner
+        // died without cleaning up.
+        match UnixStream::connect(path) {
+            Ok(stream) => return Ok(Claim::Running(stream)),
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                debug!(
+                    path = %path.display(),
+                    "the launcher socket is stale; taking it over"
+                );
+                remove_stale(path).map_err(|error| unavailable("cleared", &error))?;
+            }
+            // Gone between the bind and the connect; bind again.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(unavailable("reached", &error)),
+        }
+    }
+
+    Err(unavailable("claimed", &"it kept changing hands"))
+}
+
+/// Removes a name whose connection was refused, if it is a socket of ours.
+///
+/// Connecting to a file that is not a socket is also refused, so a refusal
+/// alone does not make a path safe to delete.
+fn remove_stale(path: &Path) -> std::io::Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !metadata.file_type().is_socket() || metadata.uid() != uid_of_self()? {
+        return Err(std::io::Error::other("it is not a socket of ours"));
+    }
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
+fn hand_over(mut stream: UnixStream, message: &str, path: &Path) -> CoreResult<()> {
     // One line, because one message is all a launch has to say. Newline
     // terminated so the reader knows where it ends without a length prefix.
     let payload = format!("{}\n", message.replace('\n', " "));
@@ -344,12 +462,14 @@ fn is_private_directory(path: &std::path::Path) -> bool {
     metadata.file_type().is_dir() && metadata.uid() == uid && !others_have_access
 }
 
+fn uid_of_self() -> std::io::Result<u32> {
+    std::fs::metadata("/proc/self").map(|metadata| metadata.uid())
+}
+
 fn uid() -> CoreResult<u32> {
-    std::fs::metadata("/proc/self")
-        .map(|metadata| metadata.uid())
-        .map_err(|error| CoreError::SingleInstanceUnavailable {
-            detail: format!("this process cannot read its own identity: {error}"),
-        })
+    uid_of_self().map_err(|error| CoreError::SingleInstanceUnavailable {
+        detail: format!("this process cannot read its own identity: {error}"),
+    })
 }
 
 #[cfg(test)]
@@ -412,10 +532,8 @@ mod tests {
     fn a_handed_over_message_arrives_whole() {
         let base = tempfile::tempdir().expect("temp dir");
         let path = base.path().join("ephervex.sock");
-        let primary = PrimaryInstance {
-            listener: claim(&path).expect("bind"),
-            path: path.clone(),
-        };
+        let primary =
+            PrimaryInstance::new(claim(&path).expect("bind"), path.clone()).expect("identity");
 
         let (sender, receiver) = mpsc::channel();
         primary.listen(move |message| {
@@ -439,10 +557,8 @@ mod tests {
     fn a_released_name_is_taken_by_the_next_launch() {
         let base = tempfile::tempdir().expect("temp dir");
         let path = base.path().join("ephervex.sock");
-        let primary = PrimaryInstance {
-            listener: claim(&path).expect("bind"),
-            path: path.clone(),
-        };
+        let primary =
+            PrimaryInstance::new(claim(&path).expect("bind"), path.clone()).expect("identity");
 
         let listening = primary.listen(|_| {}).expect("the listener starts");
         assert_eq!(
@@ -460,10 +576,8 @@ mod tests {
     fn a_launch_with_nothing_to_say_asks_the_running_launcher_to_raise() {
         let base = tempfile::tempdir().expect("temp dir");
         let path = base.path().join("ephervex.sock");
-        let primary = PrimaryInstance {
-            listener: claim(&path).expect("bind"),
-            path: path.clone(),
-        };
+        let primary =
+            PrimaryInstance::new(claim(&path).expect("bind"), path.clone()).expect("identity");
 
         let (sender, receiver) = mpsc::channel();
         primary.listen(move |handover| {
@@ -540,10 +654,8 @@ mod tests {
     fn dropping_the_owner_releases_the_name() {
         let base = tempfile::tempdir().expect("temp dir");
         let path = base.path().join("ephervex.sock");
-        let primary = PrimaryInstance {
-            listener: claim(&path).expect("bind"),
-            path: path.clone(),
-        };
+        let primary =
+            PrimaryInstance::new(claim(&path).expect("bind"), path.clone()).expect("identity");
         assert!(path.exists());
 
         drop(primary);
@@ -592,5 +704,171 @@ mod tests {
 
         std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o700)).expect("chmod");
         assert!(is_private_directory(&shared));
+    }
+
+    fn leave_stale_socket(path: &Path) {
+        // Dropping a std listener leaves its file behind, as a crash does.
+        drop(claim(path).expect("bind"));
+        assert_eq!(
+            UnixStream::connect(path)
+                .expect_err("nobody answers")
+                .kind(),
+            std::io::ErrorKind::ConnectionRefused
+        );
+    }
+
+    #[test]
+    fn concurrent_takeovers_of_a_stale_name_leave_exactly_one_launcher() {
+        const LAUNCHES: usize = 8;
+        let base = tempfile::tempdir().expect("temp dir");
+        let path = base.path().join("ephervex.sock");
+        leave_stale_socket(&path);
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(LAUNCHES));
+        let launches: Vec<_> = (0..LAUNCHES)
+            .map(|_| {
+                let (path, barrier) = (path.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    start_at(&path, Some("link")).expect("every launch settles")
+                })
+            })
+            .collect();
+        let outcomes: Vec<_> = launches
+            .into_iter()
+            .map(|launch| launch.join().expect("launch thread"))
+            .collect();
+
+        let primaries = outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, Startup::Primary(_)))
+            .count();
+        assert_eq!(primaries, 1, "two launchers must never both own the name");
+        assert!(
+            UnixStream::connect(&path).is_ok(),
+            "and the one that does answers"
+        );
+    }
+
+    #[test]
+    fn a_takeover_waits_while_another_launch_holds_the_name_lock() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let path = base.path().join("ephervex.sock");
+        leave_stale_socket(&path);
+
+        let lock = NameLock::acquire(&path).expect("lock");
+        let (sender, receiver) = mpsc::channel();
+        let launch = std::thread::spawn({
+            let path = path.clone();
+            move || {
+                let outcome = start_at(&path, None).expect("start");
+                let _ = sender.send(());
+                outcome
+            }
+        });
+
+        assert!(
+            receiver.recv_timeout(Duration::from_millis(300)).is_err(),
+            "a launch must not touch the name while another holds the lock"
+        );
+        drop(lock);
+        receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the launch proceeds once the lock is free");
+        assert!(matches!(
+            launch.join().expect("launch thread"),
+            Startup::Primary(_)
+        ));
+    }
+
+    /// Connecting to a file that is not a socket is refused too.
+    #[test]
+    fn a_path_that_is_not_a_socket_is_reported_and_left_alone() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let path = base.path().join("ephervex.sock");
+        std::fs::write(&path, "not a socket").expect("write");
+
+        assert!(matches!(
+            start_at(&path, None),
+            Err(CoreError::SingleInstanceUnavailable { .. })
+        ));
+        assert_eq!(std::fs::read(&path).expect("kept"), b"not a socket");
+    }
+
+    /// Only a refused connection proves the owner is gone.
+    #[test]
+    fn a_connection_failure_other_than_a_refusal_does_not_clear_the_name() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let path = base.path().join("ephervex.sock");
+        let _listener = claim(&path).expect("bind");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        let Err(error) = UnixStream::connect(&path) else {
+            // Privileged users connect regardless of the mode.
+            return;
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+
+        assert!(matches!(
+            start_at(&path, None),
+            Err(CoreError::SingleInstanceUnavailable { .. })
+        ));
+        assert!(path.exists(), "the socket of a live owner is not removed");
+    }
+
+    #[test]
+    fn dropping_an_owner_leaves_a_name_another_launcher_has_since_taken() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let path = base.path().join("ephervex.sock");
+        let first = PrimaryInstance::new(claim(&path).expect("bind"), path.clone()).expect("id");
+        std::fs::remove_file(&path).expect("the name is taken away");
+        let _second = claim(&path).expect("another launcher binds the name");
+
+        drop(first);
+
+        assert!(
+            UnixStream::connect(&path).is_ok(),
+            "the other launcher still answers"
+        );
+    }
+
+    #[test]
+    fn releasing_leaves_a_name_another_launcher_has_since_taken() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let path = base.path().join("ephervex.sock");
+        let first = PrimaryInstance::new(claim(&path).expect("bind"), path.clone()).expect("id");
+        let listening = first.listen(|_| {}).expect("the listener starts");
+        std::fs::remove_file(&path).expect("the name is taken away");
+        let _second = claim(&path).expect("another launcher binds the name");
+
+        listening.release();
+
+        assert!(
+            UnixStream::connect(&path).is_ok(),
+            "the other launcher still answers"
+        );
+    }
+
+    #[test]
+    fn a_running_launcher_is_handed_the_message_by_a_later_start() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let path = base.path().join("ephervex.sock");
+        let Startup::Primary(primary) = start_at(&path, None).expect("first") else {
+            panic!("the first launch owns the name");
+        };
+        let (sender, receiver) = mpsc::channel();
+        let _listening = primary.listen(move |handover| {
+            let _ = sender.send(handover);
+        });
+
+        assert!(matches!(
+            start_at(&path, Some("link")).expect("second"),
+            Startup::HandedOff
+        ));
+        assert_eq!(
+            receiver
+                .recv_timeout(Duration::from_secs(5))
+                .expect("handed over"),
+            Handover::Link("link".to_owned())
+        );
     }
 }
