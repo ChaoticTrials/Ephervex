@@ -7469,7 +7469,7 @@ fn print_server(record: &ServerRecord, json: bool) {
     }
 }
 
-fn print_server_event(event: ServerEvent, json: bool) {
+fn print_server_event(event: ServerEvent, json: bool, progress: &mut LaunchProgressPrinter) {
     match event {
         ServerEvent::Preparing { operation } => {
             if json {
@@ -7481,6 +7481,7 @@ fn print_server_event(event: ServerEvent, json: bool) {
                 print_operation_id(operation);
             }
         }
+        ServerEvent::Downloading(operation) => progress.print_progress(&operation),
         ServerEvent::Started { pid } => {
             if json {
                 print_json(&serde_json::json!({ "event": "started", "pid": pid }));
@@ -7544,8 +7545,9 @@ async fn run_server_foreground(
     let (observer, events) = ServerObserver::channel();
     let mut events = events;
     let printer = tokio::spawn(async move {
+        let mut progress = LaunchProgressPrinter::default();
         while let Some(event) = events.recv().await {
-            print_server_event(event, json);
+            print_server_event(event, json, &mut progress);
         }
     });
 

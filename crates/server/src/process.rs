@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
-use ephervex_model::OperationId;
+use ephervex_model::{Operation, OperationId};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -78,6 +78,9 @@ pub enum ServerEvent {
     Preparing {
         operation: OperationId,
     },
+    /// Progress of a download the preparation makes, such as a managed Java
+    /// runtime. A snapshot of the operation named by `Preparing`.
+    Downloading(Box<Operation>),
     Started {
         pid: u32,
     },

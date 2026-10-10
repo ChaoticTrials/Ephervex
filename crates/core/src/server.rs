@@ -5,7 +5,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
-use ephervex_download::{CacheLayout, OperationReporter};
+use ephervex_download::{CacheLayout, OperationReporter, ProgressSink};
 use ephervex_model::{
     AccountKind, AttentionReason, ImportSourceKind, InstanceId, JavaOverride, JvmSettings,
     OperationId, ServerId, ServerInstallation, ServerLaunch, ServerRelativePath,
@@ -108,6 +108,22 @@ pub(super) struct PreparedServerStart {
     /// The id every launcher log line for this start carries, kept so the
     /// supervision that follows the preparation logs under the same one.
     operation: OperationId,
+}
+
+/// Forwards the downloads a server start makes into the server event stream, so
+/// a frontend watches one stream for the whole start.
+#[derive(Debug)]
+struct ServerDownloadProgress {
+    observer: ServerObserver,
+}
+
+impl ProgressSink for ServerDownloadProgress {
+    fn operation_changed(&self, operation: &ephervex_model::Operation) {
+        self.observer
+            .emit(ephervex_server::ServerEvent::Downloading(Box::new(
+                operation.clone(),
+            )));
+    }
 }
 
 impl App {
@@ -776,13 +792,17 @@ impl App {
         observer: &ServerObserver,
         cancel: &CancellationToken,
     ) -> CoreResult<PreparedServerStart> {
-        // Silent because a server start reports through `ServerObserver` rather
-        // than through a progress bar; the reporter is here for its id, which
-        // is the workspace's one way of naming an operation. Created before the
-        // span so every line the preparation logs carries it.
-        let operation = OperationReporter::silent("operation-starting-server").id();
+        // Created before the span so every line the preparation logs carries
+        // its id. Downloads the preparation makes report through the observer.
+        let reporter = OperationReporter::new(
+            "operation-starting-server",
+            true,
+            std::sync::Arc::new(ServerDownloadProgress {
+                observer: observer.clone(),
+            }),
+        );
         let result = self
-            .prepare_server_start_operation(id, explicit_java, observer, cancel, operation)
+            .prepare_server_start_operation(id, explicit_java, observer, cancel, &reporter)
             .await;
         if result.is_err() {
             observer.emit(ephervex_server::ServerEvent::Finished { exit: None });
@@ -792,8 +812,8 @@ impl App {
 
     #[tracing::instrument(
         name = "prepare_server_start",
-        skip(self, explicit_java, observer, cancel),
-        fields(server = %id, operation = %operation)
+        skip(self, explicit_java, observer, cancel, reporter),
+        fields(server = %id, operation = %reporter.id())
     )]
     async fn prepare_server_start_operation(
         &self,
@@ -801,9 +821,12 @@ impl App {
         explicit_java: Option<PathBuf>,
         observer: &ServerObserver,
         cancel: &CancellationToken,
-        operation: OperationId,
+        reporter: &OperationReporter,
     ) -> CoreResult<PreparedServerStart> {
+        let operation = reporter.id();
         observer.emit(ephervex_server::ServerEvent::Preparing { operation });
+        // Begun so downloads reported under it read as running, not queued.
+        reporter.begin_stage("operation-stage-preparing-environment".to_owned());
 
         let mut record = self.canonical_server_for_mutation(id)?;
         refuse_if_running(&record)?;
@@ -848,7 +871,7 @@ impl App {
                     explicit_path: explicit_java,
                     install_if_missing: true,
                     cancel: cancel.clone(),
-                    reporter: None,
+                    reporter: Some(reporter.clone()),
                 },
             )
             .await?;
@@ -1691,6 +1714,65 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[test]
+    fn downloads_made_while_preparing_a_start_reach_the_observer_under_the_start_operation() {
+        let (observer, mut events) = ServerObserver::channel();
+        let reporter = OperationReporter::new(
+            "operation-starting-server",
+            true,
+            std::sync::Arc::new(ServerDownloadProgress { observer }),
+        );
+
+        reporter.begin_stage("operation-stage-preparing-environment".to_owned());
+
+        let Ok(ephervex_server::ServerEvent::Downloading(snapshot)) = events.try_recv() else {
+            panic!("the download was not reported through the observer");
+        };
+        assert_eq!(snapshot.id, reporter.id());
+        assert_eq!(
+            snapshot.stage.as_deref(),
+            Some("operation-stage-preparing-environment")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_start_reports_its_operation_as_running_with_a_stage_before_any_download() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let mut server = app
+            .registry_for_services()
+            .create_server(NewServer::new("test", "1.20.1", LoaderSelection::vanilla()))
+            .expect("scaffold");
+        server.installation = ServerInstallation::Installed {
+            launch: ServerLaunch::Jar {
+                path: ServerRelativePath::new("server.jar").expect("relative"),
+            },
+        };
+        app.registry_for_services()
+            .update_server(&mut server)
+            .expect("update");
+        let (observer, mut events) = ServerObserver::channel();
+
+        app.prepare_server_start(server.id, None, &observer, &CancellationToken::new())
+            .await
+            .err()
+            .expect("consent is required, so the start stops before Java planning");
+
+        let events: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        let Some(ephervex_server::ServerEvent::Preparing { operation }) = events.first() else {
+            panic!("the start did not announce itself first: {events:?}");
+        };
+        let Some(ephervex_server::ServerEvent::Downloading(snapshot)) = events.get(1) else {
+            panic!("the operation was never begun: {events:?}");
+        };
+        assert_eq!(snapshot.id, *operation);
+        assert_eq!(snapshot.status, ephervex_model::OperationStatus::Running);
+        assert_eq!(
+            snapshot.stage.as_deref(),
+            Some("operation-stage-preparing-environment")
+        );
     }
 
     fn stand_in_prepared(root: &Path, script: &str) -> PreparedServerStart {

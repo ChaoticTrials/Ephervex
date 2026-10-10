@@ -2938,6 +2938,7 @@ gui-activity-preparing-environment = Preparing exact environment
 gui-activity-starting-server = Starting server
 gui-activity-validating-server = Validating runtime, EULA, and network
 gui-activity-server-run = Server run
+gui-activity-server-running = Server running
 gui-activity-server-exited = Server exited
 gui-activity-connected-to = Connected to { $value }
 gui-launch-and-connect = Launch & Connect

@@ -2974,7 +2974,14 @@ fn run_worker(
                         ),
                         InstalledHost::Server(server) => {
                             settled.server_completion_owned = true;
-                            start_server(&app, &events, &changing, &supervised, server);
+                            start_server(
+                                &app,
+                                &events,
+                                &changing,
+                                &supervised,
+                                &cancellations,
+                                server,
+                            );
                         }
                     },
                     Err(error) => send_error(&events, &error),
@@ -4403,7 +4410,14 @@ fn run_worker(
                 }
             }
             Command::StartServer(server) => {
-                start_server(&app, &events, &changing, &supervised, server);
+                start_server(
+                    &app,
+                    &events,
+                    &changing,
+                    &supervised,
+                    &cancellations,
+                    server,
+                );
             }
             Command::StopServer(server) => {
                 spawn_server_control(app.paths().clone(), &events, server, ServerControl::Stop);
@@ -7181,6 +7195,7 @@ fn start_server(
     events: &Sender<Event>,
     changing: &ChangingHosts,
     supervised: &SupervisedServers,
+    cancellations: &CancellationRegistry,
     server: ServerId,
 ) {
     if refuse_while_changing(changing, InstalledHost::Server(server), events) {
@@ -7197,6 +7212,7 @@ fn start_server(
         app.paths().clone(),
         events,
         supervised.clone(),
+        Arc::clone(cancellations),
         server,
         entity,
     );
@@ -7824,6 +7840,7 @@ fn spawn_server(
     paths: Paths,
     events: &Sender<Event>,
     supervised: SupervisedServers,
+    cancellations: CancellationRegistry,
     server: ServerId,
     entity: String,
 ) {
@@ -7845,6 +7862,11 @@ fn spawn_server(
             let paths_for_events = paths.clone();
             let observed_operation = Arc::new(Mutex::new(None::<String>));
             let forwarded_operation = Arc::clone(&observed_operation);
+            // Canceling ends the start while it prepares, so nothing is started.
+            // Once the server runs, Stop is what ends it.
+            let cancel = CancellationToken::new();
+            let forwarded_cancellations = Arc::clone(&cancellations);
+            let forwarded_token = cancel.clone();
             runtime.block_on(async move {
                 let mut receiver = ObservedServerEvents::new(receiver, supervised, server);
                 let forward = tokio::spawn(async move {
@@ -7861,6 +7883,7 @@ fn spawn_server(
                                         &entity_for_events,
                                         &paths_for_events,
                                         &forwarded_operation,
+                                        Some((&forwarded_cancellations, &forwarded_token)),
                                         server,
                                         other,
                                     ),
@@ -7880,15 +7903,19 @@ fn spawn_server(
                                 &entity_for_events,
                                 &paths_for_events,
                                 &forwarded_operation,
+                                Some((&forwarded_cancellations, &forwarded_token)),
                                 server,
                                 event,
                             );
                         }
                     }
                 });
-                let result = app.start_server(server, None, &observer).await;
+                let result = app
+                    .start_server_until_canceled(server, None, &observer, &cancel)
+                    .await;
                 drop(observer);
                 let _ = forward.await;
+                release_server_cancellation(&cancellations, &observed_operation);
                 report_server_run(&events, server, &entity, &observed_operation, &result);
                 if let Ok(mut app) = App::open_at(paths) {
                     send_snapshot(&mut app, &events);
@@ -7923,6 +7950,17 @@ fn report_server_run(
             lookup("gui-activity-server-exited"),
             server_exit_failure(exit).is_some(),
         ),
+        Err(error) if error.is_cancellation() => {
+            let _ = events.send(Event::Toast {
+                message: lookup("gui-operation-canceled"),
+                error: false,
+            });
+            (
+                lookup("gui-activity-starting-server"),
+                localized_error(error),
+                false,
+            )
+        }
         Err(error) => {
             send_error(events, error);
             (
@@ -7932,24 +7970,37 @@ fn report_server_run(
             )
         }
     };
+    let status = match result {
+        Err(error) if error.is_cancellation() => "canceled",
+        _ if failed => "failed",
+        _ => "completed",
+    };
     send_activity_state(
-        events,
-        id,
-        &title,
-        entity,
-        &detail,
-        if failed { "failed" } else { "completed" },
-        false,
-        failed,
-        false,
+        events, id, &title, entity, &detail, status, false, failed, false,
     );
 }
 
+/// Drops the token a server start was filed under, whichever way the start ended.
+fn release_server_cancellation(
+    cancellations: &CancellationRegistry,
+    observed_operation: &Mutex<Option<String>>,
+) {
+    if let Ok(observed) = observed_operation.lock()
+        && let Some(operation) = observed.as_deref()
+        && let Ok(mut entries) = cancellations.lock()
+    {
+        entries.remove(operation);
+    }
+}
+
+/// Reports one server event. `cancellation` is the token that ends this start
+/// while it prepares, where the start can be canceled at all.
 fn forward_server_event(
     events: &Sender<Event>,
     entity: &str,
     paths: &Paths,
     observed_operation: &Mutex<Option<String>>,
+    cancellation: Option<(&CancellationRegistry, &CancellationToken)>,
     server: ServerId,
     event: ServerEvent,
 ) {
@@ -7957,6 +8008,9 @@ fn forward_server_event(
         ServerEvent::Preparing { operation } => {
             if let Ok(mut observed) = observed_operation.lock() {
                 *observed = Some(operation.to_string());
+            }
+            if let Some((cancellations, token)) = cancellation {
+                hold_cancellation(cancellations, operation.to_string(), token);
             }
             send_activity_state(
                 events,
@@ -7967,11 +8021,44 @@ fn forward_server_event(
                 "running",
                 true,
                 false,
-                false,
+                cancellation.is_some(),
             );
             refresh_snapshot(paths, events);
         }
+        ServerEvent::Downloading(operation) => {
+            // Canceling goes through the token held at Preparing.
+            send_operation(
+                events,
+                &operation,
+                entity.to_owned(),
+                cancellation.is_some(),
+            );
+        }
         ServerEvent::Started { .. } => {
+            // Preparation is over; from here Stop ends the server, so the
+            // activity stops offering a Cancel that would not be the same thing.
+            let operation = observed_operation
+                .lock()
+                .ok()
+                .and_then(|observed| observed.clone());
+            if let Some((cancellations, _)) = cancellation
+                && let Some(operation) = operation
+            {
+                if let Ok(mut entries) = cancellations.lock() {
+                    entries.remove(&operation);
+                }
+                send_activity_state(
+                    events,
+                    operation,
+                    &lookup("gui-activity-starting-server"),
+                    entity,
+                    &lookup("gui-activity-server-running"),
+                    "running",
+                    true,
+                    false,
+                    false,
+                );
+            }
             let _ = events.send(Event::Toast {
                 message: localized_value("gui-server-running", entity),
                 error: false,
@@ -8030,7 +8117,15 @@ fn forward_connect_server_event(
             event: ServerToolEvent::Finished { failure },
         });
     } else {
-        forward_server_event(events, entity, paths, observed_operation, server, event);
+        forward_server_event(
+            events,
+            entity,
+            paths,
+            observed_operation,
+            None,
+            server,
+            event,
+        );
     }
 }
 
@@ -12630,6 +12725,154 @@ mod tests {
         }
         drop(commands);
         worker.join().expect("the worker ends with its commands");
+    }
+
+    fn activities(received: &std::sync::mpsc::Receiver<Event>) -> Vec<ActivityData> {
+        received
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::Activity(activity) => Some(activity),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_server_start_is_cancelable_while_it_prepares_and_stops_offering_cancel_once_it_runs() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = Paths::rooted_at(root.path());
+        let (events, received) = std::sync::mpsc::channel();
+        let cancellations: CancellationRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let cancel = CancellationToken::new();
+        let observed = Mutex::new(None);
+        let server = ServerId::new();
+        let operation = OperationReporter::silent("test-server-start").id();
+
+        forward_server_event(
+            &events,
+            "server",
+            &paths,
+            &observed,
+            Some((&cancellations, &cancel)),
+            server,
+            ServerEvent::Preparing { operation },
+        );
+        let preparing = activities(&received);
+        assert!(
+            preparing.iter().all(|activity| activity.item.cancellable),
+            "the activity offers Cancel while the start prepares"
+        );
+
+        cancel_operation(&cancellations, &events, &operation.to_string());
+        assert!(cancel.is_cancelled(), "Cancel reaches the start's token");
+
+        forward_server_event(
+            &events,
+            "server",
+            &paths,
+            &observed,
+            Some((&cancellations, &cancel)),
+            server,
+            ServerEvent::Started { pid: 1 },
+        );
+        let started = activities(&received);
+        assert!(
+            started.iter().all(|activity| !activity.item.cancellable),
+            "a running server is ended by Stop, not by the activity's Cancel"
+        );
+        assert!(
+            cancellations
+                .lock()
+                .expect("registry")
+                .get(&operation.to_string())
+                .is_none(),
+            "the token is released once the server runs"
+        );
+    }
+
+    #[test]
+    fn a_managed_runtime_download_during_a_server_start_is_reported_as_cancelable_activity() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = Paths::rooted_at(root.path());
+        let (events, received) = std::sync::mpsc::channel();
+        let cancellations: CancellationRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let cancel = CancellationToken::new();
+        let snapshot = Operation::new("operation-starting-server", true);
+
+        for (cancellation, cancellable) in [(Some((&cancellations, &cancel)), true), (None, false)]
+        {
+            forward_server_event(
+                &events,
+                "server",
+                &paths,
+                &Mutex::new(None),
+                cancellation,
+                ServerId::new(),
+                ServerEvent::Downloading(Box::new(snapshot.clone())),
+            );
+            let shown = activities(&received);
+            assert_eq!(shown.len(), 1, "the download is shown as an activity");
+            assert_eq!(shown[0].item.id, snapshot.id.to_string());
+            assert_eq!(shown[0].item.cancellable, cancellable);
+        }
+    }
+
+    #[test]
+    fn a_server_start_canceled_while_preparing_is_reported_as_canceled_and_not_as_an_error() {
+        let (events, received) = std::sync::mpsc::channel();
+        let result: CoreResult<ephervex_core::ServerExit> =
+            Err(ephervex_server::ServerError::StartCanceled.into());
+
+        report_server_run(
+            &events,
+            ServerId::new(),
+            "server",
+            &Mutex::new(Some("operation".to_owned())),
+            &result,
+        );
+
+        let received: Vec<_> = received.try_iter().collect();
+        assert!(
+            received
+                .iter()
+                .all(|event| !matches!(event, Event::Toast { error: true, .. })),
+            "a start the user canceled is not an error"
+        );
+        let shown: Vec<_> = received
+            .iter()
+            .filter_map(|event| match event {
+                Event::Activity(activity) => Some(activity),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(shown.len(), 1, "the run reports one activity");
+        let activity = shown[0];
+        assert_eq!(activity.item.status_kind, "canceled");
+        assert!(!activity.item.failed);
+    }
+
+    #[test]
+    fn ending_a_server_start_releases_the_token_filed_under_its_operation() {
+        let cancellations: CancellationRegistry = Arc::new(Mutex::new(HashMap::new()));
+        hold_cancellation(
+            &cancellations,
+            "operation".to_owned(),
+            &CancellationToken::new(),
+        );
+        hold_cancellation(
+            &cancellations,
+            "other".to_owned(),
+            &CancellationToken::new(),
+        );
+
+        release_server_cancellation(&cancellations, &Mutex::new(Some("operation".to_owned())));
+
+        let held = cancellations.lock().expect("registry");
+        assert!(!held.contains_key("operation"));
+        assert!(
+            held.contains_key("other"),
+            "another operation's token stays"
+        );
     }
 
     #[test]
