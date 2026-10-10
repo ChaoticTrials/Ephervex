@@ -151,10 +151,40 @@ fn discard_stage(destination: &Path) -> std::io::Result<()> {
 }
 
 /// Removes a directory tree; one that is already gone is success.
+///
+/// Directories copied with a read-only mode get owner access back first.
 pub(crate) fn remove_tree_if_present(path: &Path) -> std::io::Result<()> {
-    match std::fs::remove_dir_all(path) {
+    let mut removed = std::fs::remove_dir_all(path);
+    if matches!(&removed, Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied) {
+        restore_owner_access(path);
+        removed = std::fs::remove_dir_all(path);
+    }
+    match removed {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
         _ => Ok(()),
+    }
+}
+
+/// Gives the owner full access to every directory under `path`, links excluded.
+/// Best effort: whatever still cannot be removed is reported by the removal.
+fn restore_owner_access(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return;
+    };
+    if !metadata.file_type().is_dir() {
+        return;
+    }
+    let mode = metadata.permissions().mode();
+    if mode & 0o700 != 0o700 {
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode | 0o700));
+    }
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        restore_owner_access(&entry.path());
     }
 }
 
@@ -164,7 +194,13 @@ fn copy_into(
     progress: &mut dyn FnMut(usize),
     report: &mut RelocationReport,
 ) -> std::io::Result<()> {
-    std::fs::create_dir(destination)?;
+    use std::os::unix::fs::PermissionsExt;
+
+    let source_permissions =
+        std::fs::Permissions::from_mode(std::fs::metadata(source)?.permissions().mode() & 0o7777);
+    // Private while it fills; the source's mode is applied after its entries.
+    std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700)
+        .create(destination)?;
     report.directories += 1;
 
     for entry in std::fs::read_dir(source)? {
@@ -190,8 +226,11 @@ fn copy_into(
         // Anything else -- a socket, a fifo, a device node -- has no business
         // in an instance directory and is not something to reproduce.
     }
+    // Opened before the mode narrows, so even an unreadable directory flushes.
     // Flushed before the rename that publishes it, like every file in it.
-    std::fs::File::open(destination)?.sync_all()
+    let directory = std::fs::File::open(destination)?;
+    directory.set_permissions(source_permissions)?;
+    directory.sync_all()
 }
 
 fn copy_file(from: &Path, to: &Path) -> std::io::Result<()> {
@@ -462,6 +501,86 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o755);
+    }
+
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).expect("stat").permissions().mode() & 0o7777
+    }
+
+    fn chmod(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("chmod");
+    }
+
+    #[test]
+    fn copied_directories_keep_their_permissions_whatever_the_umask() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let source = base.path().join("source");
+        let destination = base.path().join("destination");
+        write(&source.join("private/world/level.dat"), "data");
+        write(&source.join("open/readme.txt"), "text");
+        chmod(&source.join("private/world"), 0o700);
+        chmod(&source.join("private"), 0o750);
+        chmod(&source.join("open"), 0o777);
+        chmod(&source, 0o700);
+
+        copy_through_stage(&source, &destination, &mut ignore_progress()).expect("copy");
+
+        assert_eq!(mode_of(&destination), 0o700, "the tree root");
+        assert_eq!(mode_of(&destination.join("private")), 0o750);
+        assert_eq!(mode_of(&destination.join("private/world")), 0o700);
+        assert_eq!(mode_of(&destination.join("open")), 0o777);
+    }
+
+    #[test]
+    fn a_read_only_directory_is_copied_with_its_entries_and_its_mode() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let source = base.path().join("source");
+        let destination = base.path().join("destination");
+        write(&source.join("frozen/inner/file.txt"), "kept");
+        chmod(&source.join("frozen/inner"), 0o500);
+        chmod(&source.join("frozen"), 0o555);
+
+        let copied = copy_through_stage(&source, &destination, &mut ignore_progress());
+
+        // Let the temporary directory clean up after itself.
+        remove_tree_if_present(&source).expect("remove source");
+        copied.expect("copy");
+        assert_eq!(mode_of(&destination.join("frozen")), 0o555);
+        assert_eq!(mode_of(&destination.join("frozen/inner")), 0o500);
+        assert_eq!(
+            std::fs::read_to_string(destination.join("frozen/inner/file.txt")).expect("read"),
+            "kept"
+        );
+        discard_tree(&destination).expect("a read-only tree can be discarded");
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn an_interrupted_copy_of_read_only_directories_is_replaced_by_the_next_move() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let source = base.path().join("source");
+        let destination = base.path().join("destination");
+        write(&source.join("frozen/one.jar"), "one");
+        write(&source.join("frozen/two.jar"), "two");
+        chmod(&source.join("frozen"), 0o555);
+        // A copy that finished but was never renamed into place.
+        let stage = stage_for(&destination).expect("stage");
+        let mut leftover = RelocationReport::default();
+        copy_into(&source, &stage, &mut ignore_progress(), &mut leftover).expect("stage");
+        assert_eq!(mode_of(&stage.join("frozen")), 0o555);
+
+        force_copy(true);
+        let moved = relocate_tree(&source, &destination, &mut ignore_progress());
+        force_copy(false);
+
+        remove_tree_if_present(&source).expect("remove source");
+        let report = moved.expect("the leftover stage is discarded");
+        assert_eq!(report.files, 2);
+        assert_eq!(mode_of(&destination.join("frozen")), 0o555);
+        assert!(!stage_for(&destination).expect("stage").exists());
+        discard_tree(&destination).expect("discard");
     }
 
     #[test]
