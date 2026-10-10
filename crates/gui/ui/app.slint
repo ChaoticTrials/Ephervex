@@ -720,7 +720,7 @@ export component AppWindow inherits Window {
     // shared cache after that.
     callback refresh-mods(string, string);
     callback disable-suggested-mods(string);
-    callback save-server-properties(string, string, string, string, string, bool, bool, bool, bool, string, string, string);
+    callback save-server-properties(string, string, string, string, string, bool, bool, bool, bool, string, string, string, string);
     callback accept-eula();
     callback revoke-eula();
     callback open-eula-reference();
@@ -1393,7 +1393,7 @@ export component AppWindow inherits Window {
                                     host: host;
                                     eula-accepted: root.eula-accepted;
                                     eula-status: root.eula-status;
-                                    save(id, motd, players, difficulty, gamemode, flight, pvp, allowlist, online, access, address, port) => { root.save-server-properties(id, motd, players, difficulty, gamemode, flight, pvp, allowlist, online, access, address, port); }
+                                    save(id, motd, players, difficulty, gamemode, flight, pvp, allowlist, online, access, address, port, unset) => { root.save-server-properties(id, motd, players, difficulty, gamemode, flight, pvp, allowlist, online, access, address, port, unset); }
                                     review-eula => { root.modal = "eula"; }
                                 }
                             }

@@ -45,8 +45,8 @@ use ephervex_model::{
 use crate::diagnosis_view::{self, DiagnosisView, OutcomeView, PreviewView};
 use crate::presentation::{
     ActivityPresentation, ImportErrorKind, ImportFailure, ImportPresentation, InstancePresentation,
-    ModImpactPresentation, ModRequirementPresentation, PairPresentation, ServerPresentation,
-    diagnostic_kind_label, diagnostic_scope_label,
+    ModImpactPresentation, ModRequirementPresentation, PairPresentation,
+    SERVER_PROPERTY_DEFINITIONS, ServerPresentation, diagnostic_kind_label, diagnostic_scope_label,
 };
 
 type CancellationRegistry = Arc<Mutex<HashMap<String, CancellationToken>>>;
@@ -1435,6 +1435,10 @@ pub struct ServerWorkspaceData {
     pub allow_flight: bool,
     pub pvp: bool,
     pub allowlist: bool,
+    /// The form's keys the file does not hold. Their text and choice fields
+    /// are empty and their toggles show the server's default, and none is
+    /// written unless the user sets it.
+    pub unset: Vec<&'static str>,
     pub network: ServerNetworkSettings,
 }
 
@@ -6951,23 +6955,21 @@ fn send_server_workspace(app: &App, server: ServerId, events: &Sender<Event>) {
     let result = (|| {
         let record = app.server(server)?;
         let properties = app.server_properties(server)?;
+        let unset: Vec<&'static str> = SERVER_PROPERTY_DEFINITIONS
+            .iter()
+            .map(|definition| definition.key)
+            .filter(|key| properties.get(key).is_none())
+            .collect();
         Ok::<_, CoreError>(ServerWorkspaceData {
             server: server.to_string(),
-            motd: properties
-                .get("motd")
-                .unwrap_or_else(|| lookup("gui-default-motd")),
-            max_players: properties
-                .get("max-players")
-                .unwrap_or_else(|| "20".to_owned()),
-            difficulty: properties
-                .get("difficulty")
-                .unwrap_or_else(|| "normal".to_owned()),
-            gamemode: properties
-                .get("gamemode")
-                .unwrap_or_else(|| "survival".to_owned()),
+            motd: properties.get("motd").unwrap_or_default(),
+            max_players: properties.get("max-players").unwrap_or_default(),
+            difficulty: properties.get("difficulty").unwrap_or_default(),
+            gamemode: properties.get("gamemode").unwrap_or_default(),
             allow_flight: property_bool(&properties, "allow-flight", false),
             pvp: property_bool(&properties, "pvp", true),
             allowlist: property_bool(&properties, "white-list", false),
+            unset,
             network: record.network,
         })
     })();

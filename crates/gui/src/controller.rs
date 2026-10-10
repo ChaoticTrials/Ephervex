@@ -5423,17 +5423,21 @@ fn register_server_property_actions(ui: &AppWindow, commands: &Sender<Command>) 
     let rules = ui.global::<PropertyRules>();
     rules.on_port_error(|port| validate_port(&port).message.into());
     rules.on_address_error(|address, custom| validate_ip(&address, custom).message.into());
-    rules.on_players_error(|players| validate_player_count(&players).into());
-    rules.on_choice_model(|key, stored| {
-        let entries: Vec<SharedString> = presentation::property_choice_model(&key, &stored)
+    rules.on_players_error(|players, unset| validate_player_count(&players, unset).into());
+    rules.on_is_unset(|unset, key| presentation::property_is_unset(&unset, &key));
+    rules.on_without_unset(|unset, key| presentation::property_without_unset(&unset, &key).into());
+    rules.on_choice_model(|key, stored, unset| {
+        let entries: Vec<SharedString> = presentation::property_choice_model(&key, &stored, unset)
             .into_iter()
             .map(Into::into)
             .collect();
         ModelRc::new(VecModel::from(entries))
     });
-    rules.on_choice_index(|key, stored| presentation::property_choice_index(&key, &stored));
-    rules.on_choice_value(|key, stored, picked| {
-        presentation::property_choice_value(&key, &stored, &picked).into()
+    rules.on_choice_index(|key, stored, unset| {
+        presentation::property_choice_index(&key, &stored, unset)
+    });
+    rules.on_choice_value(|key, stored, picked, unset| {
+        presentation::property_choice_value(&key, &stored, &picked, unset).into()
     });
 
     let sender = commands.clone();
@@ -5450,7 +5454,8 @@ fn register_server_property_actions(ui: &AppWindow, commands: &Sender<Command>) 
               online_mode,
               access,
               address,
-              port| {
+              port,
+              unset| {
             let Some(server) = backend::parse_server_id(&id) else {
                 return;
             };
@@ -5465,6 +5470,7 @@ fn register_server_property_actions(ui: &AppWindow, commands: &Sender<Command>) 
                 &difficulty,
                 &gamemode,
                 (allow_flight, pvp, allowlist),
+                &unset,
             ) else {
                 if let Some(ui) = weak.upgrade() {
                     ui.invoke_present_toast(
@@ -5488,28 +5494,53 @@ fn register_server_property_actions(ui: &AppWindow, commands: &Sender<Command>) 
 
 // Difficulty and game mode are written as the form holds them: the form
 // itself keeps a stored value it has no name for, and no choice here refuses it.
+// A property the file does not hold stays out of the file until it is set: an
+// empty field, or a toggle the user has not touched, is left alone.
 fn server_property_values(
     motd: &str,
     max_players: &str,
     difficulty: &str,
     gamemode: &str,
     (allow_flight, pvp, allowlist): (bool, bool, bool),
+    unset: &str,
 ) -> Option<Vec<(String, String)>> {
-    if !validate_player_count(max_players).is_empty() {
+    if !validate_player_count(
+        max_players,
+        presentation::property_is_unset(unset, "max-players"),
+    )
+    .is_empty()
+    {
         return None;
     }
-    Some(vec![
-        ("motd".to_owned(), motd.to_owned()),
-        ("max-players".to_owned(), max_players.to_owned()),
-        ("difficulty".to_owned(), difficulty.to_owned()),
-        ("gamemode".to_owned(), gamemode.to_owned()),
-        ("allow-flight".to_owned(), allow_flight.to_string()),
-        ("pvp".to_owned(), pvp.to_string()),
-        ("white-list".to_owned(), allowlist.to_string()),
-    ])
+    let mut values = Vec::new();
+    for (key, value) in [
+        ("motd", motd),
+        ("max-players", max_players),
+        ("difficulty", difficulty),
+        ("gamemode", gamemode),
+    ] {
+        if !(value.is_empty() && presentation::property_is_unset(unset, key)) {
+            values.push((key.to_owned(), value.to_owned()));
+        }
+    }
+    for (key, value) in [
+        ("allow-flight", allow_flight),
+        ("pvp", pvp),
+        ("white-list", allowlist),
+    ] {
+        if !presentation::property_is_unset(unset, key) {
+            values.push((key.to_owned(), value.to_string()));
+        }
+    }
+    Some(values)
 }
 
-fn validate_player_count(value: &str) -> String {
+/// An empty count is acceptable only while the file holds no maximum, which
+/// then stays unset.
+fn validate_player_count(value: &str, unset: bool) -> String {
+    if value.is_empty() && unset {
+        return String::new();
+    }
     if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
         return lookup("gui-digits-only");
     }
@@ -8522,6 +8553,7 @@ fn apply_server_workspace(workspace: &Workspace, data: ServerWorkspaceData) {
         view.property_allow_flight = data.allow_flight;
         view.property_pvp = data.pvp;
         view.property_allowlist = data.allowlist;
+        view.property_unset = data.unset.join(",").into();
         view.property_online_mode = data.network.online_mode;
         view.property_access = match data.network.access {
             ephervex_core::NetworkAccess::Localhost => "Localhost",
@@ -13256,22 +13288,68 @@ mod tests {
 
     #[test]
     fn player_count_accepts_positive_digits_only() {
-        assert!(validate_player_count("20").is_empty());
-        assert!(!validate_player_count("0").is_empty());
-        assert!(!validate_player_count("2.5").is_empty());
-        assert!(!validate_player_count("many").is_empty());
+        assert!(validate_player_count("20", false).is_empty());
+        assert!(!validate_player_count("0", false).is_empty());
+        assert!(!validate_player_count("2.5", false).is_empty());
+        assert!(!validate_player_count("many", false).is_empty());
+        assert!(!validate_player_count("", false).is_empty());
+        assert!(!validate_player_count("many", true).is_empty());
+    }
+
+    #[test]
+    fn an_empty_player_count_is_accepted_only_while_the_file_holds_none() {
+        assert!(validate_player_count("", true).is_empty());
+        assert!(!validate_player_count("", false).is_empty());
     }
 
     #[test]
     fn saving_keeps_a_difficulty_and_game_mode_the_form_has_no_name_for() {
         for (difficulty, gamemode) in [("1", "0"), ("hardcore", "7"), ("normal", "survival")] {
             let values =
-                server_property_values("A", "20", difficulty, gamemode, (false, true, false))
+                server_property_values("A", "20", difficulty, gamemode, (false, true, false), "")
                     .expect("a port-only save is not refused");
             assert!(values.contains(&("difficulty".to_owned(), difficulty.to_owned())));
             assert!(values.contains(&("gamemode".to_owned(), gamemode.to_owned())));
         }
-        assert!(server_property_values("A", "many", "1", "0", (false, true, false)).is_none());
+        assert!(server_property_values("A", "many", "1", "0", (false, true, false), "").is_none());
+    }
+
+    #[test]
+    fn saving_writes_no_value_for_a_property_the_file_does_not_hold() {
+        let every_key = "motd,max-players,difficulty,gamemode,allow-flight,pvp,white-list";
+        let values = server_property_values("", "", "", "", (false, true, false), every_key)
+            .expect("empty unset fields are not refused");
+        assert!(values.is_empty());
+    }
+
+    #[test]
+    fn saving_writes_an_unset_property_once_the_user_sets_it() {
+        let values = server_property_values(
+            "Hello",
+            "8",
+            "easy",
+            "",
+            (true, true, false),
+            "motd,max-players,difficulty,gamemode,pvp,white-list",
+        )
+        .expect("set values are accepted");
+        assert_eq!(
+            values,
+            [
+                ("motd".to_owned(), "Hello".to_owned()),
+                ("max-players".to_owned(), "8".to_owned()),
+                ("difficulty".to_owned(), "easy".to_owned()),
+                ("allow-flight".to_owned(), "true".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn saving_writes_an_empty_value_the_file_holds() {
+        let values =
+            server_property_values("", "20", "normal", "survival", (false, true, false), "")
+                .expect("a stored empty message of the day is kept");
+        assert!(values.contains(&("motd".to_owned(), String::new())));
     }
 
     #[test]

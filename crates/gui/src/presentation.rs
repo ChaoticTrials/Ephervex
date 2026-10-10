@@ -541,12 +541,34 @@ fn property_choice_position(key: &str, value: &str) -> Option<usize> {
     })
 }
 
-/// The entries a choice control lists: the property's names, preceded by the
-/// stored value itself when no name stands for it.
+/// Whether `key` is among the comma-separated property keys the file does not
+/// hold.
 #[must_use]
-pub fn property_choice_model(key: &str, stored: &str) -> Vec<String> {
+pub fn property_is_unset(unset: &str, key: &str) -> bool {
+    unset.split(',').any(|item| item == key)
+}
+
+/// `unset` without `key`, once the user has set that property.
+#[must_use]
+pub fn property_without_unset(unset: &str, key: &str) -> String {
+    unset
+        .split(',')
+        .filter(|item| !item.is_empty() && *item != key)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// The entries a choice control lists: the property's names, preceded by the
+/// stored value itself when no name stands for it, or by the entry for no value
+/// when the file does not hold the property.
+#[must_use]
+pub fn property_choice_model(key: &str, stored: &str, unset: bool) -> Vec<String> {
     let names = property_choices(key).iter().map(|name| (*name).to_owned());
-    if property_choice_position(key, stored).is_some() {
+    if unset {
+        std::iter::once(lookup("gui-property-unset"))
+            .chain(names)
+            .collect()
+    } else if property_choice_position(key, stored).is_some() {
         names.collect()
     } else {
         std::iter::once(stored.to_owned()).chain(names).collect()
@@ -555,15 +577,22 @@ pub fn property_choice_model(key: &str, stored: &str) -> Vec<String> {
 
 /// The entry of [`property_choice_model`] that shows the stored value.
 #[must_use]
-pub fn property_choice_index(key: &str, stored: &str) -> i32 {
+pub fn property_choice_index(key: &str, stored: &str, unset: bool) -> i32 {
+    if unset {
+        return 0;
+    }
     let position = property_choice_position(key, stored).unwrap_or(0);
     i32::try_from(position).unwrap_or(0)
 }
 
-/// The value to save once `picked` is chosen. A stored number stays a number
-/// and an unrepresentable stored value is kept while it stays selected.
+/// The value to save once `picked` is chosen, empty for the entry that leaves
+/// an unset property unset. A stored number stays a number and an
+/// unrepresentable stored value is kept while it stays selected.
 #[must_use]
-pub fn property_choice_value(key: &str, stored: &str, picked: &str) -> String {
+pub fn property_choice_value(key: &str, stored: &str, picked: &str, unset: bool) -> String {
+    if unset && picked == lookup("gui-property-unset") {
+        return String::new();
+    }
     if picked == stored {
         return stored.to_owned();
     }
@@ -1705,18 +1734,21 @@ mod tests {
 
     #[test]
     fn numeric_choice_values_show_the_name_they_stand_for_and_stay_numeric() {
-        assert_eq!(property_choice_index("difficulty", "1"), 1);
-        assert_eq!(property_choice_index("gamemode", "3"), 3);
-        assert_eq!(property_choice_index("difficulty", "hard"), 3);
+        assert_eq!(property_choice_index("difficulty", "1", false), 1);
+        assert_eq!(property_choice_index("gamemode", "3", false), 3);
+        assert_eq!(property_choice_index("difficulty", "hard", false), 3);
         assert_eq!(
-            property_choice_model("difficulty", "1"),
+            property_choice_model("difficulty", "1", false),
             ["peaceful", "easy", "normal", "hard"]
         );
-        assert_eq!(property_choice_value("difficulty", "1", "easy"), "1");
-        assert_eq!(property_choice_value("difficulty", "1", "hard"), "3");
-        assert_eq!(property_choice_value("gamemode", "0", "creative"), "1");
+        assert_eq!(property_choice_value("difficulty", "1", "easy", false), "1");
+        assert_eq!(property_choice_value("difficulty", "1", "hard", false), "3");
         assert_eq!(
-            property_choice_value("gamemode", "creative", "survival"),
+            property_choice_value("gamemode", "0", "creative", false),
+            "1"
+        );
+        assert_eq!(
+            property_choice_value("gamemode", "creative", "survival", false),
             "survival"
         );
     }
@@ -1724,17 +1756,54 @@ mod tests {
     #[test]
     fn a_choice_value_no_name_stands_for_is_listed_and_kept() {
         for stored in ["hardcore", "7", "Easy", ""] {
-            let model = property_choice_model("difficulty", stored);
+            let model = property_choice_model("difficulty", stored, false);
             assert_eq!(model.first().map(String::as_str), Some(stored));
             assert_eq!(model.len(), 5);
-            assert_eq!(property_choice_index("difficulty", stored), 0);
-            assert_eq!(property_choice_value("difficulty", stored, stored), stored);
+            assert_eq!(property_choice_index("difficulty", stored, false), 0);
+            assert_eq!(
+                property_choice_value("difficulty", stored, stored, false),
+                stored
+            );
         }
         assert_eq!(
-            property_choice_value("difficulty", "hardcore", "easy"),
+            property_choice_value("difficulty", "hardcore", "easy", false),
             "easy"
         );
-        assert_eq!(property_choice_value("difficulty", "7", "easy"), "1");
+        assert_eq!(property_choice_value("difficulty", "7", "easy", false), "1");
+    }
+
+    #[test]
+    fn an_unset_choice_lists_no_value_first_and_saves_nothing_for_it() {
+        let unset_label = lookup("gui-property-unset");
+        let model = property_choice_model("difficulty", "", true);
+        assert_eq!(
+            model,
+            [unset_label.as_str(), "peaceful", "easy", "normal", "hard"]
+        );
+        assert_eq!(property_choice_index("difficulty", "", true), 0);
+        assert_eq!(
+            property_choice_value("difficulty", "", &unset_label, true),
+            ""
+        );
+        assert_eq!(
+            property_choice_value("difficulty", "", "easy", true),
+            "easy"
+        );
+        // A value the file holds as empty is a value, not an unset property.
+        assert_eq!(property_choice_value("difficulty", "", "", false), "");
+    }
+
+    #[test]
+    fn unset_keys_are_matched_whole_and_removed_one_at_a_time() {
+        assert!(property_is_unset("pvp,white-list", "pvp"));
+        assert!(!property_is_unset("pvp,white-list", "list"));
+        assert!(!property_is_unset("", "pvp"));
+        assert_eq!(
+            property_without_unset("pvp,white-list", "pvp"),
+            "white-list"
+        );
+        assert_eq!(property_without_unset("pvp", "pvp"), "");
+        assert_eq!(property_without_unset("pvp", "motd"), "pvp");
     }
 
     #[test]

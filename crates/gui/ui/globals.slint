@@ -13,13 +13,19 @@ export global PropertyRules {
     pure callback port-error(string) -> string;
     // (address, whether a custom address is in use)
     pure callback address-error(string, bool) -> string;
-    pure callback players-error(string) -> string;
-    // (property key, stored value): the entries a choice control lists, and
-    // which of them shows the stored value
-    pure callback choice-model(string, string) -> [string];
-    pure callback choice-index(string, string) -> int;
-    // (property key, stored value, entry picked): the value to save
-    pure callback choice-value(string, string, string) -> string;
+    // (value, whether the file holds no maximum)
+    pure callback players-error(string, bool) -> string;
+    // (comma-separated keys the file does not hold, property key)
+    pure callback is-unset(string, string) -> bool;
+    // The keys given, less the one the user has just set.
+    pure callback without-unset(string, string) -> string;
+    // (property key, stored value, whether the file holds no such key): the
+    // entries a choice control lists, and which of them shows the stored value
+    pure callback choice-model(string, string, bool) -> [string];
+    pure callback choice-index(string, string, bool) -> int;
+    // (property key, stored value, entry picked, whether the file holds no
+    // such key): the value to save, empty to leave the key out
+    pure callback choice-value(string, string, string, bool) -> string;
 }
 
 // The name a server takes when nobody types one, derived by the same rules
