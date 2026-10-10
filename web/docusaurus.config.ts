@@ -46,29 +46,6 @@ const config: Config = {
         {href: repository, label: 'GitHub', position: 'right'},
       ],
     },
-    footer: {
-      style: 'dark',
-      links: [
-        {
-          title: 'Documentation',
-          items: [
-            {label: 'Introduction', to: '/docs/v1/intro'},
-            {label: 'Feature List', to: '/docs/v1/feature-list'},
-            {label: 'Installation', to: '/install'},
-            {label: 'Interface tour', to: '/docs/v1/interface-tour'},
-          ],
-        },
-        {
-          title: 'Project',
-          items: [
-            {label: 'Source code', href: repository},
-            {label: 'Downloads', href: `${repository}/releases`},
-            {label: 'Report an issue', href: `${repository}/issues`},
-          ],
-        },
-      ],
-      copyright: `Copyright &copy; ${new Date().getFullYear()} Ephervex contributors. Ephervex is not affiliated with or endorsed by Mojang or Microsoft.`,
-    },
     prism: {theme: prismThemes.dracula, darkTheme: prismThemes.dracula},
   } satisfies Preset.ThemeConfig,
 };
