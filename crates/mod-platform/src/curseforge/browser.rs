@@ -44,7 +44,7 @@ use super::mapping;
 use crate::error::{ModPlatformError, ModPlatformResult};
 use crate::model::{
     Compatibility, IncompatibilityReason, InstanceTarget, ModProject, ModSearchHit, ModSearchQuery,
-    ModSearchResults, ModVersionInfo,
+    ModSearchResults, ModVersionInfo, ProjectBatch,
 };
 use crate::provider::ModProviderApi;
 use crate::resolve::newest_compatible;
@@ -296,14 +296,15 @@ impl ModProviderApi for CurseForgeProvider {
             .await
     }
 
-    async fn projects_by_id(
+    async fn project_batch_by_id(
         &self,
         ids: &[String],
         _reporter: &OperationReporter,
         cancel: &CancellationToken,
-    ) -> ModPlatformResult<Vec<ModProject>> {
+    ) -> ModPlatformResult<ProjectBatch> {
+        let mut batch = ProjectBatch::default();
         if ids.is_empty() {
-            return Ok(Vec::new());
+            return Ok(batch);
         }
         let projects: Vec<CurseForgeProjectId> = ids
             .iter()
@@ -312,12 +313,10 @@ impl ModProviderApi for CurseForgeProvider {
 
         let operation = self.api.begin_operation()?;
         let classes = operation.project_classes(MINECRAFT_GAME_ID, cancel).await?;
-        operation
-            .projects(&projects, cancel)
-            .await?
-            .into_iter()
-            .map(|raw| mapping::checked_project(raw, &classes))
-            .collect()
+        for raw in operation.projects(&projects, cancel).await? {
+            mapping::sort_project(&mut batch, raw, &classes)?;
+        }
+        Ok(batch)
     }
 
     async fn versions_by_id(

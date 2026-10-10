@@ -66,8 +66,8 @@ pub use fingerprint::curseforge_fingerprint;
 pub use model::{
     AnnotatedVersion, Compatibility, DEFAULT_SEARCH_LIMIT, Distribution, IncompatibilityReason,
     InstanceTarget, MAX_SEARCH_LIMIT, ModDependency, ModFile, ModProject, ModProjectDetails,
-    ModSearchHit, ModSearchQuery, ModSearchResults, ModVersionInfo, RecognizedFile, ReleaseChannel,
-    SideSupport,
+    ModSearchHit, ModSearchQuery, ModSearchResults, ModVersionInfo, NotModProject, ProjectBatch,
+    RecognizedFile, ReleaseChannel, SideSupport,
 };
 pub use modrinth::{MODRINTH_API_BASE, ModrinthProvider};
 pub use provider::{ModProviderApi, loader_name_for};

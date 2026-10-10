@@ -237,17 +237,23 @@ impl App {
             return;
         }
 
-        match provider.projects_by_id(&missing, reporter, cancel).await {
-            Ok(projects) => {
-                for project in projects {
+        match provider
+            .project_batch_by_id(&missing, reporter, cancel)
+            .await
+        {
+            Ok(batch) => {
+                for project in batch.mods {
                     if let Some(answer) = answers.get_mut(&project.id) {
                         answer.title = Some(project.title);
                     }
                 }
                 // A catalog answers a batch by omitting the ids it does not
                 // know, so what is still untitled is what it has never heard
-                // of.
+                // of. A project it does know that is not a mod is not that.
                 for project_id in &missing {
+                    if batch.not_mods.iter().any(|other| &other.id == project_id) {
+                        continue;
+                    }
                     mark_unknown(answers, project_id);
                 }
             }
@@ -584,6 +590,54 @@ mod tests {
             );
             assert!(!answer.availability.is_installable());
         }
+    }
+
+    #[tokio::test]
+    async fn a_declared_project_that_is_not_a_mod_neither_hides_the_others_nor_reads_as_unknown() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(route("/v1/categories"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"{{"data":[
+                        {{"id":{MODS_CLASS_ID},"gameId":432,"name":"Mods","slug":"mc-mods","isClass":true}},
+                        {{"id":12,"gameId":432,"name":"Resource Packs","slug":"texture-packs","isClass":true}}
+                    ]}}"#
+                ),
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(route("/v1/mods"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"{{"data":[
+                        {{"id":{FIRST_DECLARED},"gameId":432,"name":"Absent Library","slug":"absent-library","classId":{MODS_CLASS_ID}}},
+                        {{"id":{SECOND_DECLARED},"gameId":432,"name":"Faithful","slug":"faithful","classId":12}}
+                    ]}}"#
+                ),
+                "application/json",
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        serve_files(&server, FIRST_DECLARED, "").await;
+        let (app, host, path) = instance_declaring_two_absent_projects(base.path(), &server);
+
+        let answers = declared(&app, host, &path).await;
+
+        assert_eq!(
+            answers[FIRST_DECLARED].title.as_deref(),
+            Some("Absent Library")
+        );
+        assert_ne!(
+            answers[SECOND_DECLARED].availability,
+            ProjectAvailability::UnknownToCatalog,
+            "the catalog knows this project; it is just not a mod"
+        );
+        assert!(!answers[SECOND_DECLARED].availability.is_installable());
     }
 
     #[tokio::test]

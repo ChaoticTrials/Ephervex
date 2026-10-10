@@ -75,6 +75,26 @@ pub struct ModProject {
     pub icon_url: Option<String>,
 }
 
+/// The answer to a batch project lookup: the mods, and the ids that are not.
+///
+/// A catalog can hold projects that are not mods (resource packs, modpacks,
+/// shader packs). A caller that only describes projects keeps the mods and
+/// reports the rest, rather than losing every description to one such id.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectBatch {
+    pub mods: Vec<ModProject>,
+    pub not_mods: Vec<NotModProject>,
+}
+
+/// A project a batch lookup found that is not a mod.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotModProject {
+    /// The provider's own id.
+    pub id: String,
+    /// What the provider calls the project's kind.
+    pub project_type: String,
+}
+
 /// Whether this launcher may fetch a release's bytes, and from where.
 ///
 /// A CurseForge project's owner can turn third-party distribution off. That

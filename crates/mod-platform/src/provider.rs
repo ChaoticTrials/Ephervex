@@ -19,7 +19,9 @@ use ephervex_model::{LoaderKind, ModProvider};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{ModPlatformError, ModPlatformResult};
-use crate::model::{InstanceTarget, ModProject, ModSearchQuery, ModSearchResults, ModVersionInfo};
+use crate::model::{
+    InstanceTarget, ModProject, ModSearchQuery, ModSearchResults, ModVersionInfo, ProjectBatch,
+};
 
 /// One mod catalog.
 #[async_trait]
@@ -86,14 +88,36 @@ pub trait ModProviderApi: std::fmt::Debug + Send + Sync {
     /// asking for them one at a time would spend a rate-limit budget on round
     /// trips for a graph the resolver has already settled.
     ///
-    /// Every project returned is a mod. One that is not is refused as
+    /// Callers that describe projects use this: a project that is not a mod is
+    /// reported in [`ProjectBatch::not_mods`] and the mods still come back.
+    /// Order is not significant and an id may be missing from the answer.
+    async fn project_batch_by_id(
+        &self,
+        ids: &[String],
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> ModPlatformResult<ProjectBatch>;
+
+    /// Several projects by id, every one of them a mod.
+    ///
+    /// The strict form of [`Self::project_batch_by_id`] for callers that act on
+    /// the projects, such as the resolver: one that is not a mod is refused as
     /// `ProjectTypeUnsupported`, as a single lookup refuses it.
     async fn projects_by_id(
         &self,
         ids: &[String],
         reporter: &OperationReporter,
         cancel: &CancellationToken,
-    ) -> ModPlatformResult<Vec<ModProject>>;
+    ) -> ModPlatformResult<Vec<ModProject>> {
+        let batch = self.project_batch_by_id(ids, reporter, cancel).await?;
+        match batch.not_mods.into_iter().next() {
+            Some(refused) => Err(ModPlatformError::ProjectTypeUnsupported {
+                reference: refused.id,
+                project_type: refused.project_type,
+            }),
+            None => Ok(batch.mods),
+        }
+    }
 
     /// Several versions by id, in one request where the provider allows it.
     ///

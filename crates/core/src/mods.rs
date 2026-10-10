@@ -1875,7 +1875,20 @@ impl App {
             let versions: Vec<String> = snapshot.identified_version_ids(catalog);
             let provider = self.mod_provider(catalog)?;
 
-            let projects = provider.projects_by_id(&projects, reporter, cancel).await?;
+            let batch = provider
+                .project_batch_by_id(&projects, reporter, cancel)
+                .await?;
+            // A project that is not a mod has nothing to show in a mod list;
+            // it must not take the other mods' descriptions with it.
+            for refused in &batch.not_mods {
+                warn!(
+                    project = refused.id,
+                    project_type = refused.project_type,
+                    provider = %catalog,
+                    "a managed mod's project is not a mod, so it is left undescribed"
+                );
+            }
+            let projects = batch.mods;
             // A version lookup that fails is survivable in a way a project
             // lookup is not: without it the list loses version names, with no
             // project it loses everything. So it is asked for separately and

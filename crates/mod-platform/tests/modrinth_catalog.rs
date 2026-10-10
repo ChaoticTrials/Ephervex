@@ -1017,6 +1017,48 @@ async fn a_batch_lookup_refuses_a_project_that_is_not_a_mod_like_a_single_lookup
 }
 
 #[tokio::test]
+async fn a_batch_description_keeps_the_mods_and_names_the_projects_that_are_not() {
+    let catalog = Catalog::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/projects"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            format!(
+                "[{},{},{}]",
+                project_document("FITSPROJ", "mod"),
+                project_document("PACKPROJ", "resourcepack"),
+                project_document("LIBPROJ", "mod")
+            ),
+            "application/json",
+        ))
+        .mount(&catalog.server)
+        .await;
+
+    let batch = catalog
+        .provider
+        .project_batch_by_id(
+            &[
+                "FITSPROJ".to_owned(),
+                "PACKPROJ".to_owned(),
+                "LIBPROJ".to_owned(),
+            ],
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("one project that is not a mod does not fail the batch");
+
+    let mods: Vec<&str> = batch
+        .mods
+        .iter()
+        .map(|project| project.id.as_str())
+        .collect();
+    assert_eq!(mods, ["FITSPROJ", "LIBPROJ"]);
+    assert_eq!(batch.not_mods.len(), 1);
+    assert_eq!(batch.not_mods[0].id, "PACKPROJ");
+    assert_eq!(batch.not_mods[0].project_type, "resourcepack");
+}
+
+#[tokio::test]
 async fn a_batch_lookup_returns_every_project_when_all_are_mods() {
     let catalog = Catalog::start().await;
     Mock::given(method("GET"))

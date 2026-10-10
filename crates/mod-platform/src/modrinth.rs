@@ -36,7 +36,7 @@ use tracing::{instrument, warn};
 use crate::error::{ModPlatformError, ModPlatformResult};
 use crate::model::{
     Compatibility, IncompatibilityReason, InstanceTarget, ModProject, ModSearchHit, ModSearchQuery,
-    ModSearchResults, ModVersionInfo, RecognizedFile,
+    ModSearchResults, ModVersionInfo, ProjectBatch, RecognizedFile,
 };
 use crate::provider::ModProviderApi;
 use crate::resolve::newest_compatible;
@@ -225,22 +225,20 @@ impl ModProviderApi for ModrinthProvider {
         raw.into_iter().map(mapping::version).collect()
     }
 
-    async fn projects_by_id(
+    async fn project_batch_by_id(
         &self,
         ids: &[String],
         reporter: &OperationReporter,
         cancel: &CancellationToken,
-    ) -> ModPlatformResult<Vec<ModProject>> {
+    ) -> ModPlatformResult<ProjectBatch> {
+        let mut batch = ProjectBatch::default();
         if ids.is_empty() {
-            return Ok(Vec::new());
+            return Ok(batch);
         }
-        let raw = self.api.projects_by_id(ids, reporter, cancel).await?;
-        raw.into_iter()
-            .map(|raw| {
-                let reference = raw.id.clone();
-                mapping::checked_project(raw, &reference)
-            })
-            .collect()
+        for raw in self.api.projects_by_id(ids, reporter, cancel).await? {
+            mapping::sort_project(&mut batch, raw);
+        }
+        Ok(batch)
     }
 
     async fn versions_by_id(

@@ -25,7 +25,8 @@ use super::dto::{
 };
 use crate::error::{ModPlatformError, ModPlatformResult};
 use crate::model::{
-    Distribution, ModDependency, ModFile, ModProject, ModVersionInfo, ReleaseChannel, SideSupport,
+    Distribution, ModDependency, ModFile, ModProject, ModVersionInfo, NotModProject, ProjectBatch,
+    ReleaseChannel, SideSupport,
 };
 
 impl From<RawSide> for SideSupport {
@@ -126,6 +127,18 @@ pub(super) fn checked_project(raw: RawProject, reference: &str) -> ModPlatformRe
         });
     }
     Ok(project(raw))
+}
+
+/// Files one project of a batch under the mods or the non-mods.
+pub(super) fn sort_project(batch: &mut ProjectBatch, raw: RawProject) {
+    if raw.project_type == PROJECT_TYPE {
+        batch.mods.push(project(raw));
+    } else {
+        batch.not_mods.push(NotModProject {
+            id: raw.id,
+            project_type: raw.project_type,
+        });
+    }
 }
 
 /// One version, with the single file this launcher would install.

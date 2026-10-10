@@ -38,7 +38,8 @@ use super::dto::{
 };
 use crate::error::{ModPlatformError, ModPlatformResult};
 use crate::model::{
-    Distribution, ModDependency, ModFile, ModProject, ModVersionInfo, ReleaseChannel, SideSupport,
+    Distribution, ModDependency, ModFile, ModProject, ModVersionInfo, NotModProject, ProjectBatch,
+    ReleaseChannel, SideSupport,
 };
 
 /// One project, once its class has been confirmed to be Mods.
@@ -54,6 +55,29 @@ pub(super) fn checked_project(
         return Err(rejection);
     }
     Ok(project(raw))
+}
+
+/// Files one project of a batch under the mods or the non-mods.
+///
+/// Only a project confirmed to be in another class is a non-mod. One whose
+/// class cannot be determined is still a failure, as it is for a single lookup.
+pub(super) fn sort_project(
+    batch: &mut ProjectBatch,
+    raw: CurseForgeProject,
+    classes: &CurseForgeProjectClasses,
+) -> ModPlatformResult<()> {
+    match classes.rejection_for(&raw) {
+        None => batch.mods.push(project(raw)),
+        Some(ModPlatformError::ProjectTypeUnsupported {
+            reference,
+            project_type,
+        }) => batch.not_mods.push(NotModProject {
+            id: reference,
+            project_type,
+        }),
+        Some(error) => return Err(error),
+    }
+    Ok(())
 }
 
 /// One confirmed Mods project as the neutral model.

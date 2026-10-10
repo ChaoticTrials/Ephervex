@@ -1418,13 +1418,16 @@ mod tests {
                 })
         }
 
-        async fn projects_by_id(
+        async fn project_batch_by_id(
             &self,
             ids: &[String],
             _reporter: &OperationReporter,
             _cancel: &CancellationToken,
-        ) -> ModPlatformResult<Vec<ModProject>> {
-            Ok(ids.iter().map(|id| project(id)).collect())
+        ) -> ModPlatformResult<crate::model::ProjectBatch> {
+            Ok(crate::model::ProjectBatch {
+                mods: ids.iter().map(|id| project(id)).collect(),
+                not_mods: Vec::new(),
+            })
         }
 
         async fn versions_by_id(

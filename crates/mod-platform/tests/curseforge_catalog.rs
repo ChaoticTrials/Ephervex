@@ -928,6 +928,62 @@ async fn a_key_the_provider_refuses_stays_a_credential_problem() {
 }
 
 #[tokio::test]
+async fn a_batch_description_keeps_the_mods_and_names_the_projects_that_are_not() {
+    let server = MockServer::start().await;
+    serve_categories(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/v1/mods"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            format!(
+                r#"{{"data":[{},{},{}]}}"#,
+                project_document(
+                    JEI_PROJECT,
+                    "Just Enough Items",
+                    "jei",
+                    &MODS_CLASS.to_string()
+                ),
+                project_document(
+                    1000,
+                    "Faithful",
+                    "faithful",
+                    &RESOURCE_PACK_CLASS.to_string()
+                ),
+                project_document(1002, "Library", "lib", &MODS_CLASS.to_string()),
+            ),
+            "application/json",
+        ))
+        .mount(&server)
+        .await;
+    let ids = [
+        JEI_PROJECT.to_string(),
+        "1000".to_owned(),
+        "1002".to_owned(),
+    ];
+    let provider = provider_against(&server, Some(FAKE_KEY));
+
+    let batch = provider
+        .project_batch_by_id(&ids, &reporter(), &CancellationToken::new())
+        .await
+        .expect("one project that is not a mod does not fail the batch");
+    let strict = provider
+        .projects_by_id(&ids, &reporter(), &CancellationToken::new())
+        .await
+        .expect_err("the strict lookup still refuses it");
+
+    assert_eq!(batch.mods.len(), 2);
+    assert_eq!(batch.not_mods.len(), 1);
+    assert_eq!(batch.not_mods[0].id, "1000");
+    assert_eq!(batch.not_mods[0].project_type, "Resource Packs");
+    assert!(
+        matches!(
+            strict,
+            ModPlatformError::ProjectTypeUnsupported { ref reference, .. } if reference == "1000"
+        ),
+        "{strict:?}"
+    );
+}
+
+#[tokio::test]
 async fn several_projects_are_asked_about_in_one_request() {
     let server = MockServer::start().await;
     serve_categories(&server).await;

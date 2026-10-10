@@ -690,8 +690,8 @@ impl App {
             let Ok(provider) = self.mod_provider(catalog) else {
                 continue;
             };
-            let projects = match provider.projects_by_id(&ids, reporter, cancel).await {
-                Ok(projects) => projects,
+            let projects = match provider.project_batch_by_id(&ids, reporter, cancel).await {
+                Ok(batch) => batch.mods,
                 Err(error) => {
                     warn!(%error, provider = %catalog, "could not name a missing requirement");
                     continue;
@@ -3535,6 +3535,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_batch_that_includes_a_project_that_is_not_a_mod_still_describes_the_mods() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let catalog = MockServer::start().await;
+        let mut not_a_mod = project_json("PACKPROJ");
+        not_a_mod["project_type"] = json!("resourcepack");
+        Mock::given(method("GET"))
+            .and(route("/projects"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(vec![
+                project_json(LIBRARY),
+                not_a_mod,
+                project_json(DEPENDENT),
+                project_json(SKYGUIS),
+            ]))
+            .mount(&catalog)
+            .await;
+        Mock::given(method("GET"))
+            .and(route("/versions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(every_release()))
+            .mount(&catalog)
+            .await;
+        let (mut app, host, _root) = listed_instance_with_unasked_mods(base.path());
+        app.use_loopback_catalog(&catalog.uri())
+            .expect("loopback catalog");
+
+        let snapshot = app
+            .enriched_host_mods(
+                host,
+                &OperationReporter::silent("test-listing"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("a listing reports rather than fails");
+
+        assert_eq!(snapshot.metadata, crate::MetadataAvailability::Provider);
+        let titles: Vec<&str> = snapshot
+            .mods
+            .iter()
+            .filter_map(|entry| entry.details.as_ref().map(|details| details.title.as_str()))
+            .collect();
+        assert_eq!(
+            titles.len(),
+            3,
+            "every mod keeps its description: {titles:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_listing_changes_nothing_about_the_mods_but_their_recorded_relations() {
         let base = tempfile::tempdir().expect("temp dir");
         let catalog = listing_catalog(every_release()).await;
@@ -3693,6 +3740,8 @@ mod tests {
     const JEI_MODRINTH: &str = "u6dRKJwZ";
     const JEI_CURSEFORGE: &str = "238222";
     const BIOMES_O_PLENTY: &str = "220318";
+    /// Answered in the same batch as the requirements, though it is not a mod.
+    const A_RESOURCE_PACK: &str = "400400";
     const JEI_BYTES: &[u8] = b"just enough items";
 
     /// A Modrinth pack whose overrides brought CurseForge jars: JER requires
@@ -3722,7 +3771,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(route("/v1/categories"))
             .respond_with(ResponseTemplate::new(200).set_body_raw(
-                r#"{"data":[{"id":6,"gameId":432,"name":"Mods","slug":"mc-mods","isClass":true}]}"#,
+                r#"{"data":[{"id":6,"gameId":432,"name":"Mods","slug":"mc-mods","isClass":true},{"id":12,"gameId":432,"name":"Resource Packs","slug":"texture-packs","isClass":true}]}"#,
                 "application/json",
             ))
             .mount(&server)
@@ -3731,7 +3780,7 @@ mod tests {
             .and(route("/v1/mods"))
             .respond_with(ResponseTemplate::new(200).set_body_raw(
                 format!(
-                    r#"{{"data":[{{"id":{BIOMES_O_PLENTY},"gameId":432,"name":"Biomes O' Plenty","slug":"biomes-o-plenty","classId":6}}]}}"#
+                    r#"{{"data":[{{"id":{BIOMES_O_PLENTY},"gameId":432,"name":"Biomes O' Plenty","slug":"biomes-o-plenty","classId":6}},{{"id":{A_RESOURCE_PACK},"gameId":432,"name":"Faithful","slug":"faithful","classId":12}}]}}"#
                 ),
                 "application/json",
             ))
@@ -3836,6 +3885,23 @@ mod tests {
             fingerprinted, 1,
             "only jars CurseForge had not identified are asked about"
         );
+    }
+
+    #[tokio::test]
+    async fn a_requirement_is_still_named_when_its_batch_also_holds_a_project_that_is_not_a_mod() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, host, _server) = mixed_catalog_host(base.path()).await;
+        let mut problems = app.requirement_problems(host).expect("problems");
+
+        app.confirm_unmet_requirements(
+            host,
+            &mut problems,
+            &OperationReporter::silent("test-confirm"),
+            &CancellationToken::new(),
+        )
+        .await;
+
+        assert_eq!(missing(&problems), [("Biomes O' Plenty".to_owned(), true)]);
     }
 
     #[tokio::test]
