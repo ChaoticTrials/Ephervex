@@ -25,13 +25,21 @@
 //! one. Both are "the number that goes up every quarter", which is exactly what
 //! a compatibility bound needs to compare.
 //!
+//! # Emergency patch releases
+//!
+//! JEP 322 allows a fourth number after the quarterly update, for an
+//! emergency fix of that update: `17.0.4.1+1` replaces `17.0.4+8`. The parsed
+//! form keeps it as `patch` so the fix orders above every build of the release
+//! it patches instead of collapsing onto it.
+//!
 //! # Ordering
 //!
 //! [`JavaVersion`] is a plain ordered tuple: major, then minor, then the
-//! quarterly number, then the build. The raw text is deliberately *not* a
-//! field - two spellings of the same version must compare equal, and a `raw`
-//! field would make `Ord` disagree with `PartialEq`. Callers that want to show
-//! what the JVM actually printed keep the string beside the parsed value.
+//! quarterly number, then the emergency patch, then the build. The raw text is
+//! deliberately *not* a field - two spellings of the same version must compare
+//! equal, and a `raw` field would make `Ord` disagree with `PartialEq`. Callers
+//! that want to show what the JVM actually printed keep the string beside the
+//! parsed value.
 
 use std::fmt;
 
@@ -49,6 +57,13 @@ pub struct JavaVersion {
     /// because the whole point is that a bound can be written once and hold for
     /// both.
     pub update: u32,
+    /// The emergency patch of the update: `1` from `17.0.4.1+1`, `0` when the
+    /// string carried none.
+    ///
+    /// Sits between `update` and `build` so the derived `Ord` ranks a patch
+    /// release above every build of the update it fixes.
+    #[serde(default)]
+    pub patch: u32,
     /// The vendor build number, or `0` when the string did not carry one.
     ///
     /// Folded into the ordering rather than left `Option` so that `Ord` and
@@ -64,6 +79,7 @@ impl JavaVersion {
             major,
             minor,
             update,
+            patch: 0,
             build: 0,
         }
     }
@@ -118,17 +134,19 @@ impl JavaVersion {
         let first = *components.first()?;
         // The fossil `1.` prefix. `1` alone is not a Java version anyone ships,
         // and treating it as major 1 would be no more useful than rejecting it.
-        let (major, minor, dotted_update) = if first == 1 && components.len() >= 2 {
+        let (major, minor, dotted_update, patch) = if first == 1 && components.len() >= 2 {
             (
                 components[1],
                 components.get(2).copied().unwrap_or(0),
                 components.get(3).copied().unwrap_or(0),
+                components.get(4).copied().unwrap_or(0),
             )
         } else {
             (
                 first,
                 components.get(1).copied().unwrap_or(0),
                 components.get(2).copied().unwrap_or(0),
+                components.get(3).copied().unwrap_or(0),
             )
         };
 
@@ -138,6 +156,7 @@ impl JavaVersion {
             // The legacy `_492` wins where present: in `1.8.0_492` the dotted
             // third component is always 0 and carries nothing.
             update: legacy_update.unwrap_or(dotted_update),
+            patch,
             build,
         })
     }
@@ -170,10 +189,16 @@ impl JavaVersion {
 
 impl fmt::Display for JavaVersion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.is_legacy_scheme() {
+        // The `1.x.y_z` spelling has no slot for a patch, so a patched legacy
+        // major is written in the dotted form, which parses back to the same
+        // value.
+        if self.is_legacy_scheme() && self.patch == 0 {
             write!(f, "1.{}.{}_{}", self.major, self.minor, self.update)?;
         } else {
             write!(f, "{}.{}.{}", self.major, self.minor, self.update)?;
+            if self.patch != 0 {
+                write!(f, ".{}", self.patch)?;
+            }
         }
         if self.build != 0 {
             write!(f, "+{}", self.build)?;
@@ -286,11 +311,53 @@ mod tests {
     }
 
     #[test]
+    fn a_fourth_component_is_an_emergency_patch_that_orders_above_its_release() {
+        let patched = JavaVersion::parse("17.0.4.1+1").expect("parses");
+        assert_eq!(patched.update, 4);
+        assert_eq!(patched.patch, 1);
+        assert_eq!(patched.build, 1);
+
+        let release = JavaVersion::parse("17.0.4+8").expect("parses");
+        assert_eq!(release.patch, 0);
+        assert!(patched > release, "the patch replaces the release it fixes");
+        assert_ne!(patched.with_build(0), release.with_build(0));
+        assert!(
+            JavaVersion::parse("17.0.4.2").unwrap() > JavaVersion::parse("17.0.4.1+9").unwrap()
+        );
+        assert!(JavaVersion::parse("17.0.5").unwrap() > JavaVersion::parse("17.0.4.9").unwrap());
+    }
+
+    #[test]
+    fn a_packaged_runtime_string_keeps_its_emergency_patch() {
+        let ubuntu25 = JavaVersion::parse("25.0.4.1+1-1-24.04.4-Ubuntu").expect("parses");
+        assert_eq!(
+            ubuntu25,
+            JavaVersion {
+                patch: 1,
+                ..JavaVersion::new(25, 0, 4).with_build(1)
+            }
+        );
+    }
+
+    #[test]
+    fn the_legacy_prefix_layout_is_not_mistaken_for_a_patch() {
+        // `1.8.0_492` has no fourth dotted component, and `1.8.0.292` keeps
+        // meaning "update 292" rather than "patch 292".
+        let underscore = JavaVersion::parse("1.8.0_492").expect("parses");
+        assert_eq!((underscore.update, underscore.patch), (492, 0));
+        let dotted = JavaVersion::parse("1.8.0.292").expect("parses");
+        assert_eq!((dotted.update, dotted.patch), (292, 0));
+    }
+
+    #[test]
     fn display_round_trips_through_the_parser() {
         for version in [
             JavaVersion::new(8, 0, 492),
             JavaVersion::new(17, 0, 19),
             JavaVersion::new(25, 0, 3).with_build(9),
+            JavaVersion::parse("17.0.4.1+1").unwrap(),
+            JavaVersion::parse("25.0.4.1").unwrap(),
+            JavaVersion::parse("8.0.6.26").unwrap(),
         ] {
             let rendered = version.to_string();
             assert_eq!(

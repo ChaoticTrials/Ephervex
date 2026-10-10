@@ -289,13 +289,12 @@ fn from_properties(executable: &Path, text: &str) -> Option<ProbeReport> {
     Some(ProbeReport {
         executable: executable.to_path_buf(),
         home: property("java.home").map(PathBuf::from),
-        // The runtime version carries the vendor build; the parsed
-        // `java.version` does not. Prefer the richer one when they agree on the
-        // major, and keep the plainer one when a vendor writes something
-        // unparseable there.
+        // The runtime version contributes only the vendor build, and only when
+        // it names the same release as `java.version`. Some vendors put their
+        // own product numbering there, which must not replace the real release.
         version: JavaVersion::parse(&runtime_version)
-            .filter(|parsed| parsed.major == version.major)
-            .unwrap_or(version),
+            .filter(|parsed| parsed.with_build(0) == version.with_build(0))
+            .map_or(version, |parsed| version.with_build(parsed.build)),
         version_string,
         runtime_version,
         vendor: property("java.vendor").unwrap_or_default(),
@@ -378,6 +377,43 @@ openjdk version "1.8.0_492"
             report.home,
             Some(PathBuf::from("/usr/lib/jvm/java-25-openjdk-amd64"))
         );
+    }
+
+    #[test]
+    fn a_runtime_version_in_vendor_numbering_does_not_replace_the_release() {
+        let properties = "Property settings:\n    java.version = 1.8.0_281\n    java.runtime.version = 8.0.6.26 - pxa6480sr6fp26-20210226_01(SR6 FP26)\n";
+        let report = from_properties(Path::new("/x/bin/java"), properties).expect("report");
+        assert_eq!(report.version, JavaVersion::new(8, 0, 281));
+        assert_eq!(
+            report.runtime_version,
+            "8.0.6.26 - pxa6480sr6fp26-20210226_01(SR6 FP26)"
+        );
+    }
+
+    #[test]
+    fn a_runtime_version_naming_a_different_release_contributes_no_build() {
+        let properties =
+            "Property settings:\n    java.version = 17.0.4\n    java.runtime.version = 17.0.5+9\n";
+        let report = from_properties(Path::new("/x/bin/java"), properties).expect("report");
+        assert_eq!(report.version, JavaVersion::new(17, 0, 4));
+    }
+
+    #[test]
+    fn an_emergency_patch_release_keeps_its_patch_and_build() {
+        let properties = "Property settings:\n    java.version = 25.0.4.1\n    java.runtime.version = 25.0.4.1+1-1-24.04.4-Ubuntu\n";
+        let report = from_properties(Path::new("/x/bin/java"), properties).expect("report");
+        let release = JavaVersion::new(25, 0, 4).with_build(8);
+        assert!(report.version > release);
+        assert_eq!(report.version.patch, 1);
+        assert_eq!(report.version.build, 1);
+    }
+
+    #[test]
+    fn a_runtime_version_without_the_patch_does_not_drop_it_from_java_version() {
+        let properties = "Property settings:\n    java.version = 25.0.4.1\n    java.runtime.version = 25.0.4+8\n";
+        let report = from_properties(Path::new("/x/bin/java"), properties).expect("report");
+        assert_eq!(report.version.patch, 1);
+        assert_eq!(report.version.build, 0);
     }
 
     #[test]

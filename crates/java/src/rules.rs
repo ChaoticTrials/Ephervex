@@ -152,6 +152,7 @@ impl VersionBound {
     ///
     /// Every vendor build of the bound's own update counts as at the bound:
     /// `21.0.3+9` is at most `21.0.3`. A build on the bound itself is ignored.
+    /// An emergency patch is not a build: `21.0.3.1` is above `21.0.3`.
     ///
     /// This is the bound old Forge needs, and the one a major-only check cannot
     /// express.
@@ -169,8 +170,12 @@ impl VersionBound {
 }
 
 /// The release a runtime is on, without its vendor build.
-const fn release_update(version: JavaVersion) -> (u32, u32, u32) {
-    (version.major, version.minor, version.update)
+///
+/// An emergency patch is part of the release: `21.0.3.1` is newer than
+/// `21.0.3`, so a ceiling at `21.0.3` does not admit it. Write the patch into
+/// the bound to admit the patched release.
+const fn release(version: JavaVersion) -> JavaVersion {
+    version.with_build(0)
 }
 
 impl JavaCompatibilityRule for VersionBound {
@@ -201,7 +206,7 @@ impl JavaCompatibilityRule for VersionBound {
             return reject(RejectionReason::TooOld { minimum, found });
         }
         if let Some(maximum) = self.maximum
-            && release_update(found) > release_update(maximum)
+            && release(found) > release(maximum)
         {
             return reject(RejectionReason::TooNew { maximum, found });
         }
@@ -457,6 +462,40 @@ mod tests {
             rule.evaluate(&runtime(JavaVersion::new(21, 0, 3).with_build(9)))
                 .is_accepted(),
             "a build on the bound's own update is at the bound, not past it"
+        );
+    }
+
+    #[test]
+    fn an_at_most_bound_rejects_an_emergency_patch_of_its_own_update() {
+        let rule = VersionBound::new("x")
+            .major(21)
+            .at_most(JavaVersion::new(21, 0, 3));
+        let patched = JavaVersion::parse("21.0.3.1+1").expect("parses");
+        assert!(
+            !rule.evaluate(&runtime(patched)).is_accepted(),
+            "21.0.3.1 is newer than every 21.0.3 build"
+        );
+        assert!(
+            VersionBound::new("x")
+                .major(21)
+                .at_most(JavaVersion::parse("21.0.3.1").expect("parses"))
+                .evaluate(&runtime(patched))
+                .is_accepted(),
+            "a bound that names the patch admits it"
+        );
+    }
+
+    #[test]
+    fn an_at_least_bound_counts_an_emergency_patch_above_its_release() {
+        let rule = VersionBound::new("x").at_least(JavaVersion::parse("17.0.4.1").expect("parses"));
+        assert!(
+            !rule
+                .evaluate(&runtime(JavaVersion::new(17, 0, 4).with_build(8)))
+                .is_accepted()
+        );
+        assert!(
+            rule.evaluate(&runtime(JavaVersion::parse("17.0.4.1+1").expect("parses")))
+                .is_accepted()
         );
     }
 

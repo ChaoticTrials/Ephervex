@@ -566,6 +566,26 @@ mod tests {
     }
 
     #[test]
+    fn an_emergency_patch_release_wins_over_the_release_it_patches() {
+        let mut inventory = representative_inventory();
+        inventory.runtimes.push(runtime(
+            "/usr/lib/jvm/java-17-release/bin/java",
+            JavaVersion::new(17, 0, 25).with_build(8),
+            JavaSourceKind::System,
+        ));
+        inventory.runtimes.push(runtime(
+            "/usr/lib/jvm/java-17-patched/bin/java",
+            JavaVersion::parse("17.0.25.1+1").expect("parses"),
+            JavaSourceKind::System,
+        ));
+        let selection = select(&inventory, &required(17), &[]).expect("java 17");
+        assert_eq!(
+            selection.runtime.executable,
+            PathBuf::from("/usr/lib/jvm/java-17-patched/bin/java")
+        );
+    }
+
+    #[test]
     fn a_managed_runtime_wins_a_tie_against_a_system_one() {
         let mut inventory = representative_inventory();
         inventory.runtimes.push(runtime(
