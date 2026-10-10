@@ -1168,6 +1168,20 @@ impl Config {
         toml::to_string_pretty(self).map_err(|source| ConfigError::Serialization(Box::new(source)))
     }
 
+    /// The same document [`Self::to_toml_string`] writes, as JSON, under the
+    /// same refusal to emit anything that looks like a secret.
+    ///
+    /// A TOML date or time becomes its RFC 3339 text, since JSON has no such
+    /// type.
+    pub fn to_json_value(&self) -> Result<serde_json::Value, ConfigError> {
+        if let Some(key) = self.find_secret_looking_key() {
+            return Err(ConfigError::SecretRejected { key });
+        }
+        let document = toml::Value::try_from(self)
+            .map_err(|source| ConfigError::Serialization(Box::new(source)))?;
+        Ok(toml_value_to_json(document))
+    }
+
     /// Applies `change` to the configuration on disk and writes the result.
     ///
     /// The file is reloaded under an exclusive lock first, so a change another
@@ -1573,6 +1587,30 @@ fn sanitized_parse_error(text: &str, error: &toml::de::Error) -> ConfigParseErro
 struct SecretKeyMatch {
     reported: String,
     leaf: String,
+}
+
+/// Converts a TOML value to JSON. Datetimes become their RFC 3339 text and a
+/// non-finite float, which JSON cannot hold, becomes its text.
+fn toml_value_to_json(value: toml::Value) -> serde_json::Value {
+    match value {
+        toml::Value::String(text) => serde_json::Value::String(text),
+        toml::Value::Integer(number) => number.into(),
+        toml::Value::Float(number) => serde_json::Number::from_f64(number).map_or_else(
+            || serde_json::Value::String(number.to_string()),
+            serde_json::Value::Number,
+        ),
+        toml::Value::Boolean(flag) => flag.into(),
+        toml::Value::Datetime(moment) => serde_json::Value::String(moment.to_string()),
+        toml::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(toml_value_to_json).collect())
+        }
+        toml::Value::Table(table) => serde_json::Value::Object(
+            table
+                .into_iter()
+                .map(|(key, value)| (key, toml_value_to_json(value)))
+                .collect(),
+        ),
+    }
 }
 
 fn find_secret_key(table: &toml::Table, prefix: &str) -> Option<SecretKeyMatch> {
@@ -2441,6 +2479,32 @@ reference = ""
             panic!("unexpected error");
         };
         assert!(source.to_string().contains("line 1"));
+    }
+
+    #[test]
+    fn json_form_refuses_a_credential_like_the_toml_form() {
+        let mut config = Config::default();
+        config.unknown.insert(
+            "curseforge_api_key".to_owned(),
+            toml::Value::String("$2a$10$notarealkey".to_owned()),
+        );
+
+        assert!(matches!(
+            config.to_json_value(),
+            Err(ConfigError::SecretRejected { .. })
+        ));
+    }
+
+    #[test]
+    fn json_form_mirrors_every_section_of_the_toml_form() {
+        let config = Config::default();
+        let json = config.to_json_value().expect("json");
+        let toml_document: toml::Table =
+            toml::from_str(&config.to_toml_string().expect("toml")).expect("parse");
+
+        let json_keys: Vec<_> = json.as_object().expect("object").keys().cloned().collect();
+        let toml_keys: Vec<_> = toml_document.keys().cloned().collect();
+        assert_eq!(json_keys, toml_keys);
     }
 
     #[test]

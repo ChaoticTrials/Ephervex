@@ -3979,12 +3979,11 @@ fn bundled_document_json(document: &BundledDocumentHealth) -> serde_json::Value 
 
 fn show_config(config: &Config, paths: &Paths, json: bool) -> anyhow::Result<()> {
     if json {
+        // Same credential refusal as the text form below (ADR 0004).
         print_json(&serde_json::json!({
             "path": json_path(&paths.config_file()),
             "exists": paths.config_file().is_file(),
-            "schema_version": config.schema_version,
-            "language": config.language,
-            "persistent_instance_root": config.persistent_instance_root,
+            "config": config.to_json_value()?,
         }));
     } else {
         outln!("# {}", paths.config_file().display());
