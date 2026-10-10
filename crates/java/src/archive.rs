@@ -47,7 +47,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use ephervex_pack::path::{safe_link_target, safe_relative_path};
@@ -268,7 +268,14 @@ pub(crate) fn extract_tar_gz_until_canceled(
             continue;
         }
 
-        report.bytes = extract_file(&mut entry, &resolved.target, report.bytes, limits, cancel)?;
+        report.bytes = extract_file(
+            archive,
+            &mut entry,
+            &resolved.target,
+            report.bytes,
+            limits,
+            cancel,
+        )?;
         report.files += 1;
     }
 
@@ -515,14 +522,20 @@ fn create_symlink(resolved: &ResolvedEntry, link: &Path) -> Result<(), ArchiveEr
 
 /// Writes one file entry, enforcing both size limits. Returns the new running
 /// byte total.
+///
+/// A file that was refused or that failed part-way is removed, so nothing left
+/// in the destination looks like a complete entry.
 fn extract_file<R: Read>(
+    archive: &Path,
     entry: &mut tar::Entry<'_, R>,
     target: &Path,
     written_so_far: u64,
     limits: &ExtractionLimits,
     cancel: &CancellationToken,
 ) -> Result<u64, ArchiveError> {
-    let declared = entry.header().size().unwrap_or(0);
+    // `Entry::size` is the length the stream delivers: a PAX `size` record
+    // overrides the ustar header field that `Header::size` reports.
+    let declared = entry.size();
     check_size(declared, written_so_far.saturating_add(declared), limits)?;
 
     if let Some(parent) = target.parent() {
@@ -533,15 +546,35 @@ fn extract_file<R: Read>(
     }
 
     let mode = entry.header().mode().unwrap_or(0o644);
-    // Read through a bounded reader rather than trusting the header's size: a
-    // header may claim less than the stream delivers, and the declared figure
-    // is attacker-controlled.
-    let mut limited = entry.take(limits.max_entry_bytes.saturating_add(1));
-    let written = write_file(target, &mut limited, mode, cancel)?;
+    // The declared size is attacker-controlled, so the copy is bounded by the
+    // tighter of the two limits, with one byte of headroom so that an overrun is
+    // observed rather than silently truncated.
+    let remaining = limits.max_total_bytes.saturating_sub(written_so_far);
+    let bound = limits.max_entry_bytes.min(remaining);
+    let mut limited = entry.take(bound.saturating_add(1));
 
-    let total = written_so_far.saturating_add(written);
-    check_size(written, total, limits)?;
-    Ok(total)
+    let written = write_file(archive, target, &mut limited, mode, cancel).and_then(|written| {
+        let total = written_so_far.saturating_add(written);
+        check_size(written, total, limits)?;
+        // An intact stream delivers exactly `declared` bytes. A shorter entry
+        // means the tar ended mid-file without the gzip layer failing.
+        if written < declared {
+            return Err(ArchiveError::Unreadable {
+                path: archive.to_path_buf(),
+                source: io::Error::from(io::ErrorKind::UnexpectedEof),
+            });
+        }
+        Ok(written)
+    });
+    match written {
+        Ok(written) => Ok(written_so_far.saturating_add(written)),
+        Err(error) => {
+            // Best effort: the extraction is already failing, and the caller
+            // discards the whole destination.
+            let _ = std::fs::remove_file(target);
+            Err(error)
+        }
+    }
 }
 
 /// The two size limits, checked together so neither can be forgotten.
@@ -564,7 +597,13 @@ const fn check_size(entry: u64, total: u64, limits: &ExtractionLimits) -> Result
 }
 
 /// Writes one entry, preserving only its permission bits.
+///
+/// Copies by hand rather than with [`io::copy`] so a failure reading the
+/// archive (a corrupt gzip stream) is reported against `archive` and only a
+/// failure writing `target` is reported against the destination. Cancellation
+/// is checked before every read, so a large entry stops mid-copy.
 fn write_file(
+    archive: &Path,
     target: &Path,
     source: &mut impl Read,
     mode: u32,
@@ -575,14 +614,31 @@ fn write_file(
         source,
     };
     let mut file = File::create(target).map_err(unwritable)?;
-    let mut source = CancelableRead { source, cancel };
-    let written = io::copy(&mut source, &mut file).map_err(|error| {
+
+    let mut buffer = vec![0u8; COPY_BUFFER_BYTES];
+    let mut written: u64 = 0;
+    loop {
         if cancel.is_cancelled() {
-            ArchiveError::Canceled
-        } else {
-            unwritable(error)
+            return Err(ArchiveError::Canceled);
         }
-    })?;
+        let read = match source.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(source) => {
+                return Err(if cancel.is_cancelled() {
+                    ArchiveError::Canceled
+                } else {
+                    ArchiveError::Unreadable {
+                        path: archive.to_path_buf(),
+                        source,
+                    }
+                });
+            }
+        };
+        file.write_all(&buffer[..read]).map_err(unwritable)?;
+        written = written.saturating_add(read as u64);
+    }
 
     // Without this, `bin/java` arrives at 0644 and the entire install is inert.
     #[cfg(unix)]
@@ -599,20 +655,7 @@ fn write_file(
     Ok(written)
 }
 
-/// A reader that fails once `cancel` fires, so a large entry stops mid-copy.
-struct CancelableRead<'a, R> {
-    source: R,
-    cancel: &'a CancellationToken,
-}
-
-impl<R: Read> Read for CancelableRead<'_, R> {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        if self.cancel.is_cancelled() {
-            return Err(io::Error::other("canceled"));
-        }
-        self.source.read(buffer)
-    }
-}
+const COPY_BUFFER_BYTES: usize = 64 * 1024;
 
 /// Entry types that are never extracted, with the name to report.
 const fn forbidden_entry_type(kind: EntryType) -> Option<&'static str> {
@@ -894,8 +937,14 @@ mod tests {
         let target = base.path().join("big");
         let cancel = CancellationToken::new();
 
-        let error = write_file(&target, &mut CancelsAfterFirstRead(&cancel), 0o644, &cancel)
-            .expect_err("the copy must stop once canceled");
+        let error = write_file(
+            Path::new("archive.tar.gz"),
+            &target,
+            &mut CancelsAfterFirstRead(&cancel),
+            0o644,
+            &cancel,
+        )
+        .expect_err("the copy must stop once canceled");
 
         assert!(matches!(error, ArchiveError::Canceled), "{error:?}");
     }
@@ -1297,6 +1346,179 @@ mod tests {
             matches!(error, ArchiveError::LimitExceeded { .. }),
             "{error:?}"
         );
+    }
+
+    /// Builds a `.tar.gz` whose only entry has a ustar size field smaller than
+    /// the data that follows, with the real length in a PAX `size` record.
+    fn tar_gz_with_pax_size(path: &Path, name: &str, header_size: u64, contents: &[u8]) {
+        let file = File::create(path).expect("create archive");
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+        let mut builder = tar::Builder::new(encoder);
+        let real = contents.len().to_string();
+        builder
+            .append_pax_extensions([("size", real.as_bytes())])
+            .expect("pax");
+        let mut header = tar::Header::new_gnu();
+        header.set_size(header_size);
+        header.set_mode(0o644);
+        header.set_path(name).expect("path");
+        header.set_cksum();
+        builder.append(&header, contents).expect("append");
+        builder.into_inner().expect("finish").finish().expect("gz");
+    }
+
+    /// Incompressible filler, so truncating the compressed stream cuts an entry.
+    fn noise(len: usize) -> Vec<u8> {
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state.to_le_bytes()[4]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_entry_whose_header_understates_its_size_is_refused_and_not_left_behind() {
+        let dir = temp();
+        let archive = dir.path().join("understated.tar.gz");
+        let root = dir.path().join("install");
+        tar_gz_with_pax_size(&archive, "jdk/big", 8, &vec![7u8; 64 * 1024]);
+
+        let limits = ExtractionLimits {
+            max_total_bytes: 16 * 1024,
+            ..ExtractionLimits::default()
+        };
+        let error =
+            extract_tar_gz(&archive, &root, 1, &limits).expect_err("the budget must be enforced");
+
+        assert!(
+            matches!(
+                error,
+                ArchiveError::LimitExceeded {
+                    limit: "total-size",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+        assert!(!root.join("big").exists(), "a refused file must not remain");
+    }
+
+    #[test]
+    fn a_file_that_pushes_the_running_total_over_budget_is_not_left_behind() {
+        let dir = temp();
+        let archive = dir.path().join("two.tar.gz");
+        let root = dir.path().join("install");
+        tar_gz(
+            &archive,
+            &[
+                ("jdk/first", 0o644, &[1u8; 600]),
+                ("jdk/second", 0o644, &[2u8; 600]),
+            ],
+        );
+
+        let limits = ExtractionLimits {
+            max_total_bytes: 1000,
+            ..ExtractionLimits::default()
+        };
+        let error =
+            extract_tar_gz(&archive, &root, 1, &limits).expect_err("the total must be enforced");
+
+        assert!(
+            matches!(
+                error,
+                ArchiveError::LimitExceeded {
+                    limit: "total-size",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+        assert!(
+            !root.join("second").exists(),
+            "a refused file must not remain"
+        );
+    }
+
+    #[test]
+    fn an_entry_that_exactly_fills_the_remaining_budget_is_extracted() {
+        let dir = temp();
+        let archive = dir.path().join("exact.tar.gz");
+        let root = dir.path().join("install");
+        tar_gz(
+            &archive,
+            &[
+                ("jdk/first", 0o644, &[1u8; 600]),
+                ("jdk/second", 0o644, &[2u8; 400]),
+            ],
+        );
+
+        let limits = ExtractionLimits {
+            max_total_bytes: 1000,
+            ..ExtractionLimits::default()
+        };
+        let report = extract_tar_gz(&archive, &root, 1, &limits).expect("within budget");
+
+        assert_eq!(report.bytes, 1000);
+        assert_eq!(std::fs::read(root.join("second")).expect("read").len(), 400);
+    }
+
+    #[test]
+    fn a_corrupt_archive_stream_is_reported_against_the_archive_and_leaves_no_partial_file() {
+        let dir = temp();
+        let archive = dir.path().join("truncated.tar.gz");
+        let root = dir.path().join("install");
+        tar_gz(&archive, &[("jdk/big", 0o644, &noise(256 * 1024))]);
+        let compressed = std::fs::read(&archive).expect("read archive");
+        std::fs::write(&archive, &compressed[..compressed.len() * 6 / 10]).expect("truncate");
+
+        let error = extract_tar_gz(&archive, &root, 1, &ExtractionLimits::default())
+            .expect_err("a truncated stream must fail");
+
+        match &error {
+            ArchiveError::Unreadable { path, .. } => assert_eq!(path, &archive),
+            other => panic!("expected Unreadable against the archive, got {other:?}"),
+        }
+        assert!(
+            !root.join("big").exists(),
+            "a partially written file must not remain"
+        );
+    }
+
+    #[test]
+    fn an_entry_cut_short_inside_an_intact_gzip_stream_is_refused_and_not_left_behind() {
+        let dir = temp();
+        let archive = dir.path().join("short.tar.gz");
+        let root = dir.path().join("install");
+        let mut tar_bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_bytes);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(8 * 1024);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "jdk/big", &[3u8; 8 * 1024][..])
+                .expect("append");
+            builder.finish().expect("finish");
+        }
+        tar_bytes.truncate(512 + 4096);
+        let file = File::create(&archive).expect("create archive");
+        let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+        encoder.write_all(&tar_bytes).expect("write");
+        encoder.finish().expect("gz");
+
+        let error = extract_tar_gz(&archive, &root, 1, &ExtractionLimits::default())
+            .expect_err("a short entry must fail");
+
+        match &error {
+            ArchiveError::Unreadable { path, .. } => assert_eq!(path, &archive),
+            other => panic!("expected Unreadable against the archive, got {other:?}"),
+        }
+        assert!(!root.join("big").exists(), "a short file must not remain");
     }
 
     #[test]
