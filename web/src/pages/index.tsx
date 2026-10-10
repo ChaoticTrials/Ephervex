@@ -72,6 +72,7 @@ export default function Home(): ReactNode {
                 </article>
               ))}
             </div>
+            <Link className={styles.featureBrowse} to="/docs/v1/feature-list">Browse the Feature List <span aria-hidden="true">→</span></Link>
           </div>
         </section>
 

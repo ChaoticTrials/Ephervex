@@ -53,6 +53,7 @@ const config: Config = {
           title: 'Documentation',
           items: [
             {label: 'Introduction', to: '/docs/v1/intro'},
+            {label: 'Feature List', to: '/docs/v1/feature-list'},
             {label: 'Installation', to: '/install'},
             {label: 'Interface tour', to: '/docs/v1/interface-tour'},
           ],

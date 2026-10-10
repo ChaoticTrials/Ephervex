@@ -1,0 +1,62 @@
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  margin: 1.35rem 0 2.5rem;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  min-height: 196px;
+  padding: 1.35rem 1.5rem;
+  border: 1px solid var(--site-border);
+  border-radius: 0.8rem;
+  background: var(--site-surface);
+  color: var(--ifm-font-color-base);
+  box-shadow: 0 0.65rem 1.7rem var(--site-shadow);
+  transition: border-color 150ms ease, transform 150ms ease;
+}
+
+.card:hover {
+  border-color: var(--site-accent);
+  color: var(--ifm-font-color-base);
+  text-decoration: none;
+  transform: translateY(-2px);
+}
+
+.card:focus-visible {
+  outline: 3px solid var(--site-accent);
+  outline-offset: 3px;
+}
+
+.kind {
+  color: var(--site-accent);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.card h3 {
+  margin: 0.65rem 0 0.4rem;
+  font-size: 1.15rem;
+  line-height: 1.3;
+}
+
+.card p {
+  margin: 0 0 1.2rem;
+  color: var(--site-muted);
+  line-height: 1.55;
+}
+
+.action {
+  margin-top: auto;
+  color: var(--site-accent);
+  font-weight: 650;
+}
+
+@media (max-width: 700px) {
+  .grid { grid-template-columns: 1fr; }
+  .card { min-height: 0; }
+}

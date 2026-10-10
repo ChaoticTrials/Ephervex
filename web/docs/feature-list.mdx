@@ -1,0 +1,112 @@
+---
+title: Feature List
+description: Find instructions and overviews for Ephervex features.
+---
+
+import Link from '@docusaurus/Link';
+import styles from './feature-list.module.css';
+
+# Feature List
+
+Choose what you want to do. **Guide** links lead to instructions for the
+desktop app and CLI. **Overview** links show the feature in the interface tour;
+their detailed guides are still being written.
+
+## Set up Ephervex
+
+<div className={styles.grid}>
+  <Link className={styles.card} to="/install">
+    <span className={styles.kind}>Guide</span>
+    <h3>Install Ephervex</h3>
+    <p>Choose an AppImage or Linux package for your distribution and architecture.</p>
+    <span className={styles.action}>Installation instructions <span aria-hidden="true">→</span></span>
+  </Link>
+  <Link className={styles.card} to="/docs/v1/getting-started">
+    <span className={styles.kind}>Guide</span>
+    <h3>Create your first environment</h3>
+    <p>Check the installation, add an account, create an instance, and launch Minecraft.</p>
+    <span className={styles.action}>Getting Started <span aria-hidden="true">→</span></span>
+  </Link>
+  <Link className={styles.card} to="/docs/v1/accounts">
+    <span className={styles.kind}>Guide</span>
+    <h3>Manage accounts</h3>
+    <p>Add an offline account, sign in with Microsoft, or choose an account for one launch.</p>
+    <span className={styles.action}>Account instructions <span aria-hidden="true">→</span></span>
+  </Link>
+</div>
+
+## Work with instances
+
+<div className={styles.grid}>
+  <Link className={styles.card} to="/docs/v1/instances#choose-temporary-or-persistent-storage">
+    <span className={styles.kind}>Guide</span>
+    <h3>Temporary and persistent storage</h3>
+    <p>Choose a disposable test directory or keep an instance for later.</p>
+    <span className={styles.action}>Choose storage <span aria-hidden="true">→</span></span>
+  </Link>
+  <Link className={styles.card} to="/docs/v1/instances#create-an-instance">
+    <span className={styles.kind}>Guide</span>
+    <h3>Create exact game versions</h3>
+    <p>Pick a Minecraft release and an exact Vanilla, Forge, or NeoForge setup.</p>
+    <span className={styles.action}>Create an instance <span aria-hidden="true">→</span></span>
+  </Link>
+  <Link className={styles.card} to="/docs/v1/instances#find-and-launch-an-instance">
+    <span className={styles.kind}>Guide</span>
+    <h3>Launch Minecraft</h3>
+    <p>Find an instance and start the game from the desktop app or CLI.</p>
+    <span className={styles.action}>Launch instructions <span aria-hidden="true">→</span></span>
+  </Link>
+  <Link className={styles.card} to="/docs/v1/instances#copy-or-keep-an-instance">
+    <span className={styles.kind}>Guide</span>
+    <h3>Duplicate or keep an instance</h3>
+    <p>Make an independent copy or move a temporary instance into persistent storage.</p>
+    <span className={styles.action}>Copy and keep <span aria-hidden="true">→</span></span>
+  </Link>
+  <Link className={styles.card} to="/docs/v1/instances#set-java-and-memory-for-one-instance">
+    <span className={styles.kind}>Guide</span>
+    <h3>Set Java and memory</h3>
+    <p>Override the global runtime settings for one instance.</p>
+    <span className={styles.action}>Runtime settings <span aria-hidden="true">→</span></span>
+  </Link>
+  <Link className={styles.card} to="/docs/v1/instances#change-a-loader-build">
+    <span className={styles.kind}>Guide</span>
+    <h3>Change a loader build</h3>
+    <p>Switch to another build of the same Forge or NeoForge loader.</p>
+    <span className={styles.action}>Loader instructions <span aria-hidden="true">→</span></span>
+  </Link>
+  <Link className={styles.card} to="/docs/v1/instances#delete-an-instance">
+    <span className={styles.kind}>Guide</span>
+    <h3>Delete an instance</h3>
+    <p>Remove its Ephervex record, and decide whether to keep its files.</p>
+    <span className={styles.action}>Deletion instructions <span aria-hidden="true">→</span></span>
+  </Link>
+</div>
+
+## Explore more features
+
+<div className={styles.grid}>
+  <Link className={styles.card} to="/docs/v1/interface-tour#creating-and-importing">
+    <span className={styles.kind}>Overview</span>
+    <h3>Import modpacks</h3>
+    <p>Bring in Modrinth or CurseForge packs, including optional and manually downloaded files.</p>
+    <span className={styles.action}>See pack import <span aria-hidden="true">→</span></span>
+  </Link>
+  <Link className={styles.card} to="/docs/v1/interface-tour#mods">
+    <span className={styles.kind}>Overview</span>
+    <h3>Manage and isolate mods</h3>
+    <p>Browse compatible mods, review dependencies, and narrow down a failing mod set.</p>
+    <span className={styles.action}>See mod tools <span aria-hidden="true">→</span></span>
+  </Link>
+  <Link className={styles.card} to="/docs/v1/interface-tour#servers">
+    <span className={styles.kind}>Overview</span>
+    <h3>Run a server</h3>
+    <p>Create a standalone or linked server, edit properties, and use the console.</p>
+    <span className={styles.action}>See server tools <span aria-hidden="true">→</span></span>
+  </Link>
+  <Link className={styles.card} to="/docs/v1/interface-tour#when-something-goes-wrong">
+    <span className={styles.kind}>Overview</span>
+    <h3>Inspect a failure</h3>
+    <p>Read logs and crash reports, run diagnostics, and restore a snapshot.</p>
+    <span className={styles.action}>See investigation tools <span aria-hidden="true">→</span></span>
+  </Link>
+</div>
