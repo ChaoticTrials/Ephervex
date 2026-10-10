@@ -17,9 +17,9 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::capture::{CaptureStream, CapturedLine, OutputCapture, ServerOutputEvent};
 use crate::runtime::{
-    ProcessEvidence, RuntimeEvidence, RuntimeLock, active_control_socket_path, capture_java_child,
-    prepare_control_socket_path, read_runtime_evidence, remove_per_run_control_directory,
-    runtime_lock_path, runtime_path, write_runtime_evidence,
+    ProcessEvidence, RuntimeEvidence, RuntimeLock, SERVER_RUN_VARIABLE, active_control_socket_path,
+    capture_java_child, prepare_control_socket_path, read_runtime_evidence,
+    remove_per_run_control_directory, runtime_lock_path, runtime_path, write_runtime_evidence,
 };
 use crate::{ServerError, ServerResult};
 
@@ -390,7 +390,13 @@ async fn supervise_commands(
         evidence.child = None;
         evidence.child_pending = true;
         write_runtime_evidence(server_root, evidence)?;
-        let spawned = spawn_child(command, observer, capture, &finished_starting);
+        let spawned = spawn_child(
+            command,
+            evidence.generation,
+            observer,
+            capture,
+            &finished_starting,
+        );
         let (mut child, stdin, readers, pid) = match spawned {
             Ok(spawned) => spawned,
             // The old child is gone, which is what the runtime evidence has to
@@ -580,6 +586,7 @@ async fn capture_spawned_child(
 
 fn spawn_child(
     command: &ServerCommand,
+    run: uuid::Uuid,
     observer: &ServerObserver,
     capture: &Arc<Mutex<OutputCapture>>,
     finished_starting: &Arc<AtomicBool>,
@@ -592,6 +599,7 @@ fn spawn_child(
     process
         .args(&command.arguments)
         .current_dir(&command.working_directory)
+        .env(SERVER_RUN_VARIABLE, run.to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1241,6 +1249,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_supervisor_that_died_while_starting_is_resolved_through_the_child_it_tagged() {
+        let directory = tempfile::tempdir().expect("directory");
+        let command = ServerCommand {
+            java: PathBuf::from("/bin/sh"),
+            arguments: vec!["-c".to_owned(), "exec sleep 30".to_owned()],
+            working_directory: directory.path().join("server"),
+        };
+        let capture = Arc::new(Mutex::new(OutputCapture::new(directory.path())));
+        let mut evidence = RuntimeEvidence::for_current_supervisor().expect("capture");
+        evidence.supervisor.start_ticks = 0;
+        evidence.child_pending = true;
+        write_runtime_evidence(directory.path(), &evidence).expect("write");
+        let (mut child, _stdin, readers, pid) = spawn_child(
+            &command,
+            evidence.generation,
+            &ServerObserver::silent(),
+            &capture,
+            &Arc::new(AtomicBool::new(false)),
+        )
+        .expect("spawn");
+
+        let running = classify_runtime(directory.path()).expect("classify");
+        child.kill().await.expect("kill");
+        for reader in readers {
+            let _ = reader.await;
+        }
+        let gone = classify_runtime(directory.path()).expect("classify");
+
+        assert!(
+            matches!(&running, RuntimeClassification::Orphaned { child } if child.pid == pid),
+            "{running:?}"
+        );
+        assert!(
+            matches!(gone, RuntimeClassification::ProvenStale { .. }),
+            "{gone:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn the_server_child_runs_in_a_process_group_of_its_own() {
         let directory = tempfile::tempdir().expect("directory");
         let command = ServerCommand {
@@ -1251,6 +1298,7 @@ mod tests {
         let capture = Arc::new(Mutex::new(OutputCapture::new(directory.path())));
         let (mut child, _stdin, readers, pid) = spawn_child(
             &command,
+            uuid::Uuid::new_v4(),
             &ServerObserver::silent(),
             &capture,
             &Arc::new(AtomicBool::new(false)),
@@ -1431,6 +1479,18 @@ mod tests {
             .collect()
     }
 
+    /// The journal once it holds at least `entries` lines, or as it stands after a bounded wait.
+    async fn wait_for_journal(path: &Path, entries: usize) -> Vec<String> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let lines = journal(path);
+            if lines.len() >= entries || tokio::time::Instant::now() >= deadline {
+                return lines;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     struct Supervised {
         root: tempfile::TempDir,
         _capture: tempfile::TempDir,
@@ -1503,8 +1563,10 @@ mod tests {
             unreachable!()
         };
         assert_ne!(pid, old.pid, "a new process");
+        // The reply names the replacement once it is spawned, not once its script has run.
+        let journal = wait_for_journal(&server.journal, 3).await;
         assert_eq!(
-            journal(&server.journal),
+            journal,
             ["start", "stop", "start"],
             "the old child had stopped before the replacement started, once"
         );

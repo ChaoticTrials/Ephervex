@@ -633,8 +633,13 @@ exit. They distinguish a controlled process, an orphan, an unverifiable
 process, and proven-stale state. An orphan is reported but never adopted or
 signaled. The runtime lock is an exclusive `flock`, so a leftover lock file no
 process holds does not block a start, and starts racing for one cannot both
-take it. The record is marked while a child is being started, so a supervisor
-that dies before the child is recorded is not proven stale until the machine restarts.
+take it. The record is marked while a child is being started, and each child
+carries the run's generation in its environment. A supervisor that dies before
+the child is recorded is resolved by looking for live processes with that tag: one
+is reported as an orphan, and a machine restart proves it stale. Finding none on
+two looks a short time apart is treated as stale too, assuming the start reaches
+the Java image within that interval and the child keeps the tag. A candidate whose
+environment cannot be read keeps the state unknown-running.
 
 Launcher capture is separate from Minecraft's own `server/logs/` and
 `server/crash-reports/`. A bounded memory ring feeds frontends while rotated

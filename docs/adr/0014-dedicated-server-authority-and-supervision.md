@@ -78,8 +78,18 @@ with the same verified live child is orphaned. Unverifiable identity is
 unknown-running. Evidence is stale only after both recorded processes are
 proven dead or the boot ID changed. The supervisor records that a child is
 being started before it spawns it, and clears that mark when the child is
-recorded, so a supervisor that dies in between leaves evidence that is not
-proven stale until the machine restarts. Ephervex never adopts, writes stdin to, or signals an orphan.
+recorded. Every server child carries the run's generation in its environment,
+and the record names the supervisor's session. When a supervisor dies in
+between, the processes of the same user that started after it and carry that
+generation stand in for the missing child record: one alive is an orphan, and
+a machine restart proves the evidence stale. So does finding none on two looks
+a short time apart, which assumes that a start reaches the Java image within
+that interval and that the child keeps the variable. A process whose
+environment this user cannot read is skipped unless it leads its own process
+group in the supervisor's session, as a child does; that one, like any scan
+error, leaves the state unknown-running. The check assumes the classifying
+process runs as the supervisor's user. Ephervex never adopts, writes stdin to,
+or signals an orphan.
 Recovery clears evidence only when it is proven stale.
 
 The runtime lock is an exclusive `flock` on `.launcher/server-runtime.lock`,

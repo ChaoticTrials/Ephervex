@@ -20,6 +20,9 @@ pub const RUNTIME_FILE: &str = "server-runtime.json";
 pub const RUNTIME_LOCK_FILE: &str = "server-runtime.lock";
 const LEGACY_CONTROL_SOCKET_FILE: &str = "server-control.sock";
 const MAX_UNIX_SOCKET_PATH_BYTES: usize = 107;
+/// Names the run in the environment of every server child it starts, so a
+/// child started just before its supervisor died can still be found.
+pub(crate) const SERVER_RUN_VARIABLE: &str = "EPHERVEX_SERVER_RUN";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -55,9 +58,13 @@ pub struct RuntimeEvidence {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_directory: Option<PathBuf>,
     /// A child is being started and `child` does not name it yet. While set,
-    /// a dead supervisor is not proof that nothing it started is alive.
+    /// a dead supervisor is not proof that nothing it started is alive, until
+    /// no process carrying the run's [`SERVER_RUN_VARIABLE`] is left.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub child_pending: bool,
+    /// The supervisor's session, which every child it starts inherits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor_session: Option<u32>,
 }
 
 impl RuntimeEvidence {
@@ -68,6 +75,7 @@ impl RuntimeEvidence {
             child: None,
             control_directory: None,
             child_pending: false,
+            supervisor_session: read_stat(std::process::id()).ok().map(|stat| stat.session),
         })
     }
 
@@ -153,19 +161,163 @@ fn classify_evidence(server_root: &Path, evidence: RuntimeEvidence) -> RuntimeCl
             },
         },
         // A child started just before the supervisor died has no evidence to
-        // check, unless the machine has restarted since.
+        // check, so the processes carrying the run's tag stand in for it.
         (IdentityState::ProvenDead, None | Some(IdentityState::ProvenDead))
             if evidence.child_pending && recorded_in_current_boot(&evidence.supervisor) =>
         {
-            RuntimeClassification::UnknownRunning {
-                supervisor: evidence.supervisor,
-                child: None,
+            match find_pending_child(&evidence) {
+                PendingChild::Gone => RuntimeClassification::ProvenStale { evidence },
+                PendingChild::Alive(child) => RuntimeClassification::Orphaned { child },
+                PendingChild::Unverifiable => RuntimeClassification::UnknownRunning {
+                    supervisor: evidence.supervisor,
+                    child: None,
+                },
             }
         }
         (IdentityState::ProvenDead, None | Some(IdentityState::ProvenDead)) => {
             RuntimeClassification::ProvenStale { evidence }
         }
     }
+}
+
+/// What is left of a child that was being started when its supervisor died.
+enum PendingChild {
+    Gone,
+    Alive(ProcessEvidence),
+    Unverifiable,
+}
+
+/// How long a scan that found nothing waits before it looks once more.
+const PENDING_CHILD_SETTLE: Duration = Duration::from_millis(100);
+
+/// Finds the oldest live process the run tagged with [`SERVER_RUN_VARIABLE`].
+///
+/// A child that is still being exec'd shows an environment without the tag, so
+/// finding nothing is only believed after a second look.
+fn find_pending_child(evidence: &RuntimeEvidence) -> PendingChild {
+    match scan_for_pending_child(evidence) {
+        PendingChild::Gone => {
+            std::thread::sleep(PENDING_CHILD_SETTLE);
+            scan_for_pending_child(evidence)
+        }
+        found => found,
+    }
+}
+
+/// A process that started before the supervisor cannot be its child. One whose
+/// environment this user may not read is skipped unless it could be the child:
+/// a child leads its own process group in the supervisor's session. That skip
+/// also needs this process to read its own environment, so a blanket refusal
+/// fails closed.
+fn scan_for_pending_child(evidence: &RuntimeEvidence) -> PendingChild {
+    let Ok(uid) = current_uid() else {
+        return PendingChild::Unverifiable;
+    };
+    if std::fs::read("/proc/self/environ").is_err() {
+        return PendingChild::Unverifiable;
+    }
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return PendingChild::Unverifiable;
+    };
+    let mut oldest: Option<(u64, u32)> = None;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return PendingChild::Unverifiable;
+        };
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        match tagged_with_run(pid, uid, evidence) {
+            Ok(Some(ticks)) if oldest.is_none_or(|(oldest_ticks, _)| ticks < oldest_ticks) => {
+                oldest = Some((ticks, pid));
+            }
+            Ok(_) => {}
+            Err(_) => return PendingChild::Unverifiable,
+        }
+    }
+    let Some((_, pid)) = oldest else {
+        return PendingChild::Gone;
+    };
+    capture_process(pid, ProcessRole::JavaChild)
+        .map_or(PendingChild::Unverifiable, PendingChild::Alive)
+}
+
+/// The start ticks of `pid` when it is a live process carrying the run's tag,
+/// or `None` when it is not. Fails when that cannot be told.
+fn tagged_with_run(pid: u32, uid: u32, evidence: &RuntimeEvidence) -> std::io::Result<Option<u64>> {
+    /// A kernel thread has no environment of its own.
+    const KERNEL_THREAD: u64 = 0x0020_0000;
+
+    let stat = match read_stat(pid) {
+        Ok(stat) => stat,
+        Err(error) if process_vanished(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if matches!(stat.state, 'Z' | 'X')
+        || stat.flags & KERNEL_THREAD != 0
+        || stat.start_ticks < evidence.supervisor.start_ticks
+    {
+        return Ok(None);
+    }
+    match std::fs::read(format!("/proc/{pid}/environ")) {
+        Ok(environment) => {
+            Ok(environment_carries_run(&environment, evidence.generation)
+                .then_some(stat.start_ticks))
+        }
+        Err(error) if process_vanished(&error) => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            let ours = std::fs::metadata(format!("/proc/{pid}")).is_ok_and(|m| m.uid() == uid);
+            let could_be_child = ours
+                && stat.process_group == pid
+                && evidence
+                    .supervisor_session
+                    .is_none_or(|session| session == stat.session);
+            if could_be_child { Err(error) } else { Ok(None) }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// The fields of `/proc/<pid>/stat` that process lookups use.
+struct ProcessStat {
+    state: char,
+    process_group: u32,
+    session: u32,
+    flags: u64,
+    start_ticks: u64,
+}
+
+fn read_stat(pid: u32) -> std::io::Result<ProcessStat> {
+    let malformed = || std::io::Error::new(std::io::ErrorKind::InvalidData, "malformed stat");
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    let (_, tail) = stat.rsplit_once(") ").ok_or_else(malformed)?;
+    let fields: Vec<&str> = tail.split_whitespace().collect();
+    let field = |index: usize| fields.get(index).copied().ok_or_else(malformed);
+    Ok(ProcessStat {
+        state: field(0)?.chars().next().ok_or_else(malformed)?,
+        process_group: field(2)?.parse().map_err(|_| malformed())?,
+        session: field(3)?.parse().map_err(|_| malformed())?,
+        flags: field(6)?.parse().map_err(|_| malformed())?,
+        start_ticks: field(19)?.parse().map_err(|_| malformed())?,
+    })
+}
+
+fn environment_carries_run(environment: &[u8], generation: Uuid) -> bool {
+    let tag = format!("{SERVER_RUN_VARIABLE}={generation}");
+    environment
+        .split(|byte| *byte == 0)
+        .any(|entry| entry == tag.as_bytes())
+}
+
+/// Whether reading a `/proc/<pid>` file failed because the process is gone,
+/// which the kernel reports as `ESRCH` for one that exits mid-read.
+fn process_vanished(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound
+        || error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error())
 }
 
 /// How long a reader waits for a lock that is held but not yet written.
@@ -223,6 +375,7 @@ fn classify_lock_holder(server_root: &Path) -> ServerResult<RuntimeClassificatio
                     child: None,
                     control_directory: None,
                     child_pending: false,
+                    supervisor_session: None,
                 },
             },
             // Locks written before they were flocked name a supervisor that is still alive.
@@ -1367,17 +1520,38 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_supervisor_that_died_while_starting_a_child_is_not_proven_stale() {
-        let root = root();
+    /// A pending start whose supervisor is already gone.
+    fn write_dead_pending_start(root: &Path) -> RuntimeEvidence {
         let mut evidence = RuntimeEvidence::for_current_supervisor().expect("capture");
         evidence.supervisor.start_ticks = 0;
         evidence.child_pending = true;
-        write_runtime_evidence(root.path(), &evidence).expect("write");
-        assert!(matches!(
-            classify_runtime(root.path()).expect("classify"),
-            RuntimeClassification::UnknownRunning { child: None, .. }
-        ));
+        write_runtime_evidence(root, &evidence).expect("write");
+        evidence
+    }
+
+    fn spawn_tagged(run: Uuid) -> KillOnDrop {
+        KillOnDrop(
+            std::process::Command::new("/bin/sleep")
+                .arg("60")
+                .env(SERVER_RUN_VARIABLE, run.to_string())
+                .spawn()
+                .expect("spawn"),
+        )
+    }
+
+    #[test]
+    fn a_child_started_before_its_supervisor_died_is_found_by_the_run_tag() {
+        let root = root();
+        let evidence = write_dead_pending_start(root.path());
+        let decoy = spawn_tagged(Uuid::new_v4());
+        let mut child = spawn_tagged(evidence.generation);
+
+        let RuntimeClassification::Orphaned { child: found } =
+            classify_runtime(root.path()).expect("classify")
+        else {
+            panic!("a tagged child is an orphan");
+        };
+        assert_eq!(found.pid, child.0.id());
         assert!(matches!(
             RuntimeLock::acquire(root.path()),
             Err(ServerError::AlreadyRunning)
@@ -1388,13 +1562,145 @@ mod tests {
         ));
         assert!(runtime_path(root.path()).exists());
 
-        evidence.child_pending = false;
+        child.0.kill().expect("kill");
+        child.0.wait().expect("reap");
+        assert!(
+            matches!(
+                classify_runtime(root.path()).expect("classify"),
+                RuntimeClassification::ProvenStale { .. }
+            ),
+            "another run's child does not keep this run alive"
+        );
+        drop(decoy);
+        drop(RuntimeLock::acquire(root.path()).expect("a proven stale run is taken over"));
+    }
+
+    #[test]
+    fn a_pending_start_that_left_no_process_behind_can_be_cleared_without_editing_files() {
+        let root = root();
+        write_dead_pending_start(root.path());
+        assert!(matches!(
+            classify_runtime(root.path()).expect("classify"),
+            RuntimeClassification::ProvenStale { .. }
+        ));
+        clear_stale_runtime(root.path()).expect("recovery clears it");
+        assert!(!runtime_path(root.path()).exists());
+    }
+
+    #[test]
+    fn a_process_that_started_before_the_supervisor_is_not_its_pending_child() {
+        let root = root();
+        let mut evidence = write_dead_pending_start(root.path());
+        let early = spawn_tagged(evidence.generation);
+        evidence.supervisor.start_ticks = u64::MAX;
         write_runtime_evidence(root.path(), &evidence).expect("write");
         assert!(matches!(
             classify_runtime(root.path()).expect("classify"),
             RuntimeClassification::ProvenStale { .. }
         ));
-        drop(RuntimeLock::acquire(root.path()).expect("a proven stale run is taken over"));
+        drop(early);
+    }
+
+    /// A tagged process that leads a session of its own and whose environment this user cannot read.
+    fn spawn_unreadable_leader(directory: &Path, run: Uuid) -> KillOnDrop {
+        let program = directory.join("sleep");
+        std::fs::copy("/bin/sleep", &program).expect("copy sleep");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o111))
+            .expect("execute only");
+        // A concurrent fork can briefly hold the copy's write descriptor, which blocks an exec.
+        for _ in 0..100 {
+            match std::process::Command::new(&program).arg("0").status() {
+                Ok(_) => break,
+                Err(error) if error.raw_os_error() == Some(26) => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => panic!("probe: {error}"),
+            }
+        }
+        // Not a group leader, so setsid takes over the process itself rather than forking.
+        KillOnDrop(
+            std::process::Command::new("setsid")
+                .arg(&program)
+                .arg("60")
+                .env(SERVER_RUN_VARIABLE, run.to_string())
+                .spawn()
+                .expect("spawn"),
+        )
+    }
+
+    #[test]
+    fn a_group_leader_in_the_supervisors_session_with_an_unreadable_environment_keeps_the_start_unresolved()
+     {
+        let root = root();
+        let bin = tempfile::tempdir().expect("bin dir");
+        let mut evidence = write_dead_pending_start(root.path());
+        let leader = spawn_unreadable_leader(bin.path(), evidence.generation);
+        let session = leader.0.id();
+        let environment = format!("/proc/{session}/environ");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::fs::read_to_string(format!("/proc/{session}/stat"))
+            .is_ok_and(|stat| stat.contains("(setsid)"))
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        match std::fs::read(&environment) {
+            Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied),
+            // A process that reads an execute-only program anyway, such as root, proves nothing here.
+            Ok(_) => return,
+        }
+
+        evidence.supervisor_session = Some(session);
+        write_runtime_evidence(root.path(), &evidence).expect("write");
+        assert!(matches!(
+            classify_runtime(root.path()).expect("classify"),
+            RuntimeClassification::UnknownRunning { child: None, .. }
+        ));
+        assert!(matches!(
+            clear_stale_runtime(root.path()),
+            Err(ServerError::RuntimeMayBeAlive)
+        ));
+
+        evidence.supervisor_session = None;
+        write_runtime_evidence(root.path(), &evidence).expect("write");
+        assert!(matches!(
+            classify_runtime(root.path()).expect("classify"),
+            RuntimeClassification::UnknownRunning { .. }
+        ));
+
+        evidence.supervisor_session = Some(session + 1);
+        write_runtime_evidence(root.path(), &evidence).expect("write");
+        assert!(
+            matches!(
+                classify_runtime(root.path()).expect("classify"),
+                RuntimeClassification::ProvenStale { .. }
+            ),
+            "a process in another session did not come from this supervisor"
+        );
+    }
+
+    #[test]
+    fn a_run_tag_is_matched_as_a_whole_environment_entry() {
+        let run = Uuid::new_v4();
+        let entry = format!("{SERVER_RUN_VARIABLE}={run}");
+        let other = format!("{SERVER_RUN_VARIABLE}={}", Uuid::new_v4());
+        assert!(environment_carries_run(
+            format!("PATH=/bin\0{entry}\0HOME=/x\0").as_bytes(),
+            run
+        ));
+        assert!(!environment_carries_run(
+            format!("PATH=/bin\0{other}\0").as_bytes(),
+            run
+        ));
+        assert!(!environment_carries_run(
+            format!("X{entry}\0").as_bytes(),
+            run
+        ));
+        assert!(!environment_carries_run(
+            format!("{entry}x\0").as_bytes(),
+            run
+        ));
+        assert!(!environment_carries_run(b"", run));
     }
 
     #[test]
