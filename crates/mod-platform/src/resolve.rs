@@ -1105,25 +1105,17 @@ impl<'a> Resolver<'a> {
     /// what the instance already has. Checking earlier could clear a conflict
     /// that a later re-resolution reintroduces.
     fn check_conflicts(&self) -> ModPlatformResult<()> {
-        let installed: BTreeSet<&str> = self
-            .request
-            .installed
-            .iter()
-            .map(|entry| entry.project_id.as_str())
-            .collect();
-
         for ((source, _), relations) in &self.edges {
             for relation in relations {
                 let Normalized::Project {
                     kind: ModRelationKind::Incompatible,
                     project_id,
-                    ..
+                    pinned_version,
                 } = relation
                 else {
                     continue;
                 };
-                if self.resolved.contains_key(project_id) || installed.contains(project_id.as_str())
-                {
+                if self.is_present(project_id, pinned_version.as_deref()) {
                     return Err(ModPlatformError::IncompatibleDependency {
                         declared_by: source.clone(),
                         conflicting: project_id.clone(),
@@ -1132,6 +1124,23 @@ impl<'a> Resolver<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Whether the finished plan leaves `project_id` on the instance, at
+    /// `version` when one is given and at any release otherwise.
+    ///
+    /// A release the plan resolved supersedes the installed one, so only it
+    /// counts for a project the plan touches.
+    fn is_present(&self, project_id: &str, version: Option<&str>) -> bool {
+        let matches = |present: &str| version.is_none_or(|pinned| pinned == present);
+        match self.resolved.get(project_id) {
+            Some(resolution) => matches(&resolution.version.id),
+            None => self
+                .request
+                .installed
+                .iter()
+                .any(|entry| entry.project_id == project_id && matches(&entry.version_id)),
+        }
     }
 
     /// Splits the resolved set into "already there" and "would be installed",
@@ -1897,6 +1906,92 @@ mod tests {
             error,
             ModPlatformError::IncompatibleDependency { ref conflicting, .. }
                 if conflicting == "PRESENT"
+        ));
+    }
+
+    /// ROOT requires `B` and declares an incompatibility with `B`'s release `b1`.
+    fn declares_b1_incompatible(b_versions: Vec<ModVersionInfo>) -> Catalog {
+        Catalog::default()
+            .with(
+                "ROOT",
+                vec![pins(
+                    needs(compatible("v1", "ROOT"), ModRelationKind::Required, "B"),
+                    ModRelationKind::Incompatible,
+                    "b1",
+                )],
+            )
+            .with("B", b_versions)
+    }
+
+    #[tokio::test]
+    async fn a_pinned_incompatibility_does_not_refuse_another_release_in_the_plan() {
+        let catalog = declares_b1_incompatible(vec![
+            at(compatible("b1", "B"), 0),
+            at(compatible("b2", "B"), 10),
+        ]);
+
+        let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+        assert_eq!(plan.dependencies[0].version.id, "b2");
+    }
+
+    #[tokio::test]
+    async fn a_pinned_incompatibility_refuses_the_pinned_release_in_the_plan() {
+        let catalog = declares_b1_incompatible(vec![at(compatible("b1", "B"), 0)]);
+
+        let error = plan_with(&catalog, InstallSelection::new("ROOT"), &[])
+            .await
+            .expect_err("must refuse");
+        assert!(matches!(
+            error,
+            ModPlatformError::IncompatibleDependency { ref conflicting, .. } if conflicting == "B"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_pinned_incompatibility_does_not_refuse_another_installed_release() {
+        let catalog = Catalog::default()
+            .with(
+                "ROOT",
+                vec![pins(
+                    compatible("v1", "ROOT"),
+                    ModRelationKind::Incompatible,
+                    "b1",
+                )],
+            )
+            .with("B", vec![compatible("b1", "B"), compatible("b2", "B")]);
+
+        let installed = [InstalledProject {
+            project_id: "B".to_owned(),
+            version_id: "b2".to_owned(),
+        }];
+        plan_with(&catalog, InstallSelection::new("ROOT"), &installed)
+            .await
+            .expect("an unrelated release of the project is fine");
+    }
+
+    #[tokio::test]
+    async fn a_pinned_incompatibility_refuses_the_pinned_installed_release() {
+        let catalog = Catalog::default()
+            .with(
+                "ROOT",
+                vec![pins(
+                    compatible("v1", "ROOT"),
+                    ModRelationKind::Incompatible,
+                    "b1",
+                )],
+            )
+            .with("B", vec![compatible("b1", "B"), compatible("b2", "B")]);
+
+        let installed = [InstalledProject {
+            project_id: "B".to_owned(),
+            version_id: "b1".to_owned(),
+        }];
+        let error = plan_with(&catalog, InstallSelection::new("ROOT"), &installed)
+            .await
+            .expect_err("must refuse");
+        assert!(matches!(
+            error,
+            ModPlatformError::IncompatibleDependency { ref conflicting, .. } if conflicting == "B"
         ));
     }
 
