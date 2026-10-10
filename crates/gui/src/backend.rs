@@ -2979,7 +2979,8 @@ fn run_worker(
                                 client,
                                 server,
                                 entity,
-                                pair: Some((settled, server_name)),
+                                server_name,
+                                pair: Some(settled),
                             },
                         );
                     }
@@ -3047,7 +3048,8 @@ fn run_worker(
                         client,
                         server,
                         entity,
-                        pair: Some((settled, server_name)),
+                        server_name,
+                        pair: Some(settled),
                     },
                 );
             }
@@ -8134,35 +8136,172 @@ fn forward_server_event(
     }
 }
 
+/// How a server start that never ran ended, known once the run's result is.
+struct ServerStartEnd {
+    canceled: bool,
+    detail: String,
+}
+
+/// The activity row of the server a Launch & Connect run starts, from its
+/// preparation to its exit.
+struct ConnectedServerRow {
+    /// The server's name.
+    entity: String,
+    cancellations: CancellationRegistry,
+    /// Ends the whole run, so canceling the server's preparation cancels the
+    /// pair start.
+    cancel: CancellationToken,
+    /// The preparation's operation id until the row reaches a terminal state.
+    operation: Mutex<Option<String>>,
+    started: AtomicBool,
+    start_end: Mutex<Option<ServerStartEnd>>,
+}
+
+impl ConnectedServerRow {
+    fn new(entity: String, cancellations: CancellationRegistry, cancel: CancellationToken) -> Self {
+        Self {
+            entity,
+            cancellations,
+            cancel,
+            operation: Mutex::new(None),
+            started: AtomicBool::new(false),
+            start_end: Mutex::new(None),
+        }
+    }
+
+    /// Records why the run ended, for a server that never started.
+    fn record_run_end(&self, result: &CoreResult<ephervex_core::LaunchAndConnectOutcome>) {
+        if let Err(error) = result
+            && let Ok(mut end) = self.start_end.lock()
+        {
+            *end = Some(ServerStartEnd {
+                canceled: error.is_cancellation(),
+                detail: localized_error(error),
+            });
+        }
+    }
+
+    /// Moves the row to its terminal state and drops the token filed under it.
+    /// Does nothing once the row is terminal or when no row was created.
+    fn finish(&self, events: &Sender<Event>, end: ConnectedServerEnd<'_>) {
+        let Some(operation) = self.operation.lock().ok().and_then(|mut id| id.take()) else {
+            return;
+        };
+        if let Ok(mut entries) = self.cancellations.lock() {
+            entries.remove(&operation);
+        }
+        let (title, detail, status, failed) = match end {
+            ConnectedServerEnd::Exited(exit) => {
+                let failed = exit.is_some_and(|exit| server_exit_failure(exit).is_some());
+                (
+                    lookup("gui-activity-server-run"),
+                    lookup("gui-activity-server-exited"),
+                    if failed { "failed" } else { "completed" },
+                    failed,
+                )
+            }
+            ConnectedServerEnd::SupervisionLost => (
+                lookup("gui-activity-server-run"),
+                lookup("gui-run-server-exited-with-error"),
+                "failed",
+                true,
+            ),
+            ConnectedServerEnd::NotStarted => {
+                let end = self.start_end.lock().ok().and_then(|mut end| end.take());
+                match end {
+                    Some(end) => (
+                        lookup("gui-activity-starting-server"),
+                        end.detail,
+                        if end.canceled { "canceled" } else { "failed" },
+                        !end.canceled,
+                    ),
+                    None => (
+                        lookup("gui-activity-server-run"),
+                        lookup("gui-activity-server-exited"),
+                        "completed",
+                        false,
+                    ),
+                }
+            }
+        };
+        send_activity_state(
+            events,
+            operation,
+            &title,
+            &self.entity,
+            &detail,
+            status,
+            false,
+            failed,
+            false,
+        );
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ConnectedServerEnd<'a> {
+    /// The server process exited.
+    Exited(Option<&'a ephervex_core::ServerExit>),
+    /// Supervision of a server that had started ended without an exit to show.
+    SupervisionLost,
+    /// The server's event stream ended; the start did not reach a process
+    /// exit, so the run's result says how it ended.
+    NotStarted,
+}
+
+/// Reports the end of a connected server's events: a start that never ran gets
+/// the run's outcome, and a server that did run is settled by its exit.
+fn finish_connected_server_events(events: &Sender<Event>, row: &ConnectedServerRow) {
+    if row.started.load(Ordering::SeqCst) {
+        row.finish(events, ConnectedServerEnd::Exited(None));
+    } else {
+        row.finish(events, ConnectedServerEnd::NotStarted);
+    }
+}
+
 /// Linked runs finish through their observer, independently of the client.
 fn forward_connect_server_event(
     events: &Sender<Event>,
-    entity: &str,
     paths: &Paths,
-    observed_operation: &Mutex<Option<String>>,
+    row: &ConnectedServerRow,
     server: ServerId,
     event: ServerEvent,
 ) {
-    if let ServerEvent::Finished { exit } = event {
-        refresh_snapshot(paths, events);
-        let failure = exit.map_or_else(
-            || Some(lookup("gui-run-server-exited-with-error")),
-            |exit| server_exit_failure(&exit),
-        );
-        let _ = events.send(Event::ServerTool {
-            server,
-            event: ServerToolEvent::Finished { failure },
-        });
-    } else {
-        forward_server_event(
-            events,
-            entity,
-            paths,
-            observed_operation,
-            None,
-            server,
-            event,
-        );
+    match event {
+        ServerEvent::Finished { exit } => {
+            refresh_snapshot(paths, events);
+            // A start that ended without running is settled when the stream
+            // closes, once the run's result is known.
+            match &exit {
+                Some(exit) => row.finish(events, ConnectedServerEnd::Exited(Some(exit))),
+                None if row.started.load(Ordering::SeqCst) => {
+                    row.finish(events, ConnectedServerEnd::SupervisionLost);
+                }
+                None => {}
+            }
+            let failure = exit.map_or_else(
+                || Some(lookup("gui-run-server-exited-with-error")),
+                |exit| server_exit_failure(&exit),
+            );
+            let _ = events.send(Event::ServerTool {
+                server,
+                event: ServerToolEvent::Finished { failure },
+            });
+        }
+        event => {
+            if matches!(event, ServerEvent::Started { .. }) {
+                row.started.store(true, Ordering::SeqCst);
+            }
+            forward_server_event(
+                events,
+                &row.entity,
+                paths,
+                &row.operation,
+                Some((&row.cancellations, &row.cancel)),
+                server,
+                event,
+            );
+        }
     }
 }
 
@@ -8172,9 +8311,10 @@ struct ConnectRun {
     server: ServerId,
     /// The client's name.
     entity: String,
-    /// Set when the run is a pair start: what settles it, and the server's name
-    /// for saying which side failed.
-    pair: Option<(PairStartSettled, String)>,
+    /// The server's name.
+    server_name: String,
+    /// Set when the run is a pair start: what settles it.
+    pair: Option<PairStartSettled>,
 }
 
 // The three observers intentionally stay in one scope so their channel and
@@ -8190,11 +8330,13 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
         client,
         server,
         entity,
+        server_name,
         pair,
     } = run;
-    let (settled, server_name) = pair.map_or((None, None), |(mut settled, name)| {
+    let is_pair_start = pair.is_some();
+    let settled = pair.map(|mut settled| {
         settled.server_completion_owned = true;
-        (Some(settled), Some(name))
+        settled
     });
     // Taken once the client is running, or when the run ends first.
     let settled = Arc::new(Mutex::new(settled));
@@ -8258,9 +8400,12 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
                 });
                 let server_paths = paths.clone();
                 let server_event_sender = events.clone();
-                let server_entity = entity.clone();
-                let observed_operation = Arc::new(Mutex::new(None::<String>));
-                let forwarded_operation = Arc::clone(&observed_operation);
+                let server_row = Arc::new(ConnectedServerRow::new(
+                    server_name.clone(),
+                    Arc::clone(&cancellations),
+                    cancel.clone(),
+                ));
+                let forwarded_row = Arc::clone(&server_row);
                 let mut server_events =
                     ObservedServerEvents::new(server_events, supervised, server);
                 let server_forward = tokio::spawn(async move {
@@ -8274,9 +8419,8 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
                                     }
                                     Ok(other) => forward_connect_server_event(
                                         &server_event_sender,
-                                        &server_entity,
                                         &server_paths,
-                                        &forwarded_operation,
+                                        &forwarded_row,
                                         server,
                                         other,
                                     ),
@@ -8293,14 +8437,14 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
                         } else {
                             forward_connect_server_event(
                                 &server_event_sender,
-                                &server_entity,
                                 &server_paths,
-                                &forwarded_operation,
+                                &forwarded_row,
                                 server,
                                 event,
                             );
                         }
                     }
+                    finish_connected_server_events(&server_event_sender, &forwarded_row);
                 });
                 let launch_paths = paths.clone();
                 let launch_event_sender = events.clone();
@@ -8339,6 +8483,7 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
                         &cancel,
                     )
                     .await;
+                server_row.record_run_end(&result);
                 let revision = end_client_run();
                 drop(connect_observer);
                 drop(server_observer);
@@ -8380,16 +8525,14 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
                             false,
                         );
                     }
-                    Err(error) => match &server_name {
-                        Some(server_name) => send_pair_start_failure(
-                            &events,
-                            &error,
-                            server_ready.load(Ordering::SeqCst),
-                            &entity,
-                            server_name,
-                        ),
-                        None => send_error(&events, &error),
-                    },
+                    Err(error) if is_pair_start => send_pair_start_failure(
+                        &events,
+                        &error,
+                        server_ready.load(Ordering::SeqCst),
+                        &entity,
+                        &server_name,
+                    ),
+                    Err(error) => send_error(&events, &error),
                 }
                 if let Ok(mut settled) = settled.lock() {
                     settled.take();
@@ -12919,18 +13062,30 @@ mod tests {
         );
     }
 
+    fn connected_row(
+        cancellations: &CancellationRegistry,
+        cancel: &CancellationToken,
+    ) -> ConnectedServerRow {
+        ConnectedServerRow::new(
+            "server".to_owned(),
+            Arc::clone(cancellations),
+            cancel.clone(),
+        )
+    }
+
     #[test]
     fn linked_server_completion_targets_the_server_without_waiting_for_the_client() {
         let root = tempfile::tempdir().expect("root");
         let paths = Paths::rooted_at(root.path());
         let (events, received) = std::sync::mpsc::channel();
+        let cancellations: CancellationRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let row = connected_row(&cancellations, &CancellationToken::new());
         let server = ServerId::new();
         for (code, finished_starting) in [(Some(9), true), (Some(0), false), (Some(0), true)] {
             forward_connect_server_event(
                 &events,
-                "server",
                 &paths,
-                &Mutex::new(None),
+                &row,
                 server,
                 ServerEvent::Finished {
                     exit: Some(ephervex_core::ServerExit {
@@ -12960,6 +13115,248 @@ mod tests {
                 (server, None),
             ]
         );
+    }
+
+    #[test]
+    fn a_pair_start_server_row_is_cancelable_while_it_prepares_and_settles_when_the_server_exits() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = Paths::rooted_at(root.path());
+        let (events, received) = std::sync::mpsc::channel();
+        let cancellations: CancellationRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let cancel = CancellationToken::new();
+        let row = connected_row(&cancellations, &cancel);
+        let server = ServerId::new();
+        let operation = OperationReporter::silent("test-server-start").id();
+        let key = operation.to_string();
+
+        forward_connect_server_event(
+            &events,
+            &paths,
+            &row,
+            server,
+            ServerEvent::Preparing { operation },
+        );
+        let preparing = activities(&received);
+        assert!(!preparing.is_empty());
+        assert!(
+            preparing
+                .iter()
+                .all(|activity| activity.item.cancellable && activity.entity == "server"),
+            "the row names the server and offers Cancel while it prepares"
+        );
+
+        let download = Operation::new("operation-starting-server", true);
+        forward_connect_server_event(
+            &events,
+            &paths,
+            &row,
+            server,
+            ServerEvent::Downloading(Box::new(download)),
+        );
+        assert!(
+            activities(&received)
+                .iter()
+                .all(|activity| activity.item.cancellable),
+            "a Java download made for the start is cancelable"
+        );
+
+        cancel_operation(&cancellations, &events, &key);
+        assert!(cancel.is_cancelled(), "Cancel reaches the run's token");
+
+        forward_connect_server_event(
+            &events,
+            &paths,
+            &row,
+            server,
+            ServerEvent::Started { pid: 1 },
+        );
+        let started = activities(&received);
+        assert!(
+            started.iter().all(
+                |activity| activity.item.status_kind == "running" && !activity.item.cancellable
+            ),
+            "a running server is ended by Stop, not by the activity's Cancel"
+        );
+        assert!(
+            !cancellations.lock().expect("registry").contains_key(&key),
+            "the token is released once the server runs"
+        );
+
+        forward_connect_server_event(
+            &events,
+            &paths,
+            &row,
+            server,
+            ServerEvent::Finished {
+                exit: Some(ephervex_core::ServerExit {
+                    code: Some(0),
+                    signal: None,
+                    finished_starting: true,
+                    stop_requested: true,
+                }),
+            },
+        );
+        let finished: Vec<_> = activities(&received);
+        assert_eq!(finished.len(), 1);
+        assert_eq!(finished[0].item.id, key);
+        assert_eq!(finished[0].item.status_kind, "completed");
+        assert_eq!(finished[0].entity, "server");
+        assert!(!finished[0].item.failed);
+
+        finish_connected_server_events(&events, &row);
+        assert!(
+            activities(&received).is_empty(),
+            "a settled row is not reported again"
+        );
+    }
+
+    #[test]
+    fn a_pair_start_server_row_records_a_crash_after_start_as_failed() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = Paths::rooted_at(root.path());
+        let (events, received) = std::sync::mpsc::channel();
+        let cancellations: CancellationRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let row = connected_row(&cancellations, &CancellationToken::new());
+        let server = ServerId::new();
+        let operation = OperationReporter::silent("test-server-start").id();
+
+        for event in [
+            ServerEvent::Preparing { operation },
+            ServerEvent::Started { pid: 1 },
+            ServerEvent::Finished {
+                exit: Some(ephervex_core::ServerExit {
+                    code: Some(1),
+                    signal: None,
+                    finished_starting: true,
+                    stop_requested: false,
+                }),
+            },
+        ] {
+            forward_connect_server_event(&events, &paths, &row, server, event);
+        }
+
+        let last = activities(&received).pop().expect("a final activity");
+        assert_eq!(last.item.status_kind, "failed");
+        assert!(last.item.failed);
+        assert!(!last.item.cancellable);
+    }
+
+    #[test]
+    fn a_pair_start_server_row_fails_when_supervision_ends_after_the_server_started() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = Paths::rooted_at(root.path());
+        let (events, received) = std::sync::mpsc::channel();
+        let cancellations: CancellationRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let row = connected_row(&cancellations, &CancellationToken::new());
+        let server = ServerId::new();
+        let operation = OperationReporter::silent("test-server-start").id();
+
+        for event in [
+            ServerEvent::Preparing { operation },
+            ServerEvent::Started { pid: 1 },
+            ServerEvent::Finished { exit: None },
+        ] {
+            forward_connect_server_event(&events, &paths, &row, server, event);
+        }
+        finish_connected_server_events(&events, &row);
+
+        let ended: Vec<_> = activities(&received)
+            .into_iter()
+            .filter(|activity| activity.item.status_kind != "running")
+            .collect();
+        assert_eq!(ended.len(), 1, "the row settles once");
+        assert_eq!(ended[0].item.status_kind, "failed");
+        assert!(ended[0].item.failed);
+    }
+
+    #[test]
+    fn a_pair_start_server_row_settles_with_the_run_outcome_when_preparation_ends_the_start() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = Paths::rooted_at(root.path());
+        let server = ServerId::new();
+        let operation = OperationReporter::silent("test-server-start").id();
+        let key = operation.to_string();
+
+        for (error, status) in [
+            (
+                CoreError::from(ephervex_server::ServerError::StartCanceled),
+                "canceled",
+            ),
+            (
+                CoreError::from(ephervex_server::ServerError::ReadinessCanceled),
+                "canceled",
+            ),
+        ] {
+            let (events, received) = std::sync::mpsc::channel();
+            let cancellations: CancellationRegistry = Arc::new(Mutex::new(HashMap::new()));
+            let row = connected_row(&cancellations, &CancellationToken::new());
+            forward_connect_server_event(
+                &events,
+                &paths,
+                &row,
+                server,
+                ServerEvent::Preparing { operation },
+            );
+            forward_connect_server_event(
+                &events,
+                &paths,
+                &row,
+                server,
+                ServerEvent::Finished { exit: None },
+            );
+            let before = activities(&received);
+            assert!(
+                before
+                    .iter()
+                    .all(|activity| activity.item.status_kind == "running"),
+                "the row waits for the run's outcome"
+            );
+            row.record_run_end(&Err(error));
+            finish_connected_server_events(&events, &row);
+            let ended = activities(&received);
+            assert_eq!(ended.len(), 1);
+            assert_eq!(ended[0].item.id, key);
+            assert_eq!(ended[0].item.status_kind, status);
+            assert!(!ended[0].item.failed);
+            assert!(!ended[0].item.cancellable);
+            assert!(
+                !cancellations.lock().expect("registry").contains_key(&key),
+                "the token is released when the start ends"
+            );
+        }
+
+        let (events, received) = std::sync::mpsc::channel();
+        let cancellations: CancellationRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let row = connected_row(&cancellations, &CancellationToken::new());
+        forward_connect_server_event(
+            &events,
+            &paths,
+            &row,
+            server,
+            ServerEvent::Preparing { operation },
+        );
+        row.record_run_end(&Err(CoreError::from(
+            ephervex_server::ServerError::EulaNotAccepted,
+        )));
+        finish_connected_server_events(&events, &row);
+        let failed = activities(&received).pop().expect("a final activity");
+        assert_eq!(failed.item.status_kind, "failed");
+        assert!(failed.item.failed);
+    }
+
+    #[test]
+    fn a_pair_start_that_reuses_a_server_creates_no_server_row() {
+        let (events, received) = std::sync::mpsc::channel();
+        let cancellations: CancellationRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let row = connected_row(&cancellations, &CancellationToken::new());
+
+        row.record_run_end(&Err(CoreError::from(
+            ephervex_server::ServerError::ReadinessCanceled,
+        )));
+        finish_connected_server_events(&events, &row);
+
+        assert!(activities(&received).is_empty());
+        assert!(cancellations.lock().expect("registry").is_empty());
     }
 
     #[test]
