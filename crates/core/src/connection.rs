@@ -271,11 +271,19 @@ impl App {
         // This early read avoids starting a stopped server for a client that
         // is already known to be unavailable. The ordinary launch lock remains
         // authoritative and closes a race with another launcher after this
-        // check without introducing a second lock path here.
-        if let Some(running) = self.launch_state(client_id)? {
+        // check without introducing a second lock path here. An additional
+        // launch is only unavailable when its own handle is already live.
+        let blocking = self
+            .running_launches(client_id)?
+            .into_iter()
+            .find(|running| match options.launch.additional.as_deref() {
+                None => true,
+                Some(handle) => running.id.as_deref() == Some(handle),
+            });
+        if let Some(running) = blocking {
             return Err(ephervex_storage::LockError::AlreadyRunning {
-                pid: running.holder_pid(),
-                since: running.since,
+                pid: running.state.holder_pid(),
+                since: running.state.since,
             }
             .into());
         }
@@ -739,6 +747,75 @@ mod tests {
             classify_runtime(&server.root).expect("runtime"),
             RuntimeClassification::Stopped
         ));
+        assert!(!server.root.join("server/eula.txt").exists());
+        drop(held);
+    }
+
+    fn alongside_options(handle: &str, dry_run: bool) -> LaunchAndConnectOptions {
+        LaunchAndConnectOptions {
+            launch: LaunchOptions {
+                dry_run,
+                additional: Some(handle.to_owned()),
+                ..LaunchOptions::default()
+            },
+            ..LaunchAndConnectOptions::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn an_additional_launch_connects_while_the_client_is_already_running() {
+        let directory = tempfile::tempdir().expect("directory");
+        let mut app = app_rooted_at(directory.path());
+        let (client, server) = installed_linked_server(&app, ServerNetworkSettings::default());
+        let held = LaunchLock::acquire(&client.root).expect("client launch lock");
+
+        let error = app
+            .launch_and_connect(
+                client.id,
+                server.id,
+                &alongside_options("second", true),
+                &LaunchAndConnectObserver::silent(),
+                &ServerObserver::silent(),
+                &LaunchObserver::silent(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("no account still means no launch");
+        assert!(
+            error.requires_interactive_login(),
+            "the running client refused an additional launch: {error}"
+        );
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn an_additional_launch_handle_that_is_already_live_is_refused_before_server_preparation()
+    {
+        let directory = tempfile::tempdir().expect("directory");
+        let mut app = app_rooted_at(directory.path());
+        let (client, server) = installed_linked_server(&app, ServerNetworkSettings::default());
+        let held = LaunchLock::acquire_additional(&client.root, "second").expect("additional lock");
+        let (observer, mut events) = LaunchAndConnectObserver::channel();
+
+        let error = app
+            .launch_and_connect(
+                client.id,
+                server.id,
+                &alongside_options("second", false),
+                &observer,
+                &ServerObserver::silent(),
+                &LaunchObserver::silent(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("a live handle is unavailable");
+        assert!(matches!(
+            error,
+            CoreError::Storage(ephervex_storage::StorageError::Lock(
+                ephervex_storage::LockError::AlreadyRunning { .. }
+            ))
+        ));
+        assert!(events.try_recv().is_err(), "the server was not prepared");
         assert!(!server.root.join("server/eula.txt").exists());
         drop(held);
     }
