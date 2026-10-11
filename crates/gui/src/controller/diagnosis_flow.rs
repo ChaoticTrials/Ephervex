@@ -195,11 +195,11 @@ impl DiagnosisFlowState {
             .is_none_or(|floor| ended >= *floor)
     }
 
-    /// Notes that a client was started, so a failure of a run that already
-    /// ended is stale from here on.
-    pub(super) fn note_client_start(&mut self, host: InstalledHost) {
+    /// Notes that a client was started when [`backend::run_clock`] read
+    /// `floor`, so a failure of a run that already ended is stale from here on.
+    pub(super) fn note_client_start(&mut self, host: InstalledHost, floor: u64) {
         if matches!(host, InstalledHost::Instance(_)) {
-            self.run_floors.insert(host, backend::run_clock());
+            self.run_floors.insert(host, floor);
         }
     }
 

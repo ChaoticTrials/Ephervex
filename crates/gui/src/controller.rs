@@ -4785,7 +4785,13 @@ impl Workspace {
     /// Clears what a host's last run left behind once it starts again. A new
     /// failure brings its own notices.
     fn forget_last_run(&self, host: InstalledHost) {
-        self.diagnosis.borrow_mut().note_client_start(host);
+        self.forget_last_run_from(host, backend::run_clock());
+    }
+
+    /// [`Self::forget_last_run`] for a start the backend began when the run
+    /// clock read `floor`.
+    fn forget_last_run_from(&self, host: InstalledHost, floor: u64) {
+        self.diagnosis.borrow_mut().note_client_start(host, floor);
         diagnosis_flow::forget_run(self, host);
         self.update(host, |view| {
             view.crash_report = SharedString::default();
@@ -7693,6 +7699,14 @@ fn apply_event(
             request,
             stage,
         } => apply_host_restart(ui, workspace, lifecycle, host, request, stage),
+        // Sent only once the old run is gone, so a refused or unfinished stop
+        // keeps the notice.
+        Event::ClientRestartStarting {
+            instance,
+            run_floor,
+        } => {
+            workspace.forget_last_run_from(InstalledHost::Instance(instance), run_floor);
+        }
         Event::PairStartSettled {
             operation,
             server_completion_owned,
@@ -12426,6 +12440,65 @@ mod tests {
         assert_eq!(run_notices(&ui), [String::new()]);
 
         fail_client_run(&workspace, client, backend::run_clock());
+        assert_eq!(run_notices(&ui), [lookup("gui-run-failed-client")]);
+    }
+
+    #[test]
+    fn a_client_restart_starting_forgets_the_clients_failed_run() {
+        let ui = test_window();
+        let (workspace, _commands, client, _server) = paired_workspace(&ui);
+        workspace.open(&ui, client, Surface::Overview);
+        fail_run(&workspace, client);
+        assert_eq!(run_notices(&ui), [lookup("gui-run-failed-client")]);
+        let lifecycle = Rc::clone(&workspace.lifecycle);
+
+        apply_host_restart(
+            &ui,
+            &workspace,
+            &lifecycle,
+            client,
+            1,
+            Some(backend::RestartStage::Stopping),
+        );
+        assert_eq!(run_notices(&ui), [lookup("gui-run-failed-client")]);
+
+        workspace.forget_last_run_from(client, backend::run_clock());
+        assert_eq!(run_notices(&ui), [String::new()]);
+    }
+
+    #[test]
+    fn a_client_restart_drops_the_failure_of_a_run_that_ended_before_it_started() {
+        let ui = test_window();
+        let (workspace, _commands, client, _server) = paired_workspace(&ui);
+        workspace.open(&ui, client, Surface::Overview);
+
+        workspace.forget_last_run_from(client, 10);
+        fail_client_run(&workspace, client, 9);
+        assert_eq!(run_notices(&ui), [String::new()]);
+    }
+
+    #[test]
+    fn a_failure_of_a_run_that_ended_before_a_client_restart_is_applied_still_shows() {
+        let ui = test_window();
+        let (workspace, _commands, client, _server) = paired_workspace(&ui);
+        workspace.open(&ui, client, Surface::Overview);
+
+        // The new run failed after the backend noted the clock, but before the
+        // window applied that start.
+        workspace.forget_last_run_from(client, 10);
+        fail_client_run(&workspace, client, 10);
+        assert_eq!(run_notices(&ui), [lookup("gui-run-failed-client")]);
+    }
+
+    #[test]
+    fn a_client_restart_that_ends_without_starting_keeps_the_failed_run() {
+        let ui = test_window();
+        let (workspace, _commands, client, _server) = paired_workspace(&ui);
+        workspace.open(&ui, client, Surface::Overview);
+        fail_run(&workspace, client);
+        let lifecycle = Rc::clone(&workspace.lifecycle);
+
+        apply_host_restart(&ui, &workspace, &lifecycle, client, 1, None);
         assert_eq!(run_notices(&ui), [lookup("gui-run-failed-client")]);
     }
 

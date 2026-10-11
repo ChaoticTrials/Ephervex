@@ -1725,6 +1725,13 @@ pub enum Event {
         request: u64,
         stage: Option<RestartStage>,
     },
+    /// A client restart is about to start the new run. `run_floor` is
+    /// [`run_clock`] as it stood then, so a run that ends after this point
+    /// stays current however late the event is applied.
+    ClientRestartStarting {
+        instance: InstanceId,
+        run_floor: u64,
+    },
     /// Whether a client launch this run started is still running, which is
     /// what makes it restartable: its launch request is known.
     LaunchContext {
@@ -7898,6 +7905,10 @@ fn spawn_client_restart(
                             .is_ok_and(|state| state.is_none())
                 },
                 || {
+                    let _ = events.send(Event::ClientRestartStarting {
+                        instance,
+                        run_floor: run_clock(),
+                    });
                     let (sender, started) = tokio::sync::oneshot::channel();
                     spawn_launch(
                         paths.clone(),
