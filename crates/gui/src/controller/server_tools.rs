@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use ephervex_i18n::lookup;
+use ephervex_i18n::{Arg, lookup, lookup_args};
 use ephervex_model::ServerId;
 
 use crate::backend::{ConsoleOutcome, ServerToolEvent};
@@ -23,6 +23,37 @@ pub(super) enum LinkedClaim {
     Starting,
     /// The server is already running and this action joins that run.
     Running,
+}
+
+/// Why a linked start could not claim its server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum LinkedRefusal {
+    /// A start, stop, or console command of the server is still under way.
+    Busy { server: String },
+    /// The server is being restarted.
+    Restarting { server: String },
+    /// The server can neither be started nor joined as it is.
+    Unavailable { server: String, state: String },
+}
+
+impl LinkedRefusal {
+    pub(super) fn message(&self) -> String {
+        let (id, server, state) = match self {
+            Self::Busy { server } => ("gui-pair-start-server-busy", server, None),
+            Self::Restarting { server } => ("gui-pair-start-server-restarting", server, None),
+            Self::Unavailable { server, state } => {
+                ("gui-pair-start-server-unavailable", server, Some(state))
+            }
+        };
+        let server = Arg::from(server.as_str());
+        match state {
+            Some(state) => lookup_args(
+                id,
+                [("server", server), ("state", Arg::from(state.as_str()))],
+            ),
+            None => lookup_args(id, [("server", server)]),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,18 +108,42 @@ impl ServerTools {
             || self.stops.contains_key(&id)
     }
 
-    pub(super) fn claim_linked(&mut self, id: ServerId, restarting: bool) -> Option<LinkedClaim> {
-        if self.busy(id) || restarting {
-            return None;
+    pub(super) fn claim_linked(
+        &mut self,
+        id: ServerId,
+        restarting: bool,
+    ) -> Result<LinkedClaim, LinkedRefusal> {
+        let server = self
+            .rows
+            .get(&id)
+            .map_or_else(|| id.to_string(), |row| row.name.to_string());
+        if restarting {
+            return Err(LinkedRefusal::Restarting { server });
         }
-        if self.rows.get(&id).is_some_and(|row| row.can_start) {
-            self.request(id, ServerAction::Start, restarting)
-                .then_some(LinkedClaim::Starting)
+        if self.busy(id) {
+            return Err(LinkedRefusal::Busy { server });
+        }
+        let Some(row) = self.rows.get(&id) else {
+            return Err(LinkedRefusal::Unavailable {
+                server,
+                state: lookup("gui-pair-start-server-unknown"),
+            });
+        };
+        if row.can_start {
+            if self.request(id, ServerAction::Start, restarting) {
+                Ok(LinkedClaim::Starting)
+            } else {
+                Err(LinkedRefusal::Busy { server })
+            }
+        } else if row.can_stop {
+            Ok(LinkedClaim::Running)
         } else {
-            self.rows
-                .get(&id)
-                .is_some_and(|row| row.can_stop)
-                .then_some(LinkedClaim::Running)
+            let state = if row.installed {
+                row.state.to_string()
+            } else {
+                lookup("gui-pair-start-server-not-installed")
+            };
+            Err(LinkedRefusal::Unavailable { server, state })
         }
     }
 

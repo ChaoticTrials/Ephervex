@@ -56,7 +56,7 @@ mod workspace;
 use diagnosis_flow::DiagnosisFlowState;
 use log_views::LogViews;
 use mod_views::ModViews;
-use server_tools::{LinkedClaim, ServerAction, ServerTools};
+use server_tools::{LinkedClaim, LinkedRefusal, ServerAction, ServerTools};
 use workspace::{PaneChange, WorkspaceState};
 
 pub struct Controller {
@@ -4852,23 +4852,25 @@ impl Workspace {
     fn claim_start(&self, ui: &AppWindow, host: InstalledHost) -> HostStart {
         let mut lifecycle = self.lifecycle.borrow_mut();
         if lifecycle.pair_starting(host) {
-            return HostStart::Refused;
+            return HostStart::Refused(StartRefusal::PairStarting);
         }
         let Some((client, server)) = self.state.borrow().pair_starting_together(host) else {
             self.forget_last_run(host);
             return HostStart::Alone;
         };
         let Some(operation) = lifecycle.begin_pair_start(client, server) else {
-            return HostStart::Refused;
+            return HostStart::Refused(StartRefusal::PairStarting);
         };
         let mut starts_server = false;
         if let InstalledHost::Server(id) = server {
             let restarting = !lifecycle.stage_of(server).is_empty();
-            let Some(claim) = lifecycle.servers.claim_linked(id, restarting) else {
-                lifecycle.settle_pair_start(operation, true);
-                return HostStart::Refused;
-            };
-            starts_server = claim == LinkedClaim::Starting;
+            match lifecycle.servers.claim_linked(id, restarting) {
+                Ok(claim) => starts_server = claim == LinkedClaim::Starting,
+                Err(refusal) => {
+                    lifecycle.settle_pair_start(operation, true);
+                    return HostStart::Refused(StartRefusal::Server(refusal));
+                }
+            }
         }
         self.forget_last_run(client);
         self.forget_last_run(server);
@@ -5115,9 +5117,13 @@ fn register_linked_pair(ui: &AppWindow, workspace: &Workspace) {
             else {
                 return;
             };
-            let Some(claim) = lifecycle.servers.claim_linked(server, restarting) else {
-                lifecycle.settle_pair_start(operation, true);
-                return;
+            let claim = match lifecycle.servers.claim_linked(server, restarting) {
+                Ok(claim) => claim,
+                Err(refusal) => {
+                    lifecycle.settle_pair_start(operation, true);
+                    ui.invoke_present_toast(refusal.message().into(), true);
+                    return;
+                }
             };
             stamp_host_lifecycle(&ui, &lifecycle);
             (operation, claim)
@@ -5186,7 +5192,7 @@ fn register_pane_layout(ui: &AppWindow, workspace: &Workspace) {
 }
 
 /// How a fresh Launch or Start of a host goes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum HostStart {
     Alone,
     /// A pair start with this operation.
@@ -5198,8 +5204,26 @@ enum HostStart {
         /// joining one that is already running.
         starts_server: bool,
     },
+    /// The start was refused, and the reason is said to the user.
+    Refused(StartRefusal),
+}
+
+/// Why a fresh Launch or Start of a paired host was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StartRefusal {
     /// A start of the host's pair is already under way.
-    Refused,
+    PairStarting,
+    /// The pair's server could not be claimed for the start.
+    Server(LinkedRefusal),
+}
+
+impl StartRefusal {
+    fn message(&self) -> String {
+        match self {
+            Self::PairStarting => lookup("gui-pair-start-busy"),
+            Self::Server(refusal) => refusal.message(),
+        }
+    }
 }
 
 /// Launching a client and starting a server, each of which starts its pair
@@ -5245,8 +5269,8 @@ fn register_host_starts(ui: &AppWindow, workspace: &Workspace) {
                 }
                 launch.show_pair(&ui, client, server);
             }
-            HostStart::Refused => {
-                ui.invoke_present_toast(lookup("gui-pair-start-busy").into(), true);
+            HostStart::Refused(refusal) => {
+                ui.invoke_present_toast(refusal.message().into(), true);
             }
         }
     });
@@ -5306,8 +5330,8 @@ fn register_host_starts(ui: &AppWindow, workspace: &Workspace) {
                 );
                 (Some((client, server)), starts_server)
             }
-            HostStart::Refused => {
-                ui.invoke_present_toast(lookup("gui-pair-start-busy").into(), true);
+            HostStart::Refused(refusal) => {
+                ui.invoke_present_toast(refusal.message().into(), true);
                 return;
             }
         };
@@ -11834,7 +11858,7 @@ mod tests {
                     .borrow_mut()
                     .servers
                     .claim_linked(server, false)
-                    .is_some()
+                    .is_ok()
             );
             apply_server_tool_event(
                 &ui,
@@ -11858,6 +11882,13 @@ mod tests {
 
     fn server_host() -> InstalledHost {
         InstalledHost::Server(ephervex_model::ServerId::new())
+    }
+
+    fn server_host_id(host: InstalledHost) -> ephervex_model::ServerId {
+        match host {
+            InstalledHost::Server(id) => id,
+            InstalledHost::Instance(_) => panic!("not a server host"),
+        }
     }
 
     /// Every pane's host and surface, in reading order.
@@ -12274,6 +12305,123 @@ mod tests {
                 (lookup("gui-pair-start-busy"), true)
             ]
         );
+    }
+
+    /// A start that cannot claim the server says why, and leaves the pair free
+    /// to start once the server can.
+    #[test]
+    fn a_start_together_refused_for_the_server_says_why_and_frees_the_pair() {
+        let ui = test_window();
+        let toasts = toasts(&ui);
+        let (workspace, commands, client, server) = paired_workspace_starting_together(&ui, true);
+        let server_id = server_host_id(server);
+
+        // A console command to the running server is still in flight.
+        let (clients, rows) = paired_rows(client, server, true, true);
+        workspace.lifecycle.borrow_mut().servers.observe(&rows);
+        workspace.state.borrow_mut().set_rows(clients, rows);
+        assert!(workspace.lifecycle.borrow_mut().servers.request(
+            server_id,
+            ServerAction::Console,
+            false
+        ));
+        ui.invoke_launch_client(client.id().into());
+        ui.invoke_server_start(server.id().into());
+        let busy = LinkedRefusal::Busy {
+            server: "Repro Server".into(),
+        };
+        assert_eq!(
+            busy.message(),
+            lookup_args(
+                "gui-pair-start-server-busy",
+                [("server", Arg::from("Repro Server"))],
+            )
+        );
+        assert_ne!(busy.message(), lookup("gui-pair-start-busy"));
+
+        // A server that can neither start nor stop needs the user to act.
+        let (clients, mut rows) = paired_rows(client, server, true, false);
+        rows[0].installed = true;
+        rows[0].can_start = false;
+        rows[0].state = "Needs recovery".into();
+        workspace.lifecycle.borrow_mut().servers = ServerTools::default();
+        workspace.lifecycle.borrow_mut().servers.observe(&rows);
+        workspace.state.borrow_mut().set_rows(clients, rows);
+        ui.invoke_launch_client(client.id().into());
+        ui.invoke_server_start(server.id().into());
+        let unavailable = LinkedRefusal::Unavailable {
+            server: "Repro Server".into(),
+            state: "Needs recovery".into(),
+        };
+
+        assert_eq!(
+            toasts.borrow().as_slice(),
+            [
+                (busy.message(), true),
+                (busy.message(), true),
+                (unavailable.message(), true),
+                (unavailable.message(), true),
+            ]
+        );
+        assert!(unavailable.message().contains("Needs recovery"));
+        assert!(starts(&commands).is_empty(), "nothing launches");
+        assert!(!workspace.lifecycle.borrow().pair_starting(client));
+    }
+
+    #[test]
+    fn a_linked_claim_refuses_a_busy_restarting_or_unstartable_server_with_its_own_reason() {
+        let client = client_host();
+        let server = server_host();
+        let server_id = server_host_id(server);
+        let name = || "Repro Server".to_string();
+
+        let mut stopping = ServerTools::default();
+        let (_, rows) = paired_rows(client, server, true, true);
+        stopping.observe(&rows);
+        assert!(stopping.request(server_id, ServerAction::Stop, false));
+        assert_eq!(
+            stopping.claim_linked(server_id, false),
+            Err(LinkedRefusal::Busy { server: name() })
+        );
+
+        let mut restarting = ServerTools::default();
+        restarting.observe(&rows);
+        assert_eq!(
+            restarting.claim_linked(server_id, true),
+            Err(LinkedRefusal::Restarting { server: name() })
+        );
+
+        let mut recovery = ServerTools::default();
+        let (_, mut rows) = paired_rows(client, server, true, false);
+        rows[0].installed = true;
+        rows[0].can_start = false;
+        rows[0].state = "Needs recovery".into();
+        recovery.observe(&rows);
+        assert_eq!(
+            recovery.claim_linked(server_id, false),
+            Err(LinkedRefusal::Unavailable {
+                server: name(),
+                state: "Needs recovery".into()
+            })
+        );
+
+        let mut uninstalled = ServerTools::default();
+        let (_, mut rows) = paired_rows(client, server, true, false);
+        rows[0].can_start = false;
+        uninstalled.observe(&rows);
+        assert_eq!(
+            uninstalled.claim_linked(server_id, false),
+            Err(LinkedRefusal::Unavailable {
+                server: name(),
+                state: lookup("gui-pair-start-server-not-installed")
+            })
+        );
+
+        let mut missing = ServerTools::default();
+        assert!(matches!(
+            missing.claim_linked(server_id, false),
+            Err(LinkedRefusal::Unavailable { .. })
+        ));
     }
 
     /// However a pair start ends, its settle frees the pair, and a settle for
