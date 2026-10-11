@@ -4390,32 +4390,7 @@ fn run_worker(
                 provider,
                 project,
             } => {
-                let paths = app.paths().clone();
-                spawn_detached(paths, events.clone(), move |app, events, runtime| {
-                    let result = runtime.block_on(app.plan_linked_mod_operation(
-                        instance,
-                        &LinkedModRequest::Install {
-                            provider,
-                            project: project.clone(),
-                            version: None,
-                        },
-                        &OperationReporter::silent("planning-mod-install"),
-                        &CancellationToken::new(),
-                    ));
-                    match result {
-                        Ok(plan) => {
-                            let _ = events.send(Event::ModPlan(install_plan_data(&plan, &project)));
-                        }
-                        Err(error) => {
-                            send_error(&events, &error);
-                            let _ = events.send(Event::ModPlanFailed {
-                                instance: instance.to_string(),
-                                provider: provider.as_str().to_owned(),
-                                requested: project,
-                            });
-                        }
-                    }
-                });
+                spawn_mod_plan(app.paths().clone(), &events, instance, provider, project);
             }
             Command::InstallMod {
                 instance,
@@ -9778,6 +9753,58 @@ enum Acquisition {
     Abandoned,
 }
 
+/// Plans an install on its own thread. Every request ends in an
+/// [`Event::ModPlan`] or an [`Event::ModPlanFailed`], including when the
+/// thread cannot be set up, so the browser install queue always moves on.
+fn spawn_mod_plan(
+    paths: Paths,
+    events: &Sender<Event>,
+    instance: InstanceId,
+    provider: ModProvider,
+    project: String,
+) {
+    let failed = {
+        let project = project.clone();
+        move |events: &Sender<Event>| {
+            let _ = events.send(Event::ModPlanFailed {
+                instance: instance.to_string(),
+                provider: provider.as_str().to_owned(),
+                requested: project,
+            });
+        }
+    };
+    spawn_detached_with_setup_failure(
+        paths,
+        events.clone(),
+        failed,
+        move |app, events, runtime| {
+            let result = runtime.block_on(app.plan_linked_mod_operation(
+                instance,
+                &LinkedModRequest::Install {
+                    provider,
+                    project: project.clone(),
+                    version: None,
+                },
+                &OperationReporter::silent("planning-mod-install"),
+                &CancellationToken::new(),
+            ));
+            match result {
+                Ok(plan) => {
+                    let _ = events.send(Event::ModPlan(install_plan_data(&plan, &project)));
+                }
+                Err(error) => {
+                    send_error(&events, &error);
+                    let _ = events.send(Event::ModPlanFailed {
+                        instance: instance.to_string(),
+                        provider: provider.as_str().to_owned(),
+                        requested: project,
+                    });
+                }
+            }
+        },
+    );
+}
+
 fn spawn_detached(
     paths: Paths,
     events: Sender<Event>,
@@ -14448,6 +14475,42 @@ mod tests {
                     ConsoleOutcome::Rejected,
                     "setup failure does not establish a broken input pipe"
                 );
+                break;
+            }
+            assert!(
+                matches!(event, Event::Toast { error: true, .. }),
+                "unexpected event: {event:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mod_plan_setup_failure_settles_the_request_it_was_started_for() {
+        let temp = tempfile::tempdir().expect("temp");
+        let invalid = temp.path().join("not-a-directory");
+        std::fs::write(&invalid, b"file").expect("file");
+        let (events, received) = std::sync::mpsc::channel();
+        let instance = ephervex_model::InstanceId::new();
+        spawn_mod_plan(
+            Paths::rooted_at(&invalid),
+            &events,
+            instance,
+            ModProvider::Modrinth,
+            "sodium".to_owned(),
+        );
+        loop {
+            let event = received
+                .recv_timeout(Duration::from_secs(5))
+                .expect("completion");
+            if let Event::ModPlanFailed {
+                instance: failed,
+                provider,
+                requested,
+            } = event
+            {
+                assert_eq!(failed, instance.to_string());
+                assert_eq!(provider, ModProvider::Modrinth.as_str());
+                assert_eq!(requested, "sodium");
                 break;
             }
             assert!(
