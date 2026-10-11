@@ -73,6 +73,9 @@ pub enum Command {
     WarmLanguageCatalog(String),
     LoadLoaderVersions {
         form: String,
+        /// The instance the Change Loader dialog was opened for, so a failure
+        /// is reported to that dialog alone. `None` for the create forms.
+        instance: Option<InstanceId>,
         loader: LoaderKind,
         minecraft: String,
     },
@@ -1577,6 +1580,27 @@ pub enum Event {
         minecraft: String,
         versions: Vec<String>,
     },
+    /// The build list the Change Loader dialog asked for could not be fetched.
+    /// Ends that dialog's loading state with the reason, or is a toast once
+    /// the dialog is no longer open for `instance`.
+    LoaderVersionsFailed {
+        instance: InstanceId,
+        loader: LoaderKind,
+        minecraft: String,
+        message: String,
+    },
+    /// A loader change for `instance` finished. Closes the Change Loader
+    /// dialog only while it is still open for that instance.
+    LoaderChangeFinished {
+        instance: InstanceId,
+    },
+    /// A loader change for `instance` was refused or failed. Shown in the
+    /// Change Loader dialog only while it is still open for that instance, as
+    /// a toast otherwise.
+    LoaderChangeFailed {
+        instance: InstanceId,
+        message: String,
+    },
     ManagedMods(ManagedModsData),
     /// What a set of dropped files would do, and what has to be asked first.
     LocalModPlan(LocalModPlanData),
@@ -2573,6 +2597,7 @@ fn run_worker(
             }
             Command::LoadLoaderVersions {
                 form,
+                instance,
                 loader,
                 minecraft,
             } => {
@@ -2598,7 +2623,17 @@ fn run_worker(
                                 versions,
                             });
                         }
-                        Err(error) => send_modal_error(&events, &error),
+                        Err(error) => match instance {
+                            Some(instance) => {
+                                let _ = events.send(Event::LoaderVersionsFailed {
+                                    instance,
+                                    loader,
+                                    minecraft,
+                                    message: logged_failure_message(&error),
+                                });
+                            }
+                            None => send_modal_error(&events, &error),
+                        },
                     },
                 );
             }
@@ -3307,14 +3342,19 @@ fn run_worker(
                 }
             }
             Command::ChangeLoaderVersion { instance, version } => {
-                let Some(in_flight) = claim_hosts_for_change(
+                let in_flight = match HostChangeInFlight::try_mark(
                     &changing,
                     &[InstalledHost::Instance(instance)],
                     "gui-loader-change-busy",
-                    ModalScope::LOADER_CHANGE,
-                    &events,
-                ) else {
-                    continue;
+                ) {
+                    Ok(marks) => marks,
+                    Err(refusal) => {
+                        let _ = events.send(Event::LoaderChangeFailed {
+                            instance,
+                            message: lookup(refusal),
+                        });
+                        continue;
+                    }
                 };
                 let paths = app.paths().clone();
                 spawn_detached(paths, events.clone(), move |mut app, events, runtime| {
@@ -3330,7 +3370,7 @@ fn run_worker(
                     ));
                     match result {
                         Ok(change) => {
-                            let _ = events.send(Event::CloseModal(ModalScope::LOADER_CHANGE));
+                            let _ = events.send(Event::LoaderChangeFinished { instance });
                             let _ = events.send(Event::Toast {
                                 message: localized_value(
                                     "gui-loader-changed",
@@ -3341,7 +3381,10 @@ fn run_worker(
                             send_snapshot(&mut app, &events);
                         }
                         Err(error) => {
-                            send_scoped_modal_error(&events, ModalScope::LOADER_CHANGE, &error);
+                            let _ = events.send(Event::LoaderChangeFailed {
+                                instance,
+                                message: logged_failure_message(&error),
+                            });
                         }
                     }
                 });
@@ -11017,11 +11060,17 @@ fn send_modal_error(events: &Sender<Event>, error: &CoreError) {
 /// Reports a failed submission to the dialogs in `scope`, or as a toast once
 /// none of them is on screen.
 fn send_scoped_modal_error(events: &Sender<Event>, scope: ModalScope, error: &CoreError) {
-    tracing::warn!(message_id = error.message_id(), detail = %ErrorChain(error), "GUI form submission failed");
     let _ = events.send(Event::ModalError {
         scope,
-        message: localized_error(error),
+        message: logged_failure_message(error),
     });
+}
+
+/// The user-facing text of a failed submission, with the technical detail
+/// logged beside it.
+fn logged_failure_message(error: &CoreError) -> String {
+    tracing::warn!(message_id = error.message_id(), detail = %ErrorChain(error), "GUI form submission failed");
+    localized_error(error)
 }
 
 fn storage_class(persistent: bool) -> StorageClass {

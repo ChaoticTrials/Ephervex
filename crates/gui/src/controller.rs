@@ -3270,6 +3270,7 @@ fn register_catalog_actions(ui: &AppWindow, commands: &Sender<Command>) {
                 &sender,
                 Command::LoadLoaderVersions {
                     form: form.into(),
+                    instance: None,
                     loader,
                     minecraft: minecraft.into(),
                 },
@@ -4082,6 +4083,9 @@ fn register_loader_change(ui: &AppWindow, commands: &Sender<Command>) {
         else {
             return;
         };
+        let Some(instance) = backend::parse_instance_id(&id) else {
+            return;
+        };
         ui.set_mod_action_host(id);
         // Vanilla has no build to change; the control that opens this is
         // hidden for it, and this is the second gate.
@@ -4101,6 +4105,7 @@ fn register_loader_change(ui: &AppWindow, commands: &Sender<Command>) {
             &sender,
             Command::LoadLoaderVersions {
                 form: "loader-change".to_owned(),
+                instance: Some(instance),
                 loader,
                 minecraft: row.minecraft.to_string(),
             },
@@ -7407,6 +7412,16 @@ fn apply_event(
             minecraft,
             versions,
         } => apply_loader_versions(ui, &form, loader, &minecraft, &versions),
+        Event::LoaderVersionsFailed {
+            instance,
+            loader,
+            minecraft,
+            message,
+        } => apply_loader_versions_failure(ui, instance, loader, &minecraft, message),
+        Event::LoaderChangeFinished { instance } => apply_loader_change_finished(ui, instance),
+        Event::LoaderChangeFailed { instance, message } => {
+            apply_loader_change_failure(ui, instance, message);
+        }
         Event::ManagedMods(data) => {
             // Kept with the host it belongs to, checked by kind as well as id,
             // so a server's list never lands in the panel of the instance it
@@ -7973,6 +7988,65 @@ fn recompute_create_name(ui: &AppWindow) {
     );
 }
 
+/// Whether the Change Loader dialog is open for `instance`. A later outcome of
+/// a change started from an earlier dialog must not act on this one.
+fn loader_change_dialog_is_for(ui: &AppWindow, instance: ephervex_model::InstanceId) -> bool {
+    ui.get_modal() == "loader-change" && ui.get_mod_action_host() == instance.to_string().as_str()
+}
+
+/// Whether the open Change Loader dialog lists builds of `loader` for
+/// `minecraft`.
+fn loader_change_dialog_lists(
+    ui: &AppWindow,
+    loader: ephervex_model::LoaderKind,
+    minecraft: &str,
+) -> bool {
+    ui.get_modal() == "loader-change"
+        && ui.get_loader_change_loader() == loader.to_string().as_str()
+        && ui.get_loader_change_minecraft() == minecraft
+}
+
+/// Closes the Change Loader dialog when it is the one the finished change was
+/// started from.
+fn apply_loader_change_finished(ui: &AppWindow, instance: ephervex_model::InstanceId) {
+    if loader_change_dialog_is_for(ui, instance) {
+        close_modal_for(ui, backend::ModalScope::LOADER_CHANGE);
+    }
+}
+
+/// Shows a refused or failed loader change in the dialog it was started from,
+/// or as a toast once that dialog is gone or open for another instance.
+fn apply_loader_change_failure(
+    ui: &AppWindow,
+    instance: ephervex_model::InstanceId,
+    message: String,
+) {
+    if loader_change_dialog_is_for(ui, instance) {
+        apply_modal_error(ui, backend::ModalScope::LOADER_CHANGE, message);
+    } else {
+        ui.invoke_present_toast(message.into(), true);
+    }
+}
+
+/// Ends the Change Loader dialog's wait for its build list with the reason, or
+/// tells the user in a toast once that dialog is gone or open for something else.
+fn apply_loader_versions_failure(
+    ui: &AppWindow,
+    instance: ephervex_model::InstanceId,
+    loader: ephervex_model::LoaderKind,
+    minecraft: &str,
+    message: String,
+) {
+    if loader_change_dialog_is_for(ui, instance)
+        && loader_change_dialog_lists(ui, loader, minecraft)
+    {
+        ui.set_loader_change_loading(false);
+        ui.set_modal_error(message.into());
+    } else {
+        ui.invoke_present_toast(message.into(), true);
+    }
+}
+
 fn apply_loader_versions(
     ui: &AppWindow,
     form: &str,
@@ -7984,10 +8058,7 @@ fn apply_loader_versions(
     // Applied only to the dialog that is open for this loader and release: a
     // list asked for by a dialog since closed must not fill the next one.
     if form == "loader-change" {
-        if ui.get_modal() != "loader-change"
-            || ui.get_loader_change_loader() != label
-            || ui.get_loader_change_minecraft() != minecraft
-        {
+        if !loader_change_dialog_lists(ui, loader, minecraft) {
             return;
         }
         ui.set_loader_change_versions(model(
@@ -15075,10 +15146,19 @@ mod tests {
         builds.iter().map(|build| (*build).to_owned()).collect()
     }
 
+    fn new_instance() -> ephervex_model::InstanceId {
+        ephervex_model::InstanceId::new()
+    }
+
+    fn open_loader_change(ui: &AppWindow, instance: ephervex_model::InstanceId) {
+        ui.invoke_open_loader_change(instance.to_string().into());
+    }
+
     #[test]
     fn a_refused_loader_change_leaves_the_change_button_usable() {
-        let (ui, _commands) = loader_change_window(&[("a", "NeoForge", "1.21.1")]);
-        ui.invoke_open_loader_change("a".into());
+        let a = new_instance();
+        let (ui, _commands) = loader_change_window(&[(&a.to_string(), "NeoForge", "1.21.1")]);
+        open_loader_change(&ui, a);
         ui.set_loader_change_pending(true);
 
         apply_modal_error(
@@ -15093,8 +15173,9 @@ mod tests {
 
     #[test]
     fn a_failure_for_another_dialog_does_not_release_a_loader_change_in_flight() {
-        let (ui, _commands) = loader_change_window(&[("a", "NeoForge", "1.21.1")]);
-        ui.invoke_open_loader_change("a".into());
+        let a = new_instance();
+        let (ui, _commands) = loader_change_window(&[(&a.to_string(), "NeoForge", "1.21.1")]);
+        open_loader_change(&ui, a);
         ui.set_loader_change_pending(true);
 
         apply_modal_error(&ui, backend::ModalScope::Anywhere, "Unrelated".into());
@@ -15105,15 +15186,12 @@ mod tests {
 
     #[test]
     fn a_loader_change_failure_after_its_dialog_closed_is_a_toast_beside_the_open_dialog() {
+        let a = new_instance();
         let (ui, _commands) = loader_change_window(&[]);
         let toasts = toasts(&ui);
         ui.set_modal("rename".into());
 
-        apply_modal_error(
-            &ui,
-            backend::ModalScope::LOADER_CHANGE,
-            "Not compatible".into(),
-        );
+        apply_loader_change_failure(&ui, a, "Not compatible".into());
 
         assert_eq!(ui.get_modal_error(), "");
         assert_eq!(
@@ -15124,8 +15202,9 @@ mod tests {
 
     #[test]
     fn a_version_list_for_another_loader_or_release_is_not_applied_to_the_open_loader_change() {
-        let (ui, _commands) = loader_change_window(&[("b", "NeoForge", "1.21.1")]);
-        ui.invoke_open_loader_change("b".into());
+        let b = new_instance();
+        let (ui, _commands) = loader_change_window(&[(&b.to_string(), "NeoForge", "1.21.1")]);
+        open_loader_change(&ui, b);
 
         apply_loader_versions(
             &ui,
@@ -15149,8 +15228,9 @@ mod tests {
 
     #[test]
     fn a_version_list_for_the_open_loader_change_fills_it_and_defaults_to_the_current_build() {
-        let (ui, _commands) = loader_change_window(&[("b", "NeoForge", "1.21.1")]);
-        ui.invoke_open_loader_change("b".into());
+        let b = new_instance();
+        let (ui, _commands) = loader_change_window(&[(&b.to_string(), "NeoForge", "1.21.1")]);
+        open_loader_change(&ui, b);
 
         apply_loader_versions(
             &ui,
@@ -15167,8 +15247,9 @@ mod tests {
 
     #[test]
     fn a_version_list_arriving_after_the_loader_change_dialog_closed_is_dropped() {
-        let (ui, _commands) = loader_change_window(&[("a", "NeoForge", "1.21.1")]);
-        ui.invoke_open_loader_change("a".into());
+        let a = new_instance();
+        let (ui, _commands) = loader_change_window(&[(&a.to_string(), "NeoForge", "1.21.1")]);
+        open_loader_change(&ui, a);
         ui.set_modal(SharedString::default());
 
         apply_loader_versions(
@@ -15181,6 +15262,149 @@ mod tests {
 
         assert!(ui.get_loader_change_loading());
         assert_eq!(ui.get_loader_change_versions().row_count(), 0);
+    }
+
+    #[test]
+    fn opening_the_loader_change_dialog_asks_for_builds_on_behalf_of_its_instance() {
+        let a = new_instance();
+        let (ui, commands) = loader_change_window(&[(&a.to_string(), "NeoForge", "1.21.1")]);
+
+        open_loader_change(&ui, a);
+
+        match commands.try_recv() {
+            Ok(Command::LoadLoaderVersions {
+                form,
+                instance,
+                loader,
+                minecraft,
+            }) => {
+                assert_eq!(form, "loader-change");
+                assert_eq!(instance, Some(a));
+                assert_eq!(loader, ephervex_model::LoaderKind::NeoForge);
+                assert_eq!(minecraft, "1.21.1");
+            }
+            other => panic!("expected a build list request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_failed_build_list_ends_the_loading_of_the_dialog_it_was_asked_for() {
+        let a = new_instance();
+        let (ui, _commands) = loader_change_window(&[(&a.to_string(), "NeoForge", "1.21.1")]);
+        let toasts = toasts(&ui);
+        open_loader_change(&ui, a);
+        assert!(ui.get_loader_change_loading());
+
+        apply_loader_versions_failure(
+            &ui,
+            a,
+            ephervex_model::LoaderKind::NeoForge,
+            "1.21.1",
+            "Offline".into(),
+        );
+
+        assert!(!ui.get_loader_change_loading());
+        assert_eq!(ui.get_modal_error(), "Offline");
+        assert!(toasts.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_failed_build_list_for_a_dialog_since_reopened_for_another_instance_is_a_toast() {
+        let (a, b) = (new_instance(), new_instance());
+        let (ui, _commands) = loader_change_window(&[
+            (&a.to_string(), "NeoForge", "1.21.1"),
+            (&b.to_string(), "NeoForge", "1.21.1"),
+        ]);
+        let toasts = toasts(&ui);
+        open_loader_change(&ui, a);
+        open_loader_change(&ui, b);
+
+        apply_loader_versions_failure(
+            &ui,
+            a,
+            ephervex_model::LoaderKind::NeoForge,
+            "1.21.1",
+            "Offline".into(),
+        );
+
+        assert!(ui.get_loader_change_loading());
+        assert_eq!(ui.get_modal_error(), "");
+        assert_eq!(toasts.borrow().as_slice(), [("Offline".to_owned(), true)]);
+    }
+
+    #[test]
+    fn a_failed_build_list_after_the_loader_change_dialog_closed_is_a_toast() {
+        let a = new_instance();
+        let (ui, _commands) = loader_change_window(&[(&a.to_string(), "NeoForge", "1.21.1")]);
+        let toasts = toasts(&ui);
+        open_loader_change(&ui, a);
+        ui.set_modal(SharedString::default());
+
+        apply_loader_versions_failure(
+            &ui,
+            a,
+            ephervex_model::LoaderKind::NeoForge,
+            "1.21.1",
+            "Offline".into(),
+        );
+
+        assert_eq!(ui.get_modal_error(), "");
+        assert_eq!(toasts.borrow().as_slice(), [("Offline".to_owned(), true)]);
+    }
+
+    #[test]
+    fn a_loader_change_failure_for_another_instance_leaves_the_open_dialog_alone() {
+        let (a, b) = (new_instance(), new_instance());
+        let (ui, _commands) = loader_change_window(&[
+            (&a.to_string(), "NeoForge", "1.21.1"),
+            (&b.to_string(), "NeoForge", "1.21.1"),
+        ]);
+        let toasts = toasts(&ui);
+        open_loader_change(&ui, a);
+        open_loader_change(&ui, b);
+        ui.set_loader_change_pending(true);
+
+        apply_loader_change_failure(&ui, a, "Not compatible".into());
+
+        assert_eq!(ui.get_modal(), "loader-change");
+        assert_eq!(ui.get_modal_error(), "");
+        assert!(ui.get_loader_change_pending());
+        assert_eq!(
+            toasts.borrow().as_slice(),
+            [("Not compatible".to_owned(), true)]
+        );
+    }
+
+    #[test]
+    fn a_loader_change_failure_for_the_open_instance_is_shown_in_its_dialog() {
+        let a = new_instance();
+        let (ui, _commands) = loader_change_window(&[(&a.to_string(), "NeoForge", "1.21.1")]);
+        let toasts = toasts(&ui);
+        open_loader_change(&ui, a);
+        ui.set_loader_change_pending(true);
+
+        apply_loader_change_failure(&ui, a, "Not compatible".into());
+
+        assert_eq!(ui.get_modal_error(), "Not compatible");
+        assert!(!ui.get_loader_change_pending());
+        assert!(toasts.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_finished_loader_change_closes_only_the_dialog_open_for_its_instance() {
+        let (a, b) = (new_instance(), new_instance());
+        let (ui, _commands) = loader_change_window(&[
+            (&a.to_string(), "NeoForge", "1.21.1"),
+            (&b.to_string(), "NeoForge", "1.21.1"),
+        ]);
+        open_loader_change(&ui, a);
+        open_loader_change(&ui, b);
+
+        apply_loader_change_finished(&ui, a);
+        assert_eq!(ui.get_modal(), "loader-change");
+
+        apply_loader_change_finished(&ui, b);
+        assert_eq!(ui.get_modal(), "");
     }
 
     /// A link request the backend has answered with its download, as the window
