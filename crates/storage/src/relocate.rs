@@ -35,6 +35,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::removal::remove_tree_if_present;
+
 /// What a relocation moved.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct RelocationReport {
@@ -148,44 +150,6 @@ pub(crate) fn staged_name(directory: &Path) -> Option<&str> {
 
 fn discard_stage(destination: &Path) -> std::io::Result<()> {
     remove_tree_if_present(&stage_for(destination)?)
-}
-
-/// Removes a directory tree; one that is already gone is success.
-///
-/// Directories copied with a read-only mode get owner access back first.
-pub(crate) fn remove_tree_if_present(path: &Path) -> std::io::Result<()> {
-    let mut removed = std::fs::remove_dir_all(path);
-    if matches!(&removed, Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied) {
-        restore_owner_access(path);
-        removed = std::fs::remove_dir_all(path);
-    }
-    match removed {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
-        _ => Ok(()),
-    }
-}
-
-/// Gives the owner full access to every directory under `path`, links excluded.
-/// Best effort: whatever still cannot be removed is reported by the removal.
-fn restore_owner_access(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-
-    let Ok(metadata) = std::fs::symlink_metadata(path) else {
-        return;
-    };
-    if !metadata.file_type().is_dir() {
-        return;
-    }
-    let mode = metadata.permissions().mode();
-    if mode & 0o700 != 0o700 {
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode | 0o700));
-    }
-    let Ok(entries) = std::fs::read_dir(path) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        restore_owner_access(&entry.path());
-    }
 }
 
 fn copy_into(

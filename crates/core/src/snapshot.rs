@@ -318,9 +318,11 @@ impl App {
         let record = match result {
             Ok(record) => record,
             Err(error) => {
-                std::fs::remove_dir_all(&staging).map_err(|source| SnapshotError::Unwritable {
-                    path: staging.clone(),
-                    source: std::io::Error::other(format!("{error}; cleanup failed: {source}")),
+                ephervex_storage::remove_tree_if_present(&staging).map_err(|source| {
+                    SnapshotError::Unwritable {
+                        path: staging.clone(),
+                        source: std::io::Error::other(format!("{error}; cleanup failed: {source}")),
+                    }
                 })?;
                 ephervex_storage::sync_parent(&staging).map_err(|source| {
                     SnapshotError::Unwritable {
@@ -409,9 +411,11 @@ impl App {
         {
             return Err(IsolationError::SafetySnapshotInUse { snapshot: id }.into());
         }
-        std::fs::remove_dir_all(&directory).map_err(|source| SnapshotError::Unwritable {
-            path: directory.clone(),
-            source,
+        ephervex_storage::remove_tree_if_present(&directory).map_err(|source| {
+            SnapshotError::Unwritable {
+                path: directory.clone(),
+                source,
+            }
         })?;
         ephervex_storage::sync_parent(&directory).map_err(|source| SnapshotError::Unwritable {
             path: directory,
@@ -1250,6 +1254,102 @@ mod tests {
             .expect("read safety state"),
             b"changed"
         );
+    }
+
+    fn freeze_directory(game: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let frozen = game.join("frozen");
+        std::fs::create_dir_all(&frozen).expect("create frozen directory");
+        std::fs::write(frozen.join("kept.txt"), b"frozen").expect("write frozen file");
+        std::fs::set_permissions(&frozen, std::fs::Permissions::from_mode(0o555))
+            .expect("make the directory read-only");
+        frozen
+    }
+
+    #[test]
+    fn a_snapshot_of_a_host_with_a_read_only_directory_can_be_deleted() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let app = App::open_at(Paths::rooted_at(temporary.path())).expect("open app");
+        let client = app
+            .create_client_for_test(NewClient::new(
+                "frozen client",
+                "1.21.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create client");
+        let host = InstalledHost::Instance(client.id);
+        let game = ephervex_storage::metadata::client_game_dir(&client.root);
+        freeze_directory(&game);
+        let captured = app
+            .create_snapshot(
+                host,
+                "frozen",
+                SnapshotOrigin::Manual,
+                &CancellationToken::new(),
+            )
+            .expect("create snapshot");
+
+        let deleted = app.delete_snapshot(host, captured.id);
+
+        let remaining = app.snapshots(host).expect("list").len();
+        let leftover = ephervex_storage::metadata::snapshots_dir(&client.root)
+            .join(captured.id.to_string())
+            .exists();
+        ephervex_storage::remove_tree_if_present(temporary.path()).expect("clean up");
+        deleted.expect("a read-only directory does not block deletion");
+        assert_eq!(remaining, 0);
+        assert!(!leftover);
+    }
+
+    #[test]
+    fn restoring_over_a_host_with_a_read_only_directory_completes_and_leaves_no_staging() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let app = App::open_at(Paths::rooted_at(temporary.path())).expect("open app");
+        let client = app
+            .create_client_for_test(NewClient::new(
+                "frozen restore",
+                "1.21.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create client");
+        let host = InstalledHost::Instance(client.id);
+        let game = ephervex_storage::metadata::client_game_dir(&client.root);
+        std::fs::write(game.join("state.txt"), b"captured").expect("write captured state");
+        let captured = app
+            .create_snapshot(
+                host,
+                "plain",
+                SnapshotOrigin::Manual,
+                &CancellationToken::new(),
+            )
+            .expect("create snapshot");
+        freeze_directory(&game);
+        std::fs::write(game.join("state.txt"), b"changed").expect("change state");
+
+        let first = app.restore_snapshot(
+            host,
+            captured.id,
+            SnapshotRestoreOptions::default(),
+            &CancellationToken::new(),
+        );
+        let state = std::fs::read(game.join("state.txt")).ok();
+        let frozen_left = game.join("frozen").exists();
+        let staging = std::fs::read_dir(ephervex_storage::metadata::staging_dir(&client.root))
+            .map_or(0, Iterator::count);
+        let second = app.restore_snapshot(
+            host,
+            captured.id,
+            SnapshotRestoreOptions::default(),
+            &CancellationToken::new(),
+        );
+        ephervex_storage::remove_tree_if_present(temporary.path()).expect("clean up");
+
+        first.expect("the restore succeeds over a read-only directory");
+        assert_eq!(state.as_deref(), Some(b"captured".as_slice()));
+        assert!(!frozen_left, "restore is replacement, not merge");
+        assert_eq!(staging, 0, "the finished restore leaves no staging behind");
+        second.expect("a later restore is not blocked by leftover staging");
     }
 
     #[test]

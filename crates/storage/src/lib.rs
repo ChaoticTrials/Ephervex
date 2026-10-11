@@ -41,6 +41,7 @@ pub mod reconcile;
 pub mod records;
 pub mod registry;
 pub(crate) mod relocate;
+pub mod removal;
 pub mod restore;
 
 #[cfg(test)]
@@ -79,6 +80,7 @@ pub use records::{
     ServerOperatorProfile, ServerOperatorSetup, ServerPortSelection, ServerRecord,
 };
 pub use registry::{HostClaim, RecipeClaim, Registry, RegistryError};
+pub use removal::remove_tree_if_present;
 pub use restore::{
     RestorePart, RestorePartState, RestoreTransaction, prepare_restore,
     recover_interrupted_restores,

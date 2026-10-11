@@ -1600,7 +1600,7 @@ fn recipe_guard_name(host: RecordRef) -> String {
 /// Reconciliation and user deletion both race with the OS clearing the
 /// temporary root, and losing that race is not an error (ADR 0006).
 fn remove_tree(root: &Path) -> Result<(), RegistryError> {
-    crate::relocate::remove_tree_if_present(root).map_err(|source| RegistryError::Io {
+    crate::removal::remove_tree_if_present(root).map_err(|source| RegistryError::Io {
         path: root.to_path_buf(),
         source,
     })

@@ -293,7 +293,7 @@ fn remove_path_if_present(path: &Path) -> std::io::Result<()> {
         Err(error) => return Err(error),
     };
     if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
-        std::fs::remove_dir_all(path)
+        crate::removal::remove_tree_if_present(path)
     } else {
         std::fs::remove_file(path)
     }
@@ -384,5 +384,66 @@ mod tests {
         );
         assert!(!metadata::is_incomplete(&root));
         assert!(!transaction.directory().exists());
+    }
+
+    fn read_only_game(live: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::create_dir_all(live.join("frozen")).expect("frozen");
+        std::fs::write(live.join("frozen/file"), b"old").expect("file");
+        std::fs::set_permissions(live.join("frozen"), std::fs::Permissions::from_mode(0o555))
+            .expect("chmod");
+    }
+
+    fn prepared_client_game_restore(root: &Path) -> RestoreTransaction {
+        let transaction = prepare_restore(
+            root,
+            SnapshotId::new(),
+            vec![RestorePartState {
+                part: RestorePart::ClientGame,
+                original_present: true,
+                replacement_present: true,
+            }],
+        )
+        .expect("prepare");
+        let incoming = transaction.incoming_path(RestorePart::ClientGame);
+        std::fs::create_dir_all(&incoming).expect("incoming");
+        std::fs::write(incoming.join("state"), b"restored").expect("state");
+        transaction
+    }
+
+    #[test]
+    fn finishing_a_restore_removes_a_replaced_tree_with_a_read_only_directory() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let root = temporary.path();
+        let live = root.join("minecraft");
+        read_only_game(&live);
+        let transaction = prepared_client_game_restore(root);
+        transaction.publish().expect("publish");
+
+        let finished = transaction.finish();
+
+        crate::removal::remove_tree_if_present(root).ok();
+        finished.expect("the replaced tree is removed despite its mode");
+    }
+
+    #[test]
+    fn rolling_back_a_restore_removes_a_published_tree_with_a_read_only_directory() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let root = temporary.path();
+        let live = root.join("minecraft");
+        std::fs::create_dir_all(&live).expect("live");
+        std::fs::write(live.join("state"), b"old").expect("state");
+        let transaction = prepared_client_game_restore(root);
+        let incoming = transaction.incoming_path(RestorePart::ClientGame);
+        read_only_game(&incoming);
+        transaction.publish().expect("publish");
+
+        let rolled_back = transaction.rollback();
+
+        let original = std::fs::read(live.join("state")).ok();
+        crate::removal::remove_tree_if_present(root).ok();
+        rolled_back.expect("the published tree is removed despite its mode");
+        assert_eq!(original.as_deref(), Some(b"old".as_slice()));
     }
 }
