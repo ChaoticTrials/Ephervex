@@ -2244,10 +2244,7 @@ fn confirm_instance_deletion(
             "deleting this instance removes {summary}, which cannot be undone; pass --yes to confirm, or --keep-files to leave the files on disk"
         );
     }
-    eprint!("Delete {summary}? This cannot be undone. [y/N] ");
-    std::io::stderr().flush()?;
-    let mut answer = String::new();
-    std::io::stdin().read_line(&mut answer)?;
+    let answer = ask(&format!("Delete {summary}? This cannot be undone. [y/N] "))?;
     match answer.trim().to_ascii_lowercase().as_str() {
         "y" | "yes" => Ok(()),
         _ => anyhow::bail!("the instance was not deleted"),
@@ -2474,11 +2471,9 @@ async fn run_server_command(
                         "EULA acceptance requires an interactive terminal; review {MINECRAFT_EULA_REFERENCE}"
                     );
                 }
-                outln!("Review the Minecraft EULA: {MINECRAFT_EULA_REFERENCE}");
-                out!("Type {EULA_CONFIRMATION_PHRASE} to accept: ");
-                std::io::stdout().flush()?;
-                let mut phrase = String::new();
-                std::io::stdin().read_line(&mut phrase)?;
+                let phrase = ask(&format!(
+                    "Review the Minecraft EULA: {MINECRAFT_EULA_REFERENCE}\nType {EULA_CONFIRMATION_PHRASE} to accept: "
+                ))?;
                 if phrase.trim_end() != EULA_CONFIRMATION_PHRASE {
                     anyhow::bail!("EULA consent was not recorded");
                 }
@@ -7153,15 +7148,11 @@ fn resolve_host_consent(
         );
     }
 
-    outln!("Ephervex would download a pack from:");
-    outln!("  {}", source.display());
-    out!(
-        "Download from {} and remember it? [y/N/once] ",
+    let answer = ask(&format!(
+        "Ephervex would download a pack from:\n  {}\nDownload from {} and remember it? [y/N/once] ",
+        source.display(),
         source.host()
-    );
-    std::io::stdout().flush()?;
-    let mut answer = String::new();
-    std::io::stdin().read_line(&mut answer)?;
+    ))?;
     match answer.trim().to_ascii_lowercase().as_str() {
         "y" | "yes" => Ok(Some(ephervex_core::HostConsent::Remember)),
         "once" | "o" => Ok(Some(ephervex_core::HostConsent::JustOnce)),
@@ -7185,12 +7176,9 @@ fn resolve_redirect_consent(
         );
     }
 
-    outln!("The download was redirected to another site. Ephervex would download from:");
-    outln!("  {target}");
-    out!("Download from {host} and remember it? [y/N/once] ");
-    std::io::stdout().flush()?;
-    let mut answer = String::new();
-    std::io::stdin().read_line(&mut answer)?;
+    let answer = ask(&format!(
+        "The download was redirected to another site. Ephervex would download from:\n  {target}\nDownload from {host} and remember it? [y/N/once] "
+    ))?;
     match answer.trim().to_ascii_lowercase().as_str() {
         "y" | "yes" => Ok(ephervex_core::HostConsent::Remember),
         "once" | "o" => Ok(ephervex_core::HostConsent::JustOnce),
@@ -7880,13 +7868,43 @@ async fn run_server_foreground(
         Err(error) => return Err(error.into()),
     };
     if !json {
-        match (exit.code, exit.signal) {
-            (Some(code), _) => outln!("server exited with code {code}"),
-            (_, Some(signal)) => outln!("server exited from signal {signal}"),
-            _ => outln!("server exited"),
-        }
+        note(&server_exit_description(&exit));
     }
     server_exit_result(&exit).and(stdout_result())
+}
+
+/// The one-line account of how a server ended, for a person rather than a script.
+fn server_exit_description(exit: &ServerExit) -> String {
+    match (exit.code, exit.signal) {
+        (Some(code), _) => format!("server exited with code {code}"),
+        (_, Some(signal)) => format!("server exited from signal {signal}"),
+        _ => "server exited".to_owned(),
+    }
+}
+
+/// Asks a question on standard error and returns the line typed in answer.
+///
+/// Standard output carries data only, so a question there would land in a file
+/// or pipe the user redirected it to while the command waits on an answer no
+/// one sees. The caller has already checked that standard input is a terminal.
+fn ask(question: &str) -> anyhow::Result<String> {
+    Ok(ask_on(
+        &mut std::io::stderr(),
+        &mut std::io::stdin().lock(),
+        question,
+    )?)
+}
+
+fn ask_on(
+    question_sink: &mut impl std::io::Write,
+    answers: &mut impl std::io::BufRead,
+    question: &str,
+) -> std::io::Result<String> {
+    question_sink.write_all(question.as_bytes())?;
+    question_sink.flush()?;
+    let mut answer = String::new();
+    answers.read_line(&mut answer)?;
+    Ok(answer)
 }
 
 /// Tells the user something while a child may still be running.
@@ -8486,6 +8504,39 @@ fn localized_failure(error: &CoreError) -> (String, Option<String>) {
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_question_is_written_to_the_question_sink_and_the_typed_line_is_returned() {
+        let mut sink = Vec::new();
+        let mut typed = std::io::Cursor::new(b"once\nignored\n".to_vec());
+
+        let answer = ask_on(&mut sink, &mut typed, "Download? [y/N/once] ").expect("answer");
+
+        assert_eq!(answer, "once\n");
+        assert_eq!(
+            String::from_utf8(sink).expect("UTF-8"),
+            "Download? [y/N/once] "
+        );
+    }
+
+    #[test]
+    fn a_server_exit_is_described_by_its_code_then_its_signal() {
+        let exit = |code, signal| ServerExit {
+            code,
+            signal,
+            finished_starting: true,
+            stop_requested: false,
+        };
+        assert_eq!(
+            server_exit_description(&exit(Some(3), Some(9))),
+            "server exited with code 3"
+        );
+        assert_eq!(
+            server_exit_description(&exit(None, Some(9))),
+            "server exited from signal 9"
+        );
+        assert_eq!(server_exit_description(&exit(None, None)), "server exited");
+    }
 
     #[test]
     fn an_unverified_optional_dependency_is_not_reported_as_incompatible() {

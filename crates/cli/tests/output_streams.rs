@@ -85,6 +85,21 @@ fn no_output_line_is_written_with_a_macro_that_panics_on_a_closed_pipe() {
     );
 }
 
+/// Standard output carries data, so a question asked there ends up in the file
+/// a user redirected it to while the command waits for an answer nobody saw.
+/// Every prompt goes through `ask`, which writes to standard error; a second
+/// place reading an answer is a new prompt that has to be routed the same way.
+#[test]
+fn every_answer_is_read_through_the_prompt_that_asks_on_standard_error() {
+    let source = include_str!("../src/main.rs");
+    let readers = source.matches(".read_line(").count();
+
+    assert_eq!(
+        readers, 1,
+        "read an answer with `ask` so the question is written to standard error"
+    );
+}
+
 /// The reproducible case: the completion script is far larger than a pipe
 /// buffer, so the write that fails is guaranteed rather than a race.
 #[test]
