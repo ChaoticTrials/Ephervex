@@ -1369,9 +1369,13 @@ mod tests {
         running.expect("still running").abort();
         drop(listener);
 
-        let closed = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("reserve");
-        let target = local_target(closed.local_addr().expect("address").port());
-        drop(closed);
+        // Bound but never listening, so no other test's listener can take the
+        // port. Held until the test ends.
+        let reserved = tokio::net::TcpSocket::new_v4().expect("socket");
+        reserved
+            .bind((Ipv4Addr::LOCALHOST, 0).into())
+            .expect("reserve a loopback port");
+        let target = local_target(reserved.local_addr().expect("address").port());
         let server = ServerId::new();
         let mut exited = Some(tokio::spawn(async {
             Ok(ServerExit {
