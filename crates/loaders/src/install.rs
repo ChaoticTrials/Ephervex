@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ephervex_download::{
-    CacheLayout, ContentStore, DownloadManager, DownloadRequest, FileExtension, HashVerifier,
-    MavenCoordinate, MetadataCache, MetadataKey, OperationReporter, UrlPolicyError,
+    CacheLayout, ContentStore, DownloadError, DownloadManager, DownloadRequest, FileExtension,
+    HashVerifier, MavenCoordinate, MetadataCache, MetadataCacheError, MetadataKey,
+    OperationReporter, UrlPolicyError,
 };
 use ephervex_minecraft::{
     Artifact, Installation, Library, Platform, RuleContext, VanillaInstaller, VersionMetadata,
@@ -24,6 +25,13 @@ use crate::{LoaderError, LoaderResult};
 
 const FORGE_MAVEN: &str = "https://maven.minecraftforge.net";
 const NEOFORGE_MAVEN: &str = "https://maven.neoforged.net/releases";
+
+/// Digests an installer may publish as `<installer>.jar.<algorithm>`, strongest first.
+const INSTALLER_DIGESTS: [HashAlgorithm; 3] = [
+    HashAlgorithm::Sha512,
+    HashAlgorithm::Sha256,
+    HashAlgorithm::Sha1,
+];
 const MAX_PROFILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_PROFILE_DATA_BYTES: u64 = 128 * 1024 * 1024;
 static WORKSPACE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -281,6 +289,85 @@ impl InstallerEngine {
         })
     }
 
+    /// Resolves the strongest digest the installer's Maven publishes beside the jar.
+    ///
+    /// Only a sidecar the Maven confirms absent moves the choice to a weaker
+    /// digest, because the oldest builds publish SHA-1 alone. When the Maven
+    /// cannot be reached, a weaker sidecar is used only if an earlier lookup
+    /// already stored it, so a relaunch works offline. Any other failure, or a
+    /// sidecar that is not a valid digest, ends the install.
+    async fn installer_digest(
+        &self,
+        kind: LoaderKind,
+        minecraft: &str,
+        exact: &str,
+        jar_url: &str,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> LoaderResult<Hash> {
+        let metadata = MetadataCache::new(self.layout.clone());
+        let mut unreachable = None;
+        for (index, algorithm) in INSTALLER_DIGESTS.into_iter().enumerate() {
+            let sidecar_url = Url::parse(&format!("{jar_url}.{algorithm}")).map_err(|_| {
+                LoaderError::MetadataInvalid {
+                    provider: "installer",
+                    detail: "installer sidecar URL is invalid".to_owned(),
+                }
+            })?;
+            let key = installer_sidecar_key(kind, minecraft, exact, algorithm)?;
+            let sidecar = if unreachable.is_some() {
+                match metadata.peek(&key).await {
+                    Some(sidecar) => sidecar,
+                    None => continue,
+                }
+            } else {
+                match metadata
+                    .fetch_text(&self.manager, &key, &sidecar_url, reporter, cancel)
+                    .await
+                {
+                    Ok(sidecar) => sidecar,
+                    Err(error)
+                        if index + 1 < INSTALLER_DIGESTS.len() && sidecar_is_absent(&error) =>
+                    {
+                        debug!(%algorithm, "installer publishes no sidecar for this digest");
+                        continue;
+                    }
+                    Err(error) if sidecar_is_unreachable(&error) => {
+                        unreachable = Some(error);
+                        continue;
+                    }
+                    Err(source) => {
+                        return Err(LoaderError::MetadataUnavailable {
+                            provider: "installer",
+                            source: Box::new(source),
+                        });
+                    }
+                }
+            };
+            let text = sidecar
+                .text()
+                .map_err(|error| LoaderError::MetadataInvalid {
+                    provider: "installer",
+                    detail: error.to_string(),
+                })?;
+            let digest = text.split_whitespace().next().unwrap_or_default();
+            return Hash::new(algorithm, digest).ok_or_else(|| LoaderError::MetadataInvalid {
+                provider: "installer",
+                detail: format!("installer sidecar has no {algorithm} digest"),
+            });
+        }
+        Err(unreachable.map_or_else(
+            || LoaderError::MetadataInvalid {
+                provider: "installer",
+                detail: "installer publishes no digest".to_owned(),
+            },
+            |source| LoaderError::MetadataUnavailable {
+                provider: "installer",
+                source: Box::new(source),
+            },
+        ))
+    }
+
     async fn fetch_bundle(
         &self,
         kind: LoaderKind,
@@ -290,36 +377,15 @@ impl InstallerEngine {
         cancel: &CancellationToken,
     ) -> LoaderResult<InstallerBundle> {
         let (coordinate, jar_url) = installer_location(kind, minecraft, exact)?;
-        let sidecar_url =
-            Url::parse(&format!("{jar_url}.sha1")).map_err(|_| LoaderError::MetadataInvalid {
-                provider: "installer",
-                detail: "installer sidecar URL is invalid".to_owned(),
-            })?;
-        let key = installer_sidecar_key(kind, minecraft, exact)?;
-        let sidecar = MetadataCache::new(self.layout.clone())
-            .fetch_text(&self.manager, &key, &sidecar_url, reporter, cancel)
-            .await
-            .map_err(|source| LoaderError::MetadataUnavailable {
-                provider: "installer",
-                source: Box::new(source),
-            })?
-            .text()
-            .map_err(|error| LoaderError::MetadataInvalid {
-                provider: "installer",
-                detail: error.to_string(),
-            })?;
-        let digest = sidecar.split_whitespace().next().unwrap_or_default();
-        let sha1 =
-            Hash::new(HashAlgorithm::Sha1, digest).ok_or_else(|| LoaderError::MetadataInvalid {
-                provider: "installer",
-                detail: "installer sidecar has no SHA-1".to_owned(),
-            })?;
+        let digest = self
+            .installer_digest(kind, minecraft, exact, &jar_url, reporter, cancel)
+            .await?;
         let jar = FileExtension::new("jar")?;
         let installer = self
             .layout
-            .content(ContentStore::InstallerCache, &sha1, Some(&jar));
+            .content(ContentStore::InstallerCache, &digest, Some(&jar));
         let request = DownloadRequest::parse(&jar_url, &installer)?
-            .verifying(sha1)
+            .verifying(digest)
             .labeled(format!("{coordinate}"));
         self.manager
             .download(&request, reporter, cancel)
@@ -1102,13 +1168,35 @@ fn installer_sidecar_key(
     kind: LoaderKind,
     minecraft: &str,
     exact: &str,
+    algorithm: HashAlgorithm,
 ) -> LoaderResult<MetadataKey> {
     Ok(MetadataKey::new(&format!(
-        "{}-{}-{}-installer-sha1",
+        "{}-{}-{}-installer-{algorithm}",
         kind.to_string().to_ascii_lowercase(),
         minecraft,
         exact
     ))?)
+}
+
+/// Whether the Maven could not be reached, as opposed to answering with a refusal.
+fn sidecar_is_unreachable(error: &MetadataCacheError) -> bool {
+    matches!(
+        error,
+        MetadataCacheError::Fetch { source, .. } | MetadataCacheError::Unavailable { source, .. }
+            if matches!(
+                **source,
+                DownloadError::Transport { .. } | DownloadError::RetriesExhausted { .. }
+            )
+    )
+}
+
+/// Whether the Maven answered that the sidecar does not exist, as opposed to failing to answer.
+fn sidecar_is_absent(error: &MetadataCacheError) -> bool {
+    matches!(
+        error,
+        MetadataCacheError::Fetch { source, .. } | MetadataCacheError::Unavailable { source, .. }
+            if matches!(**source, DownloadError::HttpStatus { status: 404, .. })
+    )
 }
 
 /// Refuses profile and version metadata that would store different files at one cache path.
@@ -2042,13 +2130,13 @@ mod tests {
         }
         archive.finish().expect("installer finish");
 
-        let sha1 = ephervex_download::hash_file(&staged, HashAlgorithm::Sha1)
+        let digest = ephervex_download::hash_file(&staged, HashAlgorithm::Sha512)
             .await
             .expect("installer digest");
         let jar = FileExtension::new("jar").expect("extension");
         let cached = engine
             .layout
-            .content(ContentStore::InstallerCache, &sha1, Some(&jar));
+            .content(ContentStore::InstallerCache, &digest, Some(&jar));
         std::fs::create_dir_all(cached.parent().expect("parent")).expect("installer cache");
         std::fs::rename(&staged, &cached).expect("cached installer");
 
@@ -2056,9 +2144,15 @@ mod tests {
             installer_location(LoaderKind::Forge, "1.20.1", "47.4.10").expect("installer");
         MetadataCache::new(engine.layout.clone())
             .store(
-                &installer_sidecar_key(LoaderKind::Forge, "1.20.1", "47.4.10").expect("key"),
-                &Url::parse(&format!("{jar_url}.sha1")).expect("sidecar url"),
-                serde_json::value::to_raw_value(sha1.digest()).expect("sidecar"),
+                &installer_sidecar_key(
+                    LoaderKind::Forge,
+                    "1.20.1",
+                    "47.4.10",
+                    HashAlgorithm::Sha512,
+                )
+                .expect("key"),
+                &Url::parse(&format!("{jar_url}.sha512")).expect("sidecar url"),
+                serde_json::value::to_raw_value(digest.digest()).expect("sidecar"),
             )
             .await
             .expect("sidecar cached");
@@ -2075,6 +2169,238 @@ mod tests {
         std::fs::create_dir_all(path.parent().expect("parent")).expect("store");
         std::fs::write(&path, bytes).expect("library");
         path
+    }
+
+    /// Serves `installer.jar.<algorithm>` sidecars: a digest for the listed
+    /// algorithms, the given status for the others. Returns the jar URL.
+    async fn serve_installer_sidecars(
+        server: &wiremock::MockServer,
+        published: &[(HashAlgorithm, &str)],
+        status: u16,
+    ) -> String {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        for algorithm in HashAlgorithm::ALL {
+            let body = published
+                .iter()
+                .find(|(published, _)| *published == algorithm)
+                .map(|(_, digest)| format!("{digest}\n"));
+            let response = match body {
+                Some(body) => ResponseTemplate::new(200).set_body_string(body),
+                None => ResponseTemplate::new(status),
+            };
+            Mock::given(method("GET"))
+                .and(path(format!("/installer.jar.{algorithm}")))
+                .respond_with(response)
+                .mount(server)
+                .await;
+        }
+        format!("{}/installer.jar", server.uri())
+    }
+
+    async fn resolve_installer_digest(
+        engine: &InstallerEngine,
+        jar_url: &str,
+    ) -> LoaderResult<Hash> {
+        engine
+            .installer_digest(
+                LoaderKind::Forge,
+                "1.20.1",
+                "47.4.10",
+                jar_url,
+                &OperationReporter::silent("installer-digest-test"),
+                &CancellationToken::new(),
+            )
+            .await
+    }
+
+    #[tokio::test]
+    async fn an_installer_is_verified_with_the_strongest_digest_its_maven_publishes() {
+        let server = wiremock::MockServer::start().await;
+        let sha512 = "5".repeat(128);
+        let jar_url = serve_installer_sidecars(
+            &server,
+            &[
+                (HashAlgorithm::Sha512, &sha512),
+                (HashAlgorithm::Sha256, &"2".repeat(64)),
+                (HashAlgorithm::Sha1, ABC_SHA1),
+            ],
+            404,
+        )
+        .await;
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+
+        let digest = resolve_installer_digest(&engine, &jar_url)
+            .await
+            .expect("digest");
+
+        assert_eq!(digest.algorithm, HashAlgorithm::Sha512);
+        assert_eq!(digest.digest(), sha512);
+    }
+
+    #[tokio::test]
+    async fn an_installer_with_no_sha512_sidecar_is_verified_with_sha256() {
+        let server = wiremock::MockServer::start().await;
+        let sha256 = "2".repeat(64);
+        let jar_url = serve_installer_sidecars(
+            &server,
+            &[
+                (HashAlgorithm::Sha256, &sha256),
+                (HashAlgorithm::Sha1, ABC_SHA1),
+            ],
+            404,
+        )
+        .await;
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+
+        let digest = resolve_installer_digest(&engine, &jar_url)
+            .await
+            .expect("digest");
+
+        assert_eq!(digest.algorithm, HashAlgorithm::Sha256);
+    }
+
+    #[tokio::test]
+    async fn an_installer_publishing_only_sha1_is_verified_with_sha1() {
+        let server = wiremock::MockServer::start().await;
+        let jar_url =
+            serve_installer_sidecars(&server, &[(HashAlgorithm::Sha1, ABC_SHA1)], 404).await;
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+
+        let digest = resolve_installer_digest(&engine, &jar_url)
+            .await
+            .expect("digest");
+
+        assert_eq!(digest.algorithm, HashAlgorithm::Sha1);
+        assert_eq!(digest.digest(), ABC_SHA1);
+    }
+
+    #[tokio::test]
+    async fn a_stronger_sidecar_that_fails_for_another_reason_does_not_fall_back_to_sha1() {
+        let server = wiremock::MockServer::start().await;
+        let jar_url =
+            serve_installer_sidecars(&server, &[(HashAlgorithm::Sha1, ABC_SHA1)], 403).await;
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+
+        let error = resolve_installer_digest(&engine, &jar_url)
+            .await
+            .expect_err("a forbidden sidecar is not an absent one");
+
+        assert!(matches!(error, LoaderError::MetadataUnavailable { .. }));
+    }
+
+    async fn store_installer_sidecar(
+        engine: &InstallerEngine,
+        jar_url: &str,
+        algorithm: HashAlgorithm,
+        digest: &str,
+    ) {
+        MetadataCache::new(engine.layout.clone())
+            .store(
+                &installer_sidecar_key(LoaderKind::Forge, "1.20.1", "47.4.10", algorithm)
+                    .expect("key"),
+                &Url::parse(&format!("{jar_url}.{algorithm}")).expect("sidecar url"),
+                serde_json::value::to_raw_value(digest).expect("sidecar"),
+            )
+            .await
+            .expect("sidecar cached");
+    }
+
+    /// A jar URL on a loopback port that is reserved but never listening, so
+    /// connections are refused and no other test's server can take the port.
+    /// The socket holds the port until it is dropped.
+    fn unreachable_jar_url() -> (tokio::net::TcpSocket, String) {
+        let reserved = tokio::net::TcpSocket::new_v4().expect("socket");
+        reserved
+            .bind("127.0.0.1:0".parse().expect("loopback address"))
+            .expect("reserve a loopback port");
+        let port = reserved.local_addr().expect("bound address").port();
+        (reserved, format!("http://127.0.0.1:{port}/installer.jar"))
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_maven_still_resolves_a_sidecar_stored_by_an_earlier_lookup() {
+        let (_reserved, jar_url) = unreachable_jar_url();
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+        store_installer_sidecar(&engine, &jar_url, HashAlgorithm::Sha1, ABC_SHA1).await;
+
+        let digest = resolve_installer_digest(&engine, &jar_url)
+            .await
+            .expect("digest");
+
+        assert_eq!(digest.algorithm, HashAlgorithm::Sha1);
+        assert_eq!(digest.digest(), ABC_SHA1);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_maven_with_no_stored_sidecar_is_refused() {
+        let (_reserved, jar_url) = unreachable_jar_url();
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+
+        let error = resolve_installer_digest(&engine, &jar_url)
+            .await
+            .expect_err("no digest can be resolved");
+
+        assert!(matches!(error, LoaderError::MetadataUnavailable { .. }));
+    }
+
+    #[tokio::test]
+    async fn a_refused_stronger_sidecar_is_not_replaced_by_a_stored_sha1_sidecar() {
+        let server = wiremock::MockServer::start().await;
+        let jar_url =
+            serve_installer_sidecars(&server, &[(HashAlgorithm::Sha1, ABC_SHA1)], 403).await;
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+        store_installer_sidecar(&engine, &jar_url, HashAlgorithm::Sha1, ABC_SHA1).await;
+
+        let error = resolve_installer_digest(&engine, &jar_url)
+            .await
+            .expect_err("a refusal is not an absence");
+
+        assert!(matches!(error, LoaderError::MetadataUnavailable { .. }));
+    }
+
+    #[tokio::test]
+    async fn a_malformed_stronger_sidecar_does_not_fall_back_to_sha1() {
+        let server = wiremock::MockServer::start().await;
+        let jar_url = serve_installer_sidecars(
+            &server,
+            &[
+                (HashAlgorithm::Sha512, "not-a-digest"),
+                (HashAlgorithm::Sha1, ABC_SHA1),
+            ],
+            404,
+        )
+        .await;
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+
+        let error = resolve_installer_digest(&engine, &jar_url)
+            .await
+            .expect_err("a malformed sidecar is refused");
+
+        assert!(matches!(error, LoaderError::MetadataInvalid { .. }));
+    }
+
+    #[tokio::test]
+    async fn an_installer_with_no_published_digest_is_refused() {
+        let server = wiremock::MockServer::start().await;
+        let jar_url = serve_installer_sidecars(&server, &[], 404).await;
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+
+        let error = resolve_installer_digest(&engine, &jar_url)
+            .await
+            .expect_err("an installer without a digest cannot be verified");
+
+        assert!(matches!(error, LoaderError::MetadataUnavailable { .. }));
     }
 
     #[tokio::test]
