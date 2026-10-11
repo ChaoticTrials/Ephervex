@@ -167,7 +167,80 @@ pub struct OptionalCandidate {
     pub declared_by: String,
     /// The version that would be installed if it were selected, when one fits.
     pub version: Option<ModVersionInfo>,
-    pub compatibility: Compatibility,
+    pub status: OptionalStatus,
+}
+
+/// What is known about an optional dependency's fit with the instance.
+///
+/// A lookup that failed is not an absence of compatible releases, so the two
+/// stay different states.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OptionalStatus {
+    /// A release that fits is offered.
+    Compatible,
+    /// The provider answered and no release fits.
+    Incompatible(Vec<crate::model::IncompatibilityReason>),
+    /// The provider's answer did not settle the question.
+    Unverified(UnverifiedOptional),
+}
+
+impl OptionalStatus {
+    #[must_use]
+    pub const fn is_compatible(&self) -> bool {
+        matches!(self, Self::Compatible)
+    }
+
+    /// Why no release fits, or an empty slice for any other state.
+    #[must_use]
+    pub fn reasons(&self) -> &[crate::model::IncompatibilityReason] {
+        match self {
+            Self::Incompatible(reasons) => reasons,
+            Self::Compatible | Self::Unverified(_) => &[],
+        }
+    }
+}
+
+impl From<Compatibility> for OptionalStatus {
+    fn from(compatibility: Compatibility) -> Self {
+        match compatibility {
+            Compatibility::Compatible => Self::Compatible,
+            Compatibility::Incompatible(reasons) => Self::Incompatible(reasons),
+        }
+    }
+}
+
+/// Why an optional dependency could not be checked against the instance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnverifiedOptional {
+    /// The provider could not be asked or refused to answer.
+    Unavailable,
+    /// The provider does not know the project or the release the relation names.
+    UnknownIdentity,
+    /// The release the relation pins belongs to a different project than the
+    /// one the relation names.
+    ConflictingIdentity { version_project_id: String },
+}
+
+impl UnverifiedOptional {
+    /// A stable machine-readable name.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unavailable => "unavailable",
+            Self::UnknownIdentity => "unknown_identity",
+            Self::ConflictingIdentity { .. } => "conflicting_identity",
+        }
+    }
+
+    /// The `ephervex-i18n` message id describing this state.
+    #[must_use]
+    pub const fn message_id(&self) -> &'static str {
+        match self {
+            Self::Unavailable => "mod-optional-unavailable",
+            Self::UnknownIdentity => "mod-optional-unknown-identity",
+            Self::ConflictingIdentity { .. } => "mod-optional-conflicting-identity",
+        }
+    }
 }
 
 /// A relation naming a bare file rather than a project.
@@ -418,6 +491,18 @@ const fn is_graph_refusal(error: &ModPlatformError) -> bool {
             | ModPlatformError::VersionUnknown { .. }
             | ModPlatformError::InconsistentDependency { .. }
             | ModPlatformError::MalformedDependency { .. }
+    )
+}
+
+/// Whether an error describes the content of one release rather than the
+/// provider failing: the release is unusable or unknown, not the lookup.
+const fn is_release_content_refusal(error: &ModPlatformError) -> bool {
+    matches!(
+        error,
+        ModPlatformError::VersionUnknown { .. }
+            | ModPlatformError::FileUnavailable { .. }
+            | ModPlatformError::HashesMissing { .. }
+            | ModPlatformError::AmbiguousPrimaryFile { .. }
     )
 }
 
@@ -854,10 +939,10 @@ impl<'a> Resolver<'a> {
         let pinned: Vec<String> = version
             .dependencies
             .iter()
-            .filter(|dependency| dependency.version_id.is_some() && dependency.project_id.is_none())
+            .filter(|dependency| dependency.project_id.is_none())
             .filter_map(|dependency| dependency.version_id.clone())
             .collect();
-        let looked_up = if pinned.is_empty() {
+        let mut looked_up = if pinned.is_empty() {
             Vec::new()
         } else {
             self.request
@@ -872,11 +957,65 @@ impl<'a> Resolver<'a> {
                 .map(|looked| (looked.id.clone(), looked.project_id.clone())),
         );
 
+        // An embedded or incompatible relation that names both a project and a
+        // version needs the version's owner to confirm they agree. Required
+        // relations are checked when their release is selected, and an optional
+        // one when it is offered, where a failed lookup is reported instead of
+        // failing the install.
+        let named: Vec<String> = version
+            .dependencies
+            .iter()
+            .filter(|dependency| {
+                dependency.project_id.is_some()
+                    && matches!(
+                        dependency.kind,
+                        ModRelationKind::Embedded | ModRelationKind::Incompatible
+                    )
+            })
+            .filter_map(|dependency| dependency.version_id.clone())
+            .collect();
+        looked_up.extend(self.lookup_owners(&named).await?);
+
         version
             .dependencies
             .iter()
             .map(|dependency| normalize(dependency, &version.project_id, &looked_up))
             .collect()
+    }
+
+    /// Looks up releases only to learn which project owns them.
+    ///
+    /// A release that cannot be installed (no usable hash, no single primary
+    /// file, unknown to the provider) still has an owner, and the relation that
+    /// names it is not an installation, so it is left unchecked rather than
+    /// refusing the plan. The batch is retried one release at a time when
+    /// such a release hides the owners of the others.
+    async fn lookup_owners(
+        &self,
+        version_ids: &[String],
+    ) -> ModPlatformResult<Vec<ModVersionInfo>> {
+        if version_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let batch = self
+            .request
+            .provider
+            .versions_by_id(version_ids, self.request.reporter, self.request.cancel)
+            .await;
+        match batch {
+            Err(error) if is_release_content_refusal(&error) => {
+                let mut found = Vec::new();
+                for version_id in version_ids {
+                    match self.fetch_version(version_id).await {
+                        Ok(version) => found.push(version),
+                        Err(error) if is_release_content_refusal(&error) => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+                Ok(found)
+            }
+            other => other,
+        }
     }
 
     /// A project's candidate versions, limited to releases that project owns.
@@ -1003,7 +1142,7 @@ impl<'a> Resolver<'a> {
                             continue;
                         }
                         self.record_optional(&source, project_id, pinned_version)
-                            .await;
+                            .await?;
                     }
                     Normalized::Project {
                         kind: ModRelationKind::Embedded,
@@ -1030,44 +1169,81 @@ impl<'a> Resolver<'a> {
     ///
     /// Its version is resolved so the offer can say what would be installed and
     /// whether it would even fit - but a failure to resolve is not fatal: an
-    /// optional extra that has no compatible release is a fact to display, not
-    /// a reason to refuse the install the user actually asked for.
+    /// optional extra that cannot be judged is a fact to display, not a reason
+    /// to refuse the install the user actually asked for. The one failure that
+    /// does stop the plan is the user canceling it.
     async fn record_optional(
         &mut self,
         source: &str,
         project_id: String,
         pinned_version: Option<String>,
-    ) {
+    ) -> ModPlatformResult<()> {
         if self.optional.contains_key(&project_id) {
-            return;
+            return Ok(());
         }
-        let resolved = match &pinned_version {
-            Some(version_id) => self.fetch_version(version_id).await.ok(),
-            None => self.versions(&project_id).await.ok().and_then(|versions| {
-                newest_compatible(&versions, self.request.target, self.request.loader_name)
-            }),
+        let outcome = match &pinned_version {
+            Some(version_id) => match self.fetch_version(version_id).await {
+                Ok(version) if version.project_id == project_id => Ok(Some(version)),
+                Ok(version) => Err(UnverifiedOptional::ConflictingIdentity {
+                    version_project_id: version.project_id,
+                }),
+                Err(error) => Err(self.unverified(&error)?),
+            },
+            None => match self.versions(&project_id).await {
+                Ok(versions) => Ok(newest_compatible(
+                    &versions,
+                    self.request.target,
+                    self.request.loader_name,
+                )),
+                Err(error) => Err(self.unverified(&error)?),
+            },
         };
-        let compatibility = resolved.as_ref().map_or_else(
-            || {
-                Compatibility::Incompatible(vec![
+        let (resolved, status) = match outcome {
+            Ok(Some(version)) => {
+                let status = OptionalStatus::from(
+                    version.compatibility(self.request.target, self.request.loader_name),
+                );
+                (Some(version), status)
+            }
+            Ok(None) => (
+                None,
+                OptionalStatus::Incompatible(vec![
                     crate::model::IncompatibilityReason::MinecraftVersion {
                         required: self.request.target.minecraft_version.clone(),
                         supported: Vec::new(),
                     },
-                ])
-            },
-            |version| version.compatibility(self.request.target, self.request.loader_name),
-        );
+                ]),
+            ),
+            Err(unverified) => (None, OptionalStatus::Unverified(unverified)),
+        };
 
         self.optional.insert(
             project_id.clone(),
             OptionalCandidate {
                 project_id,
                 declared_by: source.to_owned(),
-                version: resolved.filter(|_| compatibility.is_compatible()),
-                compatibility,
+                version: resolved.filter(|_| status.is_compatible()),
+                status,
             },
         );
+        Ok(())
+    }
+
+    /// Classifies a failed lookup for an optional dependency, or stops the plan
+    /// when the lookup failed because the user canceled it.
+    ///
+    /// The token is consulted as well as the error: a provider may report a
+    /// canceled request as an ordinary failure.
+    fn unverified(&self, error: &ModPlatformError) -> ModPlatformResult<UnverifiedOptional> {
+        if error.is_cancellation() || self.request.cancel.is_cancelled() {
+            return Err(ModPlatformError::Canceled);
+        }
+        Ok(match error {
+            ModPlatformError::ProjectUnknown { .. } | ModPlatformError::VersionUnknown { .. } => {
+                UnverifiedOptional::UnknownIdentity
+            }
+            _ => UnverifiedOptional::Unavailable,
+        })
     }
 
     /// Handles a relation that names a file and nothing else.
@@ -1328,7 +1504,7 @@ mod tests {
 
     use super::*;
     use crate::model::{ModSearchQuery, ModSearchResults};
-    use crate::test_support::{at, compatible, needs, needs_file, pins, project, version};
+    use crate::test_support::{at, compatible, needs, needs_file, pins, pins_of, project, version};
 
     /// A catalog held in memory, so a resolver test states the graph it is
     /// about rather than a fixture directory.
@@ -1338,9 +1514,34 @@ mod tests {
         /// What `versions_by_id` answers with whatever was asked, for a
         /// provider that returns something other than the requested ids.
         by_id_response: Option<Vec<ModVersionInfo>>,
+        /// Lookups for these ids (project listings and by-id version lookups)
+        /// fail with the error built by `failure` instead of answering.
+        failing_ids: Vec<String>,
+        failure: Option<fn() -> ModPlatformError>,
+        /// Canceled when a lookup fails, for a provider that reports a canceled
+        /// request as an ordinary failure.
+        cancel_on_failure: Option<CancellationToken>,
     }
 
     impl Catalog {
+        fn failing_for(mut self, failure: fn() -> ModPlatformError, ids: &[&str]) -> Self {
+            self.failure = Some(failure);
+            self.failing_ids = ids.iter().map(|id| (*id).to_owned()).collect();
+            self
+        }
+
+        fn failure_for(&self, ids: &[&str]) -> Option<ModPlatformError> {
+            let failure = self.failure?;
+            ids.iter()
+                .any(|id| self.failing_ids.iter().any(|failing| failing == id))
+                .then(|| {
+                    if let Some(token) = &self.cancel_on_failure {
+                        token.cancel();
+                    }
+                    failure()
+                })
+        }
+
         fn with(mut self, project_id: &str, versions: Vec<ModVersionInfo>) -> Self {
             self.versions.insert(project_id.to_owned(), versions);
             self
@@ -1373,6 +1574,9 @@ mod tests {
                     response.reverse();
                     response
                 }),
+                failing_ids: self.failing_ids.clone(),
+                failure: self.failure,
+                cancel_on_failure: self.cancel_on_failure.clone(),
             }
         }
     }
@@ -1417,6 +1621,9 @@ mod tests {
             _reporter: &OperationReporter,
             _cancel: &CancellationToken,
         ) -> ModPlatformResult<Vec<ModVersionInfo>> {
+            if let Some(error) = self.failure_for(&[project_id]) {
+                return Err(error);
+            }
             self.versions
                 .get(project_id)
                 .cloned()
@@ -1444,6 +1651,10 @@ mod tests {
             _reporter: &OperationReporter,
             _cancel: &CancellationToken,
         ) -> ModPlatformResult<Vec<ModVersionInfo>> {
+            let requested: Vec<&str> = ids.iter().map(String::as_str).collect();
+            if let Some(error) = self.failure_for(&requested) {
+                return Err(error);
+            }
             if let Some(response) = &self.by_id_response {
                 return Ok(response.clone());
             }
@@ -1774,11 +1985,276 @@ mod tests {
         );
         assert_eq!(plan.optional.len(), 1);
         assert_eq!(plan.optional[0].project_id, "EXTRA");
-        assert!(plan.optional[0].compatibility.is_compatible());
+        assert!(plan.optional[0].status.is_compatible());
         assert!(
             plan.optional[0].version.is_some(),
             "the offer says what would be installed if it were taken"
         );
+    }
+
+    fn optional_of(root: ModVersionInfo) -> Catalog {
+        Catalog::default().with("ROOT", vec![root])
+    }
+
+    fn unreachable() -> ModPlatformError {
+        ModPlatformError::RequestFailed {
+            provider: ModProvider::Modrinth,
+            detail: "connection reset".to_owned(),
+        }
+    }
+
+    fn rejected() -> ModPlatformError {
+        ModPlatformError::CredentialRejected {
+            provider: ModProvider::Modrinth,
+            status: 401,
+        }
+    }
+
+    fn canceled() -> ModPlatformError {
+        ModPlatformError::Canceled
+    }
+
+    fn optional_status(plan: &ModInstallPlan) -> &OptionalStatus {
+        assert_eq!(plan.optional.len(), 1, "the optional dependency is offered");
+        &plan.optional[0].status
+    }
+
+    #[tokio::test]
+    async fn an_optional_dependency_whose_listing_cannot_be_fetched_is_unverified_not_incompatible()
+    {
+        for failure in [unreachable as fn() -> ModPlatformError, rejected] {
+            let catalog = optional_of(needs(
+                compatible("v1", "ROOT"),
+                ModRelationKind::Optional,
+                "EXTRA",
+            ))
+            .with("EXTRA", vec![compatible("v1", "EXTRA")])
+            .failing_for(failure, &["EXTRA"]);
+
+            let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+            assert_eq!(
+                optional_status(&plan),
+                &OptionalStatus::Unverified(UnverifiedOptional::Unavailable)
+            );
+            assert!(plan.optional[0].version.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn an_optional_dependency_pinning_an_unfetchable_version_is_unverified() {
+        let catalog = optional_of(pins_of(
+            compatible("v1", "ROOT"),
+            ModRelationKind::Optional,
+            "EXTRA",
+            "extra-v1",
+        ))
+        .with("EXTRA", vec![compatible("extra-v1", "EXTRA")])
+        .failing_for(unreachable, &["extra-v1"]);
+
+        let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+        assert_eq!(
+            optional_status(&plan),
+            &OptionalStatus::Unverified(UnverifiedOptional::Unavailable)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_optional_dependency_the_provider_does_not_know_is_an_unknown_identity() {
+        let unknown_project = optional_of(needs(
+            compatible("v1", "ROOT"),
+            ModRelationKind::Optional,
+            "GHOST",
+        ));
+        let plan_of_project = plan(&unknown_project, InstallSelection::new("ROOT")).await;
+        assert_eq!(
+            optional_status(&plan_of_project),
+            &OptionalStatus::Unverified(UnverifiedOptional::UnknownIdentity)
+        );
+
+        let unknown_pinned_version = optional_of(pins_of(
+            compatible("v1", "ROOT"),
+            ModRelationKind::Optional,
+            "EXTRA",
+            "ghost-v1",
+        ))
+        .with("EXTRA", vec![compatible("extra-v1", "EXTRA")]);
+        let plan_of_version = plan(&unknown_pinned_version, InstallSelection::new("ROOT")).await;
+        assert_eq!(
+            optional_status(&plan_of_version),
+            &OptionalStatus::Unverified(UnverifiedOptional::UnknownIdentity)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_optional_dependency_with_no_release_for_the_instance_is_incompatible() {
+        let catalog = optional_of(needs(
+            compatible("v1", "ROOT"),
+            ModRelationKind::Optional,
+            "EXTRA",
+        ))
+        .with(
+            "EXTRA",
+            vec![version("v1", "EXTRA", &["1.21.1"], &["neoforge"])],
+        );
+
+        let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+        assert!(matches!(
+            optional_status(&plan),
+            OptionalStatus::Incompatible(reasons) if !reasons.is_empty()
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_optional_dependency_pinning_a_release_of_another_project_is_a_conflicting_identity()
+    {
+        let catalog = optional_of(pins_of(
+            compatible("v1", "ROOT"),
+            ModRelationKind::Optional,
+            "EXTRA",
+            "other-v1",
+        ))
+        .with("EXTRA", vec![compatible("extra-v1", "EXTRA")])
+        .with("OTHER", vec![compatible("other-v1", "OTHER")]);
+
+        let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+        assert_eq!(
+            optional_status(&plan),
+            &OptionalStatus::Unverified(UnverifiedOptional::ConflictingIdentity {
+                version_project_id: "OTHER".to_owned()
+            })
+        );
+        assert!(
+            plan.optional[0].version.is_none(),
+            "a release of another project is never offered as this one"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_canceled_optional_dependency_lookup_stops_the_plan() {
+        for pinned in [false, true] {
+            let root = if pinned {
+                pins_of(
+                    compatible("v1", "ROOT"),
+                    ModRelationKind::Optional,
+                    "EXTRA",
+                    "extra-v1",
+                )
+            } else {
+                needs(compatible("v1", "ROOT"), ModRelationKind::Optional, "EXTRA")
+            };
+            let catalog = optional_of(root)
+                .with("EXTRA", vec![compatible("extra-v1", "EXTRA")])
+                .failing_for(canceled, &["EXTRA", "extra-v1"]);
+
+            let error = plan_with(&catalog, InstallSelection::new("ROOT"), &[])
+                .await
+                .expect_err("a canceled lookup is not an offer");
+            assert!(error.is_cancellation(), "pinned: {pinned}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_lookup_failure_reported_after_the_user_canceled_stops_the_plan() {
+        let token = CancellationToken::new();
+        let mut catalog = optional_of(needs(
+            compatible("v1", "ROOT"),
+            ModRelationKind::Optional,
+            "EXTRA",
+        ))
+        .with("EXTRA", vec![compatible("v1", "EXTRA")])
+        .failing_for(unreachable, &["EXTRA"]);
+        catalog.cancel_on_failure = Some(token.clone());
+
+        let error = resolve(ResolveRequest {
+            provider: &catalog,
+            target: &target(),
+            loader_name: "neoforge",
+            selection: &InstallSelection::new("ROOT"),
+            installed: &[],
+            installed_policy: InstalledPolicy::Preserve,
+            reporter: &OperationReporter::silent("resolving-mods"),
+            cancel: &token,
+        })
+        .await
+        .expect_err("a plan abandoned by the user is not a plan");
+        assert!(error.is_cancellation());
+    }
+
+    #[tokio::test]
+    async fn embedded_and_incompatible_relations_naming_disagreeing_identities_are_refused() {
+        for kind in [ModRelationKind::Embedded, ModRelationKind::Incompatible] {
+            let catalog = optional_of(pins_of(compatible("v1", "ROOT"), kind, "LIB", "other-v1"))
+                .with("LIB", vec![compatible("lib-v1", "LIB")])
+                .with("OTHER", vec![compatible("other-v1", "OTHER")]);
+
+            let error = plan_with(&catalog, InstallSelection::new("ROOT"), &[])
+                .await
+                .expect_err("must refuse");
+            assert!(
+                matches!(error, ModPlatformError::InconsistentDependency { .. }),
+                "{kind:?}: {error:?}"
+            );
+        }
+    }
+
+    fn hashes_missing() -> ModPlatformError {
+        ModPlatformError::HashesMissing {
+            version_id: "lib-v1".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unusable_release_named_by_an_embedded_or_incompatible_relation_does_not_refuse_the_plan()
+     {
+        for kind in [ModRelationKind::Embedded, ModRelationKind::Incompatible] {
+            let catalog = optional_of(pins_of(compatible("v1", "ROOT"), kind, "LIB", "lib-v1"))
+                .with("LIB", vec![compatible("lib-v1", "LIB")])
+                .failing_for(hashes_missing, &["lib-v1"]);
+
+            let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+            assert_eq!(plan.root.version.id, "v1", "{kind:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unusable_release_does_not_hide_an_ownership_mismatch_beside_it() {
+        let root = pins_of(
+            pins_of(
+                compatible("v1", "ROOT"),
+                ModRelationKind::Embedded,
+                "LIB",
+                "lib-v1",
+            ),
+            ModRelationKind::Embedded,
+            "OTHERLIB",
+            "other-v1",
+        );
+        let catalog = optional_of(root)
+            .with("LIB", vec![compatible("lib-v1", "LIB")])
+            .with("OTHER", vec![compatible("other-v1", "OTHER")])
+            .failing_for(hashes_missing, &["lib-v1"]);
+
+        let error = plan_with(&catalog, InstallSelection::new("ROOT"), &[])
+            .await
+            .expect_err("must refuse");
+        assert!(
+            matches!(error, ModPlatformError::InconsistentDependency { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn embedded_and_incompatible_relations_naming_agreeing_identities_are_accepted() {
+        for kind in [ModRelationKind::Embedded, ModRelationKind::Incompatible] {
+            let catalog = optional_of(pins_of(compatible("v1", "ROOT"), kind, "LIB", "lib-v1"))
+                .with("LIB", vec![compatible("lib-v1", "LIB")]);
+
+            let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+            assert_eq!(
+                plan.embedded.len(),
+                usize::from(kind == ModRelationKind::Embedded)
+            );
+        }
     }
 
     #[tokio::test]

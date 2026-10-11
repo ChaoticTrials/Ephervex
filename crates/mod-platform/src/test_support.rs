@@ -98,6 +98,22 @@ pub(crate) fn pins(
     version
 }
 
+/// Adds a relation naming a project and the exact version it pins.
+pub(crate) fn pins_of(
+    mut version: ModVersionInfo,
+    kind: ModRelationKind,
+    project_id: &str,
+    version_id: &str,
+) -> ModVersionInfo {
+    version.dependencies.push(ModDependency {
+        kind,
+        project_id: Some(project_id.to_owned()),
+        version_id: Some(version_id.to_owned()),
+        file_name: None,
+    });
+    version
+}
+
 /// Adds a relation naming only a bare file.
 pub(crate) fn needs_file(
     mut version: ModVersionInfo,

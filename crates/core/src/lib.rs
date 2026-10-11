@@ -274,8 +274,8 @@ pub use ephervex_mod_platform::{
     AnnotatedVersion, CURSEFORGE_API_KEY_HELP, Compatibility, DEFAULT_SEARCH_LIMIT, EmbeddedNote,
     ExternalDependency, IncompatibilityReason, InstanceTarget, MAX_SEARCH_LIMIT, ModFile,
     ModInstallPlan, ModPlatformError, ModProject, ModProjectDetails, ModSearchHit, ModSearchQuery,
-    ModSearchResults, ModVersionInfo, OptionalCandidate, PlanWarning, PlannedMod, ReleaseChannel,
-    SideSupport,
+    ModSearchResults, ModVersionInfo, OptionalCandidate, OptionalStatus, PlanWarning, PlannedMod,
+    ReleaseChannel, SideSupport, UnverifiedOptional,
 };
 pub use ephervex_model::{
     ARTIFACT_CACHE_LIMIT_PRESETS, ArtifactCacheLimit, ArtifactCacheLimitError, ByteUnit,

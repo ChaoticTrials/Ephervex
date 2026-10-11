@@ -38,17 +38,17 @@ use ephervex_core::{
     MAX_SEARCH_MATCHES, MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod,
     ManagedModInstallation, ManagedModSnapshot, ModInstallPlan, ModInstallRequest, ModPresence,
     ModProjectDetails, ModRelations, ModSearchQuery, ModSearchResults, NetworkAccess, NewClient,
-    NewServer, OperationReporter, OptionalSelection, OutputLine, PackAnalysis, PackRecipe,
-    PackSide, Paths, PlanWarning, PlannedMod, PreferenceApplication, PreferenceId, PreferenceKey,
-    ProcessMonitor, PromotionRequest, PromotionWarning, ReconciliationReport, RelatedMod,
-    ReleaseListing, RequiredMods, RequirementBasis, RoundAnswer, RuntimeClassification,
-    RuntimeInventory, SearchOptions, SecretString, ServerCommitWarning, ServerContentSource,
-    ServerCreateOptions, ServerEvent, ServerExit, ServerFolder, ServerNetworkChange,
-    ServerObserver, ServerPersistenceHealth, ServerRecord, ServerWarning, Session,
-    SharedArtifactReport, SideRequirement, SkipReason, SnapshotOrigin, SnapshotRecord,
+    NewServer, OperationReporter, OptionalCandidate, OptionalSelection, OptionalStatus, OutputLine,
+    PackAnalysis, PackRecipe, PackSide, Paths, PlanWarning, PlannedMod, PreferenceApplication,
+    PreferenceId, PreferenceKey, ProcessMonitor, PromotionRequest, PromotionWarning,
+    ReconciliationReport, RelatedMod, ReleaseListing, RequiredMods, RequirementBasis, RoundAnswer,
+    RuntimeClassification, RuntimeInventory, SearchOptions, SecretString, ServerCommitWarning,
+    ServerContentSource, ServerCreateOptions, ServerEvent, ServerExit, ServerFolder,
+    ServerNetworkChange, ServerObserver, ServerPersistenceHealth, ServerRecord, ServerWarning,
+    Session, SharedArtifactReport, SideRequirement, SkipReason, SnapshotOrigin, SnapshotRecord,
     SnapshotRestoreOptions, StartedServerLifetime, SuspectConfidence, SuspectReason,
-    TerminationRequests, TextAnchor, TextView, UnknownServerFiles, VerificationReport,
-    VersionMetadata, VersionRecord, format_binary_bytes,
+    TerminationRequests, TextAnchor, TextView, UnknownServerFiles, UnverifiedOptional,
+    VerificationReport, VersionMetadata, VersionRecord, format_binary_bytes,
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{
@@ -5134,6 +5134,44 @@ fn compatibility_json(compatibility: &Compatibility) -> serde_json::Value {
     })
 }
 
+/// Like [`compatibility_json`], with `compatible` null while the optional
+/// dependency could not be checked, and the reason named.
+fn optional_status_json(status: &OptionalStatus) -> serde_json::Value {
+    serde_json::json!({
+        "compatible": match status {
+            OptionalStatus::Compatible => Some(true),
+            OptionalStatus::Incompatible(_) => Some(false),
+            OptionalStatus::Unverified(_) => None,
+        },
+        "reasons": status.reasons().iter().map(incompatibility_json).collect::<Vec<_>>(),
+        "unverified": match status {
+            OptionalStatus::Unverified(unverified) => Some(unverified.as_str()),
+            _ => None,
+        },
+    })
+}
+
+fn optional_unverified_text(candidate: &OptionalCandidate) -> Option<String> {
+    let OptionalStatus::Unverified(unverified) = &candidate.status else {
+        return None;
+    };
+    let project = MessageArg::from(candidate.project_id.as_str());
+    Some(match unverified {
+        UnverifiedOptional::ConflictingIdentity { version_project_id } => {
+            ephervex_i18n::lookup_args(
+                unverified.message_id(),
+                [
+                    ("project", project),
+                    ("owner", MessageArg::from(version_project_id.as_str())),
+                ],
+            )
+        }
+        UnverifiedOptional::Unavailable | UnverifiedOptional::UnknownIdentity => {
+            ephervex_i18n::lookup_args(unverified.message_id(), [("project", project)])
+        }
+    })
+}
+
 fn print_mod_search(results: &ModSearchResults, json: bool) {
     if json {
         print_json(&serde_json::json!({
@@ -5283,7 +5321,7 @@ fn print_mod_plan(plan: &ModInstallPlan, json: bool) {
                 "declared_by": candidate.declared_by,
                 "selected": false,
                 "version_id": candidate.version.as_ref().map(|version| version.id.clone()),
-                "compatibility": compatibility_json(&candidate.compatibility),
+                "compatibility": optional_status_json(&candidate.status),
             })).collect::<Vec<_>>(),
             "external": plan.external.iter().map(|external| serde_json::json!({
                 "kind": external.kind.as_str(),
@@ -5320,7 +5358,10 @@ fn print_mod_plan(plan: &ModInstallPlan, json: bool) {
     }
     for candidate in &plan.optional {
         // Unchecked by default, and shown as such rather than hidden.
-        outln!("  [ ] {} (optional)", candidate.project_id);
+        match optional_unverified_text(candidate) {
+            Some(note) => outln!("  [ ] {} (optional): {note}", candidate.project_id),
+            None => outln!("  [ ] {} (optional)", candidate.project_id),
+        }
     }
     for external in &plan.external {
         outln!("  ? {} ({})", external.file_name, external.kind.as_str());
@@ -8350,6 +8391,22 @@ fn localized_failure(error: &CoreError) -> (String, Option<String>) {
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unverified_optional_dependency_is_not_reported_as_incompatible() {
+        let unverified =
+            optional_status_json(&OptionalStatus::Unverified(UnverifiedOptional::Unavailable));
+        assert_eq!(unverified["compatible"], serde_json::Value::Null);
+        assert_eq!(unverified["unverified"], "unavailable");
+        assert_eq!(unverified["reasons"], serde_json::json!([]));
+
+        let incompatible = optional_status_json(&OptionalStatus::Incompatible(Vec::new()));
+        assert_eq!(incompatible["compatible"], false);
+        assert_eq!(incompatible["unverified"], serde_json::Value::Null);
+
+        let compatible = optional_status_json(&OptionalStatus::Compatible);
+        assert_eq!(compatible["compatible"], true);
+    }
 
     fn settings_with(key: ephervex_core::CurseForgeKeyState) -> ApiSettings {
         ApiSettings {
