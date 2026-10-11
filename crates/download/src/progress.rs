@@ -10,6 +10,7 @@
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use ephervex_model::{Operation, OperationId, OperationStatus, Progress};
@@ -56,6 +57,8 @@ struct ReporterState {
     last_emit: Option<Instant>,
     /// A change the throttle has not published yet.
     held_back: bool,
+    /// Whether a thread is already waiting to publish a held-back change.
+    trailing_scheduled: bool,
     /// Whether `operation.items` is a download batch's count rather than one
     /// its caller keeps, so a later single download knows it is stale.
     items_from_batch: bool,
@@ -124,6 +127,7 @@ impl OperationReporter {
                     operation: Operation::new(title, cancellable),
                     last_emit: None,
                     held_back: false,
+                    trailing_scheduled: false,
                     items_from_batch: false,
                 }),
                 publishing: Mutex::new(()),
@@ -165,8 +169,10 @@ impl OperationReporter {
         });
     }
 
-    /// Publishes an update the throttle held back, so a stage's last state is
-    /// not lost while the operation moves on.
+    /// Publishes an update the throttle held back right away.
+    ///
+    /// A held-back update is also published once the throttle interval has
+    /// passed, so calling this is only needed to publish before then.
     pub fn flush(&self) {
         let held_back = {
             let mut state = self.lock_state();
@@ -293,6 +299,9 @@ impl OperationReporter {
                 state.last_emit = Some(now);
             }
             state.held_back = !due;
+            if !due {
+                self.ensure_trailing_publisher(&mut state);
+            }
             due
         };
         if due {
@@ -319,7 +328,9 @@ impl OperationReporter {
                 Ok(order) => order,
                 Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
                 Err(std::sync::TryLockError::WouldBlock) => {
-                    self.lock_state().held_back = true;
+                    let mut state = self.lock_state();
+                    state.held_back = true;
+                    self.ensure_trailing_publisher(&mut state);
                     return;
                 }
             }
@@ -331,6 +342,66 @@ impl OperationReporter {
             state.operation.clone()
         };
         sink.operation_changed(&snapshot);
+    }
+
+    /// Makes sure a held-back change is published once the throttle interval
+    /// has passed, so the last change before quiet work is never left unseen.
+    ///
+    /// A plain thread rather than a runtime timer: the reporter is driven from
+    /// async tasks, blocking pools and plain threads alike. The thread lives
+    /// only while something is held back.
+    fn ensure_trailing_publisher(&self, state: &mut ReporterState) {
+        if state.trailing_scheduled || self.inner.sink.is_none() {
+            return;
+        }
+        state.trailing_scheduled = true;
+        let reporter = self.clone();
+        let spawned = thread::Builder::new()
+            .name("progress-trailing".to_owned())
+            .spawn(move || reporter.publish_held_back_updates());
+        if spawned.is_err() {
+            // Without a thread, the next update or flush publishes it as before.
+            state.trailing_scheduled = false;
+        }
+    }
+
+    fn publish_held_back_updates(&self) {
+        loop {
+            let wait = {
+                let mut state = self.lock_state();
+                if !state.held_back || state.operation.status.is_terminal() {
+                    state.trailing_scheduled = false;
+                    return;
+                }
+                state.last_emit.map_or(Duration::ZERO, |last| {
+                    self.inner.min_interval.saturating_sub(last.elapsed())
+                })
+            };
+            if !wait.is_zero() {
+                thread::sleep(wait);
+                continue;
+            }
+            let Some(sink) = self.inner.sink.as_ref() else {
+                return;
+            };
+            let _order = self
+                .inner
+                .publishing
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let snapshot = {
+                let mut state = self.lock_state();
+                // A forced change may have published it while this waited.
+                (state.held_back && !state.operation.status.is_terminal()).then(|| {
+                    state.held_back = false;
+                    state.last_emit = Some(Instant::now());
+                    state.operation.clone()
+                })
+            };
+            if let Some(snapshot) = snapshot {
+                sink.operation_changed(&snapshot);
+            }
+        }
     }
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, ReporterState> {
@@ -504,6 +575,125 @@ mod tests {
         let last = snapshots.last().expect("flushed");
         assert_eq!(last.items, Progress::new(8, 8));
         assert_eq!(last.status, OperationStatus::Running);
+    }
+
+    fn wait_for(condition: impl Fn() -> bool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if condition() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        condition()
+    }
+
+    #[test]
+    fn a_held_back_update_is_published_once_the_interval_passes_without_a_flush() {
+        let sink = Arc::new(RecordingSink::default());
+        let reporter = OperationReporter::build_with_interval(
+            "verify",
+            true,
+            Some(sink.clone()),
+            Duration::from_millis(30),
+        );
+        reporter.begin(None);
+        reporter.set_items(Progress::new(7, 8));
+        reporter.set_items(Progress::new(8, 8));
+
+        assert!(
+            wait_for(|| sink
+                .snapshots()
+                .last()
+                .is_some_and(|last| last.items == Progress::new(8, 8))),
+            "the last count reached the sink with no further call"
+        );
+    }
+
+    #[test]
+    fn a_trailing_publish_does_not_follow_a_finished_operation() {
+        let sink = Arc::new(RecordingSink::default());
+        let reporter = OperationReporter::build_with_interval(
+            "verify",
+            true,
+            Some(sink.clone()),
+            Duration::from_millis(30),
+        );
+        reporter.begin(None);
+        reporter.set_items(Progress::new(1, 2));
+        reporter.finish(OperationStatus::Completed);
+        let published = sink.snapshots().len();
+
+        thread::sleep(Duration::from_millis(150));
+        let snapshots = sink.snapshots();
+        assert_eq!(snapshots.len(), published, "nothing followed the finish");
+        assert_eq!(
+            snapshots.last().expect("finished").status,
+            OperationStatus::Completed
+        );
+    }
+
+    #[test]
+    fn an_update_that_lost_the_publishing_race_is_still_published() {
+        #[derive(Debug, Default)]
+        struct GatedSink {
+            gate_open: Mutex<bool>,
+            opened: std::sync::Condvar,
+            entered: Mutex<bool>,
+            entered_signal: std::sync::Condvar,
+            inner: RecordingSink,
+        }
+
+        impl ProgressSink for GatedSink {
+            fn operation_changed(&self, operation: &Operation) {
+                let first = {
+                    let mut entered = self.entered.lock().unwrap();
+                    !std::mem::replace(&mut *entered, true)
+                };
+                self.entered_signal.notify_all();
+                if first {
+                    let mut open = self.gate_open.lock().unwrap();
+                    while !*open {
+                        open = self.opened.wait(open).unwrap();
+                    }
+                }
+                self.inner.operation_changed(operation);
+            }
+        }
+
+        let sink = Arc::new(GatedSink::default());
+        let reporter = OperationReporter::build_with_interval(
+            "verify",
+            true,
+            Some(sink.clone()),
+            Duration::from_millis(20),
+        );
+        let publisher = {
+            let reporter = reporter.clone();
+            thread::spawn(move || reporter.begin(None))
+        };
+        // The first publish now holds the publishing order inside the sink.
+        {
+            let mut entered = sink.entered.lock().unwrap();
+            while !*entered {
+                entered = sink.entered_signal.wait(entered).unwrap();
+            }
+        }
+        thread::sleep(Duration::from_millis(40));
+        reporter.set_items(Progress::new(5, 5));
+
+        *sink.gate_open.lock().unwrap() = true;
+        sink.opened.notify_all();
+        publisher.join().unwrap();
+
+        assert!(
+            wait_for(|| sink
+                .inner
+                .snapshots()
+                .last()
+                .is_some_and(|last| last.items == Progress::new(5, 5))),
+            "the update that could not publish was published afterwards"
+        );
     }
 
     #[test]
