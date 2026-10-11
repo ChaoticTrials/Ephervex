@@ -290,3 +290,21 @@ html[data-season='halloween'] .theme-doc-markdown > header:first-child + p code 
   color: #ffd19b;
   background: rgba(255, 196, 125, 0.12);
 }
+html[data-season='halloween'] .theme-doc-markdown .theme-code-block {
+  /* Docusaurus sets Prism colors inline on the block and its pre element. */
+  --prism-background-color: #211629 !important;
+  --prism-color: #fff0df !important;
+  border: 1px solid #80536a;
+  box-shadow: none;
+}
+html[data-season='halloween'] .theme-doc-markdown .theme-code-block pre {
+  background: #211629 !important;
+  color: #fff0df !important;
+}
+html[data-season='halloween'] .theme-doc-markdown .theme-code-block button {
+  border-color: #ad786c;
+  color: #ffe2be;
+  background: #4a2d41;
+}
+html[data-season='halloween'] .theme-doc-markdown .theme-code-block button:hover { background: #68415c; }
+html[data-season='halloween'] .theme-doc-markdown .theme-code-block button:focus-visible { outline-color: #ffc47d; }
