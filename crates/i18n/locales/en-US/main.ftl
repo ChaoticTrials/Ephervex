@@ -2781,6 +2781,7 @@ gui-ip-invalid = Enter a valid IPv4 or IPv6 address.
 gui-network-access-required = Choose a network access mode.
 gui-background-service-failed = The background service could not start: { $value }
 gui-background-runtime-failed = The background runtime could not start: { $value }
+gui-background-service-stopped = The background service stopped unexpectedly.
 gui-background-unavailable = The background service is not running. Nothing in this window will take effect until Ephervex is restarted.
 gui-choose-modpack-archive = Choose a modpack archive
 gui-modpack-archives = Modpack archives

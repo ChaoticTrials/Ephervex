@@ -4,7 +4,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use copypasta::{ClipboardContext, ClipboardProvider as _};
@@ -2455,7 +2455,16 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
             ui.set_compact_layout(compact_layout);
         }
         let mut log_changes = HashMap::new();
-        for event in poll_receiver.borrow_mut().try_iter() {
+        let mut worker_gone = take_worker_stopped();
+        loop {
+            let event = match poll_receiver.borrow_mut().try_recv() {
+                Ok(event) => event,
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    worker_gone = true;
+                    break;
+                }
+            };
             match event {
                 Event::LiveLog(update) => {
                     poll_workspace
@@ -2478,6 +2487,9 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
                     &poll_commands,
                 ),
             }
+        }
+        if worker_gone {
+            report_worker_stopped(&ui);
         }
         poll_workspace.logs.borrow_mut().settle(log_changes);
     });
@@ -9779,9 +9791,29 @@ fn reconciled<T: Clone + PartialEq + 'static>(list: &ModelRc<T>, rows: Vec<T>) -
     list.clone()
 }
 
+thread_local! {
+    /// Set by a command that found the worker gone, for the next poll to show.
+    /// Commands are sent from the window's own thread, which is also the one
+    /// that polls.
+    static WORKER_STOPPED: Cell<bool> = const { Cell::new(false) };
+}
+
 fn send(sender: &Sender<Command>, command: Command) {
     if sender.send(command).is_err() {
         tracing::error!("the GUI core worker stopped unexpectedly");
+        WORKER_STOPPED.set(true);
+    }
+}
+
+fn take_worker_stopped() -> bool {
+    WORKER_STOPPED.replace(false)
+}
+
+/// Shows that the background service is gone, keeping the reason already on
+/// screen when it reported one itself.
+fn report_worker_stopped(ui: &AppWindow) {
+    if ui.get_startup_error().is_empty() {
+        apply_backend_unavailable(ui, lookup("gui-background-service-stopped"));
     }
 }
 
@@ -9827,6 +9859,45 @@ mod tests {
         assert!(!ui.get_loading());
         assert_eq!(ui.get_startup_error(), "config.toml is malformed");
         assert_eq!(ui.get_modal_error(), "");
+    }
+
+    #[test]
+    fn a_command_sent_to_a_stopped_worker_puts_the_unavailable_banner_on_screen() {
+        let ui = test_window();
+        let (commands, received) = std::sync::mpsc::channel();
+        drop(received);
+        assert!(!take_worker_stopped());
+
+        send(&commands, Command::Refresh);
+
+        assert!(take_worker_stopped());
+        assert!(!take_worker_stopped());
+        report_worker_stopped(&ui);
+        assert!(!ui.get_loading());
+        assert_eq!(
+            ui.get_startup_error(),
+            lookup("gui-background-service-stopped")
+        );
+    }
+
+    #[test]
+    fn a_command_sent_to_a_running_worker_does_not_report_it_stopped() {
+        let (commands, received) = std::sync::mpsc::channel();
+
+        send(&commands, Command::Refresh);
+
+        assert!(!take_worker_stopped());
+        assert_eq!(received.try_iter().count(), 1);
+    }
+
+    #[test]
+    fn a_stopped_worker_keeps_the_reason_it_already_reported() {
+        let ui = test_window();
+        apply_backend_unavailable(&ui, "config.toml is malformed".to_owned());
+
+        report_worker_stopped(&ui);
+
+        assert_eq!(ui.get_startup_error(), "config.toml is malformed");
     }
 
     fn isolation_data(host: &str, active: bool, phase: &str) -> IsolationData {

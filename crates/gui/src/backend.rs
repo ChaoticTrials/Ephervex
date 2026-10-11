@@ -2479,6 +2479,23 @@ pub fn spawn() -> BackendHandle {
     }
 }
 
+/// Reports the worker as lasting-unavailable when it ends by unwinding, so a
+/// panic in a command handler cannot leave the window silently unresponsive.
+struct WorkerStopReport {
+    events: Sender<Event>,
+}
+
+impl Drop for WorkerStopReport {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            tracing::error!("the GUI core worker stopped unexpectedly");
+            let _ = self.events.send(Event::BackendUnavailable(lookup(
+                "gui-background-service-stopped",
+            )));
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
 fn run_worker(
     open_app: impl FnOnce() -> CoreResult<App>,
@@ -2487,6 +2504,9 @@ fn run_worker(
     cancellations: CancellationRegistry,
     supervised: SupervisedServers,
 ) {
+    let _stop_report = WorkerStopReport {
+        events: events.clone(),
+    };
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -13096,6 +13116,39 @@ mod tests {
             matches!(&event, Event::BackendUnavailable(message) if !message.is_empty()),
             "the failure is reported as lasting: {event:?}"
         );
+        assert!(received.try_recv().is_err());
+    }
+
+    #[test]
+    fn worker_that_panics_reports_the_service_as_stopped() {
+        let (_commands, command_rx) = std::sync::mpsc::channel();
+        let (events, received) = std::sync::mpsc::channel();
+
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_worker(
+                || std::panic::resume_unwind(Box::new("a command handler panicked")),
+                command_rx,
+                events,
+                Arc::new(Mutex::new(HashMap::new())),
+                SupervisedServers::default(),
+            );
+        }));
+
+        assert!(unwound.is_err());
+        let event = received.try_recv().expect("an event");
+        assert!(
+            matches!(&event, Event::BackendUnavailable(message) if !message.is_empty()),
+            "the stop is reported as lasting: {event:?}"
+        );
+        assert!(received.try_recv().is_err());
+    }
+
+    #[test]
+    fn worker_stop_report_stays_silent_when_the_worker_ends_normally() {
+        let (events, received) = std::sync::mpsc::channel();
+
+        drop(WorkerStopReport { events });
+
         assert!(received.try_recv().is_err());
     }
 
