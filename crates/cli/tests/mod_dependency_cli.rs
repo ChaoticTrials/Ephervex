@@ -857,6 +857,126 @@ fn enabling_a_mod_declared_incompatible_with_a_loaded_one_refuses() {
     assert!(jars(&mods).contains(&"Clashing.jar".to_owned()));
 }
 
+#[test]
+fn an_explicit_flag_reports_missing_requirements_when_relations_are_not_followed() {
+    let sandbox = Sandbox::new();
+    let (id, mods) = sandbox.instance_with_a_shared_library();
+    add_recorded_mod(
+        &mods,
+        "NeedsMissing.jar",
+        "zzMissing1",
+        &[("zzAbsent01", "required")],
+    );
+    let disabled = sandbox.run(&[
+        "mod",
+        "disable",
+        "--instance",
+        &id,
+        "--only-this",
+        "mods/NeedsMissing.jar",
+    ]);
+    assert!(disabled.status.success(), "{}", stderr_of(&disabled));
+    set_config(
+        &sandbox,
+        "follow_mod_dependencies = true",
+        "follow_mod_dependencies = false",
+    );
+
+    let output = sandbox.run(&[
+        "mod",
+        "enable",
+        "--instance",
+        &id,
+        "--with-dependencies",
+        "mods/NeedsMissing.jar",
+    ]);
+    assert!(output.status.success(), "{}", stderr_of(&output));
+    assert!(jars(&mods).contains(&"NeedsMissing.jar".to_owned()));
+    assert!(
+        stderr_of(&output).contains("zzAbsent01"),
+        "the requirement that is not installed is reported: {}",
+        stderr_of(&output)
+    );
+}
+
+#[test]
+fn an_explicit_flag_reports_incompatible_mods_when_relations_are_not_followed() {
+    let sandbox = Sandbox::new();
+    let (id, mods) = sandbox.instance_with_a_shared_library();
+    add_recorded_mod(
+        &mods,
+        "Clashing.jar",
+        "zzClash001",
+        &[(LIBRARY, "incompatible")],
+    );
+    let disabled = sandbox.run(&[
+        "mod",
+        "disable",
+        "--instance",
+        &id,
+        "--only-this",
+        "mods/Clashing.jar",
+    ]);
+    assert!(disabled.status.success(), "{}", stderr_of(&disabled));
+    set_config(
+        &sandbox,
+        "follow_mod_dependencies = true",
+        "follow_mod_dependencies = false",
+    );
+
+    let output = sandbox.run(&[
+        "mod",
+        "enable",
+        "--instance",
+        &id,
+        "--with-dependencies",
+        "mods/Clashing.jar",
+    ]);
+    assert!(output.status.success(), "{}", stderr_of(&output));
+    assert!(jars(&mods).contains(&"Clashing.jar".to_owned()));
+    assert!(
+        stderr_of(&output).contains("LibX.jar"),
+        "the conflicting mod is reported: {}",
+        stderr_of(&output)
+    );
+}
+
+#[test]
+fn not_following_relations_does_not_report_requirements_for_an_unflagged_enable() {
+    // The report accompanies carrying dependencies along; with the preference
+    // off and no flag, the command touches only the named mod.
+    let sandbox = Sandbox::new();
+    let (id, mods) = sandbox.instance_with_a_shared_library();
+    add_recorded_mod(
+        &mods,
+        "NeedsMissing.jar",
+        "zzMissing1",
+        &[("zzAbsent01", "required")],
+    );
+    let disabled = sandbox.run(&[
+        "mod",
+        "disable",
+        "--instance",
+        &id,
+        "--only-this",
+        "mods/NeedsMissing.jar",
+    ]);
+    assert!(disabled.status.success(), "{}", stderr_of(&disabled));
+    set_config(
+        &sandbox,
+        "follow_mod_dependencies = true",
+        "follow_mod_dependencies = false",
+    );
+
+    let output = sandbox.run(&["mod", "enable", "--instance", &id, "mods/NeedsMissing.jar"]);
+    assert!(output.status.success(), "{}", stderr_of(&output));
+    assert!(
+        !stderr_of(&output).contains("zzAbsent01"),
+        "{}",
+        stderr_of(&output)
+    );
+}
+
 /// Rewrites one recorded setting, through a save the launcher itself made.
 ///
 /// Reading a configuration never writes one, so a setting change is what puts

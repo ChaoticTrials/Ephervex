@@ -4561,7 +4561,7 @@ fn run_mod_enable(
     }
     changes.push((path.to_path_buf(), true));
     print_mod_states(&app.set_mods_enabled(host, &changes)?, json);
-    if policy.cascades() {
+    if cascade || policy.cascades() {
         for entry in &needs.absent {
             eprintln!("still missing: {} is not installed here", entry.name);
         }
