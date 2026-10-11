@@ -587,7 +587,8 @@ impl DownloadManager {
     ///
     /// Names the artifact and reports byte progress, but never begins or
     /// finishes the operation: only its owner knows when the whole thing is
-    /// done.
+    /// done. A file count the caller published stays; one left by a preceding
+    /// [`Self::download_all`] is cleared.
     pub async fn download(
         &self,
         request: &DownloadRequest,
@@ -599,7 +600,7 @@ impl DownloadManager {
             tally: None,
             contributed: 0,
         };
-        reporter.set_step(request.label.clone());
+        reporter.begin_single_download(request.label.clone());
         let outcome = self.fetch(request, &mut cursor, cancel).await;
         reporter.flush();
         outcome
@@ -652,7 +653,7 @@ impl DownloadManager {
         let total = requests.len() as u64;
         let mut done = 0;
         // A new batch replaces the last one's count at once.
-        reporter.set_items(Progress::new(0, total));
+        reporter.set_batch_items(Progress::new(0, total));
         reporter.flush();
         while let Some((index, result)) = pending.next().await {
             match result {
@@ -675,7 +676,7 @@ impl DownloadManager {
             // for the whole batch. Published on completion, the name and the
             // count are the same fact stated twice and always agree.
             done += 1;
-            reporter.set_items_at(Progress::new(done, total), requests[index].label.clone());
+            reporter.set_batch_items_at(Progress::new(done, total), requests[index].label.clone());
         }
 
         reporter.flush();

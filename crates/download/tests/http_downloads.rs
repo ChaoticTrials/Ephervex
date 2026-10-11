@@ -1087,6 +1087,120 @@ async fn a_plaintext_http_url_is_refused_by_the_default_configuration() {
 }
 
 #[tokio::test]
+async fn single_downloads_after_a_batch_do_not_report_the_batchs_file_count() {
+    let server = MockServer::start().await;
+    for name in ["batch-a.jar", "batch-b.jar", "single.jar"] {
+        Mock::given(method("GET"))
+            .and(path(format!("/{name}")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+            .mount(&server)
+            .await;
+    }
+    let dir = TempDir::new().expect("temp dir");
+    let file = |name: &str| {
+        request(&server, &format!("/{name}"), &dir.path().join(name))
+            .verifying(sha1_of(BODY))
+            .sized(BODY.len() as u64)
+            .labeled(name.to_owned())
+    };
+
+    let (sink, mut events) = ChannelSink::new();
+    let sink: Arc<dyn ProgressSink> = sink;
+    let reporter = OperationReporter::new("launch", true, sink);
+    reporter.begin(None);
+    let manager = manager(RetryPolicy::none());
+    let cancel = CancellationToken::new();
+
+    manager
+        .download_all(
+            &[file("batch-a.jar"), file("batch-b.jar")],
+            &reporter,
+            &cancel,
+        )
+        .await
+        .expect("the batch succeeds");
+    assert_eq!(reporter.snapshot().items, Progress::new(2, 2));
+
+    manager
+        .download(&file("single.jar"), &reporter, &cancel)
+        .await
+        .expect("the single download succeeds");
+
+    let after = reporter.snapshot();
+    assert_eq!(after.items, Progress::indeterminate());
+    assert_eq!(after.current_step.as_deref(), Some("single.jar"));
+    let mut last = None;
+    while let Ok(operation) = events.try_recv() {
+        last = Some(operation);
+    }
+    assert_eq!(
+        last.expect("at least one snapshot").items,
+        Progress::indeterminate(),
+        "the cleared count is what the frontend was told"
+    );
+}
+
+#[tokio::test]
+async fn single_downloads_after_a_failed_batch_do_not_report_the_batchs_file_count() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/present.jar"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/missing.jar"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    let dir = TempDir::new().expect("temp dir");
+    let present =
+        request(&server, "/present.jar", &dir.path().join("present.jar")).verifying(sha1_of(BODY));
+    let missing = request(&server, "/missing.jar", &dir.path().join("missing.jar"));
+
+    let reporter = OperationReporter::silent("import");
+    reporter.begin(None);
+    let manager = manager(RetryPolicy::none());
+    let cancel = CancellationToken::new();
+
+    manager
+        .download_all(&[missing, present.clone()], &reporter, &cancel)
+        .await
+        .expect_err("a missing file fails the batch");
+    assert_ne!(reporter.snapshot().items, Progress::indeterminate());
+
+    manager
+        .download(&present, &reporter, &cancel)
+        .await
+        .expect("the single download succeeds");
+    assert_eq!(reporter.snapshot().items, Progress::indeterminate());
+}
+
+#[tokio::test]
+async fn single_downloads_keep_the_file_count_their_caller_publishes() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/single.jar"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+        .mount(&server)
+        .await;
+    let dir = TempDir::new().expect("temp dir");
+    let single =
+        request(&server, "/single.jar", &dir.path().join("single.jar")).verifying(sha1_of(BODY));
+
+    let reporter = OperationReporter::silent("verify");
+    reporter.begin(None);
+    reporter.set_items(Progress::new(3, 10));
+
+    manager(RetryPolicy::none())
+        .download(&single, &reporter, &CancellationToken::new())
+        .await
+        .expect("the single download succeeds");
+
+    assert_eq!(reporter.snapshot().items, Progress::new(3, 10));
+}
+
+#[tokio::test]
 async fn a_batch_downloads_every_file_and_reports_one_operation() {
     let server = MockServer::start().await;
     for index in 0..5 {

@@ -56,6 +56,9 @@ struct ReporterState {
     last_emit: Option<Instant>,
     /// A change the throttle has not published yet.
     held_back: bool,
+    /// Whether `operation.items` is a download batch's count rather than one
+    /// its caller keeps, so a later single download knows it is stale.
+    items_from_batch: bool,
 }
 
 #[derive(Debug)]
@@ -121,6 +124,7 @@ impl OperationReporter {
                     operation: Operation::new(title, cancellable),
                     last_emit: None,
                     held_back: false,
+                    items_from_batch: false,
                 }),
                 publishing: Mutex::new(()),
                 sink,
@@ -157,7 +161,7 @@ impl OperationReporter {
     pub fn begin_stage(&self, stage: String) {
         self.update(true, |state| {
             state.operation.status = OperationStatus::Running;
-            enter_stage(&mut state.operation, Some(stage));
+            enter_stage(state, Some(stage));
         });
     }
 
@@ -189,12 +193,15 @@ impl OperationReporter {
     /// Emitted immediately: a stage change is the thing a waiting user is
     /// watching for, and throttling it would be throttling the answer.
     pub fn set_stage(&self, stage: Option<String>) {
-        self.update(true, |state| enter_stage(&mut state.operation, stage));
+        self.update(true, |state| enter_stage(state, stage));
     }
 
     /// Publishes how many of the current stage's units are done. Throttled.
     pub fn set_items(&self, items: Progress) {
-        self.update(false, |state| state.operation.items = items);
+        self.update(false, |state| {
+            state.operation.items = items;
+            state.items_from_batch = false;
+        });
     }
 
     /// Publishes a completed unit and what it was, as one throttled update.
@@ -209,6 +216,42 @@ impl OperationReporter {
         self.update(false, |state| {
             state.operation.items = items;
             state.operation.current_step = step;
+            state.items_from_batch = false;
+        });
+    }
+
+    /// Publishes a download batch's count of finished files. Throttled.
+    ///
+    /// The count belongs to the batch: a single download that follows it
+    /// starts without it, see [`Self::begin_single_download`].
+    pub(crate) fn set_batch_items(&self, items: Progress) {
+        self.update(false, |state| {
+            state.operation.items = items;
+            state.items_from_batch = true;
+        });
+    }
+
+    /// [`Self::set_batch_items`] together with the file that just landed.
+    pub(crate) fn set_batch_items_at(&self, items: Progress, step: Option<String>) {
+        self.update(false, |state| {
+            state.operation.items = items;
+            state.operation.current_step = step;
+            state.items_from_batch = true;
+        });
+    }
+
+    /// Names the file a single download is fetching.
+    ///
+    /// A count the caller published itself stays, because it counts across
+    /// single downloads. One left behind by a download batch is dropped: the
+    /// single downloads that follow a batch are another stage, and showing them
+    /// beside the batch's total would be wrong.
+    pub(crate) fn begin_single_download(&self, step: Option<String>) {
+        self.update(true, |state| {
+            state.operation.current_step = step;
+            if std::mem::take(&mut state.items_from_batch) {
+                state.operation.items = Progress::indeterminate();
+            }
         });
     }
 
@@ -350,11 +393,13 @@ impl ByteTally {
 }
 
 /// Starts a phase: the counts, bytes and step belonged to the one that ended.
-fn enter_stage(operation: &mut Operation, stage: Option<String>) {
+fn enter_stage(reporter_state: &mut ReporterState, stage: Option<String>) {
+    let operation = &mut reporter_state.operation;
     operation.stage = stage;
     operation.items = Progress::indeterminate();
     operation.progress = Progress::indeterminate();
     operation.current_step = None;
+    reporter_state.items_from_batch = false;
 }
 
 #[cfg(test)]
@@ -459,6 +504,51 @@ mod tests {
         let last = snapshots.last().expect("flushed");
         assert_eq!(last.items, Progress::new(8, 8));
         assert_eq!(last.status, OperationStatus::Running);
+    }
+
+    #[test]
+    fn a_single_download_after_a_batch_does_not_show_the_batchs_count() {
+        let reporter = OperationReporter::silent("download");
+        reporter.begin(None);
+        reporter.set_batch_items_at(Progress::new(37, 200), Some("a.jar".to_owned()));
+        reporter.begin_single_download(Some("b.jar".to_owned()));
+
+        let snapshot = reporter.snapshot();
+        assert_eq!(snapshot.items, Progress::indeterminate());
+        assert_eq!(snapshot.current_step.as_deref(), Some("b.jar"));
+    }
+
+    #[test]
+    fn a_single_download_keeps_the_count_its_caller_publishes() {
+        let reporter = OperationReporter::silent("verify");
+        reporter.begin(None);
+        reporter.set_items_at(Progress::new(3, 10), Some("a.jar".to_owned()));
+        reporter.begin_single_download(Some("b.jar".to_owned()));
+
+        assert_eq!(reporter.snapshot().items, Progress::new(3, 10));
+    }
+
+    #[test]
+    fn a_count_the_caller_publishes_after_a_batch_is_not_cleared_by_a_single_download() {
+        let reporter = OperationReporter::silent("download");
+        reporter.begin(None);
+        reporter.set_batch_items(Progress::new(5, 5));
+        reporter.set_items(Progress::new(1, 4));
+        reporter.begin_single_download(None);
+
+        assert_eq!(reporter.snapshot().items, Progress::new(1, 4));
+    }
+
+    #[test]
+    fn a_stage_change_forgets_that_the_count_came_from_a_batch() {
+        let reporter = OperationReporter::silent("download");
+        reporter.begin(None);
+        reporter.set_batch_items(Progress::new(5, 5));
+        reporter.set_stage(Some("stage".to_owned()));
+        reporter.set_items(Progress::new(2, 9));
+        reporter.begin_single_download(None);
+
+        assert_eq!(reporter.snapshot().items, Progress::new(2, 9));
     }
 
     #[test]
