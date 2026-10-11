@@ -162,9 +162,17 @@ impl App {
             return Err(PackError::Canceled.into());
         }
         let mut mods = measure_installed_mods(game_dir, &installed.mods).await?;
+        if cancel.is_cancelled() {
+            return Err(PackError::Canceled.into());
+        }
         let identification = self
             .identify_installed_mods(&mut mods, game_dir, client_source, cancel)
             .await;
+        // Identification degrades silently and a canceled catalog request reads
+        // as an unavailable catalog, so only the token says the user stopped.
+        if cancel.is_cancelled() {
+            return Err(PackError::Canceled.into());
+        }
         let recipe = server_pack_recipe(
             name,
             minecraft_version,
@@ -890,6 +898,64 @@ mod tests {
             relations_of(&recipe, "modded.jar"),
             Some(&[][..]),
             "modrinth still answered for its own jar"
+        );
+    }
+
+    #[tokio::test]
+    async fn canceling_while_the_catalogs_are_asked_writes_no_recipe() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v2/version_files"))
+            .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(60)))
+            .mount(&server)
+            .await;
+        let app = app_against(directory.path(), &server, false);
+        let archive = directory.path().join("pack-server.zip");
+        zip_file(&archive, &archive_jars());
+        let server_source = directory.path().join("server-source");
+        let game_dir = directory.path().join("server");
+        let cancel = CancellationToken::new();
+        let loader = neoforge();
+        let canceler = {
+            let cancel = cancel.clone();
+            let server = &server;
+            async move {
+                while server
+                    .received_requests()
+                    .await
+                    .is_none_or(|requests| requests.is_empty())
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+                cancel.cancel();
+            }
+        };
+
+        let (result, ()) = tokio::join!(
+            app.install_server_archive(ServerArchiveInstall {
+                archive: &archive,
+                name: "Repro Server",
+                minecraft_version: "1.21.1",
+                loader: &loader,
+                launch: None,
+                game_dir: &game_dir,
+                server_source: &server_source,
+                client_source: None,
+                reporter: None,
+                cancel: &cancel,
+            }),
+            canceler
+        );
+
+        let error = result.expect_err("a cancel during identification stops the install");
+        assert!(
+            error.is_cancellation(),
+            "reported as a cancel, got {error:?}"
+        );
+        assert!(
+            !server_source.join("recipe.json").exists(),
+            "a canceled install leaves no recipe behind"
         );
     }
 
