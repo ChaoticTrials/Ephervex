@@ -1013,6 +1013,21 @@ impl App {
         )
     }
 
+    /// Follows a server's capture from now on, whichever process supervises
+    /// the server. The first poll returns the newest `initial_lines` lines of
+    /// the latest run.
+    pub fn server_capture_tail(
+        &self,
+        id: ServerId,
+        initial_lines: usize,
+    ) -> CoreResult<crate::server_capture::ServerCaptureTail> {
+        let record = self.server(id)?;
+        Ok(crate::server_capture::ServerCaptureTail::new(
+            self.paths().server_capture_dir(record.id),
+            initial_lines,
+        ))
+    }
+
     pub(super) fn canonical_server_for_mutation(&self, id: ServerId) -> CoreResult<ServerRecord> {
         let indexed = self.server(id)?;
         if duplicate_server_roots(self, id).len() > 1 {
@@ -1613,6 +1628,13 @@ fn read_capture_snapshot(
     limit: usize,
     scope: CaptureScope,
 ) -> CoreResult<CaptureSnapshot> {
+    let files = capture_segment_paths(directory)?;
+    snapshot_from_segments(directory, files, limit, scope)
+}
+
+/// The capture segments in a capture directory, in no particular order. A
+/// directory that does not exist yet has none.
+pub(crate) fn capture_segment_paths(directory: &Path) -> CoreResult<Vec<PathBuf>> {
     let mut files = Vec::new();
     if directory.is_dir() {
         for entry in
@@ -1639,7 +1661,16 @@ fn read_capture_snapshot(
             }
         }
     }
-    snapshot_from_segments(directory, files, limit, scope)
+    Ok(files)
+}
+
+/// What retention has removed from a capture directory, or nothing when no
+/// report is readable.
+pub(crate) fn read_capture_retention(directory: &Path) -> CaptureRetention {
+    std::fs::read(directory.join(ephervex_server::CAPTURE_INDEX_FILE))
+        .ok()
+        .and_then(|body| serde_json::from_slice(&body).ok())
+        .unwrap_or_default()
 }
 
 /// Reads the newest `limit` lines from listed capture segments. Retention
@@ -1697,14 +1728,10 @@ fn snapshot_from_segments(
     lines.reverse();
     // The run lost a segment after it was listed whole.
     latest_run_is_whole &= !pruned_while_reading;
-    let retention_path = directory.join(ephervex_server::CAPTURE_INDEX_FILE);
     let retention = if latest_run_is_whole {
         CaptureRetention::default()
     } else {
-        std::fs::read(&retention_path)
-            .ok()
-            .and_then(|body| serde_json::from_slice(&body).ok())
-            .unwrap_or_default()
+        read_capture_retention(directory)
     };
     Ok(CaptureSnapshot {
         lines,

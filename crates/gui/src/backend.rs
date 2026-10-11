@@ -1988,11 +1988,52 @@ const QUIT_SUPERVISOR_SETTLE: Duration = Duration::from_secs(10);
 /// is not stopped before the process exits keeps running with nobody holding
 /// its input or output. Entries come and go with the server's own events.
 #[derive(Debug, Clone, Default)]
-pub struct SupervisedServers(Arc<Mutex<HashSet<ServerId>>>);
+pub struct SupervisedServers {
+    running: Arc<Mutex<HashSet<ServerId>>>,
+    /// How many forwarders of this process deliver each server's output.
+    forwarding: Arc<Mutex<HashMap<ServerId, usize>>>,
+}
+
+/// Keeps a server marked as forwarded by this process while its forwarder lives.
+#[derive(Debug)]
+struct ForwardingGuard {
+    supervised: SupervisedServers,
+    server: ServerId,
+}
+
+impl Drop for ForwardingGuard {
+    fn drop(&mut self) {
+        if let Ok(mut forwarding) = self.supervised.forwarding.lock()
+            && let Some(count) = forwarding.get_mut(&self.server)
+        {
+            *count -= 1;
+            if *count == 0 {
+                forwarding.remove(&self.server);
+            }
+        }
+    }
+}
 
 impl SupervisedServers {
+    fn forward(&self, server: ServerId) -> ForwardingGuard {
+        if let Ok(mut forwarding) = self.forwarding.lock() {
+            *forwarding.entry(server).or_default() += 1;
+        }
+        ForwardingGuard {
+            supervised: self.clone(),
+            server,
+        }
+    }
+
+    /// Whether a forwarder of this process is delivering the server's output.
+    fn forwards(&self, server: ServerId) -> bool {
+        self.forwarding
+            .lock()
+            .is_ok_and(|forwarding| forwarding.contains_key(&server))
+    }
+
     fn note(&self, server: ServerId, event: &ServerEvent) {
-        let Ok(mut servers) = self.0.lock() else {
+        let Ok(mut servers) = self.running.lock() else {
             return;
         };
         match event {
@@ -2007,7 +2048,7 @@ impl SupervisedServers {
     }
 
     fn running(&self) -> Vec<ServerId> {
-        self.0
+        self.running
             .lock()
             .map_or_else(|_| Vec::new(), |servers| servers.iter().copied().collect())
     }
@@ -2065,6 +2106,9 @@ struct ObservedServerEvents {
     events: ServerEvents,
     supervised: SupervisedServers,
     server: ServerId,
+    /// Held while a supervisor of this process runs the server, which is when
+    /// its events are the only thing that delivers the output.
+    forwarding: Option<ForwardingGuard>,
 }
 
 impl ObservedServerEvents {
@@ -2073,18 +2117,34 @@ impl ObservedServerEvents {
             events,
             supervised,
             server,
+            forwarding: None,
+        }
+    }
+
+    /// Records one event taken off the channel. A run that reuses a server
+    /// another process supervises emits no event, so it never marks the server.
+    fn observe(&mut self, event: &ServerEvent) {
+        self.supervised.note(self.server, event);
+        match event {
+            ServerEvent::Preparing { .. } | ServerEvent::Started { .. }
+                if self.forwarding.is_none() =>
+            {
+                self.forwarding = Some(self.supervised.forward(self.server));
+            }
+            ServerEvent::Finished { .. } => self.forwarding = None,
+            _ => {}
         }
     }
 
     async fn recv(&mut self) -> Option<ServerEvent> {
         let event = self.events.recv().await?;
-        self.supervised.note(self.server, &event);
+        self.observe(&event);
         Some(event)
     }
 
     fn try_recv(&mut self) -> Result<ServerEvent, tokio::sync::mpsc::error::TryRecvError> {
         let event = self.events.try_recv()?;
-        self.supervised.note(self.server, &event);
+        self.observe(&event);
         Ok(event)
     }
 }
@@ -2555,6 +2615,8 @@ fn run_worker(
     // One tail per client log being read, each stopped on its own, so two
     // views can follow two clients at once.
     let mut client_tails: HashMap<InstanceId, Arc<AtomicBool>> = HashMap::new();
+    // The same for the servers whose console is open.
+    let mut server_tails: HashMap<ServerId, Arc<AtomicBool>> = HashMap::new();
     let refreshed_mods: RefreshedHosts = Arc::new(Mutex::new(HashSet::new()));
     let changing: ChangingHosts = Arc::new(Mutex::new(HashMap::new()));
     let launches: RunningLaunches = Arc::new(Mutex::new(HashMap::new()));
@@ -5020,12 +5082,22 @@ fn run_worker(
                 delete_mod(&app, host, &path, name, &events, &refreshed_mods);
             }
             Command::OpenLiveLog(source) => {
-                open_live_log(&app, source, &events, &mut client_tails);
+                open_live_log(
+                    &app,
+                    source,
+                    &events,
+                    &supervised,
+                    &mut client_tails,
+                    &mut server_tails,
+                );
             }
             Command::CloseLiveLog(source) => {
-                if let LiveLogSource::Client(instance) = source
-                    && let Some(stop) = client_tails.remove(&instance)
-                {
+                let stop = match source {
+                    LiveLogSource::Client(instance) => client_tails.remove(&instance),
+                    LiveLogSource::Server(server) => server_tails.remove(&server),
+                    LiveLogSource::File { .. } => None,
+                };
+                if let Some(stop) = stop {
                     stop.store(true, Ordering::Relaxed);
                 }
             }
@@ -7165,7 +7237,9 @@ fn open_live_log(
     app: &App,
     source: LiveLogSource,
     events: &Sender<Event>,
+    supervised: &SupervisedServers,
     client_tails: &mut HashMap<InstanceId, Arc<AtomicBool>>,
+    server_tails: &mut HashMap<ServerId, Arc<AtomicBool>>,
 ) {
     match source.clone() {
         // A file is read once. There is no tail to follow: a rotated log is
@@ -7190,24 +7264,9 @@ fn open_live_log(
                 Err(error) => send_error(events, &error),
             }
         }
-        LiveLogSource::Server(server) => match app.server_latest_run_output(server, 2_001) {
-            Ok(mut capture) => {
-                let bounded = capture.lines.len() > 2_000;
-                if bounded {
-                    capture.lines.remove(0);
-                }
-                let source_truncated =
-                    capture.retention.removed_lines > 0 || capture.pruned_while_reading || bounded;
-                let _ = events.send(Event::LiveLog(LiveLogUpdate {
-                    source,
-                    reset: true,
-                    missing: false,
-                    source_truncated,
-                    lines: capture.lines.into_iter().map(LiveLogLine::Server).collect(),
-                }));
-            }
-            Err(error) => send_error(events, &error),
-        },
+        LiveLogSource::Server(server) => {
+            follow_server_capture(app, supervised, server, events, server_tails);
+        }
         LiveLogSource::Client(instance) => follow_client_log(app, instance, events, client_tails),
     }
 }
@@ -7281,6 +7340,98 @@ fn follow_client_log(
     {
         tracing::error!(%error, "could not start the client latest.log tail");
     }
+}
+
+/// The most lines a server Console is opened with.
+const SERVER_CONSOLE_LINES: usize = 2_000;
+
+/// Follows one server's capture on a thread of its own until its stop flag is
+/// raised, whichever process supervises the server.
+///
+/// While a forwarder of this process delivers the server's output the capture
+/// is still read, so the position stays current, but nothing is sent: the
+/// forwarder already did.
+fn follow_server_capture(
+    app: &App,
+    supervised: &SupervisedServers,
+    server: ServerId,
+    events: &Sender<Event>,
+    server_tails: &mut HashMap<ServerId, Arc<AtomicBool>>,
+) {
+    let mut tail = match app.server_capture_tail(server, SERVER_CONSOLE_LINES) {
+        Ok(tail) => tail,
+        Err(error) => {
+            send_error(events, &error);
+            return;
+        }
+    };
+    // A second open of the same server restarts its tail, so every view on it
+    // receives the whole run again.
+    let stop = Arc::new(AtomicBool::new(false));
+    if let Some(previous) = server_tails.insert(server, Arc::clone(&stop)) {
+        previous.store(true, Ordering::Relaxed);
+    }
+    let supervised = supervised.clone();
+    let events = events.clone();
+    if let Err(error) = thread::Builder::new()
+        .name("ephervex-server-capture-tail".to_owned())
+        .spawn(move || {
+            let mut first = true;
+            let mut was_forwarding = false;
+            let mut failing = false;
+            while !stop.load(Ordering::Relaxed) {
+                // Read on both sides of the poll, so a forwarder that began
+                // meanwhile is not sent its own lines a second time.
+                let forwarding_before = supervised.forwards(server);
+                match tail.poll() {
+                    Ok(update) => {
+                        failing = false;
+                        let forwarding = forwarding_before || supervised.forwards(server);
+                        let update = if first {
+                            Some(update)
+                        } else {
+                            unforwarded_capture_update(update, forwarding, was_forwarding)
+                        };
+                        was_forwarding = forwarding;
+                        first = false;
+                        if let Some(update) = update {
+                            let _ = events.send(Event::LiveLog(LiveLogUpdate {
+                                source: LiveLogSource::Server(server),
+                                reset: update.reset,
+                                missing: false,
+                                source_truncated: update.truncated,
+                                lines: update.lines.into_iter().map(LiveLogLine::Server).collect(),
+                            }));
+                        }
+                    }
+                    Err(error) => {
+                        if !failing {
+                            tracing::warn!(%error, %server, "server capture poll failed");
+                        }
+                        failing = true;
+                    }
+                }
+                thread::sleep(Duration::from_millis(120));
+            }
+        })
+    {
+        tracing::error!(%error, "could not start the server capture tail");
+    }
+}
+
+/// The part of a capture update that no forwarder of this process delivers.
+///
+/// Right after a forwarder ends, lines it delivered may still be unread, so
+/// only a new run, which it never saw, is sent.
+fn unforwarded_capture_update(
+    update: ephervex_core::CaptureUpdate,
+    forwarding: bool,
+    was_forwarding: bool,
+) -> Option<ephervex_core::CaptureUpdate> {
+    if forwarding || update.is_empty() || (was_forwarding && !update.reset) {
+        return None;
+    }
+    Some(update)
 }
 
 fn send_diagnostics(
@@ -14026,6 +14177,107 @@ mod tests {
         events.try_recv().expect("output");
         events.try_recv().expect("finished");
         assert!(supervised.running().is_empty(), "an end taken in a burst");
+    }
+
+    /// The console of a server this process does not run follows the capture
+    /// itself, so it has to know when a supervisor of this process delivers the
+    /// output through its events instead.
+    #[test]
+    fn a_server_is_forwarded_for_from_its_preparation_to_the_end_of_its_run() {
+        let supervised = SupervisedServers::default();
+        let server = ServerId::new();
+        let other = ServerId::new();
+        let (observer, events) = ServerObserver::channel();
+        let mut events = ObservedServerEvents::new(events, supervised.clone(), server);
+        assert!(!supervised.forwards(server));
+
+        observer.emit(ServerEvent::Preparing {
+            operation: ephervex_model::OperationId::new(),
+        });
+        events.try_recv().expect("preparing");
+        assert!(supervised.forwards(server));
+        assert!(!supervised.forwards(other));
+
+        observer.emit(ServerEvent::Started { pid: 1 });
+        events.try_recv().expect("started");
+        observer.emit(ServerEvent::Finished { exit: None });
+        events.try_recv().expect("finished");
+        assert!(!supervised.forwards(server));
+    }
+
+    #[test]
+    fn a_reader_that_goes_away_mid_run_stops_the_server_being_forwarded_for() {
+        let supervised = SupervisedServers::default();
+        let server = ServerId::new();
+        let (observer, events) = ServerObserver::channel();
+        let mut events = ObservedServerEvents::new(events, supervised.clone(), server);
+        observer.emit(ServerEvent::Started { pid: 1 });
+        events.try_recv().expect("started");
+        assert!(supervised.forwards(server));
+
+        drop(events);
+        assert!(!supervised.forwards(server));
+    }
+
+    /// A launch that reuses a server another process supervises emits no
+    /// event for it, so that server's console keeps following its capture.
+    #[test]
+    fn a_server_whose_run_emits_no_events_is_not_forwarded_for() {
+        let supervised = SupervisedServers::default();
+        let server = ServerId::new();
+        let (_observer, events) = ServerObserver::channel();
+        let mut events = ObservedServerEvents::new(events, supervised.clone(), server);
+
+        assert!(events.try_recv().is_err());
+        assert!(!supervised.forwards(server));
+    }
+
+    fn capture_update(lines: usize, reset: bool, truncated: bool) -> ephervex_core::CaptureUpdate {
+        ephervex_core::CaptureUpdate {
+            lines: (0..lines)
+                .map(|index| {
+                    ephervex_server::CapturedLine::from_bytes(
+                        ephervex_server::CaptureStream::Stdout,
+                        index.to_string().as_bytes(),
+                    )
+                })
+                .collect(),
+            reset,
+            truncated,
+        }
+    }
+
+    #[test]
+    fn capture_lines_are_sent_only_when_no_forwarder_of_this_process_delivers_them() {
+        let lines = || capture_update(2, false, false);
+        assert!(unforwarded_capture_update(lines(), false, false).is_some());
+        assert!(
+            unforwarded_capture_update(lines(), true, false).is_none(),
+            "the forwarder already delivers these"
+        );
+        assert!(
+            unforwarded_capture_update(capture_update(2, true, false), true, true).is_none(),
+            "a run the forwarder started is not sent a second time"
+        );
+        assert!(
+            unforwarded_capture_update(capture_update(0, false, false), false, false).is_none()
+        );
+        assert!(
+            unforwarded_capture_update(capture_update(0, false, true), false, false).is_some(),
+            "a gap is worth reporting"
+        );
+    }
+
+    #[test]
+    fn only_a_new_run_is_sent_right_after_a_forwarder_ends() {
+        assert!(
+            unforwarded_capture_update(capture_update(2, false, true), false, true).is_none(),
+            "the forwarder delivered the tail of its run"
+        );
+        assert!(
+            unforwarded_capture_update(capture_update(2, true, false), false, true).is_some(),
+            "a run another process started is new to the console"
+        );
     }
 
     /// With nothing supervised there is nothing to wait for, so quitting

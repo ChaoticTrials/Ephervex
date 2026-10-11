@@ -116,6 +116,9 @@ pub(super) struct LogViews {
     /// retained output belongs to the run before, so a viewer opened on one
     /// reads none of it and takes the run's lines as they are produced.
     starting: HashSet<LiveLogSource>,
+    /// Sources a viewer was opened on while they were starting, whose live log
+    /// is opened once the wait ends.
+    deferred: HashSet<LiveLogSource>,
 }
 
 impl LogViews {
@@ -125,6 +128,7 @@ impl LogViews {
             model: Rc::new(VecModel::default()),
             commands,
             starting: HashSet::new(),
+            deferred: HashSet::new(),
         }
     }
 
@@ -206,8 +210,24 @@ impl LogViews {
         let source = viewer.live_source();
         viewer.live.activate(source.clone());
         self.render(slot);
-        if !self.starting.contains(&source) {
+        if self.starting.contains(&source) {
+            self.deferred.insert(source);
+        } else {
             send(&self.commands, Command::OpenLiveLog(source));
+        }
+    }
+
+    /// Opens the live log of a source whose viewers were opened while it was
+    /// starting, now that its capture holds the run.
+    fn open_deferred(&mut self, source: &LiveLogSource) {
+        if self.deferred.remove(source)
+            && self
+                .slots
+                .iter()
+                .flatten()
+                .any(|viewer| viewer.live.active.as_ref() == Some(source))
+        {
+            send(&self.commands, Command::OpenLiveLog(source.clone()));
         }
     }
 
@@ -234,6 +254,7 @@ impl LogViews {
     /// capture holds the run, so a viewer opened later may read it.
     pub(super) fn settle_start(&mut self, source: &LiveLogSource) {
         self.starting.remove(source);
+        self.open_deferred(source);
     }
 
     /// Takes one update for every viewer on its source.
@@ -250,6 +271,7 @@ impl LogViews {
             }
             if !update.lines.is_empty() {
                 self.starting.remove(&update.source);
+                self.open_deferred(&update.source);
             }
         }
         for (slot, viewer) in self.slots.iter_mut().enumerate() {
@@ -841,8 +863,29 @@ mod tests {
         assert!(sent(&commands).is_empty(), "no snapshot of the run before");
 
         views.settle_start(&source);
+        assert_eq!(
+            sent(&commands),
+            ["open server"],
+            "a console opened meanwhile follows the capture once the run settles"
+        );
         views.sync(&[(A, host, Surface::Console), (B, host, Surface::Logs)]);
         assert_eq!(sent(&commands), ["open server"]);
+    }
+
+    #[test]
+    fn a_console_closed_before_its_run_settles_opens_nothing() {
+        let (mut views, commands) = views();
+        let server = ServerId::new();
+        let host = InstalledHost::Server(server);
+        let source = LiveLogSource::Server(server);
+
+        views.reopen(&source);
+        views.sync(&[(A, host, Surface::Console)]);
+        views.sync(&[(A, InstalledHost::Server(ServerId::new()), Surface::Console)]);
+        sent(&commands);
+
+        views.settle_start(&source);
+        assert!(sent(&commands).is_empty());
     }
 
     #[test]
@@ -895,6 +938,7 @@ mod tests {
         };
         let mut changes = HashMap::new();
         views.apply(&update, &mut changes);
+        assert_eq!(sent(&commands), ["open server"]);
 
         views.sync(&[(A, host, Surface::Console), (B, host, Surface::Logs)]);
         assert_eq!(sent(&commands), ["open server"]);

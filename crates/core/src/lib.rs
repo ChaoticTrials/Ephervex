@@ -63,6 +63,7 @@ pub mod pack_url;
 pub mod promotion;
 pub mod running;
 pub mod server;
+mod server_capture;
 pub mod server_pack;
 pub mod single_instance;
 pub mod snapshot;
@@ -169,6 +170,7 @@ pub use server::{
     CaptureSnapshot, ServerCreateOptions, ServerNetworkChange, ServerPersistenceHealth,
     ServerStatus, stoppable_for_deletion,
 };
+pub use server_capture::{CaptureUpdate, ServerCaptureTail};
 pub use server_pack::{IdentificationOutcome, ServerContentSource, ServerPackOutcome};
 pub use single_instance::{PrimaryInstance, Startup as SingleInstanceStartup};
 pub use snapshot::{

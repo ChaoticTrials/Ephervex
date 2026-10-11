@@ -162,6 +162,14 @@ updates an atomic index and emits an observable event. A capture write
 failure degrades capture health but never stops pipe draining or bounded
 in-memory retention.
 
+A frontend shows a server's live output by following its capture directory
+through `ephervex-core`, so the output is the same whichever process supervises
+the server. The follower reads only the bytes each segment gained, treats a
+new segment without the `.continued.jsonl` suffix as a new run that replaces
+what was shown, and reports a gap when retention removes a segment of the run
+it is following. A frontend that also receives the supervisor's events in its
+own process shows those lines and lets the follower stay silent meanwhile.
+
 ## Consequences
 
 Server display can recover from a damaged index without allowing an unhealthy
