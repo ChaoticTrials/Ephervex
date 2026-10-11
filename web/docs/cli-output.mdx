@@ -1,0 +1,125 @@
+---
+title: CLI JSON and Exit Status
+description: Parse results, foreground streams, errors, and exit statuses in scripts.
+---
+
+# CLI JSON and Exit Status
+
+Use the global `--json` option to request machine-readable results:
+
+```bash
+ephervex --json instances list
+ephervex --json config show
+```
+
+Keep stdout and stderr separate. Results go to stdout; progress, logging, and
+command failures go to stderr. Do not use `2>&1` when parsing JSON. Help,
+argument errors, and shell completion scripts keep their normal text format.
+
+## Result shapes
+
+Results have command-specific shapes, with no shared success envelope.
+Most inspection commands print one JSON value, which may span several lines.
+Parse JSON rather than splitting the output into lines or relying on whitespace.
+
+| Command | Result |
+| --- | --- |
+| `instances list` | Array of instance objects; `[]` when empty. |
+| `config` or `config show` | Object with `path`, `exists`, and `config`. |
+| `api show`, `api set-curseforge-key`, `api clear-curseforge-key` | Object describing the resulting effective API settings. |
+| `doctor` | Health report, including when a fault causes a nonzero exit. |
+
+An instance object includes `id`, `name`, `storage`, `minecraft_version`,
+`loader` (with `kind` and `version`), `root`, `source`, `attention`,
+`needs_attention`, `created_at`, `last_launched_at`, `running`, and
+`linked_server_ids`. `running` is null when no launch holds the instance;
+otherwise it contains `launcher_pid`, `game_pid`, and `since`.
+
+`config` contains the effective configuration, including defaults, rather
+than only values explicitly saved in the file. `exists` says whether the
+configuration file exists. Credential-looking configuration keys are refused
+instead of printed.
+
+API settings include `microsoft_client_id`, `microsoft_client_id_is_custom`,
+`user_agent`, `user_agent_is_custom`, `curseforge_api_key`,
+`curseforge_default_key_available`, and `credential_storage`.
+`curseforge_api_key` describes key availability, never the key itself.
+
+For example, with `jq` installed, list instance IDs and names:
+
+```bash
+ephervex --json instances list > instances.json &&
+  jq -r '.[] | [.id, .name] | @tsv' instances.json
+```
+
+Check the exit status before treating a saved result as successful. A command
+can print a report or partial result and still fail. Fields can contain null;
+for example, an unknown account credential state is not the same as a missing
+credential. Do not treat null as false without checking the field's meaning.
+
+## Foreground runs
+
+`launch` and `server start` can emit multiple JSON values. Use a streaming
+JSON parser, such as `jq`, rather than reading the entire output as one object.
+These streams are not uniformly newline-delimited JSON: some values span
+several lines.
+
+`launch` prints game output as compact objects with `stream`, `level`,
+`logger`, `thread`, and `message`. Its final summary includes `operation`,
+`instance`, `minecraft_version`, `java`, `account`, `authenticated`,
+`classpath_entries`, `natives_directory`, `assets`, `command`, `dry_run`,
+`exit_code`, and `exit_signal`. Command arguments are redacted. A dry run has
+no game exit code or signal.
+
+`server start` emits objects distinguished by `event`, including `preparing`,
+`started`, `output`, `warning`, `capture_pruned`, `capture_unavailable`, and
+`exited`. An `output` event contains a captured `line`; an `exited` event
+contains `code` and `signal`. Progress can still appear as text on stderr.
+
+## Failures
+
+After argument parsing, command failures under `--json` are reported on stderr
+as an object with these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `message_id` | Message identifier for a core error, or null for other failures. |
+| `error` | Human-readable summary. |
+| `action` | Suggested next step, or null. |
+| `detail` | Array of technical error-chain strings. |
+
+Human-readable messages can vary with the configured language. Use the exit
+status to detect failure, and `message_id` where available to distinguish
+errors. Stderr may also contain progress or logging, so do not assume all of
+stderr is one JSON document. Argument parsing errors use text instead.
+
+## Exit statuses
+
+| Status | Meaning |
+| --- | --- |
+| `0` | Successful command, help, or version output. |
+| `1` | Command failure or a failed health/verification result. |
+| `2` | Invalid command-line arguments. |
+
+The launcher does not forward the game's numeric exit code as its own status.
+Specific cases:
+
+- `doctor` prints its health report and returns `1` if it finds a fault.
+- `mod verify` fails when it finds a recorded-file fault.
+- `mod refresh` fails if a catalog could not be reached, even if it prints
+  results for other mods.
+- `instance persist` fails if a requested linked server remains temporary,
+  even if the client was moved successfully.
+- `launch` fails when Minecraft exits unsuccessfully without a requested stop.
+  A successful dry run or a requested stop succeeds.
+- `server start` fails if the server exits before finishing startup, even with
+  child status `0`. After startup, an unrequested unsuccessful exit fails.
+  A requested stop succeeds.
+
+A downstream reader closing a pipe is treated as a normal end. Foreground runs
+stop their supervised child before returning. Other stdout write failures
+return a failure status.
+
+`--json` does not grant confirmation or permission. For example, deleting
+instance files requires `--yes` instead of an interactive prompt in JSON mode;
+server EULA acceptance still requires an interactive terminal.

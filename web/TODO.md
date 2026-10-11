@@ -205,8 +205,6 @@ features show one tab or a short note.
       top-level command, produced from `ephervex --help` and
       `ephervex help <path>`. The build generates gitignored pages before
       Docusaurus reads them.
-- [ ] Hold the `--json` shape and exit-code reference until the open CLI
-      output fixes land (#271, #272, #274, #275, #277, #294).
 - [x] CLI-only features that need a mention on their own pages: `server
       recover`, `java select`, `instance recipe`, `url-handler`, `doctor`,
       `completions`.

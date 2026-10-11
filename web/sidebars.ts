@@ -16,7 +16,7 @@ const sidebars: SidebarsConfig = {
     label: 'CLI Reference',
     collapsed: true,
     link: {type: 'doc', id: 'reference/cli/index'},
-    items: [{
+    items: ['cli-output', {
       type: 'category',
       label: 'Commands',
       collapsed: true,
