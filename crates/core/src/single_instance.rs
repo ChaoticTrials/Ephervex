@@ -34,9 +34,29 @@
 //!
 //! `sun_path` is 108 bytes, so the socket cannot live wherever the application
 //! keeps everything else. `$XDG_RUNTIME_DIR` is the right home and is normally
-//! `/run/user/<uid>`, which is short; the fallback is the same short,
-//! user-owned `/tmp` directory `ephervex-server`'s control sockets use, for the
-//! same reason.
+//! `/run/user/<uid>`, which is short.
+//!
+//! # Without a usable runtime directory
+//!
+//! The socket moves to a `run-<hostname>` directory inside this account's state
+//! directory, which no other account can create entries in. It is named for the
+//! machine because a home shared between machines would otherwise show one
+//! machine's socket to the others, which would take it for stale and remove it.
+//! A state directory on a filesystem that cannot hold Unix sockets is not
+//! detected: the launcher reports that it could not bind and runs without
+//! handover.
+//!
+//! Failing that, the socket uses `/tmp/evx-<uid>`, the short directory
+//! `ephervex-server`'s control sockets use. That name is predictable in a
+//! directory every account can write to, so another account can occupy it, and
+//! can free it again at any moment. It is therefore only a last resort: if it
+//! were tried before the state directory, an account that occupied and then
+//! freed the name could make later launchers choose a different directory than
+//! the running one.
+//!
+//! The server's per-run random directory cannot be used here, because a second
+//! launcher has to find the running one without being told where it is. Each
+//! candidate is only examined when every earlier one is unusable.
 
 use std::io::{BufRead, BufReader, Read as _, Write};
 use std::os::fd::OwnedFd;
@@ -360,94 +380,177 @@ fn read_handover(stream: UnixStream) -> Option<Handover> {
 }
 
 /// Where the launcher socket lives.
-///
-/// `$XDG_RUNTIME_DIR` first, and the short `/tmp` directory when that does not
-/// fit. A runtime directory is normally `/run/user/<uid>` and leaves plenty of
-/// room, but it is set from the environment and an unusual one would otherwise
-/// cost the handover entirely: a second window is a worse answer than a socket
-/// somewhere else that is just as private.
 fn socket_path() -> CoreResult<PathBuf> {
     let name = format!("ephervex-{}.sock", uid()?);
-    let mut refusal = None;
-
-    for directory in socket_directories()? {
-        let path = directory.join(&name);
-        if path.as_os_str().as_encoded_bytes().len() <= MAX_UNIX_SOCKET_PATH_BYTES {
-            return Ok(path);
-        }
-        debug!(
-            path = %path.display(),
-            "this socket path is longer than a Unix socket path may be"
-        );
-        refusal = Some(path);
-    }
-
-    Err(CoreError::SingleInstanceUnavailable {
-        detail: refusal.map_or_else(
-            || "no usable directory for the launcher socket".to_owned(),
-            |path| {
-                format!(
-                    "{} is longer than a Unix socket path may be",
-                    path.display()
-                )
-            },
-        ),
-    })
+    SocketDirectories::from_environment().socket(&name)
 }
 
-/// The directories a launcher socket may live in, best first.
-fn socket_directories() -> CoreResult<Vec<PathBuf>> {
-    let mut candidates = Vec::new();
-    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
-        let directory = PathBuf::from(runtime);
-        if directory.is_absolute() && is_private_directory(&directory) {
-            candidates.push(directory);
-        } else {
-            debug!(
-                path = %directory.display(),
-                "$XDG_RUNTIME_DIR is not a private directory of ours; using the fallback"
-            );
-        }
-    }
-    candidates.push(private_tmp_directory()?);
-    Ok(candidates)
-}
+/// Makes a fallback socket directory usable, or says why it is not.
+type PrepareDirectory = fn(&Path) -> std::io::Result<()>;
 
-/// The short, private `/tmp` directory a socket falls back to.
+/// The places the launcher socket may live, best first.
 ///
-/// The same shape `ephervex-server` uses for its control sockets, and for the
-/// same reasons: short enough for `sun_path`, owned by this account, and closed
-/// to everybody else.
-fn private_tmp_directory() -> CoreResult<PathBuf> {
-    let fallback = PathBuf::from(format!("/tmp/evx-{}", uid()?));
-    match std::fs::symlink_metadata(&fallback) {
-        Ok(metadata) if metadata.file_type().is_dir() && metadata.uid() == uid()? => {
-            std::fs::set_permissions(&fallback, std::fs::Permissions::from_mode(0o700)).map_err(
-                |error| CoreError::SingleInstanceUnavailable {
-                    detail: format!("{} could not be secured: {error}", fallback.display()),
-                },
-            )?;
-        }
-        Ok(_) => {
-            return Err(CoreError::SingleInstanceUnavailable {
-                detail: format!("{} is not a directory of ours", fallback.display()),
-            });
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::DirBuilder::new()
-                .mode(0o700)
-                .create(&fallback)
-                .map_err(|error| CoreError::SingleInstanceUnavailable {
-                    detail: format!("{} could not be created: {error}", fallback.display()),
-                })?;
-        }
-        Err(error) => {
-            return Err(CoreError::SingleInstanceUnavailable {
-                detail: format!("{} could not be read: {error}", fallback.display()),
-            });
+/// `$XDG_RUNTIME_DIR` is private to the account by definition, and so is the
+/// `run` directory in the state directory, because only this account can create
+/// anything in its home. The `evx-<uid>` directory in the temporary directory
+/// has a predictable name in a directory everybody can write to, so another
+/// account can occupy or free it at any time; it is tried last. A candidate is
+/// looked at only when every earlier one is unusable.
+///
+/// Nothing another account does changes which candidate wins, so every launcher
+/// of an account in the same environment agrees on where the socket is.
+#[derive(Debug, Clone)]
+struct SocketDirectories {
+    runtime: Option<PathBuf>,
+    temporary: PathBuf,
+    state: Option<PathBuf>,
+}
+
+impl SocketDirectories {
+    fn from_environment() -> Self {
+        Self {
+            runtime: std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
+            temporary: PathBuf::from("/tmp"),
+            state: host_local_state_directory(),
         }
     }
-    Ok(fallback)
+
+    fn socket(&self, name: &str) -> CoreResult<PathBuf> {
+        let uid = uid()?;
+        let mut skipped = Vec::new();
+
+        if let Some(runtime) = &self.runtime {
+            if runtime.is_absolute() && is_private_directory(runtime) {
+                match socket_in(runtime, name) {
+                    Ok(path) => return Ok(path),
+                    Err(reason) => skipped.push(reason),
+                }
+            } else {
+                debug!(
+                    path = %runtime.display(),
+                    "$XDG_RUNTIME_DIR is not a private directory of ours; using the fallback"
+                );
+            }
+        }
+
+        let mut fallbacks: Vec<(PathBuf, PrepareDirectory)> = Vec::new();
+        if let Some(state) = &self.state {
+            fallbacks.push((state.clone(), prepare_state_directory));
+        }
+        fallbacks.push((
+            self.temporary.join(format!("evx-{uid}")),
+            prepare_private_directory,
+        ));
+        for (directory, prepare) in fallbacks {
+            match prepare(&directory).map_err(|error| error.to_string()) {
+                Ok(()) => match socket_in(&directory, name) {
+                    Ok(path) => return Ok(path),
+                    Err(reason) => skipped.push(reason),
+                },
+                Err(error) => {
+                    debug!(path = %directory.display(), %error, "this socket directory is not usable");
+                    skipped.push(format!("{} is not usable: {error}", directory.display()));
+                }
+            }
+        }
+
+        Err(CoreError::SingleInstanceUnavailable {
+            detail: if skipped.is_empty() {
+                "no usable directory for the launcher socket".to_owned()
+            } else {
+                skipped.join("; ")
+            },
+        })
+    }
+}
+
+/// The socket's path in `directory`, or why it cannot be one.
+fn socket_in(directory: &Path, name: &str) -> Result<PathBuf, String> {
+    let path = directory.join(name);
+    if path.as_os_str().as_encoded_bytes().len() <= MAX_UNIX_SOCKET_PATH_BYTES {
+        Ok(path)
+    } else {
+        Err(format!(
+            "{} is longer than a Unix socket path may be",
+            path.display()
+        ))
+    }
+}
+
+/// The socket directory inside the state directory, named for this machine.
+///
+/// The state directory can be on a home shared between machines, where a socket
+/// file is visible to all of them but only listens on the one that bound it. A
+/// launcher on another machine would then take the name for stale and remove
+/// it. Naming the directory for the machine gives each its own socket.
+fn host_local_state_directory() -> Option<PathBuf> {
+    let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname").ok()?;
+    let paths = ephervex_storage::Paths::from_environment().ok()?;
+    Some(paths.state_dir().join(host_directory_name(&hostname)?))
+}
+
+/// `run-<hostname>`, or nothing when the host name leaves no usable name.
+///
+/// Anything but ASCII letters, digits, `.`, `-` and `_` becomes `_`, so a host
+/// name cannot add a path component or an unreadable name.
+fn host_directory_name(hostname: &str) -> Option<String> {
+    let hostname = hostname.trim();
+    if hostname.is_empty() {
+        return None;
+    }
+    let safe: String = hostname
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    Some(format!("run-{safe}"))
+}
+
+/// Makes `directory` a mode-0700 directory of ours, creating it when missing.
+///
+/// Anything else at that name, including a symlink, is refused rather than
+/// followed or reused.
+fn prepare_private_directory(directory: &Path) -> std::io::Result<()> {
+    // A launcher of this account, or the server, may create the directory
+    // between the look and the creation. That is not a reason to go elsewhere,
+    // because the other launchers would then disagree about where the socket is:
+    // look again and judge what is there.
+    for _ in 0..2 {
+        match std::fs::symlink_metadata(directory) {
+            Ok(metadata) if metadata.file_type().is_dir() && metadata.uid() == uid_of_self()? => {
+                std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+                break;
+            }
+            Ok(_) => return Err(std::io::Error::other("it is not a directory of ours")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::DirBuilder::new().mode(0o700).create(directory) {
+                    Ok(()) => break,
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    if is_private_directory(directory) {
+        Ok(())
+    } else {
+        Err(std::io::Error::other("it is not private to this account"))
+    }
+}
+
+/// [`prepare_private_directory`] for a directory inside the account's own
+/// state directory, creating the parents it needs.
+fn prepare_state_directory(directory: &Path) -> std::io::Result<()> {
+    if let Some(parent) = directory.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    prepare_private_directory(directory)
 }
 
 /// Whether a directory is ours and closed to everybody else.
@@ -663,32 +766,222 @@ mod tests {
         assert!(!path.exists(), "a clean exit leaves no name behind");
     }
 
+    const SOCKET_NAME: &str = "ephervex-1000.sock";
+
+    fn private_directory(path: &Path) -> PathBuf {
+        std::fs::create_dir_all(path).expect("mkdir");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        path.to_owned()
+    }
+
+    fn shared_name() -> String {
+        format!("evx-{}", uid().expect("uid"))
+    }
+
     /// A runtime directory long enough to push the socket past `sun_path` costs
     /// the handover entirely unless something else is tried, and a second
     /// window is a worse answer than a socket somewhere equally private.
     #[test]
     fn a_runtime_directory_too_long_for_a_socket_falls_back_rather_than_giving_up() {
-        let long = "/tmp/".to_owned() + &"d".repeat(MAX_UNIX_SOCKET_PATH_BYTES);
-        let name = "ephervex-1000.sock";
+        let base = tempfile::tempdir().expect("temp dir");
+        let long = private_directory(&base.path().join("d".repeat(MAX_UNIX_SOCKET_PATH_BYTES)));
+        let directories = SocketDirectories {
+            runtime: Some(long),
+            temporary: base.path().to_owned(),
+            state: None,
+        };
 
-        assert!(
-            std::path::Path::new(&long)
-                .join(name)
-                .as_os_str()
-                .as_encoded_bytes()
-                .len()
-                > MAX_UNIX_SOCKET_PATH_BYTES,
-            "this test's own premise"
+        let path = directories.socket(SOCKET_NAME).expect("a fallback is used");
+
+        assert_eq!(
+            path,
+            base.path().join(shared_name()).join(SOCKET_NAME),
+            "the short shared directory is next"
         );
-        assert!(
-            std::path::Path::new("/tmp/evx-1000")
-                .join(name)
-                .as_os_str()
-                .as_encoded_bytes()
-                .len()
-                <= MAX_UNIX_SOCKET_PATH_BYTES,
-            "the fallback has to be short enough to be worth falling back to"
+    }
+
+    /// Another account can create the predictable name first. A launcher that
+    /// has a private runtime directory must not even look at it.
+    #[test]
+    fn an_occupied_shared_name_does_not_affect_a_usable_runtime_directory() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let runtime = private_directory(&base.path().join("runtime"));
+        let temporary = base.path().join("tmp");
+        std::fs::create_dir(&temporary).expect("mkdir");
+        let attacker = tempfile::tempdir().expect("attacker dir");
+        std::os::unix::fs::symlink(attacker.path(), temporary.join(shared_name()))
+            .expect("symlink");
+        let directories = SocketDirectories {
+            runtime: Some(runtime.clone()),
+            temporary,
+            state: None,
+        };
+
+        assert_eq!(
+            directories.socket(SOCKET_NAME).expect("socket path"),
+            runtime.join(SOCKET_NAME)
         );
+    }
+
+    /// Another account can occupy the shared name and free it again at will,
+    /// so nothing about it may change where a running launcher is looked for.
+    #[test]
+    fn occupying_and_freeing_the_shared_name_never_changes_where_the_socket_is() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let temporary = base.path().join("tmp");
+        std::fs::create_dir(&temporary).expect("mkdir");
+        let attacker = tempfile::tempdir().expect("attacker dir");
+        std::fs::set_permissions(attacker.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+        let occupied = temporary.join(shared_name());
+        let state = base.path().join("state").join("run");
+        let directories = SocketDirectories {
+            runtime: None,
+            temporary,
+            state: Some(state.clone()),
+        };
+
+        let before = directories.socket(SOCKET_NAME).expect("socket path");
+        std::os::unix::fs::symlink(attacker.path(), &occupied).expect("symlink");
+        let occupied_path = directories.socket(SOCKET_NAME).expect("socket path");
+        std::fs::remove_file(&occupied).expect("free the name");
+        let freed = directories.socket(SOCKET_NAME).expect("socket path");
+
+        assert_eq!(before, state.join(SOCKET_NAME));
+        assert_eq!(occupied_path, before, "launchers of one account must agree");
+        assert_eq!(freed, before, "also once the name is free again");
+        assert!(is_private_directory(&state));
+        assert!(
+            std::fs::symlink_metadata(&occupied).is_err(),
+            "the shared name is never created while a better place exists"
+        );
+        assert_eq!(
+            attacker.path().metadata().expect("metadata").mode() & 0o777,
+            0o755,
+            "the directory the symlink points at is left alone"
+        );
+    }
+
+    /// When the state directory cannot be used, the shared name is next, and an
+    /// occupied one must neither be followed nor stop the launcher.
+    #[test]
+    fn an_unusable_state_directory_falls_back_to_the_shared_name() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let elsewhere = private_directory(&base.path().join("elsewhere"));
+        let state = base.path().join("state");
+        std::fs::create_dir(&state).expect("mkdir");
+        std::os::unix::fs::symlink(&elsewhere, state.join("run")).expect("symlink");
+        let directories = SocketDirectories {
+            runtime: None,
+            temporary: base.path().to_owned(),
+            state: Some(state.join("run")),
+        };
+
+        assert_eq!(
+            directories.socket(SOCKET_NAME).expect("socket path"),
+            base.path().join(shared_name()).join(SOCKET_NAME)
+        );
+    }
+
+    /// Two launches, or a launch and the server, can create the same directory
+    /// at once. The loser must use it rather than go somewhere the winner does
+    /// not look.
+    #[test]
+    fn launches_creating_the_same_directory_at_once_all_use_it() {
+        const LAUNCHES: usize = 8;
+        let base = tempfile::tempdir().expect("temp dir");
+        let directory = base.path().join(shared_name());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(LAUNCHES));
+        let launches: Vec<_> = (0..LAUNCHES)
+            .map(|_| {
+                let (directory, barrier) = (directory.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    prepare_private_directory(&directory)
+                })
+            })
+            .collect();
+
+        for launch in launches {
+            launch
+                .join()
+                .expect("launch thread")
+                .expect("a directory of ours that appeared meanwhile is used");
+        }
+        assert!(is_private_directory(&directory));
+    }
+
+    #[test]
+    fn an_occupied_shared_name_with_nowhere_else_reports_why() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let temporary = base.path().join("tmp");
+        std::fs::create_dir(&temporary).expect("mkdir");
+        std::fs::write(temporary.join(shared_name()), b"").expect("occupy");
+        let directories = SocketDirectories {
+            runtime: None,
+            temporary,
+            state: None,
+        };
+
+        let Err(CoreError::SingleInstanceUnavailable { detail }) = directories.socket(SOCKET_NAME)
+        else {
+            panic!("an occupied name is not a socket directory");
+        };
+        assert!(detail.contains(&shared_name()), "{detail}");
+    }
+
+    #[test]
+    fn a_host_name_becomes_one_safe_directory_name() {
+        assert_eq!(
+            host_directory_name("work-pc.example_1\n").as_deref(),
+            Some("run-work-pc.example_1")
+        );
+        assert_eq!(
+            host_directory_name("a/../b c").as_deref(),
+            Some("run-a_.._b_c")
+        );
+        assert_eq!(host_directory_name("  \n"), None);
+    }
+
+    #[test]
+    fn a_state_socket_directory_that_is_a_symlink_is_not_used() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let temporary = base.path().join("tmp");
+        std::fs::create_dir(&temporary).expect("mkdir");
+        std::fs::write(temporary.join(shared_name()), b"").expect("occupy");
+        let elsewhere = private_directory(&base.path().join("elsewhere"));
+        let state = base.path().join("state");
+        std::fs::create_dir(&state).expect("mkdir");
+        std::os::unix::fs::symlink(&elsewhere, state.join("run")).expect("symlink");
+        let directories = SocketDirectories {
+            runtime: None,
+            temporary,
+            state: Some(state.join("run")),
+        };
+
+        assert!(matches!(
+            directories.socket(SOCKET_NAME),
+            Err(CoreError::SingleInstanceUnavailable { .. })
+        ));
+    }
+
+    /// An existing shared directory of ours that others can enter is tightened
+    /// rather than trusted.
+    #[test]
+    fn an_existing_shared_directory_of_ours_is_made_private() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let shared = base.path().join(shared_name());
+        std::fs::create_dir(&shared).expect("mkdir");
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).expect("chmod");
+        let directories = SocketDirectories {
+            runtime: None,
+            temporary: base.path().to_owned(),
+            state: None,
+        };
+
+        directories.socket(SOCKET_NAME).expect("socket path");
+
+        assert!(is_private_directory(&shared));
     }
 
     /// A socket in a directory others can write to is one they can replace, so

@@ -216,9 +216,10 @@ ephervex config pack-hosts --forget-all
 
 Clicking a second link while Ephervex is open reuses the window it already has
 rather than starting another launcher. The running one is found through a socket
-in `$XDG_RUNTIME_DIR`, so it lasts as long as your session does; a socket left
-behind by a crash is taken over rather than reported. If it cannot be reached at
-all, the link still opens, in a second window.
+in `$XDG_RUNTIME_DIR`, or in a private directory under the state directory (or
+`/tmp`) when that is unusable. A socket left behind by a crash or a reboot is
+taken over rather than reported. If it cannot be reached at all, the link still
+opens, in a second window.
 
 The same thing works without a browser:
 

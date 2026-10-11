@@ -1010,11 +1010,17 @@ Debian package ships the desktop entry that claims it, the AppImage is
 registered from the command line, and the desktop application offers no control
 over either (ADR 0028). A desktop scheme handler starts a fresh process for every
 link, so the launcher claims one name per user through a Unix socket under
-`$XDG_RUNTIME_DIR`. Binding succeeds exactly when nobody else holds it, which
-makes claiming the name and finding the running instance one operation that
-cannot disagree with itself; a socket nobody answers is a stale name to take
-over rather than an error. A second launch hands its link across and exits, and
-the running window opens the same import dialog a dropped file would.
+`$XDG_RUNTIME_DIR`. When that is unusable the socket moves to a
+`run-<hostname>` directory in the state directory, which only the account can
+write to and which is named for the machine because a home can be shared between
+machines, and then to `/tmp/evx-<uid>`. That `/tmp` name is predictable, so
+another account can occupy or free it at any time, which is why it is tried
+last: no action by another account changes where the running launcher is looked
+for. Binding succeeds exactly when nobody else holds it, which makes claiming
+the name and finding the running instance one operation that cannot disagree
+with itself; a socket nobody answers is a stale name to take over rather than an
+error. A second launch hands its link across and exits, and the running window
+opens the same import dialog a dropped file would.
 
 Which catalog to browse is a preference, not desired state. The settings file
 records a preferred catalog under `[mods]`; the mod browser opens on it, and the
