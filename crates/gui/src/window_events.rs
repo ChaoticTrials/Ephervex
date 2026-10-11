@@ -11,28 +11,86 @@
 //! the windowing layer's own rule for a consumed event, and it makes the order
 //! meaningful: a reader that takes events away belongs last unless it only
 //! takes the ones nothing else wants.
+//!
+//! The application has more than one window, and the readers act on the main
+//! one: a drop is routed by the main window's page and a key capture is armed
+//! from its editors. Window events are therefore offered only when they come
+//! from the main window.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use slint::ComponentHandle;
 use slint::winit_030::{CustomApplicationHandler, EventResult, winit};
 use winit::event_loop::ActiveEventLoop;
+
+/// Whether a window is the one the readers act for.
+type Belongs = Box<dyn Fn(&slint::Window) -> bool>;
+
+/// Names the main window to the readers once it exists.
+///
+/// The handler has to be registered before any window is created, so it is
+/// handed this and the window is attached afterwards. Until then no window
+/// counts as the main one.
+#[derive(Clone, Default)]
+pub struct MainWindow {
+    belongs: Rc<RefCell<Option<Belongs>>>,
+}
+
+impl std::fmt::Debug for MainWindow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MainWindow")
+            .field("attached", &self.belongs.borrow().is_some())
+            .finish()
+    }
+}
+
+impl MainWindow {
+    /// Makes `component`'s window the main one, replacing any previous choice.
+    ///
+    /// The component is held weakly, so naming it does not keep it alive.
+    pub fn attach<C: ComponentHandle + 'static>(&self, component: &C) {
+        let weak = component.as_weak();
+        *self.belongs.borrow_mut() = Some(Box::new(move |window| {
+            weak.upgrade()
+                .is_some_and(|component| std::ptr::eq(component.window(), window))
+        }));
+    }
+
+    /// Whether `window`, the one an event came from, is the main window.
+    ///
+    /// An event from a window Slint does not know has no window to compare, so
+    /// it is not the main window's.
+    fn is_main(&self, window: Option<&slint::Window>) -> bool {
+        let belongs = self.belongs.borrow();
+        matches!((belongs.as_ref(), window), (Some(belongs), Some(window)) if belongs(window))
+    }
+}
 
 /// Every reader of the raw window events, in the order they were added.
 #[derive(Default)]
 pub struct WindowEventHandlers {
+    main: MainWindow,
     readers: Vec<Box<dyn CustomApplicationHandler>>,
 }
 
 impl std::fmt::Debug for WindowEventHandlers {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WindowEventHandlers")
+            .field("main", &self.main)
             .field("readers", &self.readers.len())
             .finish()
     }
 }
 
 impl WindowEventHandlers {
+    /// Readers that see the events of `main` and no other window.
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(main: MainWindow) -> Self {
+        Self {
+            main,
+            readers: Vec::new(),
+        }
     }
 
     /// Adds a reader after the ones already registered.
@@ -40,6 +98,20 @@ impl WindowEventHandlers {
     pub fn with(mut self, reader: impl CustomApplicationHandler + 'static) -> Self {
         self.readers.push(Box::new(reader));
         self
+    }
+
+    /// Offers an event of `window` to the readers, unless it is not the main
+    /// window's.
+    fn offer_from(
+        &mut self,
+        window: Option<&slint::Window>,
+        deliver: impl FnMut(&mut dyn CustomApplicationHandler) -> EventResult,
+    ) -> EventResult {
+        if self.main.is_main(window) {
+            self.offer(deliver)
+        } else {
+            EventResult::Propagate
+        }
     }
 
     /// Offers one event to every reader until one consumes it.
@@ -69,7 +141,7 @@ impl CustomApplicationHandler for WindowEventHandlers {
         slint_window: Option<&slint::Window>,
         event: &winit::event::WindowEvent,
     ) -> EventResult {
-        self.offer(|reader| {
+        self.offer_from(slint_window, |reader| {
             reader.window_event(event_loop, window_id, winit_window, slint_window, event)
         })
     }
@@ -127,7 +199,10 @@ mod tests {
     /// Offers one event, answering with `decisions` in order, and reports how
     /// many readers were reached.
     fn offer(readers: usize, decisions: &[EventResult]) -> (usize, EventResult) {
-        let mut handlers = (0..readers).fold(WindowEventHandlers::new(), |all, _| all.with(Silent));
+        let mut handlers = (0..readers)
+            .fold(WindowEventHandlers::new(MainWindow::default()), |all, _| {
+                all.with(Silent)
+            });
         let reached = RefCell::new(0_usize);
         let result = handlers.offer(|_| {
             let mut reached = reached.borrow_mut();
@@ -166,5 +241,80 @@ mod tests {
         let (reached, result) = offer(0, &[EventResult::PreventDefault]);
         assert_eq!(reached, 0);
         assert!(matches!(result, EventResult::Propagate));
+    }
+
+    #[test]
+    fn no_window_is_the_main_one_before_the_main_window_exists() {
+        i_slint_backend_testing::init_no_event_loop();
+        let window = crate::ui::AppWindow::new().expect("window");
+
+        assert!(!MainWindow::default().is_main(Some(window.window())));
+    }
+
+    #[test]
+    fn only_the_attached_window_is_the_main_one() {
+        i_slint_backend_testing::init_no_event_loop();
+        let main_window = crate::ui::AppWindow::new().expect("window");
+        let preview = crate::ui::WindowSizePreview::new().expect("window");
+        let other_main = crate::ui::AppWindow::new().expect("window");
+        let main = MainWindow::default();
+        main.attach(&main_window);
+
+        assert!(main.is_main(Some(main_window.window())));
+        assert!(
+            !main.is_main(Some(preview.window())),
+            "the sizing window's events are not the main window's"
+        );
+        assert!(!main.is_main(Some(other_main.window())));
+    }
+
+    #[test]
+    fn an_event_from_a_window_slint_does_not_know_is_not_the_main_windows() {
+        i_slint_backend_testing::init_no_event_loop();
+        let window = crate::ui::AppWindow::new().expect("window");
+        let main = MainWindow::default();
+        main.attach(&window);
+
+        assert!(!main.is_main(None));
+    }
+
+    #[test]
+    fn a_closed_main_window_leaves_no_window_as_the_main_one() {
+        i_slint_backend_testing::init_no_event_loop();
+        let main = MainWindow::default();
+        let survivor = crate::ui::AppWindow::new().expect("window");
+        {
+            let gone = crate::ui::AppWindow::new().expect("window");
+            main.attach(&gone);
+        }
+
+        assert!(!main.is_main(Some(survivor.window())));
+    }
+
+    #[test]
+    fn a_window_that_is_not_the_main_one_reaches_no_reader() {
+        i_slint_backend_testing::init_no_event_loop();
+        let main_window = crate::ui::AppWindow::new().expect("window");
+        let preview = crate::ui::WindowSizePreview::new().expect("window");
+        let main = MainWindow::default();
+        main.attach(&main_window);
+        let mut handlers = WindowEventHandlers::new(main).with(Silent);
+        let mut reached = 0_usize;
+
+        // The deliverer consumes every event it is offered, so the answer
+        // also shows whether the toolkit would be told the event was taken.
+        let from_preview = handlers.offer_from(Some(preview.window()), |_| {
+            reached += 1;
+            EventResult::PreventDefault
+        });
+        assert_eq!(reached, 0);
+        assert!(matches!(from_preview, EventResult::Propagate));
+
+        let from_main = handlers.offer_from(Some(main_window.window()), |_| {
+            reached += 1;
+            EventResult::PreventDefault
+        });
+        assert_eq!(reached, 1);
+        assert!(matches!(from_main, EventResult::PreventDefault));
     }
 }

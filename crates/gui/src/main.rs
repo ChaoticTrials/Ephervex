@@ -82,10 +82,11 @@ fn main() -> Result<(), slint::PlatformError> {
     // dialog as the only way to name an archive.
     let drops = ephervex_gui::file_drop::FileDrops::default();
     let keys = ephervex_gui::binding_capture::BindingCapture::default();
+    let main_window = ephervex_gui::window_events::MainWindow::default();
     if let Err(error) = slint::BackendSelector::new()
         .backend_name("winit".to_owned())
         .with_winit_custom_application_handler(
-            ephervex_gui::window_events::WindowEventHandlers::new()
+            ephervex_gui::window_events::WindowEventHandlers::new(main_window.clone())
                 // First, because it takes keyboard events away while a binding
                 // editor is open, and a file drop is not one.
                 .with(ephervex_gui::binding_capture::BindingCaptureReader::new(
@@ -136,6 +137,7 @@ fn main() -> Result<(), slint::PlatformError> {
         };
 
     let ui = ephervex_gui::ui::AppWindow::new()?;
+    main_window.attach(&ui);
     // Before anything is drawn, because the console and every other technical
     // view asks for this family on its first frame.
     if let Some(family) = ephervex_gui::monospace::resolve_monospace_family() {
