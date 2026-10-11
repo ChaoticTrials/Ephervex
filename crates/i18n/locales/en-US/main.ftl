@@ -278,6 +278,12 @@ import-downloaded-pack = Downloaded the pack from { $value }.
 # instance-duplicate-skipped-links below: a move keeps a linked folder as a
 # link rather than copying what it points at.
 instance-made-persistent = { $name } is now stored permanently at { $path }.
+# $lines is how many of a server's output lines were not shown because they
+# arrived faster than they could be read.
+server-output-dropped = { $lines ->
+        [one] 1 line of server output was skipped.
+       *[other] { $lines } lines of server output were skipped.
+    }
 server-made-persistent = { $name } moved with it, to { $path }.
 server-not-made-persistent = { $name } could not be moved and is still temporary: { $value }
 # Following a symlinked folder could copy a shared mods directory, or walk out

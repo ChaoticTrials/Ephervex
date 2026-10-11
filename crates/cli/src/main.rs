@@ -7785,6 +7785,22 @@ fn print_server_event(event: ServerEvent, json: bool, progress: &mut LaunchProgr
                 print_captured_line(&line);
             }
         }
+        ServerEvent::OutputDropped { lines } => {
+            if json {
+                print_json(&serde_json::json!({ "event": "output_dropped", "lines": lines }));
+            } else {
+                eprintln!(
+                    "{}",
+                    ephervex_i18n::lookup_args(
+                        "server-output-dropped",
+                        [(
+                            "lines",
+                            MessageArg::from(i64::try_from(lines).unwrap_or(i64::MAX))
+                        )],
+                    )
+                );
+            }
+        }
         ServerEvent::Warning(warning) => print_server_warning(&warning, json),
         ServerEvent::CapturePruned(prune) => {
             let retention = prune.retention;
@@ -7829,8 +7845,7 @@ async fn run_server_foreground(
     java: Option<PathBuf>,
     json: bool,
 ) -> anyhow::Result<()> {
-    let (observer, events) = ServerObserver::channel();
-    let mut events = events;
+    let (observer, mut events) = ServerObserver::channel();
     let printer = tokio::spawn(async move {
         let mut progress = LaunchProgressPrinter::default();
         while let Some(event) = events.recv().await {

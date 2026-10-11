@@ -820,6 +820,7 @@ mod tests {
             "launch-preparing",
             "launch-starting",
             "launch-output-dropped",
+            "server-output-dropped",
             "launch-account-offline",
             "launch-account-microsoft",
             "launch-exited-cleanly",

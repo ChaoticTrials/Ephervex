@@ -27,8 +27,8 @@ pub use eula::{
 };
 pub use operators::{OperatorEntry, OperatorUpdate, OperatorsDocument, OperatorsDocumentError};
 pub use process::{
-    ControlAction, ControlResponse, ServerCommand, ServerEvent, ServerExit, ServerObserver,
-    ServerSupervisor, ServerWarning, send_control,
+    ControlAction, ControlResponse, ServerCommand, ServerEvent, ServerEvents, ServerExit,
+    ServerObserver, ServerSupervisor, ServerWarning, send_control,
 };
 pub use properties::{
     EULA_KEY, MalformedEscape, NetworkProperties, ONLINE_MODE_KEY, PropertiesDocument,

@@ -308,8 +308,8 @@ pub use ephervex_pack::{
 pub use ephervex_server::{
     CaptureHealth, CaptureRetention, CapturedLine, ControlAction, ControlResponse,
     EULA_CONFIRMATION_PHRASE, EulaStatus, MINECRAFT_EULA_REFERENCE, ProcessEvidence, ProcessRole,
-    PropertiesDocument, RuntimeClassification, RuntimeEvidence, ServerEvent, ServerExit,
-    ServerObserver, ServerWarning,
+    PropertiesDocument, RuntimeClassification, RuntimeEvidence, ServerEvent, ServerEvents,
+    ServerExit, ServerObserver, ServerWarning,
 };
 pub use ephervex_storage::{
     AccountConfig, ApiConfig, ApplicationColorScheme, ApplicationDisplayConfig,

@@ -84,6 +84,14 @@ pub enum ServerEvent {
         pid: u32,
     },
     Output(CapturedLine),
+    /// Output lines were left out of this stream because the consumer fell
+    /// behind.
+    ///
+    /// Reported in place, before the next event, so a reader knows where the
+    /// gap is.
+    OutputDropped {
+        lines: u64,
+    },
     Warning(ServerWarning),
     CapturePruned(crate::CapturePrune),
     CaptureUnavailable {
@@ -111,32 +119,139 @@ pub enum ServerWarning {
     },
 }
 
+/// How many output lines may wait for a consumer before further ones are dropped.
+const MAX_QUEUED_OUTPUT_LINES: usize = 8192;
+
+/// How many bytes of output may wait for a consumer before further lines are dropped.
+const MAX_QUEUED_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+
+/// Output waiting for a consumer, shared by the observer and the receiver.
+#[derive(Debug, Default)]
+struct OutputQueue {
+    lines: usize,
+    bytes: usize,
+    dropped: u64,
+}
+
+impl OutputQueue {
+    /// Whether a line of this size may be queued. A queue that is empty always
+    /// accepts one, so an oversized line is delivered rather than lost.
+    const fn has_room_for(&self, bytes: usize) -> bool {
+        self.lines == 0
+            || (self.lines < MAX_QUEUED_OUTPUT_LINES
+                && self.bytes.saturating_add(bytes) <= MAX_QUEUED_OUTPUT_BYTES)
+    }
+}
+
+type SharedQueue = Arc<std::sync::Mutex<OutputQueue>>;
+
+fn lock(queue: &SharedQueue) -> std::sync::MutexGuard<'_, OutputQueue> {
+    // The counters stay meaningful if a holder panicked.
+    queue
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// What a captured line costs while it waits in a queue.
+fn queued_bytes(line: &CapturedLine) -> usize {
+    std::mem::size_of::<CapturedLine>() + line.text.len()
+}
+
+#[derive(Debug, Clone)]
+struct Link {
+    sender: mpsc::UnboundedSender<ServerEvent>,
+    queue: SharedQueue,
+}
+
+/// Receives [`ServerEvent`]s.
+///
+/// Emitting never waits, so a consumer that stops reading cannot stall the
+/// server's output pipes. Output lines it has not yet taken are capped instead:
+/// past the cap a line is dropped from this stream and the next event reports
+/// how many were. Every other event is always queued.
 #[derive(Debug, Clone)]
 pub struct ServerObserver {
-    sender: Option<mpsc::UnboundedSender<ServerEvent>>,
+    link: Option<Link>,
+}
+
+/// The receiving end of a [`ServerObserver`].
+#[derive(Debug)]
+pub struct ServerEvents {
+    receiver: mpsc::UnboundedReceiver<ServerEvent>,
+    queue: SharedQueue,
+}
+
+impl ServerEvents {
+    /// Waits for the next event, or `None` once every observer is gone and the
+    /// queue is empty.
+    pub async fn recv(&mut self) -> Option<ServerEvent> {
+        let event = self.receiver.recv().await?;
+        self.release(&event);
+        Some(event)
+    }
+
+    /// Takes the next event if one is already waiting.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`mpsc::error::TryRecvError`] when nothing is waiting or every
+    /// observer is gone.
+    pub fn try_recv(&mut self) -> Result<ServerEvent, mpsc::error::TryRecvError> {
+        let event = self.receiver.try_recv()?;
+        self.release(&event);
+        Ok(event)
+    }
+
+    fn release(&self, event: &ServerEvent) {
+        if let ServerEvent::Output(line) = event {
+            let mut queue = lock(&self.queue);
+            queue.lines = queue.lines.saturating_sub(1);
+            queue.bytes = queue.bytes.saturating_sub(queued_bytes(line));
+        }
+    }
 }
 
 impl ServerObserver {
     #[must_use]
-    pub fn channel() -> (Self, mpsc::UnboundedReceiver<ServerEvent>) {
+    pub fn channel() -> (Self, ServerEvents) {
         let (sender, receiver) = mpsc::unbounded_channel();
+        let queue = SharedQueue::default();
         (
             Self {
-                sender: Some(sender),
+                link: Some(Link {
+                    sender,
+                    queue: Arc::clone(&queue),
+                }),
             },
-            receiver,
+            ServerEvents { receiver, queue },
         )
     }
 
     #[must_use]
     pub const fn silent() -> Self {
-        Self { sender: None }
+        Self { link: None }
     }
 
+    /// Emits an event, ignoring a receiver that has gone away. Never waits.
     pub fn emit(&self, event: ServerEvent) {
-        if let Some(sender) = &self.sender {
-            let _ = sender.send(event);
+        let Some(link) = &self.link else {
+            return;
+        };
+        let mut queue = lock(&link.queue);
+        if let ServerEvent::Output(line) = &event {
+            let bytes = queued_bytes(line);
+            if !queue.has_room_for(bytes) {
+                queue.dropped = queue.dropped.saturating_add(1);
+                return;
+            }
+            queue.lines += 1;
+            queue.bytes = queue.bytes.saturating_add(bytes);
         }
+        if queue.dropped > 0 {
+            let lines = std::mem::take(&mut queue.dropped);
+            let _ = link.sender.send(ServerEvent::OutputDropped { lines });
+        }
+        let _ = link.sender.send(event);
     }
 }
 
@@ -1506,7 +1621,7 @@ mod tests {
         root: tempfile::TempDir,
         capture: tempfile::TempDir,
         journal: PathBuf,
-        events: mpsc::UnboundedReceiver<ServerEvent>,
+        events: ServerEvents,
         task: tokio::task::JoinHandle<ServerResult<ServerExit>>,
     }
 
@@ -1539,7 +1654,7 @@ mod tests {
         }
     }
 
-    fn lifecycle(events: &mut mpsc::UnboundedReceiver<ServerEvent>) -> Vec<&'static str> {
+    fn lifecycle(events: &mut ServerEvents) -> Vec<&'static str> {
         let mut seen = Vec::new();
         while let Ok(event) = events.try_recv() {
             seen.push(match event {
@@ -1813,7 +1928,7 @@ mod tests {
     ) -> (
         tempfile::TempDir,
         tempfile::TempDir,
-        mpsc::UnboundedReceiver<ServerEvent>,
+        ServerEvents,
         tokio::task::JoinHandle<ServerResult<ServerExit>>,
     ) {
         let root = tempfile::tempdir().expect("root");
@@ -1835,7 +1950,7 @@ mod tests {
     }
 
     /// Waits until the child prints `text` on a line of its own.
-    async fn wait_for_output(events: &mut mpsc::UnboundedReceiver<ServerEvent>, text: &str) {
+    async fn wait_for_output(events: &mut ServerEvents, text: &str) {
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if let Some(ServerEvent::Output(line)) = events.recv().await
@@ -2390,7 +2505,7 @@ mod tests {
     }
 
     /// The pid a script announced as `descendant:<pid>`.
-    async fn announced_descendant(events: &mut mpsc::UnboundedReceiver<ServerEvent>) -> u32 {
+    async fn announced_descendant(events: &mut ServerEvents) -> u32 {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if let Some(ServerEvent::Output(line)) = events.recv().await
@@ -2678,5 +2793,95 @@ mod tests {
         ] {
             assert!(!announces_startup_finished(other), "{other}");
         }
+    }
+
+    /// Built directly: `CapturedLine::from_bytes` caps a line far below the queue's byte cap.
+    fn output_line(text: &str) -> ServerEvent {
+        ServerEvent::Output(CapturedLine {
+            timestamp: chrono::Utc::now(),
+            stream: CaptureStream::Stdout,
+            text: text.to_owned(),
+            truncated: false,
+            omitted_bytes: 0,
+        })
+    }
+
+    #[tokio::test]
+    async fn output_nobody_reads_is_bounded_and_lifecycle_events_are_still_delivered() {
+        let (observer, mut events) = ServerObserver::channel();
+        observer.emit(ServerEvent::Started { pid: 7 });
+        for round in 0..(MAX_QUEUED_OUTPUT_LINES * 2) {
+            observer.emit(output_line(&round.to_string()));
+        }
+        observer.emit(ServerEvent::Restarting);
+        observer.emit(ServerEvent::Finished { exit: None });
+        drop(observer);
+
+        let mut lines = 0usize;
+        let mut dropped = 0u64;
+        let mut lifecycle = Vec::new();
+        while let Some(event) = events.recv().await {
+            match event {
+                ServerEvent::Output(_) => lines += 1,
+                ServerEvent::OutputDropped { lines } => dropped += lines,
+                ServerEvent::Started { .. } => lifecycle.push("started"),
+                ServerEvent::Restarting => lifecycle.push("restarting"),
+                ServerEvent::Finished { .. } => lifecycle.push("finished"),
+                _ => {}
+            }
+        }
+        assert_eq!(lines, MAX_QUEUED_OUTPUT_LINES);
+        assert_eq!(
+            lines as u64 + dropped,
+            (MAX_QUEUED_OUTPUT_LINES * 2) as u64,
+            "every line is delivered or counted"
+        );
+        assert_eq!(lifecycle, ["started", "restarting", "finished"]);
+    }
+
+    #[tokio::test]
+    async fn a_consumer_that_keeps_up_loses_no_output() {
+        let (observer, mut events) = ServerObserver::channel();
+        for round in 0..(MAX_QUEUED_OUTPUT_LINES * 3) {
+            observer.emit(output_line(&round.to_string()));
+            assert!(matches!(events.recv().await, Some(ServerEvent::Output(_))));
+        }
+        assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn dropped_output_is_reported_where_the_gap_is() {
+        let (observer, mut events) = ServerObserver::channel();
+        observer.emit(output_line(&"x".repeat(MAX_QUEUED_OUTPUT_BYTES)));
+        observer.emit(output_line("lost"));
+        observer.emit(output_line("lost too"));
+        assert!(matches!(events.recv().await, Some(ServerEvent::Output(_))));
+        observer.emit(output_line("kept"));
+        observer.emit(ServerEvent::Restarting);
+
+        assert!(matches!(
+            events.recv().await,
+            Some(ServerEvent::OutputDropped { lines: 2 })
+        ));
+        assert!(matches!(events.recv().await, Some(ServerEvent::Output(_))));
+        assert!(matches!(events.recv().await, Some(ServerEvent::Restarting)));
+    }
+
+    #[tokio::test]
+    async fn a_dropped_line_is_reported_before_a_lifecycle_event_when_no_output_follows() {
+        let (observer, mut events) = ServerObserver::channel();
+        observer.emit(output_line(&"x".repeat(MAX_QUEUED_OUTPUT_BYTES)));
+        observer.emit(output_line("lost"));
+        observer.emit(ServerEvent::Finished { exit: None });
+
+        assert!(matches!(events.recv().await, Some(ServerEvent::Output(_))));
+        assert!(matches!(
+            events.recv().await,
+            Some(ServerEvent::OutputDropped { lines: 1 })
+        ));
+        assert!(matches!(
+            events.recv().await,
+            Some(ServerEvent::Finished { .. })
+        ));
     }
 }

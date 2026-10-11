@@ -28,9 +28,9 @@ use ephervex_core::{
     ModSearchQuery, MutationRestriction, NewClient, NewServer, OperationReporter,
     OptionalSelection, PackAnalysis, Paths, PlannedOutcome, ProcessMonitor, ProgressSink,
     ProviderFileIdentity, RoundAnswer, SearchOptions, ServerCommit, ServerContentSource,
-    ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings, ServerObserver,
-    ServerRecord, SideRequirement, SnapshotOrigin, SnapshotRestoreOptions, SuspectReason,
-    WatchTarget,
+    ServerCreateOptions, ServerEvent, ServerEvents, ServerFolder, ServerNetworkSettings,
+    ServerObserver, ServerRecord, SideRequirement, SnapshotOrigin, SnapshotRestoreOptions,
+    SuspectReason, WatchTarget,
 };
 use ephervex_core::{
     ConfiguredPreferences, LanguageAvailability, LanguageEntry, MinecraftPreferencePreview,
@@ -2055,17 +2055,13 @@ impl SupervisedServers {
 /// because a forwarder takes a burst of output and any other event that lands
 /// in it together, and a `Started` or `Finished` taken that way must count too.
 struct ObservedServerEvents {
-    events: tokio::sync::mpsc::UnboundedReceiver<ServerEvent>,
+    events: ServerEvents,
     supervised: SupervisedServers,
     server: ServerId,
 }
 
 impl ObservedServerEvents {
-    const fn new(
-        events: tokio::sync::mpsc::UnboundedReceiver<ServerEvent>,
-        supervised: SupervisedServers,
-        server: ServerId,
-    ) -> Self {
+    const fn new(events: ServerEvents, supervised: SupervisedServers, server: ServerId) -> Self {
         Self {
             events,
             supervised,
@@ -8342,7 +8338,10 @@ fn forward_server_event(
                 send_server_truncation(events, server);
             }
         }
-        ServerEvent::CaptureUnavailable { .. } => send_server_truncation(events, server),
+        // The Console shows a gap where lines were skipped.
+        ServerEvent::CaptureUnavailable { .. } | ServerEvent::OutputDropped { .. } => {
+            send_server_truncation(events, server);
+        }
         ServerEvent::Warning(warning) => {
             let _ = events.send(Event::Toast {
                 message: server_warning_message(&warning),
@@ -13439,6 +13438,33 @@ mod tests {
             assert_eq!(updates.len(), usize::from(truncated));
             assert!(updates.iter().all(|update| update.source_truncated));
         }
+    }
+
+    #[test]
+    fn skipped_server_output_marks_the_console_as_missing_lines() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = Paths::rooted_at(root.path());
+        let (events, received) = std::sync::mpsc::channel();
+
+        forward_server_event(
+            &events,
+            "server",
+            &paths,
+            &Mutex::new(None),
+            None,
+            ServerId::new(),
+            ServerEvent::OutputDropped { lines: 3 },
+        );
+
+        let updates: Vec<_> = received
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::LiveLog(update) => Some(update),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(updates.len(), 1);
+        assert!(updates[0].source_truncated);
     }
 
     #[test]
