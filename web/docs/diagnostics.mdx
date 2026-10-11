@@ -6,6 +6,7 @@ description: Read logs and crash reports, diagnose a failed run, and export a di
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 import ThemeScreenshot from '@site/src/components/ThemeScreenshot';
+import {diagnosticResultCallouts} from '@site/src/components/screenshot-callouts';
 
 # Diagnostics
 
@@ -84,6 +85,11 @@ link to a log, crash report, Mods, or settings. If it offers a fix, select
 current result.
 
 <ThemeScreenshot state="client-diagnostics-result" alt="Diagnostics result showing likely problems and completed checks" />
+
+In this result, **1** identifies the missing or damaged files and **2** marks
+**Review fix**. Review the proposed changes before applying them.
+
+<ThemeScreenshot state="client-diagnostics-result" region="missing-files" callouts={diagnosticResultCallouts} alt="Missing files finding: 1 marks the result and 2 marks Review fix" />
 
 <ThemeScreenshot state="client-diagnostics-fix-preview" alt="Fix preview showing the changes before applying them" />
 

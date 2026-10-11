@@ -10,7 +10,7 @@ use image::{ImageBuffer, RgbaImage, imageops::FilterType};
 use slint::platform::{PointerEventButton, WindowEvent};
 use slint::{ComponentHandle, LogicalPosition, PhysicalSize};
 
-use crate::catalog::{Interaction, Region, State};
+use crate::catalog::{Interaction, Region, RegionBounds, State};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ThemeName {
@@ -301,6 +301,44 @@ fn perform(ui: &AppWindow, interaction: Interaction) -> Result<()> {
     clippy::cast_sign_loss
 )]
 fn crop_region(ui: &AppWindow, image: &RgbaImage, region: &Region) -> Result<RgbaImage> {
+    if let Some(bounds) = region.bounds {
+        let (x, y, width, height) = match bounds {
+            RegionBounds::Centered {
+                left,
+                top,
+                width,
+                height,
+            } => (image.width() as f32 / 2.0 + left, top, width, height),
+            RegionBounds::RightAligned {
+                right,
+                top,
+                width,
+                height,
+            } => (image.width() as f32 - right - width, top, width, height),
+        };
+        ensure!(
+            x.is_finite()
+                && y.is_finite()
+                && width.is_finite()
+                && height.is_finite()
+                && x >= 0.0
+                && y >= 0.0
+                && width > 0.0
+                && height > 0.0
+                && x + width <= image.width() as f32
+                && y + height <= image.height() as f32,
+            "UI region {:?} exceeds the window",
+            region.name
+        );
+        return Ok(image::imageops::crop_imm(
+            image,
+            x.floor() as u32,
+            y.floor() as u32,
+            width.ceil() as u32,
+            height.ceil() as u32,
+        )
+        .to_image());
+    }
     let Some(label) = region.accessible_label else {
         return Ok(image.clone());
     };

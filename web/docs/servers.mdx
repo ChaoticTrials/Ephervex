@@ -6,6 +6,7 @@ description: Create, configure, run, and recover local Minecraft servers.
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 import ThemeScreenshot from '@site/src/components/ThemeScreenshot';
+import {serverAccessCallouts, serverOnlineModeCallouts, serverEulaCallouts} from '@site/src/components/screenshot-callouts';
 
 # Servers
 
@@ -87,7 +88,9 @@ The card shows the recorded status.
 
 <ThemeScreenshot state="server-eula-review" alt="Minecraft Server EULA dialog with Open Minecraft EULA and Accept EULA" />
 
-<ThemeScreenshot state="server-properties" alt="Server properties with network settings, gameplay options, and the Minecraft Server EULA card" />
+**1** marks the EULA action on the server's Properties page.
+
+<ThemeScreenshot state="server-properties" region="eula" callouts={serverEulaCallouts} alt="Minecraft Server EULA card: 1 marks Review and Accept" />
 
 </TabItem>
 <TabItem value="cli" label="CLI">
@@ -122,6 +125,15 @@ Stop the server, open **Properties**, and edit **Access**, **Port**, and
 difficulty, game mode, flight, PvP, and allowlist controls. Select **Save
 Changes** to apply them. The save action is available while the server is
 stopped.
+
+**1** marks **Access**, where you choose who can connect.
+
+<ThemeScreenshot state="server-properties" region="access" callouts={serverAccessCallouts} alt="Server Access setting: 1 marks the LAN access selector" />
+
+**1** marks **Online mode**. The example warns because it is off while LAN
+access is selected.
+
+<ThemeScreenshot state="server-properties" region="online-mode" callouts={serverOnlineModeCallouts} alt="Server Online mode setting: 1 marks the switch beside the offline access warning" />
 
 </TabItem>
 <TabItem value="cli" label="CLI">

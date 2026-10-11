@@ -25,6 +25,9 @@ the default screenshot directory, so removed states and old paths do not remain.
 Some states also include a crop around an accessible UI element. A crop is taken
 from the rendered window, not rebuilt separately. Light and Dark use the same
 fixture object.
+Native popup menus are cropped from their known window position because they
+do not expose a stable element boundary to the headless renderer. Review those
+crops at both window sizes when changing the related layout.
 The PNG directory, including review contact sheets, is gitignored.
 
 To capture a subset, pass options through the script:

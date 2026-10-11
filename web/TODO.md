@@ -164,11 +164,11 @@ in nearby text and alt text.
       choice in `create-instance-dialog`.
 - [x] Crop and mark Open in Browser in `import-modpack-manual-download` and the
       answer buttons in `mod-isolation-round`.
-- [ ] Crop and mark the result and action in `client-diagnostics-result`.
-- [ ] Crop and mark Access, Online mode, and the EULA action in
+- [x] Crop and mark the result and action in `client-diagnostics-result`.
+- [x] Crop and mark Access, Online mode, and the EULA action in
       `server-properties`; show the account and instance action menus beside
       the instructions that name them.
-- [ ] Add labeled dialog or control regions where an accessible-element crop
+- [x] Add labeled dialog or control regions where an accessible-element crop
       is possible.
 
 ## 5. Documentation pages

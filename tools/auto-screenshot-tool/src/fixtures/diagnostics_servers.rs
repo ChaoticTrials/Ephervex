@@ -551,7 +551,7 @@ pub(crate) fn server_console(ui: &AppWindow) {
     );
 }
 
-/// The Properties surface of a stopped server with LAN access and its EULA accepted.
+/// The Properties surface of a stopped server with LAN access awaiting EULA consent.
 pub(crate) fn server_properties(ui: &AppWindow) {
     let view = HostView {
         property_motd: "CaveStone reproduction server".into(),
@@ -568,14 +568,8 @@ pub(crate) fn server_properties(ui: &AppWindow) {
         properties_revision: 1,
         ..server_view(named_server(ui, "cavestone-server"))
     };
-    ui.set_eula_accepted(true);
-    ui.set_eula_status(
-        lookup_args(
-            "gui-eula-accepted-at",
-            [("value", Arg::from("2026-10-02 18:20 UTC"))],
-        )
-        .into(),
-    );
+    ui.set_eula_accepted(false);
+    ui.set_eula_status(lookup("gui-eula-not-accepted").into());
     open_server(ui, view, "Properties", None);
 }
 
@@ -978,7 +972,13 @@ mod tests {
             derive_1080: false,
         })
         .expect("render the states");
-        assert_eq!(files.len(), NAMES.len());
+        assert_eq!(
+            files.len(),
+            states
+                .iter()
+                .map(|state| state.regions.len())
+                .sum::<usize>()
+        );
         assert!(files.iter().all(|path| path.is_file()));
     }
 }

@@ -10,6 +10,23 @@ pub(crate) struct Region {
     pub(crate) accessible_label: Option<&'static str>,
     /// Horizontal and vertical crop padding in source pixels.
     pub(crate) padding: (f32, f32),
+    pub(crate) bounds: Option<RegionBounds>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum RegionBounds {
+    Centered {
+        left: f32,
+        top: f32,
+        width: f32,
+        height: f32,
+    },
+    RightAligned {
+        right: f32,
+        top: f32,
+        width: f32,
+        height: f32,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -36,11 +53,13 @@ const INSTANCE_REGIONS: &[Region] = &[
         name: "full",
         accessible_label: None,
         padding: (0.0, 0.0),
+        bounds: None,
     },
     Region {
         name: "client-card",
         accessible_label: Some("CaveStone"),
         padding: (12.0, 12.0),
+        bounds: None,
     },
 ];
 const SERVER_REGIONS: &[Region] = &[
@@ -48,11 +67,13 @@ const SERVER_REGIONS: &[Region] = &[
         name: "full",
         accessible_label: None,
         padding: (0.0, 0.0),
+        bounds: None,
     },
     Region {
         name: "server-card",
         accessible_label: Some("CaveStone Server"),
         padding: (12.0, 12.0),
+        bounds: None,
     },
 ];
 const ACCOUNT_REGIONS: &[Region] = &[
@@ -60,17 +81,20 @@ const ACCOUNT_REGIONS: &[Region] = &[
         name: "full",
         accessible_label: None,
         padding: (0.0, 0.0),
+        bounds: None,
     },
     Region {
         name: "offline-profile",
         accessible_label: Some("MelanX"),
         padding: (12.0, 12.0),
+        bounds: None,
     },
 ];
 const FULL_ONLY: &[Region] = &[Region {
     name: "full",
     accessible_label: None,
     padding: (0.0, 0.0),
+    bounds: None,
 }];
 
 const MANUAL_DOWNLOAD_REGIONS: &[Region] = &[
@@ -78,11 +102,13 @@ const MANUAL_DOWNLOAD_REGIONS: &[Region] = &[
         name: "full",
         accessible_label: None,
         padding: (0.0, 0.0),
+        bounds: None,
     },
     Region {
         name: "blocked-file",
         accessible_label: Some("Obsidian Mirror"),
         padding: (0.0, 0.0),
+        bounds: None,
     },
 ];
 
@@ -91,11 +117,13 @@ const CREATE_INSTANCE_REGIONS: &[Region] = &[
         name: "full",
         accessible_label: None,
         padding: (0.0, 0.0),
+        bounds: None,
     },
     Region {
         name: "dialog",
         accessible_label: Some("New Instance"),
         padding: (4.0, 4.0),
+        bounds: None,
     },
 ];
 
@@ -104,11 +132,13 @@ const ISOLATION_ROUND_REGIONS: &[Region] = &[
         name: "full",
         accessible_label: None,
         padding: (0.0, 0.0),
+        bounds: None,
     },
     Region {
         name: "answer-controls",
         accessible_label: Some("Still failing"),
         padding: (140.0, 22.0),
+        bounds: None,
     },
 ];
 
@@ -116,25 +146,118 @@ const CLIENT_HOSTS_REGIONS: &[Region] = &[Region {
     name: "full",
     accessible_label: None,
     padding: (0.0, 0.0),
+    bounds: None,
 }];
 
 const SETTINGS_REGIONS: &[Region] = &[Region {
     name: "full",
     accessible_label: None,
     padding: (0.0, 0.0),
+    bounds: None,
 }];
 
 const MODS_FULL_WINDOW_REGIONS: &[Region] = &[Region {
     name: "full",
     accessible_label: None,
     padding: (0.0, 0.0),
+    bounds: None,
 }];
 
 const DIAGNOSTICS_SERVERS_REGIONS: &[Region] = &[Region {
     name: "full",
     accessible_label: None,
     padding: (0.0, 0.0),
+    bounds: None,
 }];
+
+const DIAGNOSTIC_RESULT_REGIONS: &[Region] = &[
+    Region {
+        name: "full",
+        accessible_label: None,
+        padding: (0.0, 0.0),
+        bounds: None,
+    },
+    Region {
+        name: "missing-files",
+        accessible_label: Some("Problem: 2 recorded files are missing or damaged"),
+        padding: (4.0, 4.0),
+        bounds: None,
+    },
+];
+
+const SERVER_PROPERTIES_REGIONS: &[Region] = &[
+    Region {
+        name: "full",
+        accessible_label: None,
+        padding: (0.0, 0.0),
+        bounds: None,
+    },
+    Region {
+        name: "access",
+        accessible_label: Some("Access"),
+        padding: (12.0, 22.0),
+        bounds: None,
+    },
+    Region {
+        name: "online-mode",
+        accessible_label: None,
+        padding: (0.0, 0.0),
+        bounds: Some(RegionBounds::Centered {
+            left: -453.0,
+            top: 344.0,
+            width: 660.0,
+            height: 56.0,
+        }),
+    },
+    Region {
+        name: "eula",
+        accessible_label: Some("Minecraft Server EULA"),
+        padding: (4.0, 4.0),
+        bounds: None,
+    },
+];
+
+const INSTANCE_MENU_REGIONS: &[Region] = &[
+    Region {
+        name: "full",
+        accessible_label: None,
+        padding: (0.0, 0.0),
+        bounds: None,
+    },
+    Region {
+        name: "actions",
+        accessible_label: None,
+        padding: (0.0, 0.0),
+        // The native context menu is centered over the instance list at both sizes.
+        bounds: Some(RegionBounds::Centered {
+            left: -84.0,
+            top: 288.0,
+            width: 304.0,
+            height: 330.0,
+        }),
+    },
+];
+
+const ACCOUNT_LAUNCH_REGIONS: &[Region] = &[
+    Region {
+        name: "full",
+        accessible_label: None,
+        padding: (0.0, 0.0),
+        bounds: None,
+    },
+    Region {
+        name: "account-menu",
+        accessible_label: None,
+        padding: (0.0, 0.0),
+        // The native account menu stays against the right edge at both sizes.
+        bounds: Some(RegionBounds::RightAligned {
+            right: 0.0,
+            top: 390.0,
+            width: 300.0,
+            height: 280.0,
+        }),
+    },
+];
 
 pub(crate) const STATES: &[State] = &[
     State {
@@ -399,7 +522,7 @@ pub(crate) const STATES: &[State] = &[
     State {
         name: "client-diagnostics-result",
         show: fixtures::diagnostics_servers::client_diagnostics_result,
-        regions: DIAGNOSTICS_SERVERS_REGIONS,
+        regions: DIAGNOSTIC_RESULT_REGIONS,
         same_layout_at_both_sizes: false,
         interaction: None,
     },
@@ -434,7 +557,7 @@ pub(crate) const STATES: &[State] = &[
     State {
         name: "server-properties",
         show: fixtures::diagnostics_servers::server_properties,
-        regions: DIAGNOSTICS_SERVERS_REGIONS,
+        regions: SERVER_PROPERTIES_REGIONS,
         same_layout_at_both_sizes: false,
         interaction: None,
     },
@@ -483,7 +606,7 @@ pub(crate) const STATES: &[State] = &[
     State {
         name: "instance-actions-menu",
         show: fixtures::instance_dialogs::instances_page,
-        regions: FULL_ONLY,
+        regions: INSTANCE_MENU_REGIONS,
         same_layout_at_both_sizes: false,
         interaction: Some(Interaction::RightClick("CaveStone")),
     },
@@ -560,7 +683,7 @@ pub(crate) const STATES: &[State] = &[
     State {
         name: "account-launch-picker",
         show: fixtures::instance_dialogs::account_launch_picker,
-        regions: FULL_ONLY,
+        regions: ACCOUNT_LAUNCH_REGIONS,
         same_layout_at_both_sizes: false,
         interaction: Some(Interaction::Click("Launch as")),
     },
