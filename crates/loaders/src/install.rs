@@ -3,10 +3,12 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use ephervex_download::scratch::{ScratchOwner, sweep_abandoned};
 use ephervex_download::{
     CacheLayout, ContentStore, DownloadError, DownloadManager, DownloadRequest, FileExtension,
-    HashVerifier, MavenCoordinate, MetadataCache, MetadataCacheError, MetadataKey,
-    OperationReporter, UrlPolicyError,
+    HashVerifier, INSTALLER_WORKSPACE_DIRECTORY, MavenCoordinate, MetadataCache,
+    MetadataCacheError, MetadataKey, OperationReporter, UrlPolicyError,
+    is_installer_workspace_name,
 };
 use ephervex_minecraft::{
     Artifact, Installation, Library, Platform, RuleContext, VanillaInstaller, VersionMetadata,
@@ -103,7 +105,7 @@ impl InstallerEngine {
         cancel: &CancellationToken,
     ) -> LoaderResult<InstalledServer> {
         ensure_empty_target(target).await?;
-        let staging = ScratchDirectory::create(server_staging(target)).await?;
+        let staging = ScratchDirectory::create_fresh(|| server_staging(target)).await?;
         let jar = staging
             .path()
             .join(format!("minecraft_server.{}.jar", metadata.id));
@@ -213,7 +215,7 @@ impl InstallerEngine {
         self.install_installer_declared_libraries(&bundle, &context)
             .await?;
 
-        let scratch = ScratchDirectory::create(server_staging(target)).await?;
+        let scratch = ScratchDirectory::create_fresh(|| server_staging(target)).await?;
         let staging = scratch.path();
         let staged = async {
             let server = parent.server_jar()?.clone();
@@ -693,7 +695,7 @@ impl InstallerEngine {
         {
             return Ok(());
         }
-        let scratch = ScratchDirectory::create(self.workspace("client")).await?;
+        let scratch = ScratchDirectory::create_fresh(|| self.workspace("client")).await?;
         let workspace = scratch.path();
         let processed = async {
             self.prepare_workspace_in(workspace, &bundle.profile)
@@ -837,7 +839,7 @@ impl InstallerEngine {
         let sequence = WORKSPACE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         self.layout
             .store_root(ContentStore::InstallerCache)
-            .join("work")
+            .join(INSTALLER_WORKSPACE_DIRECTORY)
             .join(format!("{side}-{}-{sequence}", std::process::id()))
     }
 
@@ -889,7 +891,7 @@ impl InstallerEngine {
     ) -> LoaderResult<KnownDigests> {
         // The installer's data files are scratch input for the processors, so
         // they live outside the workspace that becomes the installed tree.
-        let data = ScratchDirectory::create(self.workspace("data")).await?;
+        let data = ScratchDirectory::create_fresh(|| self.workspace("data")).await?;
         let processed = self
             .run_processors_with_data(
                 bundle,
@@ -1817,27 +1819,65 @@ async fn ensure_empty_target(target: &Path) -> LoaderResult<()> {
 
 /// An installer-owned scratch directory. The install settles it, publishing or
 /// removing it; if the install is dropped first, it is removed off the async
-/// runtime.
+/// runtime. A launcher that is killed first leaves it behind with its owner
+/// claim unlocked, which the next installer to share the parent collects.
 #[derive(Debug)]
 struct ScratchDirectory {
     /// `None` once the directory has been published or removed.
     path: Option<PathBuf>,
+    owner: Option<ScratchOwner>,
 }
 
 impl ScratchDirectory {
+    /// Creates an empty directory at a name `next` produces that no running
+    /// process holds. Processes in different pid namespaces that share a cache
+    /// can produce the same name, and one must not clear the other's directory.
+    async fn create_fresh(mut next: impl FnMut() -> PathBuf) -> LoaderResult<Self> {
+        let mut attempts = 0;
+        loop {
+            let path = next();
+            match Self::create(path.clone()).await {
+                Err(LoaderError::Io { source, .. })
+                    if source.kind() == std::io::ErrorKind::WouldBlock && attempts < 16 =>
+                {
+                    attempts += 1;
+                }
+                outcome => return outcome,
+            }
+        }
+    }
+
     /// Creates an empty directory at `path`, clearing anything an earlier
     /// process with the same id left there.
     async fn create(path: PathBuf) -> LoaderResult<Self> {
+        let owner = ScratchOwner::claim(&path).map_err(|source| io_error(&path, source))?;
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .await
-                .map_err(|source| io_error(parent, source))?;
+            let parent = parent.to_path_buf();
+            // Directories of killed launchers; this one is claimed already.
+            // A failed sweep only leaves them for the next installer.
+            let server_staging = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with('.'));
+            let _ = tokio::task::spawn_blocking(move || {
+                sweep_abandoned(&parent, |name| {
+                    if server_staging {
+                        name.starts_with('.') && name.contains(".ephervex-installing-")
+                    } else {
+                        is_installer_workspace_name(name)
+                    }
+                });
+            })
+            .await;
         }
         remove_tree(&path).await;
         fs::create_dir(&path)
             .await
             .map_err(|source| io_error(&path, source))?;
-        Ok(Self { path: Some(path) })
+        Ok(Self {
+            path: Some(path),
+            owner: Some(owner),
+        })
     }
 
     fn path(&self) -> &Path {
@@ -1862,6 +1902,9 @@ impl ScratchDirectory {
             return Err(io_error(target, source));
         }
         self.path = None;
+        if let Some(owner) = self.owner.take() {
+            owner.release();
+        }
         result
     }
 
@@ -1869,13 +1912,14 @@ impl ScratchDirectory {
         let Some(path) = self.path.take() else {
             return;
         };
+        let owner = self.owner.take();
         let retried = path.clone();
         // The blocking pool refuses work while the runtime shuts down.
-        if tokio::task::spawn_blocking(move || remove_scratch(&retried))
+        if tokio::task::spawn_blocking(move || remove_scratch(&retried, owner))
             .await
             .is_err()
         {
-            remove_scratch(&path);
+            remove_scratch(&path, None);
         }
     }
 }
@@ -1885,31 +1929,33 @@ impl Drop for ScratchDirectory {
         let Some(path) = self.path.take() else {
             return;
         };
+        let owner = self.owner.take();
         if tokio::runtime::Handle::try_current().is_err() {
-            remove_scratch(&path);
+            remove_scratch(&path, owner);
             return;
         }
         // Its own thread, not the runtime's blocking pool, which refuses work
         // while the runtime shuts down.
         let retried = path.clone();
         if std::thread::Builder::new()
-            .spawn(move || remove_scratch(&retried))
+            .spawn(move || remove_scratch(&retried, owner))
             .is_err()
         {
-            remove_scratch(&path);
+            remove_scratch(&path, None);
         }
     }
 }
 
-/// Removes a scratch directory. A dropped or failed install's detached writes
-/// and killed processor may still be finishing, so a removal that races them
-/// is tried again shortly.
-fn remove_scratch(path: &Path) {
+/// Removes a scratch directory and gives up its owner claim. A dropped or
+/// failed install's detached writes and killed processor may still be
+/// finishing, so a removal that races them is tried again shortly. A claim
+/// whose directory could not be removed is kept unreleased for a later sweep.
+fn remove_scratch(path: &Path, owner: Option<ScratchOwner>) {
     let mut attempts = 0;
     loop {
         match std::fs::remove_dir_all(path) {
-            Ok(()) => return,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Ok(()) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
             Err(_) if attempts < 3 => {
                 attempts += 1;
                 std::thread::sleep(std::time::Duration::from_millis(200));
@@ -1923,6 +1969,9 @@ fn remove_scratch(path: &Path) {
                 return;
             }
         }
+    }
+    if let Some(owner) = owner {
+        owner.release();
     }
 }
 
@@ -3877,6 +3926,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn creating_a_scratch_directory_collects_the_ones_a_dead_launcher_left() {
+        let root = tempfile::tempdir().expect("root");
+        let dead = root.path().join("client-1-0");
+        drop(ScratchOwner::claim(&dead).expect("claim"));
+        std::fs::create_dir_all(dead.join("libraries")).expect("abandoned content");
+        let live = ScratchDirectory::create(root.path().join("client-2-0"))
+            .await
+            .expect("live scratch");
+        std::fs::write(live.path().join("partial"), b"x").expect("live content");
+
+        let fresh = ScratchDirectory::create(root.path().join("client-3-0"))
+            .await
+            .expect("scratch");
+
+        assert!(!dead.exists());
+        assert!(!root.path().join("client-1-0.owner").exists());
+        assert!(live.path().join("partial").is_file());
+        fresh.remove().await;
+        live.remove().await;
+    }
+
+    #[tokio::test]
+    async fn a_scratch_name_a_running_launcher_holds_is_never_cleared_for_another() {
+        let root = tempfile::tempdir().expect("root");
+        let held = root.path().join("client-1-0");
+        let live = ScratchDirectory::create(held.clone())
+            .await
+            .expect("live scratch");
+        std::fs::write(live.path().join("partial"), b"x").expect("live content");
+        let mut candidates = vec![root.path().join("client-1-1"), held.clone()];
+
+        let other = ScratchDirectory::create_fresh(|| {
+            candidates
+                .pop()
+                .unwrap_or_else(|| root.path().join("client-1-2"))
+        })
+        .await
+        .expect("a free name is used instead");
+
+        assert_ne!(other.path(), held);
+        assert!(live.path().join("partial").is_file());
+        other.remove().await;
+        live.remove().await;
+    }
+
+    #[tokio::test]
     async fn a_scratch_directory_dropped_inside_the_runtime_is_removed() {
         let root = tempfile::tempdir().expect("root");
         let scratch = ScratchDirectory::create(root.path().join("dropped"))
@@ -3902,6 +3997,7 @@ mod tests {
         std::fs::create_dir_all(path.join("libraries")).expect("scratch");
         drop(ScratchDirectory {
             path: Some(path.clone()),
+            owner: None,
         });
         assert!(!path.exists());
     }

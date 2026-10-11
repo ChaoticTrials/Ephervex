@@ -365,6 +365,7 @@ impl ArtifactCache {
 
         blocking(move || {
             let _guard = lock_exclusively(&path)?;
+            collect_abandoned_workspaces(&layout);
             let mut survey = survey(&layout)?;
             let mut report = std::mem::take(&mut survey.report);
             report.usage_before = survey.bytes;
@@ -405,6 +406,7 @@ impl ArtifactCache {
         let path = self.lock_path();
         blocking(move || {
             let _guard = lock_exclusively(&path)?;
+            collect_abandoned_workspaces(&layout);
             let mut survey = survey(&layout)?;
             let mut report = std::mem::take(&mut survey.report);
             report.usage_before = survey.bytes;
@@ -421,6 +423,27 @@ impl ArtifactCache {
         })
         .await
     }
+}
+
+/// Name of the directory under the installer cache that holds loader install
+/// workspaces. Each is claimed through [`crate::scratch`], so a maintenance
+/// pass reclaims the ones whose installer is gone and leaves live ones alone.
+pub const INSTALLER_WORKSPACE_DIRECTORY: &str = "work";
+
+/// Whether `name` has the shape of an installer workspace: ASCII letters,
+/// digits and hyphens only, as in `client-4242-3`.
+pub fn is_installer_workspace_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+fn collect_abandoned_workspaces(layout: &CacheLayout) {
+    let workspaces = layout
+        .store_root(ContentStore::InstallerCache)
+        .join(INSTALLER_WORKSPACE_DIRECTORY);
+    crate::scratch::sweep_abandoned(&workspaces, is_installer_workspace_name);
 }
 
 /// Runs filesystem work off the async runtime.
@@ -1479,5 +1502,28 @@ mod tests {
                 .store_root(ContentStore::Downloads)
                 .is_dir()
         );
+    }
+
+    #[tokio::test]
+    async fn clearing_collects_installer_workspaces_whose_installer_is_gone() {
+        use crate::scratch::ScratchOwner;
+
+        let fixture = Fixture::new();
+        let work = fixture
+            .layout()
+            .store_root(ContentStore::InstallerCache)
+            .join(INSTALLER_WORKSPACE_DIRECTORY);
+        let dead = work.join("client-1-0");
+        drop(ScratchOwner::claim(&dead).expect("claim"));
+        write_file(&dead.join("libraries").join("a.jar"), 64);
+        let live_path = work.join("client-2-0");
+        let live = ScratchOwner::claim(&live_path).expect("claim");
+        write_file(&live_path.join("libraries").join("b.jar"), 64);
+
+        fixture.cache.clear().await.expect("clear");
+
+        assert!(!dead.exists());
+        assert!(live_path.join("libraries").join("b.jar").is_file());
+        drop(live);
     }
 }

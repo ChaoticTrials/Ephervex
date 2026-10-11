@@ -461,6 +461,16 @@ and `artwork/` holds entries no provider publishes a hash for. The provider
 metadata cache has its own addressing and its own freshness policy and is not
 governed by this limit.
 
+Loader installs and server creation build in scratch directories: processor
+workspaces under `installer-cache/work/`, loader staging beside a server's
+`game/`, and hidden `.staging-` roots beside a new server. Each is claimed by an
+exclusive `flock` on a sibling `.owner` marker, taken before the directory
+exists and removed after it is gone. The kernel drops the lock when the holder
+exits however it exits, so a directory whose marker is unlocked is abandoned
+whatever pid namespace or host shared the directory. The next install, server
+creation, cache clear, or limited-budget collection pass removes abandoned ones; a
+directory with no marker has no provable owner and is never removed.
+
 The budget is a `u64` byte count or Unlimited, defaulting to 10 GiB. A settings
 screen offers presets up to 100 GiB, a custom size in mebibytes, gibibytes, or
 tebibytes, and Unlimited; the stored value is always bytes, so no unit choice

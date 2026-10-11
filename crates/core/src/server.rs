@@ -5,6 +5,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
+use ephervex_download::scratch::{ScratchOwner, sweep_abandoned};
 use ephervex_download::{CacheLayout, OperationReporter, ProgressSink};
 use ephervex_model::{
     AccountKind, AttentionReason, ImportSourceKind, InstanceId, JavaOverride, JvmSettings,
@@ -251,8 +252,9 @@ impl App {
                 ),
             ));
         }
+        let cleanup = StagingCleanup::claim(staging.clone())
+            .map_err(|source| storage_io(&staging, source))?;
         std::fs::create_dir_all(&staging).map_err(|source| storage_io(&staging, source))?;
-        let cleanup = StagingCleanup::new(staging.clone());
         let target = ephervex_storage::metadata::server_game_dir(&staging);
 
         let java = self
@@ -1740,9 +1742,13 @@ fn synthetic_unverifiable_evidence() -> ephervex_server::ProcessEvidence {
     }
 }
 
+/// A server staging root and the claim that proves it has a live owner. A
+/// launcher killed mid-creation leaves the root with its claim unlocked, and
+/// the next server creation collects it.
 struct StagingCleanup {
     path: PathBuf,
     armed: std::cell::Cell<bool>,
+    owner: std::cell::RefCell<Option<ScratchOwner>>,
 }
 
 struct InstallationCleanup {
@@ -1777,22 +1783,41 @@ impl Drop for InstallationCleanup {
 }
 
 impl StagingCleanup {
-    fn new(path: PathBuf) -> Self {
-        Self {
+    /// Claims `path` before it exists, and collects the staging roots of
+    /// launchers that are gone from the directory beside it.
+    fn claim(path: PathBuf) -> std::io::Result<Self> {
+        let owner = ScratchOwner::claim(&path)?;
+        if let Some(parent) = path.parent() {
+            sweep_abandoned(parent, |name| {
+                name.starts_with('.') && name.contains(".staging-")
+            });
+        }
+        Ok(Self {
             path,
             armed: std::cell::Cell::new(true),
-        }
+            owner: std::cell::RefCell::new(Some(owner)),
+        })
     }
 
+    /// The staging root now belongs to the finished server.
     fn disarm(&self) {
         self.armed.set(false);
+        if let Some(owner) = self.owner.borrow_mut().take() {
+            owner.release();
+        }
     }
 }
 
 impl Drop for StagingCleanup {
     fn drop(&mut self) {
         if self.armed.get() {
-            let _ = std::fs::remove_dir_all(&self.path);
+            let removed = match std::fs::remove_dir_all(&self.path) {
+                Ok(()) => true,
+                Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+            };
+            if removed && let Some(owner) = self.owner.get_mut().take() {
+                owner.release();
+            }
         }
     }
 }
@@ -3592,7 +3617,7 @@ mod tests {
         {
             let final_root = directory.path().join(format!("server-{index}"));
             let staging = staging_root(&final_root);
-            let cleanup = StagingCleanup::new(staging.clone());
+            let cleanup = StagingCleanup::claim(staging.clone()).expect("claim staging");
             let path = staging.join(artifact);
             std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
             std::fs::write(&path, b"partial").expect("write partial stage");
@@ -3604,6 +3629,25 @@ mod tests {
             );
             assert!(!final_root.exists(), "partial server was published");
         }
+    }
+
+    #[test]
+    fn claiming_a_staging_root_collects_the_roots_a_dead_launcher_left() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let dead = staging_root(&directory.path().join("server-a"));
+        drop(ScratchOwner::claim(&dead).expect("claim"));
+        std::fs::create_dir_all(dead.join("game")).expect("abandoned staging");
+        let live_root = staging_root(&directory.path().join("server-b"));
+        let live = StagingCleanup::claim(live_root.clone()).expect("claim");
+        std::fs::create_dir_all(live_root.join("game")).expect("live staging");
+
+        let fresh =
+            StagingCleanup::claim(staging_root(&directory.path().join("server-c"))).expect("claim");
+
+        assert!(!dead.exists());
+        assert!(live_root.join("game").is_dir());
+        fresh.disarm();
+        live.disarm();
     }
 
     #[test]

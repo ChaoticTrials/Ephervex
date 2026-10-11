@@ -65,6 +65,7 @@ pub mod metadata;
 pub mod progress;
 mod publication;
 pub mod retry;
+pub mod scratch;
 pub mod verify;
 
 pub use allowlist::{
@@ -73,8 +74,8 @@ pub use allowlist::{
 };
 pub use artifact_cache::{
     ArtifactCache, ArtifactCacheError, ArtifactCacheLease, ArtifactCacheMaintenance,
-    ArtifactCacheUsage, MAINTENANCE_LOCK_FILE, MaintenanceStage, MaintenanceTrouble,
-    reusable_artifact_stores,
+    ArtifactCacheUsage, INSTALLER_WORKSPACE_DIRECTORY, MAINTENANCE_LOCK_FILE, MaintenanceStage,
+    MaintenanceTrouble, is_installer_workspace_name, reusable_artifact_stores,
 };
 pub use cache::{
     ARTWORK_FORMAT, CacheKeyError, CacheLayout, ContentAddress, ContentStore, FileExtension,
