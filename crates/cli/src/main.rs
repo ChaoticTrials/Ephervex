@@ -3003,8 +3003,12 @@ async fn run_launch(app: &mut App, args: &LaunchArgs, json: bool) -> anyhow::Res
     // runs in its own process group, so none of these reach it from the
     // terminal. The task ends with the process, so nothing has to shut it down.
     let interrupt = cancel.clone();
+    // Watched before the task is spawned so a request cannot arrive while the
+    // handlers are still being installed.
+    let requests = TerminationRequests::watch().ok();
     tokio::spawn(async move {
-        if wait_for_termination_request().await {
+        if let Some(requests) = requests {
+            wait_for_termination_request(requests).await;
             // Canceled first: after a hangup the terminal may refuse the write.
             interrupt.cancel();
             let _ = std::io::Write::write_fmt(
@@ -3258,13 +3262,9 @@ impl StopRequests for TerminationRequests {
 }
 
 /// Waits for Ctrl-C or, on Unix, for the terminal closing or a termination
-/// request. Returns `false` if the signals cannot be watched.
-async fn wait_for_termination_request() -> bool {
-    let Ok(mut requests) = TerminationRequests::watch() else {
-        return false;
-    };
+/// request.
+async fn wait_for_termination_request(mut requests: TerminationRequests) {
     requests.next().await;
-    true
 }
 
 /// One line of the game's output.
@@ -8884,9 +8884,24 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_hangup_is_a_request_to_stop_the_game() {
-        let waiting = tokio::spawn(wait_for_termination_request());
-        // The handlers are installed when the task first runs.
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // A process started under `nohup` keeps ignoring hangups by design.
+        let hangup_ignored = std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|status| {
+                status
+                    .lines()
+                    .find_map(|line| line.strip_prefix("SigIgn:"))
+                    .and_then(|mask| u64::from_str_radix(mask.trim(), 16).ok())
+            })
+            .is_some_and(|mask| mask & 1 == 1);
+        if hangup_ignored {
+            return;
+        }
+
+        // The signals are registered once this returns, so the hangup below
+        // cannot arrive before the handler exists.
+        let requests = TerminationRequests::watch().expect("signals are watched");
+        let waiting = tokio::spawn(wait_for_termination_request(requests));
         let status = tokio::process::Command::new("kill")
             .args(["-HUP", &std::process::id().to_string()])
             .status()
@@ -8894,11 +8909,12 @@ mod tests {
             .expect("kill runs");
         assert!(status.success());
 
-        let requested = tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+        // Only a failsafe: the signal is already pending, so this does not
+        // race the handler on a loaded machine.
+        tokio::time::timeout(std::time::Duration::from_secs(60), waiting)
             .await
             .expect("the hangup is noticed")
             .expect("task");
-        assert!(requested);
     }
 
     fn microsoft_summary(credential: CredentialPresence) -> AccountSummary {
