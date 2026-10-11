@@ -671,6 +671,16 @@ impl CoreError {
         }
     }
 
+    /// Whether a server run ended because the replacement for a restart could
+    /// not be started. The restart's own caller is told the same failure.
+    #[must_use]
+    pub const fn is_failed_restart_replacement(&self) -> bool {
+        matches!(
+            self,
+            Self::Server(ServerError::RestartReplacementFailed { .. })
+        )
+    }
+
     /// Whether this installation cannot authenticate until its Azure
     /// application registration is approved for the Minecraft Services API.
     ///

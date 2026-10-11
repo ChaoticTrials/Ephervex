@@ -8137,7 +8137,10 @@ fn report_server_run(
             )
         }
         Err(error) => {
-            send_error(events, error);
+            // The restart that caused it already said so, with the detail.
+            if !error.is_failed_restart_replacement() {
+                send_error(events, error);
+            }
             (
                 lookup("gui-activity-starting-server"),
                 localized_error(error),
@@ -13392,6 +13395,43 @@ mod tests {
         let activity = shown[0];
         assert_eq!(activity.item.status_kind, "canceled");
         assert!(!activity.item.failed);
+    }
+
+    #[test]
+    fn a_run_ended_by_a_failed_restart_replacement_shows_failed_without_a_second_error_toast() {
+        let (events, received) = std::sync::mpsc::channel();
+        let result: CoreResult<ephervex_core::ServerExit> =
+            Err(ephervex_server::ServerError::RestartReplacementFailed {
+                source: Box::new(ephervex_server::ServerError::ProcessIo(
+                    std::io::Error::other("no Java"),
+                )),
+            }
+            .into());
+
+        report_server_run(
+            &events,
+            ServerId::new(),
+            "server",
+            &Mutex::new(Some("operation".to_owned())),
+            &result,
+        );
+
+        let received: Vec<_> = received.try_iter().collect();
+        assert!(
+            received
+                .iter()
+                .all(|event| !matches!(event, Event::Toast { error: true, .. })),
+            "the restart's own report is the only toast"
+        );
+        let activity = received
+            .iter()
+            .find_map(|event| match event {
+                Event::Activity(activity) => Some(activity),
+                _ => None,
+            })
+            .expect("the run reports its activity");
+        assert_eq!(activity.item.status_kind, "failed");
+        assert!(activity.item.failed);
     }
 
     #[test]

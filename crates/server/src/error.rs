@@ -40,6 +40,13 @@ pub enum ServerError {
         #[source]
         source: std::io::Error,
     },
+    /// The old child stopped for a restart and its replacement could not be
+    /// started, which is what ended the run.
+    #[error("the server stopped for a restart and could not be started again")]
+    RestartReplacementFailed {
+        #[source]
+        source: Box<ServerError>,
+    },
     #[error("the server may already be running")]
     AlreadyRunning,
     #[error("the server console command must be one line and must not contain NUL")]
@@ -77,6 +84,7 @@ impl ServerError {
             Self::RuntimeMayBeAlive => "error-server-runtime-may-be-alive",
             Self::ControlUnavailable { .. } => "error-server-control-unavailable",
             Self::ProcessStart { .. } => "error-server-process-start",
+            Self::RestartReplacementFailed { .. } => "error-server-restart-replacement-failed",
             Self::AlreadyRunning => "error-server-already-running",
             Self::InvalidConsoleCommand => "error-server-console-invalid",
             Self::ProcessIo(_) => "error-server-process-io",
@@ -112,6 +120,7 @@ impl ServerError {
             | Self::MalformedPropertiesEscape { path, .. }
             | Self::ControlUnavailable { path, .. } => Some(path.clone()),
             Self::ProcessStart { executable, .. } => Some(executable.clone()),
+            Self::RestartReplacementFailed { source } => source.failing_path(),
             _ => None,
         }
     }

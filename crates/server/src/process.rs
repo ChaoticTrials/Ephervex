@@ -242,16 +242,8 @@ impl ServerSupervisor {
         }
         drop(guard);
         // Answered once the server is released, so an answered stop means nothing writes into it.
-        let final_response = |request: Option<&ControlAction>| match (&result, request) {
-            (
-                Ok(exit),
-                None | Some(ControlAction::Status | ControlAction::Stop | ControlAction::Kill),
-            ) => ControlResponse::Exited(*exit),
-            (Ok(_), Some(_)) => server_has_stopped(),
-            (Err(error), _) => {
-                ControlResponse::Refused(format!("the server could not be supervised: {error}"))
-            }
-        };
+        let final_response =
+            |request: Option<&ControlAction>| final_control_response(&result, request);
         for waiter in outstanding.waiters {
             let _ = waiter.send(final_response(None));
         }
@@ -259,6 +251,28 @@ impl ServerSupervisor {
             let _ = request.response.send(final_response(Some(&request.action)));
         }
         result
+    }
+}
+
+/// What a control request is told once the run has ended with `result`.
+///
+/// `request` is `None` for a request that was already waiting on a stop, kill, or restart.
+fn final_control_response(
+    result: &ServerResult<ServerExit>,
+    request: Option<&ControlAction>,
+) -> ControlResponse {
+    match (result, request) {
+        (
+            Ok(exit),
+            None | Some(ControlAction::Status | ControlAction::Stop | ControlAction::Kill),
+        ) => ControlResponse::Exited(*exit),
+        (Ok(_), Some(_)) => server_has_stopped(),
+        (Err(ServerError::RestartReplacementFailed { source }), _) => {
+            ControlResponse::StartFailed(source.to_string())
+        }
+        (Err(error), _) => {
+            ControlResponse::Refused(format!("the server could not be supervised: {error}"))
+        }
     }
 }
 
@@ -382,7 +396,6 @@ async fn supervise_commands(
     requests: &mut mpsc::UnboundedReceiver<ControlRequest>,
     outstanding: &mut Outstanding,
 ) -> ServerResult<ServerExit> {
-    let mut last_exit = None;
     loop {
         let finished_starting = Arc::new(AtomicBool::new(false));
         // A supervisor that dies between the spawn and the child's record would
@@ -401,18 +414,16 @@ async fn supervise_commands(
             Ok(spawned) => spawned,
             // The old child is gone, which is what the runtime evidence has to
             // say: the server is stopped, and whoever asked for the restart is
-            // told that its second half failed rather than left waiting.
+            // told that its second half failed rather than left waiting. The
+            // run ends with that failure, not with the old child's exit.
             Err(error) if !outstanding.waiters.is_empty() => {
                 let detail = error.to_string();
                 for waiter in outstanding.waiters.drain(..) {
                     let _ = waiter.send(ControlResponse::StartFailed(detail.clone()));
                 }
-                return Ok(last_exit.unwrap_or(ServerExit {
-                    code: None,
-                    signal: None,
-                    finished_starting: false,
-                    stop_requested: false,
-                }));
+                return Err(ServerError::RestartReplacementFailed {
+                    source: Box::new(error),
+                });
             }
             Err(error) => return Err(error),
         };
@@ -441,7 +452,6 @@ async fn supervise_commands(
         drain_output(readers).await;
         exit.finished_starting = finished_starting.load(Ordering::Relaxed);
         observer.emit(ServerEvent::Exited(exit));
-        last_exit = Some(exit);
         if restart {
             capture.lock().await.begin_run();
             observer.emit(ServerEvent::Restarting);
@@ -1677,16 +1687,46 @@ mod tests {
             matches!(restart, ControlResponse::StartFailed(_)),
             "{restart:?}"
         );
-        server
-            .task
-            .await
-            .expect("join")
-            .expect("the old child stopped cleanly");
+        let ended = server.task.await.expect("join");
+        assert!(
+            matches!(
+                &ended,
+                Err(ServerError::RestartReplacementFailed { source })
+                    if matches!(**source, ServerError::ProcessStart { .. })
+            ),
+            "the run ends with the failed start, not the old child's exit: {ended:?}"
+        );
         assert_eq!(journal(&server.journal), ["start", "stop"]);
         assert!(
             !runtime_path(server.root.path()).exists(),
             "stopped, not left looking like a server that needs recovery"
         );
+    }
+
+    #[test]
+    fn requests_after_a_failed_replacement_are_told_the_start_failed() {
+        let failed: ServerResult<ServerExit> = Err(ServerError::RestartReplacementFailed {
+            source: Box::new(ServerError::ProcessStart {
+                executable: PathBuf::from("/missing/java"),
+                source: std::io::Error::from(std::io::ErrorKind::NotFound),
+            }),
+        });
+        for request in [
+            None,
+            Some(ControlAction::Status),
+            Some(ControlAction::Stop),
+            Some(ControlAction::Kill),
+            Some(ControlAction::Restart),
+            Some(ControlAction::Console("list".to_owned())),
+        ] {
+            assert!(
+                matches!(
+                    final_control_response(&failed, request.as_ref()),
+                    ControlResponse::StartFailed(_)
+                ),
+                "{request:?}"
+            );
+        }
     }
 
     #[tokio::test]
