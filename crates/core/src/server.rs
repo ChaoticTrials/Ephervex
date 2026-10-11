@@ -792,7 +792,10 @@ impl App {
         };
         let ended = match ended {
             Some(ended) => Some(ended),
-            None => crate::connection::stop_started_server(&root, supervisor).await,
+            None => {
+                crate::connection::stop_started_server(&root, supervisor, &CancellationToken::new())
+                    .await
+            }
         };
         match ended {
             Some(Ok(exit)) => exit,

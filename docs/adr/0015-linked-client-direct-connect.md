@@ -67,8 +67,13 @@ A caller whose runtime ends with the operation, such as the CLI, asks for the
 server it started to be stopped before the operation returns, on success and on
 failure. The stop is a normal `Stop` that falls back to `Kill`, so the world is
 saved on an ordinary return instead of the process being killed with the
-runtime. A dry run only reports the command and starts no server. A server that
-was already running is never stopped by the operation.
+runtime. The operation reports when that stop begins, when it is escalated to a
+kill, and when the server has stopped, since the world can take minutes to
+save. The caller can cancel a token the options carry to end the wait and kill
+the server at once; the CLI does so on the first interrupt that arrives while
+the server is being stopped, or on the one that follows the interrupt that
+stopped the game. A dry run only reports the command and starts no server. A
+server that was already running is never stopped by the operation.
 
 ## Consequences
 

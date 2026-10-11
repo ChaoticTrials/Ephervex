@@ -60,6 +60,9 @@ pub struct LaunchAndConnectOptions {
     pub launch: LaunchOptions,
     pub readiness_timeout: Duration,
     pub started_server: StartedServerLifetime,
+    /// Canceling this while a started server is being stopped on return kills
+    /// it instead of waiting out its save. Never canceled by default.
+    pub started_server_kill: CancellationToken,
 }
 
 impl Default for LaunchAndConnectOptions {
@@ -68,6 +71,7 @@ impl Default for LaunchAndConnectOptions {
             launch: LaunchOptions::default(),
             readiness_timeout: DEFAULT_SERVER_READINESS_TIMEOUT,
             started_server: StartedServerLifetime::default(),
+            started_server_kill: CancellationToken::new(),
         }
     }
 }
@@ -90,10 +94,31 @@ pub struct LaunchAndConnectOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LaunchAndConnectEvent {
-    StartingServer { server: ServerId },
-    ReusingServer { server: ServerId },
-    WaitingForServer { target: ConnectionTarget },
-    ServerReady { target: ConnectionTarget },
+    StartingServer {
+        server: ServerId,
+    },
+    ReusingServer {
+        server: ServerId,
+    },
+    WaitingForServer {
+        target: ConnectionTarget,
+    },
+    ServerReady {
+        target: ConnectionTarget,
+    },
+    /// A server this operation started is being stopped, which can take as
+    /// long as the world needs to save.
+    StoppingServer {
+        server: ServerId,
+    },
+    /// The stop is being cut short because the caller asked to kill the server.
+    KillingServer {
+        server: ServerId,
+    },
+    /// The stopped server's supervisor has ended and released the server.
+    ServerStopped {
+        server: ServerId,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -313,7 +338,14 @@ impl App {
         if let Some(supervisor) = started
             && options.started_server == StartedServerLifetime::StopOnReturn
         {
-            stop_started_server(&root, supervisor).await;
+            stop_and_report_started_server(
+                server_id,
+                &root,
+                supervisor,
+                &options.started_server_kill,
+                observer,
+            )
+            .await;
         }
         result
     }
@@ -397,6 +429,39 @@ impl App {
     }
 }
 
+/// Stops a server this operation started and says when the stop begins and
+/// when the server is gone, because the wait can last minutes.
+async fn stop_and_report_started_server(
+    server: ServerId,
+    root: &std::path::Path,
+    supervisor: JoinHandle<CoreResult<ServerExit>>,
+    kill: &CancellationToken,
+    observer: &LaunchAndConnectObserver,
+) {
+    // A supervisor that already ended left nothing of ours to stop, and the
+    // server under the same id may be a replacement that is still running.
+    let running = !supervisor.is_finished();
+    if running {
+        observer.emit(if kill.is_cancelled() {
+            LaunchAndConnectEvent::KillingServer { server }
+        } else {
+            LaunchAndConnectEvent::StoppingServer { server }
+        });
+    }
+    let stopping = stop_started_server(root, supervisor, kill);
+    tokio::pin!(stopping);
+    let ended = tokio::select! {
+        ended = &mut stopping => ended,
+        () = kill.cancelled(), if running && !kill.is_cancelled() => {
+            observer.emit(LaunchAndConnectEvent::KillingServer { server });
+            stopping.await
+        }
+    };
+    if running && ended.is_some() {
+        observer.emit(LaunchAndConnectEvent::ServerStopped { server });
+    }
+}
+
 /// Stops a server this operation started and waits for its supervisor to end,
 /// so the world is saved and the runtime lock is released. Only the supervisor
 /// this operation spawned is addressed: once it has ended, whatever owns the
@@ -405,11 +470,40 @@ impl App {
 /// A stop the supervisor has accepted is waited out, because killing a server
 /// mid-save is what this exists to avoid. A server that never answers, or whose
 /// control channel is not published yet, is retried briefly and then killed.
+/// Canceling `kill` ends the wait at once and kills the server.
 ///
 /// Returns how the supervisor finished, or `None` when it had to be abandoned.
 pub(super) async fn stop_started_server(
     root: &std::path::Path,
     mut supervisor: JoinHandle<CoreResult<ServerExit>>,
+    kill: &CancellationToken,
+) -> Option<Result<CoreResult<ServerExit>, tokio::task::JoinError>> {
+    // Checked before `kill` is looked at: a canceled token must not reach a
+    // server that replaced the one this operation started.
+    if supervisor.is_finished() {
+        return Some((&mut supervisor).await);
+    }
+    let graceful = tokio::select! {
+        () = kill.cancelled() => None,
+        ended = stop_gracefully(root, &mut supervisor) => ended,
+    };
+    if graceful.is_some() {
+        return graceful;
+    }
+    tracing::warn!(root = %root.display(), "the server did not stop in time and was killed");
+    let _ = send_control(root, &ControlAction::Kill).await;
+    if let Ok(ended) = tokio::time::timeout(STARTED_SERVER_SETTLE, &mut supervisor).await {
+        return Some(ended);
+    }
+    supervisor.abort();
+    None
+}
+
+/// Asks the server to stop and waits for its supervisor to end, giving up
+/// with `None` when the server does not stop in time.
+async fn stop_gracefully(
+    root: &std::path::Path,
+    supervisor: &mut JoinHandle<CoreResult<ServerExit>>,
 ) -> Option<Result<CoreResult<ServerExit>, tokio::task::JoinError>> {
     let publication_deadline = tokio::time::Instant::now() + STARTED_SERVER_SETTLE;
     let mut delivered = false;
@@ -434,16 +528,7 @@ pub(super) async fn stop_started_server(
     } else {
         STARTED_SERVER_SETTLE
     };
-    if let Ok(ended) = tokio::time::timeout(grace, &mut supervisor).await {
-        return Some(ended);
-    }
-    tracing::warn!(root = %root.display(), "the server did not stop in time and was killed");
-    let _ = send_control(root, &ControlAction::Kill).await;
-    if let Ok(ended) = tokio::time::timeout(STARTED_SERVER_SETTLE, &mut supervisor).await {
-        return Some(ended);
-    }
-    supervisor.abort();
-    None
+    tokio::time::timeout(grace, supervisor).await.ok()
 }
 
 /// How long a stopped server's supervisor may take to release its runtime, and
@@ -920,6 +1005,7 @@ mod tests {
                     // A server this operation did not start is left alone even
                     // when it is told to stop what it started.
                     started_server: StartedServerLifetime::StopOnReturn,
+                    ..LaunchAndConnectOptions::default()
                 },
                 &connect_observer,
                 &server_observer,
@@ -997,19 +1083,26 @@ mod tests {
     }
 
     fn spawn_stand_in(root: &Path, capture: PathBuf) -> JoinHandle<CoreResult<ServerExit>> {
+        spawn_stand_in_process(
+            root,
+            capture,
+            "connection::tests::a_supervised_stand_in_listens_until_told_to_stop",
+        )
+    }
+
+    fn spawn_stand_in_process(
+        root: &Path,
+        capture: PathBuf,
+        test: &'static str,
+    ) -> JoinHandle<CoreResult<ServerExit>> {
         let root = root.to_owned();
         tokio::spawn(async move {
             Ok(ServerSupervisor::run(
                 &ServerCommand {
                     java: std::env::current_exe().expect("test executable"),
-                    arguments: [
-                        "--exact",
-                        "connection::tests::a_supervised_stand_in_listens_until_told_to_stop",
-                        "--ignored",
-                        "--test-threads=1",
-                    ]
-                    .map(str::to_owned)
-                    .to_vec(),
+                    arguments: ["--exact", test, "--ignored", "--test-threads=1"]
+                        .map(str::to_owned)
+                        .to_vec(),
                     working_directory: root.join("server"),
                 },
                 &root,
@@ -1039,7 +1132,7 @@ mod tests {
             "the stand-in server never published its port"
         );
 
-        stop_started_server(&root, supervisor).await;
+        stop_started_server(&root, supervisor, &CancellationToken::new()).await;
 
         assert!(
             working_directory.join(STAND_IN_STOPPED_FILE).exists(),
@@ -1052,16 +1145,162 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_server_that_replaced_the_one_this_operation_started_is_left_running() {
+    async fn canceling_the_kill_token_ends_the_wait_for_a_server_that_is_still_saving() {
         let directory = tempfile::tempdir().expect("directory");
         let root = stand_in_root(directory.path());
         let working_directory = root.join("server");
+        let supervisor = spawn_stand_in_process(
+            &root,
+            directory.path().join("capture"),
+            "connection::tests::a_supervised_stand_in_ignores_stop",
+        );
+        wait_until_controlled(&root).await;
+        let kill = CancellationToken::new();
+        let stopping = tokio::spawn({
+            let root = root.clone();
+            let kill = kill.clone();
+            async move { stop_started_server(&root, supervisor, &kill).await }
+        });
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !working_directory.join(STAND_IN_STOP_RECEIVED_FILE).exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the server received the stop");
+        assert!(!stopping.is_finished(), "the server is still saving");
+
+        kill.cancel();
+
+        let ended = tokio::time::timeout(Duration::from_secs(30), stopping)
+            .await
+            .expect("the kill ended the wait without the save grace")
+            .expect("stop task");
+        assert!(ended.is_some(), "the killed supervisor ended");
+        assert!(matches!(
+            classify_runtime(&root).expect("runtime"),
+            RuntimeClassification::Stopped
+        ));
+    }
+
+    #[tokio::test]
+    async fn stopping_a_started_server_reports_when_the_stop_begins_and_when_it_ends() {
+        let directory = tempfile::tempdir().expect("directory");
+        let root = stand_in_root(directory.path());
+        let supervisor = spawn_stand_in(&root, directory.path().join("capture"));
+        wait_until_controlled(&root).await;
+        let server = ServerId::new();
+        let (observer, mut events) = LaunchAndConnectObserver::channel();
+
+        stop_and_report_started_server(
+            server,
+            &root,
+            supervisor,
+            &CancellationToken::new(),
+            &observer,
+        )
+        .await;
+
+        assert_eq!(
+            events.try_recv().expect("stopping"),
+            LaunchAndConnectEvent::StoppingServer { server }
+        );
+        assert_eq!(
+            events.try_recv().expect("stopped"),
+            LaunchAndConnectEvent::ServerStopped { server }
+        );
+        assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_kill_requested_while_a_started_server_saves_is_reported_before_it_stops() {
+        let directory = tempfile::tempdir().expect("directory");
+        let root = stand_in_root(directory.path());
+        let working_directory = root.join("server");
+        let supervisor = spawn_stand_in_process(
+            &root,
+            directory.path().join("capture"),
+            "connection::tests::a_supervised_stand_in_ignores_stop",
+        );
+        wait_until_controlled(&root).await;
+        let server = ServerId::new();
+        let kill = CancellationToken::new();
+        let (observer, mut events) = LaunchAndConnectObserver::channel();
+        let stopping = tokio::spawn({
+            let root = root.clone();
+            let kill = kill.clone();
+            async move {
+                stop_and_report_started_server(server, &root, supervisor, &kill, &observer).await;
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !working_directory.join(STAND_IN_STOP_RECEIVED_FILE).exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the server received the stop");
+
+        kill.cancel();
+
+        tokio::time::timeout(Duration::from_secs(30), stopping)
+            .await
+            .expect("the kill ended the wait")
+            .expect("stop task");
+        let mut reported = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            reported.push(event);
+        }
+        assert_eq!(
+            reported,
+            [
+                LaunchAndConnectEvent::StoppingServer { server },
+                LaunchAndConnectEvent::KillingServer { server },
+                LaunchAndConnectEvent::ServerStopped { server },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_server_that_replaced_the_one_this_operation_started_is_left_running() {
+        assert_replacement_left_running(CancellationToken::new()).await;
+    }
+
+    #[tokio::test]
+    async fn a_canceled_kill_token_does_not_reach_a_server_that_replaced_the_one_this_operation_started()
+     {
+        let kill = CancellationToken::new();
+        kill.cancel();
+        assert_replacement_left_running(kill).await;
+    }
+
+    #[tokio::test]
+    async fn no_stop_is_reported_for_a_started_server_that_had_already_ended() {
+        let directory = tempfile::tempdir().expect("directory");
+        let root = stand_in_root(directory.path());
         let replacement = spawn_stand_in(&root, directory.path().join("capture"));
         wait_until_controlled(&root).await;
+        let ended = finished_supervisor().await;
+        let (observer, mut events) = LaunchAndConnectObserver::channel();
+
+        stop_and_report_started_server(
+            ServerId::new(),
+            &root,
+            ended,
+            &CancellationToken::new(),
+            &observer,
+        )
+        .await;
+
         assert!(
-            stand_in_port(&working_directory).await.is_some(),
-            "the stand-in server never published its port"
+            events.try_recv().is_err(),
+            "the replacement was not stopped"
         );
+        let _ = send_control(&root, &ControlAction::Stop).await;
+        let _ = replacement.await;
+    }
+
+    async fn finished_supervisor() -> JoinHandle<CoreResult<ServerExit>> {
         let ended = tokio::spawn(async {
             Ok(ServerExit {
                 code: Some(0),
@@ -1073,8 +1312,22 @@ mod tests {
         while !ended.is_finished() {
             tokio::task::yield_now().await;
         }
+        ended
+    }
 
-        stop_started_server(&root, ended).await;
+    async fn assert_replacement_left_running(kill: CancellationToken) {
+        let directory = tempfile::tempdir().expect("directory");
+        let root = stand_in_root(directory.path());
+        let working_directory = root.join("server");
+        let replacement = spawn_stand_in(&root, directory.path().join("capture"));
+        wait_until_controlled(&root).await;
+        assert!(
+            stand_in_port(&working_directory).await.is_some(),
+            "the stand-in server never published its port"
+        );
+        let ended = finished_supervisor().await;
+
+        stop_started_server(&root, ended, &kill).await;
 
         assert!(
             !working_directory.join(STAND_IN_STOPPED_FILE).exists(),
@@ -1236,6 +1489,25 @@ mod tests {
         }
         drop(listener);
         std::fs::write(STAND_IN_STOPPED_FILE, b"").expect("record the stop");
+    }
+
+    /// Written by the slow stand-in when it reads `stop`, which it then ignores.
+    const STAND_IN_STOP_RECEIVED_FILE: &str = "stop-received";
+
+    /// A supervised server that accepts `stop` but never finishes saving, so
+    /// only a kill ends it.
+    #[test]
+    #[ignore = "started as a server process by the stop escalation test"]
+    fn a_supervised_stand_in_ignores_stop() {
+        if !Path::new(STAND_IN_MARKER).exists() {
+            return;
+        }
+        for line in std::io::stdin().lines() {
+            if line.is_err() {
+                break;
+            }
+            std::fs::write(STAND_IN_STOP_RECEIVED_FILE, b"").expect("record the stop");
+        }
     }
 
     async fn stand_in_port(directory: &Path) -> Option<u16> {

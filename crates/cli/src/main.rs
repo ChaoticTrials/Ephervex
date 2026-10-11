@@ -16,6 +16,8 @@ use std::fmt::Write as _;
 use std::io::{IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::{Args, CommandFactory as _, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
@@ -3003,21 +3005,20 @@ async fn run_launch(app: &mut App, args: &LaunchArgs, json: bool) -> anyhow::Res
     // Ending the launcher stops the game rather than orphaning it. The game
     // runs in its own process group, so none of these reach it from the
     // terminal. The task ends with the process, so nothing has to shut it down.
-    let interrupt = cancel.clone();
+    let kill_server = CancellationToken::new();
+    let stopping_server = Arc::new(AtomicBool::new(false));
     // Watched before the task is spawned so a request cannot arrive while the
     // handlers are still being installed.
-    let requests = TerminationRequests::watch().ok();
-    tokio::spawn(async move {
-        if let Some(requests) = requests {
-            wait_for_termination_request(requests).await;
-            // Canceled first: after a hangup the terminal may refuse the write.
-            interrupt.cancel();
-            let _ = std::io::Write::write_fmt(
-                &mut std::io::stderr(),
-                format_args!("stopping Minecraft…\n"),
-            );
-        }
-    });
+    if let Ok(requests) = TerminationRequests::watch() {
+        tokio::spawn(end_launch_on_requests(
+            requests,
+            LaunchStopSignals {
+                stop: cancel.clone(),
+                kill_server: kill_server.clone(),
+                server_stopping: Arc::clone(&stopping_server),
+            },
+        ));
+    }
 
     // Drained on its own task so a long download reports progress while the
     // launch is still in `app.launch`.
@@ -3032,6 +3033,9 @@ async fn run_launch(app: &mut App, args: &LaunchArgs, json: bool) -> anyhow::Res
         let (connect_observer, mut connect_events) = LaunchAndConnectObserver::channel();
         let connect_printer = tokio::spawn(async move {
             while let Some(event) = connect_events.recv().await {
+                if matches!(event, LaunchAndConnectEvent::StoppingServer { .. }) {
+                    stopping_server.store(true, Ordering::Relaxed);
+                }
                 print_connect_event(event);
             }
         });
@@ -3044,6 +3048,7 @@ async fn run_launch(app: &mut App, args: &LaunchArgs, json: bool) -> anyhow::Res
                     // The command's runtime ends with the command, which would
                     // kill a server left running under it.
                     started_server: StartedServerLifetime::StopOnReturn,
+                    started_server_kill: kill_server,
                     ..LaunchAndConnectOptions::default()
                 },
                 &connect_observer,
@@ -3084,6 +3089,34 @@ async fn run_launch(app: &mut App, args: &LaunchArgs, json: bool) -> anyhow::Res
         }
     };
     game_exit_result(exit, stop_requested).and(stdout_result())
+}
+
+/// What the requests to end a launch act on.
+struct LaunchStopSignals {
+    /// Canceled by the first request, which stops the game.
+    stop: CancellationToken,
+    /// Canceled by the next request, which kills a linked server that is slow
+    /// to stop.
+    kill_server: CancellationToken,
+    /// Set once a linked server is being stopped, after the game has ended.
+    server_stopping: Arc<AtomicBool>,
+}
+
+/// Turns the first request into a stop of the game and the next, or the first
+/// once the linked server is being stopped, into a kill of that server.
+async fn end_launch_on_requests(mut requests: impl StopRequests, signals: LaunchStopSignals) {
+    requests.next().await;
+    // The game is already gone once the server is being stopped, so this
+    // request is the one that hurries the server rather than a stop of the game.
+    if !signals.server_stopping.load(Ordering::Relaxed) {
+        // Canceled first: after a hangup the terminal may refuse the write.
+        signals.stop.cancel();
+        note("stopping Minecraft…");
+        requests.next().await;
+    }
+    // Said by the stop itself, only when a server this launch started is
+    // actually killed.
+    signals.kill_server.cancel();
 }
 
 /// Whether the game's end means the command did its job.
@@ -3141,6 +3174,26 @@ fn print_connect_event(event: LaunchAndConnectEvent) {
                     [("target", MessageArg::from(target.to_string()))],
                 )
             );
+        }
+        // After a hangup the terminal can refuse the write, and the server is
+        // still being stopped.
+        LaunchAndConnectEvent::StoppingServer { server } => {
+            note(&ephervex_i18n::lookup_args(
+                "launch-connect-stopping-server",
+                [("server", MessageArg::from(server.to_string()))],
+            ));
+        }
+        LaunchAndConnectEvent::KillingServer { server } => {
+            note(&ephervex_i18n::lookup_args(
+                "launch-connect-killing-server",
+                [("server", MessageArg::from(server.to_string()))],
+            ));
+        }
+        LaunchAndConnectEvent::ServerStopped { server } => {
+            note(&ephervex_i18n::lookup_args(
+                "launch-connect-server-stopped",
+                [("server", MessageArg::from(server.to_string()))],
+            ));
         }
         _ => {}
     }
@@ -3260,12 +3313,6 @@ impl StopRequests for TerminationRequests {
     async fn next(&mut self) {
         TerminationRequests::next(self).await;
     }
-}
-
-/// Waits for Ctrl-C or, on Unix, for the terminal closing or a termination
-/// request.
-async fn wait_for_termination_request(mut requests: TerminationRequests) {
-    requests.next().await;
 }
 
 /// One line of the game's output.
@@ -8556,6 +8603,50 @@ mod tests {
         (sender, ScriptedRequests(receiver))
     }
 
+    fn launch_stop_signals(server_stopping: bool) -> LaunchStopSignals {
+        LaunchStopSignals {
+            stop: CancellationToken::new(),
+            kill_server: CancellationToken::new(),
+            server_stopping: Arc::new(AtomicBool::new(server_stopping)),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_first_request_stops_the_game_and_the_next_kills_the_linked_server() {
+        let (sender, requests) = scripted_requests();
+        let signals = launch_stop_signals(false);
+        let (stop, kill_server) = (signals.stop.clone(), signals.kill_server.clone());
+        let task = tokio::spawn(end_launch_on_requests(requests, signals));
+
+        sender.send(()).expect("first request");
+        stop.cancelled().await;
+        assert!(
+            !kill_server.is_cancelled(),
+            "one request leaves the server to save"
+        );
+
+        sender.send(()).expect("second request");
+        kill_server.cancelled().await;
+        task.await.expect("task");
+    }
+
+    #[tokio::test]
+    async fn a_request_while_the_linked_server_is_stopping_kills_it_without_stopping_the_game() {
+        let (sender, requests) = scripted_requests();
+        let signals = launch_stop_signals(true);
+        let (stop, kill_server) = (signals.stop.clone(), signals.kill_server.clone());
+        let task = tokio::spawn(end_launch_on_requests(requests, signals));
+
+        sender.send(()).expect("request");
+
+        kill_server.cancelled().await;
+        task.await.expect("task");
+        assert!(
+            !stop.is_cancelled(),
+            "the game had already ended, so its exit is not a requested stop"
+        );
+    }
+
     /// A supervised child that stops only when asked, the way a server answers
     /// the supervisor's graceful stop.
     async fn stops_when_canceled(cancel: CancellationToken) -> &'static str {
@@ -8972,8 +9063,8 @@ mod tests {
 
         // The signals are registered once this returns, so the hangup below
         // cannot arrive before the handler exists.
-        let requests = TerminationRequests::watch().expect("signals are watched");
-        let waiting = tokio::spawn(wait_for_termination_request(requests));
+        let mut requests = TerminationRequests::watch().expect("signals are watched");
+        let waiting = tokio::spawn(async move { requests.next().await });
         let status = tokio::process::Command::new("kill")
             .args(["-HUP", &std::process::id().to_string()])
             .status()

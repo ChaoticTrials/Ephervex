@@ -757,6 +757,9 @@ launch-connect-starting-server = Starting linked server { $server }…
 launch-connect-reusing-server = Reusing linked server { $server }.
 launch-connect-waiting = Waiting for the server at { $target }…
 launch-connect-ready = The server is ready at { $target }.
+launch-connect-stopping-server = Stopping linked server { $server }. Press Ctrl-C to kill it.
+launch-connect-server-stopped = Linked server { $server } stopped.
+launch-connect-killing-server = Killing linked server { $server }...
 
 operation-launching-minecraft = Launching Minecraft
 operation-starting-server = Starting the server
