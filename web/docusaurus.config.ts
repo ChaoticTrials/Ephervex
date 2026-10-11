@@ -61,7 +61,7 @@ const config: Config = {
         {href: repository, label: 'GitHub', position: 'right'},
       ],
     },
-    prism: {theme: prismThemes.dracula, darkTheme: prismThemes.dracula},
+    prism: {theme: prismThemes.github, darkTheme: prismThemes.dracula},
   } satisfies Preset.ThemeConfig,
 };
 

@@ -22,9 +22,9 @@
   --site-button-bg: #176e7d;
   --site-button-hover: #125c69;
   --site-button-text: #fff;
-  --docs-sidebar-bg: #10232a;
-  --docs-sidebar-text: #c8dcdf;
-  --docs-sidebar-accent: #9ce8ed;
+  --docs-sidebar-bg: #edf4f6;
+  --docs-sidebar-text: #36535b;
+  --docs-sidebar-accent: #176e7d;
   --docs-note-bg: #eaf5f6;
   --docs-warning-bg: #fff4e5;
   --docs-warning-border: #bd741d;
@@ -53,6 +53,9 @@
   --site-button-bg: #91dce3;
   --site-button-hover: #b4ecf0;
   --site-button-text: #102b32;
+  --docs-sidebar-bg: #10232a;
+  --docs-sidebar-text: #c8dcdf;
+  --docs-sidebar-accent: #9ce8ed;
   --docs-note-bg: #19373e;
   --docs-warning-bg: #382b1e;
   --docs-warning-border: #e3a051;
@@ -70,17 +73,18 @@
 .theme-doc-sidebar-container {
   --ifm-menu-color: var(--docs-sidebar-text);
   --ifm-menu-color-active: var(--docs-sidebar-accent);
-  --ifm-menu-color-background-hover: rgba(156, 232, 237, 0.08);
-  --ifm-menu-color-background-active: rgba(156, 232, 237, 0.12);
-  --ifm-menu-link-sublist-icon-filter: invert(1);
-  border-right-color: #294650;
+  --ifm-menu-color-background-hover: color-mix(in srgb, var(--docs-sidebar-accent) 8%, transparent);
+  --ifm-menu-color-background-active: color-mix(in srgb, var(--docs-sidebar-accent) 12%, transparent);
+  --ifm-menu-link-sublist-icon-filter: none;
+  border-right-color: var(--site-border);
   background: var(--docs-sidebar-bg);
 }
+[data-theme='dark'] .theme-doc-sidebar-container { --ifm-menu-link-sublist-icon-filter: invert(1); }
 .theme-doc-sidebar-menu::before {
   display: block;
   margin: 0.75rem 0.75rem 1.25rem;
   padding-bottom: 1rem;
-  border-bottom: 1px solid #294650;
+  border-bottom: 1px solid var(--site-border);
   color: var(--docs-sidebar-accent);
   content: 'EPHERVEX / GUIDES';
   font-family: var(--ifm-font-family-monospace);
@@ -110,17 +114,17 @@
   margin: calc(-1 * clamp(1.25rem, 2.5vw, 2.25rem)) calc(-1 * clamp(1.25rem, 2.5vw, 2.25rem)) 0;
   padding: 2rem clamp(1.25rem, 2.5vw, 2.25rem) 1.25rem;
   border-radius: 0.8rem 0.8rem 0 0;
-  color: #f3f8fa;
+  color: var(--site-hero-text);
   background:
-    linear-gradient(rgba(154, 225, 230, 0.045) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(154, 225, 230, 0.045) 1px, transparent 1px),
-    radial-gradient(circle at 90% 15%, rgba(49, 145, 167, 0.24), transparent 42%),
-    #10232a;
+    linear-gradient(color-mix(in srgb, var(--site-accent) 6%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--site-accent) 6%, transparent) 1px, transparent 1px),
+    radial-gradient(circle at 90% 15%, color-mix(in srgb, var(--site-accent) 12%, transparent), transparent 42%),
+    var(--site-hero-bg);
   background-size: 48px 48px, 48px 48px, auto, auto;
 }
 .theme-doc-markdown > header:first-child::before {
   margin-bottom: 1rem;
-  color: #9ce8ed;
+  color: var(--site-accent);
   content: 'EPHERVEX / DOCUMENTATION';
   font-family: var(--ifm-font-family-monospace);
   font-size: 0.72rem;
@@ -133,17 +137,17 @@
   margin: 0 calc(-1 * clamp(1.25rem, 2.5vw, 2.25rem)) 2.25rem;
   padding: 0.25rem clamp(1.25rem, 2.5vw, 2.25rem) 2rem;
   border-radius: 0 0 0.8rem 0.8rem;
-  color: #c8dce0;
-  background: #10232a;
+  color: var(--site-hero-muted);
+  background: var(--site-hero-bg);
   font-size: clamp(1rem, 1.4vw, 1.12rem);
   font-weight: 400;
   line-height: 1.6;
 }
-.theme-doc-markdown > header:first-child + p a { color: #9ce8ed; }
+.theme-doc-markdown > header:first-child + p a { color: var(--site-accent); }
 .theme-doc-markdown > header:first-child + p code {
-  border-color: rgba(156, 232, 237, 0.24);
-  color: #b9f1f3;
-  background: rgba(156, 232, 237, 0.12);
+  border-color: var(--site-border);
+  color: var(--site-hero-text);
+  background: var(--site-surface-alt);
 }
 .theme-doc-markdown h1 { letter-spacing: -0.045em; font-size: clamp(2.3rem, 4vw, 3.1rem); }
 .theme-doc-markdown > h2 {
@@ -164,6 +168,16 @@
 }
 .theme-doc-markdown h3 { letter-spacing: -0.025em; }
 .theme-doc-markdown :not(pre) > code { border: 1px solid var(--site-border); background: var(--site-surface-alt); }
+.theme-doc-markdown .theme-code-block {
+  /* Docusaurus sets Prism colors inline on the block and its pre element. */
+  --prism-background-color: var(--site-surface-alt) !important;
+  --prism-color: var(--site-hero-text) !important;
+  border: 1px solid var(--site-border);
+}
+.theme-doc-markdown .theme-code-block pre {
+  background: var(--site-surface-alt) !important;
+  color: var(--site-hero-text) !important;
+}
 .theme-doc-markdown .language-text pre code { white-space: pre-wrap; overflow-wrap: anywhere; }
 .theme-doc-markdown table { width: 100%; border-collapse: separate; border-spacing: 0; }
 .theme-doc-markdown table th { color: var(--site-muted); background: var(--site-surface-alt); }
@@ -208,9 +222,9 @@ html[data-season='halloween'] {
   --ifm-color-primary-lightest: #df7437;
   --ifm-font-color-base: #302138;
   --ifm-heading-color: #28192f;
-  --ifm-navbar-background-color: #29172e;
-  --ifm-navbar-link-color: #f7eadc;
-  --ifm-navbar-link-hover-color: #ffc47d;
+  --ifm-navbar-background-color: #fffcf7;
+  --ifm-navbar-link-color: #28192f;
+  --ifm-navbar-link-hover-color: #a94410;
   --site-bg: #fff7eb;
   --site-surface: #fffcf7;
   --site-surface-alt: #f8ead9;
@@ -219,15 +233,15 @@ html[data-season='halloween'] {
   --site-muted: #66546b;
   --site-accent: #9d3d0a;
   --site-shadow: rgba(71, 35, 45, 0.1);
-  --site-hero-bg: #3a203d;
-  --site-hero-text: #fff1dc;
-  --site-hero-muted: #ead1c3;
+  --site-hero-bg: #f8ead9;
+  --site-hero-text: #28192f;
+  --site-hero-muted: #66546b;
   --site-button-bg: #a94410;
   --site-button-hover: #873407;
   --site-button-text: #fffaf3;
-  --docs-sidebar-bg: #29172e;
-  --docs-sidebar-text: #efd9c9;
-  --docs-sidebar-accent: #ffc47d;
+  --docs-sidebar-bg: #f8ead9;
+  --docs-sidebar-text: #4a3748;
+  --docs-sidebar-accent: #9d3d0a;
   --docs-note-bg: #fff0d9;
   --docs-warning-bg: #ffead4;
   --docs-warning-border: #a94410;
@@ -244,6 +258,8 @@ html[data-theme='dark'][data-season='halloween'] {
   --ifm-font-color-base: #f3e8e3;
   --ifm-heading-color: #fff0e0;
   --ifm-navbar-background-color: #1d1124;
+  --ifm-navbar-link-color: #f7eadc;
+  --ifm-navbar-link-hover-color: #ffc47d;
   --site-bg: #1b1221;
   --site-surface: #281b2f;
   --site-surface-alt: #322239;
@@ -259,18 +275,20 @@ html[data-theme='dark'][data-season='halloween'] {
   --site-button-hover: #ffc47d;
   --site-button-text: #2b172c;
   --docs-sidebar-bg: #1d1124;
+  --docs-sidebar-text: #efd9c9;
+  --docs-sidebar-accent: #ffc47d;
   --docs-note-bg: #3a2a37;
   --docs-warning-bg: #422b2c;
   --docs-warning-border: #ffae60;
 }
 
-html[data-season='halloween'] .navbar__title,
-html[data-season='halloween'] .navbar__toggle,
-html[data-season='halloween'] .navbar .clean-btn { color: #fff0e0; }
-html[data-season='halloween'] .navbar__title:hover { color: #ffc47d; }
-html[data-season='halloween'] .theme-doc-sidebar-container { border-right-color: #68415c; }
-html[data-season='halloween'] .theme-doc-sidebar-menu::before { border-bottom-color: #68415c; }
-html[data-season='halloween'] .theme-doc-markdown > header:first-child {
+html[data-theme='dark'][data-season='halloween'] .navbar__title,
+html[data-theme='dark'][data-season='halloween'] .navbar__toggle,
+html[data-theme='dark'][data-season='halloween'] .navbar .clean-btn { color: #fff0e0; }
+html[data-theme='dark'][data-season='halloween'] .navbar__title:hover { color: #ffc47d; }
+html[data-theme='dark'][data-season='halloween'] .theme-doc-sidebar-container { border-right-color: #68415c; }
+html[data-theme='dark'][data-season='halloween'] .theme-doc-sidebar-menu::before { border-bottom-color: #68415c; }
+html[data-theme='dark'][data-season='halloween'] .theme-doc-markdown > header:first-child {
   color: #fff0df;
   background:
     linear-gradient(rgba(255, 183, 105, 0.045) 1px, transparent 1px),
@@ -279,32 +297,32 @@ html[data-season='halloween'] .theme-doc-markdown > header:first-child {
     #2c1931;
   background-size: 48px 48px, 48px 48px, auto, auto;
 }
-html[data-season='halloween'] .theme-doc-markdown > header:first-child::before,
-html[data-season='halloween'] .theme-doc-markdown > header:first-child + p a { color: #ffc47d; }
-html[data-season='halloween'] .theme-doc-markdown > header:first-child + p {
+html[data-theme='dark'][data-season='halloween'] .theme-doc-markdown > header:first-child::before,
+html[data-theme='dark'][data-season='halloween'] .theme-doc-markdown > header:first-child + p a { color: #ffc47d; }
+html[data-theme='dark'][data-season='halloween'] .theme-doc-markdown > header:first-child + p {
   color: #efd8d0;
   background: #2c1931;
 }
-html[data-season='halloween'] .theme-doc-markdown > header:first-child + p code {
+html[data-theme='dark'][data-season='halloween'] .theme-doc-markdown > header:first-child + p code {
   border-color: rgba(255, 196, 125, 0.3);
   color: #ffd19b;
   background: rgba(255, 196, 125, 0.12);
 }
-html[data-season='halloween'] .theme-doc-markdown .theme-code-block {
+html[data-theme='dark'][data-season='halloween'] .theme-doc-markdown .theme-code-block {
   /* Docusaurus sets Prism colors inline on the block and its pre element. */
   --prism-background-color: #211629 !important;
   --prism-color: #fff0df !important;
   border: 1px solid #80536a;
   box-shadow: none;
 }
-html[data-season='halloween'] .theme-doc-markdown .theme-code-block pre {
+html[data-theme='dark'][data-season='halloween'] .theme-doc-markdown .theme-code-block pre {
   background: #211629 !important;
   color: #fff0df !important;
 }
-html[data-season='halloween'] .theme-doc-markdown .theme-code-block button {
+html[data-theme='dark'][data-season='halloween'] .theme-doc-markdown .theme-code-block button {
   border-color: #ad786c;
   color: #ffe2be;
   background: #4a2d41;
 }
-html[data-season='halloween'] .theme-doc-markdown .theme-code-block button:hover { background: #68415c; }
-html[data-season='halloween'] .theme-doc-markdown .theme-code-block button:focus-visible { outline-color: #ffc47d; }
+html[data-theme='dark'][data-season='halloween'] .theme-doc-markdown .theme-code-block button:hover { background: #68415c; }
+html[data-theme='dark'][data-season='halloween'] .theme-doc-markdown .theme-code-block button:focus-visible { outline-color: #ffc47d; }

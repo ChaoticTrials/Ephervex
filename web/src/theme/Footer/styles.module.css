@@ -1,18 +1,18 @@
 .footer {
   position: relative;
   overflow: hidden;
-  color: #d2e2e5;
+  color: var(--site-hero-text);
   background:
-    radial-gradient(circle at 90% 0%, rgba(49, 145, 167, 0.16), transparent 38%),
-    #10232a;
+    radial-gradient(circle at 90% 0%, color-mix(in srgb, var(--site-accent) 10%, transparent), transparent 38%),
+    var(--site-surface-alt);
 }
 
 .footer::before {
   position: absolute;
   inset: 0;
   background-image:
-    linear-gradient(rgba(154, 225, 230, 0.035) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(154, 225, 230, 0.035) 1px, transparent 1px);
+    linear-gradient(color-mix(in srgb, var(--site-accent) 4%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--site-accent) 4%, transparent) 1px, transparent 1px);
   background-size: 48px 48px;
   content: '';
   pointer-events: none;
@@ -33,7 +33,7 @@
   display: inline-flex;
   align-items: center;
   gap: 0.75rem;
-  color: #f3f8fa;
+  color: var(--site-hero-text);
   font-size: 1.5rem;
   font-weight: 750;
   letter-spacing: -0.045em;
@@ -41,14 +41,14 @@
   text-decoration: none;
 }
 
-.brand:hover { color: #9ce8ed; text-decoration: none; }
+.brand:hover { color: var(--site-accent); text-decoration: none; }
 
 .brand img { display: block; width: 2.5rem; height: 2.5rem; object-fit: contain; }
 
 .identity p {
   max-width: 25rem;
   margin: 1.35rem 0 0;
-  color: #adc4c9;
+  color: var(--site-muted);
   line-height: 1.65;
 }
 
@@ -60,7 +60,7 @@
 
 .group h2 {
   margin: 0 0 1.2rem;
-  color: #9ce8ed;
+  color: var(--site-accent);
   font-family: var(--ifm-font-family-monospace);
   font-size: 0.75rem;
   font-weight: 700;
@@ -70,9 +70,9 @@
 
 .group ul { margin: 0; padding: 0; list-style: none; }
 .group li + li { margin-top: 0.75rem; }
-.group a { color: #d2e2e5; text-decoration: none; }
-.group a:hover { color: #9ce8ed; text-decoration: underline; text-underline-offset: 0.25em; }
-.footer a:focus-visible { outline: 2px solid #9ce8ed; outline-offset: 4px; }
+.group a { color: var(--site-hero-text); text-decoration: none; }
+.group a:hover { color: var(--site-accent); text-decoration: underline; text-underline-offset: 0.25em; }
+.footer a:focus-visible { outline: 2px solid var(--site-accent); outline-offset: 4px; }
 
 .bottom {
   display: flex;
@@ -80,8 +80,8 @@
   justify-content: space-between;
   gap: 0.6rem 2rem;
   padding: 1.3rem 0 1.6rem;
-  border-top: 1px solid rgba(156, 232, 237, 0.18);
-  color: #9eb7bc;
+  border-top: 1px solid var(--site-border);
+  color: var(--site-muted);
   font-size: 0.78rem;
   line-height: 1.5;
 }
@@ -94,23 +94,3 @@
   .groups { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2rem 1rem; }
   .bottom { flex-direction: column; }
 }
-
-:global(html[data-season='halloween']) .footer {
-  color: #f1ddcf;
-  background:
-    radial-gradient(circle at 90% 0%, rgba(234, 106, 29, 0.2), transparent 38%),
-    #221428;
-}
-:global(html[data-season='halloween']) .footer::before {
-  background-image:
-    linear-gradient(rgba(255, 190, 116, 0.04) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 190, 116, 0.04) 1px, transparent 1px);
-}
-:global(html[data-season='halloween']) .brand { color: #fff0df; }
-:global(html[data-season='halloween']) .brand:hover,
-:global(html[data-season='halloween']) .group a:hover { color: #ffc47d; }
-:global(html[data-season='halloween']) .identity p { color: #dbc3c7; }
-:global(html[data-season='halloween']) .group h2 { color: #ffc47d; }
-:global(html[data-season='halloween']) .group a { color: #f1ddcf; }
-:global(html[data-season='halloween']) .footer a:focus-visible { outline-color: #ffc47d; }
-:global(html[data-season='halloween']) .bottom { border-top-color: rgba(255, 196, 125, 0.25); color: #cbb3bd; }
