@@ -590,6 +590,11 @@ mod tests {
             "error-options-preference-value-unusable"
         );
         assert_eq!(
+            error.message_args(),
+            vec![("preference", ephervex_i18n::Arg::from("fov".to_owned()))],
+            "the message must name the setting that was refused"
+        );
+        assert_eq!(
             app.config().minecraft_preferences,
             before,
             "one bad edit must not half-apply the batch"

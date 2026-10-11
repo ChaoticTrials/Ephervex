@@ -13,6 +13,7 @@
 use std::path::PathBuf;
 
 use ephervex_auth::AuthError;
+use ephervex_i18n::Arg;
 use ephervex_java::JavaError;
 use ephervex_loaders::LoaderError;
 use ephervex_minecraft::{LaunchError, MinecraftError};
@@ -569,54 +570,73 @@ impl CoreError {
     /// the failures whose messages name several technical values. Delegated so
     /// that each provider states its own arguments beside its own message ids,
     /// and a frontend supplies them without matching on any error hierarchy.
+    /// A quantity is an [`Arg::Count`] so that plural selection sees a number.
     #[must_use]
-    pub fn message_args(&self) -> Vec<(&'static str, String)> {
+    pub fn message_args(&self) -> Vec<(&'static str, Arg<'static>)> {
+        fn text(args: Vec<(&'static str, String)>) -> Vec<(&'static str, Arg<'static>)> {
+            args.into_iter()
+                .map(|(name, value)| (name, Arg::from(value)))
+                .collect()
+        }
+
         match self {
-            Self::Loader(error) => error.message_args(),
-            Self::Pack(error) => error.message_args(),
-            Self::Snapshot(error) => error.message_args(),
-            Self::Isolation(error) => error.message_args(),
-            Self::ModPlatform(error) => error.message_args(),
-            Self::Server(error) => error.message_args(),
-            Self::Connect(error) => error.message_args(),
-            Self::ArtifactCacheLimitInvalid(error) => error.message_args(),
-            Self::LoaderFamilyFixed { loader } => vec![("loader", loader.to_string())],
-            Self::InstanceRunning { pid, .. } => vec![("pid", pid.to_string())],
+            Self::Loader(error) => text(error.message_args()),
+            Self::Pack(error) => text(error.message_args()),
+            Self::Snapshot(error) => text(error.message_args()),
+            Self::Isolation(error) => text(error.message_args()),
+            Self::ModPlatform(error) => text(error.message_args()),
+            Self::Server(error) => text(error.message_args()),
+            Self::Connect(error) => text(error.message_args()),
+            Self::ArtifactCacheLimitInvalid(error) => text(error.message_args()),
+            Self::LoaderFamilyFixed { loader } => vec![("loader", Arg::from(loader.to_string()))],
+            Self::InstanceRunning { pid, .. } => vec![("pid", Arg::from(pid.to_string()))],
             Self::LinkedServerRunning { name }
             | Self::LinkedServerUnstoppable { name }
             | Self::LinkedServerNotStopped { name, .. } => {
-                vec![("name", name.clone())]
+                vec![("name", Arg::from(name.clone()))]
             }
             Self::LoaderChangeBlockedByMods { incompatible } => {
-                vec![("count", incompatible.to_string())]
+                vec![("count", Arg::from(*incompatible))]
             }
             Self::ModCatalogPreferenceUnrecognized { configured } => {
-                vec![("catalog", configured.clone())]
+                vec![("catalog", Arg::from(configured.clone()))]
             }
             // The first file named, because the sentence is a next step rather
             // than an inventory: a frontend that can show the whole list has
             // the list itself.
             Self::ModAcquisitionRestricted { blocked, .. } => vec![(
                 "file",
-                blocked
-                    .first()
-                    .and_then(|file| file.file_name.clone())
-                    .unwrap_or_default(),
+                Arg::from(
+                    blocked
+                        .first()
+                        .and_then(|file| file.file_name.clone())
+                        .unwrap_or_default(),
+                ),
             )],
-            Self::Preference(error) => vec![("syntax", error.syntax.to_owned())],
+            Self::Preference(error) => vec![("syntax", Arg::from(error.syntax.to_owned()))],
+            Self::PreferenceValue(error) => vec![("preference", Arg::from(error.id.to_string()))],
             Self::EntityNameInvalid {
                 reason: NameRefusal::TooLong,
-            } => vec![("limit", crate::instance::MAX_ENTITY_NAME_CHARS.to_string())],
+            } => vec![(
+                "limit",
+                Arg::from(crate::instance::MAX_ENTITY_NAME_CHARS.to_string()),
+            )],
             Self::JavaSettingsInvalid {
                 minimum_mib,
                 maximum_mib,
                 minimum_layer,
                 maximum_layer,
             } => vec![
-                ("minimum", minimum_mib.to_string()),
-                ("maximum", maximum_mib.to_string()),
-                ("minimum_layer", minimum_layer.as_str().to_owned()),
-                ("maximum_layer", maximum_layer.as_str().to_owned()),
+                ("minimum", Arg::from(minimum_mib.to_string())),
+                ("maximum", Arg::from(maximum_mib.to_string())),
+                (
+                    "minimum_layer",
+                    Arg::from(minimum_layer.as_str().to_owned()),
+                ),
+                (
+                    "maximum_layer",
+                    Arg::from(maximum_layer.as_str().to_owned()),
+                ),
             ],
             _ => Vec::new(),
         }
@@ -1243,7 +1263,7 @@ mod tests {
         assert_eq!(error.message_id(), "error-artifact-cache-limit-too-large");
         assert_eq!(
             error.message_args(),
-            vec![("maximum", "4 EiB".to_owned())],
+            vec![("maximum", Arg::from("4 EiB".to_owned()))],
             "the sentence has to name the same ceiling the type enforces"
         );
         assert!(ephervex_i18n::has_attribute(error.message_id(), "action"));
@@ -1316,5 +1336,31 @@ mod tests {
             "vanilla installation failed: could not read the cached artifact at \
              /objects/86/8670: Too many open files (os error 24)"
         );
+    }
+
+    fn rendered(error: &CoreError) -> String {
+        ephervex_i18n::lookup_args(error.message_id(), error.message_args())
+    }
+
+    #[test]
+    fn a_single_incompatible_mod_selects_the_singular_message() {
+        let one = rendered(&CoreError::LoaderChangeBlockedByMods { incompatible: 1 });
+        let many = rendered(&CoreError::LoaderChangeBlockedByMods { incompatible: 3 });
+
+        assert!(one.contains("1 installed mod does"), "{one}");
+        assert!(many.contains("3 installed mods "), "{many}");
+    }
+
+    #[test]
+    fn a_refused_preference_value_names_its_setting_in_the_message() {
+        let error = CoreError::from(ephervex_options::PreferenceValueError {
+            id: ephervex_options::PreferenceId::parse("fov").unwrap(),
+            expected: ephervex_options::PreferenceValueShape::Decimal,
+            problem: ephervex_options::PreferenceValueProblem::OutOfDomain,
+        });
+
+        let message = rendered(&error);
+        assert!(message.contains("fov"), "{message}");
+        assert!(!message.contains("$preference"), "{message}");
     }
 }

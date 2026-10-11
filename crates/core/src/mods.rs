@@ -4253,7 +4253,7 @@ mod tests {
             refusal
                 .message_args()
                 .iter()
-                .any(|(_, value)| value == "a-later-catalog"),
+                .any(|(_, value)| *value == ephervex_i18n::Arg::from("a-later-catalog".to_owned())),
             "the refusal names the value that was recorded"
         );
     }

@@ -2080,9 +2080,18 @@ mod tests {
         assert_eq!(
             error.message_args(),
             vec![
-                ("provider", "CurseForge".to_owned()),
-                ("reference", OPTIONAL_PROJECT.to_string()),
-                ("project_type", "Worlds".to_owned()),
+                (
+                    "provider",
+                    ephervex_i18n::Arg::from("CurseForge".to_owned())
+                ),
+                (
+                    "reference",
+                    ephervex_i18n::Arg::from(OPTIONAL_PROJECT.to_string())
+                ),
+                (
+                    "project_type",
+                    ephervex_i18n::Arg::from("Worlds".to_owned())
+                ),
             ],
             "the refusal must name the class the categories response returned, \
              never the unrelated project's own display name"

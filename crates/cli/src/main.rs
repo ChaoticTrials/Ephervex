@@ -8492,10 +8492,7 @@ fn localized_failure(error: &CoreError) -> (String, Option<String>) {
     }
     // Failures that name several technical values state their own arguments,
     // so a message gaining a placeholder does not need a branch here.
-    let supplied = error.message_args();
-    for (key, value) in &supplied {
-        args.push((key, MessageArg::from(value.as_str())));
-    }
+    args.extend(error.message_args());
 
     let summary = if args.is_empty() {
         ephervex_i18n::lookup(id)

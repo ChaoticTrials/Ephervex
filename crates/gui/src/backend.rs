@@ -10256,24 +10256,21 @@ pub(crate) fn localized_error(error: &CoreError) -> String {
     // drops an argument the moment a message gains a second placeholder.
     let mut raw_args = error.message_args();
     if let Some(path) = error.failing_path() {
-        raw_args.push(("path", path.display().to_string()));
+        raw_args.push(("path", Arg::from(path.display().to_string())));
     }
     if let Some(url) = error.help_url() {
-        raw_args.push(("url", url.to_owned()));
+        raw_args.push(("url", Arg::from(url.to_owned())));
     }
     if let Some(subject) = error.help_subject() {
-        raw_args.push(("client_id", subject.to_owned()));
+        raw_args.push(("client_id", Arg::from(subject.to_owned())));
     }
     if let Some(syntax) = error.expected_syntax() {
-        raw_args.push(("syntax", syntax.to_owned()));
+        raw_args.push(("syntax", Arg::from(syntax.to_owned())));
     }
     if let Some(loader) = error.unsupported_loader() {
-        raw_args.push(("loader", loader.to_owned()));
+        raw_args.push(("loader", Arg::from(loader.to_owned())));
     }
-    let args = raw_args
-        .into_iter()
-        .map(|(name, value)| (name, Arg::from(value)))
-        .collect::<Vec<_>>();
+    let args = raw_args;
     let mut message = if args.is_empty() {
         lookup(error.message_id())
     } else {
