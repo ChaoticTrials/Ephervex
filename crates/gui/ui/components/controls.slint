@@ -169,25 +169,40 @@ export component TextField inherits Rectangle {
     accessible-role: text-input;
     accessible-label: accessible-name;
     accessible-enabled: enabled;
-    input := TextInput {
+    // The input does not scroll itself, so a value longer than the field is
+    // clipped here and the viewport follows the caret.
+    scroller := Flickable {
         x: 11px; width: parent.width - 22px; height: parent.height;
-        color: root.enabled ? Theme.text : Theme.text-muted;
-        font-size: Theme.body-size;
-        enabled: root.enabled;
-        input-type: root.input-type;
-        single-line: true;
-        vertical-alignment: center;
-        accepted => { root.accepted(); }
-        edited => { root.edited(self.text); }
-        // A field whose value is part of a larger draft has to be able to
-        // say "I am done" without the user pressing Enter.
-        changed has-focus => { if (!self.has-focus) { root.focus-lost(); } }
+        interactive: false;
+        viewport-width: max(self.width, input.preferred-width + 2px);
+        input := TextInput {
+            x: 0; width: max(scroller.width, self.preferred-width + 2px); height: scroller.height;
+            color: root.enabled ? Theme.text : Theme.text-muted;
+            font-size: Theme.body-size;
+            enabled: root.enabled;
+            input-type: root.input-type;
+            single-line: true;
+            vertical-alignment: center;
+            accepted => { root.accepted(); }
+            edited => { root.edited(self.text); }
+            cursor-position-changed(position) => {
+                if (position.x + scroller.viewport-x < 0px) {
+                    scroller.viewport-x = -position.x;
+                } else if (position.x + scroller.viewport-x > scroller.width - 2px) {
+                    scroller.viewport-x = scroller.width - 2px - position.x;
+                }
+            }
+            // A field whose value is part of a larger draft has to be able to
+            // say "I am done" without the user pressing Enter.
+            changed has-focus => { if (!self.has-focus) { root.focus-lost(); } }
+        }
     }
     if root.text == "" : Text {
         x: 11px; width: parent.width - 22px; height: parent.height;
         text: root.placeholder;
         color: Theme.text-muted;
         font-size: Theme.body-size;
+        overflow: elide;
         vertical-alignment: center;
     }
 }
