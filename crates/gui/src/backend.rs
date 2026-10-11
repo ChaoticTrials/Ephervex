@@ -5028,14 +5028,8 @@ fn run_worker(
                 if refuse_while_changing(&changing, InstalledHost::Server(server), &events) {
                     continue;
                 }
-                let result = app.set_server_network(server, network).and_then(|_| {
-                    for (key, value) in values {
-                        app.set_server_property(server, &key, &value)?;
-                    }
-                    Ok(())
-                });
-                match result {
-                    Ok(()) => {
+                match app.set_server_properties(server, network, &values) {
+                    Ok(_) => {
                         let _ = events.send(Event::Toast {
                             message: lookup("gui-server-properties-saved"),
                             error: false,
@@ -5147,9 +5141,7 @@ fn run_worker(
                 client_id,
                 user_agent,
             } => {
-                let result = app
-                    .set_microsoft_client_id(nonempty(&client_id))
-                    .and_then(|()| app.set_custom_user_agent(nonempty(&user_agent)));
+                let result = app.set_api_identifiers(nonempty(&client_id), nonempty(&user_agent));
                 match result {
                     Ok(()) => {
                         let _ = events.send(Event::Toast {
@@ -5373,7 +5365,7 @@ fn run_worker(
                 // Both halves, then one snapshot: each control saves as it is
                 // changed, so a confirmation per click would be noise. A
                 // failure in either is reported as itself and leaves the other
-                // where it was.
+                // where it was, so the controls are refreshed to what is stored.
                 let saved = app
                     .set_application_display_settings(text_scale, technical_text_size, &theme)
                     .and_then(|()| {
@@ -5381,7 +5373,10 @@ fn run_worker(
                     });
                 match saved {
                     Ok(()) => send_snapshot(&mut app, &events),
-                    Err(error) => send_error(&events, &error),
+                    Err(error) => {
+                        send_error(&events, &error);
+                        send_snapshot(&mut app, &events);
+                    }
                 }
             }
             // Opening the page asks for the inventory, which is cached after

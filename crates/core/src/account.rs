@@ -316,26 +316,31 @@ impl App {
     /// anything else with an `AADSTS900023` that arrives three requests into a
     /// login and blames the tenant.
     pub fn set_microsoft_client_id(&mut self, client_id: Option<&str>) -> CoreResult<()> {
-        let value = client_id.map(str::trim).unwrap_or_default();
-        if !value.is_empty() && Uuid::parse_str(value).is_err() {
-            return Err(CoreError::Auth(AuthError::ClientIdInvalid));
-        }
-        self.mutate_config(|config| value.clone_into(&mut config.api.microsoft_client_id))
+        let value = validated_client_id(client_id)?;
+        self.mutate_config(|config| config.api.microsoft_client_id = value)
     }
 
     /// Sets the advanced User-Agent override, or clears it.
     pub fn set_custom_user_agent(&mut self, user_agent: Option<&str>) -> CoreResult<()> {
-        let value = user_agent.map(str::trim).unwrap_or_default().to_owned();
-        if !value.is_empty() {
-            ephervex_download::build_client(&ephervex_download::HttpConfig {
-                user_agent: value.clone(),
-                ..ephervex_download::HttpConfig::default()
-            })
-            .map_err(|source| AuthError::ClientBuild {
-                source: Box::new(source),
-            })?;
-        }
+        let value = validated_user_agent(user_agent)?;
         self.mutate_config(|config| config.api.user_agent = value)
+    }
+
+    /// Sets the Microsoft Client ID and the User-Agent override as one change.
+    ///
+    /// Both are validated before either is written, so a refusal of one leaves
+    /// the other as it was stored.
+    pub fn set_api_identifiers(
+        &mut self,
+        client_id: Option<&str>,
+        user_agent: Option<&str>,
+    ) -> CoreResult<()> {
+        let client_id = validated_client_id(client_id)?;
+        let user_agent = validated_user_agent(user_agent)?;
+        self.mutate_config(|config| {
+            config.api.microsoft_client_id = client_id;
+            config.api.user_agent = user_agent;
+        })
     }
 
     /// Stores the CurseForge API key in the keyring, replacing any existing
@@ -1156,6 +1161,30 @@ impl TestKeyring {
             }),
         }
     }
+}
+
+/// The trimmed Client ID to store, refused unless it is empty or a GUID.
+fn validated_client_id(client_id: Option<&str>) -> CoreResult<String> {
+    let value = client_id.map(str::trim).unwrap_or_default();
+    if !value.is_empty() && Uuid::parse_str(value).is_err() {
+        return Err(CoreError::Auth(AuthError::ClientIdInvalid));
+    }
+    Ok(value.to_owned())
+}
+
+/// The trimmed User-Agent to store, refused unless an HTTP client accepts it.
+fn validated_user_agent(user_agent: Option<&str>) -> CoreResult<String> {
+    let value = user_agent.map(str::trim).unwrap_or_default().to_owned();
+    if !value.is_empty() {
+        ephervex_download::build_client(&ephervex_download::HttpConfig {
+            user_agent: value.clone(),
+            ..ephervex_download::HttpConfig::default()
+        })
+        .map_err(|source| AuthError::ClientBuild {
+            source: Box::new(source),
+        })?;
+    }
+    Ok(value)
 }
 
 /// The credential store, when Secret Service answers.
@@ -1993,6 +2022,66 @@ mod tests {
             error,
             CoreError::Auth(AuthError::ClientBuild { .. })
         ));
+    }
+
+    #[test]
+    fn a_refused_user_agent_leaves_the_client_id_of_a_grouped_save_unstored() {
+        const STORED: &str = "11112222-bbbb-3333-cccc-4444dddd5555";
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.set_api_identifiers(Some(STORED), Some("ValidAgent/1.0"))
+            .expect("valid pair");
+
+        let error = app
+            .set_api_identifiers(
+                Some("99998888-bbbb-3333-cccc-4444dddd5555"),
+                Some("bad\r\nagent"),
+            )
+            .expect_err("header controls are invalid");
+
+        assert!(matches!(
+            error,
+            CoreError::Auth(AuthError::ClientBuild { .. })
+        ));
+        let stored = app.api_settings().expect("settings");
+        assert_eq!(stored.microsoft_client_id, STORED);
+        assert_eq!(stored.user_agent, "ValidAgent/1.0");
+        let mut reread = app_rooted_at(base.path());
+        reread.reload_config().expect("reload");
+        assert_eq!(
+            reread.api_settings().expect("settings").microsoft_client_id,
+            STORED,
+            "the refusal must not have reached the file"
+        );
+    }
+
+    #[test]
+    fn a_refused_client_id_leaves_the_user_agent_of_a_grouped_save_unstored() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+
+        app.set_api_identifiers(Some("not-a-guid"), Some("NewAgent/2.0"))
+            .expect_err("not a GUID");
+
+        assert!(app.api_settings().expect("settings").user_agent.is_empty());
+    }
+
+    #[test]
+    fn a_grouped_api_save_stores_both_identifiers_and_clears_with_none() {
+        const ID: &str = "11112222-bbbb-3333-cccc-4444dddd5555";
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+
+        app.set_api_identifiers(Some(&format!(" {ID} ")), Some(" Agent/3.0 "))
+            .expect("save");
+        let stored = app.api_settings().expect("settings");
+        assert_eq!(stored.microsoft_client_id, ID);
+        assert_eq!(stored.user_agent, "Agent/3.0");
+
+        app.set_api_identifiers(None, None).expect("clear");
+        let cleared = app.api_settings().expect("settings");
+        assert!(cleared.microsoft_client_id.is_empty());
+        assert!(cleared.user_agent.is_empty());
     }
 
     #[test]

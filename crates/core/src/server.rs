@@ -648,10 +648,22 @@ impl App {
         id: ServerId,
         network: ServerNetworkSettings,
     ) -> CoreResult<ServerCommit<ServerRecord>> {
+        self.set_server_properties(id, network, &[])
+    }
+
+    /// Applies the network settings and the given property values as one
+    /// change: one claim, one validated write of `server.properties` and one
+    /// registry commit. A refused value leaves the file and the stored network
+    /// settings as they were.
+    pub fn set_server_properties(
+        &self,
+        id: ServerId,
+        network: ServerNetworkSettings,
+        values: &[(String, String)],
+    ) -> CoreResult<ServerCommit<ServerRecord>> {
         let (_claim, mut record) = self.claim_stopped_server(id)?;
-        let typed = network_properties(&network)?;
-        typed.validate()?;
-        merge_network_file(&server_properties_path(&record), &network)?;
+        network_properties(&network)?.validate()?;
+        merge_properties_file(&server_properties_path(&record), &network, values)?;
         let previous = record.clone();
         record.network = network;
         let committed = self
@@ -1277,8 +1289,21 @@ fn select_available_port_with(
 }
 
 fn merge_network_file(path: &Path, network: &ServerNetworkSettings) -> CoreResult<()> {
+    merge_properties_file(path, network, &[])
+}
+
+/// Merges the network settings, then sets each value, and writes the file once
+/// only when every one of them is accepted.
+fn merge_properties_file(
+    path: &Path,
+    network: &ServerNetworkSettings,
+    values: &[(String, String)],
+) -> CoreResult<()> {
     let mut document = read_properties(path)?;
     document.merge_network(&network_properties(network)?)?;
+    for (key, value) in values {
+        document.set(key, value)?;
+    }
     atomic_write(path, document.render().as_bytes())
 }
 
@@ -2789,6 +2814,97 @@ mod tests {
         assert!(!committed.record.network.online_mode);
         assert_eq!(committed.record.network.access, NetworkAccess::Lan);
         assert_eq!(committed.record.network.port, 25_571);
+    }
+
+    #[test]
+    fn a_refused_property_leaves_the_network_settings_and_file_of_a_grouped_save_unchanged() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let server = app
+            .registry_for_services()
+            .create_server(NewServer::new(
+                "grouped save",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("scaffold");
+        let stored = app
+            .set_server_properties(
+                server.id,
+                ServerNetworkSettings {
+                    online_mode: true,
+                    access: NetworkAccess::Lan,
+                    port: 25_570,
+                    bind_address: None,
+                },
+                &[("motd".to_owned(), "before".to_owned())],
+            )
+            .expect("initial save");
+        let path = server_properties_path(&stored.record);
+        let before = std::fs::read_to_string(&path).expect("properties file");
+
+        let error = app
+            .set_server_properties(
+                server.id,
+                ServerNetworkSettings {
+                    online_mode: false,
+                    access: NetworkAccess::Localhost,
+                    port: 25_599,
+                    bind_address: None,
+                },
+                &[
+                    ("motd".to_owned(), "after".to_owned()),
+                    ("server-port".to_owned(), "1".to_owned()),
+                ],
+            )
+            .expect_err("a protected key is refused");
+
+        assert!(matches!(
+            error,
+            CoreError::Server(ephervex_server::ServerError::ProtectedProperty { .. })
+        ));
+        assert_eq!(std::fs::read_to_string(&path).expect("file"), before);
+        assert_eq!(
+            app.server(server.id).expect("record").network,
+            stored.record.network
+        );
+    }
+
+    #[test]
+    fn a_grouped_server_save_writes_the_network_and_every_property_once() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let server = app
+            .registry_for_services()
+            .create_server(NewServer::new(
+                "grouped write",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("scaffold");
+
+        let committed = app
+            .set_server_properties(
+                server.id,
+                ServerNetworkSettings {
+                    online_mode: false,
+                    access: NetworkAccess::Lan,
+                    port: 25_580,
+                    bind_address: None,
+                },
+                &[
+                    ("motd".to_owned(), "hello".to_owned()),
+                    ("max-players".to_owned(), "7".to_owned()),
+                ],
+            )
+            .expect("grouped save");
+
+        assert_eq!(committed.record.network.port, 25_580);
+        let properties = std::fs::read_to_string(server_properties_path(&committed.record))
+            .expect("properties file");
+        assert!(properties.contains("server-port=25580"));
+        assert!(properties.contains("motd=hello"));
+        assert!(properties.contains("max-players=7"));
     }
 
     #[test]
