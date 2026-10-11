@@ -245,6 +245,12 @@ pub(crate) fn extract_tar_gz_until_canceled(
             });
         }
 
+        // A pax global header describes the whole archive and `tar` hands it
+        // back as an ordinary entry; its payload is metadata, never a file.
+        if entry.header().entry_type().is_pax_global_extensions() {
+            continue;
+        }
+
         let Some(resolved) = resolve_entry(&entry, &root, strip_components)? else {
             // Entirely consumed by `strip_components` - the wrapper directory
             // itself. Nothing to create.
@@ -660,21 +666,23 @@ const COPY_BUFFER_BYTES: usize = 64 * 1024;
 /// Entry types that are never extracted, with the name to report.
 const fn forbidden_entry_type(kind: EntryType) -> Option<&'static str> {
     match kind {
-        // Files and directories are the whole of a JDK tarball. GNU/PAX
-        // metadata entries carry no content of their own - the `tar` crate
-        // applies them to the entries that follow, which is what lets a long
-        // filename work - so they pass through and never become files.
+        // Files and directories are the whole of a JDK tarball. A pax global
+        // header is also accepted here, but the extraction loop skips it before
+        // this check runs: `tar` returns it as an ordinary entry.
         EntryType::Regular
         | EntryType::Directory
         | EntryType::Continuous
         // Resolved rather than banned: a Temurin JDK genuinely contains a few
         // hundred of them. See `safe_link_target`.
         | EntryType::Symlink
-        | EntryType::GNULongName
-        | EntryType::GNULongLink
         | EntryType::GNUSparse
-        | EntryType::XGlobalHeader
-        | EntryType::XHeader => None,
+        | EntryType::XGlobalHeader => None,
+        // `tar` applies these to the entry that follows, so they only reach
+        // the caller when their header is not ustar or GNU. The following
+        // entry would then be extracted under the wrong name, so refuse.
+        EntryType::GNULongName | EntryType::GNULongLink | EntryType::XHeader => {
+            Some("unapplied extended header")
+        }
         // Still refused. A tar hard link names an earlier entry by path, so
         // honoring one means resolving that path and calling `fs::hard_link`
         // - a second containment problem for a feature no JDK archive uses.
@@ -1365,6 +1373,131 @@ mod tests {
         header.set_cksum();
         builder.append(&header, contents).expect("append");
         builder.into_inner().expect("finish").finish().expect("gz");
+    }
+
+    /// Builds a `.tar.gz` of one metadata entry of `kind`, followed by `file` when it is not empty.
+    fn tar_gz_with_metadata_entry(path: &Path, kind: EntryType, header_name: &str, file: &str) {
+        let encoder = flate2::write::GzEncoder::new(
+            File::create(path).expect("create archive"),
+            flate2::Compression::fast(),
+        );
+        let mut builder = tar::Builder::new(encoder);
+        let payload = b"52 comment=0123456789abcdef0123456789abcdef01234567\n";
+        let mut header = if kind == EntryType::XGlobalHeader {
+            tar::Header::new_ustar()
+        } else {
+            tar::Header::new_old()
+        };
+        header.set_entry_type(kind);
+        header.set_size(payload.len() as u64);
+        header.set_mode(0o644);
+        header.set_path(header_name).expect("path");
+        header.set_cksum();
+        builder.append(&header, &payload[..]).expect("append");
+        if !file.is_empty() {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(2);
+            header.set_mode(0o644);
+            header.set_path(file).expect("path");
+            header.set_cksum();
+            builder.append(&header, &b"ok"[..]).expect("append");
+        }
+        builder.into_inner().expect("finish").finish().expect("gz");
+    }
+
+    #[test]
+    fn a_pax_global_header_is_skipped_and_never_written_as_a_file() {
+        for (header_name, strip) in [("pax_global_header", 0), ("jdk/pax_global_header", 1)] {
+            let dir = temp();
+            let archive = dir.path().join("global.tar.gz");
+            let root = dir.path().join("install");
+            tar_gz_with_metadata_entry(&archive, EntryType::XGlobalHeader, header_name, "jdk/bin");
+
+            let report = extract_tar_gz(&archive, &root, strip, &ExtractionLimits::default())
+                .expect("a global header is not an error");
+
+            assert_eq!(report.files, 1, "{header_name}");
+            assert_eq!(report.bytes, 2, "{header_name}");
+            assert!(!root.join("pax_global_header").exists(), "{header_name}");
+            assert!(
+                !root.join("jdk/pax_global_header").exists(),
+                "{header_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_archive_of_only_a_pax_global_header_is_empty() {
+        let dir = temp();
+        let archive = dir.path().join("only-global.tar.gz");
+        tar_gz_with_metadata_entry(&archive, EntryType::XGlobalHeader, "pax_global_header", "");
+
+        let error = extract_tar_gz(
+            &archive,
+            &dir.path().join("install"),
+            0,
+            &ExtractionLimits::default(),
+        )
+        .expect_err("no files were extracted");
+
+        assert!(matches!(error, ArchiveError::Empty), "{error:?}");
+    }
+
+    #[test]
+    fn a_pax_global_header_counts_against_the_entry_limit() {
+        let dir = temp();
+        let archive = dir.path().join("global.tar.gz");
+        tar_gz_with_metadata_entry(&archive, EntryType::XGlobalHeader, "pax_global_header", "f");
+
+        let limits = ExtractionLimits {
+            max_entries: 1,
+            ..ExtractionLimits::default()
+        };
+        let error = extract_tar_gz(&archive, &dir.path().join("install"), 0, &limits)
+            .expect_err("the second entry exceeds the limit");
+
+        assert!(
+            matches!(
+                error,
+                ArchiveError::LimitExceeded {
+                    limit: "entry-count",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn an_extended_header_the_tar_reader_did_not_apply_is_refused() {
+        for kind in [
+            EntryType::XHeader,
+            EntryType::GNULongName,
+            EntryType::GNULongLink,
+        ] {
+            let dir = temp();
+            let archive = dir.path().join("unapplied.tar.gz");
+            tar_gz_with_metadata_entry(&archive, kind, "meta", "jdk/bin");
+
+            let error = extract_tar_gz(
+                &archive,
+                &dir.path().join("install"),
+                1,
+                &ExtractionLimits::default(),
+            )
+            .expect_err("an unapplied extended header must be refused");
+
+            assert!(
+                matches!(
+                    error,
+                    ArchiveError::UnsafeEntryType {
+                        kind: "unapplied extended header",
+                        ..
+                    }
+                ),
+                "{kind:?}: {error:?}"
+            );
+        }
     }
 
     /// Incompressible filler, so truncating the compressed stream cuts an entry.
