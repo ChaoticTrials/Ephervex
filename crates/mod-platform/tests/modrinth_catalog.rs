@@ -711,11 +711,13 @@ async fn a_server_error_is_an_outage_rather_than_an_unknown_project() {
 
 #[tokio::test]
 async fn a_refused_connection_is_an_outage_rather_than_an_unknown_project() {
-    // A port that was bound and released, so nothing is listening on it.
-    let closed = std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind a loopback port")
-        .local_addr()
-        .expect("bound address");
+    // Bound but never listening, so no other test's server can take the port
+    // while connections to it are refused. Held until the test ends.
+    let reserved = tokio::net::TcpSocket::new_v4().expect("socket");
+    reserved
+        .bind("127.0.0.1:0".parse().expect("loopback address"))
+        .expect("reserve a loopback port");
+    let closed = reserved.local_addr().expect("bound address");
     let cache = tempfile::tempdir().expect("temp dir");
     let manager = DownloadManager::new(DownloaderConfig {
         retry: RetryPolicy::none(),
