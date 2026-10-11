@@ -258,10 +258,10 @@ easy to update, and capture screenshots late.
 
 ## 10. Verification before merging
 
-- [ ] `cargo fmt --all --check`
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
-- [ ] `cargo test --workspace`
-- [ ] `tools/licenses/generate.sh --check`
-- [ ] `cd web && npm run screenshots:check && npm run typecheck && npm run build`
-- [ ] Regenerate screenshots and run `npm run screenshots:sync` locally to
+- [x] `cargo fmt --all --check`
+- [x] `cargo clippy --workspace --all-targets -- -D warnings`
+- [x] `cargo test --workspace`
+- [x] `tools/licenses/generate.sh --check`
+- [x] `cd web && npm run screenshots:check && npm run typecheck && npm run build`
+- [x] Regenerate screenshots and run `npm run screenshots:sync` locally to
       review captures before merging. Pages regenerates them for deployment.
