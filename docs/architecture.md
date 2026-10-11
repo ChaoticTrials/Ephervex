@@ -491,6 +491,11 @@ content-addressed, so a hit opens a file and changes nothing about it, and
 entry's modification time is when its bytes arrived, because publication is a
 rename and a rename does not touch it.
 
+A file hard-linked under several recognized cache names is one entry. Usage
+counts it once, and evicting it removes every recognized name; its bytes count as
+freed only when all of them are gone, so a name that cannot be removed leaves the
+bytes in the reported usage.
+
 The budget is soft in both directions that matter. A required artifact is
 fetched, verified, and used whatever its size, even when it is larger than the
 whole budget; and an operation holds a shared lease on the cache for as long as

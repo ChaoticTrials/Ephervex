@@ -475,10 +475,14 @@ enum Exclusivity {
     Exclusive,
 }
 
-/// One finalized entry, as a collector needs to see it.
+/// One finalized file, as a collector needs to see it.
+///
+/// A file reachable under several recognized names is one entry holding every
+/// name, because its bytes are only freed once all of them are gone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ArtifactEntry {
-    path: PathBuf,
+    /// Never empty, and in path order.
+    paths: Vec<PathBuf>,
     bytes: u64,
     /// When the artifact's bytes were last written, which for this cache is when
     /// it was published. See [`survey`].
@@ -516,11 +520,12 @@ struct Survey {
 ///
 /// One entry per distinct file: recognized by [`CacheLayout::recognize_content`],
 /// confirmed a regular file by `symlink_metadata`, and deduplicated by
-/// filesystem identity so a hard link cannot be counted twice. Nothing else in
-/// the store contributes - not a directory, not a symlink, not a transfer in
-/// flight, and not a name this build does not recognize. Unrecognized names are
-/// left strictly alone: guessing that an unknown file is an artifact is how a
-/// collector deletes something that mattered.
+/// filesystem identity so a hard link cannot be counted twice; every recognized
+/// name of such a file is kept on its entry so eviction can remove them all.
+/// Nothing else in the store contributes - not a directory, not a symlink, not
+/// a transfer in flight, and not a name this build does not recognize.
+/// Unrecognized names are left strictly alone: guessing that an unknown file is
+/// an artifact is how a collector deletes something that mattered.
 fn survey(layout: &CacheLayout) -> Result<Survey, ArtifactCacheError> {
     let mut survey = Survey {
         report: ArtifactCacheMaintenance {
@@ -529,7 +534,7 @@ fn survey(layout: &CacheLayout) -> Result<Survey, ArtifactCacheError> {
         },
         ..Survey::default()
     };
-    let mut seen: Vec<(u64, u64)> = Vec::new();
+    let mut seen: BTreeMap<(u64, u64), usize> = BTreeMap::new();
 
     for store in reusable_artifact_stores() {
         let root = layout.store_root(store);
@@ -576,7 +581,7 @@ fn survey(layout: &CacheLayout) -> Result<Survey, ArtifactCacheError> {
     survey.entries.sort_by(|left, right| {
         left.published
             .cmp(&right.published)
-            .then_with(|| left.path.cmp(&right.path))
+            .then_with(|| left.paths.cmp(&right.paths))
     });
     Ok(survey)
 }
@@ -586,7 +591,7 @@ fn collect_entry(
     path: &Path,
     algorithm: &str,
     shard: &str,
-    seen: &mut Vec<(u64, u64)>,
+    seen: &mut BTreeMap<(u64, u64), usize>,
     survey: &mut Survey,
 ) {
     let Some(file_name) = path.file_name().and_then(std::ffi::OsStr::to_str) else {
@@ -628,16 +633,19 @@ fn collect_entry(
     };
 
     if let Some(identity) = file_identity(&metadata) {
-        if seen.contains(&identity) {
+        if let Some(&index) = seen.get(&identity) {
             trace!(path = %path.display(), "a second name for one artifact is counted once");
+            let paths = &mut survey.entries[index].paths;
+            paths.push(path.to_path_buf());
+            paths.sort();
             return;
         }
-        seen.push(identity);
+        seen.insert(identity, survey.entries.len());
     }
 
     survey.bytes = survey.bytes.saturating_add(metadata.len());
     survey.entries.push(ArtifactEntry {
-        path: path.to_path_buf(),
+        paths: vec![path.to_path_buf()],
         bytes: metadata.len(),
         published,
     });
@@ -645,34 +653,43 @@ fn collect_entry(
 
 /// Removes entries in order until usage is at or below `target`.
 ///
-/// A removal that fails is recorded and the pass moves on to the next candidate:
-/// one file the user has no permission to delete must not stop the rest of the
-/// cache being collected, and it must not be retried in a loop either. An entry
-/// that has already vanished counts as freed, because it is: another process got
-/// there first.
+/// An entry is removed under every name it was found with, and its bytes are
+/// credited only once all of them are gone: a name left behind still reaches the
+/// data. A removal that fails is recorded and the pass moves on to the next
+/// candidate: one file the user has no permission to delete must not stop the
+/// rest of the cache being collected, and it must not be retried in a loop
+/// either. A name that has already vanished counts as removed, because it is:
+/// another process got there first.
 fn evict(entries: &mut [ArtifactEntry], target: u64, report: &mut ArtifactCacheMaintenance) {
     for entry in entries {
         if report.usage_after <= target {
             break;
         }
-        match std::fs::remove_file(&entry.path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                warn!(
-                    path = %entry.path.display(),
-                    %error,
-                    "could not remove a reusable artifact"
-                );
-                note_entry_failure(&entry.path, MaintenanceStage::Removing, &error, report);
-                continue;
+        let mut all_removed = true;
+        for path in &entry.paths {
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    warn!(
+                        path = %path.display(),
+                        %error,
+                        "could not remove a reusable artifact"
+                    );
+                    note_entry_failure(path, MaintenanceStage::Removing, &error, report);
+                    all_removed = false;
+                    continue;
+                }
             }
+            prune_empty_shard(path);
+        }
+        if !all_removed {
+            continue;
         }
         report.removed_entries = report.removed_entries.saturating_add(1);
         report.freed_bytes = report.freed_bytes.saturating_add(entry.bytes);
         report.usage_after = report.usage_after.saturating_sub(entry.bytes);
         report.entries_after = report.entries_after.saturating_sub(1);
-        prune_empty_shard(&entry.path);
     }
 }
 
@@ -1484,6 +1501,110 @@ mod tests {
         assert_eq!(report.entries_after, 0);
         assert!(report.is_clean());
         assert_eq!(fixture.cache.usage().await.expect("usage").bytes, 0);
+    }
+
+    /// Publishes a second recognized name for the file at `original`, the way an
+    /// external deduplication tool would leave one.
+    #[cfg(unix)]
+    fn alias(fixture: &Fixture, original: &Path, store: ContentStore, seed: u8) -> PathBuf {
+        let extension = FileExtension::new("jar").expect("jar");
+        let path = fixture
+            .layout()
+            .content(store, &digest(seed), Some(&extension));
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::hard_link(original, &path).expect("hard link");
+        path
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_clear_removes_every_recognized_name_of_a_hard_linked_file() {
+        let fixture = Fixture::new();
+        let first = fixture.publish(ContentStore::Downloads, 0x20, 2, hour(1));
+        let same_store = alias(&fixture, &first, ContentStore::Downloads, 0x21);
+        let other_store = alias(&fixture, &first, ContentStore::InstallerCache, 0x22);
+
+        let usage = fixture.cache.usage().await.expect("usage");
+        assert_eq!(
+            (usage.bytes, usage.entries),
+            (2, 1),
+            "one file, counted once"
+        );
+
+        let report = fixture.cache.clear().await.expect("clear");
+        assert_eq!(report.usage_before, 2);
+        assert_eq!(report.usage_after, 0);
+        assert_eq!(report.freed_bytes, 2);
+        assert_eq!(report.removed_entries, 1);
+        assert_eq!(report.entries_after, 0);
+        assert!(report.is_clean());
+        for path in [&first, &same_store, &other_store] {
+            assert!(path.symlink_metadata().is_err(), "{path:?} is still there");
+        }
+        let usage = fixture.cache.usage().await.expect("usage");
+        assert_eq!((usage.bytes, usage.entries), (0, 0));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn collection_removes_all_names_of_a_hard_linked_file_before_crediting_it() {
+        let fixture = Fixture::new();
+        let oldest = fixture.publish(ContentStore::Downloads, 0x23, 100, hour(9));
+        let oldest_alias = alias(&fixture, &oldest, ContentStore::InstallerCache, 0x24);
+        let newer = fixture.publish(ContentStore::Downloads, 0x25, 100, hour(1));
+
+        let report = fixture
+            .cache
+            .collect(ArtifactCacheLimit::Limited(150))
+            .await
+            .expect("collect");
+        assert_eq!(report.usage_before, 200);
+        assert_eq!(report.usage_after, 100);
+        assert_eq!(report.freed_bytes, 100);
+        assert_eq!(report.removed_entries, 1);
+        assert!(!oldest.exists() && !oldest_alias.exists());
+        assert!(newer.is_file());
+        assert_eq!(fixture.cache.usage().await.expect("usage").bytes, 100);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_name_that_cannot_be_removed_keeps_a_hard_linked_files_bytes_counted() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        if !a_read_only_directory_refuses_this_process() {
+            eprintln!(
+                "skipped: this process can remove files from a read-only directory, \
+                 so a refusal cannot be staged for it to report"
+            );
+            return;
+        }
+
+        let fixture = Fixture::new();
+        let first = fixture.publish(ContentStore::Downloads, 0x26, 50, hour(2));
+        let second = alias(&fixture, &first, ContentStore::InstallerCache, 0x27);
+        let stuck_shard = second.parent().expect("shard").to_path_buf();
+        std::fs::set_permissions(&stuck_shard, std::fs::Permissions::from_mode(0o500))
+            .expect("read-only shard");
+
+        let report = fixture.cache.clear().await;
+
+        std::fs::set_permissions(&stuck_shard, std::fs::Permissions::from_mode(0o700))
+            .expect("restore the shard");
+        let report = report.expect("clear reports trouble rather than failing");
+
+        assert_eq!(
+            report.freed_bytes, 0,
+            "a remaining name still reaches the data"
+        );
+        assert_eq!(report.removed_entries, 0);
+        assert_eq!(report.usage_after, 50);
+        assert_eq!(report.entries_after, 1);
+        assert_eq!(report.troubled_entries, 1);
+        assert_eq!(report.troubles[0].stage, MaintenanceStage::Removing);
+        assert_eq!(report.troubles[0].path, second);
+        assert!(second.is_file());
+        assert_eq!(fixture.cache.usage().await.expect("usage").bytes, 50);
     }
 
     #[tokio::test]
