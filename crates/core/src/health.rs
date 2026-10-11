@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use ephervex_auth::CredentialStorage;
 use ephervex_model::ArtifactCacheLimit;
 use ephervex_options::{MinecraftPreferenceCatalog, OptionsDataset};
-use ephervex_storage::{Config, ConfigError, Paths};
+use ephervex_storage::{Config, ConfigError, PathError, Paths};
 
 use crate::app::App;
 use crate::artifact_cache::ArtifactCacheStatus;
@@ -233,6 +233,18 @@ pub enum JavaHealth {
 ///
 /// Never returns an error: a failure in any one section is part of the answer.
 pub async fn installation_health() -> InstallationHealth {
+    collect(Paths::from_environment(), CredentialStorage::probe).await
+}
+
+/// Builds the report for the given roots and credential probe.
+///
+/// The roots and the probe are parameters so the report can be exercised
+/// against throwaway directories without contacting the session's Secret
+/// Service. [`installation_health`] supplies the real ones.
+async fn collect(
+    paths: Result<Paths, PathError>,
+    probe: impl FnOnce() -> Result<CredentialStorage, String>,
+) -> InstallationHealth {
     let application = ApplicationIdentity {
         name: ephervex_model::APP_NAME,
         version: ephervex_model::APP_VERSION,
@@ -252,14 +264,14 @@ pub async fn installation_health() -> InstallationHealth {
         directories: Vec::new(),
         paths_error: None,
         configuration: None,
-        credential_storage: probe_credential_storage(),
+        credential_storage: credential_backend_health(probe()),
         bundled_data: probe_bundled_data(),
         artifact_cache: None,
         java: None,
         storage_error: None,
     };
 
-    let paths = match Paths::from_environment() {
+    let paths = match paths {
         Ok(paths) => paths,
         Err(error) => {
             health.paths_error = Some(error.to_string());
@@ -267,6 +279,7 @@ pub async fn installation_health() -> InstallationHealth {
         }
     };
 
+    let roots = paths.clone();
     health.configuration = Some(probe_configuration(&paths));
     // The configured instance root moves one of the reported directories, so
     // the configuration is read before the layout is described.
@@ -278,7 +291,7 @@ pub async fn installation_health() -> InstallationHealth {
     // that creates what it is asked to inspect cannot answer the question.
     health.directories = probe_directories(&paths);
 
-    match App::open() {
+    match App::open_at(roots) {
         Ok(app) => {
             health.artifact_cache = Some(probe_artifact_cache(&app).await);
             health.java = Some(probe_java(&app).await);
@@ -289,8 +302,8 @@ pub async fn installation_health() -> InstallationHealth {
     health
 }
 
-fn probe_credential_storage() -> CredentialBackendHealth {
-    match CredentialStorage::probe() {
+fn credential_backend_health(probe: Result<CredentialStorage, String>) -> CredentialBackendHealth {
+    match probe {
         Ok(storage) => CredentialBackendHealth {
             available: true,
             backend: storage.as_str(),
@@ -556,5 +569,62 @@ async fn probe_java(app: &App) -> JavaHealth {
             .filter(|runtime| runtime.is_managed())
             .count(),
         major_versions,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use std::cell::Cell;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn the_report_for_given_roots_completes_without_a_network_or_a_keyring() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let paths = Paths::rooted_at(base.path());
+        paths.ensure_base_directories().expect("create roots");
+        let probed = Cell::new(false);
+
+        let health = collect(Ok(paths), || {
+            probed.set(true);
+            Ok(CredentialStorage::Keyring)
+        })
+        .await;
+
+        assert!(probed.get(), "the credential section asks the probe");
+        assert_eq!(health.application.app_id, "ephervex");
+        assert!(health.credential_storage.available);
+        assert_eq!(health.credential_storage.backend, "keyring");
+        assert!(health.paths_error.is_none());
+        assert!(health.storage_error.is_none());
+        assert!(matches!(
+            health.bundled_data.options_dataset,
+            BundledDocumentHealth::Loaded { .. }
+        ));
+        // The report describes the given roots, not the environment's own.
+        assert!(
+            health
+                .directories
+                .iter()
+                .all(|directory| directory.path.starts_with(base.path()))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_credential_store_is_reported_as_session_only_with_its_reason() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let paths = Paths::rooted_at(base.path());
+        paths.ensure_base_directories().expect("create roots");
+
+        let health = collect(Ok(paths), || Err("no Secret Service".to_string())).await;
+
+        assert!(!health.credential_storage.available);
+        assert_eq!(health.credential_storage.backend, "session-only");
+        assert_eq!(
+            health.credential_storage.detail.as_deref(),
+            Some("no Secret Service")
+        );
     }
 }

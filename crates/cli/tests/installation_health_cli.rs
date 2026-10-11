@@ -2,7 +2,8 @@
 //!
 //! Every run is pointed at a throwaway directory through the XDG environment
 //! variables and `TMPDIR`, so nothing here reads or writes the developer's own
-//! configuration (ADR 0003).
+//! configuration (ADR 0003). The session bus is pointed at a socket that does
+//! not exist, so no run reaches the developer's Secret Service (ADR 0004).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::{Path, PathBuf};
@@ -38,6 +39,13 @@ impl Sandbox {
         let base = self.base();
         Command::new(env!("CARGO_BIN_EXE_ephervex"))
             .args(args)
+            // The Secret Service is found through the session bus address, or
+            // failing that `$XDG_RUNTIME_DIR/bus`. Both lead nowhere here.
+            .env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                format!("unix:path={}", base.join("no-session-bus").display()),
+            )
+            .env_remove("XDG_RUNTIME_DIR")
             .env("HOME", base)
             .env("XDG_CONFIG_HOME", base.join("config"))
             .env("XDG_DATA_HOME", base.join("data"))
@@ -158,10 +166,12 @@ fn doctor_reports_the_credential_backend_without_reporting_a_credential() {
     let report = sandbox.json(&["--json", "doctor"]);
 
     let credentials = &report["credential_storage"];
-    assert!(credentials["available"].is_boolean());
+    // With no session bus to reach, the answer is the same on every machine.
+    assert_eq!(credentials["available"], false);
+    assert_eq!(credentials["backend"], "session-only");
     assert!(
-        credentials["backend"] == "keyring" || credentials["backend"] == "session-only",
-        "the backend is one of the two the account model has"
+        credentials["detail"].is_string(),
+        "an unavailable backend carries the platform's explanation"
     );
     // Availability is a fact about the machine. What is stored, and what it is,
     // are not part of this report at all (ADR 0004).

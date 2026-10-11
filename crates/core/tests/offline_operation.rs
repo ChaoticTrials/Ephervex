@@ -191,19 +191,3 @@ async fn the_preferred_catalog_is_answerable_with_no_credential_and_no_request()
         Some(ModProvider::CurseForge)
     );
 }
-
-#[tokio::test]
-async fn the_health_report_completes_without_a_network() {
-    let base = tempfile::tempdir().expect("temp dir");
-    let paths = roots(&base);
-    // The roots exist, so the report describes them rather than the
-    // environment's own.
-    let _ = app(&paths);
-
-    let health = ephervex_core::installation_health().await;
-    assert_eq!(health.application.app_id, "ephervex");
-    assert!(matches!(
-        health.bundled_data.options_dataset,
-        ephervex_core::BundledDocumentHealth::Loaded { .. }
-    ));
-}
