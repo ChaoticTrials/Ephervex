@@ -1305,7 +1305,11 @@ is inflated, not only from its declared size, and gives a manifest a much
 smaller ceiling than other entries because it is held in memory to be parsed.
 A manifest's declared artifact list has its own count ceiling, independent of
 the entry count, enforced while the list is deserialized so a compact manifest
-cannot make the importer build or look up an unbounded number of files.
+cannot make the importer build or look up an unbounded number of files. A
+Modrinth index also has ceilings on the download addresses one file may list
+and on the addresses all files list together, counted as written before the
+host allowlist is applied, so the one-at-a-time fallback after a failed batch
+download cannot be driven into an unbounded number of requests.
 
 Pack analysis and server archive validation run extraction's per-entry checks
 over every entry before any side effect: the entry must open (not encrypted,

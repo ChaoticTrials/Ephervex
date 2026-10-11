@@ -979,4 +979,15 @@ mod tests {
             "{error:?}"
         );
     }
+
+    #[test]
+    fn a_downloads_member_in_a_file_declaration_is_ignored_like_any_unknown_member() {
+        for downloads in [r#""x""#, "{}", "null", r#"["a", "b", "c"]"#] {
+            let files = format!(
+                r#"{{"projectID": 1, "fileID": 2, "required": true, "downloads": {downloads}}}"#
+            );
+            let parsed = parse_with_ceiling(&files, 1).expect("an unknown member is ignored");
+            assert_eq!(parsed.pending.len(), 1, "{downloads}");
+        }
+    }
 }

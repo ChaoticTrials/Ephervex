@@ -58,7 +58,7 @@ fn parse(files: &[String]) -> PackRecipe {
         index(files).as_bytes(),
         &DomainAllowlist::modrinth_pack_defaults(),
         Some("reproduction.mrpack".to_owned()),
-        ephervex_pack::ExtractionLimits::default().max_declared_files,
+        &ephervex_pack::ExtractionLimits::default(),
     )
     .expect("a valid pack index")
     .recipe

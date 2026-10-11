@@ -621,6 +621,40 @@ fn a_compact_index_declaring_more_files_than_the_default_ceiling_is_refused_at_a
     );
 }
 
+#[test]
+fn a_compact_index_listing_a_hostile_number_of_download_addresses_is_refused_at_analysis() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let archive = workspace.path().join("lists-everything.mrpack");
+    let hash = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
+    let addresses = 100_000_u64;
+    let downloads = (0..addresses)
+        .map(|n| format!(r#""https://cdn.modrinth.com/data/x/versions/{n}/a.jar""#))
+        .collect::<Vec<_>>()
+        .join(",");
+    let index = format!(
+        r#"{{"formatVersion":1,"game":"minecraft","versionId":"1","name":"Deep",
+            "files":[{{"path":"mods/a.jar","hashes":{{"sha1":"{hash}"}},"downloads":[{downloads}],"fileSize":1}}],
+            "dependencies":{{"minecraft":"1.20.1","neoforge":"47.1.106"}}}}"#
+    );
+    build_archive(&archive, index.as_bytes(), &[]);
+
+    let error = analyze(&archive, &PackPolicy::modrinth())
+        .map(|_| ())
+        .expect_err("must refuse");
+    assert!(
+        matches!(
+            error,
+            PackError::LimitExceeded {
+                limit: "download-addresses-per-file",
+                allowed,
+                reached,
+            } if allowed == ExtractionLimits::default().max_download_addresses_per_file
+                && reached == addresses
+        ),
+        "{error:?}"
+    );
+}
+
 #[tokio::test]
 async fn a_pack_whose_archive_carries_a_traversing_override_is_refused_before_it_writes() {
     // The index is clean and the *archive* is hostile, which is the other half

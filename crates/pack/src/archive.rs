@@ -69,6 +69,12 @@ pub struct ExtractionLimits {
     /// `max_entries`: a compact manifest names far more files than its
     /// archive has entries, and each one costs a provider request.
     pub max_declared_files: u64,
+    /// The most download addresses one declared file may list. A failed batch
+    /// download falls back to trying a file's addresses one request at a time.
+    pub max_download_addresses_per_file: u64,
+    /// The most download addresses all declared files may list together,
+    /// counted as written, including addresses the allowlist will refuse.
+    pub max_download_addresses: u64,
 }
 
 impl Default for ExtractionLimits {
@@ -79,6 +85,8 @@ impl Default for ExtractionLimits {
             max_entry_bytes: 2 * 1024 * 1024 * 1024,
             max_manifest_bytes: 64 * 1024 * 1024,
             max_declared_files: 10_000,
+            max_download_addresses_per_file: 16,
+            max_download_addresses: 20_000,
         }
     }
 }

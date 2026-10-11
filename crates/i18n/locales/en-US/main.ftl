@@ -1090,7 +1090,7 @@ error-pack-entry-reserved = The pack contains a file that would overwrite Epherv
 error-pack-entry-type-unsupported = The pack contains an archive entry Ephervex will not extract.
 .action = Ephervex extracts ordinary files and folders only.
 
-error-pack-limit-exceeded = The pack is larger than Ephervex is willing to unpack or declares more files than it will fetch.
+error-pack-limit-exceeded = The pack is larger than Ephervex is willing to unpack, or lists more files or download addresses than it will fetch.
 .action = Ephervex stopped before the pack could fill the disk or memory, or trigger an unreasonable number of downloads. The limits are deliberately generous.
 
 error-pack-entry-id-invalid = The pack names a mod by an id that identifies nothing.

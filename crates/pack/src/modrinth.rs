@@ -35,8 +35,8 @@ use ephervex_model::{
 use serde::Deserialize;
 use tracing::{debug, warn};
 
-use crate::archive::PackArchive;
-use crate::declared_files::require_declared_files_within;
+use crate::archive::{ExtractionLimits, PackArchive};
+use crate::declared_files::require_declarations_within;
 use crate::detect::MODRINTH_INDEX;
 use crate::error::{PackError, PackResult};
 use crate::path::{is_reserved, safe_relative_path};
@@ -87,12 +87,7 @@ pub fn read(archive: &mut PackArchive, allowlist: &DomainAllowlist) -> PackResul
     let manifest = archive.read_manifest(MODRINTH_INDEX)?;
     let archive_name = archive.file_name().map(ToOwned::to_owned);
     let layers = present_layers(archive);
-    let mut parsed = parse(
-        &manifest,
-        allowlist,
-        archive_name,
-        archive.limits().max_declared_files,
-    )?;
+    let mut parsed = parse(&manifest, allowlist, archive_name, archive.limits())?;
     parsed.recipe.override_layers = layers;
     Ok(parsed)
 }
@@ -121,15 +116,15 @@ fn present_layers(archive: &PackArchive) -> Vec<OverrideLayer> {
 /// Parses the index document itself.
 ///
 /// Split out from [`read`] so manifest validation is testable against a fixture
-/// without building an archive around it. A manifest declaring more than
-/// `max_declared_files` files is refused.
+/// without building an archive around it. An index declaring more files, or
+/// more download addresses, than `limits` allow is refused.
 pub fn parse(
     manifest: &[u8],
     allowlist: &DomainAllowlist,
     archive_name: Option<String>,
-    max_declared_files: u64,
+    limits: &ExtractionLimits,
 ) -> PackResult<ParsedPack> {
-    require_declared_files_within(MODRINTH_INDEX, manifest, max_declared_files)?;
+    require_declarations_within(MODRINTH_INDEX, manifest, limits)?;
     let index: RawIndex =
         serde_json::from_slice(manifest).map_err(|source| PackError::ManifestInvalid {
             entry: MODRINTH_INDEX.to_owned(),
@@ -528,7 +523,6 @@ impl From<RawRequirement> for SideRequirement {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
-    use crate::archive::ExtractionLimits;
 
     fn allowlist() -> DomainAllowlist {
         DomainAllowlist::modrinth_pack_defaults()
@@ -565,7 +559,7 @@ mod tests {
             document.as_bytes(),
             &allowlist(),
             Some("test.mrpack".to_owned()),
-            ExtractionLimits::default().max_declared_files,
+            &ExtractionLimits::default(),
         )
     }
 
@@ -1040,13 +1034,48 @@ mod tests {
             .join(",")
     }
 
-    fn parse_with_ceiling(files: &str, ceiling: u64) -> PackResult<ParsedPack> {
+    fn parse_with_limits(files: &str, limits: &ExtractionLimits) -> PackResult<ParsedPack> {
         parse(
             index(r#"{"minecraft": "1.20.1", "neoforge": "47.1.106"}"#, files).as_bytes(),
             &allowlist(),
             None,
-            ceiling,
+            limits,
         )
+    }
+
+    fn parse_with_ceiling(files: &str, ceiling: u64) -> PackResult<ParsedPack> {
+        parse_with_limits(
+            files,
+            &ExtractionLimits {
+                max_declared_files: ceiling,
+                ..ExtractionLimits::default()
+            },
+        )
+    }
+
+    /// One file whose `downloads` lists `addresses` addresses, `allowed` of
+    /// them on an allowlisted host.
+    fn file_listing(path: &str, addresses: u32, allowed: bool) -> String {
+        let host = if allowed {
+            "cdn.modrinth.com"
+        } else {
+            "evil.example"
+        };
+        let downloads = (0..addresses)
+            .map(|n| format!(r#""https://{host}/data/x/versions/{n}/a.jar""#))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            r#"{{"path": "{path}", "hashes": {{"sha1": "{SHA1}", "sha512": "{SHA512}"}}, "downloads": [{downloads}]}}"#
+        )
+    }
+
+    fn address_limits(per_file: u64, total: u64) -> ExtractionLimits {
+        ExtractionLimits {
+            max_download_addresses_per_file: per_file,
+            max_download_addresses: total,
+            ..ExtractionLimits::default()
+        }
     }
 
     #[test]
@@ -1086,7 +1115,13 @@ mod tests {
         let document = r#"{"formatVersion": 1, "game": "minecraft", "versionId": "1",
             "name": "Test Pack", "files": null,
             "dependencies": {"minecraft": "1.20.1", "neoforge": "47.1.106"}}"#;
-        let error = parse(document.as_bytes(), &allowlist(), None, 10).expect_err("null files");
+        let error = parse(
+            document.as_bytes(),
+            &allowlist(),
+            None,
+            &ExtractionLimits::default(),
+        )
+        .expect_err("null files");
         assert!(
             matches!(error, PackError::ManifestInvalid { .. }),
             "{error:?}"
@@ -1112,7 +1147,13 @@ mod tests {
     #[test]
     fn a_malformed_declaration_is_reported_where_it_sits_in_the_index() {
         let document = "{\n  \"formatVersion\": 1,\n  \"game\": \"minecraft\",\n  \"versionId\": \"1\",\n  \"name\": \"Test Pack\",\n  \"dependencies\": {\"minecraft\": \"1.20.1\", \"neoforge\": \"47.1.106\"},\n  \"files\": [\n    {\"path\": 3}\n  ]\n}";
-        let error = parse(document.as_bytes(), &allowlist(), None, 10).expect_err("malformed");
+        let error = parse(
+            document.as_bytes(),
+            &allowlist(),
+            None,
+            &ExtractionLimits::default(),
+        )
+        .expect_err("malformed");
         assert!(
             matches!(&error, PackError::ManifestInvalid { source, .. } if source.line() == 8),
             "{error:?}"
@@ -1125,7 +1166,153 @@ mod tests {
             r#"[1, "minecraft", "1", "Test Pack", null, [{}], {{"minecraft": "1.20.1", "neoforge": "47.1.106"}}]"#,
             declared(3)
         );
-        let error = parse(document.as_bytes(), &allowlist(), None, 2).expect_err("array form");
+        let error = parse(
+            document.as_bytes(),
+            &allowlist(),
+            None,
+            &ExtractionLimits {
+                max_declared_files: 2,
+                ..ExtractionLimits::default()
+            },
+        )
+        .expect_err("array form");
+        assert!(
+            matches!(error, PackError::ManifestInvalid { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_file_listing_more_addresses_than_the_per_file_ceiling_is_refused() {
+        let error = parse_with_limits(
+            &file_listing("mods/a.jar", 5, true),
+            &address_limits(4, 100),
+        )
+        .expect_err("over the per-file ceiling");
+        assert!(
+            matches!(
+                error,
+                PackError::LimitExceeded {
+                    limit: "download-addresses-per-file",
+                    allowed: 4,
+                    reached: 5
+                }
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_file_listing_exactly_the_per_file_ceiling_is_accepted() {
+        let parsed = parse_with_limits(
+            &file_listing("mods/a.jar", 4, true),
+            &address_limits(4, 100),
+        )
+        .expect("at the per-file ceiling");
+        assert_eq!(parsed.recipe.files[0].downloads.len(), 4);
+    }
+
+    #[test]
+    fn addresses_the_allowlist_would_refuse_count_toward_the_per_file_ceiling() {
+        let error = parse_with_limits(
+            &file_listing("mods/a.jar", 5, false),
+            &address_limits(4, 100),
+        )
+        .expect_err("refused addresses are still counted");
+        assert!(
+            matches!(
+                error,
+                PackError::LimitExceeded {
+                    limit: "download-addresses-per-file",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn files_whose_addresses_together_exceed_the_total_ceiling_are_refused() {
+        let files = [
+            file_listing("mods/a.jar", 3, true),
+            file_listing("mods/b.jar", 3, true),
+            file_listing("mods/c.jar", 3, true),
+        ]
+        .join(",");
+        let error =
+            parse_with_limits(&files, &address_limits(3, 8)).expect_err("over the total ceiling");
+        assert!(
+            matches!(
+                error,
+                PackError::LimitExceeded {
+                    limit: "download-addresses",
+                    allowed: 8,
+                    reached: 9
+                }
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn files_whose_addresses_together_equal_the_total_ceiling_are_accepted() {
+        let files = [
+            file_listing("mods/a.jar", 3, true),
+            file_listing("mods/b.jar", 3, true),
+            file_listing("mods/c.jar", 3, true),
+        ]
+        .join(",");
+        let parsed =
+            parse_with_limits(&files, &address_limits(3, 9)).expect("at the total ceiling");
+        assert_eq!(parsed.recipe.files.len(), 3);
+    }
+
+    #[test]
+    fn a_file_with_no_downloads_member_still_reports_its_missing_downloads() {
+        let files = format!(
+            r#"{{"path": "mods/a.jar", "hashes": {{"sha1": "{SHA1}", "sha512": "{SHA512}"}}}}"#
+        );
+        let error = parse_with_limits(&files, &address_limits(1, 1)).expect_err("no downloads");
+        assert!(
+            matches!(error, PackError::FileDownloadsMissing { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_downloads_member_that_is_not_an_array_is_an_unreadable_index() {
+        let files = format!(
+            r#"{{"path": "mods/a.jar", "hashes": {{"sha1": "{SHA1}", "sha512": "{SHA512}"}}, "downloads": "https://cdn.modrinth.com/a.jar"}}"#
+        );
+        let error = parse_with_limits(&files, &address_limits(10, 10)).expect_err("not an array");
+        assert!(
+            matches!(error, PackError::ManifestInvalid { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_file_entry_written_as_an_array_is_refused_rather_than_read_by_position() {
+        let addresses = (0..20)
+            .map(|n| format!(r#""https://cdn.modrinth.com/data/x/versions/{n}/a.jar""#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let files = format!(
+            r#"["mods/a.jar", {{"sha1": "{SHA1}", "sha512": "{SHA512}"}}, null, [{addresses}]]"#
+        );
+        let error = parse_with_limits(&files, &address_limits(4, 100)).expect_err("array entry");
+        assert!(
+            matches!(error, PackError::ManifestInvalid { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_file_repeating_its_downloads_member_is_an_unreadable_index() {
+        let files = format!(
+            r#"{{"path": "mods/a.jar", "hashes": {{"sha1": "{SHA1}", "sha512": "{SHA512}"}}, "downloads": ["https://cdn.modrinth.com/a.jar"], "downloads": ["https://cdn.modrinth.com/b.jar"]}}"#
+        );
+        let error = parse_with_limits(&files, &address_limits(10, 10)).expect_err("repeated");
         assert!(
             matches!(error, PackError::ManifestInvalid { .. }),
             "{error:?}"
