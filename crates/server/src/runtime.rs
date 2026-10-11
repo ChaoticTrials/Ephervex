@@ -1520,10 +1520,15 @@ mod tests {
         );
     }
 
-    /// A pending start whose supervisor is already gone.
+    /// Above the kernel's pid limit, so no process leads a session with this id.
+    const NO_SUCH_SESSION: u32 = u32::MAX;
+
+    /// A pending start whose supervisor is already gone and whose session holds no process, so a
+    /// newly exec'd process elsewhere on the machine cannot make the scan unverifiable.
     fn write_dead_pending_start(root: &Path) -> RuntimeEvidence {
         let mut evidence = RuntimeEvidence::for_current_supervisor().expect("capture");
         evidence.supervisor.start_ticks = 0;
+        evidence.supervisor_session = Some(NO_SUCH_SESSION);
         evidence.child_pending = true;
         write_runtime_evidence(root, &evidence).expect("write");
         evidence
@@ -1680,7 +1685,7 @@ mod tests {
             RuntimeClassification::UnknownRunning { .. }
         ));
 
-        evidence.supervisor_session = Some(session + 1);
+        evidence.supervisor_session = Some(NO_SUCH_SESSION);
         write_runtime_evidence(root.path(), &evidence).expect("write");
         assert!(
             matches!(
