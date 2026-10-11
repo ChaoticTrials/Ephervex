@@ -2279,7 +2279,8 @@ enum DropIntent {
     Mods(InstalledHost),
     /// Nothing. A file let go over a confirmation the user is in the middle of
     /// is far more likely to be a misplaced gesture than a request to abandon
-    /// it.
+    /// it. So is one let go with the Mods lists of two hosts on screen, which
+    /// is not a pack either.
     Ignored,
 }
 
@@ -2296,30 +2297,46 @@ fn drop_intent(ui: &AppWindow, workspace: &WorkspaceState) -> DropIntent {
         // Before the import arm below, which is what an empty modal string
         // otherwise means: a jar let go over a visible mod list is not a pack
         // somebody wants imported.
-        "" => mods_drop_intent(ui, workspace).unwrap_or(DropIntent::Import),
+        "" => match mods_lists_on_screen(ui, workspace) {
+            ModsListsOnScreen::None => DropIntent::Import,
+            ModsListsOnScreen::One(host) => DropIntent::Mods(host),
+            ModsListsOnScreen::Several => DropIntent::Ignored,
+        },
         "import" => DropIntent::Import,
         _ => DropIntent::Ignored,
     }
 }
 
-/// The mod host whose list is on screen, if exactly one is.
-///
-/// A drop carries no position, so with the Mods lists of two different hosts
-/// visible there is no telling which one it was meant for.
-fn mods_drop_intent(ui: &AppWindow, workspace: &WorkspaceState) -> Option<DropIntent> {
+/// Which hosts' Mods lists are visible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModsListsOnScreen {
+    None,
+    One(InstalledHost),
+    /// Lists of two different hosts. A drop carries no position, so there is no
+    /// telling which one it was meant for, and it is not a pack either.
+    Several,
+}
+
+fn mods_lists_on_screen(ui: &AppWindow, workspace: &WorkspaceState) -> ModsListsOnScreen {
     if !ui.get_workspace_open() || !matches!(ui.get_page(), INSTANCES_PAGE | SERVERS_PAGE) {
-        return None;
+        return ModsListsOnScreen::None;
     }
-    let mut hosts = workspace
-        .layout()?
+    let Some(layout) = workspace.layout() else {
+        return ModsListsOnScreen::None;
+    };
+    let mut hosts = layout
         .panes()
         .into_iter()
         .filter(|placed| placed.pane.surface() == Surface::Mods)
         .map(|placed| placed.pane.host());
-    let host = hosts.next()?;
-    hosts
-        .all(|other| other == host)
-        .then_some(DropIntent::Mods(host))
+    let Some(host) = hosts.next() else {
+        return ModsListsOnScreen::None;
+    };
+    if hosts.all(|other| other == host) {
+        ModsListsOnScreen::One(host)
+    } else {
+        ModsListsOnScreen::Several
+    }
 }
 
 /// Routes files dropped on the window to whatever is asking for them.
@@ -11556,7 +11573,8 @@ mod tests {
     }
 
     /// A jar let go over a visible Mods list goes to that list's host, and
-    /// with two hosts' lists on screen there is no telling which was meant.
+    /// with two hosts' lists on screen there is no telling which was meant, so
+    /// the drop is ignored rather than opening a pack import.
     #[test]
     fn a_dropped_jar_goes_to_the_one_mods_list_on_screen() {
         let ui = test_window();
@@ -11585,7 +11603,7 @@ mod tests {
         });
         assert_eq!(
             drop_intent(&ui, &workspace.state.borrow()),
-            DropIntent::Import,
+            DropIntent::Ignored,
             "two hosts' lists leave the drop without a target"
         );
 
