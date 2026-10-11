@@ -410,6 +410,42 @@ async fn a_narrowed_policy_reconstructs_only_the_undeclared_files_it_names() {
     assert!(matches!(error, PackError::UnknownServerSelection { .. }));
 }
 
+#[test]
+fn the_server_preview_lists_what_server_reconstruction_installs() {
+    let (mut recipe, _) = recipe();
+    // No recorded choice, so only the unknown-file policy can include it.
+    for file in &mut recipe.files {
+        if file.server == SideRequirement::Unknown {
+            file.selected = None;
+        }
+    }
+    let paths = |files: &[&PackFileRecipe]| -> Vec<PathBuf> {
+        files.iter().map(|file| file.logical_path.clone()).collect()
+    };
+
+    let include_all = UnknownServerFiles::default();
+    let created = recipe
+        .server_reconstruction_plan(&include_all)
+        .expect("reconstruction plan");
+    let preview = recipe
+        .server_preview_plan(&OptionalSelection::none(), &include_all)
+        .expect("preview plan");
+    assert_eq!(paths(&preview.files), paths(&created.files));
+    assert!(paths(&preview.files).contains(&PathBuf::from("mods/unknown.jar")));
+    assert!(!paths(&preview.files).contains(&PathBuf::from("mods/unselected-optional.jar")));
+
+    let none = UnknownServerFiles::only(OptionalSelection::none());
+    let narrowed = recipe
+        .server_preview_plan(&OptionalSelection::none(), &none)
+        .expect("narrowed preview");
+    assert!(!paths(&narrowed.files).contains(&PathBuf::from("mods/unknown.jar")));
+
+    let everything = recipe
+        .server_preview_plan(&OptionalSelection::all(), &include_all)
+        .expect("preview with every optional");
+    assert!(paths(&everything.files).contains(&PathBuf::from("mods/unselected-optional.jar")));
+}
+
 #[tokio::test]
 async fn missing_layers_and_path_collisions_fail_before_overwriting_server_content() {
     let temp = tempfile::tempdir().expect("tempdir");

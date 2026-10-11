@@ -242,6 +242,32 @@ fn a_pack_declared_file_is_not_listed_as_a_provider_installed_mod() {
 }
 
 #[test]
+fn the_server_recipe_preview_lists_the_mods_with_no_declared_server_side_that_create_server_installs()
+ {
+    let sandbox = Sandbox::new();
+    let (id, root) = sandbox.instance();
+    seed_recipe(&root);
+
+    let server = sandbox.json(&["--json", "instance", "recipe", &id, "--side", "server"]);
+    let paths: Vec<&str> = server["files"]
+        .as_array()
+        .expect("an array")
+        .iter()
+        .map(|file| file["path"].as_str().expect("a path"))
+        .collect();
+    assert_eq!(
+        paths,
+        ["mods/library-1.0.0.jar", "mods/chosen-2.0.0.jar"],
+        "Create Server installs a mod whose server side the pack never declared"
+    );
+
+    let text = sandbox.run(&["instance", "recipe", &id, "--side", "server"]);
+    assert!(text.status.success(), "{text:?}");
+    let text = String::from_utf8(text.stdout).expect("UTF-8 output");
+    assert!(text.contains("library-1.0.0.jar"), "{text}");
+}
+
+#[test]
 fn a_recipe_from_a_newer_build_is_refused_rather_than_partly_read() {
     let sandbox = Sandbox::new();
     let (id, root) = sandbox.instance();

@@ -1053,6 +1053,34 @@ impl PackRecipe {
         &self,
         unknown: &UnknownServerFiles,
     ) -> PackResult<ServerReconstructionPlan<'_>> {
+        self.server_plan_for(&OptionalSelection::none(), unknown)
+    }
+
+    /// What Create Server would install, plus any optional files the caller
+    /// asks to see as well.
+    ///
+    /// Shares its selection rules with [`Self::server_reconstruction_plan`], so
+    /// a preview cannot disagree with creation about which files qualify.
+    pub fn server_preview_plan(
+        &self,
+        selection: &OptionalSelection,
+        unknown: &UnknownServerFiles,
+    ) -> PackResult<SidePlan<'_>> {
+        let plan = self.server_plan_for(selection, unknown)?;
+        Ok(SidePlan {
+            side: PackSide::Server,
+            files: plan.files,
+            layers: plan.layers,
+            minecraft_version: plan.minecraft_version,
+            loader: plan.loader,
+        })
+    }
+
+    fn server_plan_for(
+        &self,
+        selection: &OptionalSelection,
+        unknown: &UnknownServerFiles,
+    ) -> PackResult<ServerReconstructionPlan<'_>> {
         if let UnknownServerFiles::OnlyConfirmed(confirmed) = unknown {
             let unknown_paths: BTreeSet<&Path> = self
                 .files
@@ -1080,7 +1108,7 @@ impl PackRecipe {
             match file.server {
                 SideRequirement::Required => files.push(file),
                 SideRequirement::Optional => {
-                    if file.selected == Some(true) {
+                    if selection.includes(&file.logical_path, file.selected) {
                         files.push(file);
                     }
                 }

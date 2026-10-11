@@ -972,8 +972,9 @@ enum InstanceCommand {
     /// original archive. Server creation uses this retained recipe.
     Recipe {
         id: InstanceId,
-        /// Which side to plan for. The server plan is what "Create Server"
-        /// will use.
+        /// Which side to plan for. The server plan lists what "Create Server"
+        /// installs by default, including mods the pack does not say belong on
+        /// a server.
         #[arg(long, value_enum, default_value_t = SideArg::Client)]
         side: SideArg,
         /// Include the optional files that were not selected at import time.
@@ -2136,7 +2137,7 @@ async fn run_instance_command(
             } else {
                 OptionalSelection::none()
             };
-            print_recipe(&recipe, (*side).into(), &selection, json);
+            print_recipe(&recipe, (*side).into(), &selection, json)?;
         }
         InstanceCommand::Open { id, folder, print } => {
             let path = if *print {
@@ -7203,8 +7204,21 @@ fn print_imported(app: &App, imported: &ImportedPack, json: bool) -> anyhow::Res
 }
 
 /// Prints one side's plan out of a retained recipe.
-fn print_recipe(recipe: &PackRecipe, side: PackSide, selection: &OptionalSelection, json: bool) {
-    let plan = recipe.plan(side, selection);
+///
+/// The server side is the plan Create Server builds with its default policy for
+/// files the pack never declared a server side for.
+fn print_recipe(
+    recipe: &PackRecipe,
+    side: PackSide,
+    selection: &OptionalSelection,
+    json: bool,
+) -> anyhow::Result<()> {
+    let plan = match side {
+        PackSide::Server => {
+            recipe.server_preview_plan(selection, &UnknownServerFiles::default())?
+        }
+        PackSide::Client => recipe.plan(side, selection),
+    };
     if json {
         print_json(&serde_json::json!({
                     "side": side.as_str(),
@@ -7238,7 +7252,7 @@ fn print_recipe(recipe: &PackRecipe, side: PackSide, selection: &OptionalSelecti
                     "layers_retained": plan.layers_are_retained(),
                     "total_bytes": plan.total_bytes(),
                 }));
-        return;
+        return Ok(());
     }
 
     outln!("pack:      {}", terminal_safe(&recipe.original_name));
@@ -7269,6 +7283,7 @@ fn print_recipe(recipe: &PackRecipe, side: PackSide, selection: &OptionalSelecti
     if !plan.layers_are_retained() && side == PackSide::Server {
         eprintln!("{}", ephervex_i18n::lookup("pack-recipe-layer-missing"));
     }
+    Ok(())
 }
 
 fn analysis_json(analysis: &PackAnalysis) -> serde_json::Value {
