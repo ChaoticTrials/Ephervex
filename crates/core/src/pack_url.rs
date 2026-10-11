@@ -428,12 +428,15 @@ impl App {
     fn pack_download_config(&self) -> DownloaderConfig {
         if self.allows_plaintext_http() {
             DownloaderConfig {
-                http: ephervex_download::HttpConfig::for_loopback_tests(),
+                http: ephervex_download::HttpConfig {
+                    user_agent: self.effective_user_agent(),
+                    ..ephervex_download::HttpConfig::for_loopback_tests()
+                },
                 retry: ephervex_download::RetryPolicy::none(),
                 ..DownloaderConfig::default()
             }
         } else {
-            DownloaderConfig::default()
+            self.download_config()
         }
     }
 
@@ -716,6 +719,33 @@ mod tests {
             0,
             "a refusal must happen before anything reaches the network"
         );
+    }
+
+    #[tokio::test]
+    async fn a_pack_download_carries_the_custom_user_agent() {
+        const AGENT: &str = "BugReportBot/2.0 (+https://example.invalid)";
+        let base = tempfile::tempdir().expect("temp dir");
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/pack"))
+            .and(wiremock::matchers::header("user-agent", AGENT))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"pack".to_vec()))
+            .mount(&server)
+            .await;
+        let mut app = app_rooted_at(base.path());
+        app.set_custom_user_agent(Some(AGENT)).expect("set");
+        let source = app
+            .pack_source(&format!("{}/pack", server.uri()))
+            .expect("a loopback address");
+
+        app.fetch_pack(
+            &source,
+            &PackConsents::none().agreeing(source.host(), HostConsent::JustOnce),
+            &silent(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("a request with the custom User-Agent is the only one the server answers");
     }
 
     #[test]

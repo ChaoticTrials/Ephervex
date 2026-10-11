@@ -1959,6 +1959,16 @@ mod tests {
     }
 
     #[test]
+    fn every_download_manager_is_configured_with_the_effective_user_agent() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.set_custom_user_agent(Some("BugReportBot/2.0"))
+            .expect("set");
+
+        assert_eq!(app.download_config().http.user_agent, "BugReportBot/2.0");
+    }
+
+    #[test]
     fn invalid_api_identifiers_are_refused_without_echoing_or_persisting_them() {
         const CREDENTIAL: &str = "UNIQUE-CREDENTIAL-MATERIAL";
         let base = tempfile::tempdir().expect("temp dir");

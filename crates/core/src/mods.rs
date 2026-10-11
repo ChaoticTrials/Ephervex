@@ -2100,13 +2100,11 @@ impl App {
         if let Some(provider) = self.mods.get() {
             return Ok(provider);
         }
-        let manager = DownloadManager::new(DownloaderConfig {
-            http: self.http_config(),
-            ..DownloaderConfig::default()
-        })
-        .map_err(|source| ModPlatformError::ResponseInvalid {
-            provider: ModProvider::Modrinth,
-            detail: source.to_string(),
+        let manager = DownloadManager::new(self.download_config()).map_err(|source| {
+            ModPlatformError::ResponseInvalid {
+                provider: ModProvider::Modrinth,
+                detail: source.to_string(),
+            }
         })?;
         let provider = ModrinthProvider::new(manager, CacheLayout::new(self.paths().cache_dir()))?;
         Ok(self.mods.get_or_init(|| provider))

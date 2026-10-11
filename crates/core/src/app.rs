@@ -1263,7 +1263,7 @@ impl App {
         reporter: Option<&OperationReporter>,
         cancel: &CancellationToken,
     ) -> CoreResult<ManagedInstallation> {
-        let manager = DownloadManager::new(DownloaderConfig::default()).map_err(|source| {
+        let manager = DownloadManager::new(self.download_config()).map_err(|source| {
             JavaError::ManagedDownloadFailed {
                 major,
                 release: String::new(),
@@ -1306,7 +1306,7 @@ impl App {
     /// the *next* launch would have selected.
     #[instrument(skip(self))]
     pub async fn remove_managed_java_runtime(&self, executable: &Path) -> CoreResult<PathBuf> {
-        let manager = DownloadManager::new(DownloaderConfig::default()).map_err(|source| {
+        let manager = DownloadManager::new(self.download_config()).map_err(|source| {
             JavaError::ManagedDownloadFailed {
                 major: 0,
                 release: String::new(),
@@ -1371,7 +1371,7 @@ impl App {
             return Ok(catalogs);
         }
         let catalog = self.minecraft()?.clone();
-        let manager = DownloadManager::new(DownloaderConfig::default()).map_err(|source| {
+        let manager = DownloadManager::new(self.download_config()).map_err(|source| {
             MinecraftError::ManifestUnavailable {
                 source: MetadataCacheError::Unavailable {
                     key: VERSION_MANIFEST_CACHE_KEY.to_owned(),
@@ -1389,7 +1389,7 @@ impl App {
         if let Some(feed) = self.options_feed.get() {
             return Ok(feed);
         }
-        let manager = DownloadManager::new(DownloaderConfig::default()).map_err(|source| {
+        let manager = DownloadManager::new(self.download_config()).map_err(|source| {
             MinecraftError::ManifestUnavailable {
                 source: MetadataCacheError::Unavailable {
                     key: VERSION_MANIFEST_CACHE_KEY.to_owned(),
@@ -1412,7 +1412,7 @@ impl App {
         if let Some(catalog) = self.minecraft.get() {
             return Ok(catalog);
         }
-        let manager = DownloadManager::new(DownloaderConfig::default()).map_err(|source| {
+        let manager = DownloadManager::new(self.download_config()).map_err(|source| {
             MinecraftError::ManifestUnavailable {
                 source: MetadataCacheError::Unavailable {
                     key: VERSION_MANIFEST_CACHE_KEY.to_owned(),
@@ -1431,16 +1431,35 @@ impl App {
         if let Some(loaders) = self.loaders.get() {
             return Ok(loaders);
         }
-        let manager = DownloadManager::new(DownloaderConfig {
-            http: self.http_config(),
-            ..DownloaderConfig::default()
-        })
-        .map_err(|source| ephervex_loaders::LoaderError::MetadataInvalid {
-            provider: "loader",
-            detail: source.to_string(),
+        let manager = DownloadManager::new(self.download_config()).map_err(|source| {
+            ephervex_loaders::LoaderError::MetadataInvalid {
+                provider: "loader",
+                detail: source.to_string(),
+            }
         })?;
         let loaders = LoaderRegistry::new(manager, CacheLayout::new(self.paths().cache_dir()))?;
         Ok(self.loaders.get_or_init(|| loaders))
+    }
+
+    /// The downloader settings every request this application makes starts
+    /// from, carrying the effective User-Agent.
+    pub(crate) fn download_config(&self) -> DownloaderConfig {
+        DownloaderConfig {
+            http: self.http_config(),
+            ..DownloaderConfig::default()
+        }
+    }
+
+    /// Drops every cached service that holds an HTTP client, so the next use
+    /// builds it from the current settings.
+    fn forget_http_services(&mut self) {
+        self.minecraft.take();
+        self.languages.take();
+        self.options_feed.take();
+        self.loaders.take();
+        self.mods.take();
+        self.curseforge.take();
+        self.curseforge_mods.take();
     }
 
     /// Progress reporting for a metadata fetch.
@@ -1616,6 +1635,10 @@ impl App {
                 Err(error) => warn!(%error, "kept the persistent instance root opened earlier"),
             }
         }
+        // A cached service keeps the User-Agent its client was built with.
+        if self.storage.config.api.user_agent() != config.api.user_agent() {
+            self.forget_http_services();
+        }
         self.storage.config = config;
     }
 }
@@ -1660,6 +1683,61 @@ mod tests {
 
     fn app_rooted_at(base: &std::path::Path) -> App {
         App::open_at(Paths::rooted_at(base)).expect("app should open against a temporary root")
+    }
+
+    #[test]
+    fn changing_the_user_agent_rebuilds_services_that_were_built_with_the_old_one() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.minecraft().expect("catalog");
+        app.languages().expect("languages");
+        app.options_feed().expect("feed");
+        app.loaders().expect("loaders");
+        app.modrinth_catalog().expect("mods");
+        app.curseforge_api().expect("curseforge");
+        let services_are_built = |app: &App| {
+            [
+                app.minecraft.get().is_some(),
+                app.languages.get().is_some(),
+                app.options_feed.get().is_some(),
+                app.loaders.get().is_some(),
+                app.mods.get().is_some(),
+                app.curseforge.get().is_some(),
+            ]
+        };
+        assert_eq!(services_are_built(&app), [true; 6]);
+
+        app.set_custom_user_agent(Some("BugReportBot/2.0"))
+            .expect("set");
+        assert_eq!(
+            services_are_built(&app),
+            [false; 6],
+            "a service built with the previous User-Agent must not survive the change"
+        );
+
+        app.minecraft().expect("catalog");
+        app.set_custom_user_agent(Some("BugReportBot/2.0"))
+            .expect("same value");
+        assert!(
+            app.minecraft.get().is_some(),
+            "writing the User-Agent already in effect keeps what was built"
+        );
+    }
+
+    #[test]
+    fn a_user_agent_written_by_another_process_reaches_services_on_reload() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.minecraft().expect("catalog");
+        let mut other = app_rooted_at(base.path());
+        other
+            .set_custom_user_agent(Some("BugReportBot/2.0"))
+            .expect("set");
+
+        app.reload_config().expect("reload");
+
+        assert!(app.minecraft.get().is_none());
+        assert_eq!(app.download_config().http.user_agent, "BugReportBot/2.0");
     }
 
     #[tokio::test]

@@ -21,7 +21,7 @@
 use std::path::{Path, PathBuf};
 
 use ephervex_download::verify::file_matches_hashes;
-use ephervex_download::{CacheLayout, DownloadManager, DownloaderConfig, OperationReporter};
+use ephervex_download::{CacheLayout, DownloadManager, OperationReporter};
 use ephervex_minecraft::{
     LaunchFeatures, MinecraftError, PlannedArtifact, Platform, VERSION_MANIFEST_CACHE_KEY,
     VanillaInstaller,
@@ -370,7 +370,7 @@ impl App {
         };
 
         let installer = VanillaInstaller::new(
-            DownloadManager::new(DownloaderConfig::default()).map_err(|source| {
+            DownloadManager::new(self.download_config()).map_err(|source| {
                 MinecraftError::ManifestUnavailable {
                     source: ephervex_download::MetadataCacheError::Unavailable {
                         key: VERSION_MANIFEST_CACHE_KEY.to_owned(),

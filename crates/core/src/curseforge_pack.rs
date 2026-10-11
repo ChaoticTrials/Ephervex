@@ -58,8 +58,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use ephervex_download::{
-    AuthenticatedSource, DomainAllowlist, DownloadError, DownloadManager, DownloaderConfig,
-    HostScope,
+    AuthenticatedSource, DomainAllowlist, DownloadError, DownloadManager, HostScope,
 };
 use ephervex_mod_platform::{
     CURSEFORGE_API_KEY_HEADER, CurseForgeFileRelease, CurseForgeOperation, CurseForgeProject,
@@ -337,11 +336,7 @@ impl App {
     /// not the manager's, so there is no longer a version of this that has to be
     /// built differently depending on who the pack came from.
     pub(crate) fn artifact_manager(&self) -> CoreResult<DownloadManager> {
-        let config = DownloaderConfig {
-            http: self.http_config(),
-            ..DownloaderConfig::default()
-        };
-        Ok(DownloadManager::new(config).map_err(unusable_downloader)?)
+        Ok(DownloadManager::new(self.download_config()).map_err(unusable_downloader)?)
     }
 
     /// The credentials an artifact operation may need, read on demand.
