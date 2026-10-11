@@ -410,7 +410,15 @@ impl LaunchLock {
         let directory = metadata_dir(instance_root);
         create_dir_all(&directory)?;
         let ownership = OwnershipGuard::take(&directory)?;
-        Self::take_at(&ownership, directory.join(name))
+        let lock = Self::take_at(&ownership, directory.join(name))?;
+        // Housekeeping: a launcher that only ever runs alongside would
+        // otherwise never clear what its crashed predecessors left. Neither a
+        // live lock nor this one is touched, and a failure here is not the
+        // launch's to report.
+        if let Err(error) = live_additional_launch(&ownership, &directory) {
+            debug!(%error, "could not sweep dead launch locks");
+        }
+        Ok(lock)
     }
 
     /// Takes the lock at `path` unless a live launch holds it.
@@ -586,19 +594,19 @@ pub fn running_state(instance_root: &Path) -> Option<LaunchState> {
 #[must_use]
 pub fn running_launches(instance_root: &Path) -> Vec<RunningLaunch> {
     let directory = metadata_dir(instance_root);
-    let Ok(entries) = std::fs::read_dir(&directory) else {
+    let Ok(locks) = launch_locks(&directory) else {
         return Vec::new();
     };
 
-    let mut launches: Vec<RunningLaunch> = entries
+    // A status query reports what it can read; a lock it cannot is left out.
+    let mut launches: Vec<RunningLaunch> = locks
         .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let name = entry.file_name().into_string().ok()?;
-            let id = launch_id_of(&name)?.handle();
-            let state = read_state(&entry.path()).ok().flatten()?;
-            state
-                .holds_instance()
-                .then_some(RunningLaunch { id, state })
+        .filter_map(|lock| {
+            let state = lock.state.filter(LaunchState::holds_instance)?;
+            Some(RunningLaunch {
+                id: lock.name.handle(),
+                state,
+            })
         })
         .collect();
     launches.sort_by(|left, right| left.id.cmp(&right.id));
@@ -664,7 +672,7 @@ impl LockName {
 /// The launch a lock file's name names, if it names one at all.
 ///
 /// `None` means the file is not a launch lock, which every other thing under
-/// `.launcher/` is.
+/// `.launcher/` is, including a name no launch id produces.
 fn launch_id_of(name: &str) -> Option<LockName> {
     if name == LAUNCH_LOCK_FILE {
         return Some(LockName::First);
@@ -672,7 +680,41 @@ fn launch_id_of(name: &str) -> Option<LockName> {
     let id = name
         .strip_prefix(LAUNCH_LOCK_PREFIX)?
         .strip_suffix(".lock")?;
-    (!id.is_empty()).then(|| LockName::Additional(id.to_owned()))
+    is_valid_launch_id(id).then(|| LockName::Additional(id.to_owned()))
+}
+
+/// A launch lock file found in an instance's metadata directory.
+struct LockEntry {
+    name: LockName,
+    path: PathBuf,
+    /// `None` when the file does not parse: that is not evidence of a launch.
+    state: Option<LaunchState>,
+}
+
+/// Every launch lock file in `directory`, read.
+///
+/// This is the one rule for what counts as a launch lock: a name a launch could
+/// have written, and a regular file, since a FIFO would block the read. A file
+/// that cannot be read comes back as an error for the caller to weigh.
+fn launch_locks(
+    directory: &Path,
+) -> Result<impl Iterator<Item = Result<LockEntry, LockError>> + '_, LockError> {
+    let entries =
+        std::fs::read_dir(directory).map_err(|error| LockError::unusable(directory, error))?;
+    Ok(entries.filter_map(move |entry| {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => return Some(Err(LockError::unusable(directory, error))),
+        };
+        let name = launch_id_of(entry.file_name().to_str()?)?;
+        match entry.file_type() {
+            Ok(kind) if kind.is_file() => {}
+            Ok(_) => return None,
+            Err(error) => return Some(Err(LockError::unusable(&entry.path(), error))),
+        }
+        let path = entry.path();
+        Some(read_state(&path).map(|state| LockEntry { name, path, state }))
+    }))
 }
 
 /// Holds the right to decide who holds an instance's launch locks.
@@ -820,31 +862,20 @@ fn live_additional_launch(
     _ownership: &OwnershipGuard,
     directory: &Path,
 ) -> Result<Option<LaunchState>, LockError> {
-    let unusable = |error| LockError::unusable(directory, error);
     let mut live: Option<(String, LaunchState)> = None;
-    for entry in std::fs::read_dir(directory).map_err(unusable)? {
-        let entry = entry.map_err(unusable)?;
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+    for lock in launch_locks(directory)? {
+        let lock = lock?;
+        let LockName::Additional(id) = lock.name else {
             continue;
         };
-        let Some(LockName::Additional(id)) = launch_id_of(&name) else {
-            continue;
-        };
-        // Only names a launch could have written, and only files: a FIFO
-        // would block the read.
-        if additional_lock_file(&id).as_deref() != Some(name.as_str())
-            || !entry.file_type().map_err(unusable)?.is_file()
-        {
-            continue;
-        }
         // An unparseable lock is neither counted nor removed: it is another
         // launch's file, and only a proven-dead one is cleared.
-        let Some(state) = read_state(&entry.path())? else {
+        let Some(state) = lock.state else {
             continue;
         };
         if !state.holds_instance() {
-            if let Err(error) = std::fs::remove_file(entry.path()) {
-                debug!(path = %entry.path().display(), %error, "could not clear a dead launch lock");
+            if let Err(error) = std::fs::remove_file(&lock.path) {
+                debug!(path = %lock.path.display(), %error, "could not clear a dead launch lock");
             }
         } else if live.as_ref().is_none_or(|(lowest, _)| id < *lowest) {
             live = Some((id, state));
@@ -1349,6 +1380,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_alongside_launch_clears_dead_additional_locks_and_keeps_every_other_lock() {
+        let root = instance();
+        let directory = metadata_dir(root.path());
+        let dead = LaunchState {
+            owner_pid: 0,
+            owner_start_ticks: Some(1),
+            game_pid: None,
+            game_start_ticks: None,
+            since: Utc::now(),
+        };
+        plant(&directory.join("launch.gone.lock"), &dead);
+        plant(&directory.join("launch.again.lock"), &dead);
+        std::fs::write(directory.join("launch.unreadable.lock"), b"not json").expect("write");
+        plant(
+            &directory.join("launch.alive.lock"),
+            &LaunchLock::current_state(),
+        );
+
+        // `again` is a dead launch's id coming back, which replaces its own file.
+        let again = LaunchLock::acquire_additional(root.path(), "again").expect("alongside");
+        assert!(!directory.join("launch.gone.lock").exists());
+        assert!(
+            directory.join("launch.unreadable.lock").exists(),
+            "only a lock proven dead is removed"
+        );
+        assert!(directory.join("launch.alive.lock").exists());
+        assert!(again.path().exists(), "the lock just taken is kept");
+        assert_eq!(running_launches(root.path()).len(), 2);
+    }
+
+    #[test]
+    fn running_launches_lists_only_what_an_ordinary_launch_would_refuse_on() {
+        let root = instance();
+        let directory = metadata_dir(root.path());
+        let live = LaunchLock::current_state();
+        plant(&directory.join("launch.bob.lock"), &live);
+        // Live state under a name no launch id produces, and a directory named like a lock.
+        plant(&directory.join("launch.a.b.lock"), &live);
+        create_dir_all(&directory.join("launch.dir.lock")).expect("directory");
+
+        let launches = running_launches(root.path());
+        assert_eq!(
+            launches
+                .iter()
+                .map(|launch| launch.id.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("bob")]
+        );
+    }
+
     /// A plain launch is still exclusive. Only a caller that has said it is
     /// content to run alongside another gets to.
     #[test]
@@ -1401,6 +1483,7 @@ mod tests {
         );
         assert_eq!(launch_id_of("mod-display.json"), None);
         assert_eq!(launch_id_of("launch..lock"), None);
+        assert_eq!(launch_id_of("launch.a.b.lock"), None);
         assert_eq!(launch_id_of("server-runtime.json"), None);
         assert_eq!(launch_id_of(OWNERSHIP_GUARD_FILE), None);
     }
