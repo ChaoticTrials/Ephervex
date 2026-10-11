@@ -14447,6 +14447,64 @@ mod tests {
         assert!(source.contains("ListView, Palette, ScrollView"));
     }
 
+    /// The message ids the markup passes to one `GuiI18n` callback by literal.
+    fn markup_message_ids(callback: &str) -> Vec<&'static str> {
+        let markup = ui_markup();
+        let call = format!("GuiI18n.{callback}(\"");
+        markup
+            .match_indices(&call)
+            .filter_map(|(at, _)| {
+                let rest = &markup[at + call.len()..];
+                rest.find('"').map(|end| &rest[..end])
+            })
+            .collect()
+    }
+
+    /// A message the markup formats through `GuiI18n.value`, `.count`, or
+    /// `.values` must read the argument names that bridge supplies, or the
+    /// window shows the unfilled placeable.
+    #[test]
+    fn interface_messages_read_the_arguments_the_bridge_supplies() {
+        let bridges: [(&str, &[&str]); 3] = [
+            ("value", &["value"]),
+            ("count", &["count"]),
+            ("values", &["first", "second"]),
+        ];
+        for (callback, names) in bridges {
+            let ids = markup_message_ids(callback);
+            assert!(!ids.is_empty(), "no `{callback}` calls found in the markup");
+            for id in ids {
+                assert!(has(id), "`{id}` is not a message");
+                let text = ephervex_i18n::lookup_args(
+                    id,
+                    names.iter().map(|name| {
+                        let value = if *name == "count" {
+                            Arg::from(7_usize)
+                        } else {
+                            Arg::from(format!("<{name}>"))
+                        };
+                        (*name, value)
+                    }),
+                );
+                assert!(
+                    !text.contains("{$"),
+                    "`{id}` leaves a placeable open: {text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mod_clash_progress_shows_the_position_in_the_clash_list() {
+        let text = ephervex_i18n::lookup_args(
+            "gui-mod-clash-progress",
+            [("first", Arg::from("1")), ("second", Arg::from("3"))],
+        );
+        assert!(text.contains('1') && text.contains("of") && text.contains('3'));
+        assert!(!text.contains("{$"), "{text}");
+        assert!(markup_message_ids("values").contains(&"gui-mod-clash-progress"));
+    }
+
     /// Interface text follows the size the user chose, which it can only do
     /// while every `font-size` reads a `Theme` token. The separate size the
     /// diagnostics and console views use is the one exception, and it is
