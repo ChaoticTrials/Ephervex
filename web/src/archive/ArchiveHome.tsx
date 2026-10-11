@@ -72,14 +72,23 @@ export default function ArchiveHome({ overview }: { overview: Overview }): React
       <main className="archive-root">
         <header className="archive-hero">
           <div className="container archive-hero-inner">
-            <span className="archive-kicker">EPHERVEX ARCHIVE / THE FORGEJO ERA</span>
-            <Heading as="h1">Road to <em>v1.0.0</em></Heading>
-            <p>The permanent archive of Ephervex’s Forgejo issues and pull requests.</p>
-            {testing && (
-              <p className="archive-preview" role="status">
-                <strong>Test build.</strong> Real export; publication review pending.
-              </p>
-            )}
+            <div className="archive-hero-copy">
+              <span className="archive-kicker">EPHERVEX ARCHIVE / THE FORGEJO ERA</span>
+              <Heading as="h1">Road to <em>v1.0.0</em></Heading>
+              <p>The permanent archive of Ephervex's Forgejo issues and pull requests.</p>
+              <a className="archive-hero-link" href="#explore">Explore the records <span aria-hidden="true">→</span></a>
+              {testing && (
+                <p className="archive-preview" role="status">
+                  <strong>Test build.</strong> Real export; publication review pending.
+                </p>
+              )}
+            </div>
+            <div className="archive-hero-index">
+              <span>THE PRESERVED RECORD</span>
+              <strong>{entries.length.toLocaleString('en-US')}</strong>
+              <span>issues and pull requests</span>
+              <small>Original Forgejo numbers and archive URLs retained.</small>
+            </div>
           </div>
         </header>
         <div className="container archive-body">
@@ -91,19 +100,19 @@ export default function ArchiveHome({ overview }: { overview: Overview }): React
             <div className="archive-stats">
               <button type="button" aria-pressed={filters.kind === 'issue'}
                 onClick={() => selectStat({ kind: 'issue' }, filters.kind === 'issue')}>
-                <strong>{stats.issues}</strong><span>Issues <span aria-hidden="true">↗</span></span>
+                <strong>{stats.issues}</strong><span>Issues</span>
               </button>
               <button type="button" aria-pressed={filters.kind === 'pull' && !filters.status}
                 onClick={() => selectStat({ kind: 'pull' }, filters.kind === 'pull' && !filters.status)}>
-                <strong>{stats.pulls}</strong><span>Pull requests <span aria-hidden="true">↗</span></span>
+                <strong>{stats.pulls}</strong><span>Pull requests</span>
               </button>
               <button type="button" aria-pressed={filters.status === 'merged'}
                 onClick={() => selectStat({ kind: 'pull', status: 'merged' }, filters.status === 'merged')}>
-                <strong>{stats.merged}</strong><span>Merged PRs <span aria-hidden="true">↗</span></span>
+                <strong>{stats.merged}</strong><span>Merged PRs</span>
               </button>
               <button type="button" aria-pressed={filters.discussed}
                 onClick={() => selectStat({ discussed: true }, filters.discussed)}>
-                <strong>{stats.discussed}</strong><span>Discussed threads <span aria-hidden="true">↗</span></span>
+                <strong>{stats.discussed}</strong><span>Discussed threads</span>
               </button>
             </div>
           </section>
@@ -175,27 +184,32 @@ export default function ArchiveHome({ overview }: { overview: Overview }): React
                 {visible.map((entry) => (
                   <Link className="archive-entry" to={entry.url} key={entry.url}
                     aria-label={`${entry.kind === 'issue' ? 'Issue' : 'Pull request'} #${entry.number}: ${entry.title}`}>
+                    <span className="archive-entry-index" aria-hidden="true">
+                      <small>{entry.kind === 'issue' ? 'ISSUE' : 'PR'}</small>
+                      <strong>#{entry.number}</strong>
+                    </span>
                     <div className="archive-entry-copy">
                       <div className="archive-entry-meta">
-                        <span className="archive-type">{entry.kind === 'issue' ? 'ISSUE' : 'PULL'} #{entry.number}</span>
                         <span className={`archive-state ${entry.merged ? 'archive-state-merged' : ''}`}>
                           {entry.merged ? 'Merged' : entry.state}
                         </span>
                         <time dateTime={entry.createdAt ?? undefined}>{dateLabel(entry.createdAt)}</time>
                       </div>
                       <h3><ArchiveTitle text={entry.title} /></h3>
-                      <span className="archive-entry-byline">by {entry.author}
-                        {entry.commentCount > 0 ? ` · ${entry.commentCount} comments` : ''}
-                      </span>
+                      <div className="archive-entry-footer">
+                        <span className="archive-entry-byline">by {entry.author}
+                          {entry.commentCount > 0 ? ` · ${entry.commentCount} comments` : ''}
+                        </span>
+                        <div className="archive-tags" aria-label="Labels and milestone">
+                          {entry.milestone && <span className="archive-milestone">{entry.milestone}</span>}
+                          {entry.labels.slice(0, 3).map((label) => (
+                            <ArchiveLabel key={label} name={label} color={overview.labelColors[label]} />
+                          ))}
+                          {entry.labels.length > 3 && <span className="archive-more-labels">+{entry.labels.length - 3}</span>}
+                        </div>
+                      </div>
                     </div>
-                    <div className="archive-tags" aria-label="Labels and milestone">
-                      {entry.milestone && <span className="archive-milestone">{entry.milestone}</span>}
-                      {entry.labels.slice(0, 3).map((label) => (
-                        <ArchiveLabel key={label} name={label} color={overview.labelColors[label]} />
-                      ))}
-                      {entry.labels.length > 3 && <span className="archive-more-labels">+{entry.labels.length - 3}</span>}
-                    </div>
-                    <span className="archive-entry-arrow" aria-hidden="true">↗</span>
+                    <span className="archive-entry-arrow" aria-hidden="true">→</span>
                   </Link>
                 ))}
               </div>
