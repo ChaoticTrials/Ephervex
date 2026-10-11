@@ -1250,7 +1250,7 @@ export component AppWindow inherits Window {
                                     unrecorded: host.isolation-unrecorded; unidentifiable: host.isolation-unidentifiable; missing: host.isolation-missing;
                                     linked-servers: host.isolation-linked-servers; remaining-candidates: host.isolation-remaining-candidates; pinned: host.isolation-pinned; required-dependencies: host.isolation-required-dependencies; history: host.isolation-history;
                                     reduced-confidence: host.isolation-reduced-confidence; query: host.isolation-query;
-                                    accept-unrecorded: host.isolation-accept-unrecorded; accept-missing: host.isolation-accept-missing; error: root.modal-error;
+                                    accept-unrecorded: host.isolation-accept-unrecorded; accept-missing: host.isolation-accept-missing; error: host.isolation-error;
                                     begin => { root.open-isolation(host.kind, host.id); }
                                     filter(query) => { root.filter-isolation-candidates(host.kind, host.id, query); }
                                     toggle-pin(path, selected) => { root.toggle-isolation-pin(host.kind, host.id, path, selected); }
@@ -1266,7 +1266,7 @@ export component AppWindow inherits Window {
                                 }
                                 if host.available && host.kind == "client" && pane.surface == "Settings" : ClientRuntimeForm {
                                     host: host;
-                                    error: root.modal-error;
+                                    error: host.runtime-error;
                                     save(id, java, min, max, args) => { root.save-instance-runtime(id, java, min, max, args); }
                                     clear(id) => { root.clear-instance-runtime(id); }
                                     allow-pack-mod-changes(id, allow) => { root.set-allow-pack-mod-version-changes(id, allow); }

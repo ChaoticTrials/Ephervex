@@ -1516,6 +1516,15 @@ impl ModalScope {
     }
 }
 
+/// The host surface an error reported for one host is shown on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostErrorSurface {
+    /// A client's runtime settings form.
+    Settings,
+    /// A host's mod isolation surface.
+    Isolation,
+}
+
 #[derive(Debug, Clone)]
 pub enum Event {
     ServerTool {
@@ -1798,6 +1807,13 @@ pub enum Event {
     /// when that is still open, as a toast otherwise.
     ModalError {
         scope: ModalScope,
+        message: String,
+    },
+    /// A failure on one host's surface, shown wherever a pane shows that
+    /// surface of that host and nowhere else.
+    HostError {
+        host: InstalledHost,
+        surface: HostErrorSurface,
         message: String,
     },
     /// The background service could not start, so no command will ever be
@@ -2336,7 +2352,7 @@ fn refuse_while_changing(
 }
 
 /// Refuses a save into a host's settings while a change is rewriting its
-/// files, on the screen the fields are on.
+/// files, on the settings form of that host.
 fn refuse_save_while_changing(
     changing: &ChangingHosts,
     host: InstalledHost,
@@ -2344,10 +2360,7 @@ fn refuse_save_while_changing(
 ) -> bool {
     let refusal = change_in_flight(changing, host);
     if let Some(refusal) = refusal {
-        let _ = events.send(Event::ModalError {
-            scope: ModalScope::Anywhere,
-            message: lookup(refusal),
-        });
+        send_host_error_message(events, host, HostErrorSurface::Settings, lookup(refusal));
     }
     refusal.is_some()
 }
@@ -2702,10 +2715,12 @@ fn run_worker(
                 let jvm_args = match crate::jvm_arguments::parse(&jvm_args) {
                     Ok(arguments) => arguments,
                     Err(error) => {
-                        let _ = events.send(Event::ModalError {
-                            scope: ModalScope::Anywhere,
-                            message: lookup(error.message_id()),
-                        });
+                        send_host_error_message(
+                            &events,
+                            InstalledHost::Instance(instance),
+                            HostErrorSurface::Settings,
+                            lookup(error.message_id()),
+                        );
                         continue;
                     }
                 };
@@ -2717,10 +2732,12 @@ fn run_worker(
                             .map(|maximum| (minimum, maximum))
                     });
                 let Ok((min_memory_mib, max_memory_mib)) = memory else {
-                    let _ = events.send(Event::ModalError {
-                        scope: ModalScope::Anywhere,
-                        message: lookup(crate::memory_input::NotANumber::MESSAGE_ID),
-                    });
+                    send_host_error_message(
+                        &events,
+                        InstalledHost::Instance(instance),
+                        HostErrorSurface::Settings,
+                        lookup(crate::memory_input::NotANumber::MESSAGE_ID),
+                    );
                     continue;
                 };
                 let jvm = ephervex_model::JvmSettings {
@@ -2746,10 +2763,15 @@ fn run_worker(
                             let _ = events.send(Event::InstanceRuntime(runtime));
                         }
                     }
-                    // Shown on the screen the fields are on, not as a toast the
+                    // Shown on the form the fields are on, not as a toast the
                     // user has to catch: a refused save leaves them looking at
                     // values that are not what the instance has.
-                    Err(error) => send_modal_error(&events, &error),
+                    Err(error) => send_host_error(
+                        &events,
+                        InstalledHost::Instance(instance),
+                        HostErrorSurface::Settings,
+                        &error,
+                    ),
                 }
             }
             Command::SetLinkedPair {
@@ -3890,7 +3912,9 @@ fn run_worker(
                             &refreshed_mods,
                         );
                     }
-                    Err(error) => send_modal_error(&events, &error),
+                    Err(error) => {
+                        send_host_error(&events, host, HostErrorSurface::Isolation, &error);
+                    }
                 }
                 let _ = events.send(Event::IsolationSettled { request });
             }
@@ -3916,7 +3940,9 @@ fn run_worker(
                         );
                         send_host_mods(&app, host, &events, &refreshed_mods, false);
                     }
-                    Err(error) => send_modal_error(&events, &error),
+                    Err(error) => {
+                        send_host_error(&events, host, HostErrorSurface::Isolation, &error);
+                    }
                 }
                 let _ = events.send(Event::IsolationSettled { request });
             }
@@ -3938,7 +3964,9 @@ fn run_worker(
                         });
                         send_host_mods(&app, host, &events, &refreshed_mods, false);
                     }
-                    Err(error) => send_modal_error(&events, &error),
+                    Err(error) => {
+                        send_host_error(&events, host, HostErrorSurface::Isolation, &error);
+                    }
                 }
                 let _ = events.send(Event::IsolationSettled { request });
             }
@@ -6749,13 +6777,13 @@ fn send_isolation_state(
         Ok(None) if open => match app.plan_isolation(host, &[]) {
             Ok(plan) => isolation_plan_data(host, &plan),
             Err(error) => {
-                send_modal_error(events, &error);
+                send_host_error(events, host, HostErrorSurface::Isolation, &error);
                 return;
             }
         },
         Ok(None) => inactive_isolation_data(host),
         Err(error) => {
-            send_modal_error(events, &error);
+            send_host_error(events, host, HostErrorSurface::Isolation, &error);
             return;
         }
     };
@@ -11097,6 +11125,30 @@ fn send_scoped_modal_error(events: &Sender<Event>, scope: ModalScope, error: &Co
     });
 }
 
+/// Reports a failure to the surface of `host` it is about, in every pane
+/// showing that surface of that host and in no other.
+fn send_host_error(
+    events: &Sender<Event>,
+    host: InstalledHost,
+    surface: HostErrorSurface,
+    error: &CoreError,
+) {
+    send_host_error_message(events, host, surface, logged_failure_message(error));
+}
+
+fn send_host_error_message(
+    events: &Sender<Event>,
+    host: InstalledHost,
+    surface: HostErrorSurface,
+    message: String,
+) {
+    let _ = events.send(Event::HostError {
+        host,
+        surface,
+        message,
+    });
+}
+
 /// The user-facing text of a failed submission, with the technical detail
 /// logged beside it.
 fn logged_failure_message(error: &CoreError) -> String {
@@ -12977,7 +13029,7 @@ mod tests {
     }
 
     #[test]
-    fn a_settings_save_is_refused_on_its_screen_while_the_host_changes() {
+    fn a_settings_save_is_refused_on_its_hosts_form_while_the_host_changes() {
         let hosts: ChangingHosts = Arc::new(Mutex::new(HashMap::new()));
         let (events, received) = mpsc::channel();
         let host = InstalledHost::Instance(ephervex_model::InstanceId::new());
@@ -12991,10 +13043,12 @@ mod tests {
         assert!(
             matches!(
                 &refusal,
-                Event::ModalError { scope, message }
-                    if *scope == ModalScope::Anywhere && *message == lookup("gui-snapshot-busy")
+                Event::HostError { host: reported, surface, message }
+                    if *reported == host
+                        && *surface == HostErrorSurface::Settings
+                        && *message == lookup("gui-snapshot-busy")
             ),
-            "the change in flight is named where the fields are: {refusal:?}"
+            "the change in flight is named on the host's own form: {refusal:?}"
         );
         drop(in_flight);
         assert!(!refuse_save_while_changing(&hosts, host, &events));

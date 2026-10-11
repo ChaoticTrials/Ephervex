@@ -597,6 +597,8 @@ export struct HostView {
     runtime-jvm-args: string,
     runtime-pinned: bool,
     runtime-global: string,
+    // Why the newest save of the client's runtime settings was refused.
+    runtime-error: string,
     allow-pack-mod-changes: bool,
     // Bumped each time the stored settings are read, so an open form
     // starts over from them.
@@ -659,6 +661,8 @@ export struct HostView {
     isolation-accept-unrecorded: bool,
     isolation-accept-missing: bool,
     isolation-query: string,
+    // Why the newest isolation change the user made on this host was refused.
+    isolation-error: string,
     // The durable workflow attached to the host, shown above every one of
     // its surfaces. The workspace renders these without knowing which
     // feature owns them.

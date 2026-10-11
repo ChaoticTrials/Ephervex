@@ -3008,7 +3008,6 @@ fn register_isolation_actions(ui: &AppWindow, commands: &Sender<Command>, worksp
     });
 
     let views = workspace.clone();
-    let weak = ui.as_weak();
     ui.on_dismiss_isolation(move |kind, id| {
         let Some(host) = backend::parse_mod_host(&kind, &id) else {
             return;
@@ -3025,9 +3024,7 @@ fn register_isolation_actions(ui: &AppWindow, commands: &Sender<Command>, worksp
                 view.workflow_actions = model(Vec::new());
             });
         }
-        if let Some(ui) = weak.upgrade() {
-            ui.set_modal_error(SharedString::default());
-        }
+        views.update(host, |view| view.isolation_error = SharedString::default());
     });
 
     let sender = commands.clone();
@@ -3179,9 +3176,8 @@ fn register_isolation_actions(ui: &AppWindow, commands: &Sender<Command>, worksp
     });
 
     let views = workspace.clone();
-    let weak = ui.as_weak();
     ui.on_discard_isolation_setup(move |kind, id| {
-        let (Some(ui), Some(host)) = (weak.upgrade(), backend::parse_mod_host(&kind, &id)) else {
+        let Some(host) = backend::parse_mod_host(&kind, &id) else {
             return;
         };
         // A start in flight would be orphaned: its session would begin with
@@ -3190,7 +3186,7 @@ fn register_isolation_actions(ui: &AppWindow, commands: &Sender<Command>, worksp
         let current = flow.setup(host).is_some() && flow.pending.is_none();
         drop(flow);
         if current {
-            discard_isolation_setup(&ui, &views, host);
+            discard_isolation_setup(&views, host);
         }
     });
 
@@ -5384,12 +5380,18 @@ fn claim_server_start(
 
 /// The instance workspace's Settings tab: Java/JVM overrides and the
 /// pack-owned-mod-mutation opt-in.
-fn register_instance_runtime_actions(ui: &AppWindow, commands: &Sender<Command>) {
+fn register_instance_runtime_actions(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    workspace: &Workspace,
+) {
     let sender = commands.clone();
+    let views = workspace.clone();
     ui.on_save_instance_runtime(move |id, java, min, max, args| {
         let Some(instance) = backend::parse_instance_id(&id) else {
             return;
         };
+        clear_runtime_error(&views, instance);
         send(
             &sender,
             Command::SaveInstanceRuntime {
@@ -5403,8 +5405,10 @@ fn register_instance_runtime_actions(ui: &AppWindow, commands: &Sender<Command>)
     });
 
     let sender = commands.clone();
+    let views = workspace.clone();
     ui.on_clear_instance_runtime(move |id| {
         if let Some(instance) = backend::parse_instance_id(&id) {
+            clear_runtime_error(&views, instance);
             send(
                 &sender,
                 Command::SaveInstanceRuntime {
@@ -5429,8 +5433,16 @@ fn register_instance_runtime_actions(ui: &AppWindow, commands: &Sender<Command>)
     });
 }
 
+/// Forgets why the client's last runtime save was refused, so a new attempt
+/// starts from a form with no verdict on it.
+fn clear_runtime_error(workspace: &Workspace, instance: ephervex_model::InstanceId) {
+    workspace.update(InstalledHost::Instance(instance), |view| {
+        view.runtime_error = SharedString::default();
+    });
+}
+
 fn register_server_actions(ui: &AppWindow, commands: &Sender<Command>, workspace: &Workspace) {
-    register_instance_runtime_actions(ui, commands);
+    register_instance_runtime_actions(ui, commands, workspace);
 
     let sender = commands.clone();
     ui.on_repair_server(move |id| {
@@ -6635,7 +6647,7 @@ fn apply_artifact_cache_event(ui: &AppWindow, event: Event) {
 
 /// Shows a host's isolation state in every pane showing the host, answering
 /// whether the workspace still shows it.
-fn apply_isolation_data(ui: &AppWindow, workspace: &Workspace, data: IsolationData) -> bool {
+fn apply_isolation_data(workspace: &Workspace, data: IsolationData) -> bool {
     let Some(host) = backend::parse_mod_host(&data.host_kind, &data.host) else {
         return false;
     };
@@ -6700,8 +6712,9 @@ fn apply_isolation_data(ui: &AppWindow, workspace: &Workspace, data: IsolationDa
         view.workflow_title = workflow.title;
         view.workflow_summary = workflow.summary;
         view.workflow_actions = workflow.actions;
+        // Whatever refused an earlier change is answered by the state read now.
+        view.isolation_error = SharedString::default();
     });
-    ui.set_modal_error(SharedString::default());
     true
 }
 
@@ -6774,7 +6787,7 @@ const fn isolation_host_kind(host: InstalledHost) -> &'static str {
 ///
 /// Only a setup is affected: an active session is durable and is never
 /// discarded here, and a start already sent carries the plan it was given.
-fn apply_isolation_basis(ui: &AppWindow, workspace: &Workspace, host: InstalledHost, basis: u64) {
+fn apply_isolation_basis(workspace: &Workspace, host: InstalledHost, basis: u64) {
     let flow = workspace.isolation.borrow();
     let stale = flow.pending.is_none()
         && flow.setup(host).is_some_and(|setup| {
@@ -6782,19 +6795,19 @@ fn apply_isolation_basis(ui: &AppWindow, workspace: &Workspace, host: InstalledH
         });
     drop(flow);
     if stale {
-        discard_isolation_setup(ui, workspace, host);
+        discard_isolation_setup(workspace, host);
     }
 }
 
 /// Returns a host's Isolation surface to its empty state without leaving it.
-fn discard_isolation_setup(ui: &AppWindow, workspace: &Workspace, host: InstalledHost) {
+fn discard_isolation_setup(workspace: &Workspace, host: InstalledHost) {
     workspace.isolation.borrow_mut().discard(host);
     workspace.update(host, |view| {
         view.isolation_candidates = model(Vec::new());
         view.isolation_phase = "none".into();
         view.isolation_query = SharedString::default();
+        view.isolation_error = SharedString::default();
     });
-    ui.set_modal_error(SharedString::default());
 }
 
 /// A setup's candidates through its filter, each marked when it is pinned.
@@ -7641,7 +7654,7 @@ fn apply_event(
         } => {
             if let Some(host) = backend::parse_mod_host(&data.host_kind, &data.host)
                 && workspace.isolation.borrow().accepts(host, generation)
-                && apply_isolation_data(ui, workspace, data)
+                && apply_isolation_data(workspace, data)
                 && open
             {
                 workspace.reveal_surface(ui, host, Surface::Isolation);
@@ -7661,7 +7674,7 @@ fn apply_event(
             apply_activities(ui, &activities.borrow());
         }
         Event::IsolationBasis { host, basis } => {
-            apply_isolation_basis(ui, workspace, host, basis);
+            apply_isolation_basis(workspace, host, basis);
         }
         Event::IsolationSettled { request } => {
             if workspace.isolation.borrow_mut().settle(request) {
@@ -7798,6 +7811,11 @@ fn apply_event(
         Event::ModImpact(impact) => apply_mod_impact(ui, &impact),
         Event::ModRequirements(needs) => apply_mod_requirements(ui, &needs),
         Event::ModalError { scope, message } => apply_modal_error(ui, scope, message),
+        Event::HostError {
+            host,
+            surface,
+            message,
+        } => apply_host_error(workspace, host, surface, message),
         Event::BackendUnavailable(message) => apply_backend_unavailable(ui, message),
         Event::CloseModal(scope) => close_modal_for(ui, scope),
         // A new instance is what the user was just looking at the dialog for,
@@ -9321,6 +9339,20 @@ fn apply_backend_unavailable(ui: &AppWindow, message: String) {
     ui.set_loading(false);
 }
 
+/// Shows a failure on the one surface of the one host it is about. Every pane
+/// showing that surface of that host reads it; no other host's pane does.
+fn apply_host_error(
+    workspace: &Workspace,
+    host: InstalledHost,
+    surface: backend::HostErrorSurface,
+    message: String,
+) {
+    workspace.update(host, |view| match surface {
+        backend::HostErrorSurface::Settings => view.runtime_error = message.into(),
+        backend::HostErrorSurface::Isolation => view.isolation_error = message.into(),
+    });
+}
+
 /// Puts a failure where the user can read it: in the dialog it is about while
 /// that is still open, as a toast once it is gone.
 fn apply_modal_error(ui: &AppWindow, scope: backend::ModalScope, message: String) {
@@ -10037,7 +10069,6 @@ mod tests {
 
         assert!(workspace.isolation.borrow().accepts(host, 0));
         assert!(apply_isolation_data(
-            &ui,
             &workspace,
             isolation_data(&host.id(), true, "round")
         ));
@@ -10058,11 +10089,11 @@ mod tests {
             view.isolation_accept_missing = true;
         });
 
-        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), false, "setup"));
+        apply_isolation_data(&workspace, isolation_data(&host.id(), false, "setup"));
         assert!(!first_view(&ui).isolation_accept_unrecorded);
         assert!(!first_view(&ui).isolation_accept_missing);
 
-        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), false, "none"));
+        apply_isolation_data(&workspace, isolation_data(&host.id(), false, "none"));
         assert_eq!(first_view(&ui).isolation_phase, "none");
         assert!(first_view(&ui).workflow_id.is_empty());
     }
@@ -10073,7 +10104,7 @@ mod tests {
         let (kind, id) = kind_and_id(host);
         ui.invoke_show_pane_surface(1, "Mods".into());
 
-        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), false, "result"));
+        apply_isolation_data(&workspace, isolation_data(&host.id(), false, "result"));
         let view = first_view(&ui);
         assert_eq!(view.workflow_id, ISOLATION_WORKFLOW);
         assert_eq!(view.workflow_title, lookup("gui-isolation-finished"));
@@ -10095,7 +10126,6 @@ mod tests {
         let elsewhere = client_host();
 
         assert!(!apply_isolation_data(
-            &ui,
             &workspace,
             isolation_data(&elsewhere.id(), true, "round")
         ));
@@ -10117,11 +10147,11 @@ mod tests {
         let other = server_host();
         ui.invoke_follow_host(2, "server".into(), other.id().into(), "Isolation".into());
 
-        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), true, "round"));
+        apply_isolation_data(&workspace, isolation_data(&host.id(), true, "round"));
         let mut setup = isolation_data(&other.id(), false, "setup");
         setup.host_kind = "server".to_owned();
         setup.candidates = candidates(&["lithium"]);
-        apply_isolation_data(&ui, &workspace, setup);
+        apply_isolation_data(&workspace, setup);
 
         let views = ui.get_host_views();
         let client_view = views.row_data(0).expect("client");
@@ -10137,12 +10167,134 @@ mod tests {
         assert_eq!(client_view.isolation_candidates.row_count(), 0);
     }
 
+    /// The view of `host`, which every pane showing it reads.
+    fn view_of(ui: &AppWindow, host: InstalledHost) -> HostView {
+        ui.get_host_views()
+            .iter()
+            .find(|view| view.kind == host.kind() && view.id == host.id().as_str())
+            .expect("the host is shown")
+    }
+
+    /// A client open on its Isolation surface beside its paired server.
+    fn client_beside_its_server() -> (AppWindow, Workspace, InstalledHost, InstalledHost) {
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        let (client, server) = (client_host(), server_host());
+        let (clients, servers) = paired_rows(client, server, false, false);
+        workspace.state.borrow_mut().set_rows(clients, servers);
+        workspace.open(&ui, client, Surface::Isolation);
+        ui.invoke_split_pane_beside(1);
+        ui.invoke_show_linked_pair(1, "server".into(), server.id().into());
+        drop(commands);
+        (ui, workspace, client, server)
+    }
+
+    #[test]
+    fn an_error_reported_for_one_host_is_shown_only_on_that_host() {
+        let (ui, workspace, client, server) = client_beside_its_server();
+
+        for (surface, read) in [
+            (
+                backend::HostErrorSurface::Isolation,
+                (|view: &HostView| view.isolation_error.to_string()) as fn(&HostView) -> String,
+            ),
+            (backend::HostErrorSurface::Settings, |view: &HostView| {
+                view.runtime_error.to_string()
+            }),
+        ] {
+            apply_host_error(&workspace, client, surface, "Refused".to_owned());
+
+            assert_eq!(read(&view_of(&ui, client)), "Refused");
+            assert_eq!(
+                read(&view_of(&ui, server)),
+                "",
+                "the other host's panes never show it"
+            );
+        }
+        assert_eq!(ui.get_modal_error(), "", "no dialog is written into");
+    }
+
+    #[test]
+    fn an_isolation_reload_for_another_host_keeps_a_hosts_error() {
+        let (ui, workspace, client, server) = client_beside_its_server();
+        apply_host_error(
+            &workspace,
+            client,
+            backend::HostErrorSurface::Isolation,
+            "Refused".to_owned(),
+        );
+        apply_host_error(
+            &workspace,
+            server,
+            backend::HostErrorSurface::Isolation,
+            "Also refused".to_owned(),
+        );
+
+        let mut reload = isolation_data(&server.id(), false, "none");
+        "server".clone_into(&mut reload.host_kind);
+        assert!(apply_isolation_data(&workspace, reload));
+
+        assert_eq!(view_of(&ui, server).isolation_error, "");
+        assert_eq!(view_of(&ui, client).isolation_error, "Refused");
+
+        apply_isolation_data(&workspace, isolation_data(&client.id(), false, "none"));
+        assert_eq!(view_of(&ui, client).isolation_error, "");
+    }
+
+    #[test]
+    fn an_isolation_reload_leaves_a_dialogs_error_alone() {
+        let (ui, workspace, _, host) = isolation_window();
+        ui.set_modal("rename".into());
+        ui.set_modal_error("Name taken".into());
+
+        apply_isolation_data(&workspace, isolation_data(&host.id(), false, "none"));
+
+        assert_eq!(ui.get_modal_error(), "Name taken");
+    }
+
+    #[test]
+    fn a_runtime_save_starts_from_a_form_without_the_last_refusal() {
+        let (ui, workspace, _, host) = isolation_window();
+        let (sender, commands) = std::sync::mpsc::channel();
+        register_instance_runtime_actions(&ui, &sender, &workspace);
+        let (_, id) = kind_and_id(host);
+
+        apply_host_error(
+            &workspace,
+            host,
+            backend::HostErrorSurface::Settings,
+            "Not a Java".to_owned(),
+        );
+        ui.invoke_save_instance_runtime(
+            id.clone(),
+            "/usr/bin/java".into(),
+            "".into(),
+            "".into(),
+            "".into(),
+        );
+
+        assert_eq!(first_view(&ui).runtime_error, "");
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::SaveInstanceRuntime { .. })
+        ));
+
+        apply_host_error(
+            &workspace,
+            host,
+            backend::HostErrorSurface::Settings,
+            "Not a Java".to_owned(),
+        );
+        ui.invoke_clear_instance_runtime(id);
+        assert_eq!(first_view(&ui).runtime_error, "");
+    }
+
     /// Another pane on the same client switching surfaces or closing leaves
     /// the isolation round the first pane shows exactly as it was.
     #[test]
     fn another_pane_switching_or_closing_leaves_an_isolation_round_alone() {
         let (ui, workspace, isolation_commands, host) = isolation_window();
-        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), true, "round"));
+        apply_isolation_data(&workspace, isolation_data(&host.id(), true, "round"));
         ui.invoke_split_pane_beside(1);
         ui.invoke_show_pane_surface(2, "Logs".into());
         ui.invoke_show_pane_surface(2, "Mods".into());
@@ -10164,7 +10316,7 @@ mod tests {
     #[test]
     fn the_isolation_banner_stays_with_the_pane_showing_the_round() {
         let (ui, workspace, _, host) = isolation_window();
-        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), true, "round"));
+        apply_isolation_data(&workspace, isolation_data(&host.id(), true, "round"));
         assert_eq!(first_view(&ui).workflow_pane, 1);
 
         ui.invoke_split_pane_beside(1);
@@ -10187,11 +10339,11 @@ mod tests {
         let (kind, id) = kind_and_id(host);
         let mut narrowed = isolation_data(&host.id(), false, "setup");
         narrowed.candidates = candidates(&["e"]);
-        apply_isolation_data(&ui, &workspace, narrowed);
+        apply_isolation_data(&workspace, narrowed);
         ui.invoke_toggle_isolation_pin(kind, id, "mods/e.jar".into(), true);
 
         // What the worker sends after a restore when no session exists.
-        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), false, "none"));
+        apply_isolation_data(&workspace, isolation_data(&host.id(), false, "none"));
         assert_eq!(first_view(&ui).isolation_phase, "none");
         {
             let flow = workspace.isolation.borrow();
@@ -10202,7 +10354,7 @@ mod tests {
 
         let mut restored = isolation_data(&host.id(), false, "setup");
         restored.candidates = candidates(&["a", "b", "e"]);
-        apply_isolation_data(&ui, &workspace, restored);
+        apply_isolation_data(&workspace, restored);
         let rows = first_view(&ui).isolation_candidates;
         assert_eq!(rows.row_count(), 3);
         assert!(rows.iter().all(|row| !row.selected));
@@ -10214,7 +10366,7 @@ mod tests {
         let (kind, id) = kind_and_id(host);
         let mut setup = isolation_data(&host.id(), false, "setup");
         setup.candidates = candidates(&["a"]);
-        apply_isolation_data(&ui, &workspace, setup);
+        apply_isolation_data(&workspace, setup);
         ui.invoke_toggle_isolation_pin(kind.clone(), id.clone(), "mods/a.jar".into(), true);
         let setup_generation = workspace
             .isolation
@@ -10245,7 +10397,7 @@ mod tests {
     fn a_repeated_answer_cannot_submit_two_answers_for_one_round() {
         let (ui, workspace, commands, host) = isolation_window();
         let (kind, id) = kind_and_id(host);
-        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), true, "round"));
+        apply_isolation_data(&workspace, isolation_data(&host.id(), true, "round"));
 
         ui.invoke_answer_isolation(kind.clone(), id.clone(), "present".into());
         ui.invoke_answer_isolation(kind.clone(), id.clone(), "present".into());
@@ -10267,7 +10419,7 @@ mod tests {
         let first = workspace.single_pane().expect("one pane");
         workspace.change_pane(&ui, first, |layout| layout.split_beside(first).is_ok());
         ui.invoke_show_pane_surface(2, "Logs".into());
-        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), true, "round"));
+        apply_isolation_data(&workspace, isolation_data(&host.id(), true, "round"));
         assert_eq!(ui.get_host_views().row_count(), 1, "one host, one view");
 
         ui.invoke_workflow_action(
@@ -10290,7 +10442,7 @@ mod tests {
         let first = workspace.single_pane().expect("one pane");
         workspace.change_pane(&ui, first, |layout| layout.split_beside(first).is_ok());
         ui.invoke_show_pane_surface(1, "Logs".into());
-        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), true, "round"));
+        apply_isolation_data(&workspace, isolation_data(&host.id(), true, "round"));
 
         ui.invoke_workflow_action(
             1,
@@ -10318,7 +10470,7 @@ mod tests {
         let (kind, id) = kind_and_id(host);
         let mut blocked = isolation_data(&host.id(), true, "round");
         blocked.recovery = "running".to_owned();
-        apply_isolation_data(&ui, &workspace, blocked);
+        apply_isolation_data(&workspace, blocked);
 
         assert_eq!(first_view(&ui).isolation_recovery, "running");
         let actions: Vec<_> = first_view(&ui)
@@ -10355,7 +10507,7 @@ mod tests {
         let mut still_blocked = isolation_data(&host.id(), true, "round");
         still_blocked.recovery = "failed".to_owned();
         still_blocked.recovery_detail = "The jar is missing.".to_owned();
-        apply_isolation_data(&ui, &workspace, still_blocked);
+        apply_isolation_data(&workspace, still_blocked);
         assert!(workspace.isolation.borrow_mut().settle(request));
         clear_host_busy(&ui);
         assert_eq!(
@@ -10370,7 +10522,7 @@ mod tests {
         let Ok(Command::RecoverIsolation { request, .. }) = commands.try_recv() else {
             panic!("a failed recovery can be retried");
         };
-        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), true, "round"));
+        apply_isolation_data(&workspace, isolation_data(&host.id(), true, "round"));
         assert!(workspace.isolation.borrow_mut().settle(request));
         clear_host_busy(&ui);
         assert_eq!(first_view(&ui).isolation_recovery, "");
@@ -10387,7 +10539,7 @@ mod tests {
     fn a_pending_isolation_change_refuses_every_other_change_until_it_settles() {
         let (ui, workspace, commands, host) = isolation_window();
         let (kind, id) = kind_and_id(host);
-        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), true, "round"));
+        apply_isolation_data(&workspace, isolation_data(&host.id(), true, "round"));
 
         ui.invoke_undo_isolation(kind.clone(), id.clone());
         ui.invoke_undo_isolation(kind.clone(), id.clone());
@@ -10426,7 +10578,7 @@ mod tests {
     fn a_setup_cannot_be_discarded_while_its_start_is_pending() {
         let (ui, workspace, commands, host) = isolation_window();
         let (kind, id) = kind_and_id(host);
-        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), false, "setup"));
+        apply_isolation_data(&workspace, isolation_data(&host.id(), false, "setup"));
         let generation = workspace
             .isolation
             .borrow()
@@ -10875,7 +11027,7 @@ mod tests {
         let (isolation_sender, isolation_commands) = std::sync::mpsc::channel();
         register_isolation_actions(&ui, &isolation_sender, &workspace);
         workspace.open(&ui, host, Surface::Isolation);
-        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), false, "setup"));
+        apply_isolation_data(&workspace, isolation_data(&host.id(), false, "setup"));
         ui.invoke_start_isolation("client".into(), host.id().into(), false, false);
         assert!(isolation_commands.try_recv().is_err());
 
@@ -11238,7 +11390,7 @@ mod tests {
         let mut setup = isolation_data(&host.id(), false, "setup");
         setup.basis = Some(basis);
         setup.candidates = candidates(&["a"]);
-        apply_isolation_data(&ui, &workspace, setup);
+        apply_isolation_data(&workspace, setup);
         (ui, workspace, host)
     }
 
@@ -11249,21 +11401,21 @@ mod tests {
             setup.pinned.insert(PathBuf::from("mods/a.jar"));
         }
 
-        apply_isolation_basis(&ui, &workspace, host, 7);
+        apply_isolation_basis(&workspace, host, 7);
         assert_eq!(
             first_view(&ui).isolation_phase,
             "setup",
             "an unchanged host keeps its setup"
         );
         let other = client_host();
-        apply_isolation_basis(&ui, &workspace, other, 8);
+        apply_isolation_basis(&workspace, other, 8);
         assert_eq!(
             first_view(&ui).isolation_phase,
             "setup",
             "another host's change is not this one's"
         );
 
-        apply_isolation_basis(&ui, &workspace, host, 8);
+        apply_isolation_basis(&workspace, host, 8);
         assert_eq!(first_view(&ui).isolation_phase, "none");
         assert_eq!(first_view(&ui).isolation_candidates.row_count(), 0);
         let flow = workspace.isolation.borrow();
@@ -11280,7 +11432,7 @@ mod tests {
             .borrow_mut()
             .dispatch(host, IsolationMutation::Start)
             .expect("a start is sent");
-        apply_isolation_basis(&ui, &workspace, host, 8);
+        apply_isolation_basis(&workspace, host, 8);
         assert_eq!(first_view(&ui).isolation_phase, "setup");
 
         let request = workspace
@@ -11292,8 +11444,8 @@ mod tests {
             .isolation
             .borrow_mut()
             .settle(request.unwrap_or_default());
-        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), true, "round"));
-        apply_isolation_basis(&ui, &workspace, host, 9);
+        apply_isolation_data(&workspace, isolation_data(&host.id(), true, "round"));
+        apply_isolation_basis(&workspace, host, 9);
         assert_eq!(first_view(&ui).isolation_phase, "round");
         assert!(first_view(&ui).isolation_active);
     }
