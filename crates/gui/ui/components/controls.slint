@@ -39,6 +39,64 @@ export component SettingCard inherits Rectangle {
     }
 }
 
+// A focus stop with nothing to see or press, standing at the end of a region
+// that Tab has to stay inside.
+//
+// Tab walks the window in tree order and knows nothing about what is drawn
+// over what, so a dialog does not keep it from reaching the page behind.
+// Edges placed around the dialog catch the walk where it would leave and
+// `reached` sends it back in.
+export component FocusEdge inherits FocusScope {
+    in property <bool> active;
+    callback reached();
+    enabled: root.active;
+    width: 0px;
+    height: 0px;
+    changed has-focus => {
+        if (root.has-focus) {
+            root.reached();
+        }
+    }
+}
+
+// Keyboard focus for a control that the component around it draws.
+//
+// Laid over the control and under its `TouchArea`, so a click is still the
+// pointer's and never moves focus off whatever the user was typing into. Tab
+// reaches it, Enter and Space activate it, and a disabled one is skipped
+// rather than focusable and inert. Every other key is left to bubble, so
+// shortcuts held by a scope further out keep working while a button is
+// focused.
+component KeyboardFocus inherits FocusScope {
+    in property <length> ring-radius: 6px;
+    callback activated();
+    key-pressed(event) => {
+        if (event.text == " " || event.text == Key.Return) {
+            // A held key is swallowed, not repeated: one press is one action.
+            // A control keeps focus when it turns disabled, so the flag is
+            // read again here rather than trusted from when focus arrived.
+            if (!event.repeat && root.enabled) {
+                root.activated();
+            }
+            return accept;
+        }
+        return reject;
+    }
+    // Drawn outside the control, clear of its own edge. Primary buttons,
+    // checked switches, selected chips and hovered controls already have an
+    // accent border, so a ring inside it would only thicken a line that is
+    // there anyway.
+    if root.has-focus && root.enabled : ring := Rectangle {
+        x: -(Theme.focus-ring-offset + Theme.focus-ring-width);
+        y: -(Theme.focus-ring-offset + Theme.focus-ring-width);
+        width: root.width + 2 * (Theme.focus-ring-offset + Theme.focus-ring-width);
+        height: root.height + 2 * (Theme.focus-ring-offset + Theme.focus-ring-width);
+        border-radius: root.ring-radius + Theme.focus-ring-offset + Theme.focus-ring-width;
+        border-width: Theme.focus-ring-width;
+        border-color: Theme.accent;
+    }
+}
+
 export component AppButton inherits Rectangle {
     in property <string> text;
     // Why this button cannot be pressed, shown on hover while it is
@@ -87,6 +145,7 @@ export component AppButton inherits Rectangle {
         horizontal-alignment: center;
         vertical-alignment: center;
     }
+    KeyboardFocus { width: root.width; height: root.height; enabled: root.enabled; activated => { root.clicked(); } }
     // Always enabled, so a disabled button still reports hover and can
     // explain itself. The press is gated on `enabled` instead.
     area := TouchArea {
@@ -126,6 +185,7 @@ export component FavoriteToggle inherits Rectangle {
         image-fit: contain;
         colorize: !root.enabled ? Theme.text-muted : root.favorite ? Theme.warning : Theme.text-secondary;
     }
+    KeyboardFocus { width: root.width; height: root.height; enabled: root.enabled; activated => { root.toggled(); } }
     area := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.toggled(); } }
 }
 
@@ -147,6 +207,7 @@ export component IconButton inherits Rectangle {
     // A disabled button keeps its border and loses its click, so the glyph
     // has to go quiet too or the control still reads as available.
     Image { x: 8px; y: 8px; width: parent.width - 16px; height: parent.height - 16px; source: root.icon; image-fit: contain; colorize: root.enabled ? Theme.text-secondary : Theme.text-muted; }
+    KeyboardFocus { width: root.width; height: root.height; enabled: root.enabled; activated => { root.clicked(); } }
     area := TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
 }
 
@@ -231,6 +292,7 @@ export component FilterChip inherits Rectangle {
         horizontal-alignment: center;
         vertical-alignment: center;
     }
+    KeyboardFocus { width: root.width; height: root.height; ring-radius: 5px; activated => { root.clicked(); } }
     area := TouchArea { clicked => { root.clicked(); } }
 }
 
@@ -271,6 +333,7 @@ export component Toggle inherits Rectangle {
         background: root.enabled ? (root.checked ? Theme.accent : Theme.text-secondary) : Theme.text-muted;
         animate x { duration: 100ms; }
     }
+    KeyboardFocus { width: root.width; height: root.height; ring-radius: 12px; enabled: root.enabled; activated => { root.request(); } }
     TouchArea {
         enabled: root.enabled;
         clicked => { root.request(); }
@@ -407,6 +470,7 @@ export component LaunchAsButton inherits Rectangle {
             vertical-alignment: center;
         }
     }
+    KeyboardFocus { width: root.width; height: root.height; enabled: root.enabled; activated => { menu.show({ x: 0, y: root.height }); } }
     // Declared after the menu area, so a press opens the menu rather than
     // being swallowed by the area that hosts it.
     area := TouchArea {
@@ -468,6 +532,7 @@ export component NavItem inherits Rectangle {
         Image { source: root.icon; width: 22px; height: 22px; image-fit: contain; colorize: root.selected ? Theme.accent : Theme.text-secondary; }
         Text { text: root.label; color: root.selected ? Theme.accent : Theme.text-secondary; font-size: Theme.row-heading-size; vertical-alignment: center; }
     }
+    KeyboardFocus { width: root.width; height: root.height; activated => { root.clicked(); } }
     area := TouchArea { clicked => { root.clicked(); } }
 }
 
@@ -494,6 +559,7 @@ export component SettingsNavItem inherits Rectangle {
         font-weight: root.selected ? 600 : 400;
         vertical-alignment: center;
     }
+    KeyboardFocus { width: root.width; height: root.height; activated => { root.clicked(); } }
     area := TouchArea { clicked => { root.clicked(); } }
 }
 

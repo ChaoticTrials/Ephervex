@@ -96,6 +96,12 @@ export global Theme {
     // that mixes a button, a chip and a field lines up without each caller
     // having to know what the others chose.
     out property <length> control-height: 36px;
+    // The outline drawn around a control that has keyboard focus. Every
+    // focusable control draws the same one, so the focused control is the
+    // same thing to find wherever Tab lands.
+    out property <length> focus-ring-width: 2px;
+    // The clear gap between a control's own edge and its focus outline.
+    out property <length> focus-ring-offset: 1px;
     // The primary navigation column. Named because the page bodies beside
     // it have to know how much of the window is left.
     out property <length> sidebar-width: 218px;

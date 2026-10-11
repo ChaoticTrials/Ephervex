@@ -8,6 +8,7 @@ import {
     EmptyState,
     FavoriteToggle,
     FilterChip,
+    FocusEdge,
     IconButton,
     InlineToggle,
     LabeledToggle,
@@ -848,11 +849,22 @@ export component AppWindow inherits Window {
             root.warm-language-catalog(root.create-minecraft);
         }
     }
+    // Focus goes into a dialog when it opens, and is kept there by the edges
+    // below, so the page behind it cannot be tabbed to and pressed.
+    changed modal => {
+        if root.modal != "" {
+            dialog-start.focus();
+        }
+    }
     changed create-server-minecraft => {
         if root.create-server-minecraft != "" {
             root.warm-language-catalog(root.create-server-minecraft);
         }
     }
+
+    // Where Tab begins when nothing has focus, which with a dialog open must
+    // be the dialog.
+    FocusEdge { active: root.modal != ""; reached => { dialog-start.focus(); } }
 
     VerticalLayout {
         spacing: 0px;
@@ -1970,6 +1982,12 @@ export component AppWindow inherits Window {
         }
     }
 
+    // Tab order runs through the page, then the dialog, then wraps to the
+    // page. Shift+Tab off the dialog's start lands on the first edge, and Tab
+    // off its end on the last, and each hands focus to the other end.
+    FocusEdge { active: root.modal != ""; reached => { dialog-end.focus(); } }
+    dialog-start := FocusEdge { active: root.modal != ""; }
+
     // Modal overlay and focused workflows.
     if root.modal != "" : Rectangle {
         background: Theme.scrim;
@@ -2582,4 +2600,7 @@ export component AppWindow inherits Window {
             }
         }
     }
+
+    dialog-end := FocusEdge { active: root.modal != ""; }
+    FocusEdge { active: root.modal != ""; reached => { dialog-start.focus(); } }
 }
