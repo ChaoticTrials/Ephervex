@@ -1529,14 +1529,26 @@ mod tests {
         evidence
     }
 
+    /// Spawns a tagged process and returns once its environment shows the tag, which can lag the
+    /// spawn while the new program image is still being installed.
     fn spawn_tagged(run: Uuid) -> KillOnDrop {
-        KillOnDrop(
+        let child = KillOnDrop(
             std::process::Command::new("/bin/sleep")
                 .arg("60")
                 .env(SERVER_RUN_VARIABLE, run.to_string())
                 .spawn()
                 .expect("spawn"),
-        )
+        );
+        let environment = format!("/proc/{}/environ", child.0.id());
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !std::fs::read(&environment).is_ok_and(|bytes| environment_carries_run(&bytes, run)) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the run tag never became visible in the child's environment"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        child
     }
 
     #[test]
