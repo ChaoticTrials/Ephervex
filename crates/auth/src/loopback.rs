@@ -311,7 +311,7 @@ async fn handle(stream: TcpStream, expected_state: &str) -> Option<Redirect> {
     // redirect: a browser left hanging shows an error page next to the tab
     // the user is meant to close.
     let page = match &redirect {
-        Some(Redirect::Code(_)) => SUCCESS_PAGE,
+        Some(Redirect::Code(_)) => AUTHORIZATION_RECEIVED_PAGE,
         Some(Redirect::Error { .. }) => FAILURE_PAGE,
         None => IGNORED_PAGE,
     };
@@ -322,7 +322,7 @@ async fn handle(stream: TcpStream, expected_state: &str) -> Option<Redirect> {
         page.len()
     );
     // A browser that hung up before reading the page is not a reason to
-    // fail a login that already succeeded.
+    // fail the login.
     let _ = stream.write_all(response.as_bytes()).await;
     let _ = stream.shutdown().await;
 
@@ -420,9 +420,13 @@ fn parse_redirect(target: &str, expected_state: &str) -> AuthResult<Option<Redir
     }))
 }
 
-const SUCCESS_PAGE: &str = "<!doctype html><meta charset=utf-8>\
-<title>Signed in</title><body style=\"font-family:system-ui;padding:3rem\">\
-<h1>Signed in</h1><p>You can close this tab and return to Ephervex.</p>";
+/// Shown when the redirect carries a code. Redeeming the code and the Xbox and
+/// Minecraft steps that follow can still fail after this page is sent, so it
+/// must not claim the sign-in worked.
+const AUTHORIZATION_RECEIVED_PAGE: &str = "<!doctype html><meta charset=utf-8>\
+<title>Authorization received</title><body style=\"font-family:system-ui;padding:3rem\">\
+<h1>Authorization received</h1><p>Return to Ephervex to see the result of the sign-in. \
+You can close this tab.</p>";
 
 const FAILURE_PAGE: &str = "<!doctype html><meta charset=utf-8>\
 <title>Sign-in failed</title><body style=\"font-family:system-ui;padding:3rem\">\
@@ -670,10 +674,22 @@ mod tests {
 
     #[test]
     fn the_page_shown_to_the_user_never_echoes_the_query_string() {
-        for page in [SUCCESS_PAGE, FAILURE_PAGE, IGNORED_PAGE] {
+        for page in [AUTHORIZATION_RECEIVED_PAGE, FAILURE_PAGE, IGNORED_PAGE] {
             assert!(!page.contains("code"), "{page}");
             assert!(!page.contains("token"), "{page}");
         }
+    }
+
+    #[test]
+    fn no_page_claims_the_sign_in_succeeded() {
+        for page in [AUTHORIZATION_RECEIVED_PAGE, FAILURE_PAGE, IGNORED_PAGE] {
+            let page = page.to_ascii_lowercase();
+            assert!(!page.contains("signed in"), "{page}");
+            assert!(!page.contains("success"), "{page}");
+        }
+        let received = AUTHORIZATION_RECEIVED_PAGE.to_ascii_lowercase();
+        assert!(!received.contains("complete"), "{received}");
+        assert!(!received.contains("finished"), "{received}");
     }
 
     #[tokio::test]
@@ -734,7 +750,7 @@ mod tests {
             .expect("read the page");
         let page = String::from_utf8_lossy(&page);
         assert!(page.contains("200 OK"), "{page}");
-        assert!(page.contains("Signed in"), "{page}");
+        assert!(page.contains("Authorization received"), "{page}");
         assert!(
             !page.contains("THE-CODE"),
             "the page must not echo the code"
@@ -884,7 +900,7 @@ mod tests {
             .await
             .expect("read the page");
         let page = String::from_utf8_lossy(&page);
-        assert!(!page.contains("Signed in"), "{page}");
+        assert!(!page.contains("Authorization received"), "{page}");
         assert!(!page.contains("STOLEN"), "{page}");
         assert!(
             !waiter.is_finished(),

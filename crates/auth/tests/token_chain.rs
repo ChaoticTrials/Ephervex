@@ -460,6 +460,90 @@ async fn a_user_who_refuses_consent_is_reported_as_a_refusal_not_a_fault() {
     );
 }
 
+/// Drives the browser flow like `drive_browser_login` and also returns the
+/// page the browser was shown for the redirect.
+async fn login_and_capture_callback_page(
+    provider: &MicrosoftAccountProvider,
+) -> (Result<ephervex_auth::Login, AuthError>, String) {
+    let (observer, mut events) = AuthObserver::channel();
+    let browser = tokio::spawn(async move {
+        while let Some(event) = events.recv().await {
+            if let AuthEvent::OpenBrowser { url } = event {
+                let parsed = reqwest::Url::parse(&url).expect("an authorization url");
+                let query: std::collections::HashMap<_, _> = parsed
+                    .query_pairs()
+                    .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                    .collect();
+                let target = format!(
+                    "{}/?code=THE-AUTH-CODE&state={}",
+                    query["redirect_uri"], query["state"]
+                );
+                let response = reqwest::Client::new()
+                    .get(&target)
+                    .send()
+                    .await
+                    .expect("the listener answers the redirect");
+                return response.text().await.expect("the page body");
+            }
+        }
+        panic!("the login never asked for a browser");
+    });
+
+    let login = provider
+        .login(
+            &LoginRequest {
+                flow: LoginFlow::Browser,
+                timeout: Duration::from_secs(10),
+            },
+            &observer,
+            &CancellationToken::new(),
+        )
+        .await;
+    (login, browser.await.expect("the browser stand-in finished"))
+}
+
+#[tokio::test]
+async fn the_callback_page_does_not_claim_a_sign_in_that_the_token_exchange_then_rejects() {
+    let server = MockServer::start().await;
+    mount_token(
+        &server,
+        400,
+        r#"{"error":"invalid_grant","error_description":"The code has expired."}"#,
+    )
+    .await;
+    mount_chain(&server).await;
+
+    let provider = provider(&server, Arc::new(MemoryStore::new()));
+    let (login, page) = login_and_capture_callback_page(&provider).await;
+
+    assert!(login.is_err(), "the redemption was rejected");
+    let page = page.to_ascii_lowercase();
+    assert!(!page.contains("signed in"), "{page}");
+    assert!(!page.contains("success"), "{page}");
+    assert!(!page.contains("the-auth-code"), "{page}");
+}
+
+#[tokio::test]
+async fn the_callback_page_is_the_same_whether_the_chain_later_succeeds_or_fails() {
+    let failing = MockServer::start().await;
+    mount_token(&failing, 400, r#"{"error":"invalid_grant"}"#).await;
+    mount_chain(&failing).await;
+    let (failed, failed_page) =
+        login_and_capture_callback_page(&provider(&failing, Arc::new(MemoryStore::new()))).await;
+    assert!(failed.is_err());
+
+    let working = MockServer::start().await;
+    mount_token(&working, 200, TOKEN).await;
+    mount_chain(&working).await;
+    let (completed, completed_page) =
+        login_and_capture_callback_page(&provider(&working, Arc::new(MemoryStore::new()))).await;
+    assert!(completed.is_ok());
+
+    // The page is sent before the outcome is known, so it can only describe
+    // what the browser did.
+    assert_eq!(failed_page, completed_page);
+}
+
 #[tokio::test]
 async fn the_device_code_flow_polls_until_the_user_finishes() {
     let server = MockServer::start().await;
