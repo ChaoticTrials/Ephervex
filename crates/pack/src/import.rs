@@ -217,6 +217,14 @@ pub fn analyze(path: &Path, policy: &PackPolicy) -> PackResult<(PackArchive, Pac
             .iter()
             .map(|layer| layer.archive_prefix.as_str()),
     )?;
+    archive.require_layers_agree(
+        analysis
+            .recipe
+            .override_layers
+            .iter()
+            .map(|layer| layer.archive_prefix.as_str()),
+        crate::recipe::is_mod_file_path,
+    )?;
     info!(
         format = %analysis.format,
         pack = %analysis.recipe.original_name,
@@ -767,6 +775,76 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn analyze_layered_jars(entries: &[(&str, &[u8])]) -> (tempfile::TempDir, PackResult<()>) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("pack.mrpack");
+        let mut all: Vec<(&str, &[u8])> = vec![("modrinth.index.json", INDEX)];
+        all.extend_from_slice(entries);
+        zip_file(&archive, &all);
+        let result = analyze(&archive, &PackPolicy::modrinth()).map(|_| ());
+        (dir, result)
+    }
+
+    #[test]
+    fn analysis_refuses_a_mod_whose_bytes_differ_between_override_layers() {
+        let layer_pairs = [
+            ("overrides", "client-overrides"),
+            ("overrides", "server-overrides"),
+            ("client-overrides", "server-overrides"),
+        ];
+        for (first, second) in layer_pairs {
+            let (dir, result) = analyze_layered_jars(&[
+                (&format!("{first}/mods/x.jar"), b"first"),
+                (&format!("{second}/mods/x.jar"), b"second"),
+            ]);
+            let error = result.expect_err(first);
+            assert!(
+                matches!(error, PackError::OverrideLayersDisagree { ref path } if path == Path::new("mods/x.jar")),
+                "{first} and {second} were refused with {error:?}"
+            );
+            assert!(ephervex_i18n::has(error.message_id()));
+            assert_eq!(
+                std::fs::read_dir(dir.path()).expect("list").count(),
+                1,
+                "analysis writes nothing beside the archive"
+            );
+        }
+    }
+
+    #[test]
+    fn analysis_refuses_a_mod_that_differs_in_only_one_of_three_override_layers() {
+        let (_dir, result) = analyze_layered_jars(&[
+            ("overrides/mods/x.jar", b"same"),
+            ("client-overrides/mods/x.jar", b"same"),
+            ("server-overrides/mods/x.jar", b"other"),
+        ]);
+        assert!(matches!(
+            result.expect_err("refused"),
+            PackError::OverrideLayersDisagree { .. }
+        ));
+    }
+
+    #[test]
+    fn analysis_accepts_a_mod_with_identical_bytes_in_every_override_layer() {
+        let (_dir, result) = analyze_layered_jars(&[
+            ("overrides/mods/x.jar", b"same"),
+            ("client-overrides/mods/x.jar", b"same"),
+            ("server-overrides/mods/x.jar", b"same"),
+        ]);
+        result.expect("identical bytes describe every side truthfully");
+    }
+
+    #[test]
+    fn analysis_accepts_different_mods_per_override_layer_and_differing_untracked_files() {
+        let (_dir, result) = analyze_layered_jars(&[
+            ("overrides/mods/a.jar", b"a"),
+            ("client-overrides/mods/b.jar", b"b"),
+            ("overrides/config/x.toml", b"one"),
+            ("client-overrides/config/x.toml", b"two"),
+        ]);
+        result.expect("only a shared mod path needs one set of bytes");
     }
 
     #[test]

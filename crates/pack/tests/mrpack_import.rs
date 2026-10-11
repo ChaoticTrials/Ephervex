@@ -755,9 +755,9 @@ async fn pack_declaring_a_file_and_shipping(
     archive
 }
 
-/// Layers extract over the declared file in order, so the bytes on disk are the
-/// last layer's. The recipe has to say the same, or repair, mutation and a
-/// server built from it would treat the layer's bytes as the declared release.
+/// Layers extract over the declared file, so the bytes on disk are the pack's.
+/// The recipe has to say the same, or repair, mutation and a server built from
+/// it would treat the layer's bytes as the declared release.
 #[tokio::test]
 async fn an_override_that_wins_over_a_declared_mod_replaces_the_recorded_provenance() {
     let server = MockServer::start().await;
@@ -766,8 +766,8 @@ async fn an_override_that_wins_over_a_declared_mod_replaces_the_recorded_provena
         workspace.path(),
         &server,
         &[
-            ("overrides/mods/a.jar", b"common"),
-            ("client-overrides/mods/a.jar", b"client"),
+            ("overrides/mods/a.jar", b"shipped"),
+            ("client-overrides/mods/a.jar", b"shipped"),
         ],
     )
     .await;
@@ -782,8 +782,8 @@ async fn an_override_that_wins_over_a_declared_mod_replaces_the_recorded_provena
 
     assert_eq!(
         std::fs::read(imported.game.join("mods/a.jar")).expect("read"),
-        b"client",
-        "the later layer won on disk"
+        b"shipped",
+        "the pack's bytes won on disk"
     );
     let recipe = retained_recipe(&imported.source).expect("the recipe was retained");
     let entries: Vec<_> = recipe
@@ -819,6 +819,36 @@ async fn an_override_that_wins_over_a_declared_mod_replaces_the_recorded_provena
             .all(|file| file.display_name() != "mods/a.jar"),
         "the declared download is not part of the server plan"
     );
+}
+
+/// The recipe holds one entry per path, so a jar that is one file on the client
+/// and another on a server cannot be recorded without one side's identity
+/// describing the other side's bytes.
+#[tokio::test]
+async fn a_mod_shipped_with_different_bytes_by_two_override_layers_is_refused_before_anything_is_written()
+ {
+    let server = MockServer::start().await;
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let archive = pack_declaring_a_mod_and_shipping(
+        workspace.path(),
+        &server,
+        &[
+            ("overrides/mods/shipped.jar", b"common"),
+            ("client-overrides/mods/shipped.jar", b"client"),
+        ],
+    )
+    .await;
+
+    let error = analyze(&archive, &loopback_policy(&server))
+        .map(|_| ())
+        .expect_err("one entry cannot describe different bytes per side");
+
+    assert!(
+        matches!(error, PackError::OverrideLayersDisagree { ref path } if path == Path::new("mods/shipped.jar")),
+        "{error:?}"
+    );
+    assert!(ephervex_i18n::has(error.message_id()));
+    assert!(!workspace.path().join("instance").exists());
 }
 
 #[tokio::test]

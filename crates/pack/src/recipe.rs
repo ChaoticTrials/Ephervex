@@ -1277,7 +1277,10 @@ impl PackRecipe {
     ///
     /// Side requirements follow the layers, which are the only thing the pack
     /// said about where the file belongs. A path shipped by several layers is
-    /// required on every side one of them applies to.
+    /// required on every side one of them applies to. Import has already refused
+    /// layers that ship different bytes at one path
+    /// ([`PackError::OverrideLayersDisagree`]), so the one entry describes the
+    /// file on every side.
     ///
     /// A layer's bytes win over a declared file at the same path on the sides
     /// the layer applies to. When layers win on every side a declared file

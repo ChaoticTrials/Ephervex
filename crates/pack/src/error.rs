@@ -284,6 +284,11 @@ pub enum PackError {
     #[error("an override layer replaces the declared file `{path}` on only some sides")]
     OverrideShadowsDeclaredFile { path: PathBuf },
 
+    /// Override layers ship one path with different bytes, which the recipe's
+    /// single entry per path cannot describe.
+    #[error("the override layers ship different bytes for `{path}`")]
+    OverrideLayersDisagree { path: PathBuf },
+
     /// A selected recipe file would overwrite a file from the base server.
     #[error("the selected recipe file would overwrite {path}")]
     RecipeDestinationOccupied { path: PathBuf },
@@ -422,6 +427,7 @@ impl PackError {
             Self::RecipeDestinationCollision { .. } => "error-pack-recipe-destination-collision",
             Self::RecipeDestinationOccupied { .. } => "error-pack-recipe-destination-occupied",
             Self::OverrideShadowsDeclaredFile { .. } => "error-pack-override-shadows-declared-file",
+            Self::OverrideLayersDisagree { .. } => "error-pack-override-layers-disagree",
             Self::ManagedIdentityMissing { .. } => "error-mod-managed-identity-missing",
             Self::HandPlacedNotMutable { .. } => "error-mod-hand-placed-not-mutable",
             Self::ManagedVersionConflict { .. } => "error-mod-already-installed",
@@ -456,6 +462,7 @@ impl PackError {
             | Self::UnknownServerSelection { path }
             | Self::RecipeDestinationCollision { path }
             | Self::OverrideShadowsDeclaredFile { path }
+            | Self::OverrideLayersDisagree { path }
             | Self::RecipeDestinationOccupied { path }
             | Self::DestinationOccupied { path }
             | Self::ManagedPathUnsafe { path }
@@ -780,6 +787,9 @@ mod tests {
                 path: PathBuf::from("mods/same.jar"),
             },
             PackError::OverrideShadowsDeclaredFile {
+                path: PathBuf::from("mods/a.jar"),
+            },
+            PackError::OverrideLayersDisagree {
                 path: PathBuf::from("mods/a.jar"),
             },
             PackError::RecipeDestinationOccupied {

@@ -159,6 +159,8 @@ error-pack-recipe-destination-collision = Two selected recipe files use the same
 .action = Fix the retained desired state; Ephervex will not choose one file to overwrite the other.
 error-pack-override-shadows-declared-file = The pack's override files replace { $path } on only some sides.
 .action = The pack ships different bytes for one mod path depending on the side. Ephervex will not pick one; ask the pack author to fix the pack.
+error-pack-override-layers-disagree = The pack's override folders ship different files at { $path }.
+.action = One mod path holds different bytes depending on the side. Ephervex will not pick one; ask the pack author to fix the pack.
 error-pack-recipe-destination-occupied = A selected recipe file would overwrite part of the installed server.
 .action = Fix the retained recipe path collision; Ephervex will not overwrite the base server silently.
 

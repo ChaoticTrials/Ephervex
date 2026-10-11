@@ -40,6 +40,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument};
 use zip::ZipArchive;
@@ -409,6 +410,82 @@ impl PackArchive {
         self.require_extractable_under(&prefixes)
     }
 
+    /// Refuses the archive when one tracked path is shipped with different bytes
+    /// by more than one override layer.
+    ///
+    /// The recipe records one entry per path, so it cannot describe a file that
+    /// is one thing on the client and another on a server. Only paths shipped
+    /// more than once are read, and every read is bounded by the entry ceiling
+    /// and by the total ceiling shared across them. Identical bytes are
+    /// accepted, since the entry then describes every side truthfully.
+    pub(crate) fn require_layers_agree<'a>(
+        &mut self,
+        layer_prefixes: impl IntoIterator<Item = &'a str>,
+        is_tracked: impl Fn(&Path) -> bool,
+    ) -> PackResult<()> {
+        let prefixes: Vec<String> = layer_prefixes
+            .into_iter()
+            .map(|layer| normalize_prefix(&self.under_pack_root(layer).join("/")))
+            .collect();
+        let mut shipped: BTreeMap<PathBuf, Vec<usize>> = BTreeMap::new();
+        for index in 0..self.zip.len() {
+            let entry = self
+                .zip
+                .by_index(index)
+                .map_err(|source| PackError::ArchiveInvalid {
+                    path: self.path.clone(),
+                    source,
+                })?;
+            if entry.is_dir() || entry.is_symlink() {
+                continue;
+            }
+            for prefix in &prefixes {
+                if let Some(relative) = entry_under(entry.name_raw(), prefix)? {
+                    if is_tracked(&relative) {
+                        shipped.entry(relative).or_default().push(index);
+                    }
+                    break;
+                }
+            }
+        }
+
+        let archive_path = self.path.clone();
+        let mut bytes_read = 0_u64;
+        for (path, indexes) in shipped {
+            if indexes.len() < 2 {
+                continue;
+            }
+            let mut first: Option<[u8; 32]> = None;
+            for index in indexes {
+                let allowance = self
+                    .allowance_after(bytes_read, &[("entry-size", self.limits.max_entry_bytes)]);
+                let mut entry =
+                    self.zip
+                        .by_index(index)
+                        .map_err(|source| PackError::ArchiveInvalid {
+                            path: archive_path.clone(),
+                            source,
+                        })?;
+                allowance.check(entry.size())?;
+                let mut hasher = Sha256::new();
+                let read = stream_entry(&mut entry, allowance, &archive_path, &mut |chunk| {
+                    hasher.update(chunk);
+                    Ok(())
+                })?;
+                bytes_read = bytes_read.saturating_add(read);
+                let digest: [u8; 32] = hasher.finalize().into();
+                match first {
+                    None => first = Some(digest),
+                    Some(expected) if expected != digest => {
+                        return Err(PackError::OverrideLayersDisagree { path });
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn require_extractable_under(&mut self, prefixes: &[String]) -> PackResult<()> {
         for index in 0..self.zip.len() {
             let entry = self
@@ -753,10 +830,15 @@ impl PackArchive {
     /// The tightest of an entry's own ceilings and what is left of the shared
     /// total. Ties go to the earliest ceiling, and any ceiling beats the total.
     fn allowance(&self, ceilings: &[(&'static str, u64)]) -> Allowance {
+        self.allowance_after(self.spent_bytes, ceilings)
+    }
+
+    /// [`Self::allowance`] with `spent` bytes already charged to the total.
+    fn allowance_after(&self, spent: u64, ceilings: &[(&'static str, u64)]) -> Allowance {
         let total = Allowance {
             limit: "total-size",
             allowed: self.limits.max_total_bytes,
-            spent: self.spent_bytes,
+            spent,
         };
         ceilings
             .iter()
