@@ -791,17 +791,24 @@ fn register_import_flow(
         // The dialog has nothing left to ask, and the work that follows can
         // take minutes. It closes now, and the instances list carries the
         // import from here as a card that says what it is doing.
-        let key = CreationKey::Import {
-            archive: submission.archive.display().to_string(),
-        };
-        let request_id = submit_creations
-            .borrow_mut()
-            .accept(key.clone(), pending_creation(&key, persistent));
-        if let Some(ui) = weak.upgrade() {
-            if request_id.is_some() {
-                ui.set_modal(SharedString::default());
-                ui.set_modal_error(SharedString::default());
+        let Some(request_id) = register_import_creation(
+            &mut submit_state.borrow_mut(),
+            &mut submit_creations.borrow_mut(),
+            &submission,
+            persistent,
+        ) else {
+            // The same archive is already importing under a card of its own:
+            // refuse as the other creation dialogs do. The dialog stays open
+            // and usable.
+            if let Some(ui) = weak.upgrade() {
+                ui.invoke_present_toast(lookup("gui-creation-already-running").into(), true);
+                render_import_flow(&ui, &submit_state.borrow());
             }
+            return;
+        };
+        if let Some(ui) = weak.upgrade() {
+            ui.set_modal(SharedString::default());
+            ui.set_modal_error(SharedString::default());
             apply_pending_creations(&ui, &submit_creations.borrow());
             render_import_flow(&ui, &submit_state.borrow());
         }
@@ -821,6 +828,25 @@ fn register_import_flow(
             },
         );
     });
+}
+
+/// Gives a prepared import submission its pending card. `None` means the same
+/// archive is already importing: the flow leaves `Submitting` so the dialog
+/// is not stuck, and no import may be started.
+fn register_import_creation(
+    flow: &mut ImportFlowState,
+    creations: &mut CreationTracker,
+    submission: &PreparedImportSubmission,
+    persistent: bool,
+) -> Option<String> {
+    let key = CreationKey::Import {
+        archive: submission.archive.display().to_string(),
+    };
+    let request_id = creations.accept(key.clone(), pending_creation(&key, persistent));
+    if request_id.is_none() {
+        flow.submit_finished(submission.generation);
+    }
+    request_id
 }
 
 /// Wires the import modal's blocked-file list: skipping one, and opening its
@@ -7793,10 +7819,8 @@ fn apply_event(
             succeeded,
             request_id,
         } => {
-            if let Some(request_id) = request_id {
-                creations.borrow_mut().finish(&request_id);
-                apply_pending_creations(ui, &creations.borrow());
-            }
+            creations.borrow_mut().finish(&request_id);
+            apply_pending_creations(ui, &creations.borrow());
             apply_import_submission_finished(ui, import_flow, generation, succeeded);
         }
         Event::StorageRootPicked(path) => {
@@ -17516,6 +17540,42 @@ mod tests {
             }),
             "the archive submitted must be exactly the one the current analysis is for; \
              `begin_submit` takes no archive argument, so nothing else could have supplied one"
+        );
+    }
+
+    #[test]
+    fn a_second_import_of_an_archive_still_importing_is_refused_and_leaves_the_dialog_usable() {
+        let mut creations = CreationTracker::default();
+        let mut flow = ImportFlowState::default();
+        let analyze = |flow: &mut ImportFlowState| {
+            let generation = flow.begin_attempt();
+            flow.analyzed(
+                generation,
+                PathBuf::from("pack.mrpack"),
+                Ok(resolved_presentation("Example Pack", false)),
+            );
+        };
+
+        analyze(&mut flow);
+        let first = flow.begin_submit().expect("the analyzed pack is ready");
+        let request_id = register_import_creation(&mut flow, &mut creations, &first, false);
+        assert!(request_id.is_some(), "the first import gets a card");
+        assert_eq!(creations.pending.len(), 1);
+
+        // The dialog is opened again for the same file while that import runs.
+        flow.reset();
+        analyze(&mut flow);
+        let second = flow.begin_submit().expect("the analyzed pack is ready");
+        assert_eq!(flow.phase, ImportPhase::Submitting);
+        assert_eq!(
+            register_import_creation(&mut flow, &mut creations, &second, false),
+            None,
+            "no second import may start while the archive is still importing"
+        );
+        assert_eq!(creations.pending.len(), 1, "no second card appears");
+        assert!(
+            flow.is_ready(),
+            "the refused submission must not leave the dialog stuck in Submitting"
         );
     }
 

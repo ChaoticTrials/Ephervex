@@ -179,9 +179,8 @@ pub enum Command {
         /// only ever released by the completion of this exact submission.
         generation: u64,
         /// The pending card standing in for this import in the instances list,
-        /// so its progress can be reported onto that card. `None` when the
-        /// list already had a card for this archive.
-        request_id: Option<String>,
+        /// so its progress can be reported onto that card.
+        request_id: String,
         /// Whether to build a server from the same pack once the instance is
         /// published. Part of the same operation, so one card reports both.
         create_linked_server: bool,
@@ -1909,7 +1908,7 @@ pub enum Event {
         succeeded: bool,
         /// The pending card this attempt was showing on, so it stops standing
         /// in for an instance that now exists, or for one that never will.
-        request_id: Option<String>,
+        request_id: String,
     },
     StorageRootPicked(PathBuf),
     ServerPackPicked {
@@ -9797,7 +9796,7 @@ struct ImportSubmission {
     persistent: bool,
     selection: OptionalSelection,
     skip_blocked: Vec<ProviderFileIdentity>,
-    request_id: Option<String>,
+    request_id: String,
     create_linked_server: bool,
     server_pack: Option<PathBuf>,
 }
@@ -9851,7 +9850,7 @@ fn spawn_import_submission(
                 events: events.clone(),
                 entity,
                 allow_cancel: true,
-                pending: request_id.clone(),
+                pending: Some(request_id.clone()),
             });
             let reporter = OperationReporter::new("operation-importing-pack", true, sink);
             reporter.begin(None);
