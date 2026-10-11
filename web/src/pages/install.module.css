@@ -167,6 +167,11 @@
 .helpLine { margin: 1.5rem 0 0; color: var(--site-muted); font-size: 0.88rem; }
 
 :global(html[data-season='halloween']) .hero .kicker { color: #ffc47d; }
+:global(html[data-season='halloween']) .command { border-color: #80536a; background: #211629; }
+:global(html[data-season='halloween']) .command pre { color: #fff0df; }
+:global(html[data-season='halloween']) .command button { border-color: #ad786c; color: #ffe2be; background: #4a2d41; }
+:global(html[data-season='halloween']) .command button:hover { background: #68415c; }
+:global(html[data-season='halloween']) .command button:focus-visible { outline-color: #ffc47d; }
 
 @media (max-width: 1100px) {
   .methods { grid-template-columns: repeat(2, minmax(0, 1fr)); }
