@@ -739,7 +739,13 @@ impl InstallerEngine {
     ) -> LoaderResult<bool> {
         // Resolves outputs as the processors would see them; nothing is written here.
         let root = self.layout.root().join("published-outputs");
-        let values = processor_values(bundle, side, &root, minecraft_jar)?;
+        let values = processor_values(
+            bundle,
+            side,
+            &root,
+            &root.join("installer-data"),
+            minecraft_jar,
+        )?;
         let libraries = root.join("libraries");
         let store = self.layout.store_root(ContentStore::Libraries);
         let stored = |path: &Path| -> Option<PathBuf> {
@@ -758,7 +764,7 @@ impl InstallerEngine {
             .filter(|processor| processor.applies_to(side))
         {
             for (output, expected) in &processor.outputs {
-                let path = PathBuf::from(resolve_tokens(output, &values)?);
+                let path = PathBuf::from(resolve_output_key(output, &root, &values)?);
                 let digest = resolve_tokens(expected, &values)?;
                 let (Some(path), Some(digest)) = (
                     stored(&path),
@@ -881,9 +887,37 @@ impl InstallerEngine {
         java: &Path,
         cancel: &CancellationToken,
     ) -> LoaderResult<KnownDigests> {
-        self.extract_profile_data(bundle, workspace).await?;
+        // The installer's data files are scratch input for the processors, so
+        // they live outside the workspace that becomes the installed tree.
+        let data = ScratchDirectory::create(self.workspace("data")).await?;
+        let processed = self
+            .run_processors_with_data(
+                bundle,
+                side,
+                workspace,
+                data.path(),
+                minecraft_jar,
+                java,
+                cancel,
+            )
+            .await;
+        data.settle(processed, None).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_processors_with_data(
+        &self,
+        bundle: &InstallerBundle,
+        side: InstallSide,
+        workspace: &Path,
+        data_dir: &Path,
+        minecraft_jar: &Path,
+        java: &Path,
+        cancel: &CancellationToken,
+    ) -> LoaderResult<KnownDigests> {
+        self.extract_profile_data(bundle, side, data_dir).await?;
         let mut verified = KnownDigests::new();
-        let values = processor_values(bundle, side, workspace, minecraft_jar)?;
+        let values = processor_values(bundle, side, workspace, data_dir, minecraft_jar)?;
 
         for processor in bundle
             .profile
@@ -901,7 +935,7 @@ impl InstallerEngine {
                 self.run_processor(processor, workspace, java, &values, cancel)
                     .await?;
             }
-            self.verify_processor_outputs(processor, &values, &mut verified)
+            self.verify_processor_outputs(processor, workspace, &values, &mut verified)
                 .await?;
         }
 
@@ -959,28 +993,34 @@ impl InstallerEngine {
         Ok(())
     }
 
+    /// Extracts the installer entries the `side`'s data values name into
+    /// `data_dir`.
     async fn extract_profile_data(
         &self,
         bundle: &InstallerBundle,
-        workspace: &Path,
+        side: InstallSide,
+        data_dir: &Path,
     ) -> LoaderResult<()> {
-        for value in bundle.profile.data.values() {
-            for raw in [&value.client, &value.server] {
-                if let Some(entry) = raw.strip_prefix('/') {
-                    let destination = safe_archive_destination(workspace, entry)?;
-                    if fs::try_exists(&destination).await.unwrap_or(false) {
-                        continue;
-                    }
-                    let installer = bundle.installer.clone();
-                    let entry = entry.to_owned();
-                    let bytes = tokio::task::spawn_blocking(move || {
-                        read_zip_bytes(&installer, &entry, MAX_PROFILE_DATA_BYTES)
-                    })
-                    .await
-                    .map_err(|error| invalid_installer(&bundle.installer, &error.to_string()))??;
-                    write_private(&destination, &bytes).await?;
-                }
+        for name in bundle.profile.data.keys() {
+            let Some(entry) = bundle
+                .profile
+                .data_value(name, side)
+                .and_then(|raw| raw.strip_prefix('/'))
+            else {
+                continue;
+            };
+            let destination = safe_archive_destination(data_dir, entry)?;
+            if fs::try_exists(&destination).await.unwrap_or(false) {
+                continue;
             }
+            let installer = bundle.installer.clone();
+            let entry = entry.to_owned();
+            let bytes = tokio::task::spawn_blocking(move || {
+                read_zip_bytes(&installer, &entry, MAX_PROFILE_DATA_BYTES)
+            })
+            .await
+            .map_err(|error| invalid_installer(&bundle.installer, &error.to_string()))??;
+            write_private(&destination, &bytes).await?;
         }
         Ok(())
     }
@@ -1011,7 +1051,7 @@ impl InstallerEngine {
         let args = processor
             .args
             .iter()
-            .map(|argument| resolve_profile_value(argument, workspace, values))
+            .map(|argument| resolve_argument(argument, workspace, values))
             .collect::<LoaderResult<Vec<_>>>()?;
         debug!(
             processor = %processor.jar,
@@ -1070,11 +1110,12 @@ impl InstallerEngine {
     async fn verify_processor_outputs(
         &self,
         processor: &Processor,
+        workspace: &Path,
         values: &BTreeMap<String, String>,
         verified: &mut KnownDigests,
     ) -> LoaderResult<()> {
         for (output, expected) in &processor.outputs {
-            let path = PathBuf::from(resolve_tokens(output, values)?);
+            let path = PathBuf::from(resolve_output_key(output, workspace, values)?);
             if !fs::try_exists(&path).await.unwrap_or(false) {
                 return Err(LoaderError::ProcessorOutputMissing { path });
             }
@@ -1394,12 +1435,13 @@ fn addressless_artifacts<'a>(
         .collect()
 }
 
-/// The tokens a processor argument or output may name, with Maven-coordinate
-/// and installer-entry values resolved inside `workspace`.
+/// The tokens a processor argument or output may name. Maven-coordinate values
+/// resolve inside `workspace` and installer-entry values inside `data_dir`.
 fn processor_values(
     bundle: &InstallerBundle,
     side: InstallSide,
     workspace: &Path,
+    data_dir: &Path,
     minecraft_jar: &Path,
 ) -> LoaderResult<BTreeMap<String, String>> {
     let mut values = BTreeMap::from([
@@ -1424,34 +1466,73 @@ fn processor_values(
     ]);
     for name in bundle.profile.data.keys() {
         let raw = bundle.profile.data_value(name, side).unwrap_or_default();
-        let resolved = resolve_profile_value(raw, workspace, &values)?;
+        let resolved = resolve_data_value(raw, workspace, data_dir, &values)?;
         values.insert(name.clone(), resolved);
     }
     Ok(values)
 }
 
-fn resolve_profile_value(
-    raw: &str,
-    workspace: &Path,
-    values: &BTreeMap<String, String>,
-) -> LoaderResult<String> {
-    if let Some(coordinate) = raw
+/// The library path a `[group:artifact:version]` value names inside `workspace`.
+fn resolve_coordinate(raw: &str, workspace: &Path) -> LoaderResult<Option<String>> {
+    let Some(coordinate) = raw
         .strip_prefix('[')
         .and_then(|value| value.strip_suffix(']'))
-    {
-        return Ok(workspace
+    else {
+        return Ok(None);
+    };
+    Ok(Some(
+        workspace
             .join("libraries")
             .join(MavenCoordinate::parse(coordinate)?.relative_path())
             .to_string_lossy()
-            .into_owned());
+            .into_owned(),
+    ))
+}
+
+/// A data value: a Maven coordinate, an installer entry (`/path`, extracted
+/// into `data_dir`), or a literal that may be quoted and may name tokens.
+fn resolve_data_value(
+    raw: &str,
+    workspace: &Path,
+    data_dir: &Path,
+    values: &BTreeMap<String, String>,
+) -> LoaderResult<String> {
+    if let Some(library) = resolve_coordinate(raw, workspace)? {
+        return Ok(library);
     }
     if let Some(entry) = raw.strip_prefix('/') {
-        return Ok(safe_archive_destination(workspace, entry)?
+        return Ok(safe_archive_destination(data_dir, entry)?
             .to_string_lossy()
             .into_owned());
     }
     let resolved = resolve_tokens(raw, values)?;
     Ok(resolved.trim_matches('\'').to_owned())
+}
+
+/// A processor argument: a Maven coordinate or text that may name tokens. A
+/// leading `/` is part of the text, not an installer entry.
+fn resolve_argument(
+    raw: &str,
+    workspace: &Path,
+    values: &BTreeMap<String, String>,
+) -> LoaderResult<String> {
+    if let Some(library) = resolve_coordinate(raw, workspace)? {
+        return Ok(library);
+    }
+    let resolved = resolve_tokens(raw, values)?;
+    Ok(resolved.trim_matches('\'').to_owned())
+}
+
+/// A processor output key: a Maven coordinate or text that may name tokens.
+fn resolve_output_key(
+    raw: &str,
+    workspace: &Path,
+    values: &BTreeMap<String, String>,
+) -> LoaderResult<String> {
+    match resolve_coordinate(raw, workspace)? {
+        Some(library) => Ok(library),
+        None => resolve_tokens(raw, values),
+    }
 }
 
 /// The names of the tokens the processors that run on `side` take as arguments
@@ -2030,10 +2111,10 @@ mod tests {
     fn tokens_and_maven_values_resolve_inside_the_workspace() {
         let values = BTreeMap::from([("ROOT".to_owned(), "/tmp/work".to_owned())]);
         assert_eq!(
-            resolve_profile_value("{ROOT}/run.sh", Path::new("/tmp/work"), &values).expect("root"),
+            resolve_argument("{ROOT}/run.sh", Path::new("/tmp/work"), &values).expect("root"),
             "/tmp/work/run.sh"
         );
-        assert!(resolve_profile_value("[../evil:x:1]", Path::new("/tmp/work"), &values).is_err());
+        assert!(resolve_argument("[../evil:x:1]", Path::new("/tmp/work"), &values).is_err());
     }
 
     #[test]
@@ -3309,7 +3390,12 @@ mod tests {
         let mut verified = KnownDigests::new();
 
         engine
-            .verify_processor_outputs(&processor, &values, &mut verified)
+            .verify_processor_outputs(
+                &processor,
+                &root.path().join("work"),
+                &values,
+                &mut verified,
+            )
             .await
             .expect("the output matches");
 
@@ -3880,6 +3966,237 @@ mod tests {
             )
             .await
             .expect("processor succeeds");
+    }
+
+    #[test]
+    fn profile_values_resolve_per_context() {
+        let workspace = Path::new("/tmp/work");
+        let data_dir = Path::new("/tmp/data");
+        let values = BTreeMap::from([("ROOT".to_owned(), "/tmp/work".to_owned())]);
+
+        assert_eq!(
+            resolve_data_value("/data/server.lzma", workspace, data_dir, &values).expect("entry"),
+            "/tmp/data/data/server.lzma"
+        );
+        assert_eq!(
+            resolve_data_value("'literal'", workspace, data_dir, &values).expect("literal"),
+            "literal"
+        );
+        assert_eq!(
+            resolve_argument("/data/server.lzma", workspace, &values).expect("argument"),
+            "/data/server.lzma",
+            "an argument is not an installer entry"
+        );
+        assert_eq!(
+            resolve_argument("[g:a:1]", workspace, &values).expect("coordinate"),
+            "/tmp/work/libraries/g/a/1/a-1.jar"
+        );
+        assert_eq!(
+            resolve_output_key("[g:a:1]", workspace, &values).expect("output key"),
+            "/tmp/work/libraries/g/a/1/a-1.jar"
+        );
+        assert_eq!(
+            resolve_output_key("{ROOT}/out.bin", workspace, &values).expect("token"),
+            "/tmp/work/out.bin"
+        );
+        assert!(resolve_output_key("[../evil:x:1]", workspace, &values).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_coordinate_output_key_is_checked_against_the_shared_store() {
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+        let bundle = processed_bundle(
+            root.path(),
+            &format!(r#"{{"[{FORGE_SRG}]":"'{ABC_SHA1}'"}}"#),
+        );
+        store_library(&engine, FORGE_CLIENT, b"abc");
+        store_library(&engine, FORGE_MOJMAPS, b"map");
+
+        let srg = store_library(&engine, FORGE_SRG, b"srg");
+        assert!(
+            !published(&engine, &bundle).await,
+            "a stored copy with the wrong digest is not trusted"
+        );
+        std::fs::write(srg, b"abc").expect("verified copy");
+        assert!(published(&engine, &bundle).await);
+    }
+
+    #[cfg(unix)]
+    struct ProcessorRun {
+        root: tempfile::TempDir,
+        engine: InstallerEngine,
+        bundle: InstallerBundle,
+        workspace: PathBuf,
+        java: PathBuf,
+        record: PathBuf,
+    }
+
+    /// A processor-driven server profile whose data files are installer entries
+    /// for both sides, and a fake Java that records what its processor saw.
+    #[cfg(unix)]
+    fn processor_run_with_installer_data(exit_code: i32) -> ProcessorRun {
+        use std::io::Write as _;
+
+        let (root, workspace, java) = fake_processor_workspace(exit_code);
+        let record = root.path().join("record");
+        std::fs::create_dir_all(&record).expect("record directory");
+        std::fs::write(
+            &java,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{record}/args'\ncp \"$7\" '{record}/patch'\n\
+                 mkdir -p \"$5/libraries/g/out/1\"\nprintf abc > \"$5/libraries/g/out/1/out-1.jar\"\n\
+                 exit {exit_code}\n",
+                record = record.display()
+            ),
+        )
+        .expect("recording java");
+        let profile = format!(
+            r#"{{"spec":1,"profile":"forge","version":"1.20.1-forge-47.4.10","minecraft":"1.20.1",
+            "libraries":[],
+            "data":{{
+                "BINPATCH":{{"client":"/data/client.lzma","server":"/data/server.lzma"}}
+            }},
+            "processors":[
+                {{"sides":["server"],"jar":"g:p:1","args":["--root","{{ROOT}}","--patch","{{BINPATCH}}","/not/an/entry"],
+                  "outputs":{{"[g:out:1]":"'{ABC_SHA1}'"}}}}
+            ]}}"#
+        );
+        let installer = root.path().join("installer.jar");
+        let mut archive =
+            zip::ZipWriter::new(std::fs::File::create(&installer).expect("installer"));
+        for (name, body) in [
+            ("data/client.lzma", "client-payload"),
+            ("data/server.lzma", "server-payload"),
+        ] {
+            archive
+                .start_file(name, zip::write::SimpleFileOptions::default())
+                .expect("entry");
+            archive.write_all(body.as_bytes()).expect("entry body");
+        }
+        archive.finish().expect("installer finish");
+        let engine = loopback_engine(root.path());
+        let bundle = InstallerBundle {
+            installer,
+            profile: InstallProfile::parse(&profile).expect("profile"),
+            child: VersionMetadata::parse(&version_json(&[])).expect("version metadata"),
+        };
+        ProcessorRun {
+            root,
+            engine,
+            bundle,
+            workspace,
+            java,
+            record,
+        }
+    }
+
+    #[cfg(unix)]
+    fn installer_scratch_entries(engine: &InstallerEngine) -> Vec<PathBuf> {
+        let work = engine
+            .layout
+            .store_root(ContentStore::InstallerCache)
+            .join("work");
+        match std::fs::read_dir(&work) {
+            Ok(entries) => entries.map(|entry| entry.expect("entry").path()).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn installer_data_stays_outside_the_processor_workspace_and_is_removed() {
+        let run = processor_run_with_installer_data(0);
+
+        let verified = run
+            .engine
+            .run_processors(
+                &run.bundle,
+                InstallSide::Server,
+                &run.workspace,
+                Path::new("minecraft.jar"),
+                &run.java,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("the processors run");
+
+        assert_eq!(
+            std::fs::read(run.record.join("patch")).expect("patch seen by the processor"),
+            b"server-payload",
+            "only the running side's entry is extracted"
+        );
+        let args = std::fs::read_to_string(run.record.join("args")).expect("arguments");
+        assert!(args.lines().any(|line| line == "/not/an/entry"), "{args}");
+        let patch = args
+            .lines()
+            .skip_while(|line| *line != "--patch")
+            .nth(1)
+            .expect("patch argument");
+        assert!(!Path::new(patch).starts_with(&run.workspace), "{patch}");
+        let workspace_entries: Vec<_> = std::fs::read_dir(&run.workspace)
+            .expect("workspace")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert!(
+            !workspace_entries.iter().any(|name| name == "data"),
+            "{workspace_entries:?}"
+        );
+        assert!(
+            verified.contains_key(&run.workspace.join("libraries/g/out/1/out-1.jar")),
+            "a coordinate output key is verified"
+        );
+        assert!(installer_scratch_entries(&run.engine).is_empty());
+        drop(run.root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn installer_data_is_removed_when_a_processor_fails() {
+        let run = processor_run_with_installer_data(7);
+
+        let error = run
+            .engine
+            .run_processors(
+                &run.bundle,
+                InstallSide::Server,
+                &run.workspace,
+                Path::new("minecraft.jar"),
+                &run.java,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("the processor fails");
+
+        assert!(
+            matches!(error, LoaderError::ProcessorFailed { .. }),
+            "{error:?}"
+        );
+        assert!(installer_scratch_entries(&run.engine).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn installer_data_is_removed_when_the_install_is_canceled() {
+        let run = processor_run_with_installer_data(0);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let error = run
+            .engine
+            .run_processors(
+                &run.bundle,
+                InstallSide::Server,
+                &run.workspace,
+                Path::new("minecraft.jar"),
+                &run.java,
+                &cancel,
+            )
+            .await
+            .expect_err("a canceled install does not finish");
+
+        assert!(matches!(error, LoaderError::Canceled), "{error:?}");
+        assert!(installer_scratch_entries(&run.engine).is_empty());
     }
 
     #[cfg(unix)]
