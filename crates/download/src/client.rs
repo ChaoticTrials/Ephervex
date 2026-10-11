@@ -174,10 +174,19 @@ fn follow_within_origin(
         );
         return attempt.stop();
     }
-    if attempt.previous().len() >= max_redirects {
+    if exceeds_redirect_bound(&attempt, max_redirects) {
         return attempt.error(TooManyRedirects);
     }
     attempt.follow()
+}
+
+/// Whether following `attempt` would be redirect number `max_redirects + 1`.
+///
+/// `Attempt::previous` begins with the original request URL, so its length is
+/// the number of redirects already followed plus one, the same accounting
+/// `redirect::Policy::limited` uses.
+fn exceeds_redirect_bound(attempt: &redirect::Attempt<'_>, max_redirects: usize) -> bool {
+    attempt.previous().len() > max_redirects
 }
 
 /// Builds a client that will not follow a redirect off an explicit host list.
@@ -209,7 +218,7 @@ pub fn build_allowlisted_client(
             );
             return attempt.stop();
         }
-        if attempt.previous().len() >= max_redirects {
+        if exceeds_redirect_bound(&attempt, max_redirects) {
             return attempt.error(TooManyRedirects);
         }
         attempt.follow()
