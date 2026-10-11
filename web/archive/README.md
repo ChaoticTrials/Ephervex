@@ -1,15 +1,16 @@
 # Road to v1.0.0 archive publication
 
-This directory contains only `archive-data.json` and publication metadata. The
-committed file is the public Forgejo schema v1 export with issue and PR history.
-`publication.json` pins its exact SHA-256 and has `mode: "approved"`. Archive
-routes are indexable and included in the sitemap. The reserved unavailable
-record remains `noindex` and excluded from the sitemap.
+This directory contains the Forgejo schema v1 export, `publication.json`, and
+this README. The publication file pins the export's SHA-256 and currently has
+`mode: "approved"`. That setting makes the archive routes indexable and adds
+them to the sitemap. It does not verify the export's content or attest to a
+manual publication review. The reserved unavailable record remains `noindex`
+and is excluded from the sitemap.
 
-Keep private preservation copies such as `snapshot.json` and separately stored
-assets outside the Git worktree. Neither belongs in `web/` or Git. The public
-JSON intentionally omits Forgejo release records (`releases: []`); future
-application pre-releases are handled on GitHub, not in this archive dataset.
+Private snapshots, assets, review files, and API responses are not part of this
+checkout. Store them outside the Git worktree if retained. The site export
+omits Forgejo release records (`releases: []`); application pre-releases are
+handled on GitHub.
 
 ## Architecture and stable URLs
 
@@ -17,7 +18,7 @@ application pre-releases are handled on GitHub, not in this archive dataset.
 `loadContent`, then uses `createData` and `addRoute` to produce one overview and
 one static page for each issue or pull request. Detail pages receive only their
 own entry and the set of known numbers used for cross references. The overview
-receives searchable text from all approved public entries once. Nothing is
+receives searchable text from all exported entries once. Nothing is
 fetched from Forgejo by the browser or during the website build. Search and
 filters run on the overview in memory; results are paged at 30 entries. The
 summary counts act as shortcuts to issue, PR, merged, and discussed-thread
@@ -30,21 +31,19 @@ filters. Label accents use the validated colors from the public export.
 - `/road-to-v1/forgejo/pulls/{number}/`
 
 Docusaurus `Link` and `useBaseUrl` add the deployment prefix without changing
-these canonical paths. **Finalize and freeze these URL contracts before
-historical Git commit messages are rewritten for GitHub.** Future redesigns
-must keep them. Unknown numbers have no generated route and return 404 on a
-normal static host.
+these canonical paths. Keep the paths stable when changing the archive or site.
+Unknown numbers have no generated route and return 404 on a normal static host.
 
 The current export has issue #3 but no pull request #3. Because the latter URL
 was explicitly reserved in the migration contract, the build prerenders an
 honest unavailable-record page at `/road-to-v1/forgejo/pulls/3/`. It does not
 invent a PR. The page is `noindex` and is excluded from the sitemap even after
-publication approval. If a future reviewed export actually contains PR #3,
+publication approval. If a future export contains PR #3,
 the normal PR detail page replaces it automatically.
 
 ## Schema v1 contract
 
-The input is the reviewed `archive-data.json` made by
+The input is `archive-data.json` made by
 `forgejo_archive.py prepare-public`. `src/archive/schema.ts` defines and checks
 the contract at build time: `schemaVersion: 1`; archive metadata and the exact
 route contract; arrays of `issues`, `pulls`, `milestones`, `labels`, and
@@ -63,54 +62,51 @@ become archive links only when the exported number exists. Raw HTML is skipped,
 unsafe URL schemes and internal `.lan` links are blocked, and historical images
 are represented by a missing asset note instead of being fetched.
 
-## Refresh the public export
+## Replace the site export
 
-1. Keep the private `snapshot.json`, assets, token, and API responses **outside
-   this repository**. From `web/`, use
-   `python3 scripts/forgejo-archive/forgejo_archive.py export --out "$HOME/ephervex-road-private" --download-assets`,
-   followed by `verify --input "$HOME/ephervex-road-private"` and
-   `prepare-public --input "$HOME/ephervex-road-private" --out "$HOME/ephervex-road-public-review"`
-   with the same script path. Set `FORGEJO_TOKEN` only in your own local shell;
-   never put it in a command, chat, file, or build environment. Review every
-   issue, PR, comment, review
-   body, link, quote, person, hostname, and license. Investigate export warnings
-   and missing API capabilities. `prepare-public` produces a review candidate,
-   not a safety guarantee.
-2. Calculate `sha256sum archive-data.json` on the exact candidate bytes and
-   copy only that file here. Set `publication.json` to
-   `{"mode":"testing","sha256":"<the 64-character digest>"}` during review.
-   A changed data file without matching metadata fails the build. The exporter
-   keeps Forgejo releases in the private snapshot and writes `releases: []`
-   publicly. After a full review of the final bytes, retain the sign-off record
-   and digest outside the website, then set the publication mode to `approved`.
-3. Run `npm run archive:test`, `npm run typecheck`, `npm run build`, and
-   `npm run archive:check`. Check the generated route list, sitemap, rendered
-   pages, and search results before publishing. Each new approved export
-   regenerates the site with the same steps. For a nonroot deployment, build
-   with `DOCUSAURUS_BASE_URL=/preview/` and run
+1. Choose private export and review directories outside this checkout. From
+   `web/`, run `forgejo_archive.py export`, `verify`, and `prepare-public` in
+   that order, passing the chosen directories with `--out` and `--input`.
+   The exporter is at `scripts/forgejo-archive/forgejo_archive.py`. Supply
+   `FORGEJO_TOKEN` through your local shell. Keep the token, private snapshot,
+   assets, and API responses out of the repository.
+2. Review the public candidate's issue and PR text, comments, reviews, links,
+   people, hostnames, licenses, warnings, and missing API capabilities.
+   `prepare-public` generates a candidate and checklist; it does not complete
+   the manual review. The exporter keeps Forgejo releases in the private
+   snapshot and writes `releases: []` to the site export.
+3. Copy only the candidate's `archive-data.json` into this directory. Calculate
+   its SHA-256 and update `publication.json` with the exact digest. Use
+   `mode: "testing"` while reviewing. The build rejects a digest mismatch.
+   Record the review decision and digest outside the website before setting
+   `mode: "approved"`; the flag itself does not prove the review happened.
+4. Run `npm run archive:test`, `npm run typecheck`, `npm run build`, and
+   `npm run archive:check`. Inspect the generated routes, sitemap, pages, and
+   search results. For a nonroot deployment, build with
+   `DOCUSAURUS_BASE_URL=/preview/` and run
    `npm run archive:check -- /preview/`.
 
 The build checks for a file named `snapshot.json` or `snapshot.backup.*.json`
 under the website source and fails if one appears. Git also ignores those
 names. This is a guardrail, not a substitute for reviewing all public text:
-the committed public export is shipped in build HTML and search bundles.
+the site export is shipped in build HTML and search bundles.
 
 ## Portable public download
 
-There is currently **no download link or published ZIP**. The bundled exporter's
-`package-public` command can build a reproducible ZIP from the reviewed
-`archive-data.json` by requiring its exact SHA-256 with
-`--approve-sha256`. The ZIP contains the public JSON, readable Markdown
-exports, a manifest, and `SHA256SUMS`; it is not a Forgejo server backup.
-From `web/`, run:
+There is currently **no download link or published ZIP**. The exporter's
+`package-public` command can build a reproducible ZIP from a reviewed public
+candidate by requiring its exact SHA-256 with `--approve-sha256`. The ZIP
+contains JSON, Markdown exports, a manifest, and `SHA256SUMS`; it is not a
+Forgejo server backup. After setting `archive_review_dir` and `archive_zip`
+to paths outside this checkout, run from `web/`:
 
 ```bash
-sha256sum "$HOME/ephervex-road-public-review/archive-data.json"
+sha256sum "$archive_review_dir/archive-data.json"
 python3 scripts/forgejo-archive/forgejo_archive.py package-public \
-  --input "$HOME/ephervex-road-public-review" \
-  --out "$HOME/ephervex-road-to-v1-public.zip" \
+  --input "$archive_review_dir" \
+  --out "$archive_zip" \
   --approve-sha256 REVIEWED_DATA_SHA256
-sha256sum "$HOME/ephervex-road-to-v1-public.zip"
+sha256sum "$archive_zip"
 ```
 
 Verify the finished ZIP with `sha256sum <zip>` and publish its checksum beside
@@ -119,9 +115,7 @@ Add a website link only once the URL, approval, package bytes, and published
 SHA-256 have all been verified. Never link to `snapshot.json` or automatically
 copy the private backup into the site.
 
-Original attachments, Forgejo release records, and release binaries are omitted,
-and links to files on
-the retiring Forgejo instance may no longer work. The public export may also
-omit Forgejo API features unavailable on that server. Keep the private backup
-and Git mirror separately for preservation; the public website is a curated
-historical record.
+Original attachments, Forgejo release records, and release binaries are omitted.
+Links to files on the retiring Forgejo instance may no longer work. The site
+export may also omit Forgejo API features unavailable on that server. Retain
+private backups and the Git mirror separately from the public website.
