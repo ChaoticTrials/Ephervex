@@ -3040,6 +3040,7 @@ async fn run_launch(app: &mut App, args: &LaunchArgs, json: bool) -> anyhow::Res
                 print_connect_event(event);
             }
         });
+        let (server_observer, warning_printer) = spawn_launch_server_warning_printer(json);
         let outcome = app
             .launch_and_connect(
                 args.id,
@@ -3053,13 +3054,15 @@ async fn run_launch(app: &mut App, args: &LaunchArgs, json: bool) -> anyhow::Res
                     ..LaunchAndConnectOptions::default()
                 },
                 &connect_observer,
-                &ServerObserver::silent(),
+                &server_observer,
                 &observer,
                 &cancel,
             )
             .await;
         drop(connect_observer);
+        drop(server_observer);
         let _ = connect_printer.await;
+        let _ = warning_printer.await;
         Some(outcome)
     } else {
         None
@@ -3090,6 +3093,34 @@ async fn run_launch(app: &mut App, args: &LaunchArgs, json: bool) -> anyhow::Res
         }
     };
     game_exit_result(exit, stop_requested).and(stdout_result())
+}
+
+/// Shows a linked server's advisories during a launch.
+///
+/// The server's own output is left out because it would bury the game's. The
+/// task keeps draining until the observer is dropped, so the queue stays empty
+/// for as long as the supervised server runs.
+fn spawn_launch_server_warning_printer(
+    json: bool,
+) -> (ServerObserver, tokio::task::JoinHandle<()>) {
+    let (observer, mut events) = ServerObserver::channel();
+    let printer = tokio::spawn(async move {
+        while let Some(event) = events.recv().await {
+            if let Some(warning) = launch_server_warning(event) {
+                print_server_warning(&warning, json);
+            }
+        }
+    });
+    (observer, printer)
+}
+
+/// The advisory a linked server's event carries, which is all a launch shows
+/// of that server's events.
+fn launch_server_warning(event: ServerEvent) -> Option<ServerWarning> {
+    match event {
+        ServerEvent::Warning(warning) => Some(warning),
+        _ => None,
+    }
 }
 
 /// What the requests to end a launch act on.
@@ -8455,6 +8486,26 @@ mod tests {
 
         let compatible = optional_status_json(&OptionalStatus::Compatible);
         assert_eq!(compatible["compatible"], true);
+    }
+
+    #[test]
+    fn a_launch_shows_a_linked_servers_warnings_and_nothing_else_it_emits() {
+        let warnings = [
+            ServerWarning::OfflineModeExposed,
+            ServerWarning::PortUnavailable {
+                address: "0.0.0.0".to_owned(),
+                port: 25565,
+                detail: "address in use".to_owned(),
+            },
+        ];
+        for warning in warnings {
+            assert_eq!(
+                launch_server_warning(ServerEvent::Warning(warning.clone())),
+                Some(warning)
+            );
+        }
+        assert_eq!(launch_server_warning(ServerEvent::Started { pid: 7 }), None);
+        assert_eq!(launch_server_warning(ServerEvent::Restarting), None);
     }
 
     fn settings_with(key: ephervex_core::CurseForgeKeyState) -> ApiSettings {
