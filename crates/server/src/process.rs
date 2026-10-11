@@ -85,7 +85,7 @@ pub enum ServerEvent {
     },
     Output(CapturedLine),
     Warning(ServerWarning),
-    CapturePruned(crate::CaptureRetention),
+    CapturePruned(crate::CapturePrune),
     CaptureUnavailable {
         detail: String,
     },
@@ -1001,8 +1001,8 @@ async fn read_pipe<R>(
                 observer.emit(ServerEvent::Output(line));
                 for event in capture.drain_events() {
                     match event {
-                        ServerOutputEvent::CapturePruned(retention) => {
-                            observer.emit(ServerEvent::CapturePruned(retention));
+                        ServerOutputEvent::CapturePruned(prune) => {
+                            observer.emit(ServerEvent::CapturePruned(prune));
                         }
                         ServerOutputEvent::CaptureUnavailable { detail } => {
                             observer.emit(ServerEvent::CaptureUnavailable { detail });

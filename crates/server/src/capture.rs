@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -91,6 +91,15 @@ pub struct CaptureRetention {
     pub earliest_retained_at: Option<DateTime<Utc>>,
 }
 
+/// What one retention pass removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturePrune {
+    pub retention: CaptureRetention,
+    /// Whether the pass removed part of the run being written, as opposed to
+    /// only runs before it.
+    pub current_run_pruned: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaptureHealth {
     Available,
@@ -100,7 +109,7 @@ pub enum CaptureHealth {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerOutputEvent {
     Line(CapturedLine),
-    CapturePruned(CaptureRetention),
+    CapturePruned(CapturePrune),
     CaptureUnavailable { detail: String },
 }
 
@@ -171,9 +180,9 @@ impl OutputCapture {
 
         if let Some(writer) = &mut self.writer {
             match writer.write(&line) {
-                Ok(Some(retention)) => self
+                Ok(Some(prune)) => self
                     .events
-                    .push_back(ServerOutputEvent::CapturePruned(retention)),
+                    .push_back(ServerOutputEvent::CapturePruned(prune)),
                 Ok(None) => {}
                 Err(error) => {
                     let detail = error.to_string();
@@ -264,6 +273,15 @@ impl TrackedSegment {
             started_at: None,
         }
     }
+
+    /// Whether this segment begins a run rather than continuing one.
+    fn starts_run(&self) -> bool {
+        !self
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(segment_continues_run)
+    }
 }
 
 /// Whether a new segment begins a run or carries on the previous one.
@@ -271,6 +289,19 @@ impl TrackedSegment {
 enum SegmentStart {
     Run,
     Continuation,
+}
+
+/// How the creation instant is written in a segment's name, and its length.
+const SEGMENT_INSTANT_FORMAT: &str = "%Y%m%dT%H%M%S%.3fZ";
+const SEGMENT_INSTANT_LEN: usize = 20;
+
+/// The creation instant a segment's name carries.
+fn segment_instant(path: &Path) -> Option<DateTime<Utc>> {
+    let name = path.file_name()?.to_str()?;
+    let stamp = name.strip_prefix("capture-")?.get(..SEGMENT_INSTANT_LEN)?;
+    NaiveDateTime::parse_from_str(stamp, SEGMENT_INSTANT_FORMAT)
+        .ok()
+        .map(|naive| naive.and_utc())
 }
 
 /// Upper bound on bytes read to find a segment's first line.
@@ -297,7 +328,15 @@ impl CaptureWriter {
         std::fs::create_dir_all(directory)?;
         let retention = read_retention(directory).unwrap_or_default();
         let retained: VecDeque<TrackedSegment> = existing_segments(directory)?.into();
-        let segment_at = Utc::now();
+        // A clock that stepped back since the last run must not name the new
+        // run's segment before the ones it follows.
+        let segment_at = retained
+            .iter()
+            .filter_map(|segment| segment_instant(&segment.path))
+            .max()
+            .map_or_else(Utc::now, |newest| {
+                Utc::now().max(newest + chrono::Duration::milliseconds(1))
+            });
         let (path, current) = create_segment(directory, SegmentStart::Run, segment_at)?;
         let total_bytes = retained.iter().map(|segment| segment.bytes).sum();
         Ok(Self {
@@ -312,7 +351,7 @@ impl CaptureWriter {
         })
     }
 
-    fn write(&mut self, line: &CapturedLine) -> std::io::Result<Option<CaptureRetention>> {
+    fn write(&mut self, line: &CapturedLine) -> std::io::Result<Option<CapturePrune>> {
         let mut body = serde_json::to_vec(line).map_err(std::io::Error::other)?;
         body.push(b'\n');
         let length = u64::try_from(body.len()).unwrap_or(u64::MAX);
@@ -349,12 +388,17 @@ impl CaptureWriter {
         Ok(())
     }
 
-    fn enforce_budget(&mut self) -> std::io::Result<Option<CaptureRetention>> {
+    fn enforce_budget(&mut self) -> std::io::Result<Option<CapturePrune>> {
         let mut changed = false;
+        let mut current_run_pruned = false;
         while self.total_bytes > self.limits.budget_bytes {
             let Some(segment) = self.retained.pop_front() else {
                 break;
             };
+            // Pruning goes oldest first, so a segment belongs to the current
+            // run exactly when no later segment starts a run.
+            current_run_pruned |= !self.current_segment.starts_run()
+                && !self.retained.iter().any(TrackedSegment::starts_run);
             let lines = match segment.lines {
                 Some(lines) => lines,
                 None => match count_lines(&segment.path) {
@@ -399,7 +443,10 @@ impl CaptureWriter {
         self.current.write_all(&body)?;
         self.current.flush()?;
         self.record_current(u64::try_from(body.len()).unwrap_or(0), None);
-        Ok(Some(self.retention.clone()))
+        Ok(Some(CapturePrune {
+            retention: self.retention.clone(),
+            current_run_pruned,
+        }))
     }
 }
 
@@ -410,7 +457,7 @@ fn create_segment(
 ) -> std::io::Result<(PathBuf, std::fs::File)> {
     let name = format!(
         "capture-{}-{}{}",
-        at.format("%Y%m%dT%H%M%S%.3fZ"),
+        at.format(SEGMENT_INSTANT_FORMAT),
         Uuid::new_v4(),
         match start {
             SegmentStart::Run => ".jsonl",
@@ -569,8 +616,8 @@ mod tests {
                 CaptureStream::Stdout,
                 format!("line-{index}-xxxxxxxxxxxxxxxxxxxxxxxx").as_bytes(),
             );
-            if let Some(retention) = writer.write(&line).expect("write") {
-                pruned = Some(retention);
+            if let Some(prune) = writer.write(&line).expect("write") {
+                pruned = Some(prune.retention);
             }
         }
         let retention = pruned.expect("old segments should be pruned");
@@ -729,7 +776,11 @@ mod tests {
         };
 
         let mut writer = CaptureWriter::open(directory.path(), limits).expect("writer");
-        let retention = writer.write(&line).expect("write").expect("pruned");
+        let retention = writer
+            .write(&line)
+            .expect("write")
+            .expect("pruned")
+            .retention;
 
         assert_eq!(retention.removed_segments, 1);
         assert_eq!(retention.removed_bytes, oldest);
@@ -754,6 +805,122 @@ mod tests {
 
         let reopened = CaptureWriter::open(directory.path(), limits).expect("reopen");
         assert_eq!(reopened.retention, retention);
+    }
+
+    #[test]
+    fn a_new_run_sorts_after_every_retained_segment_when_the_clock_stepped_back() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        write_prior_segment(
+            directory.path(),
+            "capture-29990101T000000.000Z-a.jsonl",
+            "2999-01-01T00:00:00Z",
+            2,
+        );
+        write_prior_segment(
+            directory.path(),
+            "capture-29990101T000500.000Z-b.continued.jsonl",
+            "2999-01-01T00:05:00Z",
+            2,
+        );
+
+        let writer =
+            CaptureWriter::open(directory.path(), CaptureLimits::default()).expect("writer");
+
+        let names = segment_names(directory.path());
+        let current = writer
+            .current_segment
+            .path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(names.last(), Some(&current), "{names:?}");
+        assert!(
+            segment_instant(&writer.current_segment.path).unwrap()
+                > timestamp("2999-01-01T00:05:00Z")
+        );
+    }
+
+    #[test]
+    fn the_instant_in_a_segment_name_is_read_back() {
+        let at = timestamp("2026-08-13T12:34:56.789Z");
+        let directory = tempfile::tempdir().expect("temp dir");
+        let (path, _file) =
+            create_segment(directory.path(), SegmentStart::Continuation, at).expect("segment");
+        assert_eq!(segment_instant(&path), Some(at));
+        assert_eq!(
+            segment_instant(Path::new("capture-20260813T120000-old.jsonl")),
+            None
+        );
+    }
+
+    #[test]
+    fn pruning_only_earlier_runs_leaves_the_current_run_unpruned() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let oldest = write_prior_segment(
+            directory.path(),
+            "capture-20200101T000000.000Z-a.jsonl",
+            "2020-01-01T00:00:00Z",
+            3,
+        );
+        let newer = write_prior_segment(
+            directory.path(),
+            "capture-20200102T000000.000Z-b.jsonl",
+            "2020-01-02T00:00:00Z",
+            2,
+        );
+        let line = CapturedLine::from_bytes(CaptureStream::Stdout, b"fresh");
+        let line_bytes = u64::try_from(serde_json::to_vec(&line).unwrap().len() + 1).unwrap();
+        let limits = CaptureLimits {
+            segment_bytes: CAPTURE_SEGMENT_BYTES,
+            budget_bytes: oldest + newer + line_bytes - 1,
+        };
+        let mut writer = CaptureWriter::open(directory.path(), limits).expect("writer");
+
+        let prune = writer.write(&line).expect("write").expect("pruned");
+
+        assert_eq!(prune.retention.removed_segments, 1);
+        assert!(!prune.current_run_pruned);
+    }
+
+    #[test]
+    fn pruning_part_of_the_current_run_is_reported() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let prior = write_prior_segment(
+            directory.path(),
+            "capture-20200101T000000.000Z-a.jsonl",
+            "2020-01-01T00:00:00Z",
+            1,
+        );
+        let mut writer = CaptureWriter::open(
+            directory.path(),
+            CaptureLimits {
+                segment_bytes: 180,
+                budget_bytes: prior + 400,
+            },
+        )
+        .expect("writer");
+
+        let mut reports = Vec::new();
+        for index in 0..30 {
+            let line = CapturedLine::from_bytes(
+                CaptureStream::Stdout,
+                format!("line-{index}-xxxxxxxxxxxxxxxxxxxxxxxx").as_bytes(),
+            );
+            if let Some(prune) = writer.write(&line).expect("write") {
+                reports.push(prune.current_run_pruned);
+            }
+        }
+
+        assert_eq!(
+            reports.first(),
+            Some(&false),
+            "the earlier run goes first: {reports:?}"
+        );
+        assert!(
+            reports.contains(&true),
+            "the run's own segments are pruned next: {reports:?}"
+        );
     }
 
     #[test]

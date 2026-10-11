@@ -7158,7 +7158,8 @@ fn open_live_log(
                 if bounded {
                     capture.lines.remove(0);
                 }
-                let source_truncated = capture.retention.removed_lines > 0 || bounded;
+                let source_truncated =
+                    capture.retention.removed_lines > 0 || capture.pruned_while_reading || bounded;
                 let _ = events.send(Event::LiveLog(LiveLogUpdate {
                     source,
                     reset: true,
@@ -8211,6 +8212,16 @@ fn send_server_lines(events: &Sender<Event>, server: ServerId, lines: Vec<LiveLo
     }));
 }
 
+fn send_server_truncation(events: &Sender<Event>, server: ServerId) {
+    let _ = events.send(Event::LiveLog(LiveLogUpdate {
+        source: LiveLogSource::Server(server),
+        reset: false,
+        missing: false,
+        source_truncated: true,
+        lines: Vec::new(),
+    }));
+}
+
 /// Reports one server event. `cancellation` is the token that ends this start
 /// while it prepares, where the start can be canceled at all.
 fn forward_server_event(
@@ -8287,15 +8298,13 @@ fn forward_server_event(
                 event: ServerToolEvent::Started,
             });
         }
-        ServerEvent::CapturePruned(_) | ServerEvent::CaptureUnavailable { .. } => {
-            let _ = events.send(Event::LiveLog(LiveLogUpdate {
-                source: LiveLogSource::Server(server),
-                reset: false,
-                missing: false,
-                source_truncated: true,
-                lines: Vec::new(),
-            }));
+        // Pruning only earlier runs leaves the run the Console shows whole.
+        ServerEvent::CapturePruned(prune) => {
+            if prune.current_run_pruned {
+                send_server_truncation(events, server);
+            }
         }
+        ServerEvent::CaptureUnavailable { .. } => send_server_truncation(events, server),
         ServerEvent::Warning(warning) => {
             let _ = events.send(Event::Toast {
                 message: server_warning_message(&warning),
@@ -13334,6 +13343,38 @@ mod tests {
                 .is_none(),
             "the token is released once the server runs"
         );
+    }
+
+    #[test]
+    fn the_live_console_is_marked_truncated_only_when_pruning_reached_the_run_it_shows() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = Paths::rooted_at(root.path());
+        let (events, received) = std::sync::mpsc::channel();
+        let server = ServerId::new();
+
+        for (current_run_pruned, truncated) in [(false, false), (true, true)] {
+            forward_server_event(
+                &events,
+                "server",
+                &paths,
+                &Mutex::new(None),
+                None,
+                server,
+                ServerEvent::CapturePruned(ephervex_server::CapturePrune {
+                    retention: ephervex_server::CaptureRetention::default(),
+                    current_run_pruned,
+                }),
+            );
+            let updates: Vec<_> = received
+                .try_iter()
+                .filter_map(|event| match event {
+                    Event::LiveLog(update) => Some(update),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(updates.len(), usize::from(truncated));
+            assert!(updates.iter().all(|update| update.source_truncated));
+        }
     }
 
     #[test]

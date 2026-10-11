@@ -2525,6 +2525,7 @@ async fn run_server_command(
                         "removed_lines": snapshot.retention.removed_lines,
                         "earliest_retained_at": snapshot.retention.earliest_retained_at,
                     },
+                    "pruned_while_reading": snapshot.pruned_while_reading,
                     "lines": snapshot.lines.iter().map(captured_line_json).collect::<Vec<_>>(),
                 }));
             } else {
@@ -7751,7 +7752,8 @@ fn print_server_event(event: ServerEvent, json: bool, progress: &mut LaunchProgr
             }
         }
         ServerEvent::Warning(warning) => print_server_warning(&warning, json),
-        ServerEvent::CapturePruned(retention) => {
+        ServerEvent::CapturePruned(prune) => {
+            let retention = prune.retention;
             if json {
                 print_json(&serde_json::json!({
                     "event": "capture_pruned",

@@ -98,6 +98,9 @@ pub struct CaptureSnapshot {
     pub lines: Vec<CapturedLine>,
     pub health: CaptureHealth,
     pub retention: CaptureRetention,
+    /// A segment listed for this snapshot was removed by retention before it
+    /// could be read, so its lines are missing from `lines`.
+    pub pruned_while_reading: bool,
 }
 
 /// A fully validated server start whose process ownership can move onto the
@@ -1609,6 +1612,18 @@ fn read_capture_snapshot(
             }
         }
     }
+    snapshot_from_segments(directory, files, limit, scope)
+}
+
+/// Reads the newest `limit` lines from listed capture segments. Retention
+/// removes the oldest segments while the supervisor runs, so a listed segment
+/// can be gone by the time it is read.
+fn snapshot_from_segments(
+    directory: &Path,
+    mut files: Vec<PathBuf>,
+    limit: usize,
+    scope: CaptureScope,
+) -> CoreResult<CaptureSnapshot> {
     files.sort();
     // Retention removes the oldest segments first, so a run whose first
     // segment is still here lost nothing, whatever earlier runs lost.
@@ -1624,15 +1639,22 @@ fn read_capture_snapshot(
         files.drain(..start);
         latest_run_is_whole = true;
     }
+    let mut pruned_while_reading = false;
     let mut lines = Vec::with_capacity(limit.min(2_000));
     'segments: for path in files.into_iter().rev() {
         if lines.len() == limit {
             break;
         }
-        let body = std::fs::read(&path).map_err(|source| ephervex_server::ServerError::Io {
-            path: path.clone(),
-            source,
-        })?;
+        let body = match std::fs::read(&path) {
+            Ok(body) => body,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                pruned_while_reading = true;
+                continue;
+            }
+            Err(source) => {
+                return Err(ephervex_server::ServerError::Io { path, source }.into());
+            }
+        };
         for line in body
             .rsplit(|byte| *byte == b'\n')
             .filter(|line| !line.is_empty())
@@ -1646,6 +1668,8 @@ fn read_capture_snapshot(
         }
     }
     lines.reverse();
+    // The run lost a segment after it was listed whole.
+    latest_run_is_whole &= !pruned_while_reading;
     let retention_path = directory.join(ephervex_server::CAPTURE_INDEX_FILE);
     let retention = if latest_run_is_whole {
         CaptureRetention::default()
@@ -1659,6 +1683,7 @@ fn read_capture_snapshot(
         lines,
         health: CaptureHealth::Available,
         retention,
+        pruned_while_reading,
     })
 }
 
@@ -3020,6 +3045,94 @@ mod tests {
             .expect("snapshot");
         assert_eq!(texts(&latest), ["tail"]);
         assert_eq!(latest.retention.removed_lines, 4);
+    }
+
+    #[test]
+    fn a_segment_pruned_after_listing_is_skipped_and_reported_as_lost_only_within_the_scope_read() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let gone = directory
+            .path()
+            .join("capture-20260813T120000.000Z-a.jsonl");
+        let kept = directory
+            .path()
+            .join("capture-20260813T130000.000Z-b.jsonl");
+        write_capture_segment(
+            directory.path(),
+            "capture-20260813T130000.000Z-b.jsonl",
+            &["kept"],
+        );
+
+        let retained = snapshot_from_segments(
+            directory.path(),
+            vec![gone.clone(), kept.clone()],
+            100,
+            CaptureScope::Retained,
+        )
+        .expect("snapshot");
+        assert_eq!(texts(&retained), ["kept"]);
+        assert!(retained.pruned_while_reading);
+
+        // A vanished segment of an earlier run is outside the latest run.
+        let latest = snapshot_from_segments(
+            directory.path(),
+            vec![gone, kept],
+            100,
+            CaptureScope::LatestRun,
+        )
+        .expect("snapshot");
+        assert_eq!(texts(&latest), ["kept"]);
+        assert!(!latest.pruned_while_reading);
+    }
+
+    #[test]
+    fn a_latest_run_that_lost_a_segment_while_read_keeps_the_retention_report() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        write_capture_segment(
+            directory.path(),
+            "capture-20260813T130500.000Z-c.continued.jsonl",
+            &["tail"],
+        );
+        let retention = ephervex_server::CaptureRetention {
+            removed_segments: 1,
+            removed_bytes: 10,
+            removed_lines: 4,
+            earliest_retained_at: None,
+        };
+        std::fs::write(
+            directory.path().join(ephervex_server::CAPTURE_INDEX_FILE),
+            serde_json::to_vec(&retention).expect("index"),
+        )
+        .expect("write index");
+        let start = directory
+            .path()
+            .join("capture-20260813T130000.000Z-b.jsonl");
+        let rest = directory
+            .path()
+            .join("capture-20260813T130500.000Z-c.continued.jsonl");
+
+        let latest = snapshot_from_segments(
+            directory.path(),
+            vec![start, rest],
+            100,
+            CaptureScope::LatestRun,
+        )
+        .expect("snapshot");
+
+        assert_eq!(latest.retention.removed_lines, 4);
+        assert!(latest.pruned_while_reading);
+    }
+
+    #[test]
+    fn a_complete_snapshot_is_not_reported_as_lost_while_reading() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        write_capture_segment(
+            directory.path(),
+            "capture-20260813T120000.000Z-a.jsonl",
+            &["only"],
+        );
+        let snapshot = read_capture_snapshot(directory.path(), 100, CaptureScope::LatestRun)
+            .expect("snapshot");
+        assert!(!snapshot.pruned_while_reading);
     }
 
     #[test]

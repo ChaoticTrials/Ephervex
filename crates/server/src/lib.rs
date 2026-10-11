@@ -14,7 +14,7 @@ pub mod properties;
 pub mod runtime;
 
 pub use capture::{
-    CAPTURE_BUDGET_BYTES, CAPTURE_INDEX_FILE, CAPTURE_SEGMENT_BYTES, CaptureHealth,
+    CAPTURE_BUDGET_BYTES, CAPTURE_INDEX_FILE, CAPTURE_SEGMENT_BYTES, CaptureHealth, CapturePrune,
     CaptureRetention, CaptureStream, CapturedLine, MAX_CAPTURE_LINE_BYTES, MAX_RING_BYTES,
     MAX_RING_LINES, OutputCapture, ServerOutputEvent, segment_continues_run,
 };
