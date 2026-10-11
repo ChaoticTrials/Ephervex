@@ -209,7 +209,13 @@ pub fn analyze(path: &Path, policy: &PackPolicy) -> PackResult<(PackArchive, Pac
         });
     };
     let analysis = parse_with(format, &mut archive, policy)?;
-    archive.require_extractable_entries("")?;
+    archive.require_extractable_layers(
+        analysis
+            .recipe
+            .override_layers
+            .iter()
+            .map(|layer| layer.archive_prefix.as_str()),
+    )?;
     info!(
         format = %analysis.format,
         pack = %analysis.recipe.original_name,
@@ -740,6 +746,75 @@ mod tests {
             .map(|_| ())
             .expect_err("refused");
         assert!(matches!(error, PackError::EntryPathUnsafe { .. }));
+    }
+
+    #[test]
+    fn analysis_refuses_a_reserved_name_that_only_appears_beneath_a_modrinth_override_layer() {
+        for root in ["", "./", "Wrapper/"] {
+            for layer in ["overrides", "client-overrides", "server-overrides"] {
+                for reserved in [".launcher/instance.json", ".LAUNCHER/x"] {
+                    let dir = tempfile::tempdir().expect("temp dir");
+                    let archive = dir.path().join("pack.mrpack");
+                    let name = under(root, &format!("{layer}/{reserved}"));
+                    zip_file(
+                        &archive,
+                        &[
+                            (&under(root, "modrinth.index.json"), INDEX),
+                            (&under(root, "overrides/config/a.toml"), b"a"),
+                            (&under(root, "client-overrides/b.txt"), b"b"),
+                            (&under(root, "server-overrides/c.txt"), b"c"),
+                            (&name, b"x"),
+                        ],
+                    );
+
+                    let error = analyze(&archive, &PackPolicy::modrinth())
+                        .map(|_| ())
+                        .expect_err(&name);
+                    assert!(
+                        matches!(error, PackError::EntryReserved { .. }),
+                        "{name} was refused with {error:?}"
+                    );
+                    assert!(ephervex_i18n::has(error.message_id()));
+                    assert_eq!(
+                        std::fs::read_dir(dir.path()).expect("list").count(),
+                        1,
+                        "{name}: analysis writes nothing beside the archive"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn analysis_refuses_a_reserved_name_that_only_appears_beneath_a_curseforge_override_layer() {
+        for layer in ["overrides", "custom-overrides"] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let archive = dir.path().join("repro.zip");
+            let manifest = String::from_utf8(curseforge_manifest(""))
+                .expect("utf-8")
+                .replace(
+                    "\"overrides\": \"overrides\"",
+                    &format!("\"overrides\": \"{layer}\""),
+                )
+                .into_bytes();
+            let name = format!("{layer}/.launcher/instance.json");
+            zip_file(
+                &archive,
+                &[
+                    ("manifest.json", &manifest),
+                    (&format!("{layer}/config/a.toml"), b"a"),
+                    (&name, b"x"),
+                ],
+            );
+
+            let error = analyze(&archive, &PackPolicy::curseforge())
+                .map(|_| ())
+                .expect_err(&name);
+            assert!(
+                matches!(error, PackError::EntryReserved { .. }),
+                "{name} was refused with {error:?}"
+            );
+        }
     }
 
     #[test]

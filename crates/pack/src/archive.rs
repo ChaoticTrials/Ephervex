@@ -389,7 +389,27 @@ impl PackArchive {
     /// any side effect. Entries are opened the way extraction opens them, so
     /// the two cannot disagree about what is readable.
     pub(crate) fn require_extractable_entries(&mut self, prefix: &str) -> PackResult<()> {
-        let prefix = normalize_prefix(prefix);
+        self.require_extractable_under(&[normalize_prefix(prefix)])
+    }
+
+    /// [`Self::require_extractable_entries`] for the archive root and for each
+    /// override layer, resolved beneath the pack root the way
+    /// [`Self::extract_layer_filtered`] resolves it.
+    ///
+    /// A name such as `overrides/.launcher/x` is only reserved once the layer
+    /// prefix is stripped, so checking the root alone lets it through.
+    pub(crate) fn require_extractable_layers<'a>(
+        &mut self,
+        layer_prefixes: impl IntoIterator<Item = &'a str>,
+    ) -> PackResult<()> {
+        let mut prefixes = vec![String::new()];
+        for layer in layer_prefixes {
+            prefixes.push(normalize_prefix(&self.under_pack_root(layer).join("/")));
+        }
+        self.require_extractable_under(&prefixes)
+    }
+
+    fn require_extractable_under(&mut self, prefixes: &[String]) -> PackResult<()> {
         for index in 0..self.zip.len() {
             let entry = self
                 .zip
@@ -398,7 +418,9 @@ impl PackArchive {
                     path: self.path.clone(),
                     source,
                 })?;
-            entry_under(entry.name_raw(), &prefix)?;
+            for prefix in prefixes {
+                entry_under(entry.name_raw(), prefix)?;
+            }
         }
         Ok(())
     }
