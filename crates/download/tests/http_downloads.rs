@@ -8,7 +8,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1300,15 +1300,17 @@ async fn the_file_named_beside_a_batch_count_advances_with_it() {
     assert_eq!(last.current_step.as_deref(), Some("file-4.jar"));
 }
 
-/// A batch of cached artifacts must not open all of them at once.
+/// Counts descriptors pointing into a directory from a thread of its own.
 ///
-/// The cache probe runs before a transfer permit is taken, so that a cached
-/// artifact never queues behind a download. Left unbounded that opened every
-/// destination in the batch at the same instant: installing a Minecraft
-/// version's assets is thousands of objects, which exhausts the 1024 descriptor
-/// limit a desktop session hands out and surfaces as an unreadable cache entry.
-#[tokio::test]
-async fn a_batch_of_cached_artifacts_bounds_the_files_it_opens() {
+/// The scan is blocking filesystem work, so it stays off the runtime thread the
+/// batch it observes runs on.
+struct OpenFileSampler {
+    peak: Arc<std::sync::atomic::AtomicUsize>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl OpenFileSampler {
     /// Only descriptors pointing into `directory`, so the rest of the test
     /// binary's sockets and files cannot move the count.
     fn open_under(directory: &Path) -> usize {
@@ -1323,9 +1325,60 @@ async fn a_batch_of_cached_artifacts_bounds_the_files_it_opens() {
             .count()
     }
 
+    fn start(directory: PathBuf) -> Self {
+        use std::sync::atomic::Ordering;
+
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (observed, stopped) = (Arc::clone(&peak), Arc::clone(&stop));
+        let thread = std::thread::spawn(move || {
+            while !stopped.load(Ordering::Relaxed) {
+                observed.fetch_max(Self::open_under(&directory), Ordering::Relaxed);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        });
+        Self {
+            peak,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    fn finish(mut self) -> usize {
+        self.halt();
+        self.peak.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn halt(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for OpenFileSampler {
+    fn drop(&mut self) {
+        self.halt();
+    }
+}
+
+/// A batch of cached artifacts must not open all of them at once.
+///
+/// The cache probe runs before a transfer permit is taken, so that a cached
+/// artifact never queues behind a download. Left unbounded that opened every
+/// destination in the batch at the same instant: installing a Minecraft
+/// version's assets is thousands of objects, which exhausts the 1024 descriptor
+/// limit a desktop session hands out and surfaces as an unreadable cache entry.
+///
+/// The batch has a deadline, so a stall under load fails the test with a
+/// message instead of holding up the rest of the workspace run.
+#[tokio::test]
+async fn a_batch_of_cached_artifacts_bounds_the_files_it_opens() {
     // Large enough that hashing them takes long enough to observe, and more of
     // them than the probe is allowed to hold open.
     const FILES: usize = 300;
+    const DEADLINE: Duration = Duration::from_secs(120);
     let body = vec![b'a'; 256 * 1024];
     let digest = sha1_of(&body);
 
@@ -1343,25 +1396,30 @@ async fn a_batch_of_cached_artifacts_bounds_the_files_it_opens() {
         );
     }
 
-    let watched = root.clone();
-    let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let observed = Arc::clone(&peak);
-    let sampler = tokio::spawn(async move {
-        loop {
-            let open = open_under(&watched);
-            observed.fetch_max(open, std::sync::atomic::Ordering::Relaxed);
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-    });
+    let sampler = OpenFileSampler::start(root);
 
     let (sink, _events) = ChannelSink::new();
     let sink: Arc<dyn ProgressSink> = sink;
     let reporter = OperationReporter::new("download-batch", true, sink);
-    let outcomes = manager_with(RetryPolicy::none(), 6)
-        .download_all(&requests, &reporter, &CancellationToken::new())
-        .await
-        .expect("every artifact is already cached");
-    sampler.abort();
+    let manager = manager_with(RetryPolicy::none(), 6);
+    let finished = tokio::time::timeout(
+        DEADLINE,
+        manager.download_all(&requests, &reporter, &CancellationToken::new()),
+    )
+    .await;
+    // The mock server verifies its expectations on drop by blocking on a Tokio
+    // lock. That never completes in a poll whose cooperative budget the batch
+    // has used up, so the server is dropped from a fresh poll.
+    tokio::task::yield_now().await;
+    drop(server);
+    let peak = sampler.finish();
+    let Ok(outcomes) = finished else {
+        panic!(
+            "the batch of {FILES} cached artifacts did not finish within {DEADLINE:?}; \
+             peak open files so far: {peak}"
+        );
+    };
+    let outcomes = outcomes.expect("every artifact is already cached");
 
     assert_eq!(outcomes.len(), FILES);
     // No request reached the server, which mounted no route to answer one.
@@ -1370,7 +1428,6 @@ async fn a_batch_of_cached_artifacts_bounds_the_files_it_opens() {
             .iter()
             .all(|outcome| outcome.source == ArtifactSource::AlreadyCached)
     );
-    let peak = peak.load(std::sync::atomic::Ordering::Relaxed);
     assert!(
         peak < FILES / 2,
         "the batch held {peak} of {FILES} cached files open at once"
