@@ -120,6 +120,7 @@ pub mod chain;
 pub mod endpoints;
 pub mod error;
 pub mod http;
+mod lifetime;
 pub mod loopback;
 pub mod microsoft;
 pub mod minecraft;

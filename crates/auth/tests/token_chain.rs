@@ -27,10 +27,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ephervex_auth::{
-    AccountProvider, AuthError, AuthEvent, AuthObserver, CredentialChangeOrder, CredentialKey,
-    CredentialRemoval, CredentialStorage, CredentialStore, Endpoints, EntitlementLookup, LoginFlow,
-    LoginRequest, MemoryStore, MicrosoftAccountProvider, ProcessChangeOrder, SecretString,
-    XstsDenial,
+    AccountProvider, AuthError, AuthEvent, AuthObserver, AuthStage, CredentialChangeOrder,
+    CredentialKey, CredentialRemoval, CredentialStorage, CredentialStore, Endpoints,
+    EntitlementLookup, LoginFlow, LoginRequest, MemoryStore, MicrosoftAccountProvider,
+    ProcessChangeOrder, SecretString, XstsDenial,
 };
 use ephervex_download::HttpConfig;
 use tokio_util::sync::CancellationToken;
@@ -734,6 +734,116 @@ async fn a_device_code_response_without_a_lifetime_is_refused() {
         matches!(error, AuthError::MalformedResponse { .. }),
         "{error:?}"
     );
+}
+
+#[tokio::test]
+async fn a_device_code_lifetime_beyond_the_clock_range_does_not_panic_the_prompt() {
+    let server = MockServer::start().await;
+    mount_token(&server, 400, PENDING).await;
+    mount_device_code_with_lifetime(&server, Some(9_000_000_000_000)).await;
+
+    let error = provider(&server, Arc::new(MemoryStore::new()))
+        .login(
+            &LoginRequest {
+                flow: LoginFlow::DeviceCode,
+                timeout: Duration::from_millis(300),
+            },
+            &AuthObserver::silent(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("the caller timeout still ends the wait");
+    assert!(matches!(error, AuthError::TimedOut { .. }), "{error:?}");
+}
+
+#[tokio::test]
+async fn a_microsoft_token_lifetime_beyond_the_clock_range_does_not_panic_sign_in() {
+    let server = MockServer::start().await;
+    let mut token: serde_json::Value = serde_json::from_str(TOKEN).expect("fixture parses");
+    token["expires_in"] = 9_000_000_000_000_i64.into();
+    mount_token(&server, 200, &token.to_string()).await;
+    mount_chain(&server).await;
+
+    drive_browser_login(
+        &provider(&server, Arc::new(MemoryStore::new())),
+        |redirect, state| format!("{redirect}/?code=THE-AUTH-CODE&state={state}"),
+    )
+    .await
+    .expect("the Microsoft token lifetime does not decide the session");
+}
+
+/// The Minecraft login document with `expires_in` replaced, or removed.
+fn minecraft_login_with_lifetime(expires_in: Option<i64>) -> String {
+    let mut body: serde_json::Value = serde_json::from_str(MC_LOGIN).expect("fixture parses");
+    match expires_in {
+        Some(seconds) => body["expires_in"] = seconds.into(),
+        None => {
+            body.as_object_mut().expect("object").remove("expires_in");
+        }
+    }
+    body.to_string()
+}
+
+#[tokio::test]
+async fn a_minecraft_login_without_a_usable_lifetime_is_refused_rather_than_reported_as_a_session()
+{
+    for expires_in in [None, Some(0), Some(-60)] {
+        let server = MockServer::start().await;
+        mount_token(&server, 200, TOKEN).await;
+        mount_xbox(&server, 200, XBOX).await;
+        mount_xsts(&server, 200, XSTS).await;
+        mount_minecraft_login(&server, 200, &minecraft_login_with_lifetime(expires_in)).await;
+        mount_entitlements(&server, 200, ENTITLEMENTS).await;
+        mount_profile(&server, 200, PROFILE).await;
+
+        let store = Arc::new(MemoryStore::new());
+        let error = drive_browser_login(&provider(&server, store.clone()), |redirect, state| {
+            format!("{redirect}/?code=THE-AUTH-CODE&state={state}")
+        })
+        .await
+        .expect_err("a token with no time left is not a login");
+        assert!(
+            matches!(
+                error,
+                AuthError::MalformedResponse {
+                    stage: AuthStage::MinecraftLogin,
+                    ..
+                }
+            ),
+            "{expires_in:?}: {error:?}"
+        );
+        assert!(
+            store
+                .load(&CredentialKey::MicrosoftRefreshToken(account()))
+                .expect("load")
+                .is_none(),
+            "{expires_in:?}: nothing is stored for a login that failed"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_minecraft_lifetime_beyond_the_clock_range_does_not_panic_and_yields_a_usable_session() {
+    let server = MockServer::start().await;
+    mount_token(&server, 200, TOKEN).await;
+    mount_xbox(&server, 200, XBOX).await;
+    mount_xsts(&server, 200, XSTS).await;
+    mount_minecraft_login(
+        &server,
+        200,
+        &minecraft_login_with_lifetime(Some(9_000_000_000_000)),
+    )
+    .await;
+    mount_entitlements(&server, 200, ENTITLEMENTS).await;
+    mount_profile(&server, 200, PROFILE).await;
+
+    let session = drive_browser_login(
+        &provider(&server, Arc::new(MemoryStore::new())),
+        |redirect, state| format!("{redirect}/?code=THE-AUTH-CODE&state={state}"),
+    )
+    .await
+    .expect("a very long lifetime is bounded, not fatal");
+    assert!(session.is_usable(chrono::TimeDelta::seconds(60)));
 }
 
 // ------------------------------------------------------------------- refresh

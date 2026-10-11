@@ -251,8 +251,7 @@ impl MicrosoftAccountProvider {
             account,
             credentials: Credentials::Microsoft {
                 token: minecraft.access,
-                expires_at: Utc::now()
-                    + chrono::TimeDelta::try_seconds(minecraft.expires_in).unwrap_or_default(),
+                expires_at: minecraft.expires_at,
                 entitlements,
                 storage: self.credentials.storage(),
             },

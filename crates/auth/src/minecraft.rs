@@ -38,7 +38,9 @@
 //! is only a trap for hand-rolled parsing - but the value that reaches the
 //! launch arguments has to be the hyphenated form.
 
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use serde::de::Error as _;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument};
 use uuid::Uuid;
@@ -46,6 +48,7 @@ use uuid::Uuid;
 use crate::endpoints::Endpoints;
 use crate::error::{AuthError, AuthResult};
 use crate::http::send;
+use crate::lifetime::Lifetime;
 use crate::secret::SecretString;
 use crate::stage::AuthStage;
 
@@ -63,8 +66,8 @@ pub const GAME_PASS_ENTITLEMENTS: &[&str] = &["product_game_pass_pc", "product_g
 #[derive(Debug)]
 pub struct MinecraftToken {
     pub access: SecretString,
-    /// Seconds the service said it is valid for. 86 400 in practice.
-    pub expires_in: i64,
+    /// When the service said it stops working. 24 hours after issue in practice.
+    pub expires_at: DateTime<Utc>,
 }
 
 /// What the account is entitled to.
@@ -201,9 +204,17 @@ impl MinecraftServicesClient {
         }
 
         let body: LoginBody = response.parse(AuthStage::MinecraftLogin)?;
+        // A token with no time left cannot start a game, so a success that
+        // says so is a malformed response, not a login.
+        if !body.expires_in.is_positive() {
+            return Err(AuthError::malformed(
+                AuthStage::MinecraftLogin,
+                serde_json::Error::custom("expires_in must leave the token time to live"),
+            ));
+        }
         Ok(MinecraftToken {
             access: body.access_token,
-            expires_in: body.expires_in,
+            expires_at: body.expires_in.expires_at(),
         })
     }
 
@@ -302,8 +313,7 @@ fn authorized(request: reqwest::RequestBuilder, token: &SecretString) -> reqwest
 #[derive(Debug, Deserialize)]
 struct LoginBody {
     access_token: SecretString,
-    #[serde(default)]
-    expires_in: i64,
+    expires_in: Lifetime,
 }
 
 #[derive(Debug, Deserialize)]
@@ -397,7 +407,7 @@ mod tests {
                 "token_type":"Bearer","expires_in":86400}"#,
         )
         .expect("parses");
-        assert_eq!(body.expires_in, 86_400);
+        assert_eq!(body.expires_in.seconds(), 86_400);
         assert!(!format!("{body:?}").contains("SECRET"));
     }
 }

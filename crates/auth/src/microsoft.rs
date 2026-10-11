@@ -50,6 +50,7 @@ use tracing::{debug, instrument};
 use crate::endpoints::{Endpoints, SCOPE};
 use crate::error::{AuthError, AuthResult};
 use crate::http::{OAuthErrorBody, RawResponse, send};
+use crate::lifetime::Lifetime;
 use crate::pkce::Pkce;
 use crate::secret::SecretString;
 use crate::stage::AuthStage;
@@ -203,9 +204,9 @@ impl MicrosoftClient {
         let body: DeviceCodeBody = response.parse(AuthStage::Microsoft)?;
         let interval =
             Duration::from_secs(body.interval.max(1)).clamp(MIN_POLL_INTERVAL, MAX_POLL_INTERVAL);
-        let lifetime = Duration::from_secs(u64::try_from(body.expires_in).unwrap_or(0));
+        let lifetime = body.expires_in.remaining();
         debug!(
-            expires_in = body.expires_in,
+            expires_in = body.expires_in.seconds(),
             interval = interval.as_secs(),
             "device code issued"
         );
@@ -215,7 +216,7 @@ impl MicrosoftClient {
                 user_code: body.user_code,
                 verification_uri: body.verification_uri,
                 message: body.message,
-                expires_at: expiry(body.expires_in),
+                expires_at: body.expires_in.expires_at(),
             },
             device_code: body.device_code,
             interval,
@@ -401,18 +402,13 @@ async fn wait(duration: Duration, cancel: &CancellationToken) -> AuthResult<()> 
     }
 }
 
-/// `expires_in` seconds from now.
-fn expiry(seconds: i64) -> DateTime<Utc> {
-    Utc::now() + chrono::TimeDelta::try_seconds(seconds).unwrap_or_default()
-}
-
 #[derive(Debug, serde::Deserialize)]
 struct TokenBody {
     access_token: SecretString,
     #[serde(default)]
     refresh_token: Option<SecretString>,
     #[serde(default)]
-    expires_in: i64,
+    expires_in: Lifetime,
 }
 
 impl TokenBody {
@@ -422,7 +418,7 @@ impl TokenBody {
             // An empty string is not a refresh token; treating it as one would
             // store a credential that fails on the next launch.
             refresh: self.refresh_token.filter(|token| !token.is_empty()),
-            expires_at: expiry(self.expires_in),
+            expires_at: self.expires_in.expires_at(),
         }
     }
 }
@@ -436,7 +432,7 @@ struct DeviceCodeBody {
     message: String,
     // Required by RFC 8628 section 3.2. A missing value is a malformed
     // response, not a code that never expires.
-    expires_in: i64,
+    expires_in: Lifetime,
     #[serde(default)]
     interval: u64,
 }
@@ -543,7 +539,11 @@ mod tests {
 
         assert_eq!(body.user_code, "A1B2C3D4");
         assert_eq!(body.interval, 5);
-        assert_eq!(body.expires_in, 900, "Microsoft's documented 15 minutes");
+        assert_eq!(
+            body.expires_in.seconds(),
+            900,
+            "Microsoft's documented 15 minutes"
+        );
         // The device code is a bearer credential for the poll and must not be
         // renderable.
         assert!(!format!("{body:?}").contains("GMMhmHCXhWEz"));
