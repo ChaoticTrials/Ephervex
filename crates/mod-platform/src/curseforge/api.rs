@@ -555,13 +555,17 @@ impl CurseForgeOperation<'_> {
     /// loader.
     ///
     /// `GET /v1/mods/{modId}/files`, filtered server-side. Deliberately not the
-    /// project's whole file list: CurseForge pages that list, and a project
-    /// with a decade of releases would cost a dozen round trips to enumerate
-    /// for an answer that is thrown away by the compatibility check anyway.
+    /// project's whole file list: that would cost many round trips for an
+    /// answer that is thrown away by the compatibility check anyway.
     ///
     /// The consequence is stated rather than hidden: a file that does not fit
     /// this instance is not returned at all, so nothing here can explain an
     /// incompatible release the way a full listing could.
+    ///
+    /// Pages are followed until the provider has no more, up to the documented
+    /// result window. A listing with files beyond it fails with
+    /// [`ModPlatformError::FileListingIncomplete`] rather than passing a
+    /// truncated list off as the whole one.
     pub(super) async fn project_files(
         &self,
         project: CurseForgeProjectId,
@@ -607,11 +611,18 @@ impl CurseForgeOperation<'_> {
                 u64::from(index).saturating_add(received as u64) < pagination.total_count
             });
             if received == 0 || !more {
-                break;
+                return Ok(collected);
             }
             index = index.saturating_add(u32::try_from(received).unwrap_or(MAX_PAGE_SIZE));
+            if index.saturating_add(MAX_PAGE_SIZE) > MAX_RESULT_WINDOW {
+                break;
+            }
         }
-        Ok(collected)
+        // The provider still advertises files this listing cannot reach.
+        Err(ModPlatformError::FileListingIncomplete {
+            provider: ModProvider::CurseForge,
+            project_id: project.to_string(),
+        })
     }
 
     /// The project one slug names, if the game's Mods class has one.
@@ -868,14 +879,18 @@ const SORT_FIELD_POPULARITY: &str = "2";
 /// than refused, and the launcher's own page size is smaller anyway.
 const MAX_PAGE_SIZE: u32 = 50;
 
+/// How far into a listing the API will serve results.
+///
+/// The documented limit on `index + pageSize` for paged endpoints
+/// (<https://docs.curseforge.com/rest-api/>).
+const MAX_RESULT_WINDOW: u32 = 10_000;
+
 /// How many pages of one project's files a version listing will ask for.
 ///
-/// The listing is already narrowed to one exact Minecraft release and one
-/// loader, which for a real project is a few dozen files at most, so the first
-/// page normally ends the loop. The ceiling exists so that a project with an
-/// implausible number of files cannot turn opening a version picker into an
-/// unbounded crawl.
-const MAX_FILE_PAGES: u32 = 5;
+/// Exactly the pages that fit [`MAX_RESULT_WINDOW`], which also keeps a
+/// provider that answers with tiny pages from turning a version picker into
+/// an unbounded crawl.
+const MAX_FILE_PAGES: u32 = MAX_RESULT_WINDOW / MAX_PAGE_SIZE;
 
 /// What a search is for.
 ///

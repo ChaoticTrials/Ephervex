@@ -94,6 +94,17 @@ pub enum ModPlatformError {
     #[error("{provider} is not a catalog this build can browse")]
     ProviderNotBrowsable { provider: ModProvider },
 
+    /// A project's file listing is longer than the provider will page through.
+    ///
+    /// Returning the files read so far would pass a truncated listing off as
+    /// the whole one, and a version picker built on it would silently lack the
+    /// older releases.
+    #[error("{provider} lists more files for `{project_id}` than it will page through")]
+    FileListingIncomplete {
+        provider: ModProvider,
+        project_id: String,
+    },
+
     /// The reference names something that is not a mod.
     #[error("`{reference}` is a {project_type}, not a mod")]
     ProjectTypeUnsupported {
@@ -265,6 +276,7 @@ impl ModPlatformError {
             Self::DownloadAddressRejected { .. } => "error-mod-download-address-rejected",
             Self::ProviderNotBrowsable { .. } => "error-mod-provider-not-browsable",
             Self::ProjectUnknown { .. } => "error-mod-project-unknown",
+            Self::FileListingIncomplete { .. } => "error-mod-file-listing-incomplete",
             Self::ProjectTypeUnsupported { .. } => "error-mod-project-type-unsupported",
             Self::VersionUnknown { .. } => "error-mod-version-unknown",
             Self::FileUnknown { .. } => "error-mod-file-unknown",
@@ -326,6 +338,13 @@ impl ModPlatformError {
             } => vec![
                 ("provider", provider.to_string()),
                 ("reference", reference.clone()),
+            ],
+            Self::FileListingIncomplete {
+                provider,
+                project_id,
+            } => vec![
+                ("provider", provider.to_string()),
+                ("project", project_id.clone()),
             ],
             Self::ProjectTypeUnsupported {
                 reference,
@@ -516,6 +535,10 @@ mod tests {
             ModPlatformError::ProjectUnknown {
                 provider: ModProvider::Modrinth,
                 reference: "nope".to_owned(),
+            },
+            ModPlatformError::FileListingIncomplete {
+                provider: ModProvider::CurseForge,
+                project_id: "238222".to_owned(),
             },
             ModPlatformError::ProjectTypeUnsupported {
                 reference: "nope".to_owned(),

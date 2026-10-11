@@ -1718,6 +1718,9 @@ error-mod-provider-not-browsable = Ephervex cannot browse { $provider }.
 error-mod-project-unknown = No such mod.
 .action = Check the project id or slug. Ephervex looked for { $reference }.
 
+error-mod-file-listing-incomplete = { $provider } has more files for that mod than Ephervex can list.
+.action = Ephervex will not show a partial list of versions for { $project }. Pick an exact version by its file id instead.
+
 error-mod-project-type-unsupported = That is not a mod.
 .action = { $reference } has type "{ $project_type }". Modpacks are imported rather than installed into an existing instance.
 

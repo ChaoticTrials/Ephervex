@@ -1429,3 +1429,94 @@ async fn a_search_hit_never_offers_a_file_owned_by_another_project() {
             .collect::<Vec<_>>()
     );
 }
+
+/// One page of a project's file listing, `count` files long, starting at
+/// `index` of a listing that advertises `total` files.
+fn file_listing_page(server: &MockServer, index: u32, count: u32, total: u64) -> String {
+    let documents: Vec<String> = (index..index + count)
+        .map(|offset| {
+            file_document(
+                server,
+                JEI_FILE + offset,
+                JEI_PROJECT,
+                &format!("JEI build {offset}"),
+                1,
+            )
+        })
+        .collect();
+    format!(
+        r#"{{"data":[{documents}],"pagination":{{"index":{index},"pageSize":50,"resultCount":{count},"totalCount":{total}}}}}"#,
+        documents = documents.join(","),
+    )
+}
+
+#[tokio::test]
+async fn a_file_listing_follows_every_page_the_provider_advertises() {
+    let server = MockServer::start().await;
+    serve_categories(&server).await;
+    for page in 0..6_u32 {
+        let index = page * 50;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/v1/mods/\d+/files$"))
+            .and(query_param("index", index.to_string()))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                file_listing_page(&server, index, 50, 300),
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+    }
+
+    let versions = provider_against(&server, Some(FAKE_KEY))
+        .project_versions(
+            &JEI_PROJECT.to_string(),
+            &target(LoaderKind::NeoForge),
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("a complete file listing");
+
+    assert_eq!(versions.len(), 300);
+}
+
+#[tokio::test]
+async fn a_file_listing_longer_than_the_provider_will_page_through_is_reported_incomplete() {
+    let server = MockServer::start().await;
+    serve_categories(&server).await;
+    // Every request is answered with a full page and a total far past the
+    // 10,000-result window the API documents for `index + pageSize`.
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/v1/mods/\d+/files$"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            file_listing_page(&server, 0, 50, 25_000),
+            "application/json",
+        ))
+        .mount(&server)
+        .await;
+
+    let result = provider_against(&server, Some(FAKE_KEY))
+        .project_versions(
+            &JEI_PROJECT.to_string(),
+            &target(LoaderKind::NeoForge),
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(
+        matches!(result, Err(ModPlatformError::FileListingIncomplete { .. })),
+        "a truncated listing must not be returned as a complete one: {result:?}"
+    );
+    let requests = server
+        .received_requests()
+        .await
+        .expect("recorded requests")
+        .into_iter()
+        .filter(|request| request.url.path().ends_with("/files"))
+        .count();
+    assert_eq!(
+        requests, 200,
+        "the crawl stays inside the documented window"
+    );
+}
