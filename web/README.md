@@ -92,6 +92,11 @@ with previous and next buttons, the arrow keys, and swipe on touch screens.
 
 ## Site configuration and docs versions
 
+The navbar search uses a local index of documentation pages, including the
+generated CLI reference. It does not index the Road to v1 archive, which has
+its own search field. The index is generated during the website build and works
+without a search service.
+
 The production domain is `https://ephervex.chaotictrials.de` and `static/CNAME`
 records it. Configure the GitHub repository's Pages source as **GitHub Actions**
 and point the domain's DNS at GitHub Pages. `.github/workflows/pages.yml` builds

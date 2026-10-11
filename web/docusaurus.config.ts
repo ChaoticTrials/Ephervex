@@ -45,6 +45,17 @@ const config: Config = {
       } satisfies Preset.Options,
     ],
   ],
+  themes: [[
+    '@easyops-cn/docusaurus-search-local',
+    {
+      hashed: 'filename',
+      indexDocs: true,
+      indexBlog: false,
+      indexPages: false,
+      docsRouteBasePath: '/docs',
+      searchBarPosition: 'right',
+    },
+  ]],
   plugins: [roadToV1],
   themeConfig: {
     image: 'img/ephervex-social.png',
@@ -58,6 +69,7 @@ const config: Config = {
         {to: '/screenshots', label: 'Screenshots', position: 'left'},
         {to: '/road-to-v1/', label: 'Road to v1', position: 'left'},
         {type: 'docsVersionDropdown', position: 'right'},
+        {type: 'search', position: 'right'},
         {href: repository, label: 'GitHub', position: 'right'},
       ],
     },

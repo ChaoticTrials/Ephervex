@@ -28,6 +28,18 @@
   --docs-note-bg: #eaf5f6;
   --docs-warning-bg: #fff4e5;
   --docs-warning-border: #bd741d;
+  --ifm-navbar-search-input-background-color: var(--site-surface-alt);
+  --ifm-navbar-search-input-color: var(--site-hero-text);
+  --ifm-navbar-search-input-placeholder-color: var(--site-muted);
+  --search-local-modal-background: var(--site-surface);
+  --search-local-modal-shadow: 0 0.8rem 2rem var(--site-shadow), 0 0 0 1px var(--site-border);
+  --search-local-hit-background: var(--site-surface-alt);
+  --search-local-hit-shadow: 0 0 0 1px var(--site-border);
+  --search-local-hit-color: var(--site-hero-text);
+  --search-local-hit-active-color: var(--site-button-text);
+  --search-local-muted-color: var(--site-muted);
+  --search-local-highlight-color: var(--site-button-bg);
+  --search-local-input-active-border-color: var(--site-accent);
   --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
 }
 
