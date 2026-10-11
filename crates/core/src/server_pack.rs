@@ -141,7 +141,7 @@ impl App {
         // `zip` is a blocking API and this runs on a runtime, so the whole
         // extraction goes to a blocking thread rather than stalling the
         // reactor for the length of a multi-gigabyte archive.
-        let installed: InstalledServerPack = tokio::task::spawn_blocking(move || {
+        let extraction = tokio::task::spawn_blocking(move || {
             install_server_pack(ServerPackInstall {
                 archive: &archive_path,
                 game_dir: &destination,
@@ -149,8 +149,14 @@ impl App {
                 reserved: &reserved,
             })
         })
-        .await
-        .map_err(|_| PackError::Canceled)??;
+        .await;
+        // Extraction never looks at the token, so a join failure is a crash,
+        // not something the user canceled.
+        let installed: InstalledServerPack = match extraction {
+            Ok(result) => result?,
+            Err(failure) if failure.is_panic() => return Err(PackError::WorkerFailed.into()),
+            Err(_) => return Err(PackError::Canceled.into()),
+        };
 
         if cancel.is_cancelled() {
             return Err(PackError::Canceled.into());

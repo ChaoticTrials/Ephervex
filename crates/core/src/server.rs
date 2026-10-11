@@ -552,6 +552,11 @@ impl App {
                     .await);
             }
         };
+        // A cancel that lands after the last pack step must still stop the
+        // server from being published.
+        if cancel.is_cancelled() {
+            return Err(PackError::Canceled.into());
+        }
         Ok(materialized.unconfirmed_unknown)
     }
 

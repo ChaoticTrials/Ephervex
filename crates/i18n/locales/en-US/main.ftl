@@ -1559,6 +1559,9 @@ error-pack-recipe-invalid = This instance's retained pack recipe is not valid.
 error-pack-recipe-unsupported-version = This instance's pack recipe was written by a newer version of { app-name }.
 .action = Update Ephervex rather than letting this build read part of it.
 
+error-pack-worker-failed = A pack operation stopped unexpectedly.
+.action = Try again. If it keeps happening, report it with the diagnostics log.
+
 error-pack-canceled = The import was canceled.
 
 ## Mods installed through a provider

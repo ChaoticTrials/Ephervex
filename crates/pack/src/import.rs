@@ -40,6 +40,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
 
 use crate::archive::{EntryDecision, PackArchive};
+use crate::blocking::off_runtime;
 use crate::credentials::ArtifactCredentials;
 use crate::curseforge::{self, ParsedExport};
 use crate::detect::PackFormat;
@@ -551,23 +552,6 @@ fn retain_source(
         .into_iter()
         .flat_map(|(scope, paths)| paths.into_iter().map(move |path| (path, scope)))
         .collect())
-}
-
-/// Runs archive and filesystem work on a blocking thread.
-///
-/// The ZIP reader is a blocking API, so extracting a large layer on an async
-/// worker would stall every other task on it for the whole extraction. A panic
-/// in `work` is resumed rather than reported as a cancellation.
-async fn off_runtime<T: Send + 'static>(
-    work: impl FnOnce() -> PackResult<T> + Send + 'static,
-) -> PackResult<T> {
-    match tokio::task::spawn_blocking(work).await {
-        Ok(result) => result,
-        Err(failure) => match failure.try_into_panic() {
-            Ok(payload) => std::panic::resume_unwind(payload),
-            Err(_) => Err(PackError::Canceled),
-        },
-    }
 }
 
 /// The manifest file name one provider's retained state keeps.

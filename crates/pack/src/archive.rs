@@ -794,7 +794,7 @@ impl PackArchive {
     }
 }
 
-fn check_not_canceled(cancel: Option<&CancellationToken>) -> PackResult<()> {
+pub(crate) fn check_not_canceled(cancel: Option<&CancellationToken>) -> PackResult<()> {
     if cancel.is_some_and(CancellationToken::is_cancelled) {
         return Err(PackError::Canceled);
     }

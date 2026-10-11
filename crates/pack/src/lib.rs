@@ -51,6 +51,7 @@
 //!   file with no verifiable hash is never fetched.
 
 pub mod archive;
+mod blocking;
 pub mod credentials;
 pub mod curseforge;
 mod declared_files;

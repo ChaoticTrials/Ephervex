@@ -365,6 +365,13 @@ pub enum PackError {
         issues: Vec<MutationRecoveryIssue>,
     },
 
+    /// A blocking pack worker panicked.
+    ///
+    /// A crash while handling untrusted pack content, never something the user
+    /// did, so it is not a cancellation.
+    #[error("a pack worker stopped unexpectedly")]
+    WorkerFailed,
+
     /// The user canceled the import.
     #[error("the import was canceled")]
     Canceled,
@@ -424,6 +431,7 @@ impl PackError {
             Self::ManagedPathUnsafe { .. } => "error-mod-path-unsafe",
             Self::ManagedDestinationLinked { .. } => "error-mod-destination-linked",
             Self::RollbackIncomplete { .. } => "error-mod-rollback-incomplete",
+            Self::WorkerFailed => "error-pack-worker-failed",
             Self::Canceled => "error-pack-canceled",
         }
     }
@@ -816,6 +824,7 @@ mod tests {
                     "a provider layer failure",
                 )),
             },
+            PackError::WorkerFailed,
             PackError::Canceled,
         ]
     }
@@ -872,6 +881,11 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_worker_failure_is_not_a_cancellation() {
+        assert!(!PackError::WorkerFailed.is_cancellation());
     }
 
     #[test]

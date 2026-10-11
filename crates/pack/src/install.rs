@@ -68,7 +68,10 @@ use ephervex_model::Hash;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 
-use crate::archive::{EntryDecision, ExtractionLimits, ExtractionReport, PackArchive};
+use crate::archive::{
+    EntryDecision, ExtractionLimits, ExtractionReport, PackArchive, check_not_canceled,
+};
+use crate::blocking::off_runtime;
 use crate::credentials::ArtifactCredentials;
 use crate::error::{PackError, PackResult};
 use crate::mutate::{MutationRecoveryAction, MutationRecoveryIssue};
@@ -255,24 +258,72 @@ pub async fn materialize_server_recipe(
         fetch,
     )
     .await?;
-    let client_store = SourceStore::new(client_source_dir);
-    let layers =
-        apply_retained_overrides(&client_store, recipe, PackSide::Server, game_dir, reserved)?;
-    remove_retained_eula(game_dir)?;
-    let server_store = SourceStore::new(server_source_dir);
-    copy_server_source(&client_store, &server_store, recipe, &plan.layers)?;
-    let recipe_path = server_store.write_recipe(&server_desired_state(recipe, &plan))?;
+    let retained = RetainedServerContent {
+        recipe: recipe.clone(),
+        desired: server_desired_state(recipe, &plan),
+        layers: plan.layers.iter().map(|layer| (*layer).clone()).collect(),
+        game_dir: game_dir.to_path_buf(),
+        client_source_dir: client_source_dir.to_path_buf(),
+        server_source_dir: server_source_dir.to_path_buf(),
+        reserved: reserved.to_vec(),
+        cancel: fetch.cancel.clone(),
+    };
+    let unconfirmed_unknown = plan
+        .unconfirmed_unknown
+        .iter()
+        .map(|file| file.logical_path.clone())
+        .collect();
+    let (layers, recipe_path) = off_runtime(move || retained.apply()).await?;
 
     Ok(MaterializedServerRecipe {
         files,
         layers,
         recipe_path,
-        unconfirmed_unknown: plan
-            .unconfirmed_unknown
-            .iter()
-            .map(|file| file.logical_path.clone())
-            .collect(),
+        unconfirmed_unknown,
     })
+}
+
+/// Everything the blocking half of a server reconstruction needs, owned so it
+/// can move to a blocking thread.
+struct RetainedServerContent {
+    recipe: PackRecipe,
+    desired: PackRecipe,
+    layers: Vec<OverrideLayer>,
+    game_dir: PathBuf,
+    client_source_dir: PathBuf,
+    server_source_dir: PathBuf,
+    reserved: Vec<PathBuf>,
+    cancel: CancellationToken,
+}
+
+impl RetainedServerContent {
+    /// Copies the retained layers into the server and writes its recipe.
+    ///
+    /// Stops with [`PackError::Canceled`] between entries and before the recipe
+    /// is written, so a canceled reconstruction never leaves a recipe behind.
+    fn apply(self) -> PackResult<(Vec<AppliedLayer>, PathBuf)> {
+        let client_store = SourceStore::new(&self.client_source_dir);
+        let layers = apply_retained_overrides(
+            &client_store,
+            &self.recipe,
+            PackSide::Server,
+            &self.game_dir,
+            &self.reserved,
+            &self.cancel,
+        )?;
+        remove_retained_eula(&self.game_dir)?;
+        let server_store = SourceStore::new(&self.server_source_dir);
+        copy_server_source(
+            &client_store,
+            &server_store,
+            &self.recipe,
+            &self.layers,
+            &self.cancel,
+        )?;
+        check_not_canceled(Some(&self.cancel))?;
+        let recipe_path = server_store.write_recipe(&self.desired)?;
+        Ok((layers, recipe_path))
+    }
 }
 
 /// The recipe a reconstructed server keeps, describing the server rather than
@@ -976,12 +1027,15 @@ pub fn apply_overrides(
 /// Applies retained common and side-specific layers in established precedence
 /// order, rejecting missing layers and every link or special filesystem entry.
 /// Destinations the launcher owns, plus `reserved`, are left out.
+///
+/// Stops with [`PackError::Canceled`] between entries once `cancel` fires.
 pub fn apply_retained_overrides(
     store: &SourceStore,
     recipe: &PackRecipe,
     side: PackSide,
     game_dir: &Path,
     reserved: &[PathBuf],
+    cancel: &CancellationToken,
 ) -> PackResult<Vec<AppliedLayer>> {
     let mut applied = Vec::new();
     let limits = ExtractionLimits::default();
@@ -1002,6 +1056,7 @@ pub fn apply_retained_overrides(
             RetainedDestination::GameDirectory { reserved },
             &limits,
             &mut spent,
+            Some(cancel),
         )?;
         applied.push(AppliedLayer {
             layer: layer.clone(),
@@ -1087,6 +1142,7 @@ struct RetainedCopy<'a> {
     spent: &'a mut ExtractionReport,
     links: DestinationLinks<'a>,
     report: ExtractionReport,
+    cancel: Option<&'a CancellationToken>,
 }
 
 fn copy_retained_tree<'a>(
@@ -1095,6 +1151,7 @@ fn copy_retained_tree<'a>(
     kind: RetainedDestination<'a>,
     limits: &ExtractionLimits,
     spent: &mut ExtractionReport,
+    cancel: Option<&'a CancellationToken>,
 ) -> PackResult<ExtractionReport> {
     let mut copy = RetainedCopy {
         root: source,
@@ -1104,6 +1161,7 @@ fn copy_retained_tree<'a>(
         spent,
         links: DestinationLinks::new(destination),
         report: ExtractionReport::default(),
+        cancel,
     };
     copy.directory(source)?;
     Ok(copy.report)
@@ -1129,6 +1187,7 @@ impl RetainedCopy<'_> {
     }
 
     fn entry(&mut self, from: &Path) -> PackResult<()> {
+        check_not_canceled(self.cancel)?;
         let relative = from
             .strip_prefix(self.root)
             .map_err(|_| PackError::EntryPathUnsafe {
@@ -1252,7 +1311,8 @@ fn copy_server_source(
     client: &SourceStore,
     server: &SourceStore,
     recipe: &PackRecipe,
-    layers: &[&OverrideLayer],
+    layers: &[OverrideLayer],
+    cancel: &CancellationToken,
 ) -> PackResult<()> {
     let limits = ExtractionLimits::default();
     let mut spent = ExtractionReport::default();
@@ -1272,8 +1332,10 @@ fn copy_server_source(
             RetainedDestination::SourceStore,
             &limits,
             &mut spent,
+            Some(cancel),
         )?;
     }
+    check_not_canceled(Some(cancel))?;
     if let Some(relative) = &recipe.provider_metadata.manifest_file {
         let raw = relative
             .to_str()
@@ -1384,6 +1446,7 @@ mod tests {
             RetainedDestination::GameDirectory { reserved: &[] },
             &limits,
             &mut spent,
+            None,
         )
     }
 
@@ -1406,6 +1469,7 @@ mod tests {
             },
             &ExtractionLimits::default(),
             &mut ExtractionReport::default(),
+            None,
         )
         .expect("copy into a game directory");
         assert_eq!(report.files, 2);
@@ -1431,6 +1495,7 @@ mod tests {
             RetainedDestination::GameDirectory { reserved: &[] },
             &limits,
             &mut ExtractionReport::default(),
+            None,
         )
         .expect("copy into a game directory");
         assert_eq!(report.files, 1);
@@ -1444,6 +1509,7 @@ mod tests {
             RetainedDestination::SourceStore,
             &limits,
             &mut ExtractionReport::default(),
+            None,
         )
         .expect("copy into a source store");
         assert!(store.join("libraries/net/example/a.jar").is_file());
@@ -1578,6 +1644,7 @@ mod tests {
             RetainedDestination::GameDirectory { reserved: &[] },
             &limits,
             &mut spent,
+            None,
         )
         .expect_err("an oversize retained file is refused");
         assert!(
@@ -1873,5 +1940,81 @@ mod tests {
         copy_into_instance(&source, &destination).unwrap_err();
 
         assert_eq!(std::fs::read(&destination).unwrap(), b"theirs");
+    }
+
+    #[test]
+    fn a_canceled_retained_copy_writes_no_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let layer = dir.path().join("layer");
+        std::fs::create_dir_all(layer.join("config")).unwrap();
+        std::fs::write(layer.join("config/a.toml"), b"pack").unwrap();
+        std::fs::write(layer.join("server.properties"), b"motd=x\n").unwrap();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let game = dir.path().join("game");
+        let error = copy_retained_tree(
+            &layer,
+            &game,
+            RetainedDestination::GameDirectory { reserved: &[] },
+            &ExtractionLimits::default(),
+            &mut ExtractionReport::default(),
+            Some(&cancel),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, PackError::Canceled), "{error:?}");
+        assert!(!game.join("config/a.toml").exists());
+        assert!(!game.join("server.properties").exists());
+    }
+
+    #[test]
+    fn a_server_reconstruction_canceled_before_its_copies_writes_no_recipe() {
+        let dir = tempfile::tempdir().unwrap();
+        let client_source = dir.path().join("client/.launcher/source");
+        let layer = OverrideLayer {
+            scope: OverrideScope::Server,
+            archive_prefix: "server-overrides".to_owned(),
+            retained_at: Some(PathBuf::from("modrinth/server-overrides")),
+            files: 1,
+        };
+        let retained = client_source.join("modrinth/server-overrides");
+        std::fs::create_dir_all(&retained).unwrap();
+        std::fs::write(retained.join("server.properties"), b"motd=x\n").unwrap();
+        let recipe = PackRecipe {
+            recipe_version: RECIPE_VERSION,
+            source_kind: ImportSourceKind::ModrinthPack,
+            original_name: "Test".to_owned(),
+            original_version: None,
+            author: None,
+            summary: None,
+            archive_name: None,
+            minecraft_version: "1.20.1".to_owned(),
+            loader: LoaderSelection::vanilla(),
+            files: Vec::new(),
+            override_layers: vec![layer.clone()],
+            provider_metadata: ProviderRecipeMetadata::new(ImportSourceKind::ModrinthPack, None),
+        };
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let game = dir.path().join("server/game");
+        let server_source = dir.path().join("server/.launcher/source");
+
+        let error = RetainedServerContent {
+            desired: recipe.clone(),
+            recipe,
+            layers: vec![layer],
+            game_dir: game.clone(),
+            client_source_dir: client_source,
+            server_source_dir: server_source.clone(),
+            reserved: Vec::new(),
+            cancel,
+        }
+        .apply()
+        .unwrap_err();
+
+        assert!(matches!(error, PackError::Canceled), "{error:?}");
+        assert!(!game.join("server.properties").exists());
+        assert!(!SourceStore::new(&server_source).recipe_path().exists());
     }
 }
