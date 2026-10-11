@@ -226,6 +226,14 @@ pub enum ModPlatformError {
         version_project_id: String,
     },
 
+    /// The version the user chose belongs to a different project than the one
+    /// it was chosen for.
+    #[error("the version selected for `{project_id}` belongs to `{version_project_id}`")]
+    InconsistentSelectedVersion {
+        project_id: String,
+        version_project_id: String,
+    },
+
     /// A dependency names nothing at all.
     #[error("a dependency of `{declared_by}` identifies nothing to install")]
     MalformedDependency { declared_by: String },
@@ -291,6 +299,7 @@ impl ModPlatformError {
             Self::IncompatibleDependency { .. } => "error-mod-dependency-incompatible",
             Self::UnresolvableRequiredDependency { .. } => "error-mod-dependency-unresolvable",
             Self::InconsistentDependency { .. } => "error-mod-dependency-inconsistent",
+            Self::InconsistentSelectedVersion { .. } => "error-mod-selected-version-inconsistent",
             Self::MalformedDependency { .. } => "error-mod-dependency-malformed",
             // Shares an id with the pack crate's equivalent refusal: one
             // sentence for "that mod is already installed at another version",
@@ -446,6 +455,13 @@ impl ModPlatformError {
                 version_project_id,
             } => vec![
                 ("declared_by", declared_by.clone()),
+                ("project_id", project_id.clone()),
+                ("version_project_id", version_project_id.clone()),
+            ],
+            Self::InconsistentSelectedVersion {
+                project_id,
+                version_project_id,
+            } => vec![
                 ("project_id", project_id.clone()),
                 ("version_project_id", version_project_id.clone()),
             ],
@@ -611,6 +627,10 @@ mod tests {
             },
             ModPlatformError::InconsistentDependency {
                 declared_by: "a".to_owned(),
+                project_id: "p".to_owned(),
+                version_project_id: "q".to_owned(),
+            },
+            ModPlatformError::InconsistentSelectedVersion {
                 project_id: "p".to_owned(),
                 version_project_id: "q".to_owned(),
             },

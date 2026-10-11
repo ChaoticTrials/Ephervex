@@ -1778,8 +1778,11 @@ error-mod-dependency-incompatible = These mods cannot be installed together.
 error-mod-dependency-unresolvable = A required dependency could not be identified.
 .action = { $declared_by } requires the file { $file_name }, which names no project Ephervex can look up. Install that file yourself, then try again.
 
-error-mod-dependency-inconsistent = A dependency contradicts itself.
+error-mod-dependency-inconsistent = A dependency of { $declared_by } contradicts itself.
 .action = It names the project { $project_id } and a version belonging to { $version_project_id }.
+
+error-mod-selected-version-inconsistent = The selected version does not belong to the selected mod.
+.action = The version chosen for { $project_id } belongs to { $version_project_id }. Choose a version of { $project_id }.
 
 error-mod-dependency-malformed = A dependency of { $declared_by } identifies nothing to install.
 

@@ -457,6 +457,33 @@ const fn origin_rank(origin: ModOrigin) -> u8 {
     }
 }
 
+/// The refusal for a pin whose version belongs to another project. A mod that
+/// declares the pin carries the inconsistent metadata, so mods are named in
+/// preference to the user's own selection.
+fn inconsistent_pin(
+    project_id: &str,
+    version_project_id: String,
+    declarers: &BTreeSet<String>,
+) -> ModPlatformError {
+    let mods: BTreeSet<String> = declarers
+        .iter()
+        .filter(|declarer| declarer.as_str() != ROOT)
+        .cloned()
+        .collect();
+    if mods.is_empty() {
+        ModPlatformError::InconsistentSelectedVersion {
+            project_id: project_id.to_owned(),
+            version_project_id,
+        }
+    } else {
+        ModPlatformError::InconsistentDependency {
+            declared_by: join(&mods),
+            project_id: project_id.to_owned(),
+            version_project_id,
+        }
+    }
+}
+
 fn join(values: &BTreeSet<String>) -> String {
     values.iter().cloned().collect::<Vec<_>>().join(", ")
 }
@@ -503,6 +530,7 @@ const fn is_graph_refusal(error: &ModPlatformError) -> bool {
             | ModPlatformError::ProjectUnknown { .. }
             | ModPlatformError::VersionUnknown { .. }
             | ModPlatformError::InconsistentDependency { .. }
+            | ModPlatformError::InconsistentSelectedVersion { .. }
             | ModPlatformError::MalformedDependency { .. }
     )
 }
@@ -519,6 +547,15 @@ const fn is_release_content_refusal(error: &ModPlatformError) -> bool {
     )
 }
 
+/// A refusal, with the pin and the declarers it was reached under. It holds
+/// only while the graph still asks for the project the same way, so a
+/// refusal naming a declarer that has left the graph is not kept.
+struct Refusal {
+    pin: Option<String>,
+    declarers: BTreeSet<String>,
+    error: ModPlatformError,
+}
+
 struct Resolver<'a> {
     request: ResolveRequest<'a>,
     constraints: BTreeMap<String, Constraint>,
@@ -531,7 +568,7 @@ struct Resolver<'a> {
     /// be read under the pin they carried, with that pin. The refusal is final
     /// only once nothing else can change what the project is asked for, so it
     /// is kept rather than returned.
-    refused: BTreeMap<String, (Option<String>, ModPlatformError)>,
+    refused: BTreeMap<String, Refusal>,
     /// Projects the current graph pins to two different versions. Reported only
     /// once nothing else is left to resolve, because resolving a project that
     /// has not been explored yet can retract either side.
@@ -581,29 +618,36 @@ impl<'a> Resolver<'a> {
             }
 
             self.refold();
-            self.refused.retain(|project, (pin, _)| {
-                self.constraints
-                    .get(project)
-                    .is_some_and(|constraint| &constraint.pin == pin)
+            self.refused.retain(|project, refusal| {
+                self.constraints.get(project).is_some_and(|constraint| {
+                    constraint.pin == refusal.pin && constraint.pin_sources == refusal.declarers
+                })
             });
             let Some(next) = self.next_dirty() else {
                 if let Some((_, conflict)) = self.conflicts.pop_first() {
                     return Err(conflict);
                 }
-                if let Some((_, (_, refusal))) = self.refused.pop_first() {
-                    return Err(refusal);
+                if let Some((_, refusal)) = self.refused.pop_first() {
+                    return Err(refusal.error);
                 }
                 break;
             };
 
-            let pin = self
-                .constraints
-                .get(&next)
-                .and_then(|constraint| constraint.pin.clone());
-            let version = match self.select_version(&next, pin.as_deref()).await {
+            let (pin, declarers) = self.constraints.get(&next).map_or_else(
+                || (None, BTreeSet::new()),
+                |constraint| (constraint.pin.clone(), constraint.pin_sources.clone()),
+            );
+            let version = match self.select_version(&next, pin.as_deref(), &declarers).await {
                 Ok(version) => version,
-                Err(refusal) if is_graph_refusal(&refusal) => {
-                    self.refused.insert(next, (pin, refusal));
+                Err(error) if is_graph_refusal(&error) => {
+                    self.refused.insert(
+                        next,
+                        Refusal {
+                            pin,
+                            declarers,
+                            error,
+                        },
+                    );
                     continue;
                 }
                 Err(error) => return Err(error),
@@ -615,11 +659,18 @@ impl<'a> Resolver<'a> {
             self.edges.retain(|(project, _), _| project != &next);
             let normalized = match self.normalize_all(&version).await {
                 Ok(normalized) => normalized,
-                Err(refusal) if is_graph_refusal(&refusal) => {
+                Err(error) if is_graph_refusal(&error) => {
                     // The old release's relations are gone, so it must not stay
                     // resolved without them.
                     self.resolved.remove(&next);
-                    self.refused.insert(next, (pin, refusal));
+                    self.refused.insert(
+                        next,
+                        Refusal {
+                            pin,
+                            declarers,
+                            error,
+                        },
+                    );
                     continue;
                 }
                 Err(error) => return Err(error),
@@ -653,10 +704,15 @@ impl<'a> Resolver<'a> {
         // retracts the former.
         for project in conflicts.keys().cloned().collect::<Vec<_>>() {
             let (without_own, still_conflicted) = self.fold(&BTreeSet::from([project.clone()]));
-            let independent = without_own
-                .get(&project)
-                .and_then(|constraint| constraint.pin.clone());
-            let Some(pin) = independent else { continue };
+            let independent = without_own.get(&project).and_then(|constraint| {
+                constraint
+                    .pin
+                    .clone()
+                    .map(|pin| (pin, constraint.pin_sources.clone()))
+            });
+            let Some((pin, pin_sources)) = independent else {
+                continue;
+            };
             if still_conflicted.contains_key(&project)
                 || self
                     .resolved
@@ -666,7 +722,9 @@ impl<'a> Resolver<'a> {
                 continue;
             }
             if let Some(constraint) = constraints.get_mut(&project) {
+                // The sources travel with the pin they declared.
                 constraint.pin = Some(pin);
+                constraint.pin_sources = pin_sources;
                 conflicts.remove(&project);
             }
         }
@@ -837,22 +895,20 @@ impl<'a> Resolver<'a> {
             .map(|(_, project)| project.clone())
     }
 
-    /// Picks the version one project resolves to.
+    /// Picks the version one project resolves to. `declarers` are the sources
+    /// of `pin`, so a refusal of the pin can name who asked for it.
     async fn select_version(
         &self,
         project_id: &str,
         pin: Option<&str>,
+        declarers: &BTreeSet<String>,
     ) -> ModPlatformResult<ModVersionInfo> {
         let target = self.request.target;
 
         if let Some(version_id) = pin {
             let version = self.fetch_version(version_id).await?;
             if version.project_id != project_id {
-                return Err(ModPlatformError::InconsistentDependency {
-                    declared_by: project_id.to_owned(),
-                    project_id: project_id.to_owned(),
-                    version_project_id: version.project_id,
-                });
+                return Err(inconsistent_pin(project_id, version.project_id, declarers));
             }
             // An explicitly chosen version that does not fit is a refusal. The
             // alternative - quietly taking a neighbouring release - is the
@@ -4268,10 +4324,135 @@ mod tests {
         let error = plan_with(&catalog, InstallSelection::new("ROOT"), &[])
             .await
             .expect_err("must refuse");
-        assert!(matches!(
-            error,
-            ModPlatformError::InconsistentDependency { .. },
-        ));
+        assert!(
+            matches!(
+                error,
+                ModPlatformError::InconsistentDependency {
+                    ref declared_by,
+                    ref project_id,
+                    ref version_project_id,
+                } if declared_by == "ROOT" && project_id == "LIB" && version_project_id == "OTHER"
+            ),
+            "the mod that carries the pin is named, not the pinned project: {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_mod_declaring_a_pin_that_belongs_to_another_project_is_named() {
+        let pin_other = |mut release: ModVersionInfo| {
+            release.dependencies.push(ModDependency {
+                kind: ModRelationKind::Required,
+                project_id: Some("LIB".to_owned()),
+                version_id: Some("other-v1".to_owned()),
+                file_name: None,
+            });
+            release
+        };
+        let catalog = Catalog::default()
+            .with(
+                "ROOT",
+                vec![needs(
+                    pin_other(compatible("v1", "ROOT")),
+                    ModRelationKind::Required,
+                    "MID",
+                )],
+            )
+            .with("MID", vec![pin_other(compatible("mid-v1", "MID"))])
+            .with("LIB", vec![compatible("lib-v1", "LIB")])
+            .with("OTHER", vec![compatible("other-v1", "OTHER")]);
+
+        let error = plan_with(&catalog, InstallSelection::new("ROOT"), &[])
+            .await
+            .expect_err("must refuse");
+        assert!(
+            matches!(
+                error,
+                ModPlatformError::InconsistentDependency { ref declared_by, .. }
+                    if declared_by == "MID, ROOT"
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pin_kept_over_one_a_moving_release_brought_in_names_the_mod_that_declared_it() {
+        // AAA, reached only through BBB's newest release, pins that release.
+        // KKK pins a version of another project as BBB's, and that pin is the
+        // one that survives once BBB moves, so KKK carries the bad metadata.
+        let catalog = Catalog::default()
+            .with(
+                "ROOT",
+                vec![needs(
+                    needs(compatible("r1", "ROOT"), ModRelationKind::Required, "BBB"),
+                    ModRelationKind::Required,
+                    "KKK",
+                )],
+            )
+            .with(
+                "BBB",
+                vec![needs(
+                    compatible("b-new", "BBB"),
+                    ModRelationKind::Required,
+                    "AAA",
+                )],
+            )
+            .with(
+                "AAA",
+                vec![pins(
+                    compatible("a1", "AAA"),
+                    ModRelationKind::Required,
+                    "b-new",
+                )],
+            )
+            .with(
+                "KKK",
+                vec![pins_of(
+                    compatible("k1", "KKK"),
+                    ModRelationKind::Required,
+                    "BBB",
+                    "b-old",
+                )],
+            )
+            .with("OTHER", vec![compatible("b-old", "OTHER")]);
+
+        for catalog in [catalog.reversed(), catalog] {
+            let error = plan_with(&catalog, InstallSelection::new("ROOT"), &[])
+                .await
+                .expect_err("must refuse");
+            assert!(
+                matches!(
+                    error,
+                    ModPlatformError::InconsistentDependency { ref declared_by, .. }
+                        if declared_by == "KKK"
+                ),
+                "{error:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_selected_version_belonging_to_another_project_is_reported_as_the_selection() {
+        let catalog = Catalog::default()
+            .with("ROOT", vec![compatible("v1", "ROOT")])
+            .with("OTHER", vec![compatible("other-v1", "OTHER")]);
+
+        let error = plan_with(
+            &catalog,
+            InstallSelection::new("ROOT").at_version("other-v1"),
+            &[],
+        )
+        .await
+        .expect_err("must refuse");
+        assert!(
+            matches!(
+                error,
+                ModPlatformError::InconsistentSelectedVersion {
+                    ref project_id,
+                    ref version_project_id,
+                } if project_id == "ROOT" && version_project_id == "OTHER"
+            ),
+            "{error:?}"
+        );
     }
 
     #[tokio::test]
