@@ -453,6 +453,67 @@ mod tests {
     }
 
     #[test]
+    fn no_message_defines_the_same_attribute_twice() {
+        // Fluent keeps only the first attribute of a given name, so a second
+        // `.action` is unreachable. It usually means a message was inserted
+        // between another message and its attribute line.
+        let source = include_str!("../locales/en-US/main.ftl");
+        let mut current = "";
+        let mut seen = std::collections::BTreeSet::new();
+        let mut repeated = Vec::new();
+        for line in source.lines() {
+            let Some((head, _)) = line.split_once(" = ") else {
+                continue;
+            };
+            if !head.is_empty()
+                && head
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            {
+                current = head;
+            } else if let Some(name) = head.trim_start().strip_prefix('.')
+                && !seen.insert((current, name))
+            {
+                repeated.push(format!("{current}.{name}"));
+            }
+        }
+        assert!(
+            repeated.is_empty(),
+            "attribute defined more than once: {repeated:?}"
+        );
+    }
+
+    #[test]
+    fn mod_error_recovery_advice_stays_on_the_error_it_describes() {
+        select_language("en-US").unwrap();
+
+        let identity = lookup_attribute("error-mod-identity-incomplete", "action")
+            .expect("a mod with no identity says how to proceed");
+        assert!(identity.contains("managed by hand"));
+
+        // A rename failure can hit a fully identified mod, so it must not
+        // carry advice about mods that have no identity.
+        assert_eq!(
+            lookup_attribute("error-mod-file-not-toggled", "action"),
+            None
+        );
+
+        let path = "/home/dev/mods/example.jar";
+        let unrecorded = lookup_attribute_args(
+            "error-mod-managed-identity-missing",
+            "action",
+            [("path", Arg::from(path))],
+        )
+        .expect("the refusal to record a file says why");
+        assert!(unrecorded.contains(path));
+
+        let hand_placed = lookup_attribute("error-mod-hand-placed-not-mutable", "action")
+            .expect("a hand-placed jar says how to get rid of it");
+        assert!(hand_placed.contains("Delete it from the mods list"));
+        assert!(!hand_placed.contains("look up again"));
+    }
+
+    #[test]
     fn an_unknown_message_id_degrades_visibly_instead_of_panicking() {
         assert!(!has("no-such-message-id"));
         assert!(lookup("no-such-message-id").contains("no-such-message-id"));

@@ -963,6 +963,7 @@ error-loader-change-blocked-by-mods = { $count ->
 error-mod-not-managed = That mod is no longer part of this instance.
 .action = Reopen the instance to see its current mods.
 error-mod-identity-incomplete = One of this instance's mods has no provider identity, so its dependencies cannot be worked out.
+.action = Mods with no identity have to be managed by hand.
 error-mod-dependency-not-movable = That change would also move a mod that the pack declared, that you chose, or that another mod needs at its current release. Change that mod's version first.
 # $value is a URL with its query and fragment removed, because a confirmation
 # prompt is not the place to print an identifier or a token.
@@ -998,7 +999,6 @@ error-instance-already-persistent = That instance is already stored permanently.
 error-server-not-linked = That server does not belong to this instance.
 error-mod-file-missing = That mod's file is not installed, so it cannot be enabled or disabled. Repair the instance to fetch it again.
 error-mod-file-not-toggled = That mod's file could not be renamed. Check that the mods folder is writable.
-.action = Mods with no identity have to be managed by hand.
 error-mod-spelling-occupied = That mod has both an enabled and a disabled file, so switching it would replace one of them. Neither file was changed.
 .action = Delete or rename the file you do not want in the mods folder, then try again.
 error-mod-not-hand-placed = Ephervex installed that mod, so it is removed rather than deleted.
@@ -1602,9 +1602,9 @@ error-mod-already-installed = That mod is already installed at a different versi
 .action = { $project } is installed from { $provider } at { $installed }, not { $requested }. Changing an installed mod's version is not supported yet.
 
 error-mod-managed-identity-missing = That file cannot be recorded as an installed mod.
+.action = Ephervex only records mods it can look up again by project and version, so nothing was invented for { $path }.
 error-mod-hand-placed-not-mutable = That jar was added by hand, so Ephervex does not replace or remove it.
 .action = Delete it from the mods list if you no longer want it.
-.action = Ephervex only records mods it can look up again by project and version, so nothing was invented for { $path }.
 
 ## Browsing and resolving mods
 #
