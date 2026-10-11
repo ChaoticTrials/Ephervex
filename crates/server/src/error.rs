@@ -62,6 +62,14 @@ pub enum ServerError {
         target: String,
         timeout_seconds: u64,
     },
+    #[error(
+        "the server did not accept connections at {target} within {timeout_seconds} seconds \
+         because another program is also listening there"
+    )]
+    ForeignListener {
+        target: String,
+        timeout_seconds: u64,
+    },
     #[error("waiting for the server was canceled")]
     ReadinessCanceled,
     #[error("starting the server was canceled")]
@@ -91,6 +99,7 @@ impl ServerError {
             Self::InvalidControlResponse => "error-server-control-response-invalid",
             Self::NotInstalled => "error-server-not-installed",
             Self::ReadinessTimeout { .. } => "error-server-readiness-timeout",
+            Self::ForeignListener { .. } => "error-server-readiness-foreign-listener",
             Self::ReadinessCanceled => "error-server-readiness-canceled",
             Self::StartCanceled => "error-server-start-canceled",
             Self::PersistenceUnhealthy { .. } => "error-server-persistence-unhealthy",
@@ -101,6 +110,10 @@ impl ServerError {
     pub fn message_args(&self) -> Vec<(&'static str, String)> {
         match self {
             Self::ReadinessTimeout {
+                target,
+                timeout_seconds,
+            }
+            | Self::ForeignListener {
                 target,
                 timeout_seconds,
             } => vec![

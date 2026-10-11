@@ -10,7 +10,7 @@ use tokio::net::TcpStream;
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 
-use crate::runtime::runtime_child_listens_on;
+use crate::runtime::{ListenerOwnership, runtime_child_listens_on};
 use crate::{NetworkProperties, ServerBind, ServerError, ServerResult};
 
 impl NetworkProperties {
@@ -45,6 +45,8 @@ impl NetworkProperties {
 ///
 /// A connection counts only while the server's recorded Java process holds the
 /// listening socket, so another program on the same port never stands in for it.
+/// When the deadline passes while such a program was listening there, the error
+/// says so instead of reporting a plain timeout.
 pub async fn wait_for_server_readiness(
     server_root: &Path,
     target: ConnectionTarget,
@@ -57,6 +59,22 @@ pub async fn wait_for_server_readiness(
 
     let root: std::sync::Arc<Path> = server_root.into();
     let address = target.socket_address();
+    let mut foreign_listener = false;
+    let timed_out = |foreign_listener: bool| {
+        let target = target.to_string();
+        let timeout_seconds = timeout.as_secs();
+        if foreign_listener {
+            ServerError::ForeignListener {
+                target,
+                timeout_seconds,
+            }
+        } else {
+            ServerError::ReadinessTimeout {
+                target,
+                timeout_seconds,
+            }
+        }
+    };
     loop {
         // Ownership first, so a program that merely shares the port is never connected to.
         let check_root = std::sync::Arc::clone(&root);
@@ -65,12 +83,7 @@ pub async fn wait_for_server_readiness(
         tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(ServerError::ReadinessCanceled),
-            () = tokio::time::sleep_until(deadline) => {
-                return Err(ServerError::ReadinessTimeout {
-                    target: target.to_string(),
-                    timeout_seconds: timeout.as_secs(),
-                });
-            }
+            () = tokio::time::sleep_until(deadline) => return Err(timed_out(foreign_listener)),
             result = async {
                 let owned = match owned.await {
                     Ok(owned) => owned?,
@@ -78,23 +91,22 @@ pub async fn wait_for_server_readiness(
                     Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
                     Err(_) => return Err(ServerError::ReadinessCanceled),
                 };
-                Ok::<_, ServerError>(owned && TcpStream::connect(address).await.is_ok())
+                let ready = owned == ListenerOwnership::Child
+                    && TcpStream::connect(address).await.is_ok();
+                Ok::<_, ServerError>((owned, ready))
             } => {
-                if result? {
+                let (owned, ready) = result?;
+                if ready {
                     return Ok(());
                 }
+                foreign_listener = owned == ListenerOwnership::Foreign;
             }
         }
 
         tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(ServerError::ReadinessCanceled),
-            () = tokio::time::sleep_until(deadline) => {
-                return Err(ServerError::ReadinessTimeout {
-                    target: target.to_string(),
-                    timeout_seconds: timeout.as_secs(),
-                });
-            }
+            () = tokio::time::sleep_until(deadline) => return Err(timed_out(foreign_listener)),
             _ = retry.tick() => {}
         }
     }
@@ -199,9 +211,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_listener_held_by_another_process_never_makes_the_server_ready() {
+    async fn a_listener_held_by_another_process_ends_the_wait_with_a_foreign_listener_error() {
         let root = tempfile::tempdir().expect("root");
         let (_foreign, target) = listening_target().await;
+        let mut server = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("server stand-in");
+        record_child(root.path(), server.id());
+
+        let error = wait_for_server_readiness(
+            root.path(),
+            target,
+            Duration::from_secs(2),
+            &CancellationToken::new(),
+        )
+        .await;
+        server.kill().expect("kill");
+        server.wait().expect("reap");
+        assert!(
+            matches!(error, Err(ServerError::ForeignListener { .. })),
+            "{error:?}"
+        );
+
+        let empty = tempfile::tempdir().expect("root");
+        let error = wait_for_server_readiness(
+            empty.path(),
+            target,
+            Duration::from_millis(300),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("no recorded server process");
+        assert!(matches!(error, ServerError::ReadinessTimeout { .. }));
+    }
+
+    #[tokio::test]
+    async fn a_recorded_server_that_never_listens_ends_the_wait_with_a_plain_timeout() {
+        let root = tempfile::tempdir().expect("root");
+        let closed = tokio::net::TcpSocket::new_v4().expect("socket");
+        closed
+            .bind((Ipv4Addr::LOCALHOST, 0).into())
+            .expect("reserve port");
+        let address = closed.local_addr().expect("address");
+        let target = ConnectionTarget {
+            address: address.ip(),
+            port: NonZeroU16::new(address.port()).expect("port"),
+        };
         let mut server = std::process::Command::new("sleep")
             .arg("30")
             .spawn()
@@ -217,18 +273,10 @@ mod tests {
         .await;
         server.kill().expect("kill");
         server.wait().expect("reap");
-        assert!(matches!(error, Err(ServerError::ReadinessTimeout { .. })));
-
-        let empty = tempfile::tempdir().expect("root");
-        let error = wait_for_server_readiness(
-            empty.path(),
-            target,
-            Duration::from_millis(300),
-            &CancellationToken::new(),
-        )
-        .await
-        .expect_err("no recorded server process");
-        assert!(matches!(error, ServerError::ReadinessTimeout { .. }));
+        assert!(
+            matches!(error, Err(ServerError::ReadinessTimeout { .. })),
+            "{error:?}"
+        );
     }
 
     /// Names the port a co-listener stand-in shares, so running ignored tests
@@ -300,7 +348,7 @@ mod tests {
         let shared = wait_for_server_readiness(
             root.path(),
             target,
-            Duration::from_millis(300),
+            Duration::from_secs(2),
             &CancellationToken::new(),
         )
         .await;
@@ -309,7 +357,10 @@ mod tests {
         drained.join().expect("output drained");
         assert!(started, "the co-listener started");
         assert!(status.success(), "the co-listener exited cleanly: {status}");
-        assert!(matches!(shared, Err(ServerError::ReadinessTimeout { .. })));
+        assert!(
+            matches!(shared, Err(ServerError::ForeignListener { .. })),
+            "{shared:?}"
+        );
 
         wait_for_server_readiness(
             root.path(),

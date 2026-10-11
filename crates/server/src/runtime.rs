@@ -906,22 +906,32 @@ fn verify_process_instance(evidence: &ProcessEvidence) -> IdentityState {
     }
 }
 
+/// Who holds the listening sockets that a connection to a target can reach.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ListenerOwnership {
+    /// The recorded Java child holds every reachable listening socket.
+    Child,
+    /// No child is recorded or provably alive, or nothing listens there yet.
+    NotYet,
+    /// A live child is recorded, and a program other than it also listens where
+    /// the connection would go.
+    Foreign,
+}
+
 /// Whether the recorded Java child itself holds every listening TCP socket
 /// that a connection to `target` can reach, since an accepted connection does
 /// not say who accepted it.
 ///
-/// `Ok(false)` means not yet: no child is recorded or provably alive, it has
-/// not bound, or another program also listens where the connection would go.
 /// Exit is left to the caller's runtime monitoring.
 pub(crate) fn runtime_child_listens_on(
     server_root: &Path,
     target: SocketAddr,
-) -> ServerResult<bool> {
+) -> ServerResult<ListenerOwnership> {
     let Some(RuntimeEvidence {
         child: Some(child), ..
     }) = read_runtime_evidence(server_root)?
     else {
-        return Ok(false);
+        return Ok(ListenerOwnership::NotYet);
     };
     // The executable is not compared: a Java binary an upgrade replaced on
     // disk still runs as the same server.
@@ -932,7 +942,7 @@ pub(crate) fn runtime_child_listens_on(
         )
     };
     if !is_child() {
-        return Ok(false);
+        return Ok(ListenerOwnership::NotYet);
     }
     // The launcher's own tables: a socket the child holds in another network
     // namespace is not the one a local connection reaches. Unreadable tables
@@ -956,13 +966,13 @@ pub(crate) fn runtime_child_listens_on(
         );
     }
     if reachable.is_empty() {
-        return Ok(false);
+        return Ok(ListenerOwnership::NotYet);
     }
     let descriptors = PathBuf::from(format!("/proc/{}/fd", child.pid));
     let entries = match std::fs::read_dir(&descriptors) {
         Ok(entries) => entries,
         // A child that went away is reported by exit monitoring, not here.
-        Err(_) if !is_child() => return Ok(false),
+        Err(_) if !is_child() => return Ok(ListenerOwnership::NotYet),
         // A live child whose sockets cannot be attributed would only ever time out.
         Err(source) => {
             return Err(ServerError::RuntimeState {
@@ -980,10 +990,19 @@ pub(crate) fn runtime_child_listens_on(
             reachable.remove(&inode);
         }
     }
-    // A co-listener, such as a separate IPv4 socket beside an IPv6-only wildcard
-    // or a shared reuse port, could take the connection instead. Checked again
-    // so a pid recycled during the scan cannot lend its descriptors.
-    Ok(reachable.is_empty() && is_child())
+    // Checked again so a pid recycled during the scan cannot lend its descriptors.
+    if !is_child() {
+        return Ok(ListenerOwnership::NotYet);
+    }
+    // A co-listener, such as a separate IPv4 socket beside an IPv6 wildcard or a
+    // shared reuse port, could take the connection instead. `/proc/net/tcp6` does
+    // not expose `IPV6_V6ONLY`, so a foreign IPv6-only wildcard counts as one for
+    // an IPv4 target.
+    Ok(if reachable.is_empty() {
+        ListenerOwnership::Child
+    } else {
+        ListenerOwnership::Foreign
+    })
 }
 
 /// The socket inode of a `/proc/net/tcp` or `tcp6` row that listens where a

@@ -44,7 +44,11 @@ Readiness is a successful TCP connection to the derived target within a
 bounded 120-second deadline, counted only while the server's recorded Java
 process itself holds every listening socket such a connection can reach. A
 connection alone cannot say who accepted it, so another program on the port
-never stands in for the server, whether it is being started or reused.
+never stands in for the server, whether it is being started or reused. If
+the deadline passes while another program was listening where the connection
+would go, the wait ends with an error that says so rather than a plain
+timeout. `/proc/net/tcp6` does not expose `IPV6_V6ONLY`, so a foreign
+IPv6-only wildcard listener is counted as reachable from an IPv4 target.
 Cancellation is immediate. During a new start, the supervisor result is
 observed so process-start failure or exit wins over readiness. During reuse,
 runtime classification is monitored so a stopped or uncertain server cannot be

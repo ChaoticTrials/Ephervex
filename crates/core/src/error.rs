@@ -1173,6 +1173,11 @@ mod tests {
                 timeout_seconds: 120,
             }
             .message_id(),
+            ServerError::ForeignListener {
+                target: "127.0.0.1:25565".to_owned(),
+                timeout_seconds: 120,
+            }
+            .message_id(),
             ServerError::ReadinessCanceled.message_id(),
             ServerError::StartCanceled.message_id(),
             ConnectError::ServerNotLinked {
