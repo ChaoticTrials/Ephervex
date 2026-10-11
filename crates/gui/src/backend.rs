@@ -49,6 +49,7 @@ use crate::presentation::{
     SERVER_PROPERTY_DEFINITIONS, ServerPresentation, diagnostic_kind_label, diagnostic_scope_label,
 };
 use crate::settings_drafts::SettingsSave;
+use crate::workspace_layout::PaneId;
 
 type CancellationRegistry = Arc<Mutex<HashMap<String, CancellationToken>>>;
 
@@ -604,11 +605,13 @@ pub enum Command {
         kind: DiagnosticKind,
     },
     OpenDiagnostic {
+        pane: PaneId,
         scope: DiagnosticScope,
         kind: DiagnosticKind,
         name: String,
     },
     SearchDiagnostic {
+        pane: PaneId,
         scope: DiagnosticScope,
         kind: DiagnosticKind,
         name: String,
@@ -1338,6 +1341,8 @@ pub struct DiagnosticData {
 
 #[derive(Debug, Clone)]
 pub struct DiagnosticContent {
+    /// The pane that asked, which is the only one the reply is for.
+    pub pane: PaneId,
     /// The file this is, which is what decides the views it belongs in.
     pub scope: DiagnosticScope,
     pub kind: DiagnosticKind,
@@ -1682,6 +1687,7 @@ pub enum Event {
     DiagnosticContent(DiagnosticContent),
     /// A diagnostic file could not be read, with the reason to show in its place.
     DiagnosticUnavailable {
+        pane: PaneId,
         scope: DiagnosticScope,
         kind: DiagnosticKind,
         name: String,
@@ -5077,15 +5083,21 @@ fn run_worker(
             Command::LoadDiagnostics { scope, kind } => {
                 send_diagnostics(&app, scope, kind, &events);
             }
-            Command::OpenDiagnostic { scope, kind, name } => {
-                send_diagnostic_content(&app, scope, kind, &name, None, &events);
+            Command::OpenDiagnostic {
+                pane,
+                scope,
+                kind,
+                name,
+            } => {
+                send_diagnostic_content(&app, pane, scope, kind, &name, None, &events);
             }
             Command::SearchDiagnostic {
+                pane,
                 scope,
                 kind,
                 name,
                 query,
-            } => send_diagnostic_content(&app, scope, kind, &name, Some(&query), &events),
+            } => send_diagnostic_content(&app, pane, scope, kind, &name, Some(&query), &events),
             Command::OpenDiagnosticFolder { scope, kind } => {
                 report_sync(
                     &events,
@@ -7313,6 +7325,7 @@ fn send_diagnostics(
 
 fn send_diagnostic_content(
     app: &App,
+    pane: PaneId,
     scope: DiagnosticScope,
     kind: DiagnosticKind,
     name: &str,
@@ -7342,6 +7355,7 @@ fn send_diagnostic_content(
                 text.insert_str(0, &format!("[{summary}]\n\n"));
             }
             let _ = events.send(Event::DiagnosticContent(DiagnosticContent {
+                pane,
                 scope,
                 kind,
                 name: name.to_owned(),
@@ -7360,6 +7374,7 @@ fn send_diagnostic_content(
         }
         Err(error) => {
             let _ = events.send(Event::DiagnosticUnavailable {
+                pane,
                 scope,
                 kind,
                 name: name.to_owned(),

@@ -420,6 +420,7 @@ impl LogViews {
                     send(
                         &self.commands,
                         Command::OpenDiagnostic {
+                            pane,
                             scope,
                             kind,
                             name: name.to_owned(),
@@ -443,6 +444,7 @@ impl LogViews {
             send(
                 &self.commands,
                 Command::SearchDiagnostic {
+                    pane,
                     scope,
                     kind,
                     name: viewer.file.clone(),
@@ -490,35 +492,33 @@ impl LogViews {
         }
     }
 
-    /// A crash report's text, for every viewer that has that report open.
+    /// A crash report's text, for the pane that asked for it. Another pane
+    /// with the same report open keeps its own document and search.
     pub(super) fn apply_report(&mut self, content: &DiagnosticContent) {
         let text = expand_tabs(&content.text);
-        self.apply_report_text(content, &text);
+        self.show_report(content.pane, content.scope, &content.name, &text);
     }
 
-    /// A report that could not be read, shown where its text would be.
+    /// A report that could not be read, shown where its text would be in the
+    /// pane that asked.
     pub(super) fn apply_report_unavailable(
         &mut self,
+        pane: PaneId,
         scope: DiagnosticScope,
         name: &str,
         message: &str,
     ) {
-        self.show_report(scope, name, message);
+        self.show_report(pane, scope, name, message);
     }
 
-    fn apply_report_text(&mut self, content: &DiagnosticContent, text: &str) {
-        self.show_report(content.scope, &content.name, text);
-    }
-
-    fn show_report(&mut self, scope: DiagnosticScope, name: &str, text: &str) {
-        for slot in 0..self.slots.len() {
-            let Some(viewer) = self.slots[slot].as_mut() else {
-                continue;
-            };
-            if viewer.mode == LogMode::Crashes && viewer.file == name && viewer.scope() == scope {
-                text.clone_into(&mut viewer.report);
-                self.render(slot);
-            }
+    /// Drops a reply for a pane that has since moved to another file or mode.
+    fn show_report(&mut self, pane: PaneId, scope: DiagnosticScope, name: &str, text: &str) {
+        let Some((slot, viewer)) = self.viewer_mut(pane) else {
+            return;
+        };
+        if viewer.mode == LogMode::Crashes && viewer.file == name && viewer.scope() == scope {
+            text.clone_into(&mut viewer.report);
+            self.render(slot);
         }
     }
 
@@ -929,30 +929,39 @@ mod tests {
         assert!(sent(&commands).is_empty(), "nothing is reopened");
     }
 
+    fn report_for(pane: PaneId, host: InstanceId, text: &str) -> DiagnosticContent {
+        DiagnosticContent {
+            pane,
+            scope: DiagnosticScope::Client(host),
+            kind: backend::parse_diagnostic_kind("crash-report").expect("kind"),
+            name: "crash.txt".to_owned(),
+            title: String::new(),
+            path: String::new(),
+            text: text.to_owned(),
+            truncated: false,
+            lossy: false,
+            matches: None,
+        }
+    }
+
+    fn open_report_in(views: &mut LogViews, panes: &[PaneId]) {
+        for &pane in panes {
+            views.show(pane, LogMode::Crashes);
+            views.open_file(pane, "crash.txt");
+        }
+    }
+
     #[test]
-    fn a_crash_report_reaches_only_the_viewers_that_have_it_open() {
+    fn a_crash_report_reaches_only_the_pane_that_asked_for_it() {
         let (mut views, _) = views();
         let (own, other) = (InstanceId::new(), InstanceId::new());
         views.sync(&[
             (A, InstalledHost::Instance(own), Surface::Logs),
             (B, InstalledHost::Instance(other), Surface::Logs),
         ]);
-        for pane in [A, B] {
-            views.show(pane, LogMode::Crashes);
-            views.open_file(pane, "crash.txt");
-        }
+        open_report_in(&mut views, &[A, B]);
 
-        views.apply_report(&DiagnosticContent {
-            scope: DiagnosticScope::Client(own),
-            kind: backend::parse_diagnostic_kind("crash-report").expect("kind"),
-            name: "crash.txt".to_owned(),
-            title: String::new(),
-            path: String::new(),
-            text: "java.lang.Throwable".to_owned(),
-            truncated: false,
-            lossy: false,
-            matches: None,
-        });
+        views.apply_report(&report_for(A, own, "java.lang.Throwable"));
 
         assert_eq!(row(&views, A).report, "java.lang.Throwable");
         assert_eq!(
@@ -960,5 +969,93 @@ mod tests {
             "",
             "the same file name on another host is another file"
         );
+    }
+
+    #[test]
+    fn a_search_in_one_pane_leaves_another_pane_on_the_same_report_alone() {
+        let (mut views, _) = views();
+        let host = InstanceId::new();
+        views.sync(&[
+            (A, InstalledHost::Instance(host), Surface::Logs),
+            (B, InstalledHost::Instance(host), Surface::Logs),
+        ]);
+        open_report_in(&mut views, &[A, B]);
+        views.apply_report(&report_for(A, host, "whole report"));
+        views.apply_report(&report_for(B, host, "whole report"));
+
+        views.apply_report(&report_for(A, host, "[1 match]\n\nexcerpt"));
+
+        assert_eq!(row(&views, A).report, "[1 match]\n\nexcerpt");
+        assert_eq!(row(&views, B).report, "whole report");
+    }
+
+    #[test]
+    fn opening_a_report_in_one_pane_keeps_the_search_result_in_another() {
+        let (mut views, _) = views();
+        let host = InstanceId::new();
+        views.sync(&[
+            (A, InstalledHost::Instance(host), Surface::Logs),
+            (B, InstalledHost::Instance(host), Surface::Logs),
+        ]);
+        open_report_in(&mut views, &[A, B]);
+        views.apply_report(&report_for(A, host, "[1 match]\n\nexcerpt"));
+
+        views.apply_report(&report_for(B, host, "whole report"));
+
+        assert_eq!(row(&views, A).report, "[1 match]\n\nexcerpt");
+        assert_eq!(row(&views, B).report, "whole report");
+    }
+
+    #[test]
+    fn an_unreadable_report_is_shown_only_in_the_pane_that_asked() {
+        let (mut views, _) = views();
+        let host = InstanceId::new();
+        views.sync(&[
+            (A, InstalledHost::Instance(host), Surface::Logs),
+            (B, InstalledHost::Instance(host), Surface::Logs),
+        ]);
+        open_report_in(&mut views, &[A, B]);
+        views.apply_report(&report_for(B, host, "whole report"));
+
+        views.apply_report_unavailable(A, DiagnosticScope::Client(host), "crash.txt", "gone");
+
+        assert_eq!(row(&views, A).report, "gone");
+        assert_eq!(row(&views, B).report, "whole report");
+    }
+
+    #[test]
+    fn a_reply_for_a_file_the_pane_no_longer_has_open_is_dropped() {
+        let (mut views, _) = views();
+        let host = InstanceId::new();
+        views.sync(&[(A, InstalledHost::Instance(host), Surface::Logs)]);
+        open_report_in(&mut views, &[A]);
+        views.open_file(A, "other.txt");
+
+        views.apply_report(&report_for(A, host, "late reply for crash.txt"));
+
+        assert_eq!(row(&views, A).report, "");
+    }
+
+    #[test]
+    fn a_report_search_names_the_pane_that_searched() {
+        let (mut views, commands) = views();
+        let host = InstanceId::new();
+        views.sync(&[
+            (A, InstalledHost::Instance(host), Surface::Logs),
+            (B, InstalledHost::Instance(host), Surface::Logs),
+        ]);
+        open_report_in(&mut views, &[A, B]);
+        commands.try_iter().for_each(drop);
+
+        views.search_report(B, "needle");
+
+        let panes: Vec<PaneId> = commands
+            .try_iter()
+            .filter_map(|command| match command {
+                Command::SearchDiagnostic { pane, .. } => Some(pane),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(panes, [B]);
     }
 }

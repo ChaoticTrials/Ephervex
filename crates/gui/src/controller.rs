@@ -7612,6 +7612,7 @@ fn apply_event(
             apply_diagnostic_content(ui, &mut workspace.logs.borrow_mut(), &content);
         }
         Event::DiagnosticUnavailable {
+            pane,
             scope,
             name,
             message,
@@ -7620,7 +7621,7 @@ fn apply_event(
             workspace
                 .logs
                 .borrow_mut()
-                .apply_report_unavailable(scope, &name, &message);
+                .apply_report_unavailable(pane, scope, &name, &message);
             ui.set_status_message(lookup("gui-diagnostic-disappeared").into());
         }
         Event::HostSnapshots(data) => {
@@ -9064,7 +9065,7 @@ fn apply_server_workspace(workspace: &Workspace, data: ServerWorkspaceData) {
     });
 }
 
-/// Puts a crash report in every view that has it open, and says how much of it arrived.
+/// Puts a crash report in the view that asked for it, and says how much of it arrived.
 fn apply_diagnostic_content(ui: &AppWindow, logs: &mut LogViews, content: &DiagnosticContent) {
     // Through the same expansion a log record gets. A crash report is tab
     // indented on nearly every stack line, and a tab has no glyph to draw.
@@ -16936,6 +16937,7 @@ mod tests {
             &ui,
             &mut logs,
             &DiagnosticContent {
+                pane,
                 scope: ephervex_core::DiagnosticScope::Client(instance),
                 kind: backend::parse_diagnostic_kind("crash-report").expect("kind"),
                 name: name.to_owned(),
