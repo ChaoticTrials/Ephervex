@@ -107,6 +107,8 @@ struct BundleChoice {
     /// Whether `parts` came from a plan yet, so a later plan of the same
     /// host keeps the user's choices rather than the defaults.
     planned: bool,
+    /// The newest export asked for this host. A result for any other id is
+    /// stale.
     last_request: u64,
     /// The export the worker has not finished.
     pending: Option<u64>,
@@ -147,13 +149,9 @@ impl BundleChoice {
             .collect()
     }
 
-    fn dispatch(&mut self) -> Option<u64> {
-        if self.pending.is_some() || self.selected.is_empty() {
-            return None;
-        }
-        self.last_request = self.last_request.wrapping_add(1);
-        self.pending = Some(self.last_request);
-        Some(self.last_request)
+    /// Whether an export may start now: none runs and something is chosen.
+    fn can_dispatch(&self) -> bool {
+        self.pending.is_none() && !self.selected.is_empty()
     }
 }
 
@@ -175,6 +173,9 @@ struct DiagnosisHost {
 pub(super) struct DiagnosisFlowState {
     hosts: HashMap<InstalledHost, DiagnosisHost>,
     last_request: u64,
+    /// The newest export id handed out to any host. It is never reset, so an
+    /// id is not reused by another host or by a host that left and came back.
+    last_bundle_request: u64,
     last_preview: u64,
     /// The one diagnosis or fix the worker has not finished. A second
     /// request, from any view of any host, is refused here before a second
@@ -234,6 +235,19 @@ impl DiagnosisFlowState {
             operation: None,
         });
         Some(self.last_request)
+    }
+
+    /// Starts a bundle export for a shown host with an id no host has had.
+    fn dispatch_bundle(&mut self, host: InstalledHost) -> Option<u64> {
+        let bundle = &mut self.hosts.get_mut(&host)?.bundle;
+        if !bundle.can_dispatch() {
+            return None;
+        }
+        self.last_bundle_request = self.last_bundle_request.wrapping_add(1);
+        let request = self.last_bundle_request;
+        bundle.last_request = request;
+        bundle.pending = Some(request);
+        Some(request)
     }
 
     /// Releases the work the worker reports finished.
@@ -1102,15 +1116,15 @@ fn register_bundle(ui: &AppWindow, commands: &Sender<Command>, workspace: &Works
             return;
         };
         let mut state = views.diagnosis.borrow_mut();
-        let Some(surface) = state.host_mut(host) else {
-            return;
-        };
         // An empty selection is refused rather than written as an archive
         // holding nothing but its manifest.
-        let Some(request) = surface.bundle.dispatch() else {
+        let Some(request) = state.dispatch_bundle(host) else {
             return;
         };
-        let names = surface.bundle.chosen();
+        let names = state
+            .host(host)
+            .map(|s| s.bundle.chosen())
+            .unwrap_or_default();
         views.update(host, |view| {
             view.bundle_exporting = true;
             view.bundle_error = SharedString::default();

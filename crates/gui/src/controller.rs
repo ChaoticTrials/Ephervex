@@ -11215,6 +11215,109 @@ mod tests {
         assert!(!first_view(&ui).bundle_exporting);
     }
 
+    fn exported_report() -> backend::BundleExportData {
+        backend::BundleExportData {
+            path: PathBuf::from("/home/user/bundle.zip"),
+            included: 1,
+            unreadable: Vec::new(),
+            bytes: 2048,
+        }
+    }
+
+    #[test]
+    fn settling_one_hosts_export_leaves_another_hosts_export_pending() {
+        let (ui, workspace, commands, first) = planned_bundle();
+        let pane = workspace.single_pane().expect("one pane");
+        workspace.change_pane(&ui, pane, |layout| layout.split_beside(pane).is_ok());
+        let second = server_host();
+        ui.invoke_follow_host(2, "server".into(), second.id().into(), "Diagnostics".into());
+        diagnosis_flow::apply_bundle_plan(
+            &workspace,
+            &mut workspace.diagnosis.borrow_mut(),
+            second,
+            vec![bundle_part("instance/instance.json", "record")],
+        );
+        commands.try_iter().for_each(drop);
+
+        ui.invoke_export_bundle("client".into(), first.id().into());
+        ui.invoke_export_bundle("server".into(), second.id().into());
+        let requests: Vec<u64> = commands
+            .try_iter()
+            .map(|command| match command {
+                Command::ExportDiagnosticBundle { request, .. } => request,
+                other => panic!("an export: {other:?}"),
+            })
+            .collect();
+        assert_eq!(requests.len(), 2);
+        assert_ne!(requests[0], requests[1], "each export has its own id");
+
+        diagnosis_flow::settle_bundle(
+            &workspace,
+            &mut workspace.diagnosis.borrow_mut(),
+            requests[0],
+        );
+        let views = ui.get_host_views();
+        assert!(!views.row_data(0).expect("client").bundle_exporting);
+        assert!(
+            views.row_data(1).expect("server").bundle_exporting,
+            "the other host is still writing"
+        );
+
+        ui.invoke_export_bundle("server".into(), second.id().into());
+        assert!(
+            commands.try_recv().is_err(),
+            "the other host's export still waits for its own result"
+        );
+    }
+
+    #[test]
+    fn a_late_export_result_from_before_a_host_left_is_not_taken_as_its_new_answer() {
+        let (ui, workspace, commands, host) = planned_bundle();
+        ui.invoke_export_bundle("client".into(), host.id().into());
+        let Ok(Command::ExportDiagnosticBundle {
+            request: earlier, ..
+        }) = commands.try_recv()
+        else {
+            panic!("an export");
+        };
+
+        workspace.diagnosis.borrow_mut().follow(&[]);
+        diagnosis_flow::open(&workspace, &workspace.commands, host);
+        diagnosis_flow::apply_bundle_plan(
+            &workspace,
+            &mut workspace.diagnosis.borrow_mut(),
+            host,
+            vec![bundle_part("instance/instance.json", "record")],
+        );
+        ui.invoke_export_bundle("client".into(), host.id().into());
+        let sent: Vec<_> = commands
+            .try_iter()
+            .filter(|command| matches!(command, Command::ExportDiagnosticBundle { .. }))
+            .collect();
+        let [Command::ExportDiagnosticBundle { request: later, .. }] = sent.as_slice() else {
+            panic!("one export: {sent:?}");
+        };
+        assert_ne!(*later, earlier, "a returning host does not restart its ids");
+
+        diagnosis_flow::apply_bundle_exported(
+            &workspace,
+            &workspace.diagnosis.borrow(),
+            host,
+            earlier,
+            &exported_report(),
+        );
+        assert!(first_view(&ui).bundle_result.is_empty());
+
+        diagnosis_flow::apply_bundle_exported(
+            &workspace,
+            &workspace.diagnosis.borrow(),
+            host,
+            *later,
+            &exported_report(),
+        );
+        assert!(!first_view(&ui).bundle_result.is_empty());
+    }
+
     #[test]
     fn an_empty_bundle_choice_is_never_exported() {
         let (ui, _workspace, commands, host) = planned_bundle();
