@@ -5234,7 +5234,16 @@ fn optional_unverified_text(candidate: &OptionalCandidate) -> Option<String> {
     let OptionalStatus::Unverified(unverified) = &candidate.status else {
         return None;
     };
-    let project = MessageArg::from(candidate.project_id.as_str());
+    let Some(project_id) = candidate.project_id.as_deref() else {
+        return Some(ephervex_i18n::lookup_args(
+            "mod-optional-release-unverified",
+            [(
+                "release",
+                MessageArg::from(candidate.pinned_version_id.as_deref().unwrap_or_default()),
+            )],
+        ));
+    };
+    let project = MessageArg::from(project_id);
     Some(match unverified {
         UnverifiedOptional::ConflictingIdentity { version_project_id } => {
             ephervex_i18n::lookup_args(
@@ -5397,6 +5406,7 @@ fn print_mod_plan(plan: &ModInstallPlan, json: bool) {
             "dependencies": plan.dependencies.iter().map(planned_json).collect::<Vec<_>>(),
             "optional": plan.optional.iter().map(|candidate| serde_json::json!({
                 "project_id": candidate.project_id,
+                "pinned_version_id": candidate.pinned_version_id,
                 "declared_by": candidate.declared_by,
                 "selected": false,
                 "version_id": candidate.version.as_ref().map(|version| version.id.clone()),
@@ -5437,9 +5447,14 @@ fn print_mod_plan(plan: &ModInstallPlan, json: bool) {
     }
     for candidate in &plan.optional {
         // Unchecked by default, and shown as such rather than hidden.
+        let name = candidate
+            .project_id
+            .as_deref()
+            .or(candidate.pinned_version_id.as_deref())
+            .unwrap_or_default();
         match optional_unverified_text(candidate) {
-            Some(note) => outln!("  [ ] {} (optional): {note}", candidate.project_id),
-            None => outln!("  [ ] {} (optional)", candidate.project_id),
+            Some(note) => outln!("  [ ] {name} (optional): {note}"),
+            None => outln!("  [ ] {name} (optional)"),
         }
     }
     for external in &plan.external {
@@ -8506,6 +8521,19 @@ mod tests {
         }
         assert_eq!(launch_server_warning(ServerEvent::Started { pid: 7 }), None);
         assert_eq!(launch_server_warning(ServerEvent::Restarting), None);
+    }
+
+    #[test]
+    fn an_unverified_optional_release_with_no_known_project_names_the_release() {
+        let candidate = OptionalCandidate {
+            project_id: None,
+            pinned_version_id: Some("extra-v1".to_owned()),
+            declared_by: "ROOT".to_owned(),
+            version: None,
+            status: OptionalStatus::Unverified(UnverifiedOptional::Unavailable),
+        };
+        let text = optional_unverified_text(&candidate).expect("an unverified offer has a note");
+        assert!(text.contains("extra-v1"), "{text}");
     }
 
     fn settings_with(key: ephervex_core::CurseForgeKeyState) -> ApiSettings {

@@ -1689,6 +1689,7 @@ mod-warning-optional-not-offered = { $project } was selected as an optional depe
 mod-optional-unavailable = { $project } could not be checked because usable information about it could not be obtained from the provider.
 mod-optional-unknown-identity = { $project } could not be checked because the provider does not know the project or release it names.
 mod-optional-conflicting-identity = { $project } could not be checked because the release it names belongs to { $owner } instead.
+mod-optional-release-unverified = The optional dependency release { $release } could not be checked because the provider could not say which project it belongs to.
 
 error-mod-provider-unreachable = { $provider } could not be reached.
 .action = Check the network connection and try again.

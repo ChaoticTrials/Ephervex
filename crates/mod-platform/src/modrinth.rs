@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use ephervex_download::{CacheLayout, DownloadManager, OperationReporter};
-use ephervex_model::{Hash, LoaderKind, ModProvider};
+use ephervex_model::{Hash, LoaderKind, ModProvider, ModRelationKind};
 use futures_util::StreamExt as _;
 use tokio_util::sync::CancellationToken;
 use tracing::{instrument, warn};
@@ -111,6 +111,7 @@ impl ModrinthProvider {
                 .collect(),
             &OperationReporter::silent("name-pinned-projects"),
             cancel,
+            false,
         )
         .await?;
         Ok(recognized)
@@ -123,35 +124,74 @@ impl ModrinthProvider {
     /// the owner is read from the release itself, in one batched request for
     /// all the lists. A release the catalog does not answer for leaves its
     /// relation as stated.
+    ///
+    /// With `optional_may_stay_unnamed`, an optional relation whose owner
+    /// cannot be read is left as stated instead of failing the lookup, because
+    /// an optional extra that cannot be judged must not fail the release that
+    /// declares it. Canceling still fails.
     async fn name_pinned_projects(
         &self,
         lists: Vec<&mut Vec<ModDependency>>,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
+        optional_may_stay_unnamed: bool,
     ) -> ModPlatformResult<()> {
-        let mut pinned: Vec<String> = lists
-            .iter()
-            .flat_map(|list| list.iter())
-            .filter(|dependency| dependency.pins_only_a_version())
-            .filter_map(|dependency| dependency.version_id.clone())
-            .collect();
-        pinned.sort_unstable();
-        pinned.dedup();
-        if pinned.is_empty() {
-            return Ok(());
-        }
+        let pins_of = |optional: bool| -> Vec<String> {
+            let mut pinned: Vec<String> = lists
+                .iter()
+                .flat_map(|list| list.iter())
+                .filter(|dependency| dependency.pins_only_a_version())
+                .filter(|dependency| {
+                    !optional_may_stay_unnamed
+                        || (dependency.kind == ModRelationKind::Optional) == optional
+                })
+                .filter_map(|dependency| dependency.version_id.clone())
+                .collect();
+            pinned.sort_unstable();
+            pinned.dedup();
+            pinned
+        };
 
-        let owners: BTreeMap<String, String> = self
-            .api
-            .versions_by_id(&pinned, reporter, cancel)
-            .await?
-            .into_iter()
-            .map(|version| (version.id, version.project_id))
-            .collect();
+        let mut owners = BTreeMap::new();
+        let strict = pins_of(false);
+        if !strict.is_empty() {
+            owners.extend(self.owners_of(&strict, reporter, cancel).await?);
+        }
+        if optional_may_stay_unnamed {
+            let optional: Vec<String> = pins_of(true)
+                .into_iter()
+                .filter(|version_id| !strict.contains(version_id))
+                .collect();
+            if !optional.is_empty() {
+                match self.owners_of(&optional, reporter, cancel).await {
+                    Ok(found) => owners.extend(found),
+                    Err(error) if error.is_cancellation() || cancel.is_cancelled() => {
+                        return Err(error);
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
         for dependency in lists.into_iter().flat_map(|list| list.iter_mut()) {
             dependency.name_pinned_project(&owners);
         }
         Ok(())
+    }
+
+    /// The project each of these releases belongs to.
+    async fn owners_of(
+        &self,
+        version_ids: &[String],
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> ModPlatformResult<BTreeMap<String, String>> {
+        Ok(self
+            .api
+            .versions_by_id(version_ids, reporter, cancel)
+            .await?
+            .into_iter()
+            .map(|version| (version.id, version.project_id))
+            .collect())
     }
 }
 
@@ -329,6 +369,7 @@ impl ModProviderApi for ModrinthProvider {
                 .collect(),
             reporter,
             cancel,
+            true,
         )
         .await?;
         Ok(versions)

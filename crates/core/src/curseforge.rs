@@ -966,7 +966,8 @@ mod browsing {
                 .plan
                 .optional
                 .iter()
-                .any(|candidate| candidate.project_id == OPTIONAL_PROJECT.to_string()),
+                .any(|candidate| candidate.project_id.as_deref()
+                    == Some(OPTIONAL_PROJECT.to_string().as_str())),
             "the optional extra should be offered"
         );
         let managed = app.managed_mods(instance).expect("managed mods");

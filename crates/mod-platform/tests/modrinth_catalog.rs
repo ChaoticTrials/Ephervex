@@ -530,7 +530,7 @@ async fn resolving_from_the_catalog_installs_the_mod_and_its_required_library() 
 
     // The optional extra is offered and not taken.
     assert_eq!(plan.optional.len(), 1);
-    assert_eq!(plan.optional[0].project_id, "EXTRAPROJ");
+    assert_eq!(plan.optional[0].project_id.as_deref(), Some("EXTRAPROJ"));
     assert!(
         plan.to_install()
             .iter()
@@ -1012,6 +1012,58 @@ async fn releases_asked_for_by_id_state_the_project_of_a_version_only_dependency
             file_name: None,
         }]
     );
+}
+
+fn release_pinning(pin: &str, kind: &str) -> String {
+    format!(
+        r#"[{{"id":"vFeature","project_id":"FEATURE1","name":"Feature","version_number":"1","version_type":"release","game_versions":["1.20.1"],"loaders":["forge"],"date_published":"2024-01-01T00:00:00Z","files":[{{"hashes":{{"sha1":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},"url":"https://cdn.modrinth.com/data/F/versions/vFeature/feature.jar","filename":"feature.jar","primary":true,"size":1}}],"dependencies":[{{"version_id":"{pin}","dependency_type":"{kind}"}}]}}]"#
+    )
+}
+
+/// An optional extra that cannot be judged must not fail the release that
+/// declares it, while a required relation still has to be named.
+#[tokio::test]
+async fn a_release_is_read_when_the_owner_of_its_optional_version_only_pin_cannot_be_looked_up() {
+    for (kind, readable) in [("optional", true), ("required", false)] {
+        let catalog = Catalog::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v2/versions"))
+            .and(query_param("ids", r#"["vFeature"]"#))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(release_pinning("vPinned", kind)),
+            )
+            .mount(&catalog.server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v2/versions"))
+            .and(query_param("ids", r#"["vPinned"]"#))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&catalog.server)
+            .await;
+
+        let read = catalog
+            .provider
+            .versions_by_id(
+                &["vFeature".to_owned()],
+                &reporter(),
+                &CancellationToken::new(),
+            )
+            .await;
+
+        match (readable, read) {
+            (true, Ok(versions)) => assert_eq!(
+                versions[0].dependencies,
+                [ModDependency {
+                    kind: ModRelationKind::Optional,
+                    project_id: None,
+                    version_id: Some("vPinned".to_owned()),
+                    file_name: None,
+                }]
+            ),
+            (false, Err(_)) => {}
+            (readable, read) => panic!("{kind}: readable={readable}, got {read:?}"),
+        }
+    }
 }
 
 /// The answer is about specific bytes on disk and is asked once per server, so
