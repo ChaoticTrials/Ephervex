@@ -404,9 +404,9 @@ def public_view(data):
                        for x in data["milestones"]],
         "labels": [{"name": x.get("name"), "color": x.get("color"), "description": x.get("description") or ""}
                    for x in data["labels"]],
-        "releases": [{"tag": x.get("tag_name"), "name": x.get("name"), "createdAt": x.get("created_at"),
-                      "publishedAt": x.get("published_at"), "bodyMarkdown": x.get("body") or "", "draft": x.get("draft")}
-                     for x in data["releases"]],
+        # Release history and binaries stay in the private preservation snapshot.
+        # Website releases are managed separately as GitHub pre-releases.
+        "releases": [],
     }
 
 
@@ -455,7 +455,7 @@ def prepare_public(args):
         "NOT APPROVED FOR PUBLICATION. Inspect EVERY issue/PR/comment/review body.",
         "Search for credentials, tokens, IPs, internal hostnames, user emails, private links and personal data.",
         "Check quoted code snippets and historical URLs. Original Forgejo source hostname is deliberately omitted from public JSON metadata.",
-        "Attachments and release binaries are NOT included in this candidate and require individual audit before publishing.",
+        "Attachments and Forgejo releases are NOT included in this candidate; audit any external assets separately before publishing.",
         "Do not expose the raw snapshot.json, raw API data, authenticated URLs or API tokens in web/static/.",
         "Public Markdown may include raw HTML; Docusaurus renderer must sanitize or escape it (no dangerous HTML).",
         "Verify licensing and redistribution rights for third-party issue comments and attached files.",

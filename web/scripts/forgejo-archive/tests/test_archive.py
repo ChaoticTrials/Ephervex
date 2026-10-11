@@ -46,6 +46,8 @@ class OfflineTests(unittest.TestCase):
         self.assertEqual(public["issues"][0]["number"], 295)
         self.assertEqual(public["pulls"][0]["number"], 3)
         self.assertEqual(public["issues"][0]["comments"][0]["author"], "reviewer")
+        self.assertEqual(public["releases"], [])
+        self.assertNotIn("v0.10.0", json.dumps(public))
         self.assertNotIn("forgejo.lan", json.dumps(public))
         self.assertNotIn("html_url", json.dumps(public))
 
