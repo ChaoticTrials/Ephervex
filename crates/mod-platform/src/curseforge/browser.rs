@@ -124,15 +124,16 @@ impl CurseForgeProvider {
         target: &InstanceTarget,
         cancel: &CancellationToken,
     ) -> ModPlatformResult<Vec<ModVersionInfo>> {
-        let owner = project.to_string();
-        let mut versions: Vec<ModVersionInfo> = operation
+        // Ownership is decided before mapping: a file another project owns is
+        // dropped anyway, so it must not fail the listing by being unavailable
+        // or carrying no supported hash.
+        operation
             .project_files(project, &target.minecraft_version, target.loader, cancel)
             .await?
             .into_iter()
+            .filter(|document| document.mod_id == project.get())
             .map(|document| mapping::version(document, &self.hosts))
-            .collect::<ModPlatformResult<_>>()?;
-        versions.retain(|version| version.project_id == owner);
-        Ok(versions)
+            .collect()
     }
 }
 

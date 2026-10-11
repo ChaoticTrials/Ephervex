@@ -1289,6 +1289,110 @@ async fn a_file_listing_leaves_out_files_owned_by_another_project() {
     assert_eq!(ids, vec![JEI_FILE.to_string()]);
 }
 
+/// A file another project owns that cannot be mapped for the reason named.
+fn unmappable_foreign_file(server: &MockServer, reason: &str) -> String {
+    let document = file_document(server, JEI_FILE + 1, JEI_PROJECT + 1, "Foreign 9.9.9", 1);
+    match reason {
+        "unavailable" => document.replace(r#""isAvailable":true"#, r#""isAvailable":false"#),
+        "no supported hash" => document.replace(
+            r#""hashes":[{"value":"da39a3ee5e6b4b0d3255bfef95601890afd80709","algo":1}]"#,
+            r#""hashes":[]"#,
+        ),
+        other => panic!("unknown reason {other}"),
+    }
+}
+
+#[tokio::test]
+async fn a_file_listing_ignores_a_file_owned_by_another_project_that_cannot_be_mapped() {
+    for reason in ["unavailable", "no supported hash"] {
+        let server = MockServer::start().await;
+        serve_categories(&server).await;
+        let body = format!(
+            r#"{{"data":[{foreign},{own}],"pagination":{{"index":0,"pageSize":50,"resultCount":2,"totalCount":2}}}}"#,
+            foreign = unmappable_foreign_file(&server, reason),
+            own = file_document(&server, JEI_FILE, JEI_PROJECT, "JEI 15.2.0.27", 1),
+        );
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/v1/mods/\d+/files$"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+            .mount(&server)
+            .await;
+
+        let versions = provider_against(&server, Some(FAKE_KEY))
+            .project_versions(
+                &JEI_PROJECT.to_string(),
+                &target(LoaderKind::NeoForge),
+                &reporter(),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("a {reason} foreign file failed the listing: {error}"));
+
+        let ids: Vec<&str> = versions.iter().map(|version| version.id.as_str()).collect();
+        assert_eq!(ids, vec![JEI_FILE.to_string()], "{reason}");
+    }
+}
+
+#[tokio::test]
+async fn a_file_listing_still_refuses_an_own_file_that_cannot_be_mapped() {
+    let server = MockServer::start().await;
+    serve_categories(&server).await;
+    let own = file_document(&server, JEI_FILE, JEI_PROJECT, "JEI 15.2.0.27", 1)
+        .replace(r#""isAvailable":true"#, r#""isAvailable":false"#);
+    let body = format!(
+        r#"{{"data":[{own}],"pagination":{{"index":0,"pageSize":50,"resultCount":1,"totalCount":1}}}}"#,
+    );
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/v1/mods/\d+/files$"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+        .mount(&server)
+        .await;
+
+    let result = provider_against(&server, Some(FAKE_KEY))
+        .project_versions(
+            &JEI_PROJECT.to_string(),
+            &target(LoaderKind::NeoForge),
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(result.is_err(), "an unavailable own file is not skipped");
+}
+
+#[tokio::test]
+async fn a_search_hit_is_offered_when_a_file_owned_by_another_project_cannot_be_mapped() {
+    let server = MockServer::start().await;
+    let body = format!(
+        r#"{{"data":[{foreign},{own}],"pagination":{{"index":0,"pageSize":50,"resultCount":2,"totalCount":2}}}}"#,
+        foreign = unmappable_foreign_file(&server, "unavailable"),
+        own = file_document(&server, JEI_FILE, JEI_PROJECT, "JEI 15.2.0.27", 1),
+    );
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/v1/mods/\d+/files$"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+        .mount(&server)
+        .await;
+    catalog(&server).await;
+
+    let results = provider_against(&server, Some(FAKE_KEY))
+        .search(
+            &target(LoaderKind::NeoForge),
+            &ModSearchQuery::new("jei"),
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("a search");
+
+    let offered: Vec<String> = results
+        .hits
+        .iter()
+        .filter_map(|hit| hit.best_version.as_ref().map(|version| version.id.clone()))
+        .collect();
+    assert_eq!(offered, vec![JEI_FILE.to_string()]);
+}
+
 #[tokio::test]
 async fn a_search_hit_never_offers_a_file_owned_by_another_project() {
     let server = MockServer::start().await;
