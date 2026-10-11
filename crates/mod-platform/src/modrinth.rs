@@ -275,6 +275,23 @@ impl ModProviderApi for ModrinthProvider {
         raw.into_iter().map(mapping::version).collect()
     }
 
+    async fn project_versions(
+        &self,
+        project_id: &str,
+        _target: &InstanceTarget,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> ModPlatformResult<Vec<ModVersionInfo>> {
+        let raw = self.api.versions(project_id, reporter, cancel).await?;
+        // Ownership is decided before mapping: an entry another project owns is
+        // dropped anyway, so it must not fail the listing by having no usable
+        // file.
+        raw.into_iter()
+            .filter(|version| version.project_id == project_id)
+            .map(mapping::version)
+            .collect()
+    }
+
     async fn project_batch_by_id(
         &self,
         ids: &[String],

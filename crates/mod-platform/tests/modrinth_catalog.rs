@@ -1357,3 +1357,131 @@ async fn a_search_hit_never_offers_a_release_owned_by_another_project() {
         "the foreign newer release is not this project's"
     );
 }
+
+/// The fits fixture with one release made unmappable for the reason named and,
+/// when `owner` is given, reported under that project.
+fn fits_versions_with_an_unmappable_release(
+    release: &str,
+    owner: Option<&str>,
+    reason: &str,
+) -> String {
+    let mut versions: serde_json::Value =
+        serde_json::from_str(&fixture("versions-fits.json")).expect("fixture is JSON");
+    let broken = versions
+        .as_array_mut()
+        .and_then(|all| all.iter_mut().find(|version| version["id"] == release))
+        .expect("the release is in the fixture");
+    if let Some(owner) = owner {
+        broken["project_id"] = serde_json::json!(owner);
+    }
+    match reason {
+        "no supported hash" => broken["files"][0]["hashes"] = serde_json::json!({}),
+        "ambiguous primary file" => {
+            let second = broken["files"][0].clone();
+            broken["files"]
+                .as_array_mut()
+                .expect("files is an array")
+                .push(second);
+        }
+        other => panic!("unknown reason {other}"),
+    }
+    versions.to_string()
+}
+
+async fn catalog_serving_fits_versions(body: String) -> Catalog {
+    Catalog::start()
+        .await
+        .serving("/v2/search", fixture("search-mods.json"))
+        .await
+        .serving("/v2/project/FITSPROJ/version", body)
+        .await
+        .serving("/v2/project/OLDPROJ/version", fixture("versions-old.json"))
+        .await
+        .serving(
+            "/v2/project/SPLITPROJ/version",
+            fixture("versions-split.json"),
+        )
+        .await
+}
+
+#[tokio::test]
+async fn a_version_listing_ignores_a_release_owned_by_another_project_that_cannot_be_mapped() {
+    for reason in ["no supported hash", "ambiguous primary file"] {
+        let catalog = catalog_serving_fits_versions(fits_versions_with_an_unmappable_release(
+            "FITSNEW1",
+            Some("OTHERPROJ"),
+            reason,
+        ))
+        .await;
+
+        let versions = catalog
+            .provider
+            .project_versions(
+                "FITSPROJ",
+                &target(),
+                &reporter(),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!("a {reason} foreign release failed the listing: {error}")
+            });
+
+        let ids: Vec<&str> = versions.iter().map(|version| version.id.as_str()).collect();
+        assert!(!ids.contains(&"FITSNEW1"), "{reason}: {ids:?}");
+        assert!(ids.contains(&"FITSOLD1"), "{reason}: {ids:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_version_listing_still_refuses_an_own_release_that_cannot_be_mapped() {
+    for reason in ["no supported hash", "ambiguous primary file"] {
+        let catalog = catalog_serving_fits_versions(fits_versions_with_an_unmappable_release(
+            "FITSNEW1", None, reason,
+        ))
+        .await;
+
+        let result = catalog
+            .provider
+            .project_versions(
+                "FITSPROJ",
+                &target(),
+                &reporter(),
+                &CancellationToken::new(),
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "{reason}: an own release that cannot be mapped is not skipped"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_search_hit_is_offered_when_a_release_owned_by_another_project_cannot_be_mapped() {
+    let catalog = catalog_serving_fits_versions(fits_versions_with_an_unmappable_release(
+        "FITSNEW1",
+        Some("OTHERPROJ"),
+        "no supported hash",
+    ))
+    .await;
+
+    let results = catalog
+        .provider
+        .search(
+            &target(),
+            &ModSearchQuery::new("test"),
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("search");
+
+    let hit = results
+        .hits
+        .iter()
+        .find(|hit| hit.project.id == "FITSPROJ")
+        .expect("the project still has an installable release");
+    assert_eq!(hit.best_version.as_ref().expect("a version").id, "FITSOLD1");
+}
