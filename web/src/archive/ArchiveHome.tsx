@@ -131,7 +131,7 @@ export default function ArchiveHome({ overview }: { overview: Overview }): React
                   onChange={(event) => change('query', event.target.value)}
                   placeholder="Search issues and pull requests…" />
               </label>
-              <div className="archive-filter-grid">
+              <div className="archive-filter-grid archive-primary-filters">
                 <label>Type
                   <select value={filters.kind} onChange={(event) => change('kind', event.target.value)}>
                     <option value="">All types</option><option value="issue">Issues</option><option value="pull">Pull requests</option>
@@ -149,31 +149,33 @@ export default function ArchiveHome({ overview }: { overview: Overview }): React
                     <option value="updated">Recently updated</option><option value="number">Number</option>
                   </select>
                 </label>
+              </div>
+              <div className="archive-filter-footer">
+                <details className="archive-advanced">
+                  <summary>More filters{advancedCount > 0 ? ` (${advancedCount} active)` : ''}</summary>
+                  <div className="archive-filter-grid">
+                    <label>Label
+                      <select value={filters.label} onChange={(event) => change('label', event.target.value)}>
+                        <option value="">All labels</option>
+                        {labels.map((label) => <option key={label}>{label}</option>)}
+                      </select>
+                    </label>
+                    <label>Milestone
+                      <select value={filters.milestone} onChange={(event) => change('milestone', event.target.value)}>
+                        <option value="">All milestones</option>
+                        {milestones.map((milestone) => <option key={milestone}>{milestone}</option>)}
+                      </select>
+                    </label>
+                    <label>From
+                      <input type="date" value={filters.from} onChange={(event) => change('from', event.target.value)} />
+                    </label>
+                    <label>To
+                      <input type="date" value={filters.to} onChange={(event) => change('to', event.target.value)} />
+                    </label>
+                  </div>
+                </details>
                 <button type="button" className="archive-reset" onClick={clear}>Clear filters</button>
               </div>
-              <details className="archive-advanced">
-                <summary>More filters{advancedCount > 0 ? ` (${advancedCount} active)` : ''}</summary>
-                <div className="archive-filter-grid">
-                  <label>Label
-                    <select value={filters.label} onChange={(event) => change('label', event.target.value)}>
-                      <option value="">All labels</option>
-                      {labels.map((label) => <option key={label}>{label}</option>)}
-                    </select>
-                  </label>
-                  <label>Milestone
-                    <select value={filters.milestone} onChange={(event) => change('milestone', event.target.value)}>
-                      <option value="">All milestones</option>
-                      {milestones.map((milestone) => <option key={milestone}>{milestone}</option>)}
-                    </select>
-                  </label>
-                  <label>From
-                    <input type="date" value={filters.from} onChange={(event) => change('from', event.target.value)} />
-                  </label>
-                  <label>To
-                    <input type="date" value={filters.to} onChange={(event) => change('to', event.target.value)} />
-                  </label>
-                </div>
-              </details>
             </div>
             <p className="archive-results" role="status">
               {matches.length} {matches.length === 1 ? 'record' : 'records'} found

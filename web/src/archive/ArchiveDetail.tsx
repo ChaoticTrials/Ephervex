@@ -150,32 +150,30 @@ export default function ArchiveDetail({ detail }: { detail: Detail }): React.JSX
                   <p className="archive-empty">No description was included in this export.</p>
                 )}
               </section>
-              <section className="archive-discussion" aria-labelledby="archive-discussion-title">
-                <div className="archive-section-heading">
-                  <div>
-                    <span className="archive-kicker">THE CONVERSATION</span>
-                    <Heading as="h2" id="archive-discussion-title">
-                      Discussion history
-                    </Heading>
+              {entry.comments.length > 0 && (
+                <section className="archive-discussion" aria-labelledby="archive-discussion-title">
+                  <div className="archive-section-heading">
+                    <div>
+                      <span className="archive-kicker">THE CONVERSATION</span>
+                      <Heading as="h2" id="archive-discussion-title">
+                        Discussion history
+                      </Heading>
+                    </div>
+                    <p>
+                      {entry.comments.length} {entry.comments.length === 1 ? 'comment' : 'comments'}
+                    </p>
                   </div>
-                  <p>
-                    {entry.comments.length} {entry.comments.length === 1 ? 'comment' : 'comments'}
-                  </p>
-                </div>
-                {entry.comments.length ? (
-                  entry.comments.map((comment, index) => (
+                  {entry.comments.map((comment, index) => (
                     <DiscussionCard
                       key={comment.id ?? index}
                       comment={comment}
                       issues={siblingNumbers.issues}
                       pulls={siblingNumbers.pulls}
                     />
-                  ))
-                ) : (
-                  <p className="archive-empty">No comments were included in this public export.</p>
-                )}
-              </section>
-              {entry.kind === 'pull' && (
+                  ))}
+                </section>
+              )}
+              {entry.kind === 'pull' && entry.reviews.length > 0 && (
                 <section className="archive-discussion" aria-labelledby="archive-reviews-title">
                   <div className="archive-section-heading">
                     <div>
@@ -188,18 +186,14 @@ export default function ArchiveDetail({ detail }: { detail: Detail }): React.JSX
                       {entry.reviews.length} {entry.reviews.length === 1 ? 'review' : 'reviews'}
                     </p>
                   </div>
-                  {entry.reviews.length ? (
-                    entry.reviews.map((review, index) => (
-                      <ReviewCard
-                        key={`${review.author}-${index}`}
-                        review={review}
-                        issues={siblingNumbers.issues}
-                        pulls={siblingNumbers.pulls}
-                      />
-                    ))
-                  ) : (
-                    <p className="archive-empty">No reviews were included in this public export.</p>
-                  )}
+                  {entry.reviews.map((review, index) => (
+                    <ReviewCard
+                      key={`${review.author}-${index}`}
+                      review={review}
+                      issues={siblingNumbers.issues}
+                      pulls={siblingNumbers.pulls}
+                    />
+                  ))}
                 </section>
               )}
             </div>
