@@ -24,7 +24,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use ephervex_download::{HttpConfig, Url, build_single_origin_client, check_transport, redacted};
+use ephervex_download::{
+    DomainAllowlist, HttpConfig, Url, build_single_origin_client, check_transport, redacted,
+};
 use ephervex_model::{
     CurseForgeFileId, CurseForgeProjectId, Hash, HashAlgorithm, LoaderKind, ModProvider,
     SecretString,
@@ -40,9 +42,11 @@ use super::dto::{
     CurseForgeFingerprintMatches, CurseForgeGame, CurseForgePagination, CurseForgeProject,
     HASH_ALGO_SHA1,
 };
-use super::mapping::{file_declared_sides, file_relations, published_at, split_declared_support};
+use super::mapping::{
+    distribution, file_declared_sides, file_relations, published_at, split_declared_support,
+};
 use crate::error::{ModPlatformError, ModPlatformResult};
-use crate::model::{Distribution, ModDependency, ModFile, RecognizedFile, SideSupport};
+use crate::model::{ModDependency, ModFile, RecognizedFile, SideSupport};
 
 /// The production API root.
 pub const CURSEFORGE_API_BASE: &str = "https://api.curseforge.com/v1";
@@ -462,10 +466,16 @@ impl CurseForgeOperation<'_> {
     /// another project or another file is refused rather than used, because a
     /// substituted artifact is precisely the failure an exact import exists to
     /// prevent.
+    ///
+    /// A published download address is checked against `hosts` before it is
+    /// returned, because [`crate::model::Distribution::Download`] promises an address this
+    /// launcher may fetch. One outside them is a refused response, not a file
+    /// to be rejected later by whoever happens to read it.
     pub async fn file(
         &self,
         project: CurseForgeProjectId,
         file: CurseForgeFileId,
+        hosts: &DomainAllowlist,
         cancel: &CancellationToken,
     ) -> ModPlatformResult<CurseForgeFileRelease> {
         let url = self
@@ -487,7 +497,7 @@ impl CurseForgeOperation<'_> {
                 }
                 Err(other) => return Err(other),
             };
-        normalize_file(project, file, document)
+        normalize_file(project, file, document, hosts)
     }
 
     /// One page of the game's Mods, narrowed to what an instance can run.
@@ -1151,6 +1161,7 @@ fn normalize_file(
     project: CurseForgeProjectId,
     file: CurseForgeFileId,
     document: CurseForgeFileDocument,
+    hosts: &DomainAllowlist,
 ) -> ModPlatformResult<CurseForgeFileRelease> {
     if document.mod_id != project.get() || document.id != file.get() {
         return Err(ModPlatformError::FileIdentityMismatch {
@@ -1175,11 +1186,7 @@ fn normalize_file(
     // holds a verified copy - or that can ask the user for one - needs all of
     // it. There is no second address to try either way: assembling a CDN path
     // out of the ids would route around a decision the author made.
-    let distribution = document
-        .download_url
-        .map(|url| url.trim().to_owned())
-        .filter(|url| !url.is_empty())
-        .map_or(Distribution::Restricted, Distribution::Download);
+    let distribution = distribution(&document, hosts)?;
 
     if hashes.is_empty() {
         // Verification is mandatory. A file with no digest this build can check
@@ -1297,6 +1304,10 @@ mod tests {
     use super::super::credential::ConfiguredApiKey;
     use super::*;
     use ephervex_model::ModRelationKind;
+
+    fn hosts() -> DomainAllowlist {
+        DomainAllowlist::curseforge_artifact_defaults()
+    }
 
     const FAKE_KEY: &str = "test-curseforge-key-do-not-use";
 
@@ -1455,7 +1466,8 @@ mod tests {
 
     #[test]
     fn a_file_document_normalizes_to_the_address_size_and_digest_a_download_needs() {
-        let release = normalize_file(project(), file_id(), document()).expect("a usable file");
+        let release =
+            normalize_file(project(), file_id(), document(), &hosts()).expect("a usable file");
         assert_eq!(release.project, project());
         assert_eq!(release.file, file_id());
         assert_eq!(release.artifact.file_name, "jei-1.20.1-15.2.0.27.jar");
@@ -1467,10 +1479,47 @@ mod tests {
     }
 
     #[test]
+    fn a_download_address_outside_the_delivery_hosts_is_refused() {
+        let mut unapproved = document();
+        unapproved.download_url = Some("https://unapproved.invalid/a.jar".to_owned());
+        let error =
+            normalize_file(project(), file_id(), unapproved, &hosts()).expect_err("must refuse");
+        assert!(
+            matches!(
+                error,
+                ModPlatformError::DownloadAddressRejected {
+                    provider: ModProvider::CurseForge,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_download_address_is_checked_against_the_hosts_the_caller_supplies() {
+        let mut elsewhere = document();
+        elsewhere.download_url = Some("http://127.0.0.1:9/files/jei.jar".to_owned());
+        assert!(normalize_file(project(), file_id(), elsewhere.clone(), &hosts()).is_err());
+        let release = normalize_file(
+            project(),
+            file_id(),
+            elsewhere,
+            &DomainAllowlist::for_loopback_tests("127.0.0.1"),
+        )
+        .expect("a host the caller allows");
+        assert_eq!(
+            release.artifact.distribution.download_url(),
+            Some("http://127.0.0.1:9/files/jei.jar")
+        );
+    }
+
+    #[test]
     fn only_the_cryptographic_digest_this_build_can_verify_is_kept() {
         // MD5 is published beside SHA-1 and is not stronger. Nothing is
         // recorded from it, and the fingerprint is not read at all.
-        let release = normalize_file(project(), file_id(), document()).expect("a usable file");
+        let release =
+            normalize_file(project(), file_id(), document(), &hosts()).expect("a usable file");
         let algorithms: Vec<HashAlgorithm> = release
             .artifact
             .hashes
@@ -1492,7 +1541,8 @@ mod tests {
             value: "0123456789abcdef0123456789abcdef".to_owned(),
             algo: HASH_ALGO_SHA1,
         }];
-        let error = normalize_file(project(), file_id(), document).expect_err("must refuse");
+        let error =
+            normalize_file(project(), file_id(), document, &hosts()).expect_err("must refuse");
         assert!(matches!(error, ModPlatformError::HashesMissing { .. }));
     }
 
@@ -1500,7 +1550,8 @@ mod tests {
     fn a_file_with_no_verifiable_digest_is_refused_rather_than_trusted_by_address() {
         let mut document = document();
         document.hashes.retain(|hash| hash.algo != HASH_ALGO_SHA1);
-        let error = normalize_file(project(), file_id(), document).expect_err("must refuse");
+        let error =
+            normalize_file(project(), file_id(), document, &hosts()).expect_err("must refuse");
         assert!(
             matches!(error, ModPlatformError::HashesMissing { ref version_id } if version_id == "4593548"),
             "{error:?}"
@@ -1513,7 +1564,7 @@ mod tests {
         // that file, not the newest one the project happens to have.
         let mut newer = document();
         newer.id = 4_593_549;
-        let error = normalize_file(project(), file_id(), newer).expect_err("must refuse");
+        let error = normalize_file(project(), file_id(), newer, &hosts()).expect_err("must refuse");
         assert!(
             matches!(
                 error,
@@ -1528,7 +1579,8 @@ mod tests {
     fn a_response_about_another_project_is_refused_too() {
         let mut elsewhere = document();
         elsewhere.mod_id = 999;
-        let error = normalize_file(project(), file_id(), elsewhere).expect_err("must refuse");
+        let error =
+            normalize_file(project(), file_id(), elsewhere, &hosts()).expect_err("must refuse");
         assert!(matches!(
             error,
             ModPlatformError::FileIdentityMismatch { .. }
@@ -1541,7 +1593,8 @@ mod tests {
         unavailable.is_available = false;
         assert!(
             matches!(
-                normalize_file(project(), file_id(), unavailable).expect_err("must refuse"),
+                normalize_file(project(), file_id(), unavailable, &hosts())
+                    .expect_err("must refuse"),
                 ModPlatformError::FileUnavailable { .. }
             ),
             "a withdrawn file is a refusal; a restricted one is not"
@@ -1550,8 +1603,8 @@ mod tests {
         for (label, address) in [("null", None), ("blank", Some("   ".to_owned()))] {
             let mut restricted = document();
             restricted.download_url = address;
-            let release =
-                normalize_file(project(), file_id(), restricted).unwrap_or_else(|error| {
+            let release = normalize_file(project(), file_id(), restricted, &hosts())
+                .unwrap_or_else(|error| {
                     panic!("a {label} address must not lose the file: {error}")
                 });
             assert!(
@@ -1586,6 +1639,7 @@ mod tests {
             CurseForgeProjectId::new(391_382).expect("a project id"),
             CurseForgeFileId::new(7_951_520).expect("a file id"),
             restricted,
+            &hosts(),
         )
         .expect("a described file");
 
@@ -1626,6 +1680,7 @@ mod tests {
             CurseForgeProjectId::new(391_382).expect("a project id"),
             CurseForgeFileId::new(7_951_520).expect("a file id"),
             file_declaring(relations),
+            &hosts(),
         )
     }
 

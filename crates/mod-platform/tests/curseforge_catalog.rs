@@ -1095,7 +1095,10 @@ async fn a_download_address_off_the_permitted_hosts_is_refused() {
         )
         .await
         .expect_err("an unlisted host is not fetched from");
-    assert!(matches!(error, ModPlatformError::ResponseInvalid { .. }));
+    assert!(matches!(
+        error,
+        ModPlatformError::DownloadAddressRejected { .. }
+    ));
 }
 
 #[tokio::test]

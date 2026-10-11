@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use ephervex_download::HttpConfig;
+use ephervex_download::{DomainAllowlist, HttpConfig};
 use ephervex_mod_platform::{
     ConfiguredApiKey, CurseForgeApi, CurseForgeCredentialSource, MINECRAFT_GAME_ID, ModDependency,
     ModPlatformError,
@@ -305,6 +305,12 @@ const EXACT_FILE: &str = r#"{"data":{"id":4593548,"gameId":432,"modId":238222,"i
     "hashes":[{"value":"da39a3ee5e6b4b0d3255bfef95601890afd80709","algo":1},
               {"value":"0123456789abcdef0123456789abcdef","algo":2}]}}"#;
 
+/// The hosts a published download address may name, as production configures
+/// them.
+fn delivery_hosts() -> DomainAllowlist {
+    DomainAllowlist::curseforge_artifact_defaults()
+}
+
 fn project() -> CurseForgeProjectId {
     CurseForgeProjectId::new(238_222).expect("a real id")
 }
@@ -330,7 +336,12 @@ async fn an_exact_file_is_requested_by_project_and_file_and_never_by_listing_ver
     let release = api
         .begin_operation()
         .expect("a configured key")
-        .file(project(), file_id(), &CancellationToken::new())
+        .file(
+            project(),
+            file_id(),
+            &delivery_hosts(),
+            &CancellationToken::new(),
+        )
         .await
         .expect("the exact file");
 
@@ -360,6 +371,98 @@ async fn an_exact_file_is_requested_by_project_and_file_and_never_by_listing_ver
     assert_eq!(requested, vec!["/v1/mods/238222/files/4593548"]);
 }
 
+/// An exact-file response differing from [`EXACT_FILE`] only in `downloadUrl`.
+fn exact_file_publishing(download_url: &str) -> String {
+    EXACT_FILE.replace(
+        r#""downloadUrl":"https://mediafilez.forgecdn.net/files/4593/548/jei.jar""#,
+        download_url,
+    )
+}
+
+async fn exact_file_answering(
+    server: &MockServer,
+    body: String,
+) -> Result<ephervex_mod_platform::CurseForgeFileRelease, ModPlatformError> {
+    Mock::given(method("GET"))
+        .and(path("/v1/mods/238222/files/4593548"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+        .mount(server)
+        .await;
+    configured(server)
+        .begin_operation()
+        .expect("a configured key")
+        .file(
+            project(),
+            file_id(),
+            &delivery_hosts(),
+            &CancellationToken::new(),
+        )
+        .await
+}
+
+#[tokio::test]
+async fn an_exact_file_published_at_an_unapproved_host_is_refused_not_returned_as_a_download() {
+    let server = MockServer::start().await;
+    let error = exact_file_answering(
+        &server,
+        exact_file_publishing(r#""downloadUrl":"https://unapproved.invalid/a.jar""#),
+    )
+    .await
+    .expect_err("must refuse");
+    assert!(
+        matches!(
+            error,
+            ModPlatformError::DownloadAddressRejected {
+                provider: ModProvider::CurseForge,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_exact_file_published_at_a_plain_http_address_is_refused() {
+    let server = MockServer::start().await;
+    let error = exact_file_answering(
+        &server,
+        exact_file_publishing(r#""downloadUrl":"http://mediafilez.forgecdn.net/files/jei.jar""#),
+    )
+    .await
+    .expect_err("must refuse");
+    assert!(
+        matches!(error, ModPlatformError::DownloadAddressRejected { .. }),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_exact_file_without_a_usable_download_address_is_restricted_not_refused() {
+    for (label, replacement) in [
+        ("null", r#""downloadUrl":null"#),
+        ("blank", r#""downloadUrl":"   ""#),
+        ("absent", r#""unrelated":0"#),
+    ] {
+        let server = MockServer::start().await;
+        let release = exact_file_answering(&server, exact_file_publishing(replacement))
+            .await
+            .unwrap_or_else(|error| panic!("{label}: {error:?}"));
+        assert!(release.artifact.distribution.is_restricted(), "{label}");
+    }
+}
+
+#[tokio::test]
+async fn an_exact_file_at_an_approved_host_keeps_its_download_address() {
+    let server = MockServer::start().await;
+    let release = exact_file_answering(&server, EXACT_FILE.to_owned())
+        .await
+        .expect("the exact file");
+    assert_eq!(
+        release.artifact.distribution.download_url(),
+        Some("https://mediafilez.forgecdn.net/files/4593/548/jei.jar")
+    );
+}
+
 #[tokio::test]
 async fn a_file_the_project_no_longer_has_is_reported_as_missing_rather_than_as_an_outage() {
     let server = MockServer::start().await;
@@ -373,7 +476,12 @@ async fn a_file_the_project_no_longer_has_is_reported_as_missing_rather_than_as_
     let error = api
         .begin_operation()
         .expect("a configured key")
-        .file(project(), file_id(), &CancellationToken::new())
+        .file(
+            project(),
+            file_id(),
+            &delivery_hosts(),
+            &CancellationToken::new(),
+        )
         .await
         .expect_err("must refuse");
     assert!(
@@ -403,7 +511,12 @@ async fn a_rejected_key_stays_a_credential_problem_and_never_quotes_the_key() {
     let error = api
         .begin_operation()
         .expect("a configured key")
-        .file(project(), file_id(), &CancellationToken::new())
+        .file(
+            project(),
+            file_id(),
+            &delivery_hosts(),
+            &CancellationToken::new(),
+        )
         .await
         .expect_err("must refuse");
     assert!(error.is_credential_problem(), "{error:?}");
@@ -434,7 +547,12 @@ async fn an_exact_file_response_is_never_written_anywhere() {
     let api = configured(&server);
     api.begin_operation()
         .expect("a configured key")
-        .file(project(), file_id(), &CancellationToken::new())
+        .file(
+            project(),
+            file_id(),
+            &delivery_hosts(),
+            &CancellationToken::new(),
+        )
         .await
         .expect("the exact file");
 

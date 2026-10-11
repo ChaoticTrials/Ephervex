@@ -66,6 +66,18 @@ pub enum ModPlatformError {
         detail: String,
     },
 
+    /// The provider published a download address outside the hosts it delivers
+    /// from, or one that is not HTTPS.
+    ///
+    /// Distinct from [`Self::ResponseInvalid`]: the response was readable and
+    /// retrying cannot change the answer, so the message must not call it
+    /// temporary.
+    #[error("{provider} published a download address Ephervex will not use")]
+    DownloadAddressRejected {
+        provider: ModProvider,
+        detail: String,
+    },
+
     /// No such project.
     #[error("`{reference}` is not a project on {provider}")]
     ProjectUnknown {
@@ -250,6 +262,7 @@ impl ModPlatformError {
             Self::CredentialUnreadable { .. } => "error-mod-credential-unreadable",
             Self::CredentialRejected { .. } => "error-mod-credential-rejected",
             Self::ResponseInvalid { .. } => "error-mod-provider-response-invalid",
+            Self::DownloadAddressRejected { .. } => "error-mod-download-address-rejected",
             Self::ProviderNotBrowsable { .. } => "error-mod-provider-not-browsable",
             Self::ProjectUnknown { .. } => "error-mod-project-unknown",
             Self::ProjectTypeUnsupported { .. } => "error-mod-project-type-unsupported",
@@ -296,6 +309,7 @@ impl ModPlatformError {
             Self::Unreachable { provider, .. }
             | Self::RequestFailed { provider, .. }
             | Self::ResponseInvalid { provider, .. }
+            | Self::DownloadAddressRejected { provider, .. }
             | Self::CredentialMissing { provider }
             | Self::ProviderNotBrowsable { provider }
             | Self::CredentialUnreadable { provider, .. } => {
@@ -493,6 +507,10 @@ mod tests {
         vec![
             ModPlatformError::ResponseInvalid {
                 provider: ModProvider::Modrinth,
+                detail: String::new(),
+            },
+            ModPlatformError::DownloadAddressRejected {
+                provider: ModProvider::CurseForge,
                 detail: String::new(),
             },
             ModPlatformError::ProjectUnknown {

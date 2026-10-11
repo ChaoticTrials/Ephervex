@@ -1689,6 +1689,9 @@ error-mod-provider-unreachable = { $provider } could not be reached.
 error-mod-provider-response-invalid = { $provider } returned something Ephervex could not read.
 .action = This is usually temporary. If it persists, Ephervex may need updating for a changed API.
 
+error-mod-download-address-rejected = { $provider } published a download address Ephervex will not use.
+.action = Ephervex only downloads over HTTPS, and only from the hosts { $provider } delivers files from. Trying again will not change this.
+
 error-mod-provider-http-status = { $provider } answered with HTTP { $status }.
 .action = This is usually temporary. Try again in a few minutes.
 

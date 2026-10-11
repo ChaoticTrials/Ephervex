@@ -732,7 +732,7 @@ async fn resolve_files(
         futures_util::stream::iter(
             distinct
                 .iter()
-                .map(|(project, file)| operation.file(*project, *file, cancel)),
+                .map(|(project, file)| operation.file(*project, *file, hosts, cancel)),
         )
         .buffered(LOOKUP_CONCURRENCY)
         .collect::<Vec<_>>()
@@ -3807,7 +3807,7 @@ mod tests {
         let app = app_against(dir.path(), &server);
 
         let error = import(&app, &archive).await.expect_err("must refuse");
-        assert_eq!(error.message_id(), "error-pack-download-url-rejected");
+        assert_eq!(error.message_id(), "error-mod-download-address-rejected");
         assert!(app.list_clients().expect("list").is_empty());
     }
 

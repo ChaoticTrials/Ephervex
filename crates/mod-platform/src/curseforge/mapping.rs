@@ -232,7 +232,7 @@ pub(super) fn version(
 /// An address the provider did publish decides which machine the launcher
 /// connects to, so it is checked against the hosts CurseForge delivers from
 /// like any other remote address.
-fn distribution(
+pub(super) fn distribution(
     document: &CurseForgeFileDocument,
     hosts: &DomainAllowlist,
 ) -> ModPlatformResult<Distribution> {
@@ -247,7 +247,7 @@ fn distribution(
     hosts
         .validate(address)
         .map(|url| Distribution::Download(url.to_string()))
-        .map_err(|source| ModPlatformError::ResponseInvalid {
+        .map_err(|source| ModPlatformError::DownloadAddressRejected {
             provider: ModProvider::CurseForge,
             detail: source.to_string(),
         })
