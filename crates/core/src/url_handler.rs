@@ -75,6 +75,16 @@ pub struct UrlHandlerStatus {
     pub command: Option<String>,
 }
 
+/// What is left handling the scheme after Ephervex removed its own entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UrlHandlerRemoval {
+    /// Whether this user's own entry existed and was deleted.
+    pub removed: bool,
+    /// Who handles the scheme now. A package-installed entry survives removal,
+    /// so this can still be registered.
+    pub status: UrlHandlerStatus,
+}
+
 impl UrlHandlerStatus {
     /// Whether this registration is one Ephervex may remove.
     ///
@@ -412,11 +422,22 @@ impl crate::app::App {
 
     /// Stops Ephervex handling `ephervex://` links.
     ///
-    /// Returns whether anything was registered. Removing the entry is the whole
-    /// operation: a scheme whose handler entry is gone is one the desktop no
-    /// longer resolves, and leaving a stale entry claiming a scheme nothing
-    /// answers is the state this exists to avoid.
-    pub fn unregister_url_handler(&self) -> CoreResult<bool> {
+    /// Removing this user's own entry is the whole operation: a scheme whose
+    /// handler entry is gone is one the desktop no longer resolves, and leaving
+    /// a stale entry claiming a scheme nothing answers is the state this exists
+    /// to avoid. The result carries the status read afterwards, because a
+    /// package-installed entry is not Ephervex's to delete and keeps handling
+    /// links.
+    pub fn unregister_url_handler(&self) -> CoreResult<UrlHandlerRemoval> {
+        let removed = self.remove_user_url_handler_entry()?;
+        Ok(UrlHandlerRemoval {
+            removed,
+            status: self.url_handler_status(),
+        })
+    }
+
+    /// Deletes this user's own entry and reports whether there was one.
+    fn remove_user_url_handler_entry(&self) -> CoreResult<bool> {
         // Only this user's own entry. A package manager's file is not
         // Ephervex's to delete, and removing it would leave the package
         // believing it still owns a file that is gone.
@@ -880,10 +901,12 @@ mod tests {
             "registering twice must not leave two entries claiming one scheme"
         );
 
-        assert!(app.unregister_url_handler().expect("unregister"));
+        assert!(app.unregister_url_handler().expect("unregister").removed);
         assert!(!user_status_of(&app).registered);
         assert!(
-            !app.unregister_url_handler().expect("unregister again"),
+            !app.unregister_url_handler()
+                .expect("unregister again")
+                .removed,
             "removing what is not there is not an error, and is not a removal either"
         );
     }

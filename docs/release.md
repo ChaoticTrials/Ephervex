@@ -192,7 +192,8 @@ AppImage; `status` says when the recorded path no longer exists.
 
 The desktop application has no switch for this (ADR 0028). Claiming a system-wide
 scheme is an installation step, `unregister` cannot remove a file your package
-manager owns, and a control that meant different things depending on how you
+manager owns (it removes your own entry and then reports the entry that still
+handles links), and a control that meant different things depending on how you
 installed Ephervex was worse than no control. Where a package installed it,
 removing that package gives the scheme back, and your desktop's own
 default-applications settings are where you would change any other

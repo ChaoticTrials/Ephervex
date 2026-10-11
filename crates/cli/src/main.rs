@@ -6971,14 +6971,7 @@ fn run_url_handler_command(command: &UrlHandlerCommand, json: bool) -> anyhow::R
         UrlHandlerCommand::Status => app.url_handler_status(),
         UrlHandlerCommand::Register => app.register_url_handler()?,
         UrlHandlerCommand::Unregister => {
-            let removed = app.unregister_url_handler()?;
-            if json {
-                print_json(&serde_json::json!({ "registered": false, "removed": removed }));
-            } else if removed {
-                outln!("Ephervex no longer opens ephervex:// links.");
-            } else {
-                outln!("Ephervex was not opening ephervex:// links.");
-            }
+            print_url_handler_removal(&app.unregister_url_handler()?, json);
             return Ok(());
         }
     };
@@ -6986,16 +6979,21 @@ fn run_url_handler_command(command: &UrlHandlerCommand, json: bool) -> anyhow::R
     Ok(())
 }
 
+/// The fields `url-handler status` and `url-handler unregister` share in JSON.
+fn url_handler_json(status: &ephervex_core::UrlHandlerStatus) -> serde_json::Value {
+    serde_json::json!({
+        "registered": status.registered,
+        "entry": json_path(&status.entry),
+        "command": status.command,
+        "command_exists": status.command_exists(),
+        "scheme": ephervex_core::scheme_mime_type(),
+    })
+}
+
 /// Reports whether Ephervex opens its own links, and what it would run.
 fn print_url_handler(status: &ephervex_core::UrlHandlerStatus, json: bool) {
     if json {
-        print_json(&serde_json::json!({
-            "registered": status.registered,
-            "entry": json_path(&status.entry),
-            "command": status.command,
-            "command_exists": status.command_exists(),
-            "scheme": ephervex_core::scheme_mime_type(),
-        }));
+        print_json(&url_handler_json(status));
         return;
     }
 
@@ -7005,6 +7003,11 @@ fn print_url_handler(status: &ephervex_core::UrlHandlerStatus, json: bool) {
         return;
     }
     outln!("Ephervex opens ephervex:// links.");
+    print_url_handler_entry(status);
+}
+
+/// The entry in force and what it runs.
+fn print_url_handler_entry(status: &ephervex_core::UrlHandlerStatus) {
     outln!("entry:   {}", status.entry.display());
     if let Some(command) = &status.command {
         outln!("runs:    {command}");
@@ -7015,6 +7018,34 @@ fn print_url_handler(status: &ephervex_core::UrlHandlerStatus, json: bool) {
         outln!(
             "warning: that path no longer exists. Run `ephervex url-handler register` again from where Ephervex is now."
         );
+    }
+}
+
+/// Reports what `url-handler unregister` did and whether links still open.
+///
+/// The answer comes from the status read after removal: an entry a package
+/// manager installed is not removed here and keeps handling links.
+fn print_url_handler_removal(removal: &ephervex_core::UrlHandlerRemoval, json: bool) {
+    if json {
+        let mut report = url_handler_json(&removal.status);
+        report["removed"] = serde_json::Value::Bool(removal.removed);
+        print_json(&report);
+        return;
+    }
+
+    match (removal.removed, removal.status.registered) {
+        (true, false) => outln!("Ephervex no longer opens ephervex:// links."),
+        (false, false) => outln!("Ephervex was not opening ephervex:// links."),
+        (removed, true) => {
+            if removed {
+                outln!("Removed your own link handler entry.");
+            } else {
+                outln!("You have no link handler entry of your own to remove.");
+            }
+            outln!("Ephervex still opens ephervex:// links through an entry that is not yours:");
+            print_url_handler_entry(&removal.status);
+            outln!("Removing the Ephervex package is what takes that one back.");
+        }
     }
 }
 
