@@ -63,10 +63,22 @@ impl LogRecord {
     }
 }
 
+const EVENT_END: &str = "</log4j:Event>";
+const CDATA_START: &str = "<![CDATA[";
+const CDATA_END: &str = "]]>";
+
 /// Reassembles `LegacyXMLLayout` records from a line-oriented stream.
+///
+/// Message text is untrusted (chat, server names, mod output), so markup is
+/// only recognized outside CDATA sections. The layout splits a literal `]]>`
+/// in a message into `]]>]]&gt;<![CDATA[`.
 #[derive(Debug, Default)]
 pub struct Log4jReader {
     buffer: String,
+    /// How much of `buffer` the record-end scan has already passed.
+    scanned: usize,
+    /// Whether that scan stopped inside a CDATA section.
+    in_cdata: bool,
 }
 
 impl Log4jReader {
@@ -93,9 +105,11 @@ impl Log4jReader {
         self.buffer.push('\n');
 
         let mut records = Vec::new();
-        while let Some(end) = self.buffer.find("</log4j:Event>") {
-            let record = self.buffer[..end].to_owned();
-            self.buffer.drain(..end + "</log4j:Event>".len());
+        while let Some(end) = self.find_event_end() {
+            let record = self.buffer[..end - EVENT_END.len()].to_owned();
+            self.buffer.drain(..end);
+            self.scanned = 0;
+            self.in_cdata = false;
             records.push(parse_event(&record));
         }
 
@@ -106,8 +120,44 @@ impl Log4jReader {
         // empty line after every single log line.
         if self.buffer.trim().is_empty() {
             self.buffer.clear();
+            self.scanned = 0;
+            self.in_cdata = false;
         }
         records
+    }
+
+    /// Finds the end of the first complete record, as an index just past its
+    /// closing tag, skipping over CDATA sections.
+    ///
+    /// Resumes where the previous call stopped. Lines are buffered whole, so
+    /// no tag straddles the end of the buffer.
+    fn find_event_end(&mut self) -> Option<usize> {
+        loop {
+            let rest = &self.buffer[self.scanned..];
+            if self.in_cdata {
+                let Some(at) = rest.find(CDATA_END) else {
+                    self.scanned = self.buffer.len();
+                    return None;
+                };
+                self.scanned += at + CDATA_END.len();
+                self.in_cdata = false;
+                continue;
+            }
+            let Some(at) = rest.find('<') else {
+                self.scanned = self.buffer.len();
+                return None;
+            };
+            let tail = &rest[at..];
+            if tail.starts_with(EVENT_END) {
+                return Some(self.scanned + at + EVENT_END.len());
+            }
+            if tail.starts_with(CDATA_START) {
+                self.scanned += at + CDATA_START.len();
+                self.in_cdata = true;
+            } else {
+                self.scanned += at + 1;
+            }
+        }
     }
 
     /// Releases anything still buffered, as plain text.
@@ -117,6 +167,8 @@ impl Log4jReader {
     /// fragment that might have said why it died.
     pub fn flush(&mut self) -> Vec<LogRecord> {
         let pending = std::mem::take(&mut self.buffer);
+        self.scanned = 0;
+        self.in_cdata = false;
         if pending.trim().is_empty() {
             return Vec::new();
         }
@@ -126,8 +178,8 @@ impl Log4jReader {
 
 /// Pulls the fields out of one `<log4j:Event>` block.
 fn parse_event(block: &str) -> LogRecord {
-    let mut message = cdata(block, "log4j:Message").unwrap_or_default();
-    if let Some(throwable) = cdata(block, "log4j:Throwable") {
+    let mut message = element_text(block, "log4j:Message").unwrap_or_default();
+    if let Some(throwable) = element_text(block, "log4j:Throwable") {
         // A stack trace belongs with the message it explains; splitting them
         // into two records loses which line the trace came from.
         if !message.is_empty() {
@@ -135,36 +187,103 @@ fn parse_event(block: &str) -> LogRecord {
         }
         message.push_str(throwable.trim_end());
     }
+    let opening = opening_tag(block);
     LogRecord {
-        level: attribute(block, "level"),
-        logger: attribute(block, "logger"),
-        thread: attribute(block, "thread"),
+        level: attribute(opening, "level"),
+        logger: attribute(opening, "logger"),
+        thread: attribute(opening, "thread"),
         message,
     }
 }
 
+/// The `<log4j:Event ...>` tag itself, so attributes are never read out of
+/// the message that follows it.
+fn opening_tag(block: &str) -> &str {
+    let start = block.find("<log4j:Event").unwrap_or(0);
+    let mut quoted = false;
+    for (offset, c) in block[start..].char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            '>' if !quoted => return &block[start..start + offset],
+            _ => {}
+        }
+    }
+    &block[start..]
+}
+
 /// Reads `name="value"` from the opening tag.
-fn attribute(block: &str, name: &str) -> Option<String> {
+fn attribute(opening: &str, name: &str) -> Option<String> {
     let needle = format!(" {name}=\"");
-    let start = block.find(&needle)? + needle.len();
-    let rest = block.get(start..)?;
+    let start = opening.find(&needle)? + needle.len();
+    let rest = opening.get(start..)?;
     let end = rest.find('"')?;
     Some(unescape(&rest[..end]))
 }
 
-/// Reads the CDATA payload of `<tag><![CDATA[ … ]]></tag>`.
-fn cdata(block: &str, tag: &str) -> Option<String> {
+/// Reads the text of the first `<tag>` element outside any CDATA section.
+///
+/// CDATA sections are taken verbatim and the text between them is unescaped,
+/// which reassembles a `]]>` the layout split across sections.
+fn element_text(block: &str, tag: &str) -> Option<String> {
     let open = format!("<{tag}>");
-    let start = block.find(&open)? + open.len();
-    let rest = block.get(start..)?;
-    let end = rest.find(&format!("</{tag}>"))?;
-    let inner = &rest[..end];
-    let payload = inner
-        .trim()
-        .strip_prefix("<![CDATA[")
-        .and_then(|value| value.strip_suffix("]]>"))
-        .map_or_else(|| unescape(inner.trim()), str::to_owned);
-    Some(payload.trim_end_matches('\n').to_owned())
+    let close = format!("</{tag}>");
+
+    let mut at = 0;
+    let content = loop {
+        let rest = &block[at..];
+        let lt = rest.find('<')?;
+        let tail = &rest[lt..];
+        if tail.starts_with(&open) {
+            break &tail[open.len()..];
+        }
+        at += lt;
+        at += if let Some(body) = tail.strip_prefix(CDATA_START) {
+            CDATA_START.len() + body.find(CDATA_END)? + CDATA_END.len()
+        } else {
+            1
+        };
+    };
+
+    // (is CDATA, text); the first and last pieces are always plain text.
+    let mut pieces: Vec<(bool, &str)> = Vec::new();
+    let mut rest = content;
+    loop {
+        let lt = rest.find('<')?;
+        let tail = &rest[lt..];
+        if let Some(body) = tail.strip_prefix(CDATA_START) {
+            pieces.push((false, &rest[..lt]));
+            let end = body.find(CDATA_END)?;
+            pieces.push((true, &body[..end]));
+            rest = &body[end + CDATA_END.len()..];
+        } else if tail.starts_with(&close) {
+            pieces.push((false, &rest[..lt]));
+            break;
+        } else {
+            pieces.push((false, &rest[..=lt]));
+            rest = &rest[lt + 1..];
+        }
+    }
+
+    let last = pieces.len() - 1;
+    let mut text = String::new();
+    for (index, (is_cdata, piece)) in pieces.into_iter().enumerate() {
+        if is_cdata {
+            text.push_str(piece);
+            continue;
+        }
+        let piece = if index == 0 {
+            piece.trim_start()
+        } else {
+            piece
+        };
+        let piece = if index == last {
+            piece.trim_end()
+        } else {
+            piece
+        };
+        text.push_str(&unescape(piece));
+    }
+    Some(text.trim_end_matches('\n').to_owned())
 }
 
 /// The five XML entities log4j's layout escapes in an attribute.
@@ -293,6 +412,110 @@ mod tests {
             r"</log4j:Event>",
         ]);
         assert_eq!(records[0].message, "plain text");
+    }
+
+    /// How log4j's layout writes a message: a literal `]]>` is split across
+    /// sections as `]]>]]&gt;<![CDATA[`.
+    fn layout_cdata(text: &str) -> String {
+        format!("<![CDATA[{}]]>", text.replace("]]>", "]]>]]&gt;<![CDATA["))
+    }
+
+    fn event_with_message(message: &str) -> String {
+        format!(
+            r#"<log4j:Event logger="a" timestamp="1" level="INFO" thread="main"><log4j:Message>{}</log4j:Message></log4j:Event>"#,
+            layout_cdata(message)
+        )
+    }
+
+    #[test]
+    fn closing_event_tag_text_inside_a_message_stays_in_the_message() {
+        let records = feed(&[
+            r#"<log4j:Event level="INFO" thread="main"><log4j:Message><![CDATA[before </log4j:Event> after]]></log4j:Message></log4j:Event>"#,
+        ]);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].message, "before </log4j:Event> after");
+        assert_eq!(records[0].level.as_deref(), Some("INFO"));
+    }
+
+    #[test]
+    fn closing_event_tag_text_on_a_continuation_line_stays_in_the_message() {
+        let records = feed(&[
+            r#"<log4j:Event level="INFO" thread="main">"#,
+            r"<log4j:Message><![CDATA[first",
+            r"</log4j:Event>",
+            r"last]]></log4j:Message>",
+            r"</log4j:Event>",
+        ]);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].message, "first\n</log4j:Event>\nlast");
+    }
+
+    #[test]
+    fn closing_message_and_throwable_tag_text_inside_cdata_stays_in_the_field() {
+        let records = feed(&[
+            r#"<log4j:Event level="ERROR" thread="main">"#,
+            r"<log4j:Message><![CDATA[a </log4j:Message> b]]></log4j:Message>",
+            r"<log4j:Throwable><![CDATA[boom </log4j:Throwable> still the trace]]></log4j:Throwable>",
+            r"</log4j:Event>",
+        ]);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].message,
+            "a </log4j:Message> b\nboom </log4j:Throwable> still the trace"
+        );
+    }
+
+    #[test]
+    fn a_fake_event_inside_a_message_does_not_become_a_record() {
+        let injected = r#"chat </log4j:Event><log4j:Event level="ERROR" thread="evil"><log4j:Message><![CDATA[fake]]></log4j:Message></log4j:Event>"#;
+        let records = feed(&[&event_with_message(injected)]);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].message, injected);
+        assert_eq!(records[0].level.as_deref(), Some("INFO"));
+        assert_eq!(records[0].thread.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn a_message_split_across_cdata_sections_is_joined_back_together() {
+        let records = feed(&[&event_with_message("a]]>b]]>c")]);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].message, "a]]>b]]>c");
+    }
+
+    #[test]
+    fn record_boundaries_survive_a_message_that_ends_with_a_cdata_terminator() {
+        let records = feed(&[
+            &event_with_message("ends with ]]>"),
+            &event_with_message("next"),
+        ]);
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].message, "ends with ]]>");
+        assert_eq!(records[1].message, "next");
+    }
+
+    #[test]
+    fn markup_lookalikes_in_a_message_are_not_read_as_fields() {
+        let records = feed(&[
+            r#"<log4j:Event logger="a" level="INFO">"#,
+            &format!(
+                "<log4j:Message>{}</log4j:Message>",
+                layout_cdata(r#"x thread="fake" <log4j:Throwable>not a trace</log4j:Throwable>"#)
+            ),
+            r"</log4j:Event>",
+        ]);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].thread, None);
+        assert_eq!(
+            records[0].message,
+            r#"x thread="fake" <log4j:Throwable>not a trace</log4j:Throwable>"#
+        );
     }
 
     #[test]
