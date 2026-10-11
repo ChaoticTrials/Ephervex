@@ -16,7 +16,7 @@ pub mod runtime;
 pub use capture::{
     CAPTURE_BUDGET_BYTES, CAPTURE_INDEX_FILE, CAPTURE_SEGMENT_BYTES, CaptureHealth,
     CaptureRetention, CaptureStream, CapturedLine, MAX_CAPTURE_LINE_BYTES, MAX_RING_BYTES,
-    MAX_RING_LINES, OutputCapture, ServerOutputEvent,
+    MAX_RING_LINES, OutputCapture, ServerOutputEvent, segment_continues_run,
 };
 pub use connection::wait_for_server_readiness;
 pub use ephervex_model::ConnectionTarget;

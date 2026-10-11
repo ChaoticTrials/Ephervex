@@ -443,6 +443,7 @@ async fn supervise_commands(
         observer.emit(ServerEvent::Exited(exit));
         last_exit = Some(exit);
         if restart {
+            capture.lock().await.begin_run();
             observer.emit(ServerEvent::Restarting);
             continue;
         }
@@ -1493,7 +1494,7 @@ mod tests {
 
     struct Supervised {
         root: tempfile::TempDir,
-        _capture: tempfile::TempDir,
+        capture: tempfile::TempDir,
         journal: PathBuf,
         events: mpsc::UnboundedReceiver<ServerEvent>,
         task: tokio::task::JoinHandle<ServerResult<ServerExit>>,
@@ -1521,7 +1522,7 @@ mod tests {
         }
         Supervised {
             root,
-            _capture: capture,
+            capture,
             journal,
             events,
             task,
@@ -1573,6 +1574,16 @@ mod tests {
         assert_eq!(
             lifecycle(&mut server.events),
             ["exited", "restarting", "started"]
+        );
+        let run_starts = std::fs::read_dir(server.capture.path())
+            .expect("capture directory")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("capture-") && !crate::segment_continues_run(name))
+            .count();
+        assert_eq!(
+            run_starts, 2,
+            "the restart began a run of its own in the capture"
         );
 
         send_control(server.root.path(), &ControlAction::Stop)

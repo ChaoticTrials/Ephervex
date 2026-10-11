@@ -112,6 +112,10 @@ pub(super) struct LogViews {
     slots: Vec<Option<Viewer>>,
     model: Rc<VecModel<LogView>>,
     commands: Sender<Command>,
+    /// Sources whose run has been started but has written nothing yet. Their
+    /// retained output belongs to the run before, so a viewer opened on one
+    /// reads none of it and takes the run's lines as they are produced.
+    starting: HashSet<LiveLogSource>,
 }
 
 impl LogViews {
@@ -120,6 +124,7 @@ impl LogViews {
             slots: Vec::new(),
             model: Rc::new(VecModel::default()),
             commands,
+            starting: HashSet::new(),
         }
     }
 
@@ -201,13 +206,17 @@ impl LogViews {
         let source = viewer.live_source();
         viewer.live.activate(source.clone());
         self.render(slot);
-        send(&self.commands, Command::OpenLiveLog(source));
+        if !self.starting.contains(&source) {
+            send(&self.commands, Command::OpenLiveLog(source));
+        }
     }
 
-    /// Starts every viewer on `source` over, as a server that was just started
-    /// begins a new console.
+    /// Starts every viewer on `source` over, as a server that is beginning a
+    /// new run begins a new console. Nothing is read back: the run has not
+    /// written anything yet, so its lines reach the viewers as they are
+    /// produced, including a viewer opened before the run settles.
     pub(super) fn reopen(&mut self, source: &LiveLogSource) {
-        let mut reopened = false;
+        self.starting.insert(source.clone());
         for slot in 0..self.slots.len() {
             let Some(viewer) = self.slots[slot].as_mut() else {
                 continue;
@@ -217,12 +226,14 @@ impl LogViews {
                 viewer.live.activate(source.clone());
                 viewer.follow = true;
                 self.render(slot);
-                reopened = true;
             }
         }
-        if reopened {
-            send(&self.commands, Command::OpenLiveLog(source.clone()));
-        }
+    }
+
+    /// Ends the wait for a started run's first line: from here on its
+    /// capture holds the run, so a viewer opened later may read it.
+    pub(super) fn settle_start(&mut self, source: &LiveLogSource) {
+        self.starting.remove(source);
     }
 
     /// Takes one update for every viewer on its source.
@@ -231,6 +242,16 @@ impl LogViews {
         update: &LiveLogUpdate,
         changes: &mut HashMap<usize, LiveLogChange>,
     ) {
+        if self.starting.contains(&update.source) {
+            // A whole-source update can only be a snapshot taken before the
+            // run began, which is the output being left behind.
+            if update.reset {
+                return;
+            }
+            if !update.lines.is_empty() {
+                self.starting.remove(&update.source);
+            }
+        }
         for (slot, viewer) in self.slots.iter_mut().enumerate() {
             let Some(viewer) = viewer else { continue };
             if viewer.live.active.as_ref() != Some(&update.source) {
@@ -806,6 +827,77 @@ mod tests {
             ["list"],
             "the console still reads the server, so nothing is closed"
         );
+    }
+
+    #[test]
+    fn a_console_opened_for_a_starting_run_reads_nothing_until_the_run_settles() {
+        let (mut views, commands) = views();
+        let server = ServerId::new();
+        let host = InstalledHost::Server(server);
+        let source = LiveLogSource::Server(server);
+
+        views.reopen(&source);
+        views.sync(&[(A, host, Surface::Console)]);
+        assert!(sent(&commands).is_empty(), "no snapshot of the run before");
+
+        views.settle_start(&source);
+        views.sync(&[(A, host, Surface::Console), (B, host, Surface::Logs)]);
+        assert_eq!(sent(&commands), ["open server"]);
+    }
+
+    #[test]
+    fn a_snapshot_of_the_run_before_is_dropped_while_the_next_run_starts() {
+        let (mut views, _commands) = views();
+        let server = ServerId::new();
+        let host = InstalledHost::Server(server);
+        let source = LiveLogSource::Server(server);
+        views.sync(&[(A, host, Surface::Console)]);
+        views.reopen(&source);
+        let update = crate::backend::LiveLogUpdate {
+            source: source.clone(),
+            reset: true,
+            missing: false,
+            source_truncated: false,
+            lines: vec![LiveLogLine::Server(
+                ephervex_server::CapturedLine::from_bytes(
+                    ephervex_server::CaptureStream::Stdout,
+                    b"earlier run",
+                ),
+            )],
+        };
+        let mut changes = HashMap::new();
+        views.apply(&update, &mut changes);
+        views.settle(changes);
+
+        assert!(lines(&views, A).is_empty());
+        assert!(views.starting.contains(&source), "the wait goes on");
+    }
+
+    #[test]
+    fn the_first_line_of_a_starting_run_ends_the_wait_for_its_capture() {
+        let (mut views, commands) = views();
+        let server = ServerId::new();
+        let host = InstalledHost::Server(server);
+        let source = LiveLogSource::Server(server);
+        views.reopen(&source);
+        views.sync(&[(A, host, Surface::Console)]);
+        let update = crate::backend::LiveLogUpdate {
+            source,
+            reset: false,
+            missing: false,
+            source_truncated: false,
+            lines: vec![LiveLogLine::Server(
+                ephervex_server::CapturedLine::from_bytes(
+                    ephervex_server::CaptureStream::Stdout,
+                    b"ready",
+                ),
+            )],
+        };
+        let mut changes = HashMap::new();
+        views.apply(&update, &mut changes);
+
+        views.sync(&[(A, host, Surface::Console), (B, host, Surface::Logs)]);
+        assert_eq!(sent(&commands), ["open server"]);
     }
 
     #[test]

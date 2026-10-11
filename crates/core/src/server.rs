@@ -963,9 +963,29 @@ impl App {
         Ok(clear_stale_runtime(&record.root)?)
     }
 
+    /// The newest `limit` captured lines across every retained run.
     pub fn server_output(&self, id: ServerId, limit: usize) -> CoreResult<CaptureSnapshot> {
         let record = self.server(id)?;
-        read_capture_snapshot(&self.paths().server_capture_dir(record.id), limit)
+        read_capture_snapshot(
+            &self.paths().server_capture_dir(record.id),
+            limit,
+            CaptureScope::Retained,
+        )
+    }
+
+    /// The newest `limit` captured lines since the server was last started or
+    /// restarted, leaving out the runs before it.
+    pub fn server_latest_run_output(
+        &self,
+        id: ServerId,
+        limit: usize,
+    ) -> CoreResult<CaptureSnapshot> {
+        let record = self.server(id)?;
+        read_capture_snapshot(
+            &self.paths().server_capture_dir(record.id),
+            limit,
+            CaptureScope::LatestRun,
+        )
     }
 
     pub(super) fn canonical_server_for_mutation(&self, id: ServerId) -> CoreResult<ServerRecord> {
@@ -1543,7 +1563,18 @@ fn duplicate_server_roots(app: &App, id: ServerId) -> Vec<PathBuf> {
     roots
 }
 
-fn read_capture_snapshot(directory: &Path, limit: usize) -> CoreResult<CaptureSnapshot> {
+/// Which retained capture a snapshot reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureScope {
+    Retained,
+    LatestRun,
+}
+
+fn read_capture_snapshot(
+    directory: &Path,
+    limit: usize,
+    scope: CaptureScope,
+) -> CoreResult<CaptureSnapshot> {
     let mut files = Vec::new();
     if directory.is_dir() {
         for entry in
@@ -1571,6 +1602,20 @@ fn read_capture_snapshot(directory: &Path, limit: usize) -> CoreResult<CaptureSn
         }
     }
     files.sort();
+    // Retention removes the oldest segments first, so a run whose first
+    // segment is still here lost nothing, whatever earlier runs lost.
+    let mut latest_run_is_whole = false;
+    if scope == CaptureScope::LatestRun
+        && let Some(start) = files.iter().rposition(|path| {
+            !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(ephervex_server::segment_continues_run)
+        })
+    {
+        files.drain(..start);
+        latest_run_is_whole = true;
+    }
     let mut lines = Vec::with_capacity(limit.min(2_000));
     'segments: for path in files.into_iter().rev() {
         if lines.len() == limit {
@@ -1594,10 +1639,14 @@ fn read_capture_snapshot(directory: &Path, limit: usize) -> CoreResult<CaptureSn
     }
     lines.reverse();
     let retention_path = directory.join(ephervex_server::CAPTURE_INDEX_FILE);
-    let retention = std::fs::read(&retention_path)
-        .ok()
-        .and_then(|body| serde_json::from_slice(&body).ok())
-        .unwrap_or_default();
+    let retention = if latest_run_is_whole {
+        CaptureRetention::default()
+    } else {
+        std::fs::read(&retention_path)
+            .ok()
+            .and_then(|body| serde_json::from_slice(&body).ok())
+            .unwrap_or_default()
+    };
     Ok(CaptureSnapshot {
         lines,
         health: CaptureHealth::Available,
@@ -2820,7 +2869,8 @@ mod tests {
             ],
         );
 
-        let snapshot = read_capture_snapshot(directory.path(), 2).expect("snapshot");
+        let snapshot =
+            read_capture_snapshot(directory.path(), 2, CaptureScope::Retained).expect("snapshot");
         assert_eq!(
             snapshot
                 .lines
@@ -2830,11 +2880,138 @@ mod tests {
             ["new two", "new three"]
         );
         assert!(
-            read_capture_snapshot(directory.path(), 0)
+            read_capture_snapshot(directory.path(), 0, CaptureScope::Retained)
                 .expect("metadata-only snapshot")
                 .lines
                 .is_empty()
         );
+    }
+
+    fn write_capture_segment(directory: &Path, name: &str, texts: &[&str]) {
+        let mut body = Vec::new();
+        for text in texts {
+            let line = CapturedLine {
+                timestamp: Utc::now(),
+                stream: ephervex_server::CaptureStream::Stdout,
+                text: (*text).to_owned(),
+                truncated: false,
+                omitted_bytes: 0,
+            };
+            serde_json::to_writer(&mut body, &line).expect("serialize capture");
+            body.push(b'\n');
+        }
+        std::fs::write(directory.join(name), body).expect("write capture segment");
+    }
+
+    fn texts(snapshot: &CaptureSnapshot) -> Vec<&str> {
+        snapshot
+            .lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn the_latest_run_snapshot_leaves_out_earlier_runs_and_spans_its_own_rotated_segments() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        write_capture_segment(
+            directory.path(),
+            "capture-20260813T120000.000Z-a.jsonl",
+            &["old one", "old two"],
+        );
+        write_capture_segment(
+            directory.path(),
+            "capture-20260813T130000.000Z-b.jsonl",
+            &["new one", "new two"],
+        );
+        write_capture_segment(
+            directory.path(),
+            "capture-20260813T130500.000Z-c.continued.jsonl",
+            &["new three"],
+        );
+
+        let latest = read_capture_snapshot(directory.path(), 100, CaptureScope::LatestRun)
+            .expect("snapshot");
+        assert_eq!(texts(&latest), ["new one", "new two", "new three"]);
+        let retained =
+            read_capture_snapshot(directory.path(), 100, CaptureScope::Retained).expect("snapshot");
+        assert_eq!(
+            texts(&retained),
+            ["old one", "old two", "new one", "new two", "new three"]
+        );
+    }
+
+    #[test]
+    fn a_run_that_has_written_nothing_yet_has_an_empty_latest_run_snapshot() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        write_capture_segment(
+            directory.path(),
+            "capture-20260813T120000.000Z-a.jsonl",
+            &["old one"],
+        );
+        write_capture_segment(
+            directory.path(),
+            "capture-20260813T130000.000Z-b.jsonl",
+            &[],
+        );
+
+        let latest = read_capture_snapshot(directory.path(), 100, CaptureScope::LatestRun)
+            .expect("snapshot");
+        assert!(latest.lines.is_empty());
+    }
+
+    #[test]
+    fn a_latest_run_that_lost_no_segment_reports_no_pruned_output_from_earlier_runs() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        write_capture_segment(
+            directory.path(),
+            "capture-20260813T120000.000Z-a.jsonl",
+            &["only run"],
+        );
+        let retention = ephervex_server::CaptureRetention {
+            removed_segments: 3,
+            removed_bytes: 10,
+            removed_lines: 9,
+            earliest_retained_at: None,
+        };
+        std::fs::write(
+            directory.path().join(ephervex_server::CAPTURE_INDEX_FILE),
+            serde_json::to_vec(&retention).expect("index"),
+        )
+        .expect("write index");
+
+        let latest = read_capture_snapshot(directory.path(), 100, CaptureScope::LatestRun)
+            .expect("snapshot");
+        assert_eq!(latest.retention.removed_lines, 0);
+        let retained =
+            read_capture_snapshot(directory.path(), 100, CaptureScope::Retained).expect("snapshot");
+        assert_eq!(retained.retention.removed_lines, 9);
+    }
+
+    #[test]
+    fn a_latest_run_whose_first_segment_was_pruned_keeps_the_retention_report() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        write_capture_segment(
+            directory.path(),
+            "capture-20260813T130500.000Z-c.continued.jsonl",
+            &["tail"],
+        );
+        let retention = ephervex_server::CaptureRetention {
+            removed_segments: 1,
+            removed_bytes: 10,
+            removed_lines: 4,
+            earliest_retained_at: None,
+        };
+        std::fs::write(
+            directory.path().join(ephervex_server::CAPTURE_INDEX_FILE),
+            serde_json::to_vec(&retention).expect("index"),
+        )
+        .expect("write index");
+
+        let latest = read_capture_snapshot(directory.path(), 100, CaptureScope::LatestRun)
+            .expect("snapshot");
+        assert_eq!(texts(&latest), ["tail"]);
+        assert_eq!(latest.retention.removed_lines, 4);
     }
 
     #[test]

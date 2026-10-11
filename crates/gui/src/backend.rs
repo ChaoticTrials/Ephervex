@@ -7090,7 +7090,7 @@ fn open_live_log(
                 Err(error) => send_error(events, &error),
             }
         }
-        LiveLogSource::Server(server) => match app.server_output(server, 2_001) {
+        LiveLogSource::Server(server) => match app.server_latest_run_output(server, 2_001) {
             Ok(mut capture) => {
                 let bounded = capture.lines.len() > 2_000;
                 if bounded {
@@ -7994,13 +7994,12 @@ fn spawn_server(
                 let forward = tokio::spawn(async move {
                     while let Some(event) = receiver.recv().await {
                         if let ServerEvent::Output(line) = event {
-                            let mut lines = vec![LiveLogLine::Server(line)];
-                            while lines.len() < 256 {
-                                match receiver.try_recv() {
-                                    Ok(ServerEvent::Output(line)) => {
-                                        lines.push(LiveLogLine::Server(line));
-                                    }
-                                    Ok(other) => forward_server_event(
+                            forward_output_batch(
+                                line,
+                                || receiver.try_recv().ok(),
+                                |lines| send_server_lines(&event_sender, server, lines),
+                                |other| {
+                                    forward_server_event(
                                         &event_sender,
                                         &entity_for_events,
                                         &paths_for_events,
@@ -8008,17 +8007,9 @@ fn spawn_server(
                                         Some((&forwarded_cancellations, &forwarded_token)),
                                         server,
                                         other,
-                                    ),
-                                    Err(_) => break,
-                                }
-                            }
-                            let _ = event_sender.send(Event::LiveLog(LiveLogUpdate {
-                                source: LiveLogSource::Server(server),
-                                reset: false,
-                                missing: false,
-                                source_truncated: false,
-                                lines,
-                            }));
+                                    );
+                                },
+                            );
                         } else {
                             forward_server_event(
                                 &event_sender,
@@ -8113,6 +8104,46 @@ fn release_server_cancellation(
     {
         entries.remove(operation);
     }
+}
+
+/// Forwards the output line that woke a forwarder together with the lines
+/// already queued behind it. A batch is delivered before any other event that
+/// follows it, so a consumer sees the events in the order the supervisor
+/// emitted them.
+fn forward_output_batch(
+    first: ephervex_core::CapturedLine,
+    mut next: impl FnMut() -> Option<ServerEvent>,
+    mut deliver: impl FnMut(Vec<LiveLogLine>),
+    mut forward_other: impl FnMut(ServerEvent),
+) {
+    const BATCH_LINES: usize = 256;
+    let mut lines = vec![LiveLogLine::Server(first)];
+    while lines.len() < BATCH_LINES {
+        match next() {
+            Some(ServerEvent::Output(line)) => lines.push(LiveLogLine::Server(line)),
+            Some(other) => {
+                deliver(std::mem::take(&mut lines));
+                forward_other(other);
+            }
+            None => break,
+        }
+    }
+    if !lines.is_empty() {
+        deliver(lines);
+    }
+}
+
+fn send_server_lines(events: &Sender<Event>, server: ServerId, lines: Vec<LiveLogLine>) {
+    if lines.is_empty() {
+        return;
+    }
+    let _ = events.send(Event::LiveLog(LiveLogUpdate {
+        source: LiveLogSource::Server(server),
+        reset: false,
+        missing: false,
+        source_truncated: false,
+        lines,
+    }));
 }
 
 /// Reports one server event. `cancellation` is the token that ends this start
@@ -8494,29 +8525,20 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
                 let server_forward = tokio::spawn(async move {
                     while let Some(event) = server_events.recv().await {
                         if let ServerEvent::Output(line) = event {
-                            let mut lines = vec![LiveLogLine::Server(line)];
-                            while lines.len() < 256 {
-                                match server_events.try_recv() {
-                                    Ok(ServerEvent::Output(line)) => {
-                                        lines.push(LiveLogLine::Server(line));
-                                    }
-                                    Ok(other) => forward_connect_server_event(
+                            forward_output_batch(
+                                line,
+                                || server_events.try_recv().ok(),
+                                |lines| send_server_lines(&server_event_sender, server, lines),
+                                |other| {
+                                    forward_connect_server_event(
                                         &server_event_sender,
                                         &server_paths,
                                         &forwarded_row,
                                         server,
                                         other,
-                                    ),
-                                    Err(_) => break,
-                                }
-                            }
-                            let _ = server_event_sender.send(Event::LiveLog(LiveLogUpdate {
-                                source: LiveLogSource::Server(server),
-                                reset: false,
-                                missing: false,
-                                source_truncated: false,
-                                lines,
-                            }));
+                                    );
+                                },
+                            );
                         } else {
                             forward_connect_server_event(
                                 &server_event_sender,
@@ -13648,6 +13670,46 @@ mod tests {
 
         supervised.note(server, &ServerEvent::Finished { exit: None });
         assert_eq!(supervised.running(), vec![other]);
+    }
+
+    #[test]
+    fn queued_output_is_delivered_before_the_restart_that_follows_it() {
+        fn line(text: &str) -> ephervex_core::CapturedLine {
+            ephervex_server::CapturedLine::from_bytes(
+                ephervex_server::CaptureStream::Stdout,
+                text.as_bytes(),
+            )
+        }
+        let mut queued = std::collections::VecDeque::from([
+            ServerEvent::Output(line("old tail")),
+            ServerEvent::Restarting,
+            ServerEvent::Output(line("new head")),
+        ]);
+        let delivered = std::cell::RefCell::new(Vec::<String>::new());
+
+        forward_output_batch(
+            line("old first"),
+            || queued.pop_front(),
+            |lines| {
+                let texts: Vec<String> = lines
+                    .into_iter()
+                    .map(|line| match line {
+                        LiveLogLine::Server(line) => line.text,
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                delivered.borrow_mut().push(texts.join("+"));
+            },
+            |event| {
+                assert!(matches!(event, ServerEvent::Restarting));
+                delivered.borrow_mut().push("restarting".to_owned());
+            },
+        );
+
+        assert_eq!(
+            *delivered.borrow(),
+            ["old first+old tail", "restarting", "new head"]
+        );
     }
 
     /// A burst of output takes whatever lands with it off the channel in one

@@ -1700,6 +1700,17 @@ impl HostLifecycle {
         self.pair_starts.len() != before
     }
 
+    /// The server of a pair start still being tracked.
+    fn pair_start_server(&self, operation: u64) -> Option<ephervex_model::ServerId> {
+        self.pair_starts
+            .iter()
+            .find(|start| start.operation == operation)
+            .and_then(|start| match start.server {
+                InstalledHost::Server(server) => Some(server),
+                InstalledHost::Instance(_) => None,
+            })
+    }
+
     fn pair_starting(&self, host: InstalledHost) -> bool {
         self.pair_starts
             .iter()
@@ -1789,6 +1800,18 @@ fn apply_server_tool_event(
     if matches!(event, backend::ServerToolEvent::Started) {
         workspace.forget_last_run(InstalledHost::Server(server));
     }
+    if matches!(
+        event,
+        backend::ServerToolEvent::Started
+            | backend::ServerToolEvent::StartAbandoned
+            | backend::ServerToolEvent::RestartFailed { .. }
+            | backend::ServerToolEvent::Finished { .. }
+    ) {
+        workspace
+            .logs
+            .borrow_mut()
+            .settle_start(&LiveLogSource::Server(server));
+    }
     {
         let mut lifecycle = workspace.lifecycle.borrow_mut();
         if let Some(failure) = lifecycle.servers.apply(server, event)
@@ -1836,10 +1859,21 @@ fn stamp_host_lifecycle(ui: &AppWindow, lifecycle: &HostLifecycle) {
 /// Ends a pair start the worker settled, in every view of both sides.
 fn apply_pair_start_settled(
     ui: &AppWindow,
+    workspace: &Workspace,
     lifecycle: &RefCell<HostLifecycle>,
     operation: u64,
     server_completion_owned: bool,
 ) {
+    // A settled start that never ran the server leaves its console waiting for
+    // a run that is not coming.
+    if !server_completion_owned
+        && let Some(server) = lifecycle.borrow().pair_start_server(operation)
+    {
+        workspace
+            .logs
+            .borrow_mut()
+            .settle_start(&LiveLogSource::Server(server));
+    }
     if lifecycle
         .borrow_mut()
         .settle_pair_start(operation, server_completion_owned)
@@ -4763,7 +4797,7 @@ impl Workspace {
     }
 
     /// Starts every console and log viewer on `server` over with its new run;
-    /// a console opened afterwards reads the run from the beginning on its own.
+    /// a console opened afterwards reads the latest run from its beginning.
     fn reopen_server_console(&self, server: ephervex_model::ServerId) {
         self.logs
             .borrow_mut()
@@ -7251,6 +7285,26 @@ fn apply_run_failure(
     }
 }
 
+/// Applies a restart's reported stage to every view of the host.
+fn apply_host_restart(
+    ui: &AppWindow,
+    workspace: &Workspace,
+    lifecycle: &Rc<RefCell<HostLifecycle>>,
+    host: InstalledHost,
+    request: u64,
+    stage: Option<backend::RestartStage>,
+) {
+    // The supervisor reports the move to starting once the old run's output is
+    // all delivered, so the console starts over with the restarted run and
+    // none of the stopped one.
+    if let (InstalledHost::Server(server), Some(backend::RestartStage::Starting)) = (host, stage) {
+        workspace.reopen_server_console(server);
+    }
+    if lifecycle.borrow_mut().apply(host, request, stage) {
+        stamp_host_lifecycle(ui, &lifecycle.borrow());
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn apply_event(
     ui: &AppWindow,
@@ -7530,15 +7584,11 @@ fn apply_event(
             host,
             request,
             stage,
-        } => {
-            if lifecycle.borrow_mut().apply(host, request, stage) {
-                stamp_host_lifecycle(ui, &lifecycle.borrow());
-            }
-        }
+        } => apply_host_restart(ui, workspace, lifecycle, host, request, stage),
         Event::PairStartSettled {
             operation,
             server_completion_owned,
-        } => apply_pair_start_settled(ui, lifecycle, operation, server_completion_owned),
+        } => apply_pair_start_settled(ui, workspace, lifecycle, operation, server_completion_owned),
         Event::LaunchContext {
             instance,
             restartable,
@@ -11609,7 +11659,7 @@ mod tests {
             let (clients, rows) = paired_rows(client, host, true, true);
             workspace.lifecycle.borrow_mut().servers.observe(&rows);
             workspace.state.borrow_mut().set_rows(clients, rows);
-            apply_pair_start_settled(&ui, &workspace.lifecycle, sent[0].2, true);
+            apply_pair_start_settled(&ui, &workspace, &workspace.lifecycle, sent[0].2, true);
             assert!(!workspace.lifecycle.borrow().servers.busy(server));
             assert!(!workspace.lifecycle.borrow().pair_starting(host));
             assert!(
@@ -12005,7 +12055,7 @@ mod tests {
         let (clients, servers) = paired_rows(client, server, true, true);
         workspace.state.borrow_mut().set_rows(clients, servers);
         workspace.refresh(&ui);
-        apply_pair_start_settled(&ui, &workspace.lifecycle, *operation, false);
+        apply_pair_start_settled(&ui, &workspace, &workspace.lifecycle, *operation, false);
 
         assert_eq!(starting(&ui), [false, false]);
         assert!(
@@ -12069,16 +12119,16 @@ mod tests {
 
         ui.invoke_launch_client(client.id().into());
         let first = starts(&commands)[0].2;
-        apply_pair_start_settled(&ui, &workspace.lifecycle, first + 100, false);
+        apply_pair_start_settled(&ui, &workspace, &workspace.lifecycle, first + 100, false);
         assert!(workspace.lifecycle.borrow().pair_starting(client));
 
-        apply_pair_start_settled(&ui, &workspace.lifecycle, first, false);
+        apply_pair_start_settled(&ui, &workspace, &workspace.lifecycle, first, false);
         assert!(!workspace.lifecycle.borrow().pair_starting(client));
 
         ui.invoke_launch_client(client.id().into());
         let second = starts(&commands)[0].2;
         assert_ne!(second, first);
-        apply_pair_start_settled(&ui, &workspace.lifecycle, first, false);
+        apply_pair_start_settled(&ui, &workspace, &workspace.lifecycle, first, false);
         assert!(
             workspace.lifecycle.borrow().pair_starting(client),
             "an earlier start's settle does not end a later one"
@@ -12113,7 +12163,7 @@ mod tests {
             starts(&commands).is_empty(),
             "no restart during a pair start"
         );
-        apply_pair_start_settled(&ui, &workspace.lifecycle, operation, false);
+        apply_pair_start_settled(&ui, &workspace, &workspace.lifecycle, operation, false);
     }
 
     /// Every toast the window is asked to show, and whether it is an error.
@@ -12383,6 +12433,100 @@ mod tests {
         deliver_server_line(&workspace, server, "new run");
         let text = console_text(&workspace, console);
         assert!(text.contains("new run") && !text.contains("earlier run"));
+    }
+
+    #[test]
+    fn a_console_the_start_itself_opens_asks_for_no_earlier_output() {
+        let ui = test_window();
+        let (workspace, commands, client, server) = paired_workspace_starting_together(&ui, true);
+        commands.try_iter().for_each(drop);
+
+        ui.invoke_launch_client(client.id().into());
+
+        assert!(
+            !commands
+                .try_iter()
+                .any(|command| matches!(command, Command::OpenLiveLog(LiveLogSource::Server(_)))),
+            "a snapshot taken before the run writes can only be the run before"
+        );
+        deliver_server_line(&workspace, server, "new run");
+        let pane = workspace
+            .state
+            .borrow()
+            .first_pane_showing(server)
+            .expect("the start shows the console");
+        assert_eq!(console_text(&workspace, pane).trim(), "new run");
+    }
+
+    #[test]
+    fn a_refused_pair_start_leaves_the_servers_console_free_to_read_its_capture() {
+        let ui = test_window();
+        let (workspace, commands, client, server) = paired_workspace_starting_together(&ui, true);
+        let InstalledHost::Server(id) = server else {
+            unreachable!()
+        };
+        ui.invoke_launch_client(client.id().into());
+        let operation = workspace
+            .lifecycle
+            .borrow()
+            .pair_starts
+            .first()
+            .map(|start| start.operation)
+            .expect("the pair start is tracked");
+
+        apply_pair_start_settled(&ui, &workspace, &workspace.lifecycle, operation, false);
+        commands.try_iter().for_each(drop);
+        workspace
+            .logs
+            .borrow_mut()
+            .sync(&[(PaneId::from_raw(1), server, Surface::Logs)]);
+
+        assert!(
+            commands
+                .try_iter()
+                .any(|command| matches!(command, Command::OpenLiveLog(LiveLogSource::Server(opened)) if opened == id)),
+            "the console reads the capture because no run is coming"
+        );
+    }
+
+    #[test]
+    fn restarting_a_server_starts_its_console_over_with_the_restarted_run() {
+        let ui = test_window();
+        let (workspace, _commands, _client, server) = paired_workspace(&ui);
+        let console = console_with_earlier_output(&workspace, &ui, server);
+
+        let lifecycle = Rc::clone(&workspace.lifecycle);
+        apply_host_restart(
+            &ui,
+            &workspace,
+            &lifecycle,
+            server,
+            0,
+            Some(backend::RestartStage::Starting),
+        );
+        assert_eq!(console_text(&workspace, console), "");
+
+        deliver_server_line(&workspace, server, "restarted run");
+        let text = console_text(&workspace, console);
+        assert!(text.contains("restarted run") && !text.contains("earlier run"));
+    }
+
+    #[test]
+    fn a_restart_that_is_only_stopping_keeps_the_console() {
+        let ui = test_window();
+        let (workspace, _commands, _client, server) = paired_workspace(&ui);
+        let console = console_with_earlier_output(&workspace, &ui, server);
+        let lifecycle = Rc::clone(&workspace.lifecycle);
+
+        apply_host_restart(
+            &ui,
+            &workspace,
+            &lifecycle,
+            server,
+            1,
+            Some(backend::RestartStage::Stopping),
+        );
+        assert!(console_text(&workspace, console).contains("earlier run"));
     }
 
     #[test]

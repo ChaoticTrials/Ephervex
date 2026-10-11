@@ -15,6 +15,19 @@ pub const CAPTURE_SEGMENT_BYTES: u64 = 8 * 1024 * 1024;
 pub const CAPTURE_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
 pub const CAPTURE_INDEX_FILE: &str = "capture-index.json";
 
+/// Ends the name of a segment that carries on the run of the segment before
+/// it. Every other segment starts a run, which is how a reader finds where the
+/// newest run begins without any record inside a segment naming a run.
+const CONTINUED_SEGMENT_SUFFIX: &str = ".continued.jsonl";
+
+/// Whether a capture segment file continues the run of an older segment
+/// instead of starting one. A segment without the mark, as older captures
+/// have, reads as the start of a run.
+#[must_use]
+pub fn segment_continues_run(file_name: &str) -> bool {
+    file_name.ends_with(CONTINUED_SEGMENT_SUFFIX)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CaptureStream {
@@ -177,6 +190,24 @@ impl OutputCapture {
         line
     }
 
+    /// Starts a new run in the capture: the lines pushed from here on belong to
+    /// it, and a reader that wants only the newest run begins at its segment.
+    pub fn begin_run(&mut self) {
+        let Some(writer) = &mut self.writer else {
+            return;
+        };
+        if let Err(error) = writer.rotate(SegmentStart::Run) {
+            let detail = error.to_string();
+            tracing::error!(%error, "server capture became unavailable; continuing pipe drain");
+            self.writer = None;
+            self.health = CaptureHealth::Unavailable {
+                detail: detail.clone(),
+            };
+            self.events
+                .push_back(ServerOutputEvent::CaptureUnavailable { detail });
+        }
+    }
+
     #[must_use]
     pub fn snapshot(&self) -> Vec<CapturedLine> {
         self.ring.iter().cloned().collect()
@@ -235,6 +266,13 @@ impl TrackedSegment {
     }
 }
 
+/// Whether a new segment begins a run or carries on the previous one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SegmentStart {
+    Run,
+    Continuation,
+}
+
 /// Upper bound on bytes read to find a segment's first line.
 const SEGMENT_START_PROBE_BYTES: u64 = 1024 * 1024;
 
@@ -243,6 +281,9 @@ struct CaptureWriter {
     directory: PathBuf,
     current: std::fs::File,
     current_segment: TrackedSegment,
+    /// The instant in the current segment's name. A later segment is named
+    /// after it, so names sort in creation order even within one millisecond.
+    current_segment_at: DateTime<Utc>,
     /// Older segments, oldest first.
     retained: VecDeque<TrackedSegment>,
     /// Bytes across `retained` and `current_segment`, kept up to date so a write never rescans the directory.
@@ -256,12 +297,14 @@ impl CaptureWriter {
         std::fs::create_dir_all(directory)?;
         let retention = read_retention(directory).unwrap_or_default();
         let retained: VecDeque<TrackedSegment> = existing_segments(directory)?.into();
-        let (path, current) = create_segment(directory)?;
+        let segment_at = Utc::now();
+        let (path, current) = create_segment(directory, SegmentStart::Run, segment_at)?;
         let total_bytes = retained.iter().map(|segment| segment.bytes).sum();
         Ok(Self {
             directory: directory.to_path_buf(),
             current,
             current_segment: TrackedSegment::empty(path),
+            current_segment_at: segment_at,
             retained,
             total_bytes,
             limits,
@@ -276,7 +319,7 @@ impl CaptureWriter {
         if self.current_segment.bytes > 0
             && self.current_segment.bytes.saturating_add(length) > self.limits.segment_bytes
         {
-            self.rotate()?;
+            self.rotate(SegmentStart::Continuation)?;
         }
         self.current.write_all(&body)?;
         self.current.flush()?;
@@ -294,10 +337,13 @@ impl CaptureWriter {
         self.total_bytes = self.total_bytes.saturating_add(length);
     }
 
-    fn rotate(&mut self) -> std::io::Result<()> {
+    fn rotate(&mut self, start: SegmentStart) -> std::io::Result<()> {
         self.current.sync_all()?;
-        let (path, file) = create_segment(&self.directory)?;
+        let segment_at =
+            Utc::now().max(self.current_segment_at + chrono::Duration::milliseconds(1));
+        let (path, file) = create_segment(&self.directory, start, segment_at)?;
         self.current = file;
+        self.current_segment_at = segment_at;
         let finished = std::mem::replace(&mut self.current_segment, TrackedSegment::empty(path));
         self.retained.push_back(finished);
         Ok(())
@@ -357,11 +403,19 @@ impl CaptureWriter {
     }
 }
 
-fn create_segment(directory: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
+fn create_segment(
+    directory: &Path,
+    start: SegmentStart,
+    at: DateTime<Utc>,
+) -> std::io::Result<(PathBuf, std::fs::File)> {
     let name = format!(
-        "capture-{}-{}.jsonl",
-        Utc::now().format("%Y%m%dT%H%M%S%.3fZ"),
-        Uuid::new_v4()
+        "capture-{}-{}{}",
+        at.format("%Y%m%dT%H%M%S%.3fZ"),
+        Uuid::new_v4(),
+        match start {
+            SegmentStart::Run => ".jsonl",
+            SegmentStart::Continuation => CONTINUED_SEGMENT_SUFFIX,
+        }
     );
     let path = directory.join(name);
     let file = std::fs::OpenOptions::new()
@@ -522,6 +576,84 @@ mod tests {
         let retention = pruned.expect("old segments should be pruned");
         assert!(retention.removed_segments > 0);
         assert!(directory.path().join(CAPTURE_INDEX_FILE).is_file());
+    }
+
+    fn segment_names(directory: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("capture-") && name != CAPTURE_INDEX_FILE)
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn only_size_rotation_marks_a_segment_as_continuing_its_run() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let mut writer = CaptureWriter::open(
+            directory.path(),
+            CaptureLimits {
+                segment_bytes: 180,
+                budget_bytes: CAPTURE_BUDGET_BYTES,
+            },
+        )
+        .expect("writer");
+        for index in 0..6 {
+            let line = CapturedLine::from_bytes(
+                CaptureStream::Stdout,
+                format!("line-{index}-xxxxxxxxxxxxxxxxxxxxxxxx").as_bytes(),
+            );
+            writer.write(&line).expect("write");
+        }
+
+        let names = segment_names(directory.path());
+        assert!(names.len() > 1, "the run should have rotated: {names:?}");
+        let starts: Vec<_> = names
+            .iter()
+            .filter(|name| !segment_continues_run(name))
+            .collect();
+        assert_eq!(starts.len(), 1, "one run starts one segment: {names:?}");
+    }
+
+    #[test]
+    fn segments_sort_in_creation_order_even_when_created_in_one_millisecond() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let mut capture = OutputCapture::new(directory.path());
+        for _ in 0..50 {
+            capture.begin_run();
+        }
+
+        let names = segment_names(directory.path());
+        let created = capture
+            .writer
+            .as_ref()
+            .map(|writer| {
+                writer
+                    .retained
+                    .iter()
+                    .map(|segment| segment.path.clone())
+                    .chain([writer.current_segment.path.clone()])
+                    .collect::<Vec<_>>()
+            })
+            .expect("writer");
+        let mut sorted = created.clone();
+        sorted.sort();
+        assert_eq!(names.len(), 51);
+        assert_eq!(created, sorted, "the newest segment must sort last");
+    }
+
+    #[test]
+    fn beginning_a_run_starts_a_segment_even_before_it_writes_a_line() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let mut capture = OutputCapture::new(directory.path());
+        capture.push(CaptureStream::Stdout, b"first run");
+
+        capture.begin_run();
+
+        let names = segment_names(directory.path());
+        assert_eq!(names.len(), 2);
+        assert!(names.iter().all(|name| !segment_continues_run(name)));
     }
 
     fn timestamp(text: &str) -> DateTime<Utc> {

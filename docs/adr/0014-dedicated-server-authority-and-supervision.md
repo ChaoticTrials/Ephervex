@@ -153,9 +153,14 @@ the evidence stays.
 
 Combined launcher capture is timestamped JSON Lines. The in-memory ring is
 bounded to 2,000 lines and 2 MiB, individual records to 64 KiB, segments to
-8 MiB, and retained segments to 256 MiB per server. Pruning updates an atomic
-index and emits an observable event. A capture write failure degrades capture
-health but never stops pipe draining or bounded in-memory retention.
+8 MiB, and retained segments to 256 MiB per server. Each supervised run, and
+each restart within it, begins a segment of its own; a segment opened only
+because the previous one filled carries a `.continued.jsonl` suffix. A reader
+that wants the latest run starts at the newest segment without that suffix,
+while the retained history across runs stays readable as a whole. Pruning
+updates an atomic index and emits an observable event. A capture write
+failure degrades capture health but never stops pipe draining or bounded
+in-memory retention.
 
 ## Consequences
 
