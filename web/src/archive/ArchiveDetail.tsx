@@ -106,12 +106,6 @@ export default function ArchiveDetail({ detail }: { detail: Detail }): React.JSX
               {kind} #{entry.number}
             </span>
           </nav>
-          {testing && (
-            <p className="archive-preview" role="status">
-              <strong>Live archive test build.</strong> This is a real exported record.
-              Publication review and deployment are still pending.
-            </p>
-          )}
           <header className="archive-detail-head">
             <span className="archive-kicker">
               FORGEJO ERA / {entry.kind === 'issue' ? 'ISSUE' : 'PULL REQUEST'} #{entry.number}

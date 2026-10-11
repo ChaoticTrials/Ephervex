@@ -1,19 +1,15 @@
-# Road to v1.0.0 — archive publication
+# Road to v1.0.0 archive publication
 
 This directory contains only `archive-data.json` and publication metadata. The
-committed file is the real Forgejo schema v1 export with issue and PR history,
-approved for **feature-branch testing only**. `publication.json` pins its exact
-SHA-256 and has `mode: "testing"`. The pages show a test-build notice, carry
-`noindex`, and are excluded from the sitemap. Do not push or deploy this branch
-as a public archive before a separate publication review and sign-off. Change
-the mode to `approved` only after that review; this makes archive routes
-indexable and includes them in the sitemap.
+committed file is the public Forgejo schema v1 export with issue and PR history.
+`publication.json` pins its exact SHA-256 and has `mode: "approved"`. Archive
+routes are indexable and included in the sitemap. The reserved unavailable
+record remains `noindex` and excluded from the sitemap.
 
-The private preservation copy is `/home/melanx/ephervex-road-private`, outside
-the Git worktree. It includes `snapshot.json` and separately stored assets.
-Neither belongs in `web/` or Git. The public JSON intentionally omits Forgejo
-release records (`releases: []`); future application pre-releases are handled
-on GitHub, not in this archive dataset.
+Keep private preservation copies such as `snapshot.json` and separately stored
+assets outside the Git worktree. Neither belongs in `web/` or Git. The public
+JSON intentionally omits Forgejo release records (`releases: []`); future
+application pre-releases are handled on GitHub, not in this archive dataset.
 
 ## Architecture and stable URLs
 
@@ -67,7 +63,7 @@ become archive links only when the exported number exists. Raw HTML is skipped,
 unsafe URL schemes and internal `.lan` links are blocked, and historical images
 are represented by a missing asset note instead of being fetched.
 
-## Refresh the testing export and approve publication
+## Refresh the public export
 
 1. Keep the private `snapshot.json`, assets, token, and API responses **outside
    this repository**. From `web/`, use
@@ -80,14 +76,13 @@ are represented by a missing asset note instead of being fetched.
    body, link, quote, person, hostname, and license. Investigate export warnings
    and missing API capabilities. `prepare-public` produces a review candidate,
    not a safety guarantee.
-2. For feature-branch testing, calculate `sha256sum archive-data.json` on the
-   exact candidate bytes and copy only that file here. Set `publication.json`
-   to `{"mode":"testing","sha256":"<the 64-character digest>"}`. A changed
-   data file without matching metadata fails the build. The exporter keeps
-   Forgejo releases in the private snapshot and writes `releases: []` publicly.
-   A public launch needs a separate full review of the final bytes, a retained
-   sign-off record and digest outside the website, and an explicit change of
-   publication mode to `approved`. Testing approval alone is insufficient.
+2. Calculate `sha256sum archive-data.json` on the exact candidate bytes and
+   copy only that file here. Set `publication.json` to
+   `{"mode":"testing","sha256":"<the 64-character digest>"}` during review.
+   A changed data file without matching metadata fails the build. The exporter
+   keeps Forgejo releases in the private snapshot and writes `releases: []`
+   publicly. After a full review of the final bytes, retain the sign-off record
+   and digest outside the website, then set the publication mode to `approved`.
 3. Run `npm run archive:test`, `npm run typecheck`, `npm run build`, and
    `npm run archive:check`. Check the generated route list, sitemap, rendered
    pages, and search results before publishing. Each new approved export
@@ -98,14 +93,13 @@ are represented by a missing asset note instead of being fetched.
 The build checks for a file named `snapshot.json` or `snapshot.backup.*.json`
 under the website source and fails if one appears. Git also ignores those
 names. This is a guardrail, not a substitute for reviewing all public text:
-the committed testing export is deliberately shipped in local build HTML and
-search bundles. A branch push or deployment would expose that text.
+the committed public export is shipped in build HTML and search bundles.
 
 ## Portable public download
 
-There is currently **no download link or published ZIP**. After the data is
-approved, the bundled exporter's `package-public` command can build a reproducible
-ZIP from the reviewed `archive-data.json` by requiring its exact SHA-256 with
+There is currently **no download link or published ZIP**. The bundled exporter's
+`package-public` command can build a reproducible ZIP from the reviewed
+`archive-data.json` by requiring its exact SHA-256 with
 `--approve-sha256`. The ZIP contains the public JSON, readable Markdown
 exports, a manifest, and `SHA256SUMS`; it is not a Forgejo server backup.
 From `web/`, run:

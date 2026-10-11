@@ -77,11 +77,6 @@ export default function ArchiveHome({ overview }: { overview: Overview }): React
               <Heading as="h1">Road to <em>v1.0.0</em></Heading>
               <p>The permanent archive of Ephervex's Forgejo issues and pull requests.</p>
               <a className="archive-hero-link" href="#explore">Explore the records <span aria-hidden="true">→</span></a>
-              {testing && (
-                <p className="archive-preview" role="status">
-                  <strong>Test build.</strong> Real export; publication review pending.
-                </p>
-              )}
             </div>
             <div className="archive-hero-index">
               <span>THE PRESERVED RECORD</span>

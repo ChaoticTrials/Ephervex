@@ -75,7 +75,7 @@ html[data-season='halloween']:not([data-theme='dark']) .archive-root {
   color: var(--archive-hero-accent);
   font-style: normal;
 }
-.archive-hero-copy > p:not(.archive-preview) {
+.archive-hero-copy > p {
   max-width: 45rem;
   margin: 0;
   color: var(--archive-hero-muted);
@@ -135,21 +135,6 @@ html[data-season='halloween']:not([data-theme='dark']) .archive-root {
   border-top: 1px solid rgba(255, 255, 255, 0.28);
   color: var(--archive-hero-muted);
   line-height: 1.5;
-}
-.archive-preview {
-  max-width: fit-content;
-  margin: 1.25rem 0 0;
-  padding: 0.45rem 0.75rem;
-  border: 1px solid #a98d54;
-  border-radius: 0.5rem;
-  background: #f9eed5;
-  color: #3d321d;
-  font-size: 0.81rem;
-}
-.archive-hero .archive-preview {
-  border-color: rgba(255, 226, 162, 0.55);
-  background: rgba(255, 226, 162, 0.1);
-  color: #fff1cd;
 }
 .archive-body {
   padding-top: 2.7rem;
@@ -513,9 +498,6 @@ html[data-season='halloween']:not([data-theme='dark']) .archive-root {
 }
 .archive-breadcrumb a {
   font-weight: 700;
-}
-.archive-detail-shell > .archive-preview {
-  margin-bottom: 1.25rem;
 }
 .archive-detail-head {
   position: relative;
