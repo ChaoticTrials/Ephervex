@@ -655,8 +655,8 @@ impl App {
 
     /// Applies the network settings and the given property values as one
     /// change: one claim, one validated write of `server.properties` and one
-    /// registry commit. A refused value leaves the file and the stored network
-    /// settings as they were.
+    /// registry commit. A refused value or a failed commit leaves the file and
+    /// the stored network settings as they were.
     pub fn set_server_properties(
         &self,
         id: ServerId,
@@ -665,12 +665,10 @@ impl App {
     ) -> CoreResult<ServerCommit<ServerRecord>> {
         let (_claim, mut record) = self.claim_stopped_server(id)?;
         network_properties(&network)?.validate()?;
-        merge_properties_file(&server_properties_path(&record), &network, values)?;
+        let backup = merge_properties_file(&server_properties_path(&record), &network, values)?;
         let previous = record.clone();
         record.network = network;
-        let committed = self
-            .registry_for_services()
-            .update_server_committed(&mut record)?;
+        let committed = self.commit_or_restore_properties(&mut record, &backup)?;
         self.sync_linked_server_list(&committed.record, Some(&previous));
         Ok(committed)
     }
@@ -685,14 +683,30 @@ impl App {
         let (_claim, mut record) = self.claim_stopped_server(id)?;
         let network = change.applied_to(&record.network)?;
         network_properties(&network)?.validate()?;
-        merge_network_file(&server_properties_path(&record), &network)?;
+        let backup = merge_network_file(&server_properties_path(&record), &network)?;
         let previous = record.clone();
         record.network = network;
-        let committed = self
-            .registry_for_services()
-            .update_server_committed(&mut record)?;
+        let committed = self.commit_or_restore_properties(&mut record, &backup)?;
         self.sync_linked_server_list(&committed.record, Some(&previous));
         Ok(committed)
+    }
+
+    /// Commits the record after `server.properties` was rewritten. A failed
+    /// commit puts the file back so it keeps agreeing with the stored settings.
+    fn commit_or_restore_properties(
+        &self,
+        record: &mut ServerRecord,
+        backup: &PropertiesBackup,
+    ) -> CoreResult<ServerCommit<ServerRecord>> {
+        match self.registry_for_services().update_server_committed(record) {
+            Ok(committed) => Ok(committed),
+            Err(error) => {
+                if let Err(restore) = backup.restore() {
+                    tracing::warn!(%restore, "server.properties was not restored");
+                }
+                Err(error.into())
+            }
+        }
     }
 
     /// Replaces the server-specific Java and JVM overrides as one canonical
@@ -1305,23 +1319,66 @@ fn select_available_port_with(
     .into())
 }
 
-fn merge_network_file(path: &Path, network: &ServerNetworkSettings) -> CoreResult<()> {
+fn merge_network_file(
+    path: &Path,
+    network: &ServerNetworkSettings,
+) -> CoreResult<PropertiesBackup> {
     merge_properties_file(path, network, &[])
 }
 
+/// The contents of `server.properties` before a save, kept so a failed save
+/// can put them back.
+struct PropertiesBackup {
+    path: PathBuf,
+    previous: Option<Vec<u8>>,
+}
+
+impl PropertiesBackup {
+    fn restore(&self) -> CoreResult<()> {
+        match &self.previous {
+            Some(bytes) => atomic_write(&self.path, bytes),
+            None => match std::fs::remove_file(&self.path) {
+                Err(source) if source.kind() != std::io::ErrorKind::NotFound => {
+                    Err(ephervex_server::ServerError::Io {
+                        path: self.path.clone(),
+                        source,
+                    }
+                    .into())
+                }
+                _ => Ok(()),
+            },
+        }
+    }
+}
+
 /// Merges the network settings, then sets each value, and writes the file once
-/// only when every one of them is accepted.
+/// only when every one of them is accepted. Returns the previous contents.
 fn merge_properties_file(
     path: &Path,
     network: &ServerNetworkSettings,
     values: &[(String, String)],
-) -> CoreResult<()> {
+) -> CoreResult<PropertiesBackup> {
+    let previous = match std::fs::read(path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(source) => {
+            return Err(ephervex_server::ServerError::Io {
+                path: path.to_path_buf(),
+                source,
+            }
+            .into());
+        }
+    };
     let mut document = read_properties(path)?;
     document.merge_network(&network_properties(network)?)?;
     for (key, value) in values {
         document.set(key, value)?;
     }
-    atomic_write(path, document.render().as_bytes())
+    atomic_write(path, document.render().as_bytes())?;
+    Ok(PropertiesBackup {
+        path: path.to_path_buf(),
+        previous,
+    })
 }
 
 fn emit_network_advisories(
@@ -2920,6 +2977,177 @@ mod tests {
             app.server(server.id).expect("record").network,
             stored.record.network
         );
+    }
+
+    /// Makes the canonical metadata directory read-only so a registry commit
+    /// fails while the game directory stays writable. Returns `None` when the
+    /// process can write there regardless (for example as root).
+    #[cfg(unix)]
+    fn block_metadata_commits(root: &Path) -> Option<MetadataWriteBlock> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = ephervex_storage::metadata::server_metadata_path(root)
+            .parent()
+            .expect("metadata directory")
+            .to_path_buf();
+        let original = std::fs::metadata(&directory)
+            .expect("metadata dir")
+            .permissions();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o555))
+            .expect("make read-only");
+        let block = MetadataWriteBlock {
+            directory: directory.clone(),
+            original,
+        };
+        let probe = directory.join("probe");
+        if std::fs::write(&probe, b"").is_ok() {
+            let _ = std::fs::remove_file(&probe);
+            return None;
+        }
+        Some(block)
+    }
+
+    #[cfg(unix)]
+    struct MetadataWriteBlock {
+        directory: PathBuf,
+        original: std::fs::Permissions,
+    }
+
+    #[cfg(unix)]
+    impl Drop for MetadataWriteBlock {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.directory, self.original.clone());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_commit_restores_server_properties_after_a_grouped_save() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let server = app
+            .registry_for_services()
+            .create_server(NewServer::new(
+                "failed grouped commit",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("scaffold");
+        let stored = app
+            .set_server_properties(
+                server.id,
+                ServerNetworkSettings {
+                    online_mode: true,
+                    access: NetworkAccess::Lan,
+                    port: 25_570,
+                    bind_address: None,
+                },
+                &[("motd".to_owned(), "before".to_owned())],
+            )
+            .expect("initial save");
+        let path = server_properties_path(&stored.record);
+        let before = std::fs::read(&path).expect("properties file");
+
+        let Some(_block) = block_metadata_commits(&stored.record.root) else {
+            return;
+        };
+        let error = app
+            .set_server_properties(
+                server.id,
+                ServerNetworkSettings {
+                    online_mode: false,
+                    access: NetworkAccess::Localhost,
+                    port: 25_599,
+                    bind_address: None,
+                },
+                &[("motd".to_owned(), "after".to_owned())],
+            )
+            .expect_err("the registry commit fails");
+
+        assert!(matches!(error, CoreError::Storage(_)), "{error:?}");
+        assert_eq!(std::fs::read(&path).expect("file"), before);
+        assert_eq!(
+            app.server(server.id).expect("record").network,
+            stored.record.network
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_commit_restores_server_properties_after_a_network_change() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let server = app
+            .registry_for_services()
+            .create_server(NewServer::new(
+                "failed network commit",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("scaffold");
+        let stored = app
+            .update_server_network(
+                server.id,
+                &ServerNetworkChange {
+                    port: Some(25_570),
+                    ..ServerNetworkChange::default()
+                },
+            )
+            .expect("initial change");
+        let path = server_properties_path(&stored.record);
+        let before = std::fs::read(&path).expect("properties file");
+
+        let Some(_block) = block_metadata_commits(&stored.record.root) else {
+            return;
+        };
+        let error = app
+            .update_server_network(
+                server.id,
+                &ServerNetworkChange {
+                    port: Some(25_571),
+                    online_mode: Some(false),
+                    ..ServerNetworkChange::default()
+                },
+            )
+            .expect_err("the registry commit fails");
+
+        assert!(matches!(error, CoreError::Storage(_)), "{error:?}");
+        assert_eq!(std::fs::read(&path).expect("file"), before);
+        assert_eq!(
+            app.server(server.id).expect("record").network,
+            stored.record.network
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_commit_removes_a_server_properties_file_the_save_created() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let server = app
+            .registry_for_services()
+            .create_server(NewServer::new(
+                "failed first save",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("scaffold");
+        let path = server_properties_path(&server);
+        let _ = std::fs::remove_file(&path);
+
+        let Some(_block) = block_metadata_commits(&server.root) else {
+            return;
+        };
+        app.update_server_network(
+            server.id,
+            &ServerNetworkChange {
+                port: Some(25_571),
+                ..ServerNetworkChange::default()
+            },
+        )
+        .expect_err("the registry commit fails");
+
+        assert!(!path.exists());
     }
 
     #[test]
