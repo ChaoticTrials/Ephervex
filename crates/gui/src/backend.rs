@@ -7405,9 +7405,9 @@ fn follow_server_capture(
             while !stop.load(Ordering::Relaxed) {
                 // Held until the update is sent, so a forwarder's lines come
                 // either before this read or after the snapshot it sent.
-                let mut delivery = delivery
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let Some(mut delivery) = lock_delivery_unless_stopped(&delivery, &stop) else {
+                    break;
+                };
                 // Read on both sides of the poll, so a forwarder that began
                 // meanwhile is not sent its own lines a second time.
                 let forwarding_before = supervised.forwards(server);
@@ -7440,6 +7440,22 @@ fn follow_server_capture(
     {
         tracing::error!(%error, "could not start the server capture tail");
     }
+}
+
+/// Takes the server's delivery lock for a capture follower, unless the follower
+/// was stopped while it waited.
+///
+/// A replacement follower raises the stop flag before it starts, so a stopped
+/// one that gets the lock after the replacement's snapshot must not poll from
+/// its stale position and send what that snapshot already holds.
+fn lock_delivery_unless_stopped<'a>(
+    delivery: &'a Mutex<ConsoleDelivery>,
+    stop: &AtomicBool,
+) -> Option<std::sync::MutexGuard<'a, ConsoleDelivery>> {
+    let guard = delivery
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    (!stop.load(Ordering::Relaxed)).then_some(guard)
 }
 
 /// Sends what the capture follower read, remembering it for the forwarder of
@@ -14586,6 +14602,32 @@ mod tests {
         send_server_lines(&events, &delivery, server, vec![next]);
 
         assert_eq!(console_text(&received), ["kept", "next"]);
+    }
+
+    #[test]
+    fn a_capture_follower_stopped_while_waiting_for_the_delivery_lock_does_not_proceed() {
+        let delivery = Arc::new(Mutex::new(ConsoleDelivery::default()));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        // The replacement follower holds the lock to send its snapshot, after
+        // raising the stop flag of the follower waiting for it.
+        let replacement = delivery.lock().expect("delivery");
+        let stale = {
+            let delivery = Arc::clone(&delivery);
+            let stop = Arc::clone(&stop);
+            thread::spawn(move || lock_delivery_unless_stopped(&delivery, &stop).is_some())
+        };
+        stop.store(true, Ordering::Relaxed);
+        drop(replacement);
+
+        assert!(
+            !stale.join().expect("follower thread"),
+            "a stopped follower must not poll or send after its replacement"
+        );
+        assert!(
+            lock_delivery_unless_stopped(&delivery, &AtomicBool::new(false)).is_some(),
+            "a running follower still takes the lock"
+        );
     }
 
     /// With nothing supervised there is nothing to wait for, so quitting
