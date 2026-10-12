@@ -5141,6 +5141,7 @@ fn register_linked_pair(ui: &AppWindow, workspace: &Workspace) {
             let restarting = !lifecycle.stage_of(host).is_empty();
             let Some(operation) = lifecycle.begin_pair_start(InstalledHost::Instance(client), host)
             else {
+                ui.invoke_present_toast(StartRefusal::PairStarting.message().into(), true);
                 return;
             };
             let claim = match lifecycle.servers.claim_linked(server, restarting) {
@@ -13336,6 +13337,27 @@ mod tests {
         let sent = starts(&commands);
         assert_eq!(sent, [("connect", client, 0)]);
         assert!(!workspace.lifecycle.borrow().servers.busy(server));
+        assert!(workspace.lifecycle.borrow().pair_starting(host));
+    }
+
+    #[test]
+    fn launch_and_connect_while_its_pair_is_starting_says_so_and_sends_nothing() {
+        let ui = test_window();
+        let toasts = toasts(&ui);
+        let (workspace, commands, client, host) = paired_workspace(&ui);
+        let (clients, rows) = paired_rows(client, host, false, true);
+        workspace.lifecycle.borrow_mut().servers.observe(&rows);
+        workspace.state.borrow_mut().set_rows(clients, rows);
+
+        ui.invoke_launch_and_connect(client.id().into(), host.id().into());
+        assert!(toasts.borrow().is_empty(), "the first press is accepted");
+        ui.invoke_launch_and_connect(client.id().into(), host.id().into());
+
+        assert_eq!(starts(&commands), [("connect", client, 0)]);
+        assert_eq!(
+            toasts.borrow().as_slice(),
+            [(lookup("gui-pair-start-busy"), true)]
+        );
         assert!(workspace.lifecycle.borrow().pair_starting(host));
     }
 
