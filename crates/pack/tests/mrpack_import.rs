@@ -527,7 +527,7 @@ async fn every_refusal_fixture_is_refused_by_the_rule_it_was_written_for() {
     type RefusalCase = (&'static str, fn(&PackError) -> bool);
 
     let workspace = tempfile::tempdir().expect("temp dir");
-    let cases: [RefusalCase; 11] = [
+    let cases: [RefusalCase; 13] = [
         ("fabric.index.json", |error| {
             error.unsupported_loader() == Some("fabric-loader")
         }),
@@ -562,6 +562,12 @@ async fn every_refusal_fixture_is_refused_by_the_rule_it_was_written_for() {
             matches!(error, PackError::ManifestInvalid { .. })
         }),
         ("missing-required-fields.index.json", |error| {
+            matches!(error, PackError::ManifestInvalid { .. })
+        }),
+        ("no-files.index.json", |error| {
+            matches!(error, PackError::ManifestInvalid { .. })
+        }),
+        ("no-file-size.index.json", |error| {
             matches!(error, PackError::ManifestInvalid { .. })
         }),
     ];

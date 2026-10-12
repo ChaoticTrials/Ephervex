@@ -8,7 +8,7 @@
 //! # What is validated, and why refusal is the right answer
 //!
 //! Validation covers the ZIP structure, the required top-level fields
-//! (`formatVersion`, `game`, `versionId`, `name`), the Minecraft dependency, the
+//! (`formatVersion`, `game`, `versionId`, `name`, `files`), the Minecraft dependency, the
 //! loader dependencies, file paths, hashes, download URL scheme and domain, and
 //! the environment metadata. A file must carry both `sha1` and `sha512`, as the
 //! format requires. Every one of them is a hard failure rather than a repair,
@@ -298,7 +298,7 @@ fn normalize_file(
         logical_path,
         hashes,
         downloads,
-        size: file.file_size,
+        size: Some(file.file_size),
         client: environment.client.into(),
         server: environment.server.into(),
         selected: None,
@@ -454,7 +454,6 @@ struct RawIndex {
     name: String,
     #[serde(default)]
     summary: Option<String>,
-    #[serde(default)]
     files: Vec<RawFile>,
     #[serde(default)]
     dependencies: BTreeMap<String, String>,
@@ -470,8 +469,7 @@ struct RawFile {
     env: Option<RawEnv>,
     #[serde(default)]
     downloads: Vec<String>,
-    #[serde(default)]
-    file_size: Option<u64>,
+    file_size: u64,
 }
 
 /// A file's declared environment support.
@@ -593,6 +591,47 @@ mod tests {
         );
         assert_eq!(parsed.recipe.original_name, "Test Pack");
         assert_eq!(parsed.recipe.original_version.as_deref(), Some("1.0.0"));
+    }
+
+    #[test]
+    fn an_index_without_a_files_member_is_refused_rather_than_read_as_empty() {
+        let document = r#"{"formatVersion": 1, "game": "minecraft", "versionId": "1.0.0", "name": "Test Pack", "dependencies": {"minecraft": "1.20.1"}}"#;
+        let error = parse_index(document).expect_err("files is required");
+        assert!(
+            matches!(&error, PackError::ManifestInvalid { source, .. } if source.to_string().contains("files")),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_file_without_a_declared_size_is_refused() {
+        let document = index(
+            r#"{"minecraft": "1.20.1"}"#,
+            &format!(
+                r#"{{"path": "mods/a.jar", "hashes": {{"sha1": "{SHA1}", "sha512": "{SHA512}"}}, "downloads": ["https://cdn.modrinth.com/a.jar"]}}"#
+            ),
+        );
+        let error = parse_index(&document).expect_err("fileSize is required");
+        assert!(
+            matches!(&error, PackError::ManifestInvalid { source, .. } if source.to_string().contains("fileSize")),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn the_declared_file_size_reaches_the_recipe() {
+        let parsed = parse_index(&index(
+            r#"{"minecraft": "1.20.1"}"#,
+            &file_entry("mods/a.jar", r#"{"client":"required","server":"required"}"#),
+        ))
+        .expect("valid pack");
+        assert_eq!(parsed.recipe.files[0].size, Some(42));
+    }
+
+    #[test]
+    fn a_pack_with_an_empty_files_list_is_still_accepted() {
+        let parsed = parse_index(&index(r#"{"minecraft": "1.20.1"}"#, "")).expect("valid pack");
+        assert!(parsed.recipe.files.is_empty());
     }
 
     #[test]
@@ -744,7 +783,7 @@ mod tests {
         let document = index(
             r#"{"minecraft": "1.20.1"}"#,
             &format!(
-                r#"{{"path": "mods/a.jar", "hashes": {{"sha1": "{SHA1}", "sha512": "{SHA512}"}}, "downloads": ["https://cdn.modrinth.com/a.jar"]}}"#
+                r#"{{"fileSize": 1, "path": "mods/a.jar", "hashes": {{"sha1": "{SHA1}", "sha512": "{SHA512}"}}, "downloads": ["https://cdn.modrinth.com/a.jar"]}}"#
             ),
         );
         let parsed = parse_index(&document).expect("valid");
@@ -793,7 +832,7 @@ mod tests {
     fn a_file_with_no_usable_hash_is_refused_because_verification_is_mandatory() {
         let document = index(
             r#"{"minecraft": "1.20.1"}"#,
-            r#"{"path": "mods/a.jar", "hashes": {"md5": "0123456789abcdef0123456789abcdef"}, "downloads": ["https://cdn.modrinth.com/a.jar"]}"#,
+            r#"{"fileSize": 1, "path": "mods/a.jar", "hashes": {"md5": "0123456789abcdef0123456789abcdef"}, "downloads": ["https://cdn.modrinth.com/a.jar"]}"#,
         );
         let error = parse_index(&document).expect_err("must refuse");
         assert!(matches!(error, PackError::FileHashesMissing { .. }));
@@ -803,7 +842,7 @@ mod tests {
     fn a_malformed_digest_is_not_accepted_as_a_hash() {
         let document = index(
             r#"{"minecraft": "1.20.1"}"#,
-            r#"{"path": "mods/a.jar", "hashes": {"sha1": "not-a-digest"}, "downloads": ["https://cdn.modrinth.com/a.jar"]}"#,
+            r#"{"fileSize": 1, "path": "mods/a.jar", "hashes": {"sha1": "not-a-digest"}, "downloads": ["https://cdn.modrinth.com/a.jar"]}"#,
         );
         let error = parse_index(&document).expect_err("must refuse");
         assert!(matches!(error, PackError::FileHashesMissing { .. }));
@@ -827,7 +866,7 @@ mod tests {
             let document = index(
                 r#"{"minecraft": "1.20.1"}"#,
                 &format!(
-                    r#"{{"path": "mods/a.jar", "hashes": {hashes}, "downloads": ["https://cdn.modrinth.com/a.jar"]}}"#
+                    r#"{{"fileSize": 1, "path": "mods/a.jar", "hashes": {hashes}, "downloads": ["https://cdn.modrinth.com/a.jar"]}}"#
                 ),
             );
             let error = parse_index(&document).expect_err("must refuse");
@@ -843,7 +882,7 @@ mod tests {
         let document = index(
             r#"{"minecraft": "1.20.1"}"#,
             &format!(
-                r#"{{"path": "mods/a.jar", "hashes": {{"sha1": "{SHA1}", "sha512": "{SHA512}"}}, "downloads": []}}"#
+                r#"{{"fileSize": 1, "path": "mods/a.jar", "hashes": {{"sha1": "{SHA1}", "sha512": "{SHA512}"}}, "downloads": []}}"#
             ),
         );
         let error = parse_index(&document).expect_err("must refuse");
@@ -857,7 +896,7 @@ mod tests {
         let document = index(
             r#"{"minecraft": "1.20.1"}"#,
             &format!(
-                r#"{{"path": "mods/a.jar", "hashes": {{"sha1": "{SHA1}", "sha512": "{SHA512}"}}, "downloads": ["https://evil.example/a.jar", "https://cdn.modrinth.com/a.jar"]}}"#
+                r#"{{"fileSize": 1, "path": "mods/a.jar", "hashes": {{"sha1": "{SHA1}", "sha512": "{SHA512}"}}, "downloads": ["https://evil.example/a.jar", "https://cdn.modrinth.com/a.jar"]}}"#
             ),
         );
         let parsed = parse_index(&document).expect("one address is permitted");
@@ -878,7 +917,7 @@ mod tests {
             let document = index(
                 r#"{"minecraft": "1.20.1"}"#,
                 &format!(
-                    r#"{{"path": "mods/a.jar", "hashes": {{"sha1": "{SHA1}", "sha512": "{SHA512}"}}, "downloads": ["{address}"]}}"#
+                    r#"{{"fileSize": 1, "path": "mods/a.jar", "hashes": {{"sha1": "{SHA1}", "sha512": "{SHA512}"}}, "downloads": ["{address}"]}}"#
                 ),
             );
             let error = parse_index(&document).expect_err("must refuse");
@@ -1066,7 +1105,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            r#"{{"path": "{path}", "hashes": {{"sha1": "{SHA1}", "sha512": "{SHA512}"}}, "downloads": [{downloads}]}}"#
+            r#"{{"fileSize": 1, "path": "{path}", "hashes": {{"sha1": "{SHA1}", "sha512": "{SHA512}"}}, "downloads": [{downloads}]}}"#
         )
     }
 
@@ -1270,7 +1309,7 @@ mod tests {
     #[test]
     fn a_file_with_no_downloads_member_still_reports_its_missing_downloads() {
         let files = format!(
-            r#"{{"path": "mods/a.jar", "hashes": {{"sha1": "{SHA1}", "sha512": "{SHA512}"}}}}"#
+            r#"{{"fileSize": 1, "path": "mods/a.jar", "hashes": {{"sha1": "{SHA1}", "sha512": "{SHA512}"}}}}"#
         );
         let error = parse_with_limits(&files, &address_limits(1, 1)).expect_err("no downloads");
         assert!(
@@ -1282,7 +1321,7 @@ mod tests {
     #[test]
     fn a_downloads_member_that_is_not_an_array_is_an_unreadable_index() {
         let files = format!(
-            r#"{{"path": "mods/a.jar", "hashes": {{"sha1": "{SHA1}", "sha512": "{SHA512}"}}, "downloads": "https://cdn.modrinth.com/a.jar"}}"#
+            r#"{{"fileSize": 1, "path": "mods/a.jar", "hashes": {{"sha1": "{SHA1}", "sha512": "{SHA512}"}}, "downloads": "https://cdn.modrinth.com/a.jar"}}"#
         );
         let error = parse_with_limits(&files, &address_limits(10, 10)).expect_err("not an array");
         assert!(
@@ -1310,7 +1349,7 @@ mod tests {
     #[test]
     fn a_file_repeating_its_downloads_member_is_an_unreadable_index() {
         let files = format!(
-            r#"{{"path": "mods/a.jar", "hashes": {{"sha1": "{SHA1}", "sha512": "{SHA512}"}}, "downloads": ["https://cdn.modrinth.com/a.jar"], "downloads": ["https://cdn.modrinth.com/b.jar"]}}"#
+            r#"{{"fileSize": 1, "path": "mods/a.jar", "hashes": {{"sha1": "{SHA1}", "sha512": "{SHA512}"}}, "downloads": ["https://cdn.modrinth.com/a.jar"], "downloads": ["https://cdn.modrinth.com/b.jar"]}}"#
         );
         let error = parse_with_limits(&files, &address_limits(10, 10)).expect_err("repeated");
         assert!(

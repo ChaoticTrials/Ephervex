@@ -1,0 +1,9 @@
+{
+  "formatVersion": 1,
+  "game": "minecraft",
+  "versionId": "1.0.0",
+  "name": "No Files Pack",
+  "dependencies": {
+    "minecraft": "1.20.1"
+  }
+}

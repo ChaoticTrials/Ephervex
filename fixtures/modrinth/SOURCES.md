@@ -71,6 +71,8 @@ One document per refusal, so a regression names the rule it broke rather than
 | `sha1-only.index.json` | a file lists `sha1` without the `sha512` the format requires |
 | `format-version-0.index.json` | `formatVersion` 0 is not a format revision |
 | `missing-required-fields.index.json` | `formatVersion`, `game`, `versionId` and `name` are required and are never defaulted |
+| `no-files.index.json` | `files` is required, so an index without it is not read as a pack with no files |
+| `no-file-size.index.json` | a file without the `fileSize` the format requires |
 | `old-minecraft.index.json` | the selected Minecraft release is below the supported floor |
 
 The digests in these documents are the SHA-1 and SHA-512 of the empty string. They are never
