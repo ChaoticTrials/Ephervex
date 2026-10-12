@@ -119,7 +119,8 @@ pub struct ManagedMutationReport {
     /// Mods that are no longer part of the instance.
     pub removed: Vec<PathBuf>,
     /// Recorded mods whose jar had gone missing and was put back at the same
-    /// version. Repair, not a change: the recipe entry is unchanged.
+    /// version. The recipe entry is kept as recorded, except that a record
+    /// which did not take the requested side takes it.
     pub repaired: Vec<PathBuf>,
     /// Requested mods that were already installed at exactly the requested
     /// version, so nothing was written for them. The path is the one the recipe
