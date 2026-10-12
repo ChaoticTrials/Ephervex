@@ -1082,6 +1082,7 @@ impl Config {
         // A previous version, a hand edit, or a third-party tool may have left
         // a credential here. Drop it rather than carrying it back out to disk.
         config.strip_secret_looking_keys();
+        config.canonicalize_account_keys();
         Ok(config)
     }
 
@@ -1215,6 +1216,8 @@ impl Config {
     /// first account, which becomes the default because otherwise a single
     /// account would sit there not being used by anything.
     pub fn remember_account(&mut self, id: &str, name: &str, kind: AccountKind, at: &str) {
+        let id = canonical_account_key(id);
+        let id = id.as_str();
         // A remembered account's credential is current, not one to clean up.
         self.keyring_cleanup.retain(|pending| pending != id);
         let entry = self.accounts.entry(id.to_owned()).or_default();
@@ -1237,7 +1240,7 @@ impl Config {
     /// account removed while the resume ran stays removed. Unlike a sign-in it
     /// leaves the default account and any pending keyring cleanup alone.
     pub fn refresh_account(&mut self, id: &str, name: &str, kind: AccountKind, at: &str) -> bool {
-        let Some(entry) = self.accounts.get_mut(id) else {
+        let Some(entry) = self.accounts.get_mut(&canonical_account_key(id)) else {
             return false;
         };
         name.clone_into(&mut entry.name);
@@ -1251,10 +1254,11 @@ impl Config {
     /// Returns `false` for an id this installation does not have, so a caller
     /// cannot point the default at nothing.
     pub fn set_active_account(&mut self, id: &str) -> bool {
-        if !self.accounts.contains_key(id) {
+        let id = canonical_account_key(id);
+        if !self.accounts.contains_key(&id) {
             return false;
         }
-        id.clone_into(&mut self.active_account);
+        self.active_account = id;
         true
     }
 
@@ -1270,7 +1274,8 @@ impl Config {
     /// The stored credential is removed separately, by whoever owns the keyring
     /// - this crate has no business touching it (ADR 0004).
     pub fn forget_account(&mut self, id: &str) {
-        self.accounts.remove(id);
+        let id = canonical_account_key(id);
+        self.accounts.remove(&id);
         if self.active_account != id {
             return;
         }
@@ -1289,8 +1294,9 @@ impl Config {
     /// Records an account whose stored credential could not be deleted yet,
     /// for deletion once the keyring can be reached.
     pub fn record_keyring_cleanup(&mut self, id: &str) {
-        if !self.keyring_cleanup.iter().any(|pending| pending == id) {
-            self.keyring_cleanup.push(id.to_owned());
+        let id = canonical_account_key(id);
+        if !self.keyring_cleanup.contains(&id) {
+            self.keyring_cleanup.push(id);
         }
     }
 
@@ -1302,20 +1308,11 @@ impl Config {
     /// arbitrary one - removing the wrong account is not recoverable.
     pub fn find_account(&self, reference: &str) -> Result<&str, AccountLookup> {
         let reference = reference.trim();
-        if self.accounts.contains_key(reference) {
-            return self
-                .accounts
-                .get_key_value(reference)
-                .map(|(id, _)| id.as_str())
-                .ok_or(AccountLookup::Unknown);
-        }
-
-        if let Ok(requested_id) = uuid::Uuid::parse_str(reference)
-            && let Some(stored_id) = self.accounts.keys().find(|stored_id| {
-                uuid::Uuid::parse_str(stored_id).is_ok_and(|candidate| candidate == requested_id)
-            })
+        if let Some((id, _)) = self
+            .accounts
+            .get_key_value(&canonical_account_key(reference))
         {
-            return Ok(stored_id);
+            return Ok(id.as_str());
         }
 
         let matches: Vec<&str> = self
@@ -1423,6 +1420,41 @@ impl Config {
             })
     }
 
+    /// Rewrites every account id that is a UUID to its hyphenated lowercase
+    /// form, in the account table, the default, and the pending keyring cleanup.
+    ///
+    /// A file edited by hand or by another tool may spell one UUID several ways
+    /// (compact, braced, uppercase). Every other part of Ephervex compares ids
+    /// as the hyphenated text, so this is where one account becomes one key.
+    /// Two rows that turn out to be one account are merged by
+    /// [`merge_duplicate_account_rows`]. An id that is not a UUID is left as it
+    /// is.
+    fn canonicalize_account_keys(&mut self) {
+        let mut rows: BTreeMap<String, AccountConfig> = BTreeMap::new();
+        for (id, row) in std::mem::take(&mut self.accounts) {
+            match rows.entry(canonical_account_key(&id)) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert(row);
+                }
+                std::collections::btree_map::Entry::Occupied(mut slot) => {
+                    merge_duplicate_account_rows(slot.get_mut(), row);
+                }
+            }
+        }
+        self.accounts = rows;
+
+        self.active_account = canonical_account_key(self.active_account.trim());
+
+        let mut pending: Vec<String> = Vec::with_capacity(self.keyring_cleanup.len());
+        for id in std::mem::take(&mut self.keyring_cleanup) {
+            let id = canonical_account_key(&id);
+            if !pending.contains(&id) {
+                pending.push(id);
+            }
+        }
+        self.keyring_cleanup = pending;
+    }
+
     fn strip_secret_looking_keys(&mut self) {
         for (table, prefix) in self.open_tables_mut() {
             while let Some(found) = find_secret_key(table, prefix) {
@@ -1474,6 +1506,34 @@ impl Config {
             );
         }
     }
+}
+
+/// The key an account is stored and compared under.
+///
+/// A UUID in any form the `uuid` crate parses becomes its hyphenated lowercase
+/// text, the form a profile id is written in everywhere else. Anything that is
+/// not a UUID is returned as given.
+fn canonical_account_key(id: &str) -> String {
+    uuid::Uuid::parse_str(id).map_or_else(|_| id.to_owned(), |parsed| parsed.to_string())
+}
+
+/// Folds `other` into `kept` when both rows name one account.
+///
+/// The row authenticated most recently supplies the name, kind, and unknown
+/// keys, and the earliest recorded `added_at` survives, so the account keeps
+/// its true age. When both were last authenticated at the same time, `kept` -
+/// the row whose original key sorts first - wins.
+fn merge_duplicate_account_rows(kept: &mut AccountConfig, other: AccountConfig) {
+    let added_at = [&kept.added_at, &other.added_at]
+        .into_iter()
+        .filter(|at| !at.is_empty())
+        .min()
+        .cloned()
+        .unwrap_or_default();
+    if other.last_authenticated_at > kept.last_authenticated_at {
+        *kept = other;
+    }
+    kept.added_at = added_at;
 }
 
 fn sanitized_parse_error(text: &str, error: &toml::de::Error) -> ConfigParseError {
@@ -3119,6 +3179,119 @@ reference = ""
         assert!(config.active_account_config().is_none());
     }
 
+    const ALICE: &str = "069a79f4-44e9-4726-a5be-fca90e38aaf5";
+    const ALICE_COMPACT: &str = "069a79f444e94726a5befca90e38aaf5";
+    const BOB: &str = "2f8a1c40-0000-4000-8000-000000000001";
+
+    fn account_row(name: &str, added_at: &str, last_authenticated_at: &str) -> String {
+        format!(
+            "name = \"{name}\"\nkind = \"microsoft\"\n\
+             added_at = \"{added_at}\"\nlast_authenticated_at = \"{last_authenticated_at}\"\n"
+        )
+    }
+
+    #[test]
+    fn loading_rewrites_every_uuid_account_id_to_its_hyphenated_form() {
+        let text = format!(
+            "active_account = \"{ALICE_COMPACT}\"\n\
+             keyring_cleanup = [\"{}\", \"{BOB}\", \"{ALICE}\"]\n\n\
+             [accounts.{ALICE_COMPACT}]\n{}\n\
+             [accounts.\"{{{}}}\"]\n{}\n\
+             [accounts.not-a-uuid]\n{}",
+            ALICE.to_uppercase(),
+            account_row("Alice", "t1", "t2"),
+            BOB.to_uppercase(),
+            account_row("Bob", "t1", "t2"),
+            account_row("Legacy", "t1", "t2"),
+        );
+
+        let config = Config::from_toml_str(&text).expect("parse");
+
+        assert_eq!(
+            config
+                .accounts
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            [ALICE, BOB, "not-a-uuid"]
+        );
+        assert_eq!(config.active_account(), Some(ALICE));
+        assert_eq!(config.keyring_cleanup, [ALICE, BOB]);
+    }
+
+    #[test]
+    fn two_rows_for_one_account_merge_into_the_most_recently_authenticated() {
+        let text = format!(
+            "active_account = \"{ALICE_COMPACT}\"\n\n\
+             [accounts.{ALICE_COMPACT}]\n{}\n\
+             [accounts.{ALICE}]\n{}",
+            account_row("Old Name", "2026-01-01T00:00:00Z", "2026-03-01T00:00:00Z"),
+            account_row("New Name", "2026-02-01T00:00:00Z", "2026-05-01T00:00:00Z"),
+        );
+
+        let config = Config::from_toml_str(&text).expect("parse");
+
+        assert_eq!(config.accounts.len(), 1);
+        let merged = config.accounts.get(ALICE).expect("merged row");
+        assert_eq!(merged.name, "New Name");
+        assert_eq!(merged.added_at, "2026-01-01T00:00:00Z", "the earliest add");
+        assert_eq!(merged.last_authenticated_at, "2026-05-01T00:00:00Z");
+        assert_eq!(config.active_account(), Some(ALICE));
+    }
+
+    #[test]
+    fn a_canonicalized_configuration_is_written_with_hyphenated_ids() {
+        let text = format!(
+            "active_account = \"{ALICE_COMPACT}\"\n\n[accounts.{ALICE_COMPACT}]\n{}",
+            account_row("Alice", "t1", "t2"),
+        );
+        let written = Config::from_toml_str(&text)
+            .expect("parse")
+            .to_toml_string()
+            .expect("serialize");
+
+        assert!(!written.contains(ALICE_COMPACT), "{written}");
+        assert!(
+            written.contains(&format!("[accounts.{ALICE}]")),
+            "{written}"
+        );
+    }
+
+    #[test]
+    fn account_changes_name_a_compact_id_and_reach_the_hyphenated_row() {
+        let mut config = Config::default();
+        config.remember_account(ALICE_COMPACT, "Alice", AccountKind::Microsoft, "t1");
+        assert_eq!(
+            config
+                .accounts
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            [ALICE],
+            "a compact id is not a second row"
+        );
+        assert_eq!(config.active_account(), Some(ALICE));
+
+        config.remember_account(ALICE, "Alice", AccountKind::Microsoft, "t2");
+        assert_eq!(config.accounts.len(), 1);
+        assert!(config.refresh_account(ALICE_COMPACT, "Alicia", AccountKind::Microsoft, "t3"));
+        assert_eq!(config.accounts[ALICE].name, "Alicia");
+
+        config.remember_account(BOB, "Bob", AccountKind::Microsoft, "t1");
+        assert!(config.set_active_account(&BOB.to_uppercase()));
+        assert_eq!(config.active_account(), Some(BOB));
+        assert!(config.set_active_account(ALICE_COMPACT));
+        assert_eq!(config.active_account(), Some(ALICE));
+
+        config.record_keyring_cleanup(ALICE_COMPACT);
+        config.record_keyring_cleanup(ALICE);
+        assert_eq!(config.keyring_cleanup, [ALICE]);
+
+        config.forget_account(ALICE_COMPACT);
+        assert!(!config.accounts.contains_key(ALICE));
+        assert_eq!(config.active_account(), Some(BOB), "the default moved on");
+    }
+
     #[test]
     fn accounts_resolve_by_uuid_or_by_name() {
         let mut config = Config::default();
@@ -3156,10 +3329,17 @@ reference = ""
             AccountKind::Microsoft,
             "t",
         );
-        assert_eq!(
-            config.find_account("8667ba71-b85a-4004-af54-457a9734eed7"),
-            Ok("8667ba71b85a4004af54457a9734eed7")
-        );
+        for spelling in [
+            "8667ba71-b85a-4004-af54-457a9734eed7",
+            "8667ba71b85a4004af54457a9734eed7",
+            "8667BA71-B85A-4004-AF54-457A9734EED7",
+        ] {
+            assert_eq!(
+                config.find_account(spelling),
+                Ok("8667ba71-b85a-4004-af54-457a9734eed7"),
+                "{spelling}"
+            );
+        }
     }
 
     #[test]

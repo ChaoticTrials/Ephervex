@@ -1353,6 +1353,25 @@ mod tests {
         .expect("remember");
     }
 
+    /// Replaces the configuration with one whose only account is a Microsoft
+    /// account stored under its compact UUID, as a hand-edited or third-party
+    /// file can leave it, and makes that account the default.
+    fn adopt_compact_keyed_default(app: &mut App, id: Uuid) {
+        let compact = id.simple().to_string();
+        std::fs::create_dir_all(app.paths().config_dir()).expect("config dir");
+        std::fs::write(
+            app.paths().config_file(),
+            format!(
+                "active_account = \"{compact}\"\n\n[accounts.{compact}]\n\
+                 name = \"Steve\"\nkind = \"microsoft\"\n\
+                 added_at = \"2026-01-01T00:00:00Z\"\n\
+                 last_authenticated_at = \"2026-01-01T00:00:00Z\"\n"
+            ),
+        )
+        .expect("write configuration");
+        app.reload_config().expect("reload");
+    }
+
     fn microsoft_session(id: Uuid) -> Session {
         Session {
             account: ephervex_auth::Account {
@@ -2556,6 +2575,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_default_launch_reuses_the_cached_session_of_a_compact_keyed_default() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let id = Uuid::new_v4();
+        adopt_compact_keyed_default(&mut app, id);
+        app.hold_session(microsoft_session(id)).expect("held");
+
+        // The keyring is unreachable, so resuming would fail.
+        assert_eq!(default_launch_account(&mut app).await, id);
+    }
+
+    #[test]
+    fn a_cached_session_of_a_compact_keyed_default_is_dropped_when_another_writer_changes_the_default()
+     {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let id = Uuid::new_v4();
+        adopt_compact_keyed_default(&mut app, id);
+        app.hold_session(microsoft_session(id)).expect("held");
+        assert!(app.session().is_some());
+
+        let other = Uuid::new_v4().to_string();
+        ephervex_storage::Config::update(app.paths(), |config| {
+            config.remember_account(
+                &other,
+                "Alex",
+                AccountKind::Microsoft,
+                "2026-02-01T00:00:00Z",
+            );
+            assert!(config.set_active_account(&other));
+        })
+        .expect("another writer changes the default");
+        app.reload_config().expect("reload");
+
+        assert!(app.session.is_none());
+    }
+
+    #[tokio::test]
     async fn a_session_only_login_serves_default_launches_when_no_account_is_configured() {
         let base = tempfile::tempdir().expect("temp dir");
         let mut app = app_rooted_at(base.path());
@@ -2766,6 +2823,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_session_only_sign_in_serves_default_launches_when_the_default_is_compact_keyed() {
+        let server = wiremock::MockServer::start().await;
+        sign_in_services::mount(&server).await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.loopback_http = true;
+        app.auth_endpoints = Some(ephervex_auth::Endpoints::with_base(&server.uri()));
+        let id = Uuid::parse_str(sign_in_services::ACCOUNT).expect("uuid");
+        adopt_compact_keyed_default(&mut app, id);
+        let options = LoginOptions {
+            request: LoginRequest {
+                flow: ephervex_auth::LoginFlow::DeviceCode,
+                timeout: std::time::Duration::from_secs(10),
+            },
+            allow_session_only: true,
+        };
+        let observer = AuthObserver::silent();
+        let cancel = CancellationToken::new();
+        app.login(&options, &observer, &cancel)
+            .await
+            .expect("login");
+        assert_eq!(app.session_only_default(), Some(id));
+
+        // The keyring is unreachable, so only the in-memory credential can
+        // refresh the lapsed session.
+        expire_session(&mut app);
+        let refreshed = app
+            .authenticated_session(&observer, &cancel)
+            .await
+            .expect("a launch with no account named uses the session-only credential");
+        assert_eq!(refreshed.account.id, id);
+        assert_eq!(sign_in_services::refresh_redemptions(&server).await, 1);
+    }
+
+    #[tokio::test]
+    async fn resuming_a_compact_keyed_account_updates_its_row_without_adding_another() {
+        let server = wiremock::MockServer::start().await;
+        sign_in_services::mount(&server).await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.loopback_http = true;
+        app.auth_endpoints = Some(ephervex_auth::Endpoints::with_base(&server.uri()));
+        let id = Uuid::parse_str(sign_in_services::ACCOUNT).expect("uuid");
+        // A persistent keyring, so the resume records the account again.
+        let store = Arc::new(HookedStore {
+            inner: MemoryStore::new(),
+            after_store: Box::new(|| {}),
+        });
+        store
+            .store(&refresh_key(id), &SecretString::new("refresh".to_owned()))
+            .expect("store");
+        app.test_keyring = TestKeyring::Store(store);
+        adopt_compact_keyed_default(&mut app, id);
+
+        app.resume_account(&AuthObserver::silent(), &CancellationToken::new())
+            .await
+            .expect("a persistent resume finds the compact-keyed row");
+
+        let accounts = &app.config().accounts;
+        assert_eq!(accounts.len(), 1, "{accounts:?}");
+        let row = accounts.get(&id.to_string()).expect("canonical row");
+        assert_ne!(row.last_authenticated_at, "2026-01-01T00:00:00Z");
+        assert_eq!(app.config().active_account(), Some(id.to_string().as_str()));
+    }
+
+    #[tokio::test]
     async fn signing_out_of_a_session_only_sign_in_clears_its_credential() {
         let base = tempfile::tempdir().expect("temp dir");
         let mut app = app_rooted_at(base.path());
@@ -2943,15 +3066,14 @@ mod tests {
         let base = tempfile::tempdir().expect("temp dir");
         let mut app = app_rooted_at(base.path());
         app.add_offline_account("DefaultPlayer").expect("added");
-        app.mutate_config(|config| {
-            config.remember_account(
-                "069a79f444e94726a5befca90e38aaf5",
-                "MelanX",
-                AccountKind::Microsoft,
-                "2026-08-08T12:00:00Z",
-            );
-        })
-        .expect("seed Microsoft account");
+        let mut text = std::fs::read_to_string(app.paths().config_file()).expect("read");
+        text.push_str(
+            "\n[accounts.069a79f444e94726a5befca90e38aaf5]\nname = \"MelanX\"\n\
+             kind = \"microsoft\"\nadded_at = \"2026-08-08T12:00:00Z\"\n\
+             last_authenticated_at = \"2026-08-08T12:00:00Z\"\n",
+        );
+        std::fs::write(app.paths().config_file(), text).expect("seed Microsoft account");
+        app.reload_config().expect("reload");
 
         let row = app
             .accounts()
