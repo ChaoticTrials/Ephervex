@@ -56,3 +56,5 @@ i-slint-backend-testing.workspace = true
 tempfile.workspace = true
 # A real supervised child, so how a run is reported follows how it really ended.
 ephervex-server.workspace = true
+# Reading back the lines a supervisor's capture wrote, as the capture follower does.
+serde_json.workspace = true

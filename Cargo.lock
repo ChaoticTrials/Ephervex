@@ -1773,6 +1773,7 @@ dependencies = [
  "i-slint-backend-testing",
  "raw-window-handle",
  "rfd",
+ "serde_json",
  "slint",
  "slint-build",
  "tempfile",

@@ -1,6 +1,6 @@
 //! Non-blocking bridge from Slint callbacks to `ephervex-core` services.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::str::FromStr as _;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -1992,6 +1992,69 @@ pub struct SupervisedServers {
     running: Arc<Mutex<HashSet<ServerId>>>,
     /// How many forwarders of this process deliver each server's output.
     forwarding: Arc<Mutex<HashMap<ServerId, usize>>>,
+    /// The ordering point between each server's capture follower and forwarders.
+    deliveries: Arc<Mutex<HashMap<ServerId, Arc<Mutex<ConsoleDelivery>>>>>,
+}
+
+/// Orders the lines a server's Console gets from the capture follower and from
+/// the forwarder of this process, which both carry what the supervisor writes
+/// to the capture before it emits the line.
+///
+/// The follower holds it from reading the capture until its update is sent, and
+/// the forwarder while it sends. A line the forwarder delivers first is in any
+/// snapshot read after it, and one the follower already sent is dropped when
+/// the forwarder reaches it.
+#[derive(Debug, Default)]
+struct ConsoleDelivery {
+    /// The newest lines the follower sent, oldest first, for the forwarder's
+    /// lines to be matched against.
+    sent: VecDeque<ephervex_core::CapturedLine>,
+}
+
+impl ConsoleDelivery {
+    /// Remembers the lines the follower sent, since a forwarder may still hold
+    /// them whether or not it is registered as delivering the server.
+    fn note_sent(&mut self, update: &ephervex_core::CaptureUpdate) {
+        if update.reset {
+            self.sent.clear();
+        }
+        self.sent.extend(update.lines.iter().cloned());
+        let surplus = self.sent.len().saturating_sub(SERVER_CONSOLE_LINES);
+        self.sent.drain(..surplus);
+    }
+
+    /// The forwarded lines the Console does not hold yet.
+    fn without_sent_lines(&mut self, lines: Vec<LiveLogLine>) -> Vec<LiveLogLine> {
+        if self.sent.is_empty() {
+            return lines;
+        }
+        lines
+            .into_iter()
+            .filter(|line| !self.was_sent(line))
+            .collect()
+    }
+
+    /// Whether the follower already sent this forwarded line. Lines arrive in
+    /// capture order, so the first one it did not send is newer than all it did.
+    fn was_sent(&mut self, line: &LiveLogLine) -> bool {
+        let LiveLogLine::Server(line) = line else {
+            return false;
+        };
+        if let Some(index) = self.sent.iter().position(|shown| shown == line) {
+            self.sent.drain(..=index);
+            return true;
+        }
+        // Older than the lines kept: the reset left it out already.
+        if self
+            .sent
+            .front()
+            .is_some_and(|oldest| line.timestamp < oldest.timestamp)
+        {
+            return true;
+        }
+        self.sent.clear();
+        false
+    }
 }
 
 /// Keeps a server marked as forwarded by this process while its forwarder lives.
@@ -2023,6 +2086,14 @@ impl SupervisedServers {
             supervised: self.clone(),
             server,
         }
+    }
+
+    fn delivery(&self, server: ServerId) -> Arc<Mutex<ConsoleDelivery>> {
+        let mut deliveries = self
+            .deliveries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(deliveries.entry(server).or_default())
     }
 
     /// Whether a forwarder of this process is delivering the server's output.
@@ -7347,6 +7418,7 @@ fn follow_server_capture(
         previous.store(true, Ordering::Relaxed);
     }
     let supervised = supervised.clone();
+    let delivery = supervised.delivery(server);
     let events = events.clone();
     if let Err(error) = thread::Builder::new()
         .name("ephervex-server-capture-tail".to_owned())
@@ -7355,6 +7427,11 @@ fn follow_server_capture(
             let mut was_forwarding = false;
             let mut failing = false;
             while !stop.load(Ordering::Relaxed) {
+                // Held until the update is sent, so a forwarder's lines come
+                // either before this read or after the snapshot it sent.
+                let mut delivery = delivery
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 // Read on both sides of the poll, so a forwarder that began
                 // meanwhile is not sent its own lines a second time.
                 let forwarding_before = supervised.forwards(server);
@@ -7370,13 +7447,7 @@ fn follow_server_capture(
                         was_forwarding = forwarding;
                         first = false;
                         if let Some(update) = update {
-                            let _ = events.send(Event::LiveLog(LiveLogUpdate {
-                                source: LiveLogSource::Server(server),
-                                reset: update.reset,
-                                missing: false,
-                                source_truncated: update.truncated,
-                                lines: update.lines.into_iter().map(LiveLogLine::Server).collect(),
-                            }));
+                            send_followed_capture(&events, &mut delivery, server, update);
                         }
                     }
                     Err(error) => {
@@ -7386,12 +7457,31 @@ fn follow_server_capture(
                         failing = true;
                     }
                 }
+                drop(delivery);
                 thread::sleep(Duration::from_millis(120));
             }
         })
     {
         tracing::error!(%error, "could not start the server capture tail");
     }
+}
+
+/// Sends what the capture follower read, remembering it for the forwarder of
+/// this process to skip.
+fn send_followed_capture(
+    events: &Sender<Event>,
+    delivery: &mut ConsoleDelivery,
+    server: ServerId,
+    update: ephervex_core::CaptureUpdate,
+) {
+    delivery.note_sent(&update);
+    let _ = events.send(Event::LiveLog(LiveLogUpdate {
+        source: LiveLogSource::Server(server),
+        reset: update.reset,
+        missing: false,
+        source_truncated: update.truncated,
+        lines: update.lines.into_iter().map(LiveLogLine::Server).collect(),
+    }));
 }
 
 /// The part of a capture update that no forwarder of this process delivers.
@@ -8224,6 +8314,7 @@ fn spawn_server(
             let forwarded_cancellations = Arc::clone(&cancellations);
             let forwarded_token = cancel.clone();
             runtime.block_on(async move {
+                let delivery = supervised.delivery(server);
                 let mut receiver = ObservedServerEvents::new(receiver, supervised, server);
                 let forward = tokio::spawn(async move {
                     while let Some(event) = receiver.recv().await {
@@ -8231,7 +8322,7 @@ fn spawn_server(
                             forward_output_batch(
                                 line,
                                 || receiver.try_recv().ok(),
-                                |lines| send_server_lines(&event_sender, server, lines),
+                                |lines| send_server_lines(&event_sender, &delivery, server, lines),
                                 |other| {
                                     forward_server_event(
                                         &event_sender,
@@ -8370,7 +8461,16 @@ fn forward_output_batch(
     }
 }
 
-fn send_server_lines(events: &Sender<Event>, server: ServerId, lines: Vec<LiveLogLine>) {
+fn send_server_lines(
+    events: &Sender<Event>,
+    delivery: &Mutex<ConsoleDelivery>,
+    server: ServerId,
+    lines: Vec<LiveLogLine>,
+) {
+    let mut delivery = delivery
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let lines = delivery.without_sent_lines(lines);
     if lines.is_empty() {
         return;
     }
@@ -8768,6 +8868,7 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
                     cancel.clone(),
                 ));
                 let forwarded_row = Arc::clone(&server_row);
+                let delivery = supervised.delivery(server);
                 let mut server_events =
                     ObservedServerEvents::new(server_events, supervised, server);
                 let server_forward = tokio::spawn(async move {
@@ -8776,7 +8877,14 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
                             forward_output_batch(
                                 line,
                                 || server_events.try_recv().ok(),
-                                |lines| send_server_lines(&server_event_sender, server, lines),
+                                |lines| {
+                                    send_server_lines(
+                                        &server_event_sender,
+                                        &delivery,
+                                        server,
+                                        lines,
+                                    );
+                                },
                                 |other| {
                                     forward_connect_server_event(
                                         &server_event_sender,
@@ -14305,6 +14413,208 @@ mod tests {
             unforwarded_capture_update(capture_update(2, true, false), false, true).is_some(),
             "a run another process started is new to the console"
         );
+    }
+
+    /// What a Console shows after the updates it received, as `reset` and
+    /// `lines` define it.
+    fn console_text(events: &Receiver<Event>) -> Vec<String> {
+        let mut shown = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            let Event::LiveLog(update) = event else {
+                continue;
+            };
+            if update.reset {
+                shown.clear();
+            }
+            for line in update.lines {
+                let LiveLogLine::Server(line) = line else {
+                    unreachable!("a server source carries server lines");
+                };
+                shown.push(line.text);
+            }
+        }
+        shown
+    }
+
+    /// Writes lines through the supervisor's own capture, returning them as the
+    /// supervisor emits them and the capture directory a follower reads.
+    struct SupervisorCapture {
+        directory: tempfile::TempDir,
+        capture: ephervex_server::OutputCapture,
+    }
+
+    impl SupervisorCapture {
+        fn new() -> Self {
+            let directory = tempfile::tempdir().expect("capture directory");
+            let capture = ephervex_server::OutputCapture::new(directory.path());
+            Self { directory, capture }
+        }
+
+        fn write(&mut self, text: &str) -> LiveLogLine {
+            LiveLogLine::Server(
+                self.capture
+                    .push(ephervex_server::CaptureStream::Stdout, text.as_bytes()),
+            )
+        }
+
+        /// The snapshot a follower reads from the files.
+        fn snapshot(&self) -> ephervex_core::CaptureUpdate {
+            let mut segments: Vec<_> = std::fs::read_dir(self.directory.path())
+                .expect("capture directory")
+                .map(|entry| entry.expect("entry").path())
+                .filter(|path| {
+                    path.extension()
+                        .is_some_and(|extension| extension == "jsonl")
+                })
+                .collect();
+            segments.sort();
+            let lines = segments
+                .iter()
+                .flat_map(|path| {
+                    std::fs::read_to_string(path)
+                        .expect("segment")
+                        .lines()
+                        .map(|line| serde_json::from_str(line).expect("captured line"))
+                        .collect::<Vec<ephervex_core::CapturedLine>>()
+                })
+                .collect();
+            ephervex_core::CaptureUpdate {
+                lines,
+                reset: true,
+                truncated: false,
+            }
+        }
+    }
+
+    fn captured_line_of(line: &LiveLogLine) -> ephervex_core::CapturedLine {
+        match line {
+            LiveLogLine::Server(line) => line.clone(),
+            _ => unreachable!("a supervisor writes server lines"),
+        }
+    }
+
+    #[test]
+    fn a_line_in_the_console_snapshot_is_not_shown_again_when_the_forwarder_delivers_it() {
+        let (events, received) = mpsc::channel();
+        let server = ServerId::new();
+        let delivery = Mutex::new(ConsoleDelivery::default());
+        let mut supervisor = SupervisorCapture::new();
+        let one = supervisor.write("one");
+        let two = supervisor.write("two");
+
+        // The Console opens after both lines were written and before the
+        // forwarder, which still holds them, has delivered either.
+        send_followed_capture(
+            &events,
+            &mut delivery.lock().expect("delivery"),
+            server,
+            supervisor.snapshot(),
+        );
+        send_server_lines(&events, &delivery, server, vec![one, two]);
+        let three = supervisor.write("three");
+        send_server_lines(&events, &delivery, server, vec![three]);
+
+        assert_eq!(console_text(&received), ["one", "two", "three"]);
+    }
+
+    #[test]
+    fn a_line_the_forwarder_delivered_before_the_console_snapshot_is_shown_once() {
+        let (events, received) = mpsc::channel();
+        let server = ServerId::new();
+        let delivery = Mutex::new(ConsoleDelivery::default());
+        let mut supervisor = SupervisorCapture::new();
+        let one = supervisor.write("one");
+        send_server_lines(&events, &delivery, server, vec![one]);
+
+        // The snapshot is read after the delivery, so the reset that replaces
+        // the history still carries the delivered line.
+        let two = supervisor.write("two");
+        send_followed_capture(
+            &events,
+            &mut delivery.lock().expect("delivery"),
+            server,
+            supervisor.snapshot(),
+        );
+        send_server_lines(&events, &delivery, server, vec![two]);
+
+        assert_eq!(console_text(&received), ["one", "two"]);
+    }
+
+    #[test]
+    fn forwarded_lines_beyond_a_dropped_one_are_matched_against_the_snapshot() {
+        let (events, received) = mpsc::channel();
+        let server = ServerId::new();
+        let delivery = Mutex::new(ConsoleDelivery::default());
+        let mut supervisor = SupervisorCapture::new();
+        let one = supervisor.write("one");
+        let _dropped_from_the_stream = supervisor.write("two");
+        let three = supervisor.write("three");
+        send_followed_capture(
+            &events,
+            &mut delivery.lock().expect("delivery"),
+            server,
+            supervisor.snapshot(),
+        );
+        send_server_lines(&events, &delivery, server, vec![one, three]);
+        let four = supervisor.write("four");
+        send_server_lines(&events, &delivery, server, vec![four]);
+
+        assert_eq!(console_text(&received), ["one", "two", "three", "four"]);
+    }
+
+    #[test]
+    fn lines_the_follower_sent_after_the_snapshot_are_not_shown_again_by_a_late_forwarder() {
+        let (events, received) = mpsc::channel();
+        let server = ServerId::new();
+        let delivery = Mutex::new(ConsoleDelivery::default());
+        let mut supervisor = SupervisorCapture::new();
+        let one = supervisor.write("one");
+        send_followed_capture(
+            &events,
+            &mut delivery.lock().expect("delivery"),
+            server,
+            supervisor.snapshot(),
+        );
+        // The forwarder finished its run after the snapshot was read, so it is
+        // no longer registered, and still has the burst it took before then.
+        let two = supervisor.write("two");
+        send_followed_capture(
+            &events,
+            &mut delivery.lock().expect("delivery"),
+            server,
+            ephervex_core::CaptureUpdate {
+                lines: vec![captured_line_of(&two)],
+                reset: false,
+                truncated: false,
+            },
+        );
+        send_server_lines(&events, &delivery, server, vec![one, two]);
+
+        assert_eq!(console_text(&received), ["one", "two"]);
+    }
+
+    #[test]
+    fn a_forwarded_line_older_than_the_bounded_snapshot_is_not_shown_after_it() {
+        let (events, received) = mpsc::channel();
+        let server = ServerId::new();
+        let delivery = Mutex::new(ConsoleDelivery::default());
+        let mut supervisor = SupervisorCapture::new();
+        let old = supervisor.write("older than the window");
+        let kept = supervisor.write("kept");
+        let mut snapshot = supervisor.snapshot();
+        snapshot.lines.remove(0);
+        snapshot.truncated = true;
+        send_followed_capture(
+            &events,
+            &mut delivery.lock().expect("delivery"),
+            server,
+            snapshot,
+        );
+        send_server_lines(&events, &delivery, server, vec![old, kept]);
+        let next = supervisor.write("next");
+        send_server_lines(&events, &delivery, server, vec![next]);
+
+        assert_eq!(console_text(&received), ["kept", "next"]);
     }
 
     /// With nothing supervised there is nothing to wait for, so quitting

@@ -169,6 +169,10 @@ new segment without the `.continued.jsonl` suffix as a new run that replaces
 what was shown, and reports a gap when retention removes a segment of the run
 it is following. A frontend that also receives the supervisor's events in its
 own process shows those lines and lets the follower stay silent meanwhile.
+What the follower sends and the supervisor's events share one ordering point,
+so a line the follower already sent is not shown again when its event arrives,
+and a line whose event arrived first is in the next snapshot because the
+supervisor writes a line to the capture before emitting it.
 
 ## Consequences
 
