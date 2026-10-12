@@ -97,7 +97,9 @@ impl ModrinthProvider {
     ///
     /// Answers only about digests it was asked with, and says nothing about the
     /// ones it does not recognize: a file Modrinth has never seen is simply
-    /// absent from the result, which is not a failure.
+    /// absent from the result, which is not a failure. A digest in an algorithm
+    /// Modrinth cannot look up (SHA-256) is treated the same way and is never
+    /// sent under another algorithm's name.
     pub async fn recognize(
         &self,
         digests: &[Hash],

@@ -40,7 +40,7 @@ use ephervex_download::{
     CacheLayout, DownloadError, DownloadManager, MetadataCache, MetadataCacheError, MetadataKey,
     OperationReporter, Url, build_single_origin_client, check_transport,
 };
-use ephervex_model::{Hash, ModProvider};
+use ephervex_model::{Hash, HashAlgorithm, ModProvider};
 use reqwest::Client;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
@@ -108,10 +108,13 @@ impl ModrinthApi {
 
     /// Which catalog releases these files are, by digest.
     ///
-    /// `POST /v2/version_files`, which answers a whole batch in one request.
-    /// Modrinth indexes its files by SHA-1, so unlike CurseForge this needs no
-    /// separate lookup key and no second check: the digest asked with is the
-    /// digest matched on, and the answer is keyed by it.
+    /// `POST /v2/version_files`, which answers a whole batch in one request
+    /// per algorithm. Modrinth indexes its files by SHA-1 and SHA-512, so
+    /// unlike CurseForge this needs no separate lookup key and no second
+    /// check: the digest asked with is the digest matched on, and the answer is
+    /// keyed by it. Each digest is sent under its own algorithm. One Modrinth
+    /// cannot look up, SHA-256, is left out of the request, so it is
+    /// unrecognized rather than mislabeled.
     ///
     /// Not cached. The answer is about specific bytes the launcher already has,
     /// it is asked once per server, and a stale copy would name a release for a
@@ -121,15 +124,35 @@ impl ModrinthApi {
         digests: &[Hash],
         cancel: &CancellationToken,
     ) -> ModPlatformResult<BTreeMap<String, RecognizedFile>> {
-        if digests.is_empty() {
-            return Ok(BTreeMap::new());
+        let mut recognized = BTreeMap::new();
+        for algorithm in [HashAlgorithm::Sha1, HashAlgorithm::Sha512] {
+            let group: Vec<&str> = digests
+                .iter()
+                .filter(|hash| hash.algorithm == algorithm)
+                .map(Hash::digest)
+                .collect();
+            if group.is_empty() {
+                continue;
+            }
+            // Digests of different algorithms differ in length, so the groups
+            // cannot collide in the merged map.
+            recognized.extend(self.version_files_of(algorithm, &group, cancel).await?);
         }
+        Ok(recognized)
+    }
+
+    /// One `version_files` request for digests that all use `algorithm`.
+    async fn version_files_of(
+        &self,
+        algorithm: HashAlgorithm,
+        hashes: &[&str],
+        cancel: &CancellationToken,
+    ) -> ModPlatformResult<BTreeMap<String, RecognizedFile>> {
         let url = self.endpoint(&["version_files"], &[])?;
-        let hashes: Vec<&str> = digests.iter().map(Hash::digest).collect();
         let request = self
             .client
             .post(url.clone())
-            .json(&serde_json::json!({ "hashes": hashes, "algorithm": "sha1" }));
+            .json(&serde_json::json!({ "hashes": hashes, "algorithm": algorithm.to_string() }));
 
         let response = tokio::select! {
             () = cancel.cancelled() => return Err(ModPlatformError::Canceled),

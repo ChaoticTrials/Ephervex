@@ -861,6 +861,141 @@ async fn installed_files_are_recognized_by_digest_in_one_request() {
     );
 }
 
+/// What a recognition request asked for, read back from the loopback capture.
+async fn recognition_requests(catalog: &Catalog) -> Vec<(String, Vec<String>)> {
+    catalog
+        .server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|request| request.url.path() == "/v2/version_files")
+        .map(|request| {
+            let body: serde_json::Value =
+                serde_json::from_slice(&request.body).expect("the request body is JSON");
+            let algorithm = body["algorithm"].as_str().expect("an algorithm").to_owned();
+            let hashes = body["hashes"]
+                .as_array()
+                .expect("a hash list")
+                .iter()
+                .map(|hash| hash.as_str().expect("a string").to_owned())
+                .collect();
+            (algorithm, hashes)
+        })
+        .collect()
+}
+
+/// The request names the algorithm the digest was computed with, so a SHA-512
+/// is looked up as one and the answer is keyed by it.
+#[tokio::test]
+async fn a_sha512_digest_is_looked_up_as_sha512() {
+    let catalog = Catalog::start().await;
+    let known = "d".repeat(128);
+    Mock::given(method("POST"))
+        .and(path("/v2/version_files"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+            r#"{{"{known}":{{"id":"vSha512","project_id":"AANobbMI","date_published":"2024-01-01T00:00:00Z","files":[]}}}}"#
+        )))
+        .mount(&catalog.server)
+        .await;
+
+    let digests = vec![Hash::new(HashAlgorithm::Sha512, &known).expect("sha512")];
+    let recognized = catalog
+        .provider
+        .recognize(&digests, &CancellationToken::new())
+        .await
+        .expect("the lookup answers");
+
+    assert_eq!(
+        recognition_requests(&catalog).await,
+        [("sha512".to_owned(), vec![known.clone()])]
+    );
+    assert_eq!(
+        recognized.get(&known).expect("recognized").version_id,
+        "vSha512"
+    );
+}
+
+/// Digests of different algorithms cannot share a request, because the request
+/// carries one algorithm. Each group is sent under its own name.
+#[tokio::test]
+async fn a_mixed_batch_is_grouped_by_algorithm() {
+    let catalog = Catalog::start().await;
+    let sha1 = "a".repeat(40);
+    let sha512 = "b".repeat(128);
+    Mock::given(method("POST"))
+        .and(path("/v2/version_files"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+        .mount(&catalog.server)
+        .await;
+
+    let digests = vec![
+        Hash::new(HashAlgorithm::Sha512, &sha512).expect("sha512"),
+        Hash::new(HashAlgorithm::Sha1, &sha1).expect("sha1"),
+    ];
+    catalog
+        .provider
+        .recognize(&digests, &CancellationToken::new())
+        .await
+        .expect("the lookup answers");
+
+    let mut requests = recognition_requests(&catalog).await;
+    requests.sort();
+    assert_eq!(
+        requests,
+        [
+            ("sha1".to_owned(), vec![sha1]),
+            ("sha512".to_owned(), vec![sha512]),
+        ]
+    );
+}
+
+/// Modrinth cannot look up a SHA-256, and sending one under another
+/// algorithm's name would ask about bytes nobody has. It stays unrecognized
+/// and the digests Modrinth can look up are still asked about.
+#[tokio::test]
+async fn a_sha256_digest_is_never_sent_under_another_algorithm() {
+    let catalog = Catalog::start().await;
+    let sha1 = "a".repeat(40);
+    let sha256 = "c".repeat(64);
+    Mock::given(method("POST"))
+        .and(path("/v2/version_files"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+            r#"{{"{sha1}":{{"id":"vKnown","project_id":"AANobbMI","date_published":"2024-01-01T00:00:00Z","files":[]}}}}"#
+        )))
+        .mount(&catalog.server)
+        .await;
+
+    let digests = vec![
+        Hash::new(HashAlgorithm::Sha256, &sha256).expect("sha256"),
+        Hash::new(HashAlgorithm::Sha1, &sha1).expect("sha1"),
+    ];
+    let recognized = catalog
+        .provider
+        .recognize(&digests, &CancellationToken::new())
+        .await
+        .expect("the lookup answers");
+
+    assert_eq!(
+        recognition_requests(&catalog).await,
+        [("sha1".to_owned(), vec![sha1.clone()])]
+    );
+    assert_eq!(recognized.keys().collect::<Vec<_>>(), [&sha1]);
+
+    let only_sha256 = vec![Hash::new(HashAlgorithm::Sha256, &sha256).expect("sha256")];
+    let none = catalog
+        .provider
+        .recognize(&only_sha256, &CancellationToken::new())
+        .await
+        .expect("an unsupported algorithm is not a failure");
+    assert!(none.is_empty());
+    assert_eq!(
+        recognition_requests(&catalog).await.len(),
+        1,
+        "a batch of only unsupported digests contacts nobody"
+    );
+}
+
 /// The version that identified a file also says what it declares, and a
 /// version declaring nothing is an answer, not a missing one.
 #[tokio::test]
