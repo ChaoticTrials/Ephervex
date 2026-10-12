@@ -34,13 +34,14 @@ test('visitor preference control persists its choice and reloads the page', () =
   const stored = new Map();
   let reloads = 0;
   const context = {
-    Date: class extends Date {getMonth() {return 0;} getDate() {return 1;}},
+    Date: class extends Date {getMonth() {return 5;} getDate() {return 1;}},
     location: {hostname: 'example.com', search: '', reload() {reloads++;}},
-    document: {documentElement: {dataset: {}}, currentScript: {src: 'https://example.com/seasonal-theme.js'}},
+    document: {documentElement: {dataset: {}}, currentScript: {src: 'https://example.com/seasonal-theme.js'}, addEventListener() {}},
     URL, URLSearchParams,
     localStorage: {getItem: (key) => stored.get(key), setItem: (key, value) => stored.set(key, value)},
   };
   vm.runInNewContext(script, context);
+  assert.equal(context.ephervexSeasonalTheme.season, 'pride');
   context.ephervexSeasonalTheme.setEnabled(false);
   assert.equal(stored.get('ephervex-seasonal-theme'), 'off');
   context.ephervexSeasonalTheme.setEnabled(true);
