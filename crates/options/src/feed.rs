@@ -32,7 +32,7 @@
 
 use ephervex_download::{
     CacheLayout, DomainAllowlist, DownloadManager, MetadataCache, MetadataCacheError, MetadataKey,
-    OperationReporter, UrlPolicyError,
+    OperationReporter, UrlPolicyError, redacted,
 };
 use reqwest::Url;
 use serde::Deserialize;
@@ -119,7 +119,9 @@ impl FeedSource {
             Self::Gist { api_base, id, .. } => format!("{api_base}/gists/{id}"),
             Self::Document { url } => url.clone(),
         };
-        Url::parse(&raw).map_err(|_| UrlPolicyError::Malformed { url: raw })
+        Url::parse(&raw).map_err(|_| UrlPolicyError::Malformed {
+            url: describe_document(&raw),
+        })
     }
 
     /// A short stable description for logs. Never a credential-bearing URL.
@@ -127,9 +129,15 @@ impl FeedSource {
     pub fn describe(&self) -> String {
         match self {
             Self::Gist { id, file, .. } => format!("gist {id}/{file}"),
-            Self::Document { url } => url.clone(),
+            Self::Document { url } => describe_document(url),
         }
     }
+}
+
+/// A document URL without its userinfo, query, or fragment. A URL that does not
+/// parse is not echoed, since it may still carry a signed query.
+fn describe_document(raw: &str) -> String {
+    Url::parse(raw).map_or_else(|_| "<unparsable url>".to_owned(), |url| redacted(&url))
 }
 
 /// Why a feed refresh did not produce a new dataset.
@@ -482,5 +490,33 @@ mod tests {
             "https://example.invalid/minecraft-options.json"
         );
         assert!(source.describe().contains("minecraft-options.json"));
+    }
+
+    #[test]
+    fn a_document_description_omits_userinfo_query_and_fragment() {
+        let source = FeedSource::Document {
+            url: "https://user:hunter2@example.invalid/data.json?token=FAKE_REVIEW_VALUE#part"
+                .to_owned(),
+        };
+        assert_eq!(source.describe(), "https://example.invalid/data.json");
+    }
+
+    #[test]
+    fn an_unparsable_document_url_is_not_echoed_by_its_description_or_error() {
+        let source = FeedSource::Document {
+            url: "https://exa mple.invalid/data.json?token=FAKE_REVIEW_VALUE".to_owned(),
+        };
+        assert!(!source.describe().contains("FAKE_REVIEW_VALUE"));
+        let error = source.entry_url().expect_err("unparsable url");
+        assert!(matches!(error, UrlPolicyError::Malformed { .. }));
+        assert!(!error.to_string().contains("FAKE_REVIEW_VALUE"));
+    }
+
+    #[test]
+    fn a_cannot_be_a_base_document_url_is_described_without_its_query() {
+        let source = FeedSource::Document {
+            url: "mailto:someone@example.invalid?token=FAKE_REVIEW_VALUE".to_owned(),
+        };
+        assert!(!source.describe().contains("FAKE_REVIEW_VALUE"));
     }
 }
