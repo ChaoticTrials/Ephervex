@@ -63,7 +63,7 @@ export component DiskUsagePanel inherits VerticalLayout {
         spacing: 10px;
         SectionTitle { title: GuiI18n.text("gui-disk-usage-title"); detail: GuiI18n.text("gui-disk-usage-detail"); horizontal-stretch: 1; }
         if root.state == "measuring" : VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-disk-usage-stop"); clicked => { root.stop(); } } }
-        VerticalLayout { alignment: center; AppButton { text: root.state == "idle" ? GuiI18n.text("gui-disk-usage-measure") : GuiI18n.text("gui-disk-usage-refresh"); tone: "primary"; enabled: root.state != "measuring"; clicked => { root.refresh(); } } }
+        VerticalLayout { alignment: center; AppButton { text: root.state == "idle" ? GuiI18n.text("gui-disk-usage-measure") : GuiI18n.text("gui-disk-usage-refresh"); tone: "primary"; enabled: root.state != "measuring"; hint: GuiI18n.text("gui-hint-measure-running"); clicked => { root.refresh(); } } }
     }
     BodyText { text: GuiI18n.text("gui-disk-usage-metric"); color: Theme.text-secondary; wrap: word-wrap; }
     if root.state == "measuring" : HorizontalLayout {

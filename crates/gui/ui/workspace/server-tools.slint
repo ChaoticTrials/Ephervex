@@ -79,7 +79,7 @@ export component ServerCommandInput inherits HorizontalLayout {
     AppButton {
         text: GuiI18n.text("gui-send");
         tone: "primary";
-        enabled: root.available && command-field.text != "";
+        enabled: root.available && command-field.text != ""; hint: !root.available ? GuiI18n.text("gui-server-console-unavailable") : GuiI18n.text("gui-hint-enter-command");
         clicked => { root.submit(); }
     }
 }

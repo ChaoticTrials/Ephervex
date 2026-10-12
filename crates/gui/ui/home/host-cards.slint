@@ -315,7 +315,7 @@ export component InstanceInspector inherits Rectangle {
         // A server's name is in this caption, so the button takes the
         // width the panel has rather than asking for the width the name
         // wants.
-        if item.connect-server-id != "" : AppButton { min-width: 88px; text: GuiI18n.value("gui-launch-connect", item.connect-server-name); enabled: item.can-connect; clicked => { root.connect(item.id, item.connect-server-id); } }
+        if item.connect-server-id != "" : AppButton { min-width: 88px; text: GuiI18n.value("gui-launch-connect", item.connect-server-name); enabled: item.can-connect; hint: item.connect-reason; clicked => { root.connect(item.id, item.connect-server-id); } }
         HorizontalLayout { spacing: 8px;
             AppButton { width: (parent.width - 8px) / 2; text: GuiI18n.text("gui-open-workspace"); clicked => { root.workspace(item.id); } }
             AppButton { width: (parent.width - 8px) / 2; text: GuiI18n.text("gui-open-folder"); clicked => { root.open-folder(item.id); } }

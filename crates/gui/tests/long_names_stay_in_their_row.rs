@@ -185,6 +185,7 @@ fn connectable() -> InstanceRow {
         can_kill: false,
         connect_server_id: "repro-server".into(),
         connect_server_name: LONG_SERVER.into(),
+        connect_reason: SharedString::default(),
         can_connect: true,
         creating_server_detail: SharedString::default(),
         creating_server_progress: 0.0,

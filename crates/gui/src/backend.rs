@@ -5787,9 +5787,13 @@ fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
                 .map_err(|error| localized_error(&error));
             connection_states.insert(
                 server.id,
-                availability
-                    .as_ref()
-                    .is_ok_and(|availability| !availability.client_running),
+                match &availability {
+                    Ok(availability) if availability.client_running => {
+                        (false, lookup("gui-client-already-running"))
+                    }
+                    Ok(_) => (true, String::new()),
+                    Err(reason) => (false, reason.clone()),
+                },
             );
             (server, availability)
         });
@@ -5822,7 +5826,10 @@ fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
         presentation.pair = PairPresentation::of(server.id.into(), &pairs, &clients, &servers);
         presentation.snapshot_deletion_note =
             snapshot_deletion_note(app, InstalledHost::Server(server.id));
-        presentation.can_connect = connection_states.get(&server.id).copied().unwrap_or(false);
+        if let Some((can_connect, reason)) = connection_states.remove(&server.id) {
+            presentation.can_connect = can_connect;
+            presentation.connect_reason = reason;
+        }
         server_rows.push(presentation);
     }
     let accounts = app

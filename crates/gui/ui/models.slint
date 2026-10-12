@@ -53,6 +53,8 @@ export struct InstanceRow {
     connect-server-id: string,
     connect-server-name: string,
     can-connect: bool,
+    // Why Launch and Connect is unavailable, empty while it is available.
+    connect-reason: string,
     // What a linked server being built for this instance is doing, empty
     // when none is. It is carried on the instance rather than listed
     // beside it because the work belongs to this instance: a card of its

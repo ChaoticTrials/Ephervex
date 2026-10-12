@@ -31,4 +31,6 @@ pub mod window_events;
 pub mod workspace_layout;
 
 #[cfg(test)]
+mod disabled_control_reasons;
+#[cfg(test)]
 mod test_support;

@@ -160,12 +160,18 @@ export component HostWorkspace inherits Rectangle {
     in property <string> primary-label;
     in property <string> primary-tone: "primary";
     in property <bool> primary-enabled;
+    // Why the primary action is unavailable, shown on hover. Waiting on a
+    // change in progress is explained here, not by the caller.
+    in property <string> primary-hint;
     // A forced stop, for a server that no longer answers Stop.
     in property <bool> kill-visible;
     in property <bool> kill-enabled;
+    // Why a forced stop is unavailable, shown on hover.
+    in property <string> kill-hint;
     in property <bool> restart-visible;
     in property <bool> restart-enabled;
-    // Why Restart is unavailable while the host runs, shown on hover.
+    // Why Restart is unavailable, shown on hover. A change in progress is
+    // explained here, not by the caller.
     in property <string> restart-hint;
     // Where a restart of this host is, read from the host's own row.
     in property <string> restart-stage;
@@ -192,6 +198,8 @@ export component HostWorkspace inherits Rectangle {
     // What the primary action waits for. A side that is already running can
     // still be stopped during a pair start, which is how one is ended.
     property <bool> primary-waits: root.busy || root.restart-stage != "" || (root.pair-starting && !root.host-running);
+    property <string> primary-reason: root.primary-waits ? root.occupied-text : root.primary-hint;
+    property <string> restart-reason: root.occupied ? root.occupied-text : root.restart-hint;
     callback back();
     callback open-folder();
     callback primary();
@@ -245,9 +253,9 @@ export component HostWorkspace inherits Rectangle {
                 }
                 VerticalLayout { alignment: center; Pill { text: root.restart-stage != "" ? GuiI18n.text("gui-state-restarting") : root.status; tone-color: root.restart-stage != "" || root.status-kind == "starting" ? Theme.warning : root.status-kind == "running" ? Theme.success : Theme.text-secondary; } }
                 if root.paired && root.width >= 520px : VerticalLayout { alignment: center; Pill { text: root.pair-label; tone-color: root.pair-tone; } }
-                if root.kill-visible : AppButton { text: GuiI18n.text("gui-kill"); accessible-name: GuiI18n.values("gui-pane-action", GuiI18n.text("gui-kill"), root.pane-label); tone: "danger"; enabled: root.kill-enabled; clicked => { root.kill(); } }
-                if root.restart-visible : AppButton { text: GuiI18n.text("gui-restart"); accessible-name: GuiI18n.values("gui-pane-action", GuiI18n.text("gui-restart"), root.pane-label); enabled: root.restart-enabled && !root.occupied; hint: root.restart-hint; clicked => { root.restart(); } }
-                AppButton { text: root.primary-label; accessible-name: GuiI18n.values("gui-pane-action", root.primary-label, root.pane-label); tone: root.primary-tone; enabled: root.primary-enabled && !root.primary-waits; clicked => { root.primary(); } }
+                if root.kill-visible : AppButton { text: GuiI18n.text("gui-kill"); accessible-name: GuiI18n.values("gui-pane-action", GuiI18n.text("gui-kill"), root.pane-label); tone: "danger"; enabled: root.kill-enabled; hint: root.kill-hint; clicked => { root.kill(); } }
+                if root.restart-visible : AppButton { text: GuiI18n.text("gui-restart"); accessible-name: GuiI18n.values("gui-pane-action", GuiI18n.text("gui-restart"), root.pane-label); enabled: root.restart-enabled && !root.occupied; hint: root.restart-reason; clicked => { root.restart(); } }
+                AppButton { text: root.primary-label; accessible-name: GuiI18n.values("gui-pane-action", root.primary-label, root.pane-label); tone: root.primary-tone; enabled: root.primary-enabled && !root.primary-waits; hint: root.primary-reason; clicked => { root.primary(); } }
             }
             HorizontalLayout {
                 spacing: 8px;
@@ -273,13 +281,14 @@ export component HostWorkspace inherits Rectangle {
             if root.show-launch-as : LaunchAsButton {
                 accounts: root.accounts;
                 enabled: root.primary-enabled && !root.occupied;
+                hint: root.occupied ? root.occupied-text : root.primary-hint;
                 alongside: root.launch-alongside;
                 launch-as(account, alongside) => { root.launch-as(account, alongside); }
                 add-account => { root.add-account(); }
             }
-            if root.kill-visible : AppButton { text: GuiI18n.text("gui-kill"); tone: "danger"; enabled: root.kill-enabled; clicked => { root.kill(); } }
-            if root.restart-visible : AppButton { text: GuiI18n.text("gui-restart"); enabled: root.restart-enabled && !root.occupied; hint: root.restart-hint; clicked => { root.restart(); } }
-            AppButton { text: root.primary-label; tone: root.primary-tone; enabled: root.primary-enabled && !root.primary-waits; clicked => { root.primary(); } }
+            if root.kill-visible : AppButton { text: GuiI18n.text("gui-kill"); tone: "danger"; enabled: root.kill-enabled; hint: root.kill-hint; clicked => { root.kill(); } }
+            if root.restart-visible : AppButton { text: GuiI18n.text("gui-restart"); enabled: root.restart-enabled && !root.occupied; hint: root.restart-reason; clicked => { root.restart(); } }
+            AppButton { text: root.primary-label; tone: root.primary-tone; enabled: root.primary-enabled && !root.primary-waits; hint: root.primary-reason; clicked => { root.primary(); } }
         }
         if root.workflow-id != "" && root.workflow-here : Rectangle {
             height: max(64px, workflow-copy.preferred-height + 24px);
@@ -303,6 +312,7 @@ export component HostWorkspace inherits Rectangle {
                     text: action.label;
                     tone: action.tone;
                     enabled: action.enabled && (!action.requires-stopped || (!root.host-running && !root.occupied));
+                    hint: root.occupied ? root.occupied-text : GuiI18n.text("gui-hint-stop-host-first");
                     clicked => { root.workflow-action(root.workflow-id, action.id); }
                 }
             }

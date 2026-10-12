@@ -100,8 +100,8 @@ export component LiveLogViewer inherits Rectangle {
                 }
                 FilterChip { text: GuiI18n.text("gui-wrap-lines"); accessible-name: GuiI18n.text("gui-wrap-lines"); selected: root.wrap-lines; clicked => { root.wrap-changed(!root.wrap-lines); } }
                 FilterChip { text: root.follow ? GuiI18n.text("gui-following") : GuiI18n.text("gui-jump-latest"); accessible-name: root.follow ? GuiI18n.text("gui-pause-following") : GuiI18n.text("gui-jump-latest"); selected: root.follow; clicked => { root.follow-changed(!root.follow); } }
-                AppButton { text: GuiI18n.text("gui-copy-selection"); enabled: root.has-selection; clicked => { root.copy-selection(); } }
-                AppButton { text: GuiI18n.text("gui-copy-retained"); enabled: root.has-content; clicked => { root.copy(); } }
+                AppButton { text: GuiI18n.text("gui-copy-selection"); enabled: root.has-selection; hint: GuiI18n.text("gui-hint-copy-selection"); clicked => { root.copy-selection(); } }
+                AppButton { text: GuiI18n.text("gui-copy-retained"); enabled: root.has-content; hint: GuiI18n.text("gui-hint-copy-retained"); clicked => { root.copy(); } }
                 Rectangle { horizontal-stretch: 1; }
                 if root.pending-lines > 0 : BodyText { text: GuiI18n.count("gui-new-log-lines", root.pending-lines); color: Theme.accent; font-size: Theme.caption-size; }
             }
@@ -394,7 +394,7 @@ export component CrashNotice inherits Rectangle {
             if root.beside-the-mods : AppButton {
                 text: GuiI18n.count("gui-crash-disable-suggested", root.suggested);
                 tone: "primary";
-                enabled: root.suggested > 0;
+                enabled: root.suggested > 0; hint: GuiI18n.text("gui-hint-no-suggested-mods");
                 clicked => { root.disable-suggested(); }
             }
         }

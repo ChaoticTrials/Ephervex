@@ -130,6 +130,7 @@ export component AppButton inherits Rectangle {
     accessible-role: button;
     accessible-label: root.accessible-name;
     accessible-enabled: enabled;
+    accessible-description: !root.enabled ? root.hint : "";
     accessible-action-default => { if root.enabled { root.clicked(); } }
     // Held to the button's own width and elided there. `min-width` asks
     // for room for the whole caption, but a layout that has none gives
@@ -166,7 +167,12 @@ export component FavoriteToggle inherits Rectangle {
     in property <bool> favorite;
     in property <string> version;
     in property <bool> enabled: true;
+    // Why the star cannot be pressed, shown on hover while it is disabled.
+    in property <string> hint;
     callback toggled();
+    // The star has no caption, so hover says what pressing it does, or why
+    // it cannot be pressed.
+    private property <string> hover-note: !root.enabled && root.hint != "" ? root.hint : root.accessible-label;
     width: Theme.control-height;
     height: Theme.control-height;
     border-radius: 6px;
@@ -178,6 +184,7 @@ export component FavoriteToggle inherits Rectangle {
     accessible-enabled: root.enabled;
     accessible-checkable: true;
     accessible-checked: root.favorite;
+    accessible-description: !root.enabled ? root.hint : "";
     accessible-action-default => { if root.enabled { root.toggled(); } }
     Image {
         x: 8px; y: 8px; width: parent.width - 16px; height: parent.height - 16px;
@@ -186,29 +193,52 @@ export component FavoriteToggle inherits Rectangle {
         colorize: !root.enabled ? Theme.text-muted : root.favorite ? Theme.warning : Theme.text-secondary;
     }
     KeyboardFocus { width: root.width; height: root.height; enabled: root.enabled; activated => { root.toggled(); } }
-    area := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.toggled(); } }
+    // Always enabled, so a disabled star still reports hover and can explain
+    // itself. The press is gated on `enabled` instead.
+    area := TouchArea {
+        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.not-allowed;
+        clicked => { if root.enabled { root.toggled(); } }
+    }
+    Tooltip {
+        TooltipCard { text: root.hover-note; }
+    }
 }
 
 export component IconButton inherits Rectangle {
     in property <image> icon;
     in property <string> accessible-name;
     in property <bool> enabled: true;
+    // Why this button cannot be pressed, shown on hover while it is
+    // disabled.
+    in property <string> hint;
     callback clicked();
+    // A glyph alone does not say what it does, so hover shows the same
+    // name assistive technology hears, or the reason while it is disabled.
+    private property <string> hover-note: !root.enabled && root.hint != "" ? root.hint : root.accessible-name;
     width: Theme.control-height;
     height: Theme.control-height;
     border-radius: 6px;
     border-width: 1px;
-    border-color: area.has-hover ? Theme.accent : Theme.border;
-    background: area.has-hover ? Theme.elevated : transparent;
+    border-color: area.has-hover && root.enabled ? Theme.accent : Theme.border;
+    background: area.has-hover && root.enabled ? Theme.elevated : transparent;
     accessible-role: button;
     accessible-label: accessible-name;
+    accessible-description: !root.enabled ? root.hint : "";
     accessible-enabled: enabled;
     accessible-action-default => { if root.enabled { root.clicked(); } }
     // A disabled button keeps its border and loses its click, so the glyph
     // has to go quiet too or the control still reads as available.
     Image { x: 8px; y: 8px; width: parent.width - 16px; height: parent.height - 16px; source: root.icon; image-fit: contain; colorize: root.enabled ? Theme.text-secondary : Theme.text-muted; }
     KeyboardFocus { width: root.width; height: root.height; enabled: root.enabled; activated => { root.clicked(); } }
-    area := TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
+    // Always enabled, so a disabled button still reports hover and can
+    // explain itself. The press is gated on `enabled` instead.
+    area := TouchArea {
+        mouse-cursor: root.enabled ? MouseCursor.default : MouseCursor.not-allowed;
+        clicked => { if root.enabled { root.clicked(); } }
+    }
+    if root.hover-note != "" : Tooltip {
+        TooltipCard { text: root.hover-note; }
+    }
 }
 
 export component TextField inherits Rectangle {
@@ -423,6 +453,9 @@ export component LaunchAsButton inherits Rectangle {
     // Whether the instance is already running, so a launch from here is a
     // second client rather than the first.
     in property <bool> alongside;
+    // Why launching cannot be started from here, shown on hover while the
+    // button is disabled.
+    in property <string> hint;
     // The account, and whether this is a second client alongside another.
     callback launch-as(string, bool);
     callback add-account();
@@ -438,6 +471,7 @@ export component LaunchAsButton inherits Rectangle {
     accessible-role: button;
     accessible-label: GuiI18n.text("gui-launch-as");
     accessible-enabled: enabled;
+    accessible-description: !root.enabled ? root.hint : "";
     accessible-action-default => { if root.enabled { menu.show({ x: 0, y: root.height }); } }
     menu := ContextMenuArea {
         Menu {
@@ -474,9 +508,11 @@ export component LaunchAsButton inherits Rectangle {
     // Declared after the menu area, so a press opens the menu rather than
     // being swallowed by the area that hosts it.
     area := TouchArea {
-        enabled: root.enabled;
-        mouse-cursor: pointer;
-        clicked => { menu.show({ x: 0, y: root.height }); }
+        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.not-allowed;
+        clicked => { if root.enabled { menu.show({ x: 0, y: root.height }); } }
+    }
+    if !root.enabled && root.hint != "" : Tooltip {
+        TooltipCard { text: root.hint; }
     }
 }
 

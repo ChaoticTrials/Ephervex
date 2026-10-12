@@ -65,7 +65,7 @@ export component IsolationRecoveryNotice inherits Rectangle {
             BodyText { text: GuiI18n.text(root.recovery == "running" ? "gui-isolation-recovery-running" : "gui-isolation-recovery-failed"); wrap: word-wrap; }
             if root.detail != "" : BodyText { text: root.detail; color: Theme.text-secondary; wrap: word-wrap; }
         }
-        VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-isolation-recovery-retry"); enabled: !root.busy; clicked => { root.retry(); } } }
+        VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-isolation-recovery-retry"); enabled: !root.busy; hint: GuiI18n.text("gui-hint-busy"); clicked => { root.retry(); } } }
     }
 }
 
@@ -130,6 +130,7 @@ export component IsolationSurface inherits Rectangle {
         : root.missing.length > 0 && !root.accept-missing ? "missing"
         : root.unrecorded.length > 0 && !root.accept-unrecorded ? "unrecorded"
         : "";
+    property <string> start-blocked-text: GuiI18n.text(root.start-requirement == "running" ? "gui-isolation-start-blocked-running" : root.start-requirement == "missing" ? "gui-isolation-start-blocked-missing" : "gui-isolation-start-blocked-unrecorded");
     callback filter(string);
     callback toggle-pin(string, bool);
     // ("missing" | "unrecorded", accepted)
@@ -150,7 +151,7 @@ export component IsolationSurface inherits Rectangle {
         spacing: 10px;
         Heading { text: GuiI18n.text("gui-isolation-title"); horizontal-alignment: center; }
         BodyText { text: GuiI18n.text("gui-isolation-empty-detail"); color: Theme.text-muted; horizontal-alignment: center; wrap: word-wrap; }
-        HorizontalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-isolation-start-setup"); tone: "primary"; enabled: !root.busy; clicked => { root.begin(); } } }
+        HorizontalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-isolation-start-setup"); tone: "primary"; enabled: !root.busy; hint: GuiI18n.text("gui-hint-busy"); clicked => { root.begin(); } } }
     }
     if root.phase == "setup" : HorizontalLayout {
         spacing: 14px;
@@ -240,14 +241,14 @@ export component IsolationSurface inherits Rectangle {
                 if root.missing.length > 0 : AcknowledgementToggle { label: GuiI18n.text("gui-isolation-accept-missing"); enabled: !root.busy; checked: root.accept-missing; toggled(value) => { root.acknowledge("missing", value); } }
                 if root.unrecorded.length > 0 : AcknowledgementToggle { label: GuiI18n.text("gui-isolation-accept-unrecorded"); enabled: !root.busy; checked: root.accept-unrecorded; toggled(value) => { root.acknowledge("unrecorded", value); } }
                 if root.error != "" : BodyText { text: root.error; color: Theme.danger; wrap: word-wrap; }
-                if root.start-requirement != "" : BodyText { text: GuiI18n.text(root.start-requirement == "running" ? "gui-isolation-start-blocked-running" : root.start-requirement == "missing" ? "gui-isolation-start-blocked-missing" : "gui-isolation-start-blocked-unrecorded"); color: Theme.warning; wrap: word-wrap; }
+                if root.start-requirement != "" : BodyText { text: root.start-blocked-text; color: Theme.warning; wrap: word-wrap; }
                 ActionRow {
-                    AppButton { text: GuiI18n.text("gui-cancel"); enabled: !root.busy; clicked => { root.discard-setup(); } }
+                    AppButton { text: GuiI18n.text("gui-cancel"); enabled: !root.busy; hint: GuiI18n.text("gui-hint-busy"); clicked => { root.discard-setup(); } }
                     Rectangle { horizontal-stretch: 1; }
                     AppButton {
                         text: GuiI18n.text("gui-isolation-start");
                         tone: "primary";
-                        enabled: !root.busy && root.start-requirement == "";
+                        enabled: !root.busy && root.start-requirement == ""; hint: root.busy ? GuiI18n.text("gui-hint-busy") : root.start-blocked-text;
                         clicked => { root.start-session(root.accept-unrecorded, root.accept-missing); }
                     }
                 }
@@ -268,7 +269,7 @@ export component IsolationSurface inherits Rectangle {
         if root.reduced-confidence : BodyText { text: GuiI18n.text("gui-isolation-reduced-confidence"); color: Theme.warning; wrap: word-wrap; }
         if root.linked-servers.length > 0 : BodyText { text: GuiI18n.text("gui-isolation-linked-unchanged"); color: Theme.text-secondary; wrap: word-wrap; }
         if root.error != "" : BodyText { text: root.error; color: Theme.danger; wrap: word-wrap; }
-        ActionRow { AppButton { text: GuiI18n.text("gui-isolation-undo"); enabled: !root.busy && root.recovery == "" && root.history.length > 0; clicked => { root.undo(); } } AppButton { text: GuiI18n.text("gui-isolation-cancel"); tone: "danger"; enabled: !root.busy; clicked => { root.cancel(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-isolation-issue-gone"); enabled: !root.busy && root.recovery == ""; clicked => { root.answer("gone"); } } AppButton { text: GuiI18n.text("gui-isolation-issue-present"); tone: "primary"; enabled: !root.busy && root.recovery == ""; clicked => { root.answer("present"); } } }
+        ActionRow { AppButton { text: GuiI18n.text("gui-isolation-undo"); enabled: !root.busy && root.recovery == "" && root.history.length > 0; hint: root.busy ? GuiI18n.text("gui-hint-busy") : root.recovery != "" ? GuiI18n.text("gui-hint-isolation-recovery") : GuiI18n.text("gui-hint-nothing-to-undo"); clicked => { root.undo(); } } AppButton { text: GuiI18n.text("gui-isolation-cancel"); tone: "danger"; enabled: !root.busy; hint: GuiI18n.text("gui-hint-busy"); clicked => { root.cancel(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-isolation-issue-gone"); enabled: !root.busy && root.recovery == ""; hint: root.busy ? GuiI18n.text("gui-hint-busy") : GuiI18n.text("gui-hint-isolation-recovery"); clicked => { root.answer("gone"); } } AppButton { text: GuiI18n.text("gui-isolation-issue-present"); tone: "primary"; enabled: !root.busy && root.recovery == ""; hint: root.busy ? GuiI18n.text("gui-hint-busy") : GuiI18n.text("gui-hint-isolation-recovery"); clicked => { root.answer("present"); } } }
     }
     if root.phase == "contradiction" : VerticalLayout {
         spacing: 12px;
@@ -277,7 +278,7 @@ export component IsolationSurface inherits Rectangle {
         if root.recovery != "" : IsolationRecoveryNotice { recovery: root.recovery; detail: root.recovery-detail; busy: root.busy; retry => { root.retry-recovery(); } }
         IsolationHistory { items: root.history; }
         if root.error != "" : BodyText { text: root.error; color: Theme.danger; wrap: word-wrap; }
-        ActionRow { AppButton { text: GuiI18n.text("gui-isolation-cancel"); tone: "danger"; enabled: !root.busy; clicked => { root.cancel(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-isolation-undo"); tone: "primary"; enabled: !root.busy && root.recovery == ""; clicked => { root.undo(); } } }
+        ActionRow { AppButton { text: GuiI18n.text("gui-isolation-cancel"); tone: "danger"; enabled: !root.busy; hint: GuiI18n.text("gui-hint-busy"); clicked => { root.cancel(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-isolation-undo"); tone: "primary"; enabled: !root.busy && root.recovery == ""; hint: root.busy ? GuiI18n.text("gui-hint-busy") : root.recovery != "" ? GuiI18n.text("gui-hint-isolation-recovery") : GuiI18n.text("gui-hint-nothing-to-undo"); clicked => { root.undo(); } } }
     }
     if root.phase == "ready" : VerticalLayout {
         spacing: 12px;
@@ -289,7 +290,7 @@ export component IsolationSurface inherits Rectangle {
         if root.reduced-confidence : BodyText { text: GuiI18n.text("gui-isolation-reduced-confidence"); color: Theme.warning; wrap: word-wrap; }
         BodyText { text: GuiI18n.text("gui-isolation-finish-snapshot"); color: Theme.text-muted; wrap: word-wrap; }
         if root.error != "" : BodyText { text: root.error; color: Theme.danger; wrap: word-wrap; }
-        ActionRow { AppButton { text: GuiI18n.text("gui-isolation-undo"); enabled: !root.busy && root.recovery == ""; clicked => { root.undo(); } } AppButton { text: GuiI18n.text("gui-isolation-cancel"); tone: "danger"; enabled: !root.busy; clicked => { root.cancel(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-isolation-finish"); tone: "primary"; enabled: !root.busy && root.recovery == ""; clicked => { root.finish(); } } }
+        ActionRow { AppButton { text: GuiI18n.text("gui-isolation-undo"); enabled: !root.busy && root.recovery == ""; hint: root.busy ? GuiI18n.text("gui-hint-busy") : root.recovery != "" ? GuiI18n.text("gui-hint-isolation-recovery") : GuiI18n.text("gui-hint-nothing-to-undo"); clicked => { root.undo(); } } AppButton { text: GuiI18n.text("gui-isolation-cancel"); tone: "danger"; enabled: !root.busy; hint: GuiI18n.text("gui-hint-busy"); clicked => { root.cancel(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-isolation-finish"); tone: "primary"; enabled: !root.busy && root.recovery == ""; hint: root.busy ? GuiI18n.text("gui-hint-busy") : GuiI18n.text("gui-hint-isolation-recovery"); clicked => { root.finish(); } } }
     }
     if root.phase == "result" : VerticalLayout {
         spacing: 12px;

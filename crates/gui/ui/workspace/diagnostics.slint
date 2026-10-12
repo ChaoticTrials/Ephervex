@@ -31,8 +31,8 @@ export component DiagnosticBundlePanel inherits VerticalLayout {
     if root.parts.length > 0 : HorizontalLayout {
         spacing: 8px;
         alignment: start;
-        AppButton { text: GuiI18n.text("gui-bundle-select-all"); enabled: !root.exporting; clicked => { root.select-all(true); } }
-        AppButton { text: GuiI18n.text("gui-bundle-select-none"); enabled: !root.exporting; clicked => { root.select-all(false); } }
+        AppButton { text: GuiI18n.text("gui-bundle-select-all"); enabled: !root.exporting; hint: GuiI18n.text("gui-hint-export-running"); clicked => { root.select-all(true); } }
+        AppButton { text: GuiI18n.text("gui-bundle-select-none"); enabled: !root.exporting; hint: GuiI18n.text("gui-hint-export-running"); clicked => { root.select-all(false); } }
     }
     if root.parts.length > 0 : Rectangle {
         border-radius: 6px;
@@ -67,7 +67,7 @@ export component DiagnosticBundlePanel inherits VerticalLayout {
         if root.exporting : VerticalLayout { alignment: center; Spinner { indeterminate: true; width: 16px; height: 16px; } }
         Rectangle { horizontal-stretch: 1; }
         if root.result-path != "" : AppButton { text: GuiI18n.text("gui-bundle-show-folder"); clicked => { root.open-folder(); } }
-        if root.parts.length > 0 : AppButton { text: GuiI18n.text("gui-bundle-export"); tone: "primary"; enabled: root.selected-count > 0 && !root.exporting; clicked => { root.export(); } }
+        if root.parts.length > 0 : AppButton { text: GuiI18n.text("gui-bundle-export"); tone: "primary"; enabled: root.selected-count > 0 && !root.exporting; hint: root.exporting ? GuiI18n.text("gui-hint-export-running") : GuiI18n.text("gui-hint-select-export-item"); clicked => { root.export(); } }
     }
 }
 
@@ -129,6 +129,8 @@ component FindingCard inherits Rectangle {
     in property <DiagnosticFindingRow> item;
     // Whether an action that changes the host can start now.
     in property <bool> can-act;
+    // Why the actions wait, shown while `can-act` is false.
+    in property <string> blocked-reason;
     callback review-fix(string);
     callback open-route(string);
     callback install(string, string);
@@ -170,14 +172,14 @@ component FindingCard inherits Rectangle {
                 text: root.item.fix-label;
                 accessible-name: root.item.fix-label + ": " + root.item.title;
                 tone: root.item.problem ? "primary" : "secondary";
-                enabled: root.can-act;
+                enabled: root.can-act; hint: root.blocked-reason;
                 clicked => { root.review-fix(root.item.key); }
             }
             if root.item.install-label != "" : AppButton {
                 text: root.item.install-label;
                 accessible-name: root.item.install-label + ": " + root.item.title;
                 tone: "primary";
-                enabled: root.can-act;
+                enabled: root.can-act; hint: root.blocked-reason;
                 clicked => { root.install(root.item.install-provider, root.item.install-project); }
             }
             if root.item.route != "" : AppButton { text: root.item.route-label; clicked => { root.open-route(root.item.route); } }
@@ -204,6 +206,8 @@ component CheckList inherits Rectangle {
 component FixPanel inherits Rectangle {
     in property <HostView> host;
     in property <bool> can-apply;
+    // Why nothing can be applied while `can-apply` is false.
+    in property <string> blocked-reason;
     callback cancel();
     callback apply();
     border-radius: 8px;
@@ -235,11 +239,11 @@ component FixPanel inherits Rectangle {
             if root.host.fix-state == "applying" : VerticalLayout { alignment: center; Spinner { indeterminate: true; width: 16px; height: 16px; } }
             if root.host.fix-state == "applying" : BodyText { text: GuiI18n.text("gui-fix-applying"); vertical-alignment: center; }
             Rectangle { horizontal-stretch: 1; }
-            AppButton { text: GuiI18n.text("gui-fix-cancel"); enabled: root.host.fix-state != "applying"; clicked => { root.cancel(); } }
+            AppButton { text: GuiI18n.text("gui-fix-cancel"); enabled: root.host.fix-state != "applying"; hint: GuiI18n.text("gui-hint-fix-applying"); clicked => { root.cancel(); } }
             AppButton {
                 text: GuiI18n.text("gui-fix-apply");
                 tone: "primary";
-                enabled: root.can-apply && root.host.fix-state == "ready" && root.host.fix-blocked == "" && root.host.fix-changes.length > 0;
+                enabled: root.can-apply && root.host.fix-state == "ready" && root.host.fix-blocked == "" && root.host.fix-changes.length > 0; hint: root.host.fix-state == "applying" ? GuiI18n.text("gui-hint-fix-applying") : root.host.fix-blocked != "" ? root.host.fix-blocked : !root.can-apply ? root.blocked-reason : GuiI18n.text("gui-hint-nothing-to-apply");
                 clicked => { root.apply(); }
             }
         }
@@ -316,6 +320,9 @@ export component DiagnosticsSurface inherits Rectangle {
     callback open-bundle-folder();
     property <string> state: root.host.diagnosis-state == "" ? "unchecked" : root.host.diagnosis-state;
     property <bool> working: root.state == "working" || root.busy;
+    // Another change to the host and a diagnosis hold the actions alike, and
+    // only one of them is a diagnosis.
+    property <string> blocked-reason: root.state == "working" ? GuiI18n.text("gui-hint-diagnosis-running") : root.busy ? GuiI18n.text("gui-hint-busy") : GuiI18n.text("gui-hint-fix-applying");
     property <bool> after-failure: root.host.diagnosis-failure != "";
     property <bool> has-result: root.host.diagnosis-summary != "";
     property <bool> show-other: false;
@@ -331,12 +338,12 @@ export component DiagnosticsSurface inherits Rectangle {
                 spacing: 10px;
                 SectionTitle { title: GuiI18n.text("gui-diagnosis-title"); detail: GuiI18n.text("gui-diagnosis-detail"); horizontal-stretch: 1; }
                 if !body.narrow && root.working : VerticalLayout { alignment: start; AppButton { text: GuiI18n.text("gui-diagnosis-stop"); clicked => { root.stop(); } } }
-                if !body.narrow : VerticalLayout { alignment: start; AppButton { text: root.has-result ? GuiI18n.text("gui-diagnosis-diagnose-again") : GuiI18n.text("gui-diagnosis-diagnose"); tone: "primary"; enabled: !root.working; clicked => { root.diagnose(); } } }
+                if !body.narrow : VerticalLayout { alignment: start; AppButton { text: root.has-result ? GuiI18n.text("gui-diagnosis-diagnose-again") : GuiI18n.text("gui-diagnosis-diagnose"); tone: "primary"; enabled: !root.working; hint: root.blocked-reason; clicked => { root.diagnose(); } } }
             }
             if body.narrow : HorizontalLayout {
                 spacing: 8px;
                 alignment: start;
-                AppButton { text: root.has-result ? GuiI18n.text("gui-diagnosis-diagnose-again") : GuiI18n.text("gui-diagnosis-diagnose"); tone: "primary"; enabled: !root.working; clicked => { root.diagnose(); } }
+                AppButton { text: root.has-result ? GuiI18n.text("gui-diagnosis-diagnose-again") : GuiI18n.text("gui-diagnosis-diagnose"); tone: "primary"; enabled: !root.working; hint: root.blocked-reason; clicked => { root.diagnose(); } }
                 if root.working : AppButton { text: GuiI18n.text("gui-diagnosis-stop"); clicked => { root.stop(); } }
             }
             if root.after-failure : BodyText { text: GuiI18n.value("gui-diagnosis-failure-context", root.host.diagnosis-failure); color: Theme.danger; wrap: word-wrap; }
@@ -378,6 +385,7 @@ export component DiagnosticsSurface inherits Rectangle {
             if root.host.fix-state != "" : FixPanel {
                 host: root.host;
                 can-apply: !root.working;
+                blocked-reason: root.blocked-reason;
                 cancel => { root.cancel-fix(); }
                 apply => { root.apply-fix(); }
             }
@@ -399,7 +407,7 @@ export component DiagnosticsSurface inherits Rectangle {
                 Heading { text: root.after-failure ? GuiI18n.text("gui-diagnosis-likely-cause") : GuiI18n.count("gui-diagnosis-problems-heading", root.host.diagnosis-problems.length); font-size: Theme.section-size; wrap: word-wrap; }
                 for item in root.host.diagnosis-problems : FindingCard {
                     item: item;
-                    can-act: !root.working && root.host.fix-state != "applying";
+                    can-act: !root.working && root.host.fix-state != "applying"; blocked-reason: root.blocked-reason;
                     review-fix(key) => { root.review-fix(key); }
                     open-route(route) => { root.open-route(route); }
                     install(provider, project) => { root.install-mod(provider, project); }
@@ -431,7 +439,7 @@ export component DiagnosticsSurface inherits Rectangle {
                     spacing: 8px;
                     for item in root.host.diagnosis-customized : FindingCard {
                         item: item;
-                        can-act: !root.working && root.host.fix-state != "applying";
+                        can-act: !root.working && root.host.fix-state != "applying"; blocked-reason: root.blocked-reason;
                         review-fix(key) => { root.review-fix(key); }
                         open-route(route) => { root.open-route(route); }
                     }

@@ -131,6 +131,153 @@ fn a_server_restart_shows_on_its_card_as_well_as_in_its_workspace() {
     assert!(visible(&ui, &lookup("gui-state-restarting")));
 }
 
+fn reason(ui: &AppWindow, message: &str) -> String {
+    button(ui, message)
+        .accessible_description()
+        .expect("the button reports a description")
+        .to_string()
+}
+
+fn server_in_state(state_kind: &str) -> ServerRow {
+    let mut row = server(false);
+    row.state_kind = state_kind.into();
+    row.can_start = false;
+    row
+}
+
+#[test]
+fn a_disabled_restart_says_why_for_each_kind_of_host() {
+    let ui = window();
+
+    client_workspace(&ui, instance());
+    assert_eq!(
+        reason(&ui, "gui-restart"),
+        lookup("gui-hint-restart-client-stopped")
+    );
+
+    client_workspace(&ui, running_client(false, ""));
+    assert_eq!(
+        reason(&ui, "gui-restart"),
+        lookup("gui-restart-client-unavailable")
+    );
+
+    server_workspace(&ui, server(false));
+    assert_eq!(
+        reason(&ui, "gui-restart"),
+        lookup("gui-hint-restart-server-stopped")
+    );
+
+    server_workspace(&ui, server_in_state("orphaned"));
+    assert_eq!(
+        reason(&ui, "gui-restart"),
+        lookup("gui-hint-stop-server-uncontrolled")
+    );
+}
+
+#[test]
+fn a_restart_under_way_is_the_reason_the_host_actions_wait() {
+    let ui = window();
+    server_workspace(&ui, restarting_server("stopping"));
+
+    let expected = lookup("gui-restart-stage-stopping");
+    assert_eq!(reason(&ui, "gui-restart"), expected);
+    assert_eq!(reason(&ui, "gui-stop"), expected);
+}
+
+#[test]
+fn a_server_that_cannot_be_started_says_what_stands_in_the_way() {
+    let ui = window();
+    for (state_kind, message) in [
+        ("orphaned", "gui-hint-server-uncontrolled-start"),
+        ("unknown", "gui-hint-server-uncontrolled-start"),
+        ("needs-recovery", "gui-hint-server-needs-recovery"),
+    ] {
+        server_workspace(&ui, server_in_state(state_kind));
+        assert!(!enabled(&ui, "gui-start"), "{state_kind}");
+        assert_eq!(reason(&ui, "gui-start"), lookup(message), "{state_kind}");
+    }
+
+    let mut row = server_in_state("stopped");
+    row.installed = false;
+    server_workspace(&ui, row);
+    assert_eq!(
+        reason(&ui, "gui-start"),
+        lookup("gui-hint-server-not-installed")
+    );
+}
+
+#[test]
+fn server_properties_save_says_why_for_each_state_that_blocks_it() {
+    let ui = window();
+    for (state_kind, message) in [
+        ("running", "gui-hint-save-requires-stopped"),
+        ("orphaned", "gui-hint-save-server-uncontrolled"),
+        ("unknown", "gui-hint-save-server-uncontrolled"),
+        ("needs-recovery", "gui-hint-server-needs-recovery"),
+        ("stopping", "gui-hint-save-server-stopping"),
+        ("failed", "gui-hint-save-server-failed"),
+    ] {
+        let mut row = server_in_state(state_kind);
+        row.can_stop = state_kind == "running";
+        support::show_server(&ui, row, "Properties");
+        settle(&ui);
+        assert!(!enabled(&ui, "gui-save-changes"), "{state_kind}");
+        assert_eq!(
+            reason(&ui, "gui-save-changes"),
+            lookup(message),
+            "{state_kind}"
+        );
+    }
+
+    support::show_server(&ui, server(false), "Properties");
+    settle(&ui);
+    assert!(enabled(&ui, "gui-save-changes"));
+    assert_eq!(reason(&ui, "gui-save-changes"), "");
+}
+
+#[test]
+fn a_disabled_force_kill_says_why() {
+    let ui = window();
+
+    server_workspace(&ui, server(false));
+    assert!(!enabled(&ui, "gui-kill"));
+    assert_eq!(
+        reason(&ui, "gui-kill"),
+        lookup("gui-hint-force-kill-server")
+    );
+
+    server_workspace(&ui, server_in_state("orphaned"));
+    assert_eq!(
+        reason(&ui, "gui-kill"),
+        lookup("gui-hint-stop-server-uncontrolled")
+    );
+
+    server_workspace(&ui, server(true));
+    assert_eq!(reason(&ui, "gui-kill"), "");
+}
+
+#[test]
+fn a_disabled_connect_shows_the_reason_its_server_row_carries() {
+    let ui = window();
+    let mut row = server(true);
+    row.linked_client_id = "client".into();
+    row.can_connect = false;
+    row.connect_reason = "The client is already running.".into();
+    ui.set_loading(false);
+    ui.set_page(1);
+    ui.set_workspace_open(false);
+    ui.set_global_servers(ModelRc::new(VecModel::from(vec![row])));
+    ui.set_selected_global_server_index(0);
+    ui.set_selected_global_server_id("server".into());
+    settle(&ui);
+
+    assert!(!enabled(&ui, "gui-launch-client-connect"));
+    assert_eq!(
+        reason(&ui, "gui-launch-client-connect"),
+        "The client is already running."
+    );
+}
+
 fn client_workspace(ui: &AppWindow, row: InstanceRow) {
     support::show_client(ui, row, "Overview");
     settle(ui);
@@ -165,6 +312,7 @@ fn instance() -> InstanceRow {
         can_kill: false,
         connect_server_id: SharedString::default(),
         connect_server_name: SharedString::default(),
+        connect_reason: SharedString::default(),
         can_connect: false,
         creating_server_detail: SharedString::default(),
         creating_server_progress: 0.0,

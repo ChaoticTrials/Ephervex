@@ -78,7 +78,7 @@ export component RunningCard inherits Rectangle {
                 spacing: 8px;
                 AppButton { text: GuiI18n.text("gui-open-log"); clicked => { root.open-log(root.item.kind, root.item.id); } }
                 if root.item.kind == "server" : AppButton { text: GuiI18n.text("gui-open-console"); clicked => { root.open-console(root.item.id); } }
-                AppButton { text: root.item.kind == "server" ? GuiI18n.text("gui-stop") : GuiI18n.text("gui-stop-game"); tone: "danger"; enabled: root.item.can-stop; clicked => { root.stop(root.item.kind, root.item.id); } }
+                AppButton { text: root.item.kind == "server" ? GuiI18n.text("gui-stop") : GuiI18n.text("gui-stop-game"); tone: "danger"; enabled: root.item.can-stop; hint: root.item.kind == "server" ? GuiI18n.text("gui-hint-stop-server-uncontrolled") : GuiI18n.text("gui-hint-stop-client-unsupervised"); clicked => { root.stop(root.item.kind, root.item.id); } }
                 // The bigger hammer, and only for a client: a launch left
                 // by another run of the launcher has nobody supervising it,
                 // so cancelling is not available and the instance would

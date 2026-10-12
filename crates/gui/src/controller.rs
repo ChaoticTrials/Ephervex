@@ -8953,6 +8953,12 @@ fn apply_instance_snapshot(
                 .launch_and_connect
                 .first()
                 .is_some_and(|connect| connect.enabled),
+            connect_reason: item
+                .launch_and_connect
+                .first()
+                .map_or_else(SharedString::default, |connect| {
+                    connect.reason.clone().into()
+                }),
             // Filled in from the creation tracker, which a snapshot knows
             // nothing about.
             creating_server_detail: SharedString::default(),

@@ -33,3 +33,54 @@ export global PropertyRules {
 export global NameRules {
     pure callback linked-server-name(string) -> string;
 }
+
+// Why a server's Start/Stop, Restart or Force kill is unavailable, read from
+// the state the server is in. A start or stop is blamed only when one is
+// really under way.
+export global ServerHints {
+    pure function uncontrolled(state-kind: string) -> bool {
+        return state-kind == "unknown" || state-kind == "orphaned";
+    }
+    pure public function start(state-kind: string, installed: bool) -> string {
+        if (uncontrolled(state-kind)) {
+            return GuiI18n.text("gui-hint-server-uncontrolled-start");
+        }
+        if (state-kind == "needs-recovery") {
+            return GuiI18n.text("gui-hint-server-needs-recovery");
+        }
+        if (!installed) {
+            return GuiI18n.text("gui-hint-server-not-installed");
+        }
+        return GuiI18n.text("gui-hint-state-changing");
+    }
+    pure public function restart(state-kind: string) -> string {
+        if (uncontrolled(state-kind)) {
+            return GuiI18n.text("gui-hint-stop-server-uncontrolled");
+        }
+        if (state-kind == "stopped" || state-kind == "needs-recovery") {
+            return GuiI18n.text("gui-hint-restart-server-stopped");
+        }
+        return GuiI18n.text("gui-hint-restart-server-unavailable");
+    }
+    pure public function save(state-kind: string) -> string {
+        if (uncontrolled(state-kind)) {
+            return GuiI18n.text("gui-hint-save-server-uncontrolled");
+        }
+        if (state-kind == "needs-recovery") {
+            return GuiI18n.text("gui-hint-server-needs-recovery");
+        }
+        if (state-kind == "stopping") {
+            return GuiI18n.text("gui-hint-save-server-stopping");
+        }
+        if (state-kind == "failed") {
+            return GuiI18n.text("gui-hint-save-server-failed");
+        }
+        return GuiI18n.text("gui-hint-save-requires-stopped");
+    }
+    pure public function kill(state-kind: string) -> string {
+        if (uncontrolled(state-kind)) {
+            return GuiI18n.text("gui-hint-stop-server-uncontrolled");
+        }
+        return GuiI18n.text("gui-hint-force-kill-server");
+    }
+}
