@@ -131,6 +131,35 @@
   background: linear-gradient(90deg, color-mix(in srgb, #24744c 23%, var(--site-surface-alt)), color-mix(in srgb, #b52b3d 21%, var(--site-surface-alt)));
 }
 
+:global(html[data-season='april-fools']) .pathGrid a:nth-child(4n + 1) {
+  border-top: 4px solid #ed3b9a;
+  background: linear-gradient(135deg, color-mix(in srgb, #ed3b9a 24%, var(--site-surface)), var(--site-surface) 82%);
+}
+:global(html[data-season='april-fools']) .pathGrid a:nth-child(4n + 2) {
+  border-top: 4px solid #e6b323;
+  background: linear-gradient(135deg, color-mix(in srgb, #ffd447 25%, var(--site-surface)), var(--site-surface) 82%);
+}
+:global(html[data-season='april-fools']) .pathGrid a:nth-child(4n + 3) {
+  border-top: 4px solid #25b6c3;
+  background: linear-gradient(135deg, color-mix(in srgb, #25b6c3 25%, var(--site-surface)), var(--site-surface) 82%);
+}
+:global(html[data-season='april-fools']) .pathGrid a:nth-child(4n) {
+  border-top: 4px solid #874ed5;
+  background: linear-gradient(135deg, color-mix(in srgb, #874ed5 24%, var(--site-surface)), var(--site-surface) 82%);
+}
+:global(html[data-season='april-fools']) .pathGrid a:nth-child(4n + 2) span { color: #875c0a; }
+:global(html[data-season='april-fools']) .pathGrid a:nth-child(4n + 3) span { color: #116e80; }
+:global(html[data-season='april-fools']) .pathGrid a:nth-child(4n) span { color: #6134a4; }
+:global(html[data-theme='dark'][data-season='april-fools']) .pathGrid a:nth-child(4n + 2) span { color: #ffe18e; }
+:global(html[data-theme='dark'][data-season='april-fools']) .pathGrid a:nth-child(4n + 3) span { color: #81e3e9; }
+:global(html[data-theme='dark'][data-season='april-fools']) .pathGrid a:nth-child(4n) span { color: #c4a0fb; }
+:global(html[data-season='april-fools']) .pathGrid a:nth-child(odd):hover { transform: translateY(-3px) rotate(-1deg); }
+:global(html[data-season='april-fools']) .pathGrid a:nth-child(even):hover { transform: translateY(-3px) rotate(1deg); }
+:global(html[data-season='april-fools']) .preview figcaption {
+  border-top: 4px solid #ed3b9a;
+  background: linear-gradient(90deg, color-mix(in srgb, #ffd447 20%, var(--site-surface-alt)), color-mix(in srgb, #25b6c3 20%, var(--site-surface-alt)), color-mix(in srgb, #874ed5 20%, var(--site-surface-alt)));
+}
+
 @media (max-width: 700px) {
   .pathGrid { grid-template-columns: 1fr; }
   .quickLinks a { flex: 1 1 100%; }
@@ -139,4 +168,5 @@
 @media (prefers-reduced-motion: reduce) {
   .pathGrid a { transition: none; }
   .pathGrid a:hover { transform: none; }
+  :global(html[data-season='april-fools']) .pathGrid a:hover { transform: none; }
 }

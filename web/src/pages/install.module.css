@@ -261,3 +261,37 @@
 :global(html[data-season='christmas']) .instructionsHeader {
   background: linear-gradient(90deg, color-mix(in srgb, #24744c 16%, var(--site-surface-alt)), color-mix(in srgb, #b52b3d 16%, var(--site-surface-alt)));
 }
+
+:global(html[data-season='april-fools']) .hero {
+  background: linear-gradient(110deg, #fce0ed, #fff0bf 29%, #d9f3f2 65%, #eadafa);
+}
+:global(html[data-theme='dark'][data-season='april-fools']) .hero {
+  background: linear-gradient(110deg, #603151, #57452c 29%, #265062 65%, #50396d);
+}
+:global(html[data-season='april-fools']) .chooser { overflow: hidden; }
+:global(html[data-season='april-fools']) .chooser::before {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 6px;
+  background: var(--season-ribbon);
+  content: '';
+}
+:global(html[data-season='april-fools']) .method:nth-child(4n + 1) { border-top: 4px solid #ed3b9a; background: color-mix(in srgb, #ed3b9a 13%, var(--site-bg)); }
+:global(html[data-season='april-fools']) .method:nth-child(4n + 2) { border-top: 4px solid #e6b323; background: color-mix(in srgb, #ffd447 15%, var(--site-bg)); }
+:global(html[data-season='april-fools']) .method:nth-child(4n + 3) { border-top: 4px solid #25b6c3; background: color-mix(in srgb, #25b6c3 14%, var(--site-bg)); }
+:global(html[data-season='april-fools']) .method:nth-child(4n) { border-top: 4px solid #874ed5; background: color-mix(in srgb, #874ed5 13%, var(--site-bg)); }
+:global(html[data-season='april-fools']) .instructionsHeader {
+  background: linear-gradient(90deg, color-mix(in srgb, #ed3b9a 16%, var(--site-surface-alt)), color-mix(in srgb, #25b6c3 16%, var(--site-surface-alt)), color-mix(in srgb, #874ed5 16%, var(--site-surface-alt)));
+}
+
+@keyframes aprilIconRoll {
+  to { transform: rotate(1turn); }
+}
+:global(html[data-season='april-fools']) .method:hover .methodIcons img,
+:global(html[data-season='april-fools']) .method:focus-visible .methodIcons img {
+  animation: aprilIconRoll 900ms ease-in-out 1 both;
+}
+@media (prefers-reduced-motion: reduce) {
+  :global(html[data-season='april-fools']) .method:hover .methodIcons img,
+  :global(html[data-season='april-fools']) .method:focus-visible .methodIcons img { animation: none; }
+}

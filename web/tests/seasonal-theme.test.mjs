@@ -62,8 +62,15 @@ test('every seasonal palette supplies the shared light and dark color tokens', (
   const palettes = (css, name) => [...css.matchAll(new RegExp(`html(?:\\[data-theme='dark'\\])?\\[data-season='${name}'\\] \\{([^}]+)\\}`, 'g'))]
     .map((match) => [...match[1].matchAll(/(--[a-z-]+):/g)].map((token) => token[1]));
   const expected = palettes(base, 'halloween');
-  for (const name of ['pride', 'christmas']) {
+  for (const name of ['pride', 'christmas', 'april-fools']) {
     const actual = palettes(seasonal, name);
     for (let mode = 0; mode < 2; mode++) assert.deepEqual(actual[mode], expected[mode], `${name} palette ${mode}`);
   }
+});
+
+test('April Fools covers April 1 only', () => {
+  assert.equal(season(3, 31), undefined);
+  assert.equal(season(4, 1), 'april-fools');
+  assert.equal(season(4, 2), undefined);
+  assert.equal(season(2, 1, '?seasonPreview=april-fools', 'localhost'), 'april-fools');
 });

@@ -230,3 +230,126 @@ html[data-season='christmas'] .theme-doc-sidebar-menu .menu__link--active:not(.m
   box-shadow: inset 3px 0 #b52b3d;
 }
 
+html[data-season='april-fools'] {
+  --ifm-color-primary: #a4146b;
+  --ifm-color-primary-dark: #93125f;
+  --ifm-color-primary-darker: #8b115a;
+  --ifm-color-primary-darkest: #720e49;
+  --ifm-color-primary-light: #b51677;
+  --ifm-color-primary-lighter: #be177c;
+  --ifm-color-primary-lightest: #dd2c99;
+  --ifm-font-color-base: #302645;
+  --ifm-heading-color: #29203f;
+  --ifm-navbar-background-color: #fffaf6;
+  --ifm-navbar-link-color: #29203f;
+  --ifm-navbar-link-hover-color: #a4146b;
+  --site-bg: #fff9f3;
+  --site-surface: #fffefd;
+  --site-surface-alt: #f2eafa;
+  --site-image-bg: #dff2f4;
+  --site-border: #ded3e9;
+  --site-muted: #615773;
+  --site-accent: #a4146b;
+  --site-shadow: rgba(61, 28, 80, 0.1);
+  --site-hero-bg: #fce8ed;
+  --site-hero-text: #29203f;
+  --site-hero-muted: #574768;
+  --site-button-bg: #a4146b;
+  --site-button-hover: #810d53;
+  --site-button-text: #fff;
+  --docs-sidebar-bg: #f1e7fb;
+  --docs-sidebar-text: #423257;
+  --docs-sidebar-accent: #a4146b;
+  --docs-note-bg: #dcf4f1;
+  --docs-warning-bg: #fff0cc;
+  --docs-warning-border: #a56609;
+}
+
+html[data-theme='dark'][data-season='april-fools'] {
+  --ifm-color-primary: #ffd66b;
+  --ifm-color-primary-dark: #ffcb48;
+  --ifm-color-primary-darker: #ffc637;
+  --ifm-color-primary-darkest: #f2b00c;
+  --ifm-color-primary-light: #ffe18e;
+  --ifm-color-primary-lighter: #ffe69f;
+  --ifm-color-primary-lightest: #fff3d2;
+  --ifm-font-color-base: #f2eafa;
+  --ifm-heading-color: #fff5ff;
+  --ifm-navbar-background-color: #211a36;
+  --ifm-navbar-link-color: #f5e9ff;
+  --ifm-navbar-link-hover-color: #ffd66b;
+  --site-bg: #1c1830;
+  --site-surface: #29213f;
+  --site-surface-alt: #35294e;
+  --site-image-bg: #211b35;
+  --site-border: #594a71;
+  --site-muted: #d2c4e1;
+  --site-accent: #ffd66b;
+  --site-shadow: rgba(0, 0, 0, 0.24);
+  --site-hero-bg: #3d2851;
+  --site-hero-text: #fff5ff;
+  --site-hero-muted: #e0d3ea;
+  --site-button-bg: #ffd66b;
+  --site-button-hover: #ffe493;
+  --site-button-text: #2c2038;
+  --docs-sidebar-bg: #211a36;
+  --docs-sidebar-text: #edddfa;
+  --docs-sidebar-accent: #ffd66b;
+  --docs-note-bg: #224349;
+  --docs-warning-bg: #4d3850;
+  --docs-warning-border: #ffd66b;
+}
+
+html[data-season='april-fools'] {
+  --season-ribbon: repeating-linear-gradient(110deg, #ed3b9a 0 18px, #ffd447 18px 36px, #25b6c3 36px 54px, #874ed5 54px 72px);
+}
+html[data-season='april-fools'] .navbar { border-image: var(--season-ribbon) 1; border-bottom-width: 5px; }
+html[data-season='april-fools'] .theme-doc-markdown > header:first-child {
+  background:
+    var(--season-ribbon) top / 100% 7px no-repeat,
+    radial-gradient(circle at 87% 24%, #ffd447 0 7px, transparent 8px),
+    radial-gradient(circle at 77% 71%, #25b6c3 0 4px, transparent 5px),
+    linear-gradient(115deg, #f8d8ed, #ffeacb 37%, #d8f4f2 72%, #e9dcfa);
+}
+html[data-theme='dark'][data-season='april-fools'] .theme-doc-markdown > header:first-child {
+  background:
+    var(--season-ribbon) top / 100% 7px no-repeat,
+    radial-gradient(circle at 87% 24%, #ffd447 0 7px, transparent 8px),
+    radial-gradient(circle at 77% 71%, #25b6c3 0 4px, transparent 5px),
+    linear-gradient(115deg, #653052, #6a3e50 38%, #28566b 72%, #523a70);
+}
+html[data-season='april-fools'] .theme-doc-markdown > header:first-child + p {
+  background: linear-gradient(110deg, #fce0ed, #e4f4f5 58%, #fff0bf);
+}
+html[data-theme='dark'][data-season='april-fools'] .theme-doc-markdown > header:first-child + p {
+  background: linear-gradient(110deg, #523052, #284658 58%, #584528);
+}
+html[data-season='april-fools'] .theme-doc-markdown {
+  background:
+    radial-gradient(ellipse at 94% 25%, color-mix(in srgb, #25b6c3 13%, transparent), transparent 42%),
+    radial-gradient(ellipse at 8% 70%, color-mix(in srgb, #ed3b9a 9%, transparent), transparent 39%),
+    var(--site-surface);
+}
+html[data-season='april-fools'] .theme-doc-markdown > h2::before { background: var(--season-ribbon); }
+html[data-season='april-fools'] .theme-doc-sidebar-menu::before {
+  border-bottom: 4px solid transparent;
+  border-image: var(--season-ribbon) 1;
+}
+html[data-season='april-fools'] .theme-doc-sidebar-menu .menu__link--active:not(.menu__link--sublist) {
+  background: linear-gradient(90deg, color-mix(in srgb, #ed3b9a 19%, var(--docs-sidebar-bg)), color-mix(in srgb, #874ed5 18%, var(--docs-sidebar-bg)));
+  box-shadow: inset 3px 0 #ed3b9a;
+}
+
+@keyframes april-barrel-roll {
+  to { transform: rotate(1turn); }
+}
+html[data-season='april-fools'] .themeScreenshotZoomable:is(:hover, :focus-visible),
+html[data-season='april-fools'] .navbar__brand:is(:hover, :focus-visible) .navbar__logo img,
+html[data-season='april-fools'] footer a:is(:hover, :focus-visible) img {
+  animation: april-barrel-roll 900ms ease-in-out 1 both;
+}
+@media (prefers-reduced-motion: reduce) {
+  html[data-season='april-fools'] .themeScreenshotZoomable:is(:hover, :focus-visible),
+  html[data-season='april-fools'] .navbar__brand:is(:hover, :focus-visible) .navbar__logo img,
+  html[data-season='april-fools'] footer a:is(:hover, :focus-visible) img { animation: none; }
+}

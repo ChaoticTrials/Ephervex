@@ -367,7 +367,6 @@
   background: #304e71;
 }
 
-
 :global(html[data-season='christmas']) .hero {
   color: #fffdf4;
   background:
@@ -418,3 +417,46 @@
 }
 :global(html[data-theme='dark'][data-season='christmas']) .featureCard:nth-child(odd) { border-top-color: #e96e78; }
 :global(html[data-theme='dark'][data-season='christmas']) .featureCard:nth-child(even) { border-top-color: #72bf91; }
+
+:global(html[data-season='april-fools']) .hero {
+  background:
+    radial-gradient(circle at 82% 18%, #fbd2f0, transparent 35%),
+    radial-gradient(circle at 15% 76%, #fff0b7, transparent 39%),
+    linear-gradient(115deg, #fce1ed, #e1f4f4 54%, #eee2fc);
+}
+:global(html[data-season='april-fools']) .hero::before {
+  background-image:
+    radial-gradient(circle, color-mix(in srgb, #ec379b 50%, transparent) 2px, transparent 3px),
+    radial-gradient(circle, color-mix(in srgb, #25b6c3 45%, transparent) 2px, transparent 3px);
+  background-position: 8px 16px, 49px 62px;
+  background-size: 151px 137px, 173px 149px;
+}
+:global(html[data-season='april-fools']) .hero h1 span {
+  background: linear-gradient(100deg, #b41871, #9142a8 36%, #167f98 69%, #a75b09);
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+:global(html[data-season='april-fools']) .featureCard:nth-child(4n + 1) { border-top: 4px solid #ec379b; }
+:global(html[data-season='april-fools']) .featureCard:nth-child(4n + 2) { border-top: 4px solid #edba27; }
+:global(html[data-season='april-fools']) .featureCard:nth-child(4n + 3) { border-top: 4px solid #25b6c3; }
+:global(html[data-season='april-fools']) .featureCard:nth-child(4n) { border-top: 4px solid #874ed5; }
+:global(html[data-season='april-fools']) .windowDots i:first-child { background: #ec379b; }
+:global(html[data-season='april-fools']) .windowDots i:nth-child(2) { background: #ffd447; }
+:global(html[data-season='april-fools']) .windowDots i:nth-child(3) { background: #25b6c3; }
+:global(html[data-season='april-fools']) .cta {
+  border-top: 5px solid transparent;
+  border-image: var(--season-ribbon) 1;
+  background: linear-gradient(110deg, #fce0ed, #e4f4f5 55%, #fff0bf);
+}
+:global(html[data-theme='dark'][data-season='april-fools']) .hero {
+  background:
+    radial-gradient(circle at 84% 16%, #693264, transparent 37%),
+    radial-gradient(circle at 16% 81%, #54512e, transparent 43%),
+    linear-gradient(115deg, #392042, #203e52 56%, #41305e);
+}
+:global(html[data-theme='dark'][data-season='april-fools']) .hero h1 span {
+  background-image: linear-gradient(100deg, #ff8bca, #c89bff 35%, #78ebf1 70%, #ffdc79);
+}
+:global(html[data-theme='dark'][data-season='april-fools']) .cta {
+  background: linear-gradient(110deg, #4d2a50, #254452 55%, #544129);
+}

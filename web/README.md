@@ -50,6 +50,10 @@ Christmas runs December 24 through 26 in local time, with evergreen and red
 surfaces and the project-supplied Santa mascot from the x4 artwork. Preview it
 locally with
 `?seasonPreview=christmas`.
+April Fools runs April 1 in local time, with pink, gold, cyan, and violet
+surfaces and the project-supplied jester mascot from the x4 artwork. Preview it
+locally with
+`?seasonPreview=april-fools`.
 Seasonal branding keeps the default launcher screenshots.
 Run `node --test tests/seasonal-theme.test.mjs` to check date boundaries and previews.
 

@@ -125,3 +125,28 @@
 :global(html[data-season='pride']) .toc a:nth-child(6n + 5) { border-color: #468bc9; background: color-mix(in srgb, #468bc9 18%, var(--site-surface)); }
 :global(html[data-season='pride']) .toc a:nth-child(6n) { border-color: #9760c6; background: color-mix(in srgb, #9760c6 18%, var(--site-surface)); }
 :global(html[data-season='pride']) .toc a:hover { color: var(--ifm-font-color-base); filter: brightness(1.12); }
+
+:global(html[data-season='april-fools']) .intro {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(110deg, #fce0ed, #fff0bf 29%, #d9f3f2 65%, #eadafa);
+}
+:global(html[data-season='april-fools']) .intro::before {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 6px;
+  background: var(--season-ribbon);
+  content: '';
+}
+:global(html[data-theme='dark'][data-season='april-fools']) .intro {
+  background: linear-gradient(110deg, #603151, #57452c 29%, #265062 65%, #50396d);
+}
+:global(html[data-season='april-fools']) .toc a:nth-child(4n + 1) { border-color: #ed3b9a; background: color-mix(in srgb, #ed3b9a 19%, var(--site-surface)); }
+:global(html[data-season='april-fools']) .toc a:nth-child(4n + 2) { border-color: #d4a322; background: color-mix(in srgb, #ffd447 20%, var(--site-surface)); }
+:global(html[data-season='april-fools']) .toc a:nth-child(4n + 3) { border-color: #25b6c3; background: color-mix(in srgb, #25b6c3 19%, var(--site-surface)); }
+:global(html[data-season='april-fools']) .toc a:nth-child(4n) { border-color: #874ed5; background: color-mix(in srgb, #874ed5 19%, var(--site-surface)); }
+:global(html[data-season='april-fools']) .toc a:hover { color: var(--ifm-font-color-base); filter: brightness(1.12); }
+:global(html[data-season='april-fools']) .card:nth-child(4n + 1) { border-top: 4px solid #ed3b9a; }
+:global(html[data-season='april-fools']) .card:nth-child(4n + 2) { border-top: 4px solid #e6b323; }
+:global(html[data-season='april-fools']) .card:nth-child(4n + 3) { border-top: 4px solid #25b6c3; }
+:global(html[data-season='april-fools']) .card:nth-child(4n) { border-top: 4px solid #874ed5; }
