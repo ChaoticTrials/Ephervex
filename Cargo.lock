@@ -1678,6 +1678,7 @@ name = "ephervex-cli"
 version = "0.10.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "clap_complete",
  "ephervex-core",
@@ -1685,6 +1686,7 @@ dependencies = [
  "ephervex-i18n",
  "ephervex-loaders",
  "ephervex-minecraft",
+ "ephervex-mod-platform",
  "ephervex-model",
  "serde_json",
  "tempfile",

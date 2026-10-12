@@ -5393,6 +5393,10 @@ fn warning_text(warning: &PlanWarning) -> String {
     }
 }
 
+fn warnings_json(warnings: &[PlanWarning]) -> Vec<String> {
+    warnings.iter().map(warning_text).collect()
+}
+
 fn print_mod_plan(plan: &ModInstallPlan, json: bool) {
     if json {
         print_json(&serde_json::json!({
@@ -5422,7 +5426,7 @@ fn print_mod_plan(plan: &ModInstallPlan, json: bool) {
                 "project_id": installed.project_id,
                 "version_id": installed.version_id,
             })).collect::<Vec<_>>(),
-            "warnings": plan.warnings.iter().map(warning_text).collect::<Vec<_>>(),
+            "warnings": warnings_json(&plan.warnings),
         }));
         return;
     }
@@ -5502,21 +5506,28 @@ fn install_path_line(message_id: &str, path: &Path) -> String {
     ephervex_i18n::lookup_args(message_id, [("path", MessageArg::from(path))])
 }
 
+/// The JSON an installation reports. Its plan carries the same warnings
+/// `mod plan --json` does, so a script sees what text mode prints to stderr.
+fn installed_mods_json(installed: &InstalledMods) -> serde_json::Value {
+    serde_json::json!({
+        "installed": json_paths(&installed.installation.installed),
+        "repaired": json_paths(&installed.installation.repaired),
+        "already_present": json_paths(&installed.installation.already_present),
+        "recorded": json_paths(&installed.installation.recorded),
+        "modified": json_paths(&installed.installation.modified),
+        "reused_from_cache": installed.installation.reused_from_cache,
+        "bytes": installed.installation.bytes,
+        "plan": {
+            "root": planned_json(&installed.plan.root),
+            "dependencies": installed.plan.dependencies.iter().map(planned_json).collect::<Vec<_>>(),
+            "warnings": warnings_json(&installed.plan.warnings),
+        },
+    })
+}
+
 fn print_installed_mods(installed: &InstalledMods, json: bool) {
     if json {
-        print_json(&serde_json::json!({
-            "installed": json_paths(&installed.installation.installed),
-            "repaired": json_paths(&installed.installation.repaired),
-            "already_present": json_paths(&installed.installation.already_present),
-            "recorded": json_paths(&installed.installation.recorded),
-            "modified": json_paths(&installed.installation.modified),
-            "reused_from_cache": installed.installation.reused_from_cache,
-            "bytes": installed.installation.bytes,
-            "plan": {
-                "root": planned_json(&installed.plan.root),
-                "dependencies": installed.plan.dependencies.iter().map(planned_json).collect::<Vec<_>>(),
-            },
-        }));
+        print_json(&installed_mods_json(installed));
         return;
     }
 
@@ -8706,6 +8717,105 @@ mod tests {
             "a\\u{1b}[2J\\u{a}b\\u{7f}"
         );
         assert_eq!(terminal_safe("x\u{9b}y\u{202e}z"), "x\\u{9b}y\\u{202e}z");
+    }
+
+    fn planned_mod(project_id: &str) -> PlannedMod {
+        use ephervex_core::{ModFile, ModProject, ModVersionInfo, ReleaseChannel, SideSupport};
+        use ephervex_mod_platform::Distribution;
+        PlannedMod {
+            project: ModProject {
+                provider: ModProvider::Modrinth,
+                id: project_id.to_owned(),
+                slug: None,
+                title: "Example".to_owned(),
+                description: String::new(),
+                author: None,
+                client_side: SideSupport::Unsupported,
+                server_side: SideSupport::Required,
+                icon_url: None,
+            },
+            version: ModVersionInfo {
+                provider: ModProvider::Modrinth,
+                id: "version".to_owned(),
+                project_id: project_id.to_owned(),
+                name: "Example 1.0".to_owned(),
+                version_number: "1.0".to_owned(),
+                channel: ReleaseChannel::Release,
+                game_versions: Vec::new(),
+                loaders: Vec::new(),
+                published_at: chrono::DateTime::UNIX_EPOCH,
+                file: ModFile {
+                    file_name: "example.jar".to_owned(),
+                    distribution: Distribution::Restricted,
+                    size: None,
+                    hashes: Vec::new(),
+                },
+                dependencies: Vec::new(),
+                client_side: SideSupport::Unknown,
+                server_side: SideSupport::Unknown,
+            },
+            origin: ephervex_model::ModOrigin::default(),
+            requested_by: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn an_installation_reports_the_same_plan_warnings_as_a_plan() {
+        let warnings = vec![
+            PlanWarning::ClientSideUnsupported {
+                project_id: "AANobbMI".to_owned(),
+            },
+            PlanWarning::UncheckableConflict {
+                declared_by: "AANobbMI".to_owned(),
+                file_name: "other.jar".to_owned(),
+            },
+            PlanWarning::OptionalNotOffered {
+                project_id: "P7dR8mSH".to_owned(),
+            },
+        ];
+        let installed = InstalledMods {
+            plan: ModInstallPlan {
+                provider: ModProvider::Modrinth,
+                root: planned_mod("AANobbMI"),
+                dependencies: Vec::new(),
+                optional: Vec::new(),
+                external: Vec::new(),
+                embedded: Vec::new(),
+                already_installed: Vec::new(),
+                replacements: Vec::new(),
+                warnings: warnings.clone(),
+            },
+            installation: ManagedModInstallation::default(),
+        };
+
+        let reported = installed_mods_json(&installed);
+
+        let expected: Vec<String> = warnings.iter().map(warning_text).collect();
+        assert_eq!(expected.len(), 3);
+        assert_eq!(reported["plan"]["warnings"], serde_json::json!(expected));
+    }
+
+    #[test]
+    fn an_installation_without_plan_warnings_reports_an_empty_list() {
+        let installed = InstalledMods {
+            plan: ModInstallPlan {
+                provider: ModProvider::Modrinth,
+                root: planned_mod("AANobbMI"),
+                dependencies: Vec::new(),
+                optional: Vec::new(),
+                external: Vec::new(),
+                embedded: Vec::new(),
+                already_installed: Vec::new(),
+                replacements: Vec::new(),
+                warnings: Vec::new(),
+            },
+            installation: ManagedModInstallation::default(),
+        };
+
+        assert_eq!(
+            installed_mods_json(&installed)["plan"]["warnings"],
+            serde_json::json!([])
+        );
     }
 
     #[test]

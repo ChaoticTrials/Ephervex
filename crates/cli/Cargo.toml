@@ -42,5 +42,7 @@ zip.workspace = true
 ephervex-download.workspace = true
 ephervex-loaders.workspace = true
 ephervex-minecraft.workspace = true
+ephervex-mod-platform.workspace = true
+chrono.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
