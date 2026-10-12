@@ -80,6 +80,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
 use tokio::fs;
+use tokio::io::AsyncReadExt as _;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
@@ -87,6 +88,7 @@ use crate::cache::{CacheKeyError, CacheLayout, ContentStore, safe_segment};
 use crate::error::DownloadError;
 use crate::manager::{DownloadManager, DownloadRequest};
 use crate::progress::OperationReporter;
+use crate::publication::{Discard, FileIdentity, discard_unless_replaced};
 
 /// Envelope format version. Bumped only if the envelope's own fields change;
 /// an envelope from the future is treated as "nothing cached", because a cache
@@ -432,6 +434,25 @@ pub enum ConditionalStore<T> {
     Kept(T),
 }
 
+/// A cached document together with the file it was read from.
+///
+/// Holds that file open so its identity cannot be reused by a later
+/// publication before [`MetadataCache::discard`] has compared it.
+#[derive(Debug)]
+pub struct InspectedMetadata {
+    entry: CachedMetadata,
+    path: PathBuf,
+    identity: Option<FileIdentity>,
+    _file: fs::File,
+}
+
+impl InspectedMetadata {
+    #[must_use]
+    pub const fn entry(&self) -> &CachedMetadata {
+        &self.entry
+    }
+}
+
 /// Stores provider documents with the time they were fetched.
 #[derive(Debug, Clone)]
 pub struct MetadataCache {
@@ -489,13 +510,24 @@ impl MetadataCache {
     /// understood - an unreadable cache entry is a cache miss, never an error,
     /// because the correct response to both is the same: fetch it again.
     pub async fn peek(&self, key: &MetadataKey) -> Option<CachedMetadata> {
+        self.inspect(key).await.map(|inspected| inspected.entry)
+    }
+
+    /// Like [`Self::peek`], but remembers which file was read so that
+    /// [`Self::discard`] can drop exactly that publication.
+    pub async fn inspect(&self, key: &MetadataKey) -> Option<InspectedMetadata> {
         let path = self.path(key);
-        let bytes = fs::read(&path).await.ok()?;
-        let envelope: Envelope = serde_json::from_slice(&bytes)
-.inspect_err(|error| {
-                debug!(path = %path.display(), %error, "discarding unreadable metadata cache entry");
-            })
-.ok()?;
+        let mut file = fs::File::open(&path).await.ok()?;
+        let identity = file
+            .metadata()
+            .await
+            .ok()
+            .and_then(|metadata| FileIdentity::of(&metadata));
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).await.ok()?;
+        let envelope: Envelope = serde_json::from_slice(&bytes).inspect_err(|error| {
+            debug!(path = %path.display(), %error, "discarding unreadable metadata cache entry");
+        }).ok()?;
         if envelope.schema > METADATA_ENVELOPE_VERSION {
             debug!(
                 path = %path.display(),
@@ -516,7 +548,12 @@ impl MetadataCache {
         } else {
             Freshness::Stale
         };
-        Some(entry.with_freshness(freshness))
+        Some(InspectedMetadata {
+            entry: entry.with_freshness(freshness),
+            path,
+            identity,
+            _file: file,
+        })
     }
 
     /// Serves the document, fetching it only if what is cached has expired.
@@ -802,9 +839,40 @@ impl MetadataCache {
         }
     }
 
-    /// Drops one document from the cache.
+    /// Drops one document from the cache, whatever is published there now.
+    ///
+    /// For a document nothing else shares. A verdict reached by reading the
+    /// entry belongs to [`Self::discard`].
     pub async fn invalidate(&self, key: &MetadataKey) {
         remove_if_present(&self.path(key)).await;
+    }
+
+    /// Drops the entry that was inspected, unless another publication has
+    /// replaced it since.
+    ///
+    /// A process that judged an entry unusable may be acting on a stale
+    /// verdict: another process can publish a valid revision in between, and
+    /// removing that would erase the revision a later rollback check compares
+    /// against. The comparison and the removal run under the same directory
+    /// lock every publication renames under. Where the platform reports no
+    /// file identity the entry is left for the next publication to replace.
+    pub async fn discard(&self, inspected: InspectedMetadata) {
+        let Some(identity) = inspected.identity else {
+            return;
+        };
+        // `inspected` stays open across the call, which keeps the inode unique.
+        match discard_unless_replaced(&inspected.path, identity).await {
+            Ok(Discard::Removed) => {}
+            Ok(Discard::Replaced) => {
+                debug!(
+                    path = %inspected.path.display(),
+                    "kept a metadata cache entry published after it was inspected"
+                );
+            }
+            Err(error) => {
+                debug!(path = %inspected.path.display(), %error, "could not remove metadata cache file");
+            }
+        }
     }
 
     async fn write_envelope(
@@ -974,6 +1042,71 @@ mod tests {
             .await;
         assert_eq!(refused.unwrap_err(), "refused");
         assert_eq!(cache.peek(&key).await.unwrap().json(), "1");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn discarding_an_inspected_entry_removes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache_in(&dir);
+        let key = MetadataKey::new("revisioned").unwrap();
+        cache.store(&key, &url(), raw("1")).await.unwrap();
+
+        let inspected = cache.inspect(&key).await.unwrap();
+        assert_eq!(inspected.entry().json(), "1");
+        cache.discard(inspected).await;
+
+        assert!(cache.peek(&key).await.is_none());
+        assert!(!cache.path(&key).exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn discarding_an_inspected_entry_keeps_a_revision_published_after_the_inspection() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache_in(&dir);
+        let key = MetadataKey::new("revisioned").unwrap();
+        cache.store(&key, &url(), raw("1")).await.unwrap();
+        let inspected = cache.inspect(&key).await.unwrap();
+
+        cache.store(&key, &url(), raw("2")).await.unwrap();
+        cache.discard(inspected).await;
+
+        assert_eq!(cache.peek(&key).await.unwrap().json(), "2");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn discarding_an_inspected_entry_keeps_a_revision_stored_through_the_entry_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache_in(&dir);
+        let key = MetadataKey::new("revisioned").unwrap();
+        cache.store(&key, &url(), raw("1")).await.unwrap();
+        let inspected = cache.inspect(&key).await.unwrap();
+
+        cache
+            .store_if(&key, &url(), raw("2"), |_| {
+                Ok::<_, ()>(Admission::<()>::Store)
+            })
+            .await
+            .unwrap();
+        cache.discard(inspected).await;
+
+        assert_eq!(cache.peek(&key).await.unwrap().json(), "2");
+    }
+
+    #[tokio::test]
+    async fn discarding_an_entry_someone_else_already_removed_is_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache_in(&dir);
+        let key = MetadataKey::new("revisioned").unwrap();
+        cache.store(&key, &url(), raw("1")).await.unwrap();
+        let inspected = cache.inspect(&key).await.unwrap();
+
+        cache.invalidate(&key).await;
+        cache.discard(inspected).await;
+
+        assert!(cache.peek(&key).await.is_none());
     }
 
     #[cfg(unix)]

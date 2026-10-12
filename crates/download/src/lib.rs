@@ -92,7 +92,8 @@ pub use manager::{
 };
 pub use metadata::{
     Admission, CachedMetadata, ConditionalStore, DEFAULT_METADATA_TTL, Freshness,
-    MAX_METADATA_BYTES, METADATA_ENVELOPE_VERSION, MetadataCache, MetadataCacheError, MetadataKey,
+    InspectedMetadata, MAX_METADATA_BYTES, METADATA_ENVELOPE_VERSION, MetadataCache,
+    MetadataCacheError, MetadataKey,
 };
 pub use progress::{ByteTally, ChannelSink, OperationReporter, ProgressSink};
 /// The URL type the policy functions take, re-exported.

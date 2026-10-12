@@ -16,7 +16,8 @@ use ephervex_download::{
     CacheLayout, DomainAllowlist, DownloadManager, DownloaderConfig, HttpConfig, OperationReporter,
 };
 use ephervex_options::{
-    CompatibilitySource, FeedError, FeedSource, OptionsCompatibility, OptionsDataset, OptionsFeed,
+    CompatibilitySource, FeedError, FeedSource, OPTIONS_FEED_CACHE_KEY, OptionsCompatibility,
+    OptionsDataset, OptionsFeed,
 };
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path};
@@ -429,6 +430,61 @@ async fn different_content_cannot_reuse_a_cached_revision() {
             .expect("cached")
             .revision,
         3
+    );
+}
+
+/// Writes a cache envelope whose payload is not a dataset this build accepts.
+async fn cache_unusable_document(cache: &tempfile::TempDir) {
+    let layout = CacheLayout::new(cache.path());
+    let server = MockServer::start().await;
+    let unusable = serde_json::value::RawValue::from_string("{\"format_version\":1}".to_owned())
+        .expect("valid json");
+    let key = ephervex_download::MetadataKey::new(OPTIONS_FEED_CACHE_KEY).expect("key");
+    ephervex_download::MetadataCache::new(layout)
+        .store(
+            &key,
+            &ephervex_download::Url::parse(&server.uri()).expect("url"),
+            unusable,
+        )
+        .await
+        .expect("stored");
+}
+
+#[tokio::test]
+async fn an_unusable_cached_document_is_discarded_when_read() {
+    let cache = tempfile::tempdir().expect("temp dir");
+    cache_unusable_document(&cache).await;
+    let server = MockServer::start().await;
+    let feed = feed(&server, &cache);
+
+    assert!(feed.cached().await.is_none());
+
+    let layout = CacheLayout::new(cache.path());
+    let key = ephervex_download::MetadataKey::new(OPTIONS_FEED_CACHE_KEY).expect("key");
+    assert!(
+        ephervex_download::MetadataCache::new(layout)
+            .peek(&key)
+            .await
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn an_unusable_cached_document_is_discarded_when_checked_for_freshness() {
+    let cache = tempfile::tempdir().expect("temp dir");
+    cache_unusable_document(&cache).await;
+    let server = MockServer::start().await;
+    let feed = feed(&server, &cache);
+
+    assert!(!feed.is_fresh().await);
+
+    let layout = CacheLayout::new(cache.path());
+    let key = ephervex_download::MetadataKey::new(OPTIONS_FEED_CACHE_KEY).expect("key");
+    assert!(
+        ephervex_download::MetadataCache::new(layout)
+            .peek(&key)
+            .await
+            .is_none()
     );
 }
 

@@ -302,15 +302,15 @@ impl OptionsFeed {
     /// discarding it costs one refresh, while trusting it could write a setting
     /// through a codec that has since been withdrawn.
     pub async fn cached(&self) -> Option<OptionsDataset> {
-        let entry = self.cache.peek(&self.key).await?;
-        match OptionsDataset::parse(entry.json()) {
+        let inspected = self.cache.inspect(&self.key).await?;
+        match OptionsDataset::parse(inspected.entry().json()) {
             Ok(dataset) => Some(dataset),
             Err(error) => {
                 tracing::warn!(
                     %error,
                     "discarding the cached Minecraft options feed; it is no longer usable"
                 );
-                self.cache.invalidate(&self.key).await;
+                self.cache.discard(inspected).await;
                 None
             }
         }
@@ -318,14 +318,14 @@ impl OptionsFeed {
 
     /// Whether the cached copy is recent enough that a refresh would be waste.
     pub async fn is_fresh(&self) -> bool {
-        let Some(entry) = self.cache.peek(&self.key).await else {
+        let Some(inspected) = self.cache.inspect(&self.key).await else {
             return false;
         };
-        if OptionsDataset::parse(entry.json()).is_err() {
-            self.cache.invalidate(&self.key).await;
+        if OptionsDataset::parse(inspected.entry().json()).is_err() {
+            self.cache.discard(inspected).await;
             return false;
         }
-        !entry.freshness().is_stale()
+        !inspected.entry().freshness().is_stale()
     }
 
     /// Fetches, validates, and - only then - caches the published dataset.
