@@ -889,6 +889,9 @@ error-launch-natives-write = The native libraries could not be written.
 error-launch-unresolved-placeholder = Minecraft's launch arguments contain a value this build of Ephervex does not know how to fill in.
 .action = This means Mojang added something new. Ephervex refuses rather than passing { $placeholder } to the game unchanged. Please report it.
 
+error-launch-path-not-utf8 = A path Minecraft needs contains bytes that are not valid UTF-8.
+.action = Ephervex refuses rather than giving the game a different path. Move the instance or the Ephervex data directory to a path with valid UTF-8 names: { $path }.
+
 error-launch-game-directory = The instance's game directory could not be prepared.
 .action = Check permissions and free space at { $path }.
 

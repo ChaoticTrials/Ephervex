@@ -377,23 +377,23 @@ pub fn build_command(
     let classpath = plan
         .classpath()
         .iter()
-        .map(|path| path.to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
+        .map(|path| utf8_path(path))
+        .collect::<LaunchResult<Vec<_>>>()?
         .join(CLASSPATH_SEPARATOR);
 
     let mut values: BTreeMap<&str, String> = BTreeMap::new();
     // -- jvm --
-    values.insert("natives_directory", display(&plan.natives_dir));
+    values.insert("natives_directory", utf8_path(&plan.natives_dir)?);
     values.insert("launcher_name", APP_ID.to_owned());
     values.insert("launcher_version", APP_VERSION.to_owned());
     values.insert("classpath", classpath);
-    values.insert("library_directory", display(&plan.libraries_dir));
+    values.insert("library_directory", utf8_path(&plan.libraries_dir)?);
     values.insert("classpath_separator", CLASSPATH_SEPARATOR.to_owned());
     // -- game --
     values.insert("auth_player_name", settings.identity.name.clone());
     values.insert("version_name", metadata.id.clone());
-    values.insert("game_directory", display(&settings.game_directory));
-    values.insert("assets_root", display(&plan.assets_dir));
+    values.insert("game_directory", utf8_path(&settings.game_directory)?);
+    values.insert("assets_root", utf8_path(&plan.assets_dir)?);
     values.insert("assets_index_name", plan.asset_index_id.clone());
     values.insert("auth_uuid", settings.identity.uuid.clone());
     values.insert("auth_access_token", settings.identity.access_token.clone());
@@ -425,7 +425,7 @@ pub fn build_command(
     } else {
         for value in expand(declared, &context) {
             let resolved = substitute(&value, &values)?;
-            let resolved = adapt_classpath_filename_argument(&resolved, plan);
+            let resolved = adapt_classpath_filename_argument(&resolved, plan)?;
             arguments.push(argument(&resolved, &values));
         }
     }
@@ -433,7 +433,7 @@ pub fn build_command(
     // 4. The log4j configuration the release ships.
     if let Some(logging) = plan.logging.as_ref() {
         let mut path_value = BTreeMap::new();
-        path_value.insert("path", display(&logging.artifact.path));
+        path_value.insert("path", utf8_path(&logging.artifact.path)?);
         arguments.push(plain(substitute(&logging.argument, &path_value)?));
     }
 
@@ -601,8 +601,16 @@ const fn plain(value: String) -> Argument {
     }
 }
 
-fn display(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
+/// The path as the `String` a command-line template substitutes into.
+///
+/// A path that is not valid UTF-8 is refused: converting it lossily would hand
+/// the game a different pathname than the one Ephervex prepared.
+fn utf8_path(path: &Path) -> LaunchResult<String> {
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| LaunchError::PathNotUtf8 {
+            path: path.to_path_buf(),
+        })
 }
 
 /// Adapts loader metadata whose semantics depend on classpath *filenames* to
@@ -617,21 +625,23 @@ fn display(path: &Path) -> String {
 /// overlapping packages. BootstrapLauncher uses `filename.starts_with(token)`,
 /// so preserving every official token and appending the real filename exactly
 /// retains the metadata's intended exclusion.
-fn adapt_classpath_filename_argument(value: &str, plan: &InstallationPlan) -> String {
+fn adapt_classpath_filename_argument(value: &str, plan: &InstallationPlan) -> LaunchResult<String> {
     let Some(ignore_list) = value.strip_prefix("-DignoreList=") else {
-        return value.to_owned();
+        return Ok(value.to_owned());
     };
     let Some(filename) = plan.client_jar.path.file_name() else {
-        return value.to_owned();
+        return Ok(value.to_owned());
     };
-    let filename = filename.to_string_lossy();
+    let filename = filename.to_str().ok_or_else(|| LaunchError::PathNotUtf8 {
+        path: plan.client_jar.path.clone(),
+    })?;
     if ignore_list
         .split(',')
         .any(|prefix| filename.starts_with(prefix))
     {
-        value.to_owned()
+        Ok(value.to_owned())
     } else {
-        format!("{value},{filename}")
+        Ok(format!("{value},{filename}"))
     }
 }
 
@@ -1175,6 +1185,55 @@ mod tests {
                 "{name}: {jvm:?}"
             );
         }
+    }
+
+    #[cfg(unix)]
+    fn non_utf8_path(prefix: &str) -> PathBuf {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let mut bytes = prefix.as_bytes().to_vec();
+        bytes.extend_from_slice(b"/bad-\xff-name");
+        PathBuf::from(OsStr::from_bytes(&bytes))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_game_directory_that_is_not_utf8_is_refused_instead_of_rewritten() {
+        let mut settings = settings(offline());
+        settings.game_directory = non_utf8_path("/tmp/ephervex/instances/abc");
+        let metadata = metadata("1.21.1.json");
+        let context = settings.features.rule_context(platform());
+        let plan = InstallationPlan::resolve(&metadata, &context, &layout()).expect("plan");
+
+        let error = build_command(&metadata, &plan, &settings)
+            .expect_err("a lossy game directory would point the game elsewhere");
+
+        assert!(matches!(
+            error,
+            LaunchError::PathNotUtf8 { ref path } if *path == settings.game_directory
+        ));
+        assert_eq!(error.message_id(), "error-launch-path-not-utf8");
+        assert_eq!(error.failing_path(), Some(settings.game_directory));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_shared_store_path_that_is_not_utf8_is_refused_instead_of_rewritten() {
+        let settings = settings(offline());
+        let metadata = metadata("1.21.1.json");
+        let context = settings.features.rule_context(platform());
+        let plan = InstallationPlan::resolve(
+            &metadata,
+            &context,
+            &CacheLayout::new(non_utf8_path("/cache")),
+        )
+        .expect("plan");
+
+        let error = build_command(&metadata, &plan, &settings)
+            .expect_err("a lossy classpath entry would name a file that does not exist");
+
+        assert!(matches!(error, LaunchError::PathNotUtf8 { .. }));
     }
 
     #[test]

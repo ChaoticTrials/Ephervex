@@ -270,6 +270,14 @@ pub enum LaunchError {
         argument: String,
     },
 
+    /// A path the game would be handed is not valid UTF-8.
+    ///
+    /// Launch arguments are built from text templates, so such a path cannot be
+    /// passed unchanged. Refused rather than converted lossily, which would
+    /// point the game at a different pathname than the one Ephervex prepared.
+    #[error("the path {path} is not valid UTF-8 and cannot be passed to the game unchanged")]
+    PathNotUtf8 { path: PathBuf },
+
     /// The instance's game directory could not be prepared.
     #[error("the game directory {path} could not be prepared")]
     GameDirectory {
@@ -325,6 +333,7 @@ impl LaunchError {
             Self::AssetIndex(_) => "error-launch-asset-index-invalid",
             Self::Natives(error) => error.message_id(),
             Self::UnresolvedPlaceholder { .. } => "error-launch-unresolved-placeholder",
+            Self::PathNotUtf8 { .. } => "error-launch-path-not-utf8",
             Self::GameDirectory { .. } => "error-launch-game-directory",
             Self::ProcessStart { .. } => "error-launch-process-start",
             Self::ProcessLost { .. } => "error-launch-process-lost",
@@ -338,7 +347,7 @@ impl LaunchError {
     #[must_use]
     pub fn failing_path(&self) -> Option<PathBuf> {
         match self {
-            Self::GameDirectory { path, .. } => Some(path.clone()),
+            Self::PathNotUtf8 { path } | Self::GameDirectory { path, .. } => Some(path.clone()),
             Self::ProcessStart { executable, .. } => Some(executable.clone()),
             Self::Natives(error) => Some(error.failing_path()),
             _ => None,

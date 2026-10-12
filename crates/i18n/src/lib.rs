@@ -813,6 +813,7 @@ mod tests {
             "error-launch-natives-too-large",
             "error-launch-natives-write",
             "error-launch-unresolved-placeholder",
+            "error-launch-path-not-utf8",
             "error-launch-game-directory",
             "error-launch-process-start",
             "error-launch-process-lost",
