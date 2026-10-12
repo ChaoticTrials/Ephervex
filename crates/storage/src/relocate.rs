@@ -152,6 +152,57 @@ fn discard_stage(destination: &Path) -> std::io::Result<()> {
     remove_tree_if_present(&stage_for(destination)?)
 }
 
+/// Removes a staging directory that holds nothing but directories, which is
+/// all a copy killed before its first file landed has made. Returns whether it
+/// was removed.
+///
+/// A file, link, or other entry anywhere in the tree is copied content, and the
+/// whole tree is then left alone. The caller holds the host's claim, so no move
+/// is filling the stage while it is checked and removed.
+pub(crate) fn discard_stage_without_content(stage: &Path) -> std::io::Result<bool> {
+    if !holds_only_directories(stage)? {
+        return Ok(false);
+    }
+    remove_directories(stage)?;
+    Ok(true)
+}
+
+fn holds_only_directories(path: &Path) -> std::io::Result<bool> {
+    if !std::fs::symlink_metadata(path)?.file_type().is_dir() {
+        return Ok(false);
+    }
+    for entry in std::fs::read_dir(path)? {
+        if !holds_only_directories(&entry?.path())? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Removes directories deepest first with `remove_dir`, which refuses a
+/// directory that is not empty, so an entry that appeared since the check
+/// survives. Anything that is no longer a real directory is an error, so a
+/// link swapped in since the check is never entered.
+fn remove_directories(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_dir() {
+        return Err(std::io::Error::other(
+            "a staging entry stopped being a directory",
+        ));
+    }
+    // A copied directory can carry a mode that forbids removing its entries.
+    let mode = metadata.permissions().mode();
+    if mode & 0o700 != 0o700 {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode | 0o700))?;
+    }
+    for entry in std::fs::read_dir(path)? {
+        remove_directories(&entry?.path())?;
+    }
+    std::fs::remove_dir(path)
+}
+
 fn copy_into(
     source: &Path,
     destination: &Path,
@@ -545,6 +596,44 @@ mod tests {
         assert_eq!(mode_of(&destination.join("frozen")), 0o555);
         assert!(!stage_for(&destination).expect("stage").exists());
         discard_tree(&destination).expect("discard");
+    }
+
+    #[test]
+    fn removing_a_staging_skeleton_never_enters_a_link_swapped_in_for_a_directory() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let outside = base.path().join("outside");
+        std::fs::create_dir_all(outside.join("inner")).expect("mkdir");
+        chmod(&outside.join("inner"), 0o500);
+        let stage = base.path().join("stage");
+        std::fs::create_dir_all(&stage).expect("mkdir");
+        std::os::unix::fs::symlink(&outside, stage.join("mods")).expect("link");
+
+        remove_directories(&stage).expect_err("a link is not a directory to remove");
+
+        assert!(outside.join("inner").is_dir());
+        assert_eq!(mode_of(&outside.join("inner")), 0o500);
+        chmod(&outside.join("inner"), 0o700);
+    }
+
+    #[test]
+    fn a_staging_directory_is_kept_when_a_link_sits_anywhere_in_it() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let stage = base.path().join("stage");
+        std::fs::create_dir_all(stage.join("minecraft")).expect("mkdir");
+        std::os::unix::fs::symlink(base.path(), stage.join("minecraft/linked")).expect("link");
+
+        assert!(!discard_stage_without_content(&stage).expect("checked"));
+        assert!(stage.join("minecraft").is_dir());
+    }
+
+    #[test]
+    fn a_staging_skeleton_without_content_is_discarded() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let stage = base.path().join("stage");
+        std::fs::create_dir_all(stage.join("minecraft/mods")).expect("mkdir");
+
+        assert!(discard_stage_without_content(&stage).expect("discard"));
+        assert!(!stage.exists());
     }
 
     #[test]

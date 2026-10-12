@@ -9,7 +9,8 @@
 //!    warning, no "needs attention", nothing for the user to dismiss.
 //! 2. **A vanished persistent root is not.** The record is kept and marked
 //!    [`AttentionReason::MissingRoot`] so an unmounted disk or a moved
-//!    directory is recoverable. Nothing is ever deleted on the user's behalf.
+//!    directory is recoverable. Nothing is ever deleted on the user's behalf,
+//!    except the empty directory skeleton a killed move leaves (ADR 0025).
 //! 3. **A directory the index has never heard of is an opportunity.** A
 //!    `.launcher/instance.json` under the persistent instance root is re-indexed,
 //!    which is what makes losing `launcher.sqlite` a rebuild rather than a loss
@@ -633,15 +634,18 @@ fn reindex_orphaned_clients(
         // A move's copy that was never renamed into place is part of a host at
         // best, never adopted, and may not hold its metadata yet.
         if let Some(staged) = crate::relocate::staged_name(&directory) {
-            if let Ok(id) = staged.parse::<InstanceId>()
-                && !matches!(
-                    registry.probe_host(RecordRef::Client(id)),
-                    HostProbe::Mutating
-                )
-            {
-                let name = metadata::read_client_metadata(&directory)
-                    .map_or_else(|_| staged.to_owned(), |record| record.name);
-                report_unfinished_move(report, RecordRef::Client(id), name, directory);
+            if let Ok(id) = staged.parse::<InstanceId>() {
+                let staged = staged.to_owned();
+                settle_staged_move(
+                    registry,
+                    RecordRef::Client(id),
+                    directory,
+                    |directory| {
+                        metadata::read_client_metadata(directory)
+                            .map_or(staged, |record| record.name)
+                    },
+                    report,
+                );
             }
             continue;
         }
@@ -804,15 +808,18 @@ fn reindex_orphaned_servers(
     let mut discovered = std::collections::BTreeMap::<ServerId, Vec<PathBuf>>::new();
     for directory in candidate_directories(&registry.paths().persistent_servers_dir()) {
         if let Some(staged) = crate::relocate::staged_name(&directory) {
-            if let Ok(id) = staged.parse::<ServerId>()
-                && !matches!(
-                    registry.probe_host(RecordRef::Server(id)),
-                    HostProbe::Mutating
-                )
-            {
-                let name = metadata::read_server_metadata(&directory)
-                    .map_or_else(|_| staged.to_owned(), |record| record.name);
-                report_unfinished_move(report, RecordRef::Server(id), name, directory);
+            if let Ok(id) = staged.parse::<ServerId>() {
+                let staged = staged.to_owned();
+                settle_staged_move(
+                    registry,
+                    RecordRef::Server(id),
+                    directory,
+                    |directory| {
+                        metadata::read_server_metadata(directory)
+                            .map_or(staged, |record| record.name)
+                    },
+                    report,
+                );
             }
             continue;
         }
@@ -1032,6 +1039,44 @@ fn is_finished_server_root(root: &Path, id: ServerId) -> bool {
     metadata::is_server_root(root)
         && !metadata::is_incomplete(root)
         && metadata::read_server_metadata(root).is_ok_and(|found| found.id == id)
+}
+
+/// Settles a move's staging directory found beside the persistent roots.
+///
+/// One holding nothing but empty directories has no content to lose and is
+/// removed. Only the host's claim proves no move is still filling it, so
+/// without the claim nothing is touched, and a move still running is skipped.
+/// Anything else is reported and left where it is.
+fn settle_staged_move(
+    registry: &Registry,
+    reference: RecordRef,
+    directory: PathBuf,
+    name: impl FnOnce(&Path) -> String,
+    report: &mut ReconciliationReport,
+) {
+    let probe = registry.probe_host(reference);
+    if matches!(probe, HostProbe::Mutating) {
+        return;
+    }
+    if matches!(probe, HostProbe::Idle(_)) {
+        match crate::relocate::discard_stage_without_content(&directory) {
+            Ok(true) => {
+                tracing::info!(
+                    path = %directory.display(),
+                    "removed the empty directories a move left before copying anything"
+                );
+                return;
+            }
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                path = %directory.display(),
+                %error,
+                "could not remove the empty directories a move left behind"
+            ),
+        }
+    }
+    let name = name(&directory);
+    report_unfinished_move(report, reference, name, directory);
 }
 
 fn report_unfinished_move(
@@ -1295,6 +1340,182 @@ mod tests {
         assert!(report.server_conflicts.is_empty());
         assert_eq!(report.unfinished_instances.len(), 1);
         assert!(registry.server(server.id).is_err());
+    }
+
+    fn client_stage(registry: &Registry, id: InstanceId) -> PathBuf {
+        let persistent = registry.paths().persistent_instances_dir();
+        std::fs::create_dir_all(&persistent).expect("mkdir");
+        persistent.join(format!(".{id}.moving"))
+    }
+
+    fn server_stage(registry: &Registry, id: ServerId) -> PathBuf {
+        let persistent = registry.paths().persistent_servers_dir();
+        std::fs::create_dir_all(&persistent).expect("mkdir");
+        persistent.join(format!(".{id}.moving"))
+    }
+
+    /// What a move killed after creating its stage and before copying a file
+    /// leaves: directories only.
+    fn leave_skeleton(stage: &Path) {
+        std::fs::create_dir_all(stage.join("minecraft/mods")).expect("skeleton");
+        std::fs::create_dir_all(stage.join(".launcher")).expect("skeleton");
+    }
+
+    #[test]
+    fn a_moves_empty_staging_skeleton_is_removed_without_being_reported() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new(
+                "repro",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        let stage = client_stage(&registry, client.id);
+        leave_skeleton(&stage);
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert!(!stage.exists());
+        assert!(report.unfinished_instances.is_empty());
+        assert!(!report.needs_attention());
+        assert!(
+            client.root.is_dir(),
+            "the host the move was leaving is untouched"
+        );
+        assert!(reconcile(&registry).expect("second").is_empty());
+    }
+
+    #[test]
+    fn a_servers_empty_staging_skeleton_is_removed_without_being_reported() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = registry
+            .create_server(NewServer::new(
+                "repro server",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        let stage = server_stage(&registry, server.id);
+        std::fs::create_dir_all(stage.join("server/world")).expect("skeleton");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert!(!stage.exists());
+        assert!(report.unfinished_instances.is_empty());
+        assert!(registry.server(server.id).is_ok());
+    }
+
+    /// A copy that finished some directories before the kill carries their
+    /// source modes, which can forbid removing what is inside them.
+    #[test]
+    fn a_staging_skeleton_with_read_only_directories_is_removed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let id = InstanceId::new();
+        let stage = client_stage(&registry, id);
+        leave_skeleton(&stage);
+        for directory in ["minecraft/mods", "minecraft"] {
+            std::fs::set_permissions(
+                stage.join(directory),
+                std::fs::Permissions::from_mode(0o555),
+            )
+            .expect("chmod");
+        }
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert!(!stage.exists());
+        assert!(report.unfinished_instances.is_empty());
+    }
+
+    #[test]
+    fn a_staging_directory_holding_a_file_is_reported_and_kept_whole() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let id = InstanceId::new();
+        let stage = client_stage(&registry, id);
+        leave_skeleton(&stage);
+        std::fs::write(stage.join("minecraft/mods/example.jar"), "copied").expect("payload");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.unfinished_instances.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(stage.join("minecraft/mods/example.jar")).expect("read"),
+            "copied"
+        );
+        assert!(
+            stage.join(".launcher").is_dir(),
+            "the empty directories beside the content stay too"
+        );
+    }
+
+    #[test]
+    fn a_staging_directory_holding_only_a_link_is_reported_and_kept() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let id = InstanceId::new();
+        let stage = client_stage(&registry, id);
+        leave_skeleton(&stage);
+        let target = environment.base().join("shared-mods");
+        std::fs::create_dir_all(&target).expect("target");
+        std::os::unix::fs::symlink(&target, stage.join("minecraft/mods/linked")).expect("link");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.unfinished_instances.len(), 1);
+        assert!(
+            std::fs::symlink_metadata(stage.join("minecraft/mods/linked"))
+                .expect("the link survives")
+                .file_type()
+                .is_symlink()
+        );
+        assert!(target.is_dir(), "what the link points at is never touched");
+    }
+
+    #[test]
+    fn a_staging_skeleton_of_a_move_still_running_is_left_alone() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new(
+                "repro",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        let stage = client_stage(&registry, client.id);
+        leave_skeleton(&stage);
+        let claim = registry
+            .claim_host(RecordRef::Client(client.id))
+            .expect("the move's claim");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert!(stage.join("minecraft/mods").is_dir());
+        assert!(report.unfinished_instances.is_empty());
+
+        drop(claim);
+        reconcile(&registry).expect("reconcile once the move is over");
+        assert!(!stage.exists());
+    }
+
+    #[test]
+    fn a_hidden_directory_that_is_not_a_hosts_staging_name_is_never_removed() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let persistent = registry.paths().persistent_instances_dir();
+        let unrelated = persistent.join(".not-an-id.moving");
+        std::fs::create_dir_all(unrelated.join("empty")).expect("mkdir");
+
+        reconcile(&registry).expect("reconcile");
+
+        assert!(unrelated.join("empty").is_dir());
     }
 
     /// A marked root is not a finished move; its marker is a restore's or a
@@ -3010,7 +3231,29 @@ mod tests {
     }
 
     #[test]
-    fn a_move_another_process_holds_leaves_its_staging_directory_unreported() {
+    fn a_move_another_process_holds_leaves_its_staging_directory_alone() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let id = ServerId::new();
+        let staging = registry
+            .paths()
+            .persistent_servers_dir()
+            .join(format!(".{id}.moving"));
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("copied.bin"), b"partial").unwrap();
+
+        let other_process = hold_as_another_process(&registry, RecordRef::Server(id));
+        let running = reconcile(&registry).expect("reconcile");
+        assert!(running.unfinished_instances.is_empty());
+
+        drop(other_process);
+        let abandoned = reconcile(&registry).expect("reconcile");
+        assert_eq!(abandoned.unfinished_instances.len(), 1);
+        assert!(staging.join("copied.bin").is_file());
+    }
+
+    #[test]
+    fn a_move_another_process_holds_keeps_its_empty_staging_directory_until_it_ends() {
         let environment = TestEnvironment::new();
         let registry = environment.registry();
         let id = ServerId::new();
@@ -3023,10 +3266,11 @@ mod tests {
         let other_process = hold_as_another_process(&registry, RecordRef::Server(id));
         let running = reconcile(&registry).expect("reconcile");
         assert!(running.unfinished_instances.is_empty());
+        assert!(staging.is_dir());
 
         drop(other_process);
         let abandoned = reconcile(&registry).expect("reconcile");
-        assert_eq!(abandoned.unfinished_instances.len(), 1);
-        assert!(staging.is_dir());
+        assert!(abandoned.unfinished_instances.is_empty());
+        assert!(!staging.exists());
     }
 }

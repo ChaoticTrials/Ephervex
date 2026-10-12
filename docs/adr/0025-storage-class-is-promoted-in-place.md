@@ -70,10 +70,12 @@ until the move is over. Storage clears the launch locks of an instance it is
 about to move only after finding that no launch holds it, under the same guard
 that decides who holds the instance. Reconciliation skips a staging
 directory whose claim another process holds, because that move is still
-running. A move neither writes nor clears the incomplete marker, and refuses an
-instance that carries one: it is an interrupted snapshot restore's, and
-recovering it after the move would put the pre-restore metadata back over the
-move's.
+running. One it can claim and that holds only empty directories, which is all a
+copy killed before its first file leaves, is removed; one holding any file or
+link is reported and left. A move neither writes nor clears the incomplete
+marker, and refuses an instance that carries one: it is an interrupted snapshot
+restore's, and recovering it after the move would put the pre-restore metadata
+back over the move's.
 
 **Reconciliation adopts a moved root instead of forgetting the record.** A
 temporary record whose root has vanished is normally expected cleanup, and

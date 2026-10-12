@@ -183,6 +183,7 @@ fn a_running_move_s_staging_directory_is_not_reported_but_an_abandoned_one_is() 
         .persistent_instances_dir()
         .join(format!(".{}.moving", client.id));
     std::fs::create_dir_all(staging.join(".launcher")).expect("staging");
+    std::fs::write(staging.join("copied.bin"), b"partial").expect("copied content");
 
     let claim = registry
         .claim_host(RecordRef::Client(client.id))
@@ -208,6 +209,7 @@ fn a_staging_directory_of_an_unindexed_instance_is_still_reported() {
         .persistent_instances_dir()
         .join(format!(".{}.moving", InstanceId::new()));
     std::fs::create_dir_all(&staging).expect("staging");
+    std::fs::write(staging.join("copied.bin"), b"partial").expect("copied content");
 
     let report = reconcile(&registry).expect("reconcile");
 
