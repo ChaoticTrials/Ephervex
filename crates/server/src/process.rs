@@ -1858,34 +1858,8 @@ mod tests {
     }
     #[tokio::test]
     async fn closed_stdin_refuses_commands_without_abandoning_process_or_capture() {
-        let root = tempfile::tempdir().expect("root");
-        let capture = tempfile::tempdir().expect("capture");
-        std::fs::create_dir_all(root.path().join(".launcher")).expect("launcher");
-        let command = ServerCommand {
-            java: PathBuf::from("/bin/sh"),
-            arguments: vec![
-                "-c".to_owned(),
-                "exec 0<&-; echo input-closed; while :; do sleep 0.1; done".to_owned(),
-            ],
-            working_directory: root.path().join("server"),
-        };
-        let (observer, mut events) = ServerObserver::channel();
-        let server_root = root.path().to_path_buf();
-        let capture_path = capture.path().to_path_buf();
-        let task = tokio::spawn(async move {
-            ServerSupervisor::run(&command, &server_root, &capture_path, &observer).await
-        });
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if let Some(ServerEvent::Output(line)) = events.recv().await
-                    && line.text == "input-closed"
-                {
-                    break;
-                }
-            }
-        })
-        .await
-        .expect("child closed stdin");
+        let (root, _capture, _events, task) =
+            supervise_closed_input("while :; do sleep 0.1; done").await;
         for _ in 0..2 {
             assert!(matches!(
                 send_control(root.path(), &ControlAction::Console("list".to_owned()))
@@ -1921,16 +1895,15 @@ mod tests {
         task.await.expect("join").expect("supervise");
     }
 
-    /// Starts a supervised shell `script` and waits until it prints `ready`.
-    async fn supervise_script(
-        script: &str,
-        ready: &str,
-    ) -> (
+    type SupervisedScript = (
         tempfile::TempDir,
         tempfile::TempDir,
         ServerEvents,
         tokio::task::JoinHandle<ServerResult<ServerExit>>,
-    ) {
+    );
+
+    /// Starts a supervised shell `script`.
+    fn spawn_supervised(script: &str) -> SupervisedScript {
         let root = tempfile::tempdir().expect("root");
         let capture = tempfile::tempdir().expect("capture");
         std::fs::create_dir_all(root.path().join(".launcher")).expect("launcher");
@@ -1939,29 +1912,136 @@ mod tests {
             arguments: vec!["-c".to_owned(), script.to_owned()],
             working_directory: root.path().join("server"),
         };
-        let (observer, mut events) = ServerObserver::channel();
+        let (observer, events) = ServerObserver::channel();
         let server_root = root.path().to_path_buf();
         let capture_path = capture.path().to_path_buf();
         let task = tokio::spawn(async move {
             ServerSupervisor::run(&command, &server_root, &capture_path, &observer).await
         });
+        (root, capture, events, task)
+    }
+
+    /// Starts a supervised shell `script` and waits until it prints `ready`.
+    async fn supervise_script(script: &str, ready: &str) -> SupervisedScript {
+        let (root, capture, mut events, task) = spawn_supervised(script);
         wait_for_output(&mut events, ready).await;
+        (root, capture, events, task)
+    }
+
+    /// Starts a supervised shell that closes its input and then runs `then`, and
+    /// waits until nothing can read what the supervisor writes to that input.
+    async fn supervise_closed_input(then: &str) -> SupervisedScript {
+        let (root, capture, mut events, task) = spawn_supervised(&closing_input_script(then));
+        let pipe = wait_for_output_matching(&mut events, "the closed input's pipe", |text| {
+            text.starts_with("pipe:[")
+        })
+        .await;
+        wait_for_output(&mut events, "input-closed").await;
+        wait_until_pipe_has_no_reader(&pipe).await;
         (root, capture, events, task)
     }
 
     /// Waits until the child prints `text` on a line of its own.
     async fn wait_for_output(events: &mut ServerEvents, text: &str) {
+        wait_for_output_matching(events, text, |line| line == text).await;
+    }
+
+    /// Waits until the child prints a line `matches` accepts and returns it.
+    async fn wait_for_output_matching(
+        events: &mut ServerEvents,
+        description: &str,
+        matches: impl Fn(&str) -> bool,
+    ) -> String {
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if let Some(ServerEvent::Output(line)) = events.recv().await
-                    && line.text == text
+                    && matches(&line.text)
                 {
-                    break;
+                    return line.text;
                 }
             }
         })
         .await
-        .unwrap_or_else(|_| panic!("the child printed {text:?}"));
+        .unwrap_or_else(|_| panic!("the child printed {description:?}"))
+    }
+
+    /// A shell script that names the pipe its input is, closes that input, and runs `then`.
+    fn closing_input_script(then: &str) -> String {
+        format!("echo \"$(readlink /proc/$$/fd/0)\"; exec 0<&-; echo input-closed; {then}")
+    }
+
+    /// Whether `process`, a `/proc` directory, holds a descriptor that can read `pipe`.
+    fn holds_read_end(process: &Path, pipe: &str) -> bool {
+        let Ok(descriptors) = std::fs::read_dir(process.join("fd")) else {
+            return false;
+        };
+        descriptors.flatten().any(|descriptor| {
+            let target = std::fs::read_link(descriptor.path()).ok();
+            if target.as_deref().and_then(Path::to_str) != Some(pipe) {
+                return false;
+            }
+            let info = std::fs::read_to_string(process.join("fdinfo").join(descriptor.file_name()))
+                .unwrap_or_default();
+            let flags = info
+                .lines()
+                .find_map(|line| line.strip_prefix("flags:"))
+                .and_then(|flags| u32::from_str_radix(flags.trim(), 8).ok());
+            // The access mode is the low two bits: 1 is write-only.
+            flags.is_some_and(|flags| flags & 0b11 != 1)
+        })
+    }
+
+    /// Whether this process or a child it has forked holds a descriptor that can read `pipe`.
+    fn pipe_has_reader(pipe: &str) -> bool {
+        // The test process closes its own copy of a child's input read end once the
+        // spawn returns, so a process forked after that cannot inherit one. Looking at
+        // this process first and its children second therefore sees every holder.
+        if holds_read_end(Path::new("/proc/self"), pipe) {
+            return true;
+        }
+        let threads = std::fs::read_dir("/proc/self/task").expect("the threads of this process");
+        threads.flatten().any(|thread| {
+            let children =
+                std::fs::read_to_string(thread.path().join("children")).unwrap_or_default();
+            children
+                .split_whitespace()
+                .any(|pid| holds_read_end(&Path::new("/proc").join(pid), pipe))
+        })
+    }
+
+    /// Waits until no process can read `pipe`, so a write to it fails with a broken pipe.
+    ///
+    /// Closing a descriptor in the child does not close the pipe while another
+    /// process, such as one a concurrent test is between fork and exec in, still
+    /// holds a copy of its read end.
+    async fn wait_until_pipe_has_no_reader(pipe: &str) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while pipe_has_reader(pipe) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("nothing reads {pipe}"));
+    }
+
+    #[tokio::test]
+    async fn a_pipe_read_by_a_live_child_is_reported_until_that_child_is_gone() {
+        use std::os::fd::AsRawFd as _;
+
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "exec cat >/dev/null"])
+            .stdin(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn");
+        let stdin = child.stdin.take().expect("stdin");
+        let pipe = std::fs::read_link(format!("/proc/self/fd/{}", stdin.as_raw_fd()))
+            .expect("the input pipe");
+        let pipe = pipe.to_str().expect("a pipe name");
+        assert!(pipe_has_reader(pipe));
+
+        child.kill().await.expect("kill");
+        wait_until_pipe_has_no_reader(pipe).await;
     }
 
     /// A file a shell script waits for, so a test releases the script once the
@@ -2004,11 +2084,8 @@ mod tests {
     #[tokio::test]
     async fn a_stop_or_restart_sent_first_to_a_closed_input_is_refused_and_leaves_the_child_running()
      {
-        let (root, _capture, mut events, task) = supervise_script(
-            "exec 0<&-; echo input-closed; while :; do echo alive; sleep 0.1; done",
-            "input-closed",
-        )
-        .await;
+        let (root, _capture, mut events, task) =
+            supervise_closed_input("while :; do echo alive; sleep 0.1; done").await;
         for action in [ControlAction::Stop, ControlAction::Restart] {
             assert!(matches!(
                 send_control(root.path(), &action).await.expect("answered"),
@@ -2041,10 +2118,7 @@ mod tests {
         // The child keeps its input closed and stays alive until the stop write has failed,
         // so the exit the supervisor waits for is always one that follows the stop.
         let gate = Gate::new();
-        let script = format!(
-            "exec 0<&-; echo input-closed; {}; exit 3",
-            gate.wait_command()
-        );
+        let script = closing_input_script(&format!("{}; exit 3", gate.wait_command()));
         let mut child = Command::new("/bin/sh")
             .args(["-c", &script])
             .stdin(Stdio::piped())
@@ -2054,12 +2128,16 @@ mod tests {
             .expect("spawn");
         let stdin = child.stdin.take().expect("stdin");
         let mut output = BufReader::new(child.stdout.take().expect("stdout"));
+        let mut pipe = String::new();
         let mut marker = String::new();
-        tokio::time::timeout(Duration::from_secs(10), output.read_line(&mut marker))
-            .await
-            .expect("the child closed its input")
-            .expect("marker");
+        for line in [&mut pipe, &mut marker] {
+            tokio::time::timeout(Duration::from_secs(10), output.read_line(line))
+                .await
+                .expect("the child closed its input")
+                .expect("marker");
+        }
         assert_eq!(marker.trim_end(), "input-closed");
+        wait_until_pipe_has_no_reader(pipe.trim_end()).await;
 
         let mut control = ChildControl::new(stdin);
         let mut waiters = Vec::new();
