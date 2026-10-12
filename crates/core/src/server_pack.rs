@@ -447,7 +447,7 @@ pub(crate) fn launch_reserved(launch: Option<&ServerLaunch>) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-/// The record's own note of where its content came from./// The record's own note of where its content came from.
+/// The record's own note of where its content came from.
 ///
 /// The archive's file name is display evidence, not an address: nothing
 /// re-reads it, and the file is usually gone by the time anyone looks.
