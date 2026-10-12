@@ -427,6 +427,44 @@ class Validation(unittest.TestCase):
         with self.assertRaises(preferences.PreferenceCatalogError):
             preferences.validate(catalog, document)
 
+    def test_an_enum_value_outside_the_canonical_codec_domain_is_refused(self):
+        catalog, document = self.build()
+        cloud = next(d for d in catalog["descriptors"] if d["id"] == "cloud_status")
+        cloud["presentation"]["values"].append(
+            {"technical_value": "999999", "enum_constant": None, "translation_key": None, "ordinal": None}
+        )
+        with self.assertRaisesRegex(preferences.PreferenceCatalogError, "999999"):
+            preferences.validate(catalog, document)
+
+    def test_enum_ids_are_checked_against_the_integer_the_text_parses_to(self):
+        codec = {"kind": "enum_id", "values": [0, 1, 2]}
+        for inside in ("0", "2", "+1", "02"):
+            self.assertTrue(preferences._enum_value_in_codec(inside, codec), inside)
+        for outside in ("3", "-1", "two", "", " 1", "1_0", "\uff11"):
+            self.assertFalse(preferences._enum_value_in_codec(outside, codec), repr(outside))
+
+    def test_an_enum_over_a_setting_stored_as_another_shape_is_refused(self):
+        catalog, document = self.build()
+        enum_setting = next(d for d in catalog["descriptors"] if d["id"] == "cloud_status")["fields"][0][
+            "canonical_id"
+        ]
+        schema = preferences._canonical_schema(document)
+        document["representations"][schema["supported"][enum_setting]]["codec"] = {"kind": "boolean"}
+        with self.assertRaises(preferences.PreferenceCatalogError):
+            preferences.validate(catalog, document)
+
+    def test_a_descriptor_id_the_application_cannot_represent_is_refused(self):
+        for bad in ("BAD-ID", "Fov", "has space", "dotted.id", "caf\u00e9", "", "a" * 65, "fov\n"):
+            catalog, document = self.build()
+            catalog["descriptors"][0]["id"] = bad
+            with self.assertRaises(preferences.PreferenceCatalogError, msg=repr(bad)):
+                preferences.validate(catalog, document)
+
+    def test_a_descriptor_id_of_the_longest_accepted_length_is_kept(self):
+        catalog, document = self.build()
+        catalog["descriptors"][0]["id"] = "a" * 64
+        preferences.validate(catalog, document)
+
     def test_an_enum_default_absent_from_its_own_values_is_refused(self):
         catalog, document = self.build()
         cloud = next(d for d in catalog["descriptors"] if d["id"] == "cloud_status")

@@ -46,7 +46,9 @@ use std::fmt;
 
 use serde::Deserialize;
 
+use crate::codec::OptionCodec;
 use crate::dataset::OptionsDataset;
+use crate::preference::PreferenceId;
 
 /// The catalog shape this build understands.
 ///
@@ -414,13 +416,20 @@ impl MinecraftPreferenceCatalog {
     }
 
     /// Checks the catalog is internally consistent, independent of any
-    /// compatibility dataset: unique ids, and every descriptor referencing
-    /// exactly the fields its own presentation kind requires.
+    /// compatibility dataset: ids the configuration APIs can address, unique
+    /// ids, and every descriptor referencing exactly the fields its own
+    /// presentation kind requires.
     fn validate_self(&self) -> Result<(), CatalogError> {
         let inconsistent = |detail: String| CatalogError::Inconsistent { detail };
 
         let mut ids = BTreeSet::new();
         for descriptor in &self.descriptors {
+            if PreferenceId::parse(&descriptor.id).is_err() {
+                return Err(inconsistent(format!(
+                    "descriptor id `{}` is not a valid preference id",
+                    descriptor.id.escape_debug()
+                )));
+            }
             if !ids.insert(descriptor.id.as_str()) {
                 return Err(inconsistent(format!(
                     "two descriptors share the id `{}`",
@@ -473,6 +482,8 @@ impl MinecraftPreferenceCatalog {
             .map(String::as_str)
             .collect();
 
+        let canonical_schema = dataset.schema_for(&dataset.canonical_minecraft_version);
+
         let mut claimed_by: BTreeMap<&str, &str> = BTreeMap::new();
         let mut exposed: BTreeSet<&str> = BTreeSet::new();
         for descriptor in &self.descriptors {
@@ -515,6 +526,16 @@ impl MinecraftPreferenceCatalog {
                         descriptor.presentation.as_str(),
                         entry.value_type
                     )));
+                }
+                if let PreferencePresentation::Enum { values, .. } = &descriptor.presentation {
+                    let codec = canonical_schema
+                        .and_then(|schema| dataset.representation(schema, cid))
+                        .map(|representation| &representation.codec);
+                    if let Some(codec) = codec {
+                        validate_enum_values_against_codec(values, codec).map_err(|detail| {
+                            inconsistent(format!("`{}` {detail}", descriptor.id))
+                        })?;
+                    }
                 }
             }
         }
@@ -569,6 +590,39 @@ fn validate_field_roles(descriptor: &MinecraftPreferenceDescriptor) -> Result<()
             descriptor.id
         ))
     }
+}
+
+/// Checks every technical value an enum descriptor exposes is one the paired
+/// codec of the canonical release accepts, so the settings screen never offers
+/// a choice that writing the options file would refuse.
+///
+/// Mirrors how a chosen value reaches the codec: an id codec is addressed by
+/// the integer the text parses to, a token codec by the text itself.
+fn validate_enum_values_against_codec(
+    values: &[EnumValuePresentation],
+    codec: &OptionCodec,
+) -> Result<(), String> {
+    for value in values {
+        let technical = value.technical_value.as_str();
+        let member = match codec {
+            OptionCodec::EnumId { values: ids } => {
+                technical.parse::<i64>().is_ok_and(|id| ids.contains(&id))
+            }
+            OptionCodec::EnumToken { tokens, .. } => tokens.iter().any(|token| token == technical),
+            _ => {
+                return Err(format!(
+                    "is an enum but its canonical setting is stored as `{codec}`"
+                ));
+            }
+        };
+        if !member {
+            return Err(format!(
+                "offers enum value `{}`, which the canonical release's `{codec}` codec does not accept",
+                technical.escape_debug()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_presentation_shape(descriptor: &MinecraftPreferenceDescriptor) -> Result<(), String> {
@@ -669,8 +723,11 @@ mod tests {
             {"id":"resourcePacks","key":"resourcePacks","type":"special","category":"Gameplay","translation_key":null,"manageable":false}
           ],
           "current_canonical_setting_ids": ["fov", "cloudStatus", "overrideWidth", "overrideHeight", "resourcePacks"],
-          "representations": [{"key":"fov","codec":{"kind":"decimal","min":30,"max":110}}],
-          "schemas": [{"id":"aaaaaaaaaaaaaaaa","supported":{"fov":0},"unsupported":[]}],
+          "representations": [
+            {"key":"fov","codec":{"kind":"decimal","min":30,"max":110}},
+            {"key":"renderClouds","codec":{"kind":"enum_token","tokens":["false","true","fast"],"quoted":true}}
+          ],
+          "schemas": [{"id":"aaaaaaaaaaaaaaaa","supported":{"fov":0,"cloudStatus":1},"unsupported":[]}],
           "releases": [{"minecraft_version":"26.2","schema":"aaaaaaaaaaaaaaaa"}]
         }"#
         .to_owned()
@@ -1010,6 +1067,123 @@ mod tests {
                 "{why} must be refused"
             );
         }
+    }
+
+    #[test]
+    fn an_enum_value_outside_the_canonical_codec_domain_is_refused() {
+        let compat = dataset();
+        let token_outside = document("").replace(
+            r#"{"technical_value":"false","enum_constant":"OFF""#,
+            r#"{"technical_value":"999999","enum_constant":"OFF""#,
+        );
+        let catalog =
+            MinecraftPreferenceCatalog::parse(&token_outside).expect("structurally valid");
+        let error = catalog
+            .validate_against(&compat)
+            .expect_err("a token the codec does not list must be refused");
+        assert!(
+            error.to_string().contains("999999"),
+            "the offending value must be named: {error}"
+        );
+    }
+
+    #[test]
+    fn an_enum_value_inside_the_canonical_codec_domain_is_accepted() {
+        let in_domain = document("").replace(
+            r#"{"technical_value":"false","enum_constant":"OFF""#,
+            r#"{"technical_value":"fast","enum_constant":"OFF""#,
+        );
+        MinecraftPreferenceCatalog::parse(&in_domain)
+            .expect("structurally valid")
+            .validate_against(&dataset())
+            .expect("a listed token is part of the domain");
+    }
+
+    #[test]
+    fn enum_ids_are_checked_against_the_integer_the_text_parses_to() {
+        let dataset_json = dataset_document().replace(
+            r#"{"kind":"enum_token","tokens":["false","true","fast"],"quoted":true}"#,
+            r#"{"kind":"enum_id","values":[0,1,2]}"#,
+        );
+        let catalog_json = document("")
+            .replace(r#""technical_value":"false""#, r#""technical_value":"0""#)
+            .replace(r#""technical_value":"true""#, r#""technical_value":"2""#)
+            .replace("\"default\":\"true\"", "\"default\":\"2\"");
+        let compat = OptionsDataset::parse(&dataset_json).expect("valid");
+        MinecraftPreferenceCatalog::parse(&catalog_json)
+            .expect("structurally valid")
+            .validate_against(&compat)
+            .expect("listed ids are part of the domain");
+
+        for outside in ["3", "-1", "two", "02x", ""] {
+            let json = catalog_json.replace(
+                r#""technical_value":"0""#,
+                &format!(r#""technical_value":"{outside}""#),
+            );
+            let catalog = MinecraftPreferenceCatalog::parse(&json).expect("structurally valid");
+            assert!(
+                matches!(
+                    catalog.validate_against(&compat),
+                    Err(CatalogError::Inconsistent { .. })
+                ),
+                "`{outside}` is not one of the ids the release stores"
+            );
+        }
+    }
+
+    #[test]
+    fn an_enum_over_a_setting_the_codec_stores_as_another_shape_is_refused() {
+        let wrong_shape = dataset_document().replace(
+            r#"{"kind":"enum_token","tokens":["false","true","fast"],"quoted":true}"#,
+            r#"{"kind":"boolean"}"#,
+        );
+        let compat = OptionsDataset::parse(&wrong_shape).expect("valid");
+        let catalog = MinecraftPreferenceCatalog::parse(&document("")).expect("valid");
+        assert!(matches!(
+            catalog.validate_against(&compat),
+            Err(CatalogError::Inconsistent { .. })
+        ));
+    }
+
+    #[test]
+    fn a_descriptor_id_the_configuration_apis_cannot_represent_is_refused() {
+        let long = "a".repeat(65);
+        for bad in [
+            "BAD-ID",
+            "Fov",
+            "has space",
+            "dotted.id",
+            "caf\u{e9}",
+            "",
+            long.as_str(),
+        ] {
+            let json = document("").replace(
+                "\"id\":\"cloud_status\"",
+                &format!(
+                    "\"id\":{}",
+                    serde_json::to_string(bad).expect("serializable")
+                ),
+            );
+            assert!(
+                matches!(
+                    MinecraftPreferenceCatalog::parse(&json),
+                    Err(CatalogError::Inconsistent { .. })
+                ),
+                "`{bad}` is not a preference id"
+            );
+        }
+        let longest = "a".repeat(64);
+        let json =
+            document("").replace("\"id\":\"cloud_status\"", &format!("\"id\":\"{longest}\""));
+        MinecraftPreferenceCatalog::parse(&json).expect("64 characters is the limit, not past it");
+    }
+
+    #[test]
+    fn the_bundled_catalog_validates_against_the_bundled_dataset() {
+        MinecraftPreferenceCatalog::bundled()
+            .expect("valid")
+            .validate_against(&OptionsDataset::bundled())
+            .expect("the shipped pairing must satisfy every cross-check");
     }
 
     #[test]

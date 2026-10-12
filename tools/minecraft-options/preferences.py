@@ -155,6 +155,25 @@ def stable_id(canonical_id: str) -> str:
     return STABLE_ID_OVERRIDES.get(canonical_id, snake_case(canonical_id))
 
 
+# The grammar `PreferenceId::parse` accepts in the application.
+_PREFERENCE_ID = re.compile(r"[a-z0-9_]{1,64}")
+_INTEGER_TEXT = re.compile(r"[+-]?[0-9]+")
+
+
+def _enum_value_in_codec(technical: str, codec: dict[str, Any]) -> bool | None:
+    """Whether a technical value is in the codec's domain, `None` for a non-enum codec.
+
+    An id codec is addressed by the integer the text parses to, a token codec
+    by the text itself, as the application resolves a chosen value.
+    """
+    kind = codec.get("kind")
+    if kind == "enum_id":
+        return bool(_INTEGER_TEXT.fullmatch(technical)) and int(technical) in codec.get("values", [])
+    if kind == "enum_token":
+        return technical in codec.get("tokens", [])
+    return None
+
+
 def _canonical_schema(dataset_document: dict[str, Any]) -> dict[str, Any]:
     version = dataset_document["canonical_minecraft_version"]
     schema_id = next(
@@ -440,9 +459,13 @@ def validate(document: dict[str, Any], dataset_document: dict[str, Any]) -> None
 
     descriptors = document["descriptors"]
     ids = [descriptor["id"] for descriptor in descriptors]
+    for preference_id in ids:
+        if not isinstance(preference_id, str) or not _PREFERENCE_ID.fullmatch(preference_id):
+            raise PreferenceCatalogError(f"descriptor id `{preference_id}` is not a valid preference id")
     if len(set(ids)) != len(ids):
         raise PreferenceCatalogError("two descriptors share one product preference id")
 
+    codecs = _codec_by_id(dataset_document)
     claimed_by: dict[str, str] = {}
     exposed_ids: set[str] = set()
     for descriptor in descriptors:
@@ -483,6 +506,20 @@ def validate(document: dict[str, Any], dataset_document: dict[str, Any]) -> None
         if kind == "enum":
             values = descriptor["presentation"]["values"]
             technical_values = [value["technical_value"] for value in values]
+            codec = codecs.get(descriptor["fields"][0]["canonical_id"])
+            for technical in technical_values:
+                if codec is None:
+                    break
+                member = _enum_value_in_codec(technical, codec)
+                if member is None:
+                    raise PreferenceCatalogError(
+                        f"`{did}` is an enum but its canonical setting is stored as `{codec.get('kind')}`"
+                    )
+                if not member:
+                    raise PreferenceCatalogError(
+                        f"`{did}` offers enum value `{technical}`, which the canonical release's "
+                        f"`{codec['kind']}` codec does not accept"
+                    )
             if len(set(technical_values)) != len(technical_values):
                 raise PreferenceCatalogError(f"`{did}` has two enum values with the same technical value")
             default = descriptor["presentation"].get("default")
