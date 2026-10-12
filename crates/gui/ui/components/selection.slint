@@ -1,0 +1,111 @@
+// Dropdowns whose selection always follows the value the application holds.
+//
+// The stock ComboBox shows model[current-index] and nothing else: a write to
+// its current-value is ignored, and the first pick the user makes replaces any
+// binding on its current-index. These wrappers keep the application's value as
+// the input and move the index to match whenever the value or the entries
+// change, so the entry shown is the entry the dialog submits.
+//
+// Each wrapper is a plain box that takes the size hints of the dropdown inside
+// it, so it sits in a layout exactly as a stock dropdown would, and a stretch
+// set where it is placed applies.
+
+import { ComboBox } from "std-widgets.slint";
+
+// A dropdown over `model` that shows the entry at `index`. The wrapper never
+// writes `index`, so a caller's binding survives the user's picks.
+export component IndexComboBox inherits Rectangle {
+    in property <[string]> model;
+    in property <int> index;
+    in property <bool> enabled: true;
+    // What a screen reader announces for the dropdown.
+    in property <string> label;
+    callback selected(index: int, value: string);
+    min-width: box.min-width;
+    min-height: box.min-height;
+    preferred-width: box.preferred-width;
+    preferred-height: box.preferred-height;
+    max-width: box.max-width;
+    max-height: box.max-height;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+
+    function follow() {
+        box.current-index = root.index;
+    }
+
+    init => { root.follow(); }
+    changed index => { root.follow(); }
+    changed model => { root.follow(); }
+
+    box := ComboBox {
+        width: parent.width;
+        height: parent.height;
+        model: root.model;
+        enabled: root.enabled;
+        accessible-label: root.label;
+        selected(value) => { root.selected(self.current-index, value); }
+    }
+}
+
+// A dropdown over `model` that shows the entry equal to `value`. Entries are
+// matched by text, so reordering or replacing the model keeps the same entry
+// shown. A value that is in no entry shows nothing rather than another entry.
+export component ValueComboBox inherits Rectangle {
+    in property <[string]> model;
+    in property <string> value;
+    in property <bool> enabled: true;
+    // What a screen reader announces for the dropdown.
+    in property <string> label;
+    callback selected(value: string);
+    min-width: box.min-width;
+    min-height: box.min-height;
+    preferred-width: box.preferred-width;
+    preferred-height: box.preferred-height;
+    max-width: box.max-width;
+    max-height: box.max-height;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+
+    // Clears the selection when the entry shown is not the value held. Runs
+    // after every index change, so the box's own clamp of the index to the
+    // new entries cannot leave another entry showing.
+    function clear-unmatched() {
+        if (box.current-value != root.value) {
+            box.current-index = -1;
+        }
+    }
+
+    changed value => { root.clear-unmatched(); }
+    changed model => { root.clear-unmatched(); }
+
+    box := ComboBox {
+        width: parent.width;
+        height: parent.height;
+        model: root.model;
+        enabled: root.enabled;
+        accessible-label: root.label;
+        selected(value) => { root.selected(value); }
+        changed current-value => { root.clear-unmatched(); }
+    }
+
+    // One zero-size marker per entry. The marker holding the value moves the
+    // index to its own position, on creation, and again whenever the value,
+    // its entry or its position changes.
+    for entry[position] in root.model : Rectangle {
+        width: 0px;
+        height: 0px;
+        property <bool> holds-value: entry == root.value;
+        property <int> slot: position;
+
+        function claim() {
+            if (self.holds-value) {
+                box.current-index = self.slot;
+            }
+        }
+
+        init => { self.claim(); }
+        changed holds-value => { self.claim(); }
+        changed slot => { self.claim(); }
+    }
+}

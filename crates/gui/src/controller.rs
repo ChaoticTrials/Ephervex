@@ -4144,6 +4144,13 @@ fn register_loader_change(ui: &AppWindow, commands: &Sender<Command>) {
             return;
         };
         ui.set_loader_change_current(row.loader.clone());
+        ui.set_loader_change_current_build(
+            row.loader
+                .as_str()
+                .strip_prefix(&format!("{loader} "))
+                .unwrap_or_default()
+                .into(),
+        );
         ui.set_loader_change_loader(loader.to_string().into());
         ui.set_loader_change_minecraft(row.minecraft.clone());
         ui.set_loader_change_selected(SharedString::default());
@@ -8175,10 +8182,13 @@ fn apply_loader_versions(
             versions.iter().cloned().map(SharedString::from).collect(),
         ));
         ui.set_loader_change_loading(false);
-        if ui.get_loader_change_selected().is_empty() {
-            ui.set_loader_change_selected(
-                ui.get_loader_change_current().as_str().to_owned().into(),
-            );
+        // The build the instance runs is the one offered first, when the list
+        // has it; otherwise nothing is chosen until the user picks one.
+        let current = ui.get_loader_change_current_build();
+        if ui.get_loader_change_selected().is_empty()
+            && versions.iter().any(|v| current == v.as_str())
+        {
+            ui.set_loader_change_selected(current);
         }
         return;
     }
@@ -15778,7 +15788,7 @@ mod tests {
                     client: InstanceRow {
                         loader_kind: (*loader_kind).into(),
                         minecraft: (*minecraft).into(),
-                        loader: "21.1.1".into(),
+                        loader: format!("{loader_kind} 21.1.1").into(),
                         ..InstanceRow::default()
                     },
                     ..HostView::default()
@@ -15891,6 +15901,25 @@ mod tests {
         assert!(!ui.get_loader_change_loading());
         assert_eq!(ui.get_loader_change_versions().row_count(), 2);
         assert_eq!(ui.get_loader_change_selected(), "21.1.1");
+    }
+
+    #[test]
+    fn a_loader_change_list_without_the_running_build_chooses_nothing() {
+        let b = new_instance();
+        let (ui, _commands) = loader_change_window(&[(&b.to_string(), "NeoForge", "1.21.1")]);
+        open_loader_change(&ui, b);
+
+        apply_loader_versions(
+            &ui,
+            "loader-change",
+            ephervex_model::LoaderKind::NeoForge,
+            "1.21.1",
+            &loader_builds(&["21.1.3", "21.1.2"]),
+        );
+
+        assert_eq!(ui.get_loader_change_current(), "NeoForge 21.1.1");
+        assert_eq!(ui.get_loader_change_current_build(), "21.1.1");
+        assert_eq!(ui.get_loader_change_selected(), "");
     }
 
     #[test]

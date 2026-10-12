@@ -1,6 +1,7 @@
 // The Minecraft defaults screen: preference rows, key binding editor, and the window size picker.
 
-import { ComboBox, Slider } from "std-widgets.slint";
+import { Slider } from "std-widgets.slint";
+import { IndexComboBox } from "../components/selection.slint";
 import { AppButton, Pill, TextField, Toggle } from "../components/controls.slint";
 import { ActionRow, BodyText, Eyebrow, FieldLabel } from "../components/text.slint";
 import { GuiI18n } from "../globals.slint";
@@ -251,19 +252,19 @@ export component MinecraftPreferenceRowCard inherits Rectangle {
                     // number itself does, such as a scale of zero that
                     // means "pick one to fit the window".
                     if root.item.editor == "number" && root.item.number-hint != "" : BodyText { text: root.item.number-hint; color: Theme.text; horizontal-stretch: 0; }
-                    if root.item.editor == "enum" : enum-box := ComboBox {
+                    if root.item.editor == "enum" : IndexComboBox {
                         width: root.compact ? 210px : 280px;
-                        accessible-label: root.item.label;
+                        label: root.item.label;
                         model: root.item.enum-labels;
-                        current-index: root.item.enum-index;
-                        selected => { root.set-enumeration(root.item.id, enum-box.current-index); }
+                        index: root.item.enum-index;
+                        selected(index) => { root.set-enumeration(root.item.id, index); }
                     }
-                    if root.item.editor == "language" && root.languages-available : language-box := ComboBox {
+                    if root.item.editor == "language" && root.languages-available : IndexComboBox {
                         width: root.compact ? 240px : 330px;
-                        accessible-label: root.item.label;
+                        label: root.item.label;
                         model: root.item.enum-labels;
-                        current-index: root.item.enum-index;
-                        selected => { root.set-language(root.item.id, language-box.current-index); }
+                        index: root.item.enum-index;
+                        selected(index) => { root.set-language(root.item.id, index); }
                     }
                     if root.item.editor == "language" && !root.languages-available : AppButton {
                         text: GuiI18n.text("gui-minecraft-language-retry");
@@ -317,12 +318,12 @@ export component MinecraftPreferenceRowCard inherits Rectangle {
                         // own actions their column at every width.
                         HorizontalLayout {
                             spacing: 8px;
-                            aspect-box := ComboBox {
+                            IndexComboBox {
                                 width: root.compact ? 116px : 136px;
-                                accessible-label: GuiI18n.text("gui-minecraft-aspect");
+                                label: GuiI18n.text("gui-minecraft-aspect");
                                 model: root.aspect-labels;
-                                current-index: root.item.aspect-index;
-                                selected => { root.set-window-aspect(root.item.id, aspect-box.current-index); }
+                                index: root.item.aspect-index;
+                                selected(index) => { root.set-window-aspect(root.item.id, index); }
                             }
                             FieldLabel { text: GuiI18n.text("gui-minecraft-aspect-lock"); vertical-alignment: center; }
                             Toggle {

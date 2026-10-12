@@ -34,6 +34,10 @@ pub(crate) const UI_SOURCES: &[(&str, &str)] = &[
         include_str!("../ui/components/controls.slint"),
     ),
     (
+        "components/selection.slint",
+        include_str!("../ui/components/selection.slint"),
+    ),
+    (
         "components/text.slint",
         include_str!("../ui/components/text.slint"),
     ),
