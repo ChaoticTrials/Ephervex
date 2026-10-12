@@ -83,6 +83,10 @@ the same call again. Callers are told what a window covered (`file_bytes`,
 `returned_bytes`, `truncated`, `lossy`) rather than being given a value that
 silently means several different things.
 
+In JSON, `logs show` reports the window as `truncated`. `logs search` keeps
+`truncated` for reaching the match limit and reports the window as
+`window_truncated`, alongside `file_bytes`, `returned_bytes`, and `lossy`.
+
 Compressed rotated logs (`*.log.gz`) are not listed. They are not inspectable as
 text, and decompressing untrusted archive data to browse a log would open a
 security surface this feature has no reason to open.

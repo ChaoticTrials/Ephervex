@@ -2721,6 +2721,10 @@ fn print_diagnostic_search(found: &DiagnosticSearch, json: bool) -> anyhow::Resu
     if json {
         print_json(&serde_json::json!({
             "path": json_path(&found.view.path),
+            "file_bytes": found.view.file_bytes,
+            "returned_bytes": found.view.returned_bytes,
+            "window_truncated": found.view.truncated,
+            "lossy": found.view.lossy,
             "lines_searched": found.outcome.lines_searched,
             "truncated": found.outcome.truncated,
             "matches": found.outcome.matches.iter().map(|found| serde_json::json!({

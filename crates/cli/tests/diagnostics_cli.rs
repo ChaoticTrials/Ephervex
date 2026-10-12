@@ -414,6 +414,65 @@ fn a_huge_log_is_shown_in_a_bounded_window_that_says_how_much_it_covers() {
 }
 
 #[test]
+fn a_search_in_json_says_whether_it_covered_the_whole_file_and_decoded_it_cleanly() {
+    let sandbox = Sandbox::new();
+    let (id, game) = instance_with_diagnostics(&sandbox);
+    let line = "[main/INFO]: a mod says something at length, repeatedly\n";
+    let log = game.join("logs").join("debug.log");
+    std::fs::write(&log, format!("needle\n{}", line.repeat(40_000))).expect("write");
+    let file_bytes = std::fs::metadata(&log).expect("metadata").len();
+
+    let windowed = sandbox.json(&[
+        "--json",
+        "logs",
+        "search",
+        "--instance",
+        &id,
+        "debug.log",
+        "needle",
+        "--bytes",
+        "4096",
+    ]);
+    assert_eq!(windowed["file_bytes"], file_bytes, "{windowed}");
+    assert!(windowed["returned_bytes"].as_u64().expect("a size") <= 4096);
+    assert_eq!(windowed["window_truncated"], true, "{windowed}");
+    assert_eq!(windowed["lossy"], false, "{windowed}");
+    assert_eq!(
+        windowed["truncated"], false,
+        "the match-limit flag does not mean the window was cut: {windowed}"
+    );
+    assert_eq!(windowed["matches"].as_array().expect("matches").len(), 0);
+
+    let whole = sandbox.json(&[
+        "--json",
+        "logs",
+        "search",
+        "--instance",
+        &id,
+        "debug.log",
+        "needle",
+        "--bytes",
+        &file_bytes.to_string(),
+    ]);
+    assert_eq!(whole["window_truncated"], false, "{whole}");
+    assert_eq!(whole["returned_bytes"], file_bytes);
+    assert_eq!(whole["matches"].as_array().expect("matches").len(), 1);
+
+    std::fs::write(&log, b"needle \xff\xfe\n").expect("write");
+    let lossy = sandbox.json(&[
+        "--json",
+        "logs",
+        "search",
+        "--instance",
+        &id,
+        "debug.log",
+        "needle",
+    ]);
+    assert_eq!(lossy["lossy"], true, "{lossy}");
+    assert_eq!(lossy["window_truncated"], false, "{lossy}");
+}
+
+#[test]
 fn the_launcher_keeps_a_log_of_its_own_that_can_be_listed_and_opened() {
     let sandbox = Sandbox::new();
     // Any command at all writes to it.
