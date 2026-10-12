@@ -288,10 +288,7 @@ impl OptionsDataset {
         let ids = self.validated_setting_ids()?;
 
         for representation in &self.representations {
-            if representation.key.is_empty()
-                || representation.key.chars().any(char::is_control)
-                || representation.key.contains(':')
-            {
+            if !crate::file::is_valid_key(&representation.key) {
                 return Err(inconsistent(format!(
                     "`{}` is not usable as an options.txt key",
                     representation.key.escape_debug()

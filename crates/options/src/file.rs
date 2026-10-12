@@ -35,91 +35,114 @@ use std::fmt;
 /// an edit for the same reason every other unmanaged line does.
 pub const VERSION_KEY: &str = "version";
 
-/// One line of an `options.txt`.
+/// The content of one line of an `options.txt`.
 ///
 /// Anything that is not a `key:value` assignment - a blank line, a comment
 /// somebody added, a truncated line left by a crash - is kept verbatim rather
 /// than normalized or dropped.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Line {
+enum Content {
     Entry { key: String, value: String },
     Verbatim(String),
+}
+
+/// How one line ended in the source.
+///
+/// Every line carries its own, so a file that mixes `\n` and `\r\n` or ends
+/// without a terminator comes back out exactly as it went in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    /// The last line of a file that has no final terminator.
+    None,
+    Lf,
+    CrLf,
+    /// A lone `\r` closing the file's last line.
+    Cr,
+}
+
+impl Ending {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::Lf => "\n",
+            Self::CrLf => "\r\n",
+            Self::Cr => "\r",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Line {
+    content: Content,
+    ending: Ending,
+}
+
+/// Whether a key can be written as `key:value` and read back as the same key.
+///
+/// Shared with the generated dataset's representation keys so both agree on
+/// what an `options.txt` key is.
+pub(crate) fn is_valid_key(key: &str) -> bool {
+    !key.is_empty() && !key.contains(':') && !key.chars().any(char::is_control)
 }
 
 /// A `options.txt` file, parsed but not normalized.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ParsedOptions {
     lines: Vec<Line>,
-    /// Whether the source used `\r\n`. Preserved so that editing one key in a
-    /// file written on another platform does not leave mixed line endings.
-    crlf: bool,
-    /// Whether the source ended with a line terminator. Minecraft writes one;
-    /// a file that lacked one keeps lacking it.
-    trailing_newline: bool,
 }
 
 impl ParsedOptions {
     /// An empty file, as used when an instance has no `options.txt` yet.
     #[must_use]
     pub fn empty() -> Self {
-        Self {
-            lines: Vec::new(),
-            crlf: false,
-            // A file Ephervex creates gets the terminator Minecraft would
-            // write, so the game's own next save appends cleanly.
-            trailing_newline: true,
-        }
+        Self::default()
     }
 
     /// Parses a file. Infallible: see the module documentation.
     #[must_use]
     pub fn parse(text: &str) -> Self {
-        if text.is_empty() {
-            return Self::empty();
-        }
-
-        let trailing_newline = text.ends_with('\n');
-        let body = text.strip_suffix('\n').unwrap_or(text);
-        let mut crlf = false;
-
-        let lines = body
-            .split('\n')
-            .map(|raw| {
-                let raw = match raw.strip_suffix('\r') {
-                    Some(stripped) => {
-                        crlf = true;
-                        stripped
-                    }
-                    None => raw,
-                };
-                match raw.split_once(':') {
-                    Some((key, value)) if !key.is_empty() => Line::Entry {
-                        key: key.to_owned(),
-                        value: value.to_owned(),
-                    },
-                    // Everything else is kept exactly as it was: a blank line,
-                    // a comment somebody added, a truncated line - and a
-                    // leading-colon line, which has no key at all and which the
-                    // game would read as an empty one.
-                    Some(_) | None => Line::Verbatim(raw.to_owned()),
+        let mut lines = Vec::new();
+        let mut rest = text;
+        while !rest.is_empty() {
+            let (raw, ending) = if let Some((segment, after)) = rest.split_once('\n') {
+                rest = after;
+                match segment.strip_suffix('\r') {
+                    Some(stripped) => (stripped, Ending::CrLf),
+                    None => (segment, Ending::Lf),
                 }
-            })
-            .collect();
-
-        Self {
-            lines,
-            crlf,
-            trailing_newline,
+            } else {
+                let last = std::mem::take(&mut rest);
+                match last.strip_suffix('\r') {
+                    Some(stripped) => (stripped, Ending::Cr),
+                    None => (last, Ending::None),
+                }
+            };
+            let content = match raw.split_once(':') {
+                Some((key, value)) if !key.is_empty() => Content::Entry {
+                    key: key.to_owned(),
+                    value: value.to_owned(),
+                },
+                // Everything else is kept exactly as it was: a blank line,
+                // a comment somebody added, a truncated line - and a
+                // leading-colon line, which has no key at all and which the
+                // game would read as an empty one.
+                Some(_) | None => Content::Verbatim(raw.to_owned()),
+            };
+            lines.push(Line { content, ending });
         }
+        Self { lines }
     }
 
     /// The value of a key, as the game would read it: the **last** assignment.
     #[must_use]
     pub fn get(&self, key: &str) -> Option<&str> {
-        self.lines.iter().rev().find_map(|line| match line {
-            Line::Entry { key: found, value } if found == key => Some(value.as_str()),
-            _ => None,
-        })
+        self.lines
+            .iter()
+            .rev()
+            .find_map(|line| match &line.content {
+                Content::Entry { key: found, value } if found == key => Some(value.as_str()),
+                _ => None,
+            })
     }
 
     /// Whether the file assigns this key at all.
@@ -136,10 +159,24 @@ impl ParsedOptions {
     /// and deleting lines nobody asked about is not this function's business.
     ///
     /// A value containing a line terminator is refused rather than written,
-    /// because a newline in a value is how one setting becomes two. Callers
-    /// validate their values; this is the backstop.
+    /// because a newline in a value is how one setting becomes two. A key the
+    /// file format cannot hold (empty, containing a colon or a control
+    /// character) is refused for the same reason: it would read back as a
+    /// different key or as no assignment. Callers validate their input; this
+    /// is the backstop.
+    ///
+    /// A new line ends like the line before it, and a file that had no final
+    /// terminator still has none afterwards. A file closed by a bare `\r` is
+    /// terminated, so it stays terminated.
     pub fn set(&mut self, key: &str, value: impl Into<String>) {
         let value = value.into();
+        if !is_valid_key(key) {
+            tracing::warn!(
+                key = key.escape_debug().to_string(),
+                "refusing to write a Minecraft option whose key cannot be stored in options.txt"
+            );
+            return;
+        }
         if value.contains('\n') || value.contains('\r') {
             tracing::warn!(
                 key,
@@ -148,30 +185,54 @@ impl ParsedOptions {
             return;
         }
 
-        if let Some(line) = self
-            .lines
-            .iter_mut()
-            .rev()
-            .find(|line| matches!(line, Line::Entry { key: found,.. } if found == key))
+        let content = Content::Entry {
+            key: key.to_owned(),
+            value,
+        };
+        if let Some(line) =
+            self.lines.iter_mut().rev().find(
+                |line| matches!(&line.content, Content::Entry { key: found, .. } if found == key),
+            )
         {
-            *line = Line::Entry {
-                key: key.to_owned(),
-                value,
-            };
+            line.content = content;
             return;
         }
 
-        self.lines.push(Line::Entry {
-            key: key.to_owned(),
-            value,
-        });
+        // The old last line needs a terminator of its own now, and a bare
+        // `\r` would join the next line to it on reading.
+        let style = self
+            .lines
+            .iter()
+            .rev()
+            .map(|line| line.ending)
+            .find(|ending| matches!(ending, Ending::Lf | Ending::CrLf))
+            .unwrap_or(Ending::Lf);
+        let ending = match self.lines.last_mut() {
+            None => Ending::Lf,
+            Some(last) if matches!(last.ending, Ending::Lf | Ending::CrLf) => last.ending,
+            Some(last) => {
+                let was_terminated = last.ending == Ending::Cr;
+                let ends_in_cr = match &last.content {
+                    Content::Entry { value, .. } => value.ends_with('\r'),
+                    Content::Verbatim(raw) => raw.ends_with('\r'),
+                };
+                // A `\n` after content ending in `\r` would read as `\r\n`.
+                last.ending = if ends_in_cr { Ending::CrLf } else { style };
+                if was_terminated {
+                    last.ending
+                } else {
+                    Ending::None
+                }
+            }
+        };
+        self.lines.push(Line { content, ending });
     }
 
     /// Every key the file assigns, in file order, duplicates included.
     pub fn keys(&self) -> impl Iterator<Item = &str> {
-        self.lines.iter().filter_map(|line| match line {
-            Line::Entry { key, .. } => Some(key.as_str()),
-            Line::Verbatim(_) => None,
+        self.lines.iter().filter_map(|line| match &line.content {
+            Content::Entry { key, .. } => Some(key.as_str()),
+            Content::Verbatim(_) => None,
         })
     }
 
@@ -186,23 +247,17 @@ impl ParsedOptions {
     /// A file no preference touched renders byte for byte as it was parsed.
     #[must_use]
     pub fn render(&self) -> String {
-        let newline = if self.crlf { "\r\n" } else { "\n" };
         let mut text = String::new();
-        for (index, line) in self.lines.iter().enumerate() {
-            if index > 0 {
-                text.push_str(newline);
-            }
-            match line {
-                Line::Entry { key, value } => {
+        for line in &self.lines {
+            match &line.content {
+                Content::Entry { key, value } => {
                     text.push_str(key);
                     text.push(':');
                     text.push_str(value);
                 }
-                Line::Verbatim(raw) => text.push_str(raw),
+                Content::Verbatim(raw) => text.push_str(raw),
             }
-        }
-        if self.trailing_newline && !self.lines.is_empty() {
-            text.push_str(newline);
+            text.push_str(line.ending.as_str());
         }
         text
     }
@@ -329,5 +384,104 @@ mod tests {
         let mut options = ParsedOptions::parse("guiScale:0");
         options.set("lang", "en_us");
         assert_eq!(options.render(), "guiScale:0\nlang:en_us");
+    }
+
+    #[test]
+    fn each_line_keeps_its_own_terminator() {
+        for text in [
+            "a:1\r\nb:2\n",
+            "a:1\nb:2\r\n",
+            "a:1\r\nb:2",
+            "a:1\r",
+            "a:1\r\n\r",
+            "a:1\rb:2",
+            "\r\n\n\r\n",
+            "a:1\r\r\n",
+        ] {
+            assert_eq!(ParsedOptions::parse(text).render(), text, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn editing_one_line_leaves_the_terminators_of_the_others() {
+        let mut options = ParsedOptions::parse("a:1\r\nb:2\nc:3\r\n");
+        options.set("b", "9");
+        assert_eq!(options.render(), "a:1\r\nb:9\nc:3\r\n");
+    }
+
+    #[test]
+    fn a_new_line_ends_like_the_line_before_it() {
+        let mut options = ParsedOptions::parse("a:1\nb:2\r\n");
+        options.set("c", "3");
+        assert_eq!(options.render(), "a:1\nb:2\r\nc:3\r\n");
+    }
+
+    #[test]
+    fn appending_after_an_unterminated_line_keeps_the_file_unterminated() {
+        let mut options = ParsedOptions::parse("a:1\r\nb:2");
+        options.set("c", "3");
+        assert_eq!(options.render(), "a:1\r\nb:2\r\nc:3");
+    }
+
+    #[test]
+    fn appending_after_a_bare_carriage_return_does_not_join_the_lines() {
+        let mut options = ParsedOptions::parse("a:1\r");
+        options.set("b", "2");
+        let rendered = options.render();
+        assert_eq!(rendered, "a:1\nb:2\n");
+        assert_eq!(ParsedOptions::parse(&rendered), options);
+    }
+
+    #[test]
+    fn a_key_the_line_format_cannot_hold_is_refused() {
+        for key in ["", "a:b", "a\nb", "a\rb", "a\tb", "a\u{7f}b"] {
+            let mut options = ParsedOptions::parse("guiScale:0\n");
+            options.set(key, "x");
+            assert_eq!(options.render(), "guiScale:0\n", "{key:?}");
+            assert_eq!(options.keys().count(), 1, "{key:?}");
+        }
+    }
+
+    #[test]
+    fn parsing_then_rendering_is_the_identity_for_every_short_terminator_mix() {
+        let mut texts = vec![String::new()];
+        for _ in 0..7 {
+            let longer: Vec<String> = texts
+                .iter()
+                .flat_map(|text| {
+                    ["a", ":", "\r", "\n"]
+                        .into_iter()
+                        .map(move |piece| format!("{text}{piece}"))
+                })
+                .collect();
+            for text in &longer {
+                assert_eq!(ParsedOptions::parse(text).render(), *text, "{text:?}");
+            }
+            texts = longer;
+        }
+    }
+
+    #[test]
+    fn a_rendered_edit_reads_back_as_the_same_file() {
+        let mut texts = vec![String::new()];
+        for _ in 0..5 {
+            texts = texts
+                .iter()
+                .flat_map(|text| {
+                    ["a", ":", "\r", "\n"]
+                        .into_iter()
+                        .map(move |piece| format!("{text}{piece}"))
+                })
+                .collect();
+            for text in &texts {
+                for key in ["a", "new"] {
+                    let mut options = ParsedOptions::parse(text);
+                    options.set(key, "v:1");
+                    let rendered = options.render();
+                    assert_eq!(ParsedOptions::parse(&rendered), options, "{text:?} + {key}");
+                    assert_eq!(options.get(key), Some("v:1"), "{text:?} + {key}");
+                }
+            }
+        }
     }
 }
