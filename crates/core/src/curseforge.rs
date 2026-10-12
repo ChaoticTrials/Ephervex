@@ -10,10 +10,9 @@
 //!
 //! Whether a key is configured. Never the key. [`App::curseforge_api`] hands
 //! back a client that can *use* the credential, and
-//! [`crate::ApiSettings::curseforge_api_key_configured`] and
-//! [`crate::ApiSettings::curseforge_api_key_present`] report its presence;
-//! there is no path from a frontend to the value, by construction rather than
-//! by convention.
+//! [`crate::ApiSettings::curseforge_key`] reports, as a
+//! [`crate::CurseForgeKeyState`], whether one is in effect; there is no path
+//! from a frontend to the value, by construction rather than by convention.
 
 use std::fmt;
 use std::sync::Arc;
