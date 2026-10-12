@@ -1483,19 +1483,22 @@ mod tests {
     }
 
     #[test]
-    fn a_login_without_a_refresh_credential_leaves_nothing_to_clean_up() {
+    fn a_login_without_a_refresh_credential_is_not_recorded_as_a_persistent_account() {
         let base = tempfile::tempdir().expect("temp dir");
         let mut app = app_rooted_at(base.path());
         let id = Uuid::new_v4();
         let store = Arc::new(MemoryStore::new());
         app.test_keyring = TestKeyring::Store(store.clone());
-        block_configuration_writes(&app);
 
         let login = Login::new(microsoft_session(id), None);
-        app.adopt_login(&provider_over(store.clone()), login)
-            .expect_err("the account cannot be recorded");
+        let session = app
+            .adopt_login(&provider_over(store.clone()), login)
+            .expect("a session-only login still signs in");
 
+        assert_eq!(session.storage(), Some(CredentialStorage::SessionOnly));
         assert!(store.load(&refresh_key(id)).expect("load").is_none());
+        assert!(!app.config().accounts.contains_key(&id.to_string()));
+        assert!(app.config().keyring_cleanup.is_empty());
     }
 
     #[test]

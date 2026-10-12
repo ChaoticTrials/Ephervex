@@ -281,10 +281,7 @@ impl MicrosoftAccountProvider {
                 "no refresh token was issued; this login will not survive a restart"
             );
         }
-        Ok(Login {
-            session,
-            refresh: tokens.refresh,
-        })
+        Ok(Login::new(session, tokens.refresh))
     }
 
     /// Stores the refresh token a resume was issued in place of `loaded`.
@@ -417,6 +414,10 @@ impl AccountProvider for MicrosoftAccountProvider {
     }
 
     fn has_stored_credential(&self, account: Uuid) -> AuthResult<bool> {
+        // A credential held only in memory is gone after a restart.
+        if !self.credentials.storage().is_persistent() {
+            return Ok(false);
+        }
         Ok(self
             .credentials
             .load(&CredentialKey::MicrosoftRefreshToken(account))?

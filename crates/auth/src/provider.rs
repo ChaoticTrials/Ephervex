@@ -256,8 +256,16 @@ pub struct Login {
 impl Login {
     /// A completed login holding the refresh credential to store, if one was
     /// issued.
+    ///
+    /// Without a refresh credential nothing is stored, so the session reports
+    /// [`CredentialStorage::SessionOnly`] whatever backend was configured.
     #[must_use]
-    pub const fn new(session: Session, refresh: Option<SecretString>) -> Self {
+    pub fn new(mut session: Session, refresh: Option<SecretString>) -> Self {
+        if refresh.is_none()
+            && let Credentials::Microsoft { storage, .. } = &mut session.credentials
+        {
+            *storage = CredentialStorage::SessionOnly;
+        }
         Self { session, refresh }
     }
 
@@ -381,6 +389,9 @@ pub trait AccountProvider: std::fmt::Debug + Send + Sync {
     fn logout(&self, account: Uuid) -> AuthResult<()>;
 
     /// Whether this account has a credential that would survive a restart.
+    ///
+    /// False when the provider keeps credentials in memory only, even while
+    /// one is held for this process.
     fn has_stored_credential(&self, account: Uuid) -> AuthResult<bool>;
 
     /// Where this provider keeps credentials.

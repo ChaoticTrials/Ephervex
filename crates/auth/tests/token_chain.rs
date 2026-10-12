@@ -44,6 +44,8 @@ const ACCOUNT: &str = "069a79f4-44e9-4726-a5be-fca90e38aaf5";
 const TOKEN: &str = include_str!("../../../fixtures/microsoft/microsoft-token.json");
 const TOKEN_ROTATED: &str =
     include_str!("../../../fixtures/microsoft/microsoft-token-rotated.json");
+const TOKEN_NO_REFRESH: &str =
+    include_str!("../../../fixtures/microsoft/microsoft-token-no-refresh.json");
 const DEVICE_CODE: &str = include_str!("../../../fixtures/microsoft/microsoft-device-code.json");
 const PENDING: &str =
     include_str!("../../../fixtures/microsoft/microsoft-authorization-pending.json");
@@ -1449,10 +1451,142 @@ async fn a_redirect_that_stays_on_the_same_origin_is_still_followed() {
         .expect("a same-origin redirect reaches the host the credential was issued for");
 }
 
+/// A store that behaves like the desktop keyring: contents survive a restart.
+#[derive(Debug, Default)]
+struct PersistentStore(MemoryStore);
+
+impl CredentialStore for PersistentStore {
+    fn store(&self, key: &CredentialKey, secret: &SecretString) -> Result<(), AuthError> {
+        self.0.store(key, secret)
+    }
+
+    fn load(&self, key: &CredentialKey) -> Result<Option<SecretString>, AuthError> {
+        self.0.load(key)
+    }
+
+    fn delete(&self, key: &CredentialKey) -> Result<CredentialRemoval, AuthError> {
+        self.0.delete(key)
+    }
+
+    fn storage(&self) -> CredentialStorage {
+        CredentialStorage::Keyring
+    }
+}
+
+async fn browser_login_session(provider: &MicrosoftAccountProvider) -> ephervex_auth::Session {
+    drive_browser_login(provider, |redirect, state| {
+        format!("{redirect}/?code=THE-AUTH-CODE&state={state}")
+    })
+    .await
+    .expect("the chain completes")
+}
+
+#[tokio::test]
+async fn a_login_issued_a_refresh_token_reports_the_persistence_of_its_store() {
+    let server = MockServer::start().await;
+    mount_token(&server, 200, TOKEN).await;
+    mount_chain(&server).await;
+
+    let provider = provider(&server, Arc::new(PersistentStore::default()));
+    let session = browser_login_session(&provider).await;
+
+    assert_eq!(session.storage(), Some(CredentialStorage::Keyring));
+    assert!(provider.has_stored_credential(account()).expect("query"));
+}
+
+#[tokio::test]
+async fn a_login_issued_no_refresh_token_is_not_reported_as_persistent() {
+    let server = MockServer::start().await;
+    mount_token(&server, 200, TOKEN_NO_REFRESH).await;
+    mount_chain(&server).await;
+
+    let store = Arc::new(PersistentStore::default());
+    let provider = provider(&server, store.clone());
+    let session = browser_login_session(&provider).await;
+
+    assert_eq!(session.storage(), Some(CredentialStorage::SessionOnly));
+    assert!(
+        store
+            .load(&CredentialKey::MicrosoftRefreshToken(account()))
+            .expect("load")
+            .is_none(),
+        "no refresh token was issued, so nothing is stored"
+    );
+    assert!(!provider.has_stored_credential(account()).expect("query"));
+    let resumed = provider
+        .resume(
+            account(),
+            &AuthObserver::silent(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("nothing was stored to resume from");
+    assert!(matches!(resumed, AuthError::NotSignedIn));
+}
+
+#[tokio::test]
+async fn a_resume_issued_no_replacement_keeps_the_stored_credential_persistent() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/consumers/oauth2/v2.0/token"))
+        .and(body_string_contains("grant_type=refresh_token"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(TOKEN_NO_REFRESH))
+        .mount(&server)
+        .await;
+    mount_chain(&server).await;
+
+    let store = Arc::new(PersistentStore::default());
+    store
+        .store(
+            &CredentialKey::MicrosoftRefreshToken(account()),
+            &SecretString::new("FAKE-MICROSOFT-REFRESH-TOKEN"),
+        )
+        .expect("seed a previous login");
+    let provider = provider(&server, store.clone());
+
+    let session = provider
+        .resume(
+            account(),
+            &AuthObserver::silent(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("the stored credential is still usable");
+
+    assert_eq!(session.storage(), Some(CredentialStorage::Keyring));
+    assert_eq!(
+        store
+            .load(&CredentialKey::MicrosoftRefreshToken(account()))
+            .expect("load")
+            .expect("present")
+            .expose(),
+        "FAKE-MICROSOFT-REFRESH-TOKEN"
+    );
+    assert!(provider.has_stored_credential(account()).expect("query"));
+}
+
+#[tokio::test]
+async fn a_credential_held_only_in_memory_does_not_count_as_surviving_a_restart() {
+    let server = MockServer::start().await;
+    let store = Arc::new(MemoryStore::new());
+    store
+        .store(
+            &CredentialKey::MicrosoftRefreshToken(account()),
+            &SecretString::new("FAKE-MICROSOFT-REFRESH-TOKEN"),
+        )
+        .expect("seed");
+
+    assert!(
+        !provider(&server, store)
+            .has_stored_credential(account())
+            .expect("query")
+    );
+}
+
 #[tokio::test]
 async fn logging_out_removes_the_stored_credential() {
     let server = MockServer::start().await;
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(PersistentStore::default());
     let provider = provider(&server, store.clone());
 
     store

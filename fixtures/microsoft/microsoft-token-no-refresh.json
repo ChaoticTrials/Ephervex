@@ -1,0 +1,7 @@
+{
+  "token_type": "Bearer",
+  "scope": "XboxLive.signin",
+  "expires_in": 3599,
+  "ext_expires_in": 3599,
+  "access_token": "FAKE-MICROSOFT-ACCESS-TOKEN"
+}

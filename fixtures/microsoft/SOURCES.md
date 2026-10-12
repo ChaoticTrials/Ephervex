@@ -27,6 +27,7 @@ looks like a token is the string `FAKE-…` or a documentation placeholder.
 |---|---|---|
 | `microsoft-token.json` | Microsoft Learn, *OAuth 2.0 authorization code flow* (updated 2026-01-09) | `POST login.microsoftonline.com/consumers/oauth2/v2.0/token` |
 | `microsoft-token-rotated.json` | same, "Refresh the access token" | the same endpoint issuing a **replacement** refresh token |
+| `microsoft-token-no-refresh.json` | same, "Successful response" without the `offline_access` scope | the same endpoint issuing an access token and **no** refresh token |
 | `microsoft-device-code.json` | Microsoft Learn, *OAuth 2.0 device authorization grant* (updated 2025-01-04) | `POST.../oauth2/v2.0/devicecode` |
 | `microsoft-authorization-pending.json` | same, "Expected errors" | `POST.../oauth2/v2.0/token` while the user is still signing in |
 | `microsoft-authorization-declined.json` | same | the same endpoint after the user refused |
