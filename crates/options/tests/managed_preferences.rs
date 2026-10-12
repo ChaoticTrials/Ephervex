@@ -251,6 +251,63 @@ fn an_enumeration_accepts_only_what_the_exact_release_enumerates() {
 }
 
 #[test]
+fn a_value_outside_the_product_domain_is_reported_as_out_of_range_not_a_type_mismatch() {
+    // The value has the right shape; the product descriptor refuses it.
+    for version in RELEASES {
+        assert_eq!(
+            disposition(version, "gui_scale", MinecraftPreferenceValue::Integer(-1)),
+            PreferenceDisposition::NotRepresentable(SkipReason::OutOfRange),
+            "{version}: a negative interface scale is outside the proven domain"
+        );
+    }
+}
+
+#[test]
+fn a_value_the_product_does_not_enumerate_is_reported_as_not_in_domain() {
+    for version in RELEASES {
+        assert_eq!(
+            disposition(
+                version,
+                "attack_indicator",
+                MinecraftPreferenceValue::Enum("7".to_owned())
+            ),
+            PreferenceDisposition::NotRepresentable(SkipReason::NotInDomain),
+            "{version}: 7 is not an attack indicator choice"
+        );
+    }
+}
+
+#[test]
+fn a_value_that_cannot_be_one_options_line_is_reported_as_unwritable() {
+    for version in RELEASES {
+        assert_eq!(
+            disposition(
+                version,
+                "language",
+                MinecraftPreferenceValue::LanguageCode("en_us\nlang:xx".to_owned())
+            ),
+            PreferenceDisposition::NotRepresentable(SkipReason::Unwritable),
+            "{version}: a code with a line break cannot be written"
+        );
+    }
+}
+
+#[test]
+fn a_value_of_the_wrong_shape_is_still_reported_as_a_type_mismatch() {
+    for version in RELEASES {
+        assert_eq!(
+            disposition(
+                version,
+                "gui_scale",
+                MinecraftPreferenceValue::Boolean(true)
+            ),
+            PreferenceDisposition::NotRepresentable(SkipReason::TypeMismatch),
+            "{version}: a toggle is not an interface scale"
+        );
+    }
+}
+
+#[test]
 fn a_window_size_is_written_whole_or_not_at_all() {
     let size = MinecraftPreferenceValue::WindowSize(ephervex_options::WindowSize {
         width: 1920,

@@ -34,7 +34,9 @@ use crate::compatibility::{
 };
 use crate::error::OptionsError;
 use crate::file::{ParsedOptions, VERSION_KEY};
-use crate::preference::{ConfiguredPreferences, MinecraftPreferenceValue, PreferenceId};
+use crate::preference::{
+    ConfiguredPreferences, MinecraftPreferenceValue, PreferenceId, PreferenceValueProblem,
+};
 use crate::preferences::GlobalMinecraftPreferences;
 
 /// The name of Minecraft's own settings file inside a game directory.
@@ -60,9 +62,9 @@ pub enum LanguageAvailability {
 /// Why one managed preference was not written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipReason {
-    /// Outside the domain this release was proven to accept.
+    /// Outside the domain the setting or this release was proven to accept.
     OutOfRange,
-    /// Not one of the values this release's setting enumerates.
+    /// Not one of the values the setting or this release enumerates.
     NotInDomain,
     /// Could not be written as one options file line.
     Unwritable,
@@ -89,6 +91,19 @@ impl SkipReason {
             Self::LanguageAbsent => "language-absent",
             Self::LanguageUnverified => "language-unverified",
             Self::InputUnavailable => "input-unavailable",
+        }
+    }
+}
+
+impl From<PreferenceValueProblem> for SkipReason {
+    fn from(problem: PreferenceValueProblem) -> Self {
+        match problem {
+            PreferenceValueProblem::WrongShape | PreferenceValueProblem::Unreadable => {
+                Self::TypeMismatch
+            }
+            PreferenceValueProblem::OutOfDomain => Self::OutOfRange,
+            PreferenceValueProblem::NotEnumerated => Self::NotInDomain,
+            PreferenceValueProblem::Unwritable => Self::Unwritable,
         }
     }
 }
@@ -334,12 +349,12 @@ fn resolve_one(
     let Some(descriptor) = catalog.descriptor(id.as_str()) else {
         return (PreferenceDisposition::Unrecognized, Vec::new());
     };
-    if descriptor.validate_value(value).is_err() {
+    if let Err(error) = descriptor.validate_value(value) {
         // A value that does not fit the product descriptor cannot be
         // meaningfully asked about a release, and must never be repaired into
-        // one that does.
+        // one that does. The descriptor's own verdict is the reason reported.
         return (
-            PreferenceDisposition::NotRepresentable(SkipReason::TypeMismatch),
+            PreferenceDisposition::NotRepresentable(error.problem.into()),
             Vec::new(),
         );
     }
