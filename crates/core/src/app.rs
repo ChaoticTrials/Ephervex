@@ -239,6 +239,11 @@ pub struct App {
     /// operations that set it already take `&mut self` - see
     /// [`crate::account`].
     pub(crate) session: Option<ephervex_auth::Session>,
+    /// The credential of a session-only sign-in, for the life of the process.
+    ///
+    /// It never leaves memory and is dropped with the application, so a refresh
+    /// reaches the same store the sign-in used (ADR 0009).
+    pub(crate) session_only: crate::account::SessionOnlyLogin,
     /// Whether this application may talk plaintext HTTP.
     ///
     /// The field exists only in a test build, so a release binary has no way to
@@ -249,6 +254,9 @@ pub struct App {
     /// local server instead of a production one.
     #[cfg(test)]
     pub(crate) loopback_http: bool,
+    /// The sign-in services a test build talks to instead of Microsoft's.
+    #[cfg(test)]
+    pub(crate) auth_endpoints: Option<ephervex_auth::Endpoints>,
     /// The keyring a test build uses instead of Secret Service. Compiled only
     /// into a test build.
     #[cfg(test)]
@@ -288,8 +296,11 @@ impl App {
             curseforge_mods: OnceLock::new(),
             java: RwLock::new(None),
             session: None,
+            session_only: crate::account::SessionOnlyLogin::default(),
             #[cfg(test)]
             loopback_http: false,
+            #[cfg(test)]
+            auth_endpoints: None,
             #[cfg(test)]
             test_keyring: crate::account::TestKeyring::default(),
         })
@@ -313,8 +324,11 @@ impl App {
             curseforge_mods: OnceLock::new(),
             java: RwLock::new(None),
             session: None,
+            session_only: crate::account::SessionOnlyLogin::default(),
             #[cfg(test)]
             loopback_http: false,
+            #[cfg(test)]
+            auth_endpoints: None,
             #[cfg(test)]
             test_keyring: crate::account::TestKeyring::default(),
         })

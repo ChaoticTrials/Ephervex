@@ -52,6 +52,14 @@ Three consequences follow deliberately:
    Otherwise the next run would read an active account whose credential does
    not exist and report a login that is not there.
 
+4. **The store and the account live for the run.** `App` keeps the
+   `MemoryStore` and the id of the account signed in session-only, so a
+   refresh, an explicit resume, and a launch after the access token lapses all
+   reach the credential the sign-in stored. They are dropped with the
+   application, by signing out, by removing that account, or by a persistent
+   sign-in. The account id is held in memory only; with no account configured,
+   it is what makes the session-only sign-in the default launch account.
+
 The test suite uses `MemoryStore` throughout. That is not a shortcut: it means
 the degraded path is exercised by every test run, rather than only by the users
 who happen to have no keyring.

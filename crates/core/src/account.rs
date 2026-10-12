@@ -28,7 +28,7 @@
 //! the CLI owns its `App` outright, and the GUI owns one inside
 //! its worker rather than sharing it across repaints.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use chrono::{SecondsFormat, TimeDelta, Utc};
 use ephervex_auth::{
@@ -46,6 +46,22 @@ use uuid::Uuid;
 
 use crate::App;
 use crate::error::{CoreError, CoreResult};
+
+/// The credential of a session-only sign-in and the account it belongs to.
+///
+/// The store is created on first use and kept, so a sign-in and every refresh
+/// after it reach the same map. Nothing here is written to disk.
+#[derive(Debug, Default)]
+pub(crate) struct SessionOnlyLogin {
+    store: OnceLock<Arc<MemoryStore>>,
+    account: Option<Uuid>,
+}
+
+impl SessionOnlyLogin {
+    fn store(&self) -> Arc<MemoryStore> {
+        Arc::clone(self.store.get_or_init(|| Arc::new(MemoryStore::new())))
+    }
+}
 
 /// Orders credential changes across every process that shares one
 /// configuration directory (ADR 0004).
@@ -563,6 +579,9 @@ impl App {
         observer: &AuthObserver,
         cancel: &CancellationToken,
     ) -> CoreResult<&Session> {
+        if let Some(id) = self.session_only_default() {
+            return self.resume_session_only(id, observer, cancel).await;
+        }
         if self.default_account_kind()? == AccountKind::Offline {
             // Nothing to resume: an offline account has no credential and never
             // expires. Say so rather than failing later inside the keyring.
@@ -598,7 +617,9 @@ impl App {
         // An offline account has nothing to refresh and nobody to ask. Routing
         // it through `resume` would demand a keyring entry that by definition
         // does not exist, and fail on a machine that never needed one.
-        if self.default_account_kind()? == AccountKind::Offline {
+        if self.session_only_default().is_none()
+            && self.default_account_kind()? == AccountKind::Offline
+        {
             return self.establish_offline_session();
         }
         self.resume_account(observer, cancel).await
@@ -632,9 +653,57 @@ impl App {
         if self.account_kind(id)? == AccountKind::Offline {
             return self.establish_offline_session_for(id);
         }
+        if self.session_only.account == Some(id) {
+            return self.resume_session_only(id, observer, cancel).await;
+        }
         let provider = self.build_account_provider(false)?;
         let session = provider.resume(id, observer, cancel).await?;
         self.adopt(session)
+    }
+
+    /// The account whose session-only credential this process holds, when a
+    /// launch with no account named runs as it: no default is configured, or
+    /// the default is that same account.
+    fn session_only_default(&self) -> Option<Uuid> {
+        let held = self.session_only.account?;
+        match self.config().active_account() {
+            Some(default) if default != held.to_string() => None,
+            _ => Some(held),
+        }
+    }
+
+    /// [`Self::resume_account`] for the session-only credential of `id`.
+    async fn resume_session_only(
+        &mut self,
+        id: Uuid,
+        observer: &AuthObserver,
+        cancel: &CancellationToken,
+    ) -> CoreResult<&Session> {
+        let provider = self.session_only_provider()?;
+        let session = provider.resume(id, observer, cancel).await?;
+        // A session-only session writes no account record, even when the
+        // account is also recorded from an earlier persistent sign-in.
+        self.adopt(session)
+    }
+
+    /// Forgets this process's session-only sign-in, credential included.
+    /// Returns whether there was one.
+    fn end_session_only(&mut self) -> bool {
+        let Some(id) = self.session_only.account.take() else {
+            return false;
+        };
+        self.delete_session_only_credential(id);
+        true
+    }
+
+    fn delete_session_only_credential(&self, id: Uuid) {
+        if let Err(error) = self
+            .session_only
+            .store()
+            .delete(&CredentialKey::MicrosoftRefreshToken(id))
+        {
+            warn!(%error, account = %id, "could not clear a session-only credential");
+        }
     }
 
     /// The recorded kind of one account.
@@ -828,6 +897,9 @@ impl App {
         if self.session.as_ref().is_some_and(|s| s.account.id == id) {
             self.session = None;
         }
+        if self.session_only.account == Some(id) {
+            self.end_session_only();
+        }
 
         let remaining = match self.config().active_account() {
             Some(remaining) => {
@@ -853,7 +925,10 @@ impl App {
         self.reload_config()?;
         let Some(id) = self.config().active_account().map(str::to_owned) else {
             self.session = None;
-            return Ok(None);
+            // A session-only sign-in is recorded nowhere, so it ends here.
+            return Ok(self
+                .end_session_only()
+                .then_some(CredentialOutcome::NoneStored));
         };
         Ok(Some(self.remove_account(&id)?.credential))
     }
@@ -883,24 +958,52 @@ impl App {
         &self,
         allow_session_only: bool,
     ) -> CoreResult<MicrosoftAccountProvider> {
-        let store: Arc<dyn CredentialStore> = match self.keyring() {
-            Ok(keyring) => keyring,
+        match self.keyring() {
+            Ok(keyring) => Ok(self
+                .provider_over(keyring)?
+                .with_change_order(Arc::new(self.credential_order()))),
             Err(error) if allow_session_only => {
                 warn!(%error, "signing in for this session only; no secure storage is available");
-                Arc::new(MemoryStore::new())
+                self.session_only_provider()
             }
-            Err(error) => return Err(error.into()),
-        };
+            Err(error) => Err(error.into()),
+        }
+    }
 
+    /// A provider over this process's session-only credential. Only this
+    /// process can race it, so no cross-process order applies.
+    fn session_only_provider(&self) -> CoreResult<MicrosoftAccountProvider> {
+        self.provider_over(self.session_only.store())
+    }
+
+    fn provider_over(
+        &self,
+        store: Arc<dyn CredentialStore>,
+    ) -> CoreResult<MicrosoftAccountProvider> {
         Ok(MicrosoftAccountProvider::with_endpoints(
             ephervex_auth::resolve_client_id(
                 self.config().api.microsoft_client_id().unwrap_or_default(),
             ),
             store,
-            ephervex_auth::Endpoints::production(),
+            self.auth_endpoints(),
             &self.http_config(),
-        )?
-        .with_change_order(Arc::new(self.credential_order())))
+        )?)
+    }
+
+    #[cfg(test)]
+    fn auth_endpoints(&self) -> ephervex_auth::Endpoints {
+        self.auth_endpoints
+            .clone()
+            .unwrap_or_else(ephervex_auth::Endpoints::production)
+    }
+
+    #[cfg(not(test))]
+    #[expect(
+        clippy::unused_self,
+        reason = "a test build reads its endpoints from the App"
+    )]
+    fn auth_endpoints(&self) -> ephervex_auth::Endpoints {
+        ephervex_auth::Endpoints::production()
     }
 
     fn credential_order(&self) -> ConfigDirectoryOrder {
@@ -1040,6 +1143,20 @@ impl App {
                 self.discard_unrecorded_credential(id);
             }
             return Err(error);
+        }
+        if persistent {
+            self.end_session_only();
+        } else if login.has_refresh_credential() {
+            let previous = self.session_only.account.replace(id);
+            if let Some(previous) = previous
+                && previous != id
+            {
+                self.delete_session_only_credential(previous);
+            }
+        } else if self.session_only.account != Some(id) {
+            // The newest sign-in is the launch account, so an older account
+            // must not take over once its access token lapses.
+            self.end_session_only();
         }
         self.hold_session(login.session)
     }
@@ -2433,6 +2550,327 @@ mod tests {
         app.hold_session(session).expect("held");
 
         assert_eq!(default_launch_account(&mut app).await, id);
+    }
+
+    fn session_only_login(id: Uuid, refresh: &str) -> Login {
+        let mut login = login_with(id, refresh);
+        if let ephervex_auth::Credentials::Microsoft { storage, .. } =
+            &mut login.session.credentials
+        {
+            *storage = CredentialStorage::SessionOnly;
+        }
+        login
+    }
+
+    fn expire_session(app: &mut App) {
+        if let Some(Session {
+            credentials: ephervex_auth::Credentials::Microsoft { expires_at, .. },
+            ..
+        }) = app.session.as_mut()
+        {
+            *expires_at = Utc::now() - TimeDelta::hours(1);
+        }
+    }
+
+    fn files_containing(dir: &std::path::Path, needle: &str) -> Vec<std::path::PathBuf> {
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(dir).expect("read dir").flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                found.extend(files_containing(&path, needle));
+            } else if std::fs::read(&path)
+                .is_ok_and(|bytes| String::from_utf8_lossy(&bytes).contains(needle))
+            {
+                found.push(path);
+            }
+        }
+        found
+    }
+
+    /// The five sign-in services on one loopback server: a device-code login
+    /// issues one refresh token, and each refresh issues the next.
+    mod sign_in_services {
+        use wiremock::matchers::{body_string_contains, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        pub(super) const ACCOUNT: &str = "069a79f4-44e9-4726-a5be-fca90e38aaf5";
+        pub(super) const ISSUED_REFRESH: &str = "FAKE-MICROSOFT-REFRESH-TOKEN";
+        pub(super) const ROTATED_REFRESH: &str = "FAKE-MICROSOFT-REFRESH-TOKEN-ROTATED";
+
+        async fn answer(server: &MockServer, verb: &str, route: &str, body: &str) {
+            Mock::given(method(verb))
+                .and(path(route))
+                .respond_with(ResponseTemplate::new(200).set_body_string(body))
+                .mount(server)
+                .await;
+        }
+
+        pub(super) async fn mount(server: &MockServer) {
+            const TOKEN_ROUTE: &str = "/consumers/oauth2/v2.0/token";
+            answer(
+                server,
+                "POST",
+                "/consumers/oauth2/v2.0/devicecode",
+                include_str!("../../../fixtures/microsoft/microsoft-device-code.json"),
+            )
+            .await;
+            Mock::given(method("POST"))
+                .and(path(TOKEN_ROUTE))
+                .and(body_string_contains("device_code=FAKE-DEVICE-CODE"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(include_str!(
+                    "../../../fixtures/microsoft/microsoft-token.json"
+                )))
+                .mount(server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path(TOKEN_ROUTE))
+                .and(body_string_contains("grant_type=refresh_token"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(include_str!(
+                    "../../../fixtures/microsoft/microsoft-token-rotated.json"
+                )))
+                .mount(server)
+                .await;
+            answer(
+                server,
+                "POST",
+                "/user/authenticate",
+                include_str!("../../../fixtures/microsoft/xbox-authenticate.json"),
+            )
+            .await;
+            answer(
+                server,
+                "POST",
+                "/xsts/authorize",
+                include_str!("../../../fixtures/microsoft/xsts-authorize.json"),
+            )
+            .await;
+            answer(
+                server,
+                "POST",
+                "/authentication/login_with_xbox",
+                include_str!("../../../fixtures/microsoft/minecraft-login.json"),
+            )
+            .await;
+            answer(
+                server,
+                "GET",
+                "/entitlements/mcstore",
+                include_str!("../../../fixtures/microsoft/minecraft-entitlements.json"),
+            )
+            .await;
+            answer(
+                server,
+                "GET",
+                "/minecraft/profile",
+                include_str!("../../../fixtures/microsoft/minecraft-profile.json"),
+            )
+            .await;
+        }
+
+        pub(super) async fn refresh_redemptions(server: &MockServer) -> usize {
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .iter()
+                .filter(|request| {
+                    String::from_utf8_lossy(&request.body).contains("grant_type=refresh_token")
+                })
+                .count()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_only_sign_in_refreshes_from_the_credential_it_kept_in_memory() {
+        let server = wiremock::MockServer::start().await;
+        sign_in_services::mount(&server).await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.loopback_http = true;
+        app.auth_endpoints = Some(ephervex_auth::Endpoints::with_base(&server.uri()));
+        let id = Uuid::parse_str(sign_in_services::ACCOUNT).expect("uuid");
+        let options = LoginOptions {
+            request: LoginRequest {
+                flow: ephervex_auth::LoginFlow::DeviceCode,
+                timeout: std::time::Duration::from_secs(10),
+            },
+            allow_session_only: true,
+        };
+        let observer = AuthObserver::silent();
+        let cancel = CancellationToken::new();
+
+        let signed_in = app
+            .login(&options, &observer, &cancel)
+            .await
+            .expect("login");
+        assert_eq!(signed_in.storage(), Some(CredentialStorage::SessionOnly));
+        assert_eq!(signed_in.account.id, id);
+
+        // Once the access token has lapsed, the next launch refreshes from the
+        // credential the sign-in left in memory instead of asking to sign in.
+        expire_session(&mut app);
+        assert!(app.session().is_none());
+        let refreshed = app
+            .authenticated_session(&observer, &cancel)
+            .await
+            .expect("a lapsed session-only sign-in refreshes");
+        assert_eq!(refreshed.account.id, id);
+        assert_eq!(refreshed.storage(), Some(CredentialStorage::SessionOnly));
+        assert!(app.session().is_some());
+        assert_eq!(sign_in_services::refresh_redemptions(&server).await, 1);
+        assert_eq!(
+            app.session_only
+                .store()
+                .load(&refresh_key(id))
+                .expect("load")
+                .expect("kept")
+                .expose(),
+            sign_in_services::ROTATED_REFRESH,
+            "the rotated credential replaces the one the login issued"
+        );
+
+        // An explicit resume reaches the same store.
+        expire_session(&mut app);
+        app.resume_account(&observer, &cancel)
+            .await
+            .expect("an explicit resume finds the session-only credential");
+        assert_eq!(sign_in_services::refresh_redemptions(&server).await, 2);
+
+        // The sign-in is remembered nowhere on disk.
+        assert!(app.config().accounts.is_empty());
+        assert!(app.config().active_account().is_none());
+        for token in [
+            sign_in_services::ISSUED_REFRESH,
+            sign_in_services::ROTATED_REFRESH,
+        ] {
+            assert!(files_containing(base.path(), token).is_empty(), "{token}");
+        }
+    }
+
+    #[tokio::test]
+    async fn signing_out_of_a_session_only_sign_in_clears_its_credential() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let id = Uuid::new_v4();
+        let provider = app.session_only_provider().expect("provider");
+        app.adopt_login(&provider, session_only_login(id, "refresh"))
+            .expect("adopted");
+        assert_eq!(
+            app.session_only_default(),
+            Some(id),
+            "the sign-in is the default launch account"
+        );
+
+        assert_eq!(
+            app.logout().expect("logout"),
+            Some(CredentialOutcome::NoneStored)
+        );
+        assert!(app.session.is_none());
+        assert!(
+            app.session_only
+                .store()
+                .load(&refresh_key(id))
+                .expect("load")
+                .is_none()
+        );
+        let error = app
+            .authenticated_session(&AuthObserver::silent(), &CancellationToken::new())
+            .await
+            .expect_err("nobody is signed in any more");
+        assert!(
+            matches!(error, CoreError::Auth(AuthError::NotSignedIn)),
+            "{error:?}"
+        );
+        assert_eq!(app.logout().expect("logout"), None);
+    }
+
+    #[test]
+    fn a_second_session_only_sign_in_replaces_the_first_one_credential() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let (first, second) = (Uuid::new_v4(), Uuid::new_v4());
+        let provider = app.session_only_provider().expect("provider");
+        app.adopt_login(&provider, session_only_login(first, "one"))
+            .expect("adopted");
+        app.adopt_login(&provider, session_only_login(second, "two"))
+            .expect("adopted");
+
+        let store = app.session_only.store();
+        assert!(store.load(&refresh_key(first)).expect("load").is_none());
+        assert!(store.load(&refresh_key(second)).expect("load").is_some());
+        assert_eq!(app.session_only_default(), Some(second));
+    }
+
+    #[test]
+    fn a_sign_in_that_stored_no_credential_leaves_the_session_only_account_alone() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let id = Uuid::new_v4();
+        let provider = app.session_only_provider().expect("provider");
+
+        app.adopt_login(&provider, Login::new(microsoft_session(id), None))
+            .expect("adopted");
+
+        assert_eq!(app.session_only_default(), None);
+    }
+
+    #[tokio::test]
+    async fn a_newer_sign_in_without_a_credential_is_not_replaced_by_an_older_session_only_account()
+    {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let (older, newer) = (Uuid::new_v4(), Uuid::new_v4());
+        let provider = app.session_only_provider().expect("provider");
+        app.adopt_login(&provider, session_only_login(older, "older"))
+            .expect("adopted");
+        app.adopt_login(&provider, Login::new(microsoft_session(newer), None))
+            .expect("adopted");
+
+        expire_session(&mut app);
+        let error = app
+            .authenticated_session(&AuthObserver::silent(), &CancellationToken::new())
+            .await
+            .expect_err("the older account must not take over");
+        assert!(
+            matches!(error, CoreError::Auth(AuthError::NotSignedIn)),
+            "{error:?}"
+        );
+        assert!(
+            app.session_only
+                .store()
+                .load(&refresh_key(older))
+                .expect("load")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_persistent_sign_in_ends_the_session_only_credential() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let keyring = Arc::new(MemoryStore::new());
+        app.test_keyring = TestKeyring::Store(keyring.clone());
+        let session_only = Uuid::new_v4();
+        let provider = app.session_only_provider().expect("provider");
+        app.adopt_login(&provider, session_only_login(session_only, "temporary"))
+            .expect("adopted");
+
+        let persistent = Uuid::new_v4();
+        app.adopt_login(&provider_over(keyring), login_with(persistent, "kept"))
+            .expect("adopted");
+
+        assert!(
+            app.session_only
+                .store()
+                .load(&refresh_key(session_only))
+                .expect("load")
+                .is_none()
+        );
+        assert_eq!(app.session_only_default(), None);
+        assert_eq!(
+            app.config().active_account(),
+            Some(persistent.to_string().as_str())
+        );
     }
 
     #[tokio::test]
