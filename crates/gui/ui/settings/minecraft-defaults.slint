@@ -39,9 +39,9 @@ export component CompatibilityBadge inherits Rectangle {
 //
 // Nothing here listens outside the window: the control takes focus, reads
 // the next key or mouse press delivered to it, and hands the raw report to
-// Rust, which decides whether Minecraft can name it. Escape leaves the
-// binding alone, Delete and Backspace unbind it, and losing focus is the
-// same as cancelling.
+// Rust, which decides whether Minecraft can name it. A click, Enter or Space
+// starts the capture. Escape leaves the binding alone, Delete and Backspace
+// unbind it, and losing focus is the same as cancelling.
 export component PreferenceKeyBindingEditor inherits Rectangle {
     in property <string> text;
     in property <bool> capturing;
@@ -82,9 +82,21 @@ export component PreferenceKeyBindingEditor inherits Rectangle {
         height: 100%;
         key-pressed(event) => {
             if (!root.capturing) {
+                if (event.text == " " || event.text == Key.Return) {
+                    // One press is one action: a held key must not start a
+                    // capture again once the capture has ended.
+                    if (!event.repeat) {
+                        root.begin();
+                    }
+                    return accept;
+                }
                 return reject;
             }
-            root.captured-key(event.text);
+            // The key that started the capture may still be down and repeat;
+            // only a fresh press can be the binding.
+            if (!event.repeat) {
+                root.captured-key(event.text);
+            }
             return accept;
         }
         changed has-focus => {
