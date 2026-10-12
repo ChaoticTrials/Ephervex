@@ -81,6 +81,10 @@ pub enum LoaderError {
     ProcessorMainClass { processor: String },
     #[error("loader processor output `{path}` was not produced")]
     ProcessorOutputMissing { path: PathBuf },
+    #[error(
+        "the path {path} is not valid UTF-8 and cannot be passed to a loader processor unchanged"
+    )]
+    PathNotUtf8 { path: PathBuf },
     #[error("server target {path} is not empty")]
     ServerTargetOccupied { path: PathBuf },
     #[error("loader installation was canceled")]
@@ -112,6 +116,7 @@ impl LoaderError {
             | Self::ProcessorMainClass { .. }
             | Self::ProcessorOutputMissing { .. } => "error-loader-processor-failed",
             Self::ServerTargetOccupied { .. } => "error-loader-server-target-occupied",
+            Self::PathNotUtf8 { .. } => "error-launch-path-not-utf8",
             Self::Canceled => "error-launch-canceled",
         }
     }
@@ -154,6 +159,7 @@ impl LoaderError {
             | Self::InstallerLibraryConflict { path, .. }
             | Self::Io { path, .. }
             | Self::ProcessorOutputMissing { path }
+            | Self::PathNotUtf8 { path }
             | Self::ServerTargetOccupied { path } => Some(path.clone()),
             _ => None,
         }

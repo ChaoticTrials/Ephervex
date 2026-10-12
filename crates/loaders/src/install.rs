@@ -1432,6 +1432,18 @@ fn addressless_artifacts<'a>(
         .collect()
 }
 
+/// The path as the `String` a processor argument substitutes into.
+///
+/// A path that is not valid UTF-8 is refused: converting it lossily would hand
+/// the processor a different pathname than the one Ephervex prepared.
+fn utf8_path(path: &Path) -> LoaderResult<String> {
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| LoaderError::PathNotUtf8 {
+            path: path.to_path_buf(),
+        })
+}
+
 /// The tokens a processor argument or output may name. Maven-coordinate values
 /// resolve inside `workspace` and installer-entry values inside `data_dir`.
 fn processor_values(
@@ -1443,19 +1455,13 @@ fn processor_values(
 ) -> LoaderResult<BTreeMap<String, String>> {
     let mut values = BTreeMap::from([
         ("SIDE".to_owned(), side.as_str().to_owned()),
-        ("ROOT".to_owned(), workspace.to_string_lossy().into_owned()),
+        ("ROOT".to_owned(), utf8_path(workspace)?),
         (
             "LIBRARY_DIR".to_owned(),
-            workspace.join("libraries").to_string_lossy().into_owned(),
+            utf8_path(&workspace.join("libraries"))?,
         ),
-        (
-            "INSTALLER".to_owned(),
-            bundle.installer.to_string_lossy().into_owned(),
-        ),
-        (
-            "MINECRAFT_JAR".to_owned(),
-            minecraft_jar.to_string_lossy().into_owned(),
-        ),
+        ("INSTALLER".to_owned(), utf8_path(&bundle.installer)?),
+        ("MINECRAFT_JAR".to_owned(), utf8_path(minecraft_jar)?),
         (
             "MINECRAFT_VERSION".to_owned(),
             bundle.profile.minecraft.clone(),
@@ -1477,13 +1483,9 @@ fn resolve_coordinate(raw: &str, workspace: &Path) -> LoaderResult<Option<String
     else {
         return Ok(None);
     };
-    Ok(Some(
-        workspace
-            .join("libraries")
-            .join(MavenCoordinate::parse(coordinate)?.relative_path())
-            .to_string_lossy()
-            .into_owned(),
-    ))
+    Ok(Some(utf8_path(&workspace.join("libraries").join(
+        MavenCoordinate::parse(coordinate)?.relative_path(),
+    ))?))
 }
 
 /// A data value: a Maven coordinate, an installer entry (`/path`, extracted
@@ -1498,9 +1500,7 @@ fn resolve_data_value(
         return Ok(library);
     }
     if let Some(entry) = raw.strip_prefix('/') {
-        return Ok(safe_archive_destination(data_dir, entry)?
-            .to_string_lossy()
-            .into_owned());
+        return utf8_path(&safe_archive_destination(data_dir, entry)?);
     }
     let resolved = resolve_tokens(raw, values)?;
     Ok(resolved.trim_matches('\'').to_owned())
@@ -4091,6 +4091,78 @@ mod tests {
             "/tmp/work/out.bin"
         );
         assert!(resolve_output_key("[../evil:x:1]", workspace, &values).is_err());
+    }
+
+    #[cfg(unix)]
+    fn non_utf8_path(parent: &Path) -> PathBuf {
+        use std::os::unix::ffi::OsStrExt;
+        parent.join(std::ffi::OsStr::from_bytes(b"caf\xff"))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn processor_values_refuse_a_non_utf8_workspace_instead_of_altering_it() {
+        let root = tempfile::tempdir().expect("root");
+        let bundle = processed_bundle(root.path(), "{}");
+        let workspace = non_utf8_path(root.path());
+
+        let error = processor_values(
+            &bundle,
+            InstallSide::Client,
+            &workspace,
+            &root.path().join("data"),
+            Path::new("minecraft.jar"),
+        )
+        .expect_err("a non-UTF-8 workspace is refused");
+
+        assert!(matches!(&error, LoaderError::PathNotUtf8 { path } if *path == workspace));
+        assert_eq!(error.message_id(), "error-launch-path-not-utf8");
+        assert_eq!(error.failing_path(), Some(workspace));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn processor_values_refuse_a_non_utf8_installer_or_game_jar() {
+        let root = tempfile::tempdir().expect("root");
+        let mut bundle = processed_bundle(root.path(), "{}");
+        let data_dir = root.path().join("data");
+
+        let jar = non_utf8_path(root.path());
+        let error = processor_values(&bundle, InstallSide::Client, root.path(), &data_dir, &jar)
+            .expect_err("a non-UTF-8 game jar is refused");
+        assert!(matches!(&error, LoaderError::PathNotUtf8 { path } if *path == jar));
+
+        bundle.installer = non_utf8_path(root.path());
+        let error = processor_values(
+            &bundle,
+            InstallSide::Client,
+            root.path(),
+            &data_dir,
+            Path::new("minecraft.jar"),
+        )
+        .expect_err("a non-UTF-8 installer is refused");
+        assert!(matches!(&error, LoaderError::PathNotUtf8 { path } if *path == bundle.installer));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn data_and_coordinate_values_refuse_a_non_utf8_location() {
+        let root = tempfile::tempdir().expect("root");
+        let bad = non_utf8_path(root.path());
+        let values = BTreeMap::new();
+
+        assert!(matches!(
+            resolve_data_value("/data/server.lzma", root.path(), &bad, &values),
+            Err(LoaderError::PathNotUtf8 { .. })
+        ));
+        assert!(matches!(
+            resolve_data_value("[g:a:1]", &bad, root.path(), &values),
+            Err(LoaderError::PathNotUtf8 { .. })
+        ));
+        assert!(matches!(
+            resolve_argument("[g:a:1]", &bad, &values),
+            Err(LoaderError::PathNotUtf8 { .. })
+        ));
     }
 
     #[tokio::test]
