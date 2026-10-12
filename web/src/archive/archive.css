@@ -22,24 +22,6 @@
   --archive-hero-glow: rgba(103, 209, 215, 0.18);
   --archive-card-shadow: rgba(0, 0, 0, 0.22);
 }
-html[data-season='halloween'] .archive-root {
-  --archive-hero-start: #f8ead9;
-  --archive-hero-end: #ead9c5;
-  --archive-hero-accent: #9d3d0a;
-  --archive-hero-muted: #66546b;
-  --archive-hero-glow: rgba(255, 174, 96, 0.14);
-}
-html[data-theme='dark'][data-season='halloween'] .archive-root {
-  --archive-hero-start: #29182f;
-  --archive-hero-end: #4a2a3f;
-  --archive-hero-accent: #ffc47d;
-  --archive-hero-muted: #ead1c3;
-  --archive-hero-foreground: #fff;
-  --archive-hero-glow: rgba(255, 174, 96, 0.2);
-}
-html[data-season='halloween']:not([data-theme='dark']) .archive-root {
-  --archive-text: #28192f;
-}
 .archive-root a:focus-visible,
 .archive-root button:focus-visible,
 .archive-root input:focus-visible,
@@ -811,3 +793,45 @@ html[data-season='halloween']:not([data-theme='dark']) .archive-root {
   .archive-stats button:hover,
   .archive-entry:hover { transform: none; }
 }
+
+html[data-season='pride'] .archive-root {
+  --archive-hero-accent: #572d85;
+  --archive-hero-foreground: #202136;
+  --archive-hero-muted: #4f5068;
+  --archive-hero-line: color-mix(in srgb, #6432a0 38%, transparent);
+  --archive-hero-card: color-mix(in srgb, var(--site-surface) 76%, transparent);
+}
+html[data-theme='dark'][data-season='pride'] .archive-root {
+  --archive-hero-accent: #e1c1ff;
+  --archive-hero-foreground: #faf5ff;
+  --archive-hero-muted: #e1d8eb;
+  --archive-hero-line: color-mix(in srgb, #e1c1ff 45%, transparent);
+}
+html[data-season='pride'] .archive-hero,
+html[data-season='pride'] .archive-detail-head {
+  background: linear-gradient(110deg, #ffe3e8, #fff0cf 22%, #e2f4e9 45%, #e3efff 70%, #f0e3fa);
+}
+html[data-theme='dark'][data-season='pride'] .archive-hero,
+html[data-theme='dark'][data-season='pride'] .archive-detail-head {
+  background: linear-gradient(110deg, #542b3d, #56442d 22%, #2b4b3e 45%, #2b415d 70%, #48345e);
+}
+html[data-season='pride'] .archive-hero h1 em {
+  background: linear-gradient(90deg, #af3853, #a7621e 22%, #397a54 46%, #2e6eae 70%, #743ca9);
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+html[data-theme='dark'][data-season='pride'] .archive-hero h1 em {
+  background-image: linear-gradient(90deg, #ff9db4, #ffcb8e 22%, #a3e0b5 46%, #a9d6ff 70%, #d8b3ff);
+}
+html[data-season='pride'] .archive-stats button:nth-child(4n + 1) { border-top-color: #df425d; background: color-mix(in srgb, #df425d 13%, var(--site-surface)); }
+html[data-season='pride'] .archive-stats button:nth-child(4n + 2) { border-top-color: #ec9639; background: color-mix(in srgb, #ec9639 13%, var(--site-surface)); }
+html[data-season='pride'] .archive-stats button:nth-child(4n + 3) { border-top-color: #45aa77; background: color-mix(in srgb, #45aa77 13%, var(--site-surface)); }
+html[data-season='pride'] .archive-stats button:nth-child(4n) { border-top-color: #468bc9; background: color-mix(in srgb, #468bc9 13%, var(--site-surface)); }
+html[data-season='pride'] .archive-filter-panel {
+  border-top: 5px solid #9760c6;
+  background: linear-gradient(115deg, color-mix(in srgb, #45aa77 8%, var(--site-surface)), color-mix(in srgb, #9760c6 10%, var(--site-surface)));
+}
+html[data-season='pride'] .archive-entry:nth-child(4n + 1) { border-left: 4px solid #df425d; }
+html[data-season='pride'] .archive-entry:nth-child(4n + 2) { border-left: 4px solid #ec9639; }
+html[data-season='pride'] .archive-entry:nth-child(4n + 3) { border-left: 4px solid #45aa77; }
+html[data-season='pride'] .archive-entry:nth-child(4n) { border-left: 4px solid #468bc9; }

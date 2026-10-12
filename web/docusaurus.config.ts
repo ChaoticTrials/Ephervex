@@ -15,7 +15,7 @@ const config: Config = {
   title: 'Ephervex',
   tagline: 'Disposable Minecraft environments for reproducing bugs.',
   favicon: 'img/favicon.png',
-  scripts: [{src: `${baseUrl}halloween-theme.js`}],
+  scripts: [{src: `${baseUrl}seasonal-theme.js`}],
   future: {v4: true},
   url: 'https://ephervex.chaotictrials.de',
   baseUrl,

@@ -2,28 +2,33 @@
   const now = new Date();
   const previewHost = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname)
     || /^(?:10\.\d+\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+)$/.test(location.hostname);
-  const previewKey = 'ephervex-halloween-preview';
-  const previewQuery = new URLSearchParams(location.search).get('halloweenPreview');
-  let preview = false;
+  const previewKey = 'ephervex-season-preview';
+  const query = new URLSearchParams(location.search);
+  const previewQuery = query.get('seasonPreview');
+  const seasons = ['halloween', 'pride'];
+  let preview = null;
 
   if (previewHost) {
     try {
-      if (previewQuery === '1' || previewQuery === '0') {
+      if (seasons.includes(previewQuery) || previewQuery === 'off') {
         sessionStorage.setItem(previewKey, previewQuery);
       }
-      preview = sessionStorage.getItem(previewKey) === '1';
+      preview = sessionStorage.getItem(previewKey);
     } catch {
-      preview = previewQuery === '1';
+      preview = previewQuery;
     }
   }
 
-  if ((now.getMonth() !== 9 || now.getDate() !== 31) && !preview) return;
+  const scheduled = now.getMonth() === 5 ? 'pride'
+    : now.getMonth() === 9 && now.getDate() === 31 ? 'halloween' : null;
+  const season = preview === 'off' ? null : seasons.includes(preview) ? preview : scheduled;
+  if (!season) return;
 
-  document.documentElement.dataset.season = 'halloween';
+  document.documentElement.dataset.season = season;
 
   const scriptUrl = document.currentScript.src;
-  const logoUrl = new URL('img/halloween-logo.png', scriptUrl).href;
-  const faviconUrl = new URL('img/halloween-favicon.png', scriptUrl).href;
+  const logoUrl = new URL(`img/${season}-logo.png`, scriptUrl).href;
+  const faviconUrl = new URL(`img/${season}-favicon.png`, scriptUrl).href;
 
   function updateBranding() {
     const favicon = document.querySelector('link[rel="icon"]');

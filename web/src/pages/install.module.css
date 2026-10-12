@@ -166,7 +166,6 @@
 .requirementGrid p { margin: 0.4rem 0 0; color: var(--site-muted); font-size: 0.85rem; line-height: 1.6; }
 .helpLine { margin: 1.5rem 0 0; color: var(--site-muted); font-size: 0.88rem; }
 
-:global(html[data-theme='dark'][data-season='halloween']) .hero .kicker { color: #ffc47d; }
 
 @media (max-width: 1100px) {
   .methods { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -206,4 +205,26 @@
 @media (prefers-reduced-motion: reduce) {
   .method { transition: none; }
   .method:hover { transform: none; }
+}
+
+:global(html[data-season='pride']) .hero {
+  background: linear-gradient(110deg, #ffe3e8, #fff0cf 22%, #e2f4e9 45%, #e3efff 70%, #f0e3fa);
+}
+:global(html[data-theme='dark'][data-season='pride']) .hero {
+  background: linear-gradient(110deg, #542b3d, #56442d 22%, #2b4b3e 45%, #2b415d 70%, #48345e);
+}
+:global(html[data-season='pride']) .chooser { overflow: hidden; }
+:global(html[data-season='pride']) .chooser::before {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 6px;
+  background: var(--season-ribbon);
+  content: '';
+}
+:global(html[data-season='pride']) .method:nth-child(4n + 1) { border-top: 4px solid #df425d; background: color-mix(in srgb, #df425d 11%, var(--site-bg)); }
+:global(html[data-season='pride']) .method:nth-child(4n + 2) { border-top: 4px solid #ec9639; background: color-mix(in srgb, #ec9639 11%, var(--site-bg)); }
+:global(html[data-season='pride']) .method:nth-child(4n + 3) { border-top: 4px solid #45aa77; background: color-mix(in srgb, #45aa77 11%, var(--site-bg)); }
+:global(html[data-season='pride']) .method:nth-child(4n) { border-top: 4px solid #468bc9; background: color-mix(in srgb, #468bc9 11%, var(--site-bg)); }
+:global(html[data-season='pride']) .instructionsHeader {
+  background: linear-gradient(90deg, color-mix(in srgb, #45aa77 13%, var(--site-surface-alt)), color-mix(in srgb, #9760c6 17%, var(--site-surface-alt)));
 }

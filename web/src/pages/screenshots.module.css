@@ -103,4 +103,25 @@
   color: var(--site-accent);
 }
 
-:global(html[data-season='halloween']) .intro .eyebrow { color: #ffc47d; }
+:global(html[data-season='pride']) .intro {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(110deg, #ffe3e8, #fff0cf 21%, #e3f4e9 43%, #e4effd 68%, #f1e4fa);
+}
+:global(html[data-season='pride']) .intro::before {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 6px;
+  background: var(--season-ribbon);
+  content: '';
+}
+:global(html[data-theme='dark'][data-season='pride']) .intro {
+  background: linear-gradient(110deg, #52283a, #52412c 22%, #2b4c3d 45%, #2d425e 70%, #46345c);
+}
+:global(html[data-season='pride']) .toc a:nth-child(6n + 1) { border-color: #df425d; background: color-mix(in srgb, #df425d 17%, var(--site-surface)); }
+:global(html[data-season='pride']) .toc a:nth-child(6n + 2) { border-color: #d98733; background: color-mix(in srgb, #f18c39 18%, var(--site-surface)); }
+:global(html[data-season='pride']) .toc a:nth-child(6n + 3) { border-color: #c19f2e; background: color-mix(in srgb, #edc94f 20%, var(--site-surface)); }
+:global(html[data-season='pride']) .toc a:nth-child(6n + 4) { border-color: #3c9668; background: color-mix(in srgb, #45aa77 18%, var(--site-surface)); }
+:global(html[data-season='pride']) .toc a:nth-child(6n + 5) { border-color: #468bc9; background: color-mix(in srgb, #468bc9 18%, var(--site-surface)); }
+:global(html[data-season='pride']) .toc a:nth-child(6n) { border-color: #9760c6; background: color-mix(in srgb, #9760c6 18%, var(--site-surface)); }
+:global(html[data-season='pride']) .toc a:hover { color: var(--ifm-font-color-base); filter: brightness(1.12); }

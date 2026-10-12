@@ -23,9 +23,3 @@
 @media (max-width: 750px) {
   .installMethods { display: none; }
 }
-
-:global(html[data-season='halloween']) .eyebrow { color: #ffc47d; }
-:global(html[data-season='halloween']) .installButton,
-:global(html[data-season='halloween']) .installButton:hover {
-  color: var(--site-button-text);
-}

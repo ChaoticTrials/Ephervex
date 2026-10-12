@@ -1,3 +1,5 @@
+@import "./seasons.css";
+
 :root {
   --ifm-color-primary: #147485;
   --ifm-color-primary-dark: #126979;

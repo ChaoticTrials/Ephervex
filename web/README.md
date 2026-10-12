@@ -38,8 +38,16 @@ The Halloween logo and favicon in `static/img/` are resized from
 `ephervex_logos_x4.zip` supplied by the project. On October 31 in the visitor's
 local time, the site switches to warm orange and purple colors and those two
 icons. It keeps the default launcher screenshots until matching GUI captures
-exist. On localhost or a private network address, add `?halloweenPreview=1` to
-preview the theme in the current tab; `?halloweenPreview=0` clears that preview.
+exist. On localhost or a private network address, add
+`?seasonPreview=halloween` to preview the theme in the current tab.
+
+Pride runs throughout June, with rainbow surfaces and accents and the
+project-supplied rainbow mascot. Its logo and favicon are resized from the x4
+artwork in `allay_logos_upscayl_inputs.zip`. Use `?seasonPreview=pride` locally
+to preview it across navigation,
+or `?seasonPreview=off` to disable seasonal colors in the current tab.
+Seasonal branding keeps the default launcher screenshots.
+Run `node --test tests/seasonal-theme.test.mjs` to check date boundaries and previews.
 
 From the repository root, regenerate and synchronize the default 1080p assets:
 

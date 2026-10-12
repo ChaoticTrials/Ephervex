@@ -161,7 +161,7 @@
   height: 0.24rem;
   margin-bottom: 1.5rem;
   border-radius: 999px;
-  background: var(--site-accent);
+  background: var(--season-ribbon, var(--site-accent));
 }
 
 .featureCard h3,
@@ -292,3 +292,78 @@
 :global(html[data-theme='dark'][data-season='halloween']) .windowDots i { border-color: #ad7b86; }
 :global(html[data-theme='dark'][data-season='halloween']) .cta { color: #fff0df; background: #39203d; }
 :global(html[data-theme='dark'][data-season='halloween']) .cta .sectionLabel { color: #ffc47d; }
+
+:global(html[data-season='pride']) .hero {
+  background:
+    radial-gradient(ellipse at 88% 14%, color-mix(in srgb, #9760c6 25%, transparent), transparent 46%),
+    linear-gradient(110deg, #ffe8e9 0%, #fff1de 21%, #fff9df 40%, #e6f5e9 60%, #e8f0ff 79%, #f0e8fa 100%);
+}
+:global(html[data-season='pride']) .hero::before {
+  background-image: linear-gradient(90deg, transparent, color-mix(in srgb, #df425d 15%, transparent), color-mix(in srgb, #edc94f 20%, transparent), color-mix(in srgb, #45aa77 17%, transparent), color-mix(in srgb, #468bc9 17%, transparent), color-mix(in srgb, #9760c6 17%, transparent), transparent);
+  background-size: 100% 2px;
+}
+:global(html[data-season='pride']) .hero h1 span {
+  background: linear-gradient(95deg, #b32855, #ac5518 24%, #537d25 47%, #287e98 70%, #7635ac);
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+:global(html[data-season='pride']) .supportLine span:nth-child(4n + 1) {
+  border-color: #d7869a;
+  color: #74253f;
+  background: #ffe1e8;
+}
+:global(html[data-season='pride']) .supportLine span:nth-child(4n + 2) {
+  border-color: #d9a850;
+  color: #68431a;
+  background: #ffedc8;
+}
+:global(html[data-season='pride']) .supportLine span:nth-child(4n + 3) {
+  border-color: #72bd98;
+  color: #225b42;
+  background: #d9f3e5;
+}
+:global(html[data-season='pride']) .supportLine span:nth-child(4n) {
+  border-color: #86a9d9;
+  color: #284b79;
+  background: #e0ecff;
+}
+:global(html[data-season='pride']) .featureCard:nth-child(6n + 1) { border-top: 4px solid #df425d; }
+:global(html[data-season='pride']) .featureCard:nth-child(6n + 2) { border-top: 4px solid #ec9639; }
+:global(html[data-season='pride']) .featureCard:nth-child(6n + 3) { border-top: 4px solid #dfbc38; }
+:global(html[data-season='pride']) .featureCard:nth-child(6n + 4) { border-top: 4px solid #45aa77; }
+:global(html[data-season='pride']) .featureCard:nth-child(6n + 5) { border-top: 4px solid #468bc9; }
+:global(html[data-season='pride']) .featureCard:nth-child(6n) { border-top: 4px solid #9760c6; }
+:global(html[data-season='pride']) .cta {
+  border-top: 5px solid transparent;
+  border-image: var(--season-ribbon) 1;
+  background: linear-gradient(105deg, var(--site-surface-alt), color-mix(in srgb, #45aa77 12%, var(--site-surface-alt)), color-mix(in srgb, #9760c6 14%, var(--site-surface-alt)));
+}
+:global(html[data-theme='dark'][data-season='pride']) .hero {
+  background:
+    radial-gradient(ellipse at 85% 20%, #513866 0%, transparent 43%),
+    linear-gradient(110deg, #3d2333 0%, #47301f 22%, #423c25 40%, #213b34 61%, #263750 79%, #392b53 100%);
+}
+:global(html[data-theme='dark'][data-season='pride']) .hero h1 span {
+  background-image: linear-gradient(95deg, #ff8eaa, #ffba79 25%, #e6da80 45%, #8bdcb1 64%, #9dcaff 81%, #d4a8ff);
+}
+:global(html[data-theme='dark'][data-season='pride']) .supportLine span:nth-child(4n + 1) {
+  border-color: #d77b94;
+  color: #ffe7ed;
+  background: #73364b;
+}
+:global(html[data-theme='dark'][data-season='pride']) .supportLine span:nth-child(4n + 2) {
+  border-color: #d9a95c;
+  color: #fff0cf;
+  background: #705135;
+}
+:global(html[data-theme='dark'][data-season='pride']) .supportLine span:nth-child(4n + 3) {
+  border-color: #70be94;
+  color: #e0f8e8;
+  background: #285b49;
+}
+:global(html[data-theme='dark'][data-season='pride']) .supportLine span:nth-child(4n) {
+  border-color: #7aafdf;
+  color: #e3f0ff;
+  background: #304e71;
+}
+

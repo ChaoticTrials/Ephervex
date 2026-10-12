@@ -80,6 +80,35 @@
 .preview :global(.themeScreenshot) { display: block; }
 .preview figcaption { padding: 0.85rem 1rem; border-top: 1px solid var(--site-border); background: var(--site-surface-alt); color: var(--site-muted); font-size: 0.86rem; }
 
+:global(html[data-season='pride']) .pathGrid a:nth-child(4n + 1) {
+  border-top: 4px solid #df425d;
+  background: linear-gradient(140deg, color-mix(in srgb, #df425d 22%, var(--site-surface)), var(--site-surface) 82%);
+}
+:global(html[data-season='pride']) .pathGrid a:nth-child(4n + 2) {
+  border-top: 4px solid #ec9639;
+  background: linear-gradient(140deg, color-mix(in srgb, #ec9639 22%, var(--site-surface)), var(--site-surface) 82%);
+}
+:global(html[data-season='pride']) .pathGrid a:nth-child(4n + 3) {
+  border-top: 4px solid #45aa77;
+  background: linear-gradient(140deg, color-mix(in srgb, #45aa77 22%, var(--site-surface)), var(--site-surface) 82%);
+}
+:global(html[data-season='pride']) .pathGrid a:nth-child(4n) {
+  border-top: 4px solid #468bc9;
+  background: linear-gradient(140deg, color-mix(in srgb, #468bc9 22%, var(--site-surface)), var(--site-surface) 82%);
+}
+:global(html[data-season='pride']) .pathGrid a:nth-child(4n + 1) span { color: #a93153; }
+:global(html[data-season='pride']) .pathGrid a:nth-child(4n + 2) span { color: #985419; }
+:global(html[data-season='pride']) .pathGrid a:nth-child(4n + 3) span { color: #276f4a; }
+:global(html[data-season='pride']) .pathGrid a:nth-child(4n) span { color: #2a6596; }
+:global(html[data-theme='dark'][data-season='pride']) .pathGrid a:nth-child(4n + 1) span { color: #ff9db6; }
+:global(html[data-theme='dark'][data-season='pride']) .pathGrid a:nth-child(4n + 2) span { color: #ffca8d; }
+:global(html[data-theme='dark'][data-season='pride']) .pathGrid a:nth-child(4n + 3) span { color: #9be0b7; }
+:global(html[data-theme='dark'][data-season='pride']) .pathGrid a:nth-child(4n) span { color: #a6d2f6; }
+:global(html[data-season='pride']) .preview figcaption {
+  border-top: 4px solid #468bc9;
+  background: linear-gradient(90deg, color-mix(in srgb, #45aa77 17%, var(--site-surface-alt)), color-mix(in srgb, #9760c6 20%, var(--site-surface-alt)));
+}
+
 @media (max-width: 700px) {
   .pathGrid { grid-template-columns: 1fr; }
   .quickLinks a { flex: 1 1 100%; }

@@ -4,9 +4,9 @@
   inset: 0;
   display: flex;
   flex-direction: column;
-  background: rgb(6 12 15 / 0.72);
+  background: var(--season-viewer-bg, rgb(6 12 15 / 0.72));
   backdrop-filter: blur(12px);
-  color: #f2f7f8;
+  color: var(--season-viewer-text, #f2f7f8);
   outline: none;
 }
 
@@ -32,7 +32,7 @@
 }
 
 .caption span {
-  color: #b7c8cd;
+  color: var(--season-viewer-muted, #b7c8cd);
   font-family: var(--ifm-font-family-monospace);
   font-size: 0.75rem;
 }
@@ -41,7 +41,7 @@
 
 .action {
   padding: 0.45rem 0.85rem;
-  border: 1px solid rgb(255 255 255 / 0.3);
+  border: 1px solid var(--season-viewer-border, rgb(255 255 255 / 0.3));
   border-radius: 999px;
   background: transparent;
   color: inherit;
@@ -54,8 +54,8 @@
 
 .action:hover,
 .action:focus-visible {
-  border-color: #fff;
-  color: #fff;
+  border-color: var(--season-viewer-text, #fff);
+  color: var(--season-viewer-text, #fff);
   text-decoration: none;
 }
 
@@ -112,9 +112,9 @@
   width: 3rem;
   height: 3rem;
   margin-top: -2rem;
-  border: 1px solid rgb(255 255 255 / 0.3);
+  border: 1px solid var(--season-viewer-border, rgb(255 255 255 / 0.3));
   border-radius: 50%;
-  background: rgb(6 12 15 / 0.6);
+  background: var(--season-viewer-bg, rgb(6 12 15 / 0.6));
   color: inherit;
   font-size: 2rem;
   line-height: 1;
@@ -123,8 +123,8 @@
 
 .nav:hover:not(:disabled),
 .nav:focus-visible {
-  border-color: #fff;
-  background: rgb(6 12 15 / 0.85);
+  border-color: var(--season-viewer-text, #fff);
+  background: var(--season-viewer-bg, rgb(6 12 15 / 0.85));
 }
 
 .nav:disabled {

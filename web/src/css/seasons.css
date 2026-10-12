@@ -1,0 +1,129 @@
+html[data-season='pride'] {
+  --ifm-color-primary: #6432a0;
+  --ifm-color-primary-dark: #592d8f;
+  --ifm-color-primary-darker: #542a87;
+  --ifm-color-primary-darkest: #45236f;
+  --ifm-color-primary-light: #6f37b1;
+  --ifm-color-primary-lighter: #7439ba;
+  --ifm-color-primary-lightest: #8b54ca;
+  --ifm-font-color-base: #28283d;
+  --ifm-heading-color: #202136;
+  --ifm-navbar-background-color: #fffdf9;
+  --ifm-navbar-link-color: #202136;
+  --ifm-navbar-link-hover-color: #6432a0;
+  --site-bg: #f8f7fc;
+  --site-surface: #fffdf9;
+  --site-surface-alt: #f0edfa;
+  --site-image-bg: #e6e3f4;
+  --site-border: #d9d4e7;
+  --site-muted: #55566e;
+  --site-accent: #6432a0;
+  --site-shadow: rgba(44, 32, 69, 0.09);
+  --site-hero-bg: #f6ebf7;
+  --site-hero-text: #202136;
+  --site-hero-muted: #4f5068;
+  --site-button-bg: #6432a0;
+  --site-button-hover: #512687;
+  --site-button-text: #fff;
+  --docs-sidebar-bg: #f0edfa;
+  --docs-sidebar-text: #3c3b59;
+  --docs-sidebar-accent: #6432a0;
+  --docs-note-bg: #e8f5ee;
+  --docs-warning-bg: #fff3d7;
+  --docs-warning-border: #a66116;
+}
+
+html[data-theme='dark'][data-season='pride'] {
+  --ifm-color-primary: #d3a7ff;
+  --ifm-color-primary-dark: #c48aff;
+  --ifm-color-primary-darker: #bd7aff;
+  --ifm-color-primary-darkest: #a94aff;
+  --ifm-color-primary-light: #e2c4ff;
+  --ifm-color-primary-lighter: #e9d3ff;
+  --ifm-color-primary-lightest: #f7edff;
+  --ifm-font-color-base: #edebf5;
+  --ifm-heading-color: #faf5ff;
+  --ifm-navbar-background-color: #1c1a2b;
+  --ifm-navbar-link-color: #f0ecf8;
+  --ifm-navbar-link-hover-color: #d3a7ff;
+  --site-bg: #171725;
+  --site-surface: #222234;
+  --site-surface-alt: #2d2b42;
+  --site-image-bg: #1d1d2d;
+  --site-border: #4b4965;
+  --site-muted: #c7c4d9;
+  --site-accent: #d3a7ff;
+  --site-shadow: rgba(0, 0, 0, 0.22);
+  --site-hero-bg: #302740;
+  --site-hero-text: #faf5ff;
+  --site-hero-muted: #d7d1e2;
+  --site-button-bg: #d3a7ff;
+  --site-button-hover: #e3c7ff;
+  --site-button-text: #21152d;
+  --docs-sidebar-bg: #1c1a2b;
+  --docs-sidebar-text: #e1dbf0;
+  --docs-sidebar-accent: #d3a7ff;
+  --docs-note-bg: #203b34;
+  --docs-warning-bg: #443520;
+  --docs-warning-border: #ffc66d;
+}
+
+/* Shared surfaces include docs, local search, mobile navigation, and archive pages. */
+html[data-season] {
+  --season-viewer-bg: color-mix(in srgb, var(--site-surface) 94%, transparent);
+  --season-viewer-text: var(--site-hero-text);
+  --season-viewer-muted: var(--site-muted);
+  --season-viewer-border: var(--site-border);
+  --ifm-background-color: var(--site-bg);
+  --ifm-background-surface-color: var(--site-surface);
+  --ifm-footer-background-color: var(--docs-sidebar-bg);
+  --ifm-footer-color: var(--docs-sidebar-text);
+  --ifm-footer-link-color: var(--docs-sidebar-accent);
+  --ifm-menu-color: var(--docs-sidebar-text);
+  --ifm-menu-color-active: var(--docs-sidebar-accent);
+  --ifm-code-background: var(--site-surface-alt);
+  --ifm-table-stripe-background: var(--site-surface-alt);
+}
+html[data-season] .navbar__title,
+html[data-season] .navbar__toggle,
+html[data-season] .navbar .clean-btn { color: var(--site-hero-text); }
+html[data-season] .archive-root {
+  --archive-text: var(--site-hero-text);
+  --archive-hero-start: var(--site-hero-bg);
+  --archive-hero-end: var(--site-surface-alt);
+  --archive-hero-accent: var(--site-accent);
+  --archive-hero-muted: var(--site-muted);
+  --archive-hero-foreground: var(--site-hero-text);
+  --archive-hero-line: var(--site-border);
+  --archive-hero-card: var(--site-surface);
+  --archive-hero-glow: color-mix(in srgb, var(--site-accent) 18%, transparent);
+}
+html[data-season='pride'] {
+  --season-ribbon: linear-gradient(90deg, #df425d 0 16.66%, #f18c39 16.66% 33.33%, #edc94f 33.33% 50%, #45aa77 50% 66.66%, #468bc9 66.66% 83.33%, #9760c6 83.33%);
+}
+html[data-season='pride'] .navbar { border-image: var(--season-ribbon) 1; border-bottom-width: 5px; }
+html[data-season='pride'] .theme-doc-markdown > header:first-child {
+  background:
+    linear-gradient(90deg, #df425d, #f18c39, #edc94f, #45aa77, #468bc9, #9760c6) top / 100% 7px no-repeat,
+    linear-gradient(110deg, #ffe2e8, #fff0cd 22%, #e0f3e8 46%, #deecfb 72%, #eee2f9);
+}
+html[data-theme='dark'][data-season='pride'] .theme-doc-markdown > header:first-child {
+  background:
+    linear-gradient(90deg, #df425d, #f18c39, #edc94f, #45aa77, #468bc9, #9760c6) top / 100% 7px no-repeat,
+    linear-gradient(110deg, #5a2c3c, #58452e 22%, #2c4e40 46%, #2c435d 72%, #49365d);
+}
+html[data-season='pride'] .theme-doc-markdown {
+  background:
+    radial-gradient(ellipse at 93% 13%, color-mix(in srgb, #9760c6 11%, transparent), transparent 43%),
+    radial-gradient(ellipse at 8% 54%, color-mix(in srgb, #45aa77 8%, transparent), transparent 35%),
+    var(--site-surface);
+}
+html[data-season='pride'] .theme-doc-markdown > h2::before { background: var(--season-ribbon); }
+html[data-season='pride'] .theme-doc-sidebar-menu::before {
+  border-bottom: 4px solid transparent;
+  border-image: var(--season-ribbon) 1;
+}
+html[data-season='pride'] .theme-doc-sidebar-menu .menu__link--active:not(.menu__link--sublist) {
+  background: linear-gradient(90deg, color-mix(in srgb, #df425d 16%, var(--docs-sidebar-bg)), color-mix(in srgb, #9760c6 17%, var(--docs-sidebar-bg)));
+  box-shadow: inset 3px 0 #df425d;
+}
