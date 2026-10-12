@@ -1750,6 +1750,43 @@ async fn a_403_and_a_503_from_minecraft_services_do_not_share_a_message() {
 }
 
 #[tokio::test]
+async fn a_profile_without_a_player_name_is_refused_before_a_session_exists() {
+    for name_field in ["", r#","name":"""#, r#","name":"  ""#] {
+        let server = MockServer::start().await;
+        mount_token(&server, 200, TOKEN).await;
+        mount_xbox(&server, 200, XBOX).await;
+        mount_xsts(&server, 200, XSTS).await;
+        mount_minecraft_login(&server, 200, MC_LOGIN).await;
+        mount_entitlements(&server, 200, ENTITLEMENTS).await;
+        mount_profile(
+            &server,
+            200,
+            &format!(r#"{{"id":"069a79f444e94726a5befca90e38aaf5"{name_field}}}"#),
+        )
+        .await;
+
+        let store = Arc::new(MemoryStore::new());
+        let error = drive_browser_login(&provider(&server, store.clone()), |redirect, state| {
+            format!("{redirect}/?code=THE-AUTH-CODE&state={state}")
+        })
+        .await
+        .expect_err("a nameless profile cannot launch");
+
+        assert!(
+            matches!(error, AuthError::ProfileMalformed),
+            "{name_field:?}: {error:?}"
+        );
+        assert!(
+            store
+                .load(&CredentialKey::MicrosoftRefreshToken(account()))
+                .expect("load")
+                .is_none(),
+            "{name_field:?}: nothing is stored for a refused profile"
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_403_reaches_the_same_conclusion_from_the_profile_endpoint() {
     // If approval ever lands part-way - or a future endpoint is gated
     // separately - the profile call must reach the same conclusion rather than

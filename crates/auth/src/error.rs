@@ -194,8 +194,8 @@ pub enum AuthError {
     #[error("the minecraft profile could not be read (http {status})")]
     ProfileUnavailable { status: u16 },
 
-    /// The profile arrived but its id is not a UUID.
-    #[error("the minecraft profile carried an unusable account id")]
+    /// The profile arrived but its id is not a UUID or it has no player name.
+    #[error("the minecraft profile carried an unusable account id or no player name")]
     ProfileMalformed,
 
     /// Secure credential storage is not available on this machine.

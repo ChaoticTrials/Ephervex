@@ -289,11 +289,7 @@ impl MinecraftServicesClient {
         let body: ProfileBody = response.parse(AuthStage::Profile)?;
         // The service publishes the UUID unhyphenated; `parse_str` accepts both
         // spellings and the launch arguments need the hyphenated one.
-        let id = Uuid::parse_str(&body.id).map_err(|_| AuthError::ProfileMalformed)?;
-        Ok(Some(MinecraftProfile {
-            id,
-            name: body.name,
-        }))
+        body.into_profile().map(Some)
     }
 }
 
@@ -333,6 +329,22 @@ struct ProfileBody {
     id: String,
     #[serde(default)]
     name: String,
+}
+
+impl ProfileBody {
+    /// The launch arguments need both the id and the player name, so a profile
+    /// missing either is refused rather than becoming a session that cannot
+    /// identify the player.
+    fn into_profile(self) -> Result<MinecraftProfile, AuthError> {
+        let id = Uuid::parse_str(&self.id).map_err(|_| AuthError::ProfileMalformed)?;
+        if self.name.trim().is_empty() {
+            return Err(AuthError::ProfileMalformed);
+        }
+        Ok(MinecraftProfile {
+            id,
+            name: self.name,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -391,6 +403,21 @@ mod tests {
         let id = Uuid::parse_str(&body.id).expect("uuid");
         assert_eq!(id.to_string(), "069a79f4-44e9-4726-a5be-fca90e38aaf5");
         assert_eq!(body.name, "Notch");
+    }
+
+    #[test]
+    fn a_profile_without_a_player_name_is_refused() {
+        for body in [
+            r#"{"id":"069a79f444e94726a5befca90e38aaf5"}"#,
+            r#"{"id":"069a79f444e94726a5befca90e38aaf5","name":""}"#,
+            r#"{"id":"069a79f444e94726a5befca90e38aaf5","name":"  "}"#,
+        ] {
+            let parsed: ProfileBody = serde_json::from_str(body).expect("parses");
+            assert!(
+                matches!(parsed.into_profile(), Err(AuthError::ProfileMalformed)),
+                "{body}"
+            );
+        }
     }
 
     #[test]
