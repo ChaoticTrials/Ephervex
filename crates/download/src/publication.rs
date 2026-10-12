@@ -55,37 +55,70 @@ pub(crate) enum Discard {
     Replaced,
 }
 
-/// Holds the directory's exclusive lock until dropped.
-struct DirectoryLock {
+/// Holds an exclusive advisory lock until dropped.
+pub(crate) struct AdvisoryLock {
     _file: Option<std::fs::File>,
 }
 
-/// Blocks until the lock is held.
+/// Blocks until `file` is locked exclusively.
 ///
-/// A filesystem that cannot lock a directory leaves the caller with the
-/// identity check alone, which narrows the window without closing it.
+/// A filesystem that cannot lock leaves the caller with whatever check it makes
+/// under the lock, which narrows the window without closing it.
 #[cfg(unix)]
-fn lock_directory(directory: &Path) -> DirectoryLock {
+fn lock_open_file(file: std::fs::File, path: &Path) -> AdvisoryLock {
     use rustix::fs::{FlockOperation, flock};
 
-    let Ok(file) = std::fs::File::open(directory) else {
-        return DirectoryLock { _file: None };
-    };
     loop {
         match flock(&file, FlockOperation::LockExclusive) {
-            Ok(()) => return DirectoryLock { _file: Some(file) },
+            Ok(()) => return AdvisoryLock { _file: Some(file) },
             Err(rustix::io::Errno::INTR) => {}
             Err(errno) => {
-                debug!(path = %directory.display(), %errno, "directory lock unavailable");
-                return DirectoryLock { _file: None };
+                debug!(path = %path.display(), %errno, "advisory lock unavailable");
+                return AdvisoryLock { _file: None };
             }
         }
     }
 }
 
 #[cfg(not(unix))]
-fn lock_directory(_directory: &Path) -> DirectoryLock {
-    DirectoryLock { _file: None }
+fn lock_open_file(_file: std::fs::File, _path: &Path) -> AdvisoryLock {
+    AdvisoryLock { _file: None }
+}
+
+fn lock_directory(directory: &Path) -> AdvisoryLock {
+    match std::fs::File::open(directory) {
+        Ok(file) => lock_open_file(file, directory),
+        Err(_) => AdvisoryLock { _file: None },
+    }
+}
+
+/// Locks `lock_file`, creating it if needed, on a blocking thread.
+///
+/// For a read-decide-write sequence over one cache entry that spans several
+/// filesystem calls, which the directory lock around a single rename cannot
+/// order. The lock is a separate file so the rename in that sequence can still
+/// take the directory lock without deadlocking on itself. It also orders
+/// holders within one process, because `flock` belongs to the open file
+/// description.
+pub(crate) async fn lock_entry(lock_file: &Path) -> AdvisoryLock {
+    let lock_file = lock_file.to_path_buf();
+    let locked = tokio::task::spawn_blocking(move || {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_file)
+            .inspect_err(|error| {
+                debug!(path = %lock_file.display(), %error, "entry lock file unavailable");
+            })
+            .ok()?;
+        Some(lock_open_file(file, &lock_file))
+    })
+    .await;
+    locked
+        .ok()
+        .flatten()
+        .unwrap_or(AdvisoryLock { _file: None })
 }
 
 fn parent_of(path: &Path) -> &Path {

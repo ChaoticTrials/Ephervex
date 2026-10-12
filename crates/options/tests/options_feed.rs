@@ -521,3 +521,82 @@ async fn feeds_sharing_a_cache_each_adopt_only_the_response_of_their_own_source(
         "staging outlived its refresh: {staging_leftovers:?}"
     );
 }
+
+/// Another process publishes between this refresh's download and its
+/// publication: the refresh must compare against that publication and refuse
+/// to replace it.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_refresh_never_replaces_a_newer_revision_published_by_another_process_meanwhile() {
+    use ephervex_download::{MetadataCache, MetadataKey};
+    use rustix::fs::{FlockOperation, flock};
+
+    let server = MockServer::start().await;
+    let downloaded = OptionsDataset::bundled().revision + 1;
+    let published_elsewhere = downloaded + 1;
+    mount(
+        &server,
+        GIST_PATH,
+        gist_with_content(&published_revision(downloaded)),
+    )
+    .await;
+    let cache = tempfile::tempdir().expect("temp dir");
+    let refreshing = feed(&server, &cache);
+
+    // The entry's lock is held the way another process holds it while it
+    // publishes.
+    let metadata = cache.path().join("metadata");
+    std::fs::create_dir_all(&metadata).expect("metadata dir");
+    let other_process = std::fs::File::create(
+        metadata.join(format!("{}.lock", ephervex_options::OPTIONS_FEED_CACHE_KEY)),
+    )
+    .expect("lock file");
+    flock(&other_process, FlockOperation::LockExclusive).expect("lock");
+
+    let refresh = tokio::spawn(async move {
+        refreshing
+            .refresh(&reporter(), &CancellationToken::new())
+            .await
+    });
+    while server
+        .received_requests()
+        .await
+        .expect("requests")
+        .is_empty()
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        !refresh.is_finished(),
+        "published without taking the cache entry's lock"
+    );
+
+    let key = MetadataKey::new(ephervex_options::OPTIONS_FEED_CACHE_KEY).expect("key");
+    let url = reqwest::Url::parse(&server.uri()).expect("url");
+    MetadataCache::new(CacheLayout::new(cache.path()))
+        .store(
+            &key,
+            &url,
+            serde_json::value::RawValue::from_string(published_revision(published_elsewhere))
+                .expect("json"),
+        )
+        .await
+        .expect("stores");
+    drop(other_process);
+
+    let error = refresh
+        .await
+        .expect("task")
+        .expect_err("the newer revision must survive");
+    assert!(
+        matches!(
+            error,
+            FeedError::Rollback { incoming, cached }
+                if incoming == downloaded && cached == published_elsewhere
+        ),
+        "unexpected failure: {error}"
+    );
+    let cached = feed(&server, &cache).cached().await.expect("cached");
+    assert_eq!(cached.revision, published_elsewhere);
+}

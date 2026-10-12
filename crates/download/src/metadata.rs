@@ -414,6 +414,24 @@ impl MetadataCacheError {
     }
 }
 
+/// What [`MetadataCache::store_if`] does with the document it was handed.
+#[derive(Debug)]
+pub enum Admission<T> {
+    /// Replace the cached entry.
+    Store,
+    /// Leave the cached entry alone and report `T` to the caller.
+    Keep(T),
+}
+
+/// What [`MetadataCache::store_if`] did.
+#[derive(Debug)]
+pub enum ConditionalStore<T> {
+    /// The document was written.
+    Stored(CachedMetadata),
+    /// The cached entry was left alone; the value the check produced.
+    Kept(T),
+}
+
 /// Stores provider documents with the time they were fetched.
 #[derive(Debug, Clone)]
 pub struct MetadataCache {
@@ -722,6 +740,17 @@ impl MetadataCache {
         source: &Url,
         payload: Box<RawValue>,
     ) -> Result<CachedMetadata, MetadataCacheError> {
+        Ok(self.publish(key, source, payload).await)
+    }
+
+    /// Stamps and writes a document, returning it even when it could not be
+    /// written.
+    async fn publish(
+        &self,
+        key: &MetadataKey,
+        source: &Url,
+        payload: Box<RawValue>,
+    ) -> CachedMetadata {
         let entry = CachedMetadata {
             payload,
             fetched_at: Utc::now(),
@@ -736,7 +765,41 @@ impl MetadataCache {
         if let Err(error) = self.write_envelope(key, &entry).await {
             warn!(%key, %error, "provider metadata was fetched but could not be cached");
         }
-        Ok(entry)
+        entry
+    }
+
+    /// Writes a document only if `admit` accepts what is cached at the moment
+    /// of publication.
+    ///
+    /// The read of the cached entry, the decision, and the write happen under
+    /// one exclusive lock on a sibling file of the entry, so every writer that
+    /// uses this method, in this process or another, decides against the entry
+    /// the previous writer left. Deciding before calling [`Self::store`]
+    /// cannot give that: another process may publish in between.
+    ///
+    /// `admit` runs while the lock is held and must not block for long. Its
+    /// error is returned without writing.
+    pub async fn store_if<T, E>(
+        &self,
+        key: &MetadataKey,
+        source: &Url,
+        payload: Box<RawValue>,
+        admit: impl FnOnce(Option<&CachedMetadata>) -> Result<Admission<T>, E>,
+    ) -> Result<ConditionalStore<T>, E> {
+        let lock_path = self.entry_path(key, "lock");
+        if let Some(directory) = lock_path.parent() {
+            // The write below reports a directory that cannot be created; here
+            // the lock is merely skipped.
+            let _ = fs::create_dir_all(directory).await;
+        }
+        let _lock = crate::publication::lock_entry(&lock_path).await;
+
+        match admit(self.peek(key).await.as_ref())? {
+            Admission::Keep(kept) => Ok(ConditionalStore::Kept(kept)),
+            Admission::Store => Ok(ConditionalStore::Stored(
+                self.publish(key, source, payload).await,
+            )),
+        }
     }
 
     /// Drops one document from the cache.
@@ -873,6 +936,81 @@ mod tests {
 
     fn url() -> Url {
         Url::parse("https://provider.invalid/index.json").expect("valid url")
+    }
+
+    fn cache_in(dir: &tempfile::TempDir) -> MetadataCache {
+        MetadataCache::new(CacheLayout::new(dir.path()))
+    }
+
+    #[tokio::test]
+    async fn a_conditional_store_writes_only_when_the_check_admits_the_cached_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache_in(&dir);
+        let key = MetadataKey::new("revisioned").unwrap();
+
+        let first = cache
+            .store_if(&key, &url(), raw("1"), |cached| {
+                assert!(cached.is_none());
+                Ok::<_, ()>(Admission::<()>::Store)
+            })
+            .await
+            .unwrap();
+        assert!(matches!(first, ConditionalStore::Stored(_)));
+
+        let second = cache
+            .store_if(&key, &url(), raw("2"), |cached| {
+                assert_eq!(cached.unwrap().json(), "1");
+                Ok::<_, ()>(Admission::Keep("kept"))
+            })
+            .await
+            .unwrap();
+        assert!(matches!(second, ConditionalStore::Kept("kept")));
+        assert_eq!(cache.peek(&key).await.unwrap().json(), "1");
+
+        let refused = cache
+            .store_if(&key, &url(), raw("3"), |_| {
+                Err::<Admission<()>, _>("refused")
+            })
+            .await;
+        assert_eq!(refused.unwrap_err(), "refused");
+        assert_eq!(cache.peek(&key).await.unwrap().json(), "1");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_conditional_store_decides_against_what_another_writer_published_while_it_waited() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache_in(&dir);
+        let key = MetadataKey::new("revisioned").unwrap();
+        cache.store(&key, &url(), raw("1")).await.unwrap();
+
+        // Another process holds the entry's lock, as it would while publishing.
+        let lock_path = cache.entry_path(&key, "lock");
+        let holder = crate::publication::lock_entry(&lock_path).await;
+        let waiting = tokio::spawn({
+            let (cache, key) = (cache.clone(), key.clone());
+            async move {
+                cache
+                    .store_if(&key, &url(), raw("2"), |cached| {
+                        let seen = cached.unwrap().json().to_owned();
+                        Ok::<_, ()>(if seen == "1" {
+                            Admission::Store
+                        } else {
+                            Admission::Keep(seen)
+                        })
+                    })
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(!waiting.is_finished(), "decided without taking the lock");
+
+        cache.store(&key, &url(), raw("3")).await.unwrap();
+        drop(holder);
+
+        let outcome = waiting.await.unwrap().unwrap();
+        assert!(matches!(&outcome, ConditionalStore::Kept(seen) if seen == "3"));
+        assert_eq!(cache.peek(&key).await.unwrap().json(), "3");
     }
 
     #[test]

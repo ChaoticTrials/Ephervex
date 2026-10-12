@@ -31,8 +31,8 @@
 //! No credentials are involved: this is a public read-only document.
 
 use ephervex_download::{
-    CacheLayout, DomainAllowlist, DownloadManager, MetadataCache, MetadataCacheError, MetadataKey,
-    OperationReporter, UrlPolicyError, redacted,
+    Admission, CacheLayout, CachedMetadata, ConditionalStore, DomainAllowlist, DownloadManager,
+    MetadataCache, MetadataCacheError, MetadataKey, OperationReporter, UrlPolicyError, redacted,
 };
 use reqwest::Url;
 use serde::Deserialize;
@@ -207,6 +207,34 @@ struct GistFile {
     raw_url: Option<String>,
 }
 
+/// Decides whether `incoming` may replace the cached document.
+///
+/// A cached entry that no longer parses counts as no entry, as in
+/// [`OptionsFeed::cached`].
+fn admit_revision(
+    incoming: &OptionsDataset,
+    cached: Option<&CachedMetadata>,
+) -> Result<Admission<OptionsDataset>, FeedError> {
+    let Some(cached) = cached.and_then(|entry| OptionsDataset::parse(entry.json()).ok()) else {
+        return Ok(Admission::Store);
+    };
+    if incoming.revision < cached.revision {
+        return Err(FeedError::Rollback {
+            incoming: incoming.revision,
+            cached: cached.revision,
+        });
+    }
+    if incoming.revision == cached.revision {
+        if *incoming == cached {
+            return Ok(Admission::Keep(cached));
+        }
+        return Err(FeedError::RevisionCollision {
+            revision: incoming.revision,
+        });
+    }
+    Ok(Admission::Store)
+}
+
 /// Reads the published compatibility dataset.
 #[derive(Debug, Clone)]
 pub struct OptionsFeed {
@@ -318,9 +346,10 @@ impl OptionsFeed {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> Result<OptionsDataset, FeedError> {
-        // Revision comparison and publication are one critical section. Two
-        // concurrent refreshes must not let a slower older response overwrite
-        // a newer response that finished first.
+        // Serializes this process's refreshes of one feed so they do not
+        // download the same document repeatedly. It does not protect the
+        // cache: the revision check that does is made under the cache entry's
+        // cross-process lock, in `store_if` below.
         let _refresh = self.refresh_lock.lock().await;
         let entry = self.source.entry_url()?;
         self.allowlist.validate_url(&entry)?;
@@ -332,33 +361,23 @@ impl OptionsFeed {
         };
 
         let dataset = OptionsDataset::parse(&text)?;
-        if let Some(cached) = self.cached().await {
-            if dataset.revision < cached.revision {
-                return Err(FeedError::Rollback {
-                    incoming: dataset.revision,
-                    cached: cached.revision,
-                });
-            }
-            if dataset.revision == cached.revision {
-                if dataset == cached {
-                    return Ok(cached);
-                }
-                return Err(FeedError::RevisionCollision {
-                    revision: dataset.revision,
-                });
-            }
-        }
         // Cached only now, after the document has been read and validated in
         // full. Anything that failed above never reaches this line, which is
         // what keeps the last known-good copy safe from a bad publish.
         let payload = serde_json::value::RawValue::from_string(text)
             .map_err(|source| FeedError::Response { source })?;
-        self.cache
-            .store(&self.key, &entry, payload)
-            .await
-            .map_err(|source| FeedError::NotCached {
-                source: Box::new(source),
-            })?;
+        // The revision is compared with what is cached at publication, not
+        // with what was cached when the download began: another process
+        // sharing the cache may have published a newer revision meanwhile.
+        let stored = self
+            .cache
+            .store_if(&self.key, &entry, payload, |cached| {
+                admit_revision(&dataset, cached)
+            })
+            .await?;
+        if let ConditionalStore::Kept(cached) = stored {
+            return Ok(cached);
+        }
 
         tracing::info!(
             source = self.source.describe(),
