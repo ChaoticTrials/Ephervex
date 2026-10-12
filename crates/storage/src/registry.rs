@@ -47,6 +47,7 @@ use ephervex_model::{
 };
 use rusqlite::{Row, params};
 
+use crate::atomic::AtomicPublication;
 use crate::index::{Index, IndexError};
 use crate::lock::{FileGuard, GuardError, clear_launch_locks_of_idle_instance, discard_guard};
 use crate::metadata::{self, MetadataError};
@@ -884,8 +885,18 @@ impl Registry {
     ) -> Result<ServerCommit<ServerRecord>, RegistryError> {
         record.updated_at = Utc::now();
 
+        // A directory sync failure after the rename leaves the new metadata
+        // visible, so the mutation is committed and the index must follow it.
+        let mut warnings = Vec::new();
         if record.root.is_dir() {
-            metadata::write_server_metadata(&record.root, record)?;
+            if let AtomicPublication::Unsynced(error) =
+                metadata::publish_server_metadata(&record.root, record)?
+            {
+                tracing::warn!(server_id = %record.id, %error, "server metadata was published but its directory was not synced");
+                warnings.push(ServerCommitWarning::MetadataNotDurable {
+                    detail: error.to_string(),
+                });
+            }
         }
 
         let indexed = self.index.connection().execute(
@@ -919,15 +930,15 @@ impl Registry {
             ],
         );
 
-        let warnings = match indexed {
-            Ok(0) => vec![ServerCommitWarning::IndexOutOfSync {
+        match indexed {
+            Ok(0) => warnings.push(ServerCommitWarning::IndexOutOfSync {
                 detail: RegistryError::ServerUnknown { id: record.id }.to_string(),
-            }],
-            Ok(_) => Vec::new(),
-            Err(error) => vec![ServerCommitWarning::IndexOutOfSync {
+            }),
+            Ok(_) => {}
+            Err(error) => warnings.push(ServerCommitWarning::IndexOutOfSync {
                 detail: error.to_string(),
-            }],
-        };
+            }),
+        }
         Ok(ServerCommit {
             record: record.clone(),
             warnings,
@@ -2947,5 +2958,49 @@ mod tests {
         assert!(matches!(error, RegistryError::RootOccupied { .. }));
         assert!(destination.join(".launcher/instance.json").is_file());
         assert!(client.root.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_metadata_directory_sync_failure_still_updates_the_index_and_warns() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = registry
+            .create_server(NewServer::new(
+                "before",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        let directory = metadata::server_metadata_path(&server.root)
+            .parent()
+            .expect("metadata directory")
+            .to_path_buf();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o300))
+            .expect("restrict metadata directory");
+        let unsyncable = std::fs::File::open(&directory).is_err();
+        let mut record = server.clone();
+        record.name = "after".to_owned();
+        let result = unsyncable.then(|| registry.update_server_committed(&mut record));
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .expect("restore metadata directory");
+        let Some(result) = result else {
+            return;
+        };
+
+        let commit = result.expect("the published metadata is a committed mutation");
+        assert!(matches!(
+            commit.warnings.as_slice(),
+            [ServerCommitWarning::MetadataNotDurable { .. }]
+        ));
+        assert_eq!(
+            metadata::read_server_metadata(&server.root)
+                .expect("metadata")
+                .name,
+            "after"
+        );
+        assert_eq!(registry.server(server.id).expect("row").name, "after");
     }
 }

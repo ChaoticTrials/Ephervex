@@ -3121,6 +3121,61 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn a_metadata_directory_sync_failure_keeps_server_properties_and_the_index_in_step() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let server = app
+            .registry_for_services()
+            .create_server(NewServer::new(
+                "unsynced network commit",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("scaffold");
+        let metadata_directory = ephervex_storage::metadata::server_metadata_path(&server.root)
+            .parent()
+            .expect("metadata directory")
+            .to_path_buf();
+        std::fs::set_permissions(&metadata_directory, std::fs::Permissions::from_mode(0o300))
+            .expect("restrict metadata directory");
+        let unsyncable = std::fs::File::open(&metadata_directory).is_err();
+        let result = unsyncable.then(|| {
+            app.update_server_network(
+                server.id,
+                &ServerNetworkChange {
+                    port: Some(25_571),
+                    ..ServerNetworkChange::default()
+                },
+            )
+        });
+        std::fs::set_permissions(&metadata_directory, std::fs::Permissions::from_mode(0o700))
+            .expect("restore metadata directory");
+        let Some(result) = result else {
+            return;
+        };
+
+        let committed = result.expect("published metadata is a committed save");
+        assert!(matches!(
+            committed.warnings.as_slice(),
+            [ephervex_storage::ServerCommitWarning::MetadataNotDurable { .. }]
+        ));
+        assert_eq!(
+            ephervex_storage::metadata::read_server_metadata(&server.root)
+                .expect("canonical metadata")
+                .network
+                .port,
+            25_571
+        );
+        assert_eq!(app.server(server.id).expect("index").network.port, 25_571);
+        let properties =
+            std::fs::read_to_string(server_properties_path(&server)).expect("properties file");
+        assert!(properties.contains("server-port=25571"), "{properties}");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn a_failed_commit_removes_a_server_properties_file_the_save_created() {
         let directory = tempfile::tempdir().expect("temp dir");
         let app = test_app(directory.path());

@@ -27,6 +27,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::atomic::AtomicPublication;
 use crate::paths::{LAUNCHER_METADATA_DIR, PathError, create_dir_all};
 use crate::records::{ClientRecord, ServerRecord};
 
@@ -340,13 +341,30 @@ pub fn write_client_metadata(root: &Path, record: &ClientRecord) -> Result<(), M
     write_json(&warnings_path(root), &record.attention)
 }
 
-/// Writes `.launcher/server.json` and `.launcher/warnings.json`.
+/// Writes `.launcher/server.json`.
+///
+/// A directory sync failure after the file was published is an error here;
+/// [`publish_server_metadata`] reports it separately.
 pub fn write_server_metadata(root: &Path, record: &ServerRecord) -> Result<(), MetadataError> {
+    let path = server_metadata_path(root);
+    publish_server_metadata(root, record)?
+        .require_durable()
+        .map_err(|source| MetadataError::Unwritable { path, source })
+}
+
+/// Writes `.launcher/server.json`, reporting a directory sync failure after
+/// the file was published as [`AtomicPublication::Unsynced`].
+///
+/// `Err` means the previous `server.json` is still in place.
+pub(crate) fn publish_server_metadata(
+    root: &Path,
+    record: &ServerRecord,
+) -> Result<AtomicPublication, MetadataError> {
     prepare_metadata_dir(root)?;
     // `server.json` is the entity commit point. Attention is already part of
     // the record, so a redundant warnings file must not turn a committed
     // mutation into an apparent failure.
-    write_json(&server_metadata_path(root), &MetadataFile::new(record))
+    publish_json(&server_metadata_path(root), &MetadataFile::new(record))
 }
 
 /// Reads `.launcher/instance.json`.
@@ -404,6 +422,15 @@ fn prepare_metadata_dir(root: &Path) -> Result<(), MetadataError> {
 }
 
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), MetadataError> {
+    publish_json(path, value)?
+        .require_durable()
+        .map_err(|source| MetadataError::Unwritable {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+fn publish_json<T: Serialize>(path: &Path, value: &T) -> Result<AtomicPublication, MetadataError> {
     // Compact: `.launcher` metadata is read by the launcher, not by a person,
     // and indentation only costs storage and I/O.
     let body = serde_json::to_vec(value).map_err(|error| MetadataError::Unwritable {
@@ -411,7 +438,7 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), MetadataError>
         source: std::io::Error::other(error),
     })?;
 
-    crate::atomic::write_bytes_atomic(path, &body, crate::atomic::AtomicWriteOptions::default())
+    crate::atomic::publish_bytes_atomic(path, &body, crate::atomic::AtomicWriteOptions::default())
         .map_err(|source| MetadataError::Unwritable {
             path: path.to_path_buf(),
             source,

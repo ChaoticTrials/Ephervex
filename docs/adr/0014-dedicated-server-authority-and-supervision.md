@@ -24,8 +24,10 @@ validated path relative to the server game directory.
 
 SQLite is a query index and last-known recovery copy. Metadata publication is
 the commit point. SQLite is updated afterward; an index failure is reported as
-`index_out_of_sync` on an otherwise committed result. Reconciliation applies
-these rules:
+`index_out_of_sync` on an otherwise committed result. A directory sync failure
+after the metadata rename leaves the new file published, so it is reported as
+`metadata_not_durable` on a committed result and the index is still updated.
+Reconciliation applies these rules:
 
 - valid metadata replaces a disagreeing index row;
 - a discovered directory location corrects a stale serialized root;

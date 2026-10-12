@@ -478,6 +478,9 @@ pub enum ServerCommitWarning {
     /// Metadata or root publication succeeded, but the query index needs
     /// reconciliation from the canonical record.
     IndexOutOfSync { detail: String },
+    /// The canonical metadata file was published and is visible, but syncing
+    /// its directory failed, so the mutation may not survive a power loss.
+    MetadataNotDurable { detail: String },
 }
 
 #[cfg(test)]

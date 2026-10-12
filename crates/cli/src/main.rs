@@ -8288,6 +8288,12 @@ fn print_server_commit(record: &ServerRecord, warnings: &[ServerCommitWarning], 
                                 "kind": "index_out_of_sync",
                                 "detail": detail,
                             }),
+                            ServerCommitWarning::MetadataNotDurable { detail } => {
+                                serde_json::json!({
+                                    "kind": "metadata_not_durable",
+                                    "detail": detail,
+                                })
+                            }
                         })
                         .collect(),
                 ),
@@ -8301,6 +8307,11 @@ fn print_server_commit(record: &ServerRecord, warnings: &[ServerCommitWarning], 
         match warning {
             ServerCommitWarning::IndexOutOfSync { detail } => {
                 eprintln!("server committed, but its query index is out of sync: {detail}");
+            }
+            ServerCommitWarning::MetadataNotDurable { detail } => {
+                eprintln!(
+                    "server committed, but its metadata directory could not be synced to disk: {detail}"
+                );
             }
         }
     }
