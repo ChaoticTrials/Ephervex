@@ -743,9 +743,14 @@ impl OwnershipGuard {
 /// the holder dies. Taken on a file opened for writing, because NFS refuses an
 /// exclusive lock on a read-only descriptor. NFS also gives a process one lock
 /// per file shared by all its threads, so threads are kept apart in-process too.
+///
+/// A guard file may be unlinked while it is held (see
+/// [`FileGuard::discard_when_released`]), so a lock only counts once the locked
+/// file is still the one at the path; otherwise a waiter on the unlinked file
+/// and a newcomer on its replacement would both believe they hold the guard.
 pub(crate) struct FileGuard {
     // Declared first so the flock is released before the in-process claim.
-    _file: Option<std::fs::File>,
+    file: Option<std::fs::File>,
     claim: InProcessClaim,
 }
 
@@ -762,9 +767,35 @@ pub(crate) enum GuardError {
 /// This process's claim on one guard file.
 struct InProcessClaim(PathBuf);
 
+/// A guard file a thread of this process currently holds.
+struct HeldGuard {
+    path: PathBuf,
+    /// Whether the holder unlinks the file as it releases it.
+    discard: bool,
+}
+
 /// The guard files a thread of this process currently holds.
-static HELD_IN_PROCESS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+static HELD_IN_PROCESS: std::sync::Mutex<Vec<HeldGuard>> = std::sync::Mutex::new(Vec::new());
 static RELEASED_IN_PROCESS: std::sync::Condvar = std::sync::Condvar::new();
+
+fn held_in_process() -> std::sync::MutexGuard<'static, Vec<HeldGuard>> {
+    HELD_IN_PROCESS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Whether an open guard file is still the file at `path`.
+fn is_file_at_path(file: &std::fs::File, path: &Path) -> std::io::Result<bool> {
+    use rustix::fs::{fstat, stat};
+    use rustix::io::Errno;
+
+    let held = fstat(file)?;
+    match stat(path) {
+        Ok(current) => Ok(held.st_dev == current.st_dev && held.st_ino == current.st_ino),
+        Err(Errno::NOENT) => Ok(false),
+        Err(errno) => Err(errno.into()),
+    }
+}
 
 impl FileGuard {
     /// The guard file.
@@ -772,12 +803,49 @@ impl FileGuard {
         &self.claim.0
     }
 
-    /// Takes the guard file `name` in `directory`, waiting at most `patience`.
+    /// Takes the guard file `name` in `directory`, creating it when it is
+    /// missing and waiting at most `patience`.
     pub(crate) fn take(
         directory: &Path,
         name: &str,
         patience: std::time::Duration,
     ) -> Result<Self, GuardError> {
+        Self::acquire(directory, name, patience, true)?.ok_or_else(|| GuardError::Unusable {
+            path: directory.join(name),
+            source: std::io::ErrorKind::NotFound.into(),
+        })
+    }
+
+    /// Takes the guard file `name` in `directory` only if it exists, so that
+    /// looking at a guard never leaves one behind. `None` when it is missing.
+    fn take_existing(
+        directory: &Path,
+        name: &str,
+        patience: std::time::Duration,
+    ) -> Result<Option<Self>, GuardError> {
+        Self::acquire(directory, name, patience, false)
+    }
+
+    /// Unlinks the guard file when this guard is released, still under the lock.
+    ///
+    /// For a host whose record is already gone. A waiter that opened the file
+    /// before it was unlinked finds the path no longer names it once the lock
+    /// is released and starts over on a new file.
+    pub(crate) fn discard_when_released(&self) {
+        if let Some(held) = held_in_process()
+            .iter_mut()
+            .find(|held| held.path == self.claim.0)
+        {
+            held.discard = true;
+        }
+    }
+
+    fn acquire(
+        directory: &Path,
+        name: &str,
+        patience: std::time::Duration,
+        create: bool,
+    ) -> Result<Option<Self>, GuardError> {
         use rustix::fs::{FlockOperation, Mode, OFlags, flock};
         use rustix::io::Errno;
 
@@ -795,10 +863,8 @@ impl FileGuard {
             source,
         };
 
-        let mut held = HELD_IN_PROCESS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        while held.contains(&path) {
+        let mut held = held_in_process();
+        while held.iter().any(|held| held.path == path) {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
                 return Err(busy());
@@ -808,49 +874,111 @@ impl FileGuard {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .0;
         }
-        held.push(path.clone());
+        held.push(HeldGuard {
+            path: path.clone(),
+            discard: false,
+        });
         drop(held);
         let claim = InProcessClaim(path.clone());
 
-        let file = rustix::fs::open(
-            &path,
-            OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::RUSR | Mode::WUSR,
-        )
-        .map(std::fs::File::from)
-        .map_err(|errno| unusable(errno.into()))?;
-        loop {
-            match flock(&file, FlockOperation::NonBlockingLockExclusive) {
-                Ok(()) => break,
-                Err(Errno::INTR) => {}
-                Err(Errno::WOULDBLOCK) if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                Err(Errno::WOULDBLOCK) => return Err(busy()),
-                // A filesystem with no locking at all keeps the in-process
-                // exclusion, which is as much as the lock files alone gave.
-                Err(errno @ (Errno::NOLCK | Errno::OPNOTSUPP | Errno::NOSYS)) => {
-                    warn!(path = %path.display(), %errno, "this guard is not shared across processes here");
-                    return Ok(Self { _file: None, claim });
-                }
-                Err(errno) => return Err(unusable(errno.into())),
-            }
+        let mut flags = OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        if create {
+            flags |= OFlags::CREATE;
         }
-        Ok(Self {
-            _file: Some(file),
-            claim,
-        })
+        loop {
+            let file = match rustix::fs::open(&path, flags, Mode::RUSR | Mode::WUSR) {
+                Ok(file) => std::fs::File::from(file),
+                Err(Errno::NOENT) if !create => return Ok(None),
+                Err(errno) => return Err(unusable(errno.into())),
+            };
+            loop {
+                match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+                    Ok(()) => break,
+                    Err(Errno::INTR) => {}
+                    Err(Errno::WOULDBLOCK) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(Errno::WOULDBLOCK) => return Err(busy()),
+                    // A filesystem with no locking at all keeps the in-process
+                    // exclusion, which is as much as the lock files alone gave.
+                    Err(errno @ (Errno::NOLCK | Errno::OPNOTSUPP | Errno::NOSYS)) => {
+                        warn!(path = %path.display(), %errno, "this guard is not shared across processes here");
+                        return Ok(Some(Self { file: None, claim }));
+                    }
+                    Err(errno) => return Err(unusable(errno.into())),
+                }
+            }
+            if is_file_at_path(&file, &path).map_err(unusable)? {
+                return Ok(Some(Self {
+                    file: Some(file),
+                    claim,
+                }));
+            }
+            // The holder before us unlinked this file: what we locked is no
+            // longer the guard, so release it and take the one at the path.
+        }
+    }
+}
+
+impl Drop for FileGuard {
+    fn drop(&mut self) {
+        let path = &self.claim.0;
+        if !held_in_process()
+            .iter()
+            .any(|held| held.path == *path && held.discard)
+        {
+            return;
+        }
+        // Only the file this guard locked: a path someone recreated is theirs.
+        if let Some(file) = &self.file
+            && !is_file_at_path(file, path).unwrap_or(false)
+        {
+            return;
+        }
+        if let Err(error) = std::fs::remove_file(path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            debug!(path = %path.display(), %error, "could not remove a released guard file");
+        }
     }
 }
 
 impl Drop for InProcessClaim {
     fn drop(&mut self) {
-        let mut held = HELD_IN_PROCESS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        held.retain(|path| *path != self.0);
-        drop(held);
+        held_in_process().retain(|held| held.path != self.0);
         RELEASED_IN_PROCESS.notify_all();
+    }
+}
+
+/// Removes the guard file `name` in `directory` for a host that no longer
+/// exists.
+///
+/// Removed under the guard so no holder is displaced. A guard another thread or
+/// process holds is left: this process's holder removes it as it releases it,
+/// and another process's is removed by a later sweep.
+pub(crate) fn discard_guard(directory: &Path, name: &str) -> Result<(), GuardError> {
+    let canonical = match std::fs::canonicalize(directory) {
+        Ok(canonical) => canonical,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(GuardError::Unusable {
+                path: directory.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let path = canonical.join(name);
+    if let Some(held) = held_in_process().iter_mut().find(|held| held.path == path) {
+        held.discard = true;
+        return Ok(());
+    }
+    match FileGuard::take_existing(&canonical, name, std::time::Duration::ZERO) {
+        Ok(Some(guard)) => {
+            guard.discard_when_released();
+            Ok(())
+        }
+        Ok(None) | Err(GuardError::Busy { .. }) => Ok(()),
+        Err(error) => Err(error),
     }
 }
 
@@ -990,6 +1118,133 @@ mod tests {
         let root = tempfile::tempdir().expect("temp dir");
         create_dir_all(&metadata_dir(root.path())).expect("metadata dir");
         root
+    }
+
+    const GUARD: &str = "host.guard";
+    const NO_WAIT: std::time::Duration = std::time::Duration::ZERO;
+
+    fn names_in(directory: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(directory)
+            .expect("list")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_guard_marked_for_discard_is_unlinked_as_it_is_released() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let guard = FileGuard::take(directory.path(), GUARD, NO_WAIT).unwrap_or_else(|_| panic!());
+        guard.discard_when_released();
+        assert_eq!(names_in(directory.path()), [GUARD], "kept while held");
+
+        drop(guard);
+
+        assert!(names_in(directory.path()).is_empty());
+    }
+
+    #[test]
+    fn discarding_a_guard_that_is_held_in_this_process_defers_to_its_holder() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let guard = FileGuard::take(directory.path(), GUARD, NO_WAIT).unwrap_or_else(|_| panic!());
+
+        discard_guard(directory.path(), GUARD).unwrap_or_else(|_| panic!());
+        assert_eq!(names_in(directory.path()), [GUARD], "kept while held");
+        drop(guard);
+
+        assert!(names_in(directory.path()).is_empty());
+    }
+
+    #[test]
+    fn discarding_an_idle_guard_removes_it_and_never_creates_one() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        drop(FileGuard::take(directory.path(), GUARD, NO_WAIT).unwrap_or_else(|_| panic!()));
+        assert_eq!(names_in(directory.path()), [GUARD]);
+
+        discard_guard(directory.path(), GUARD).unwrap_or_else(|_| panic!());
+        assert!(names_in(directory.path()).is_empty());
+        discard_guard(directory.path(), GUARD).unwrap_or_else(|_| panic!());
+        assert!(names_in(directory.path()).is_empty(), "nothing was created");
+    }
+
+    #[test]
+    fn discarding_a_guard_in_a_missing_directory_is_a_no_op() {
+        let directory = tempfile::tempdir().expect("temp dir");
+
+        discard_guard(&directory.path().join("absent"), GUARD).unwrap_or_else(|_| panic!());
+    }
+
+    #[test]
+    fn a_guard_another_process_holds_is_not_discarded() {
+        use rustix::fs::{FlockOperation, flock};
+
+        let directory = tempfile::tempdir().expect("temp dir");
+        let other_process = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(directory.path().join(GUARD))
+            .expect("open");
+        flock(&other_process, FlockOperation::NonBlockingLockExclusive).expect("lock");
+
+        discard_guard(directory.path(), GUARD).unwrap_or_else(|_| panic!());
+
+        assert_eq!(names_in(directory.path()), [GUARD]);
+    }
+
+    #[test]
+    fn a_discarded_guard_leaves_a_file_someone_recreated_at_its_path() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let guard = FileGuard::take(directory.path(), GUARD, NO_WAIT).unwrap_or_else(|_| panic!());
+        guard.discard_when_released();
+        let path = guard.path().to_path_buf();
+        std::fs::remove_file(&path).expect("unlink");
+        std::fs::write(&path, b"replacement").expect("recreate");
+
+        drop(guard);
+
+        assert_eq!(std::fs::read(&path).expect("kept"), b"replacement");
+    }
+
+    #[test]
+    fn a_waiter_on_an_unlinked_guard_takes_the_file_that_replaces_it() {
+        use rustix::fs::{FlockOperation, flock};
+
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join(GUARD);
+        // Another process holds the guard, as seen by its descriptor alone.
+        let old_holder = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .expect("open");
+        flock(&old_holder, FlockOperation::NonBlockingLockExclusive).expect("lock");
+        let waiter = {
+            let directory = directory.path().to_path_buf();
+            std::thread::spawn(move || {
+                FileGuard::take(&directory, GUARD, std::time::Duration::from_secs(30))
+                    .unwrap_or_else(|_| panic!("the waiter takes the guard"))
+            })
+        };
+        // The waiter has opened the old file and is waiting for its lock.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        std::fs::remove_file(&path).expect("the holder discards the guard");
+        drop(old_holder);
+        let waiter = waiter.join().expect("the waiter finishes");
+
+        // The waiter holds the file now at the path, not the unlinked one, so
+        // a newcomer is refused rather than sharing the guard with it.
+        assert!(path.is_file());
+        assert!(matches!(
+            FileGuard::take(directory.path(), GUARD, NO_WAIT),
+            Err(GuardError::Busy { .. })
+        ));
+        drop(waiter);
+        assert!(FileGuard::take(directory.path(), GUARD, NO_WAIT).is_ok());
     }
 
     fn plant(path: &Path, state: &LaunchState) {

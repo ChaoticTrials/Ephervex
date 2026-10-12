@@ -48,7 +48,7 @@ use ephervex_model::{
 use rusqlite::{Row, params};
 
 use crate::index::{Index, IndexError};
-use crate::lock::{FileGuard, GuardError, clear_launch_locks_of_idle_instance};
+use crate::lock::{FileGuard, GuardError, clear_launch_locks_of_idle_instance, discard_guard};
 use crate::metadata::{self, MetadataError};
 use crate::paths::{PathError, Paths, create_dir_all};
 use crate::reconcile::RecordRef;
@@ -690,6 +690,8 @@ impl Registry {
             params![id.to_string()],
         )?;
 
+        self.discard_host_guards(RecordRef::Client(id));
+
         tracing::info!(instance_id = %id, ?files, "removed client instance from the index");
         Ok(())
     }
@@ -943,6 +945,8 @@ impl Registry {
         self.index
             .connection()
             .execute("DELETE FROM servers WHERE id = ?1", params![id.to_string()])?;
+
+        self.discard_host_guards(RecordRef::Server(id));
 
         tracing::info!(server_id = %id, ?files, "removed server from the index");
         Ok(())
@@ -1534,6 +1538,86 @@ impl Registry {
     }
 }
 
+impl Registry {
+    /// Removes a deleted host's claim files, so the directory they live in
+    /// does not grow with every host that ever existed.
+    ///
+    /// A claim a change still holds is removed as the change releases it. The
+    /// host is already gone, so a failure here costs a stray file and no more.
+    fn discard_host_guards(&self, host: RecordRef) {
+        let directory = self.paths.move_guards_dir();
+        for name in [host_guard_name(host), recipe_guard_name(host)] {
+            if let Err(error) = discard_guard(&directory, &name) {
+                log_guard_failure(&error, "could not remove a deleted host's claim file");
+            }
+        }
+    }
+
+    /// Removes the claim files of hosts the index does not list, left by
+    /// deletions that could not remove them and by hosts that never got a
+    /// record.
+    ///
+    /// A claim another process holds is left for a later sweep, which keeps a
+    /// host being created or adopted from losing the claim it already has.
+    pub(crate) fn prune_unknown_host_guards(&self) {
+        let directory = self.paths.move_guards_dir();
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => {
+                tracing::warn!(
+                    path = %directory.display(),
+                    %error,
+                    "could not list the host claim files"
+                );
+                return;
+            }
+        };
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let Some(name) = file_name.to_str() else {
+                continue;
+            };
+            let Some(host) = host_of_guard_name(name) else {
+                continue;
+            };
+            match self.is_indexed(host) {
+                Ok(true) => {}
+                Ok(false) => {
+                    if let Err(error) = discard_guard(&directory, name) {
+                        log_guard_failure(&error, "could not remove an unknown host's claim file");
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "could not tell whether a host claim file is in use");
+                    return;
+                }
+            }
+        }
+    }
+
+    fn is_indexed(&self, host: RecordRef) -> Result<bool, RegistryError> {
+        let (sql, id) = match host {
+            RecordRef::Client(id) => ("SELECT 1 FROM instances WHERE id = ?1", id.to_string()),
+            RecordRef::Server(id) => ("SELECT 1 FROM servers WHERE id = ?1", id.to_string()),
+        };
+        let connection = self.index.connection();
+        let mut statement = connection.prepare(sql)?;
+        Ok(statement.exists(params![id])?)
+    }
+}
+
+fn log_guard_failure(error: &GuardError, message: &str) {
+    match error {
+        GuardError::Busy { path } => {
+            tracing::debug!(path = %path.display(), "{message}: it is held");
+        }
+        GuardError::Unusable { path, source } => {
+            tracing::warn!(path = %path.display(), error = %source, "{message}");
+        }
+    }
+}
+
 /// How long taking a host's claim waits before reporting it busy.
 ///
 /// A claim just released can still look held for an instant: a process forked
@@ -1593,6 +1677,23 @@ fn recipe_guard_name(host: RecordRef) -> String {
         RecordRef::Client(id) => format!("client-{id}.recipe.guard"),
         RecordRef::Server(id) => format!("server-{id}.recipe.guard"),
     }
+}
+
+/// The host a claim file belongs to, if it is named like one of ours.
+///
+/// Only the canonical spelling of an id counts, so a file someone else put in
+/// the directory is never mistaken for a claim and removed.
+fn host_of_guard_name(name: &str) -> Option<RecordRef> {
+    let stem = name
+        .strip_suffix(".recipe.guard")
+        .or_else(|| name.strip_suffix(".guard"))?;
+    if let Some(id) = stem.strip_prefix("client-") {
+        let parsed: InstanceId = id.parse().ok()?;
+        return (parsed.to_string() == id).then_some(RecordRef::Client(parsed));
+    }
+    let id = stem.strip_prefix("server-")?;
+    let parsed: ServerId = id.parse().ok()?;
+    (parsed.to_string() == id).then_some(RecordRef::Server(parsed))
 }
 
 /// Removes a directory tree, treating "already gone" as success.
@@ -2539,6 +2640,171 @@ mod tests {
             registry.try_claim_recipe(host).expect("try").is_none(),
             "one claim at a time within this process too"
         );
+    }
+
+    fn guard_files(registry: &Registry) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(registry.paths().move_guards_dir())
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    /// Claims the host and its recipe, so both guard files exist.
+    fn touch_both_guards(registry: &Registry, host: RecordRef) {
+        drop(registry.claim_host(host).expect("claim"));
+        drop(registry.try_claim_recipe(host).expect("try"));
+        assert_eq!(guard_files(registry).len(), 2, "both guard files exist");
+    }
+
+    #[test]
+    fn deleting_a_client_removes_its_host_and_recipe_guard_files() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new("x", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        touch_both_guards(&registry, RecordRef::Client(client.id));
+
+        registry
+            .delete_client(client.id, crate::FileDisposition::Remove)
+            .expect("delete");
+
+        assert_eq!(guard_files(&registry), Vec::<String>::new());
+    }
+
+    #[test]
+    fn deleting_a_server_removes_its_host_and_recipe_guard_files() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = registry
+            .create_server(NewServer::new("x", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        touch_both_guards(&registry, RecordRef::Server(server.id));
+
+        registry
+            .delete_server(server.id, crate::FileDisposition::Remove)
+            .expect("delete");
+
+        assert_eq!(guard_files(&registry), Vec::<String>::new());
+    }
+
+    #[test]
+    fn deleting_a_host_under_its_own_claim_removes_the_guard_as_the_claim_is_released() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new("x", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        let host = RecordRef::Client(client.id);
+        let claim = registry.claim_host(host).expect("claim");
+        let recipe = registry.try_claim_recipe(host).expect("try").expect("free");
+
+        registry
+            .delete_client(client.id, crate::FileDisposition::Remove)
+            .expect("delete");
+        assert_eq!(
+            guard_files(&registry).len(),
+            2,
+            "a held claim keeps its file until it is released"
+        );
+        drop(claim);
+        drop(recipe);
+
+        assert_eq!(guard_files(&registry), Vec::<String>::new());
+    }
+
+    #[test]
+    fn deleting_a_host_leaves_the_claim_files_of_other_hosts() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let gone = registry
+            .create_published_client(NewClient::new("gone", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        let kept = registry
+            .create_published_client(NewClient::new("kept", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        touch_both_guards(&registry, RecordRef::Client(gone.id));
+        drop(
+            registry
+                .claim_host(RecordRef::Client(kept.id))
+                .expect("claim"),
+        );
+
+        registry
+            .delete_client(gone.id, crate::FileDisposition::Remove)
+            .expect("delete");
+
+        assert_eq!(
+            guard_files(&registry),
+            vec![host_guard_name(RecordRef::Client(kept.id))]
+        );
+    }
+
+    #[test]
+    fn a_pruning_sweep_removes_only_unknown_hosts_claim_files_that_nothing_holds() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let indexed = registry
+            .create_published_client(NewClient::new("kept", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        let indexed_host = RecordRef::Client(indexed.id);
+        drop(registry.claim_host(indexed_host).expect("claim"));
+        let unknown_client = RecordRef::Client(InstanceId::new());
+        let unknown_server = RecordRef::Server(ServerId::new());
+        let held = RecordRef::Client(InstanceId::new());
+        for host in [unknown_client, unknown_server] {
+            touch_both_guards_unchecked(&registry, host);
+        }
+        let _held = claim_host(&registry.paths, held, Path::new("unindexed")).expect("claim");
+        let stranger = registry.paths().move_guards_dir().join("notes.guard");
+        std::fs::write(&stranger, b"not ours").expect("write");
+
+        registry.prune_unknown_host_guards();
+
+        let mut expected = vec![
+            host_guard_name(indexed_host),
+            host_guard_name(held),
+            "notes.guard".to_owned(),
+        ];
+        expected.sort();
+        assert_eq!(guard_files(&registry), expected);
+        assert!(stranger.is_file());
+    }
+
+    fn touch_both_guards_unchecked(registry: &Registry, host: RecordRef) {
+        drop(claim_host(&registry.paths, host, Path::new("unindexed")).expect("claim"));
+        drop(registry.try_claim_recipe(host).expect("try"));
+    }
+
+    #[test]
+    fn a_claim_file_held_by_another_process_survives_the_sweep_until_it_is_released() {
+        use rustix::fs::{FlockOperation, flock};
+
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let host = RecordRef::Client(InstanceId::new());
+        let guards = registry.paths().move_guards_dir();
+        std::fs::create_dir_all(&guards).expect("guard directory");
+        let other_process = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(guards.join(host_guard_name(host)))
+            .expect("open the guard");
+        flock(&other_process, FlockOperation::NonBlockingLockExclusive).expect("lock");
+
+        registry.prune_unknown_host_guards();
+
+        assert_eq!(guard_files(&registry), vec![host_guard_name(host)]);
+        drop(other_process);
+        registry.prune_unknown_host_guards();
+        assert_eq!(guard_files(&registry), Vec::<String>::new());
     }
 
     #[test]

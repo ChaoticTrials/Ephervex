@@ -161,6 +161,7 @@ pub fn reconcile(registry: &Registry) -> Result<ReconciliationReport, RegistryEr
     reconcile_servers(registry, &mut report)?;
     reindex_orphaned_clients(registry, &mut report)?;
     reindex_orphaned_servers(registry, &mut report)?;
+    registry.prune_unknown_host_guards();
 
     if report.is_empty() {
         tracing::debug!("startup reconciliation found nothing to do");
@@ -2405,6 +2406,36 @@ mod tests {
             .unwrap();
         flock(&file, FlockOperation::NonBlockingLockExclusive).unwrap();
         file
+    }
+
+    #[test]
+    fn reconciliation_removes_claim_files_of_hosts_that_no_longer_exist() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let kept = registry
+            .create_published_client(NewClient::new("kept", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        let directory = registry.paths().move_guards_dir();
+        std::fs::create_dir_all(&directory).unwrap();
+        let kept_guard =
+            directory.join(crate::registry::host_guard_name(RecordRef::Client(kept.id)));
+        std::fs::write(&kept_guard, b"").unwrap();
+        let gone = [
+            format!("client-{}.guard", InstanceId::new()),
+            format!("client-{}.recipe.guard", InstanceId::new()),
+            format!("server-{}.guard", ServerId::new()),
+            format!("server-{}.recipe.guard", ServerId::new()),
+        ];
+        for name in &gone {
+            std::fs::write(directory.join(name), b"").unwrap();
+        }
+
+        reconcile(&registry).expect("reconcile");
+
+        for name in &gone {
+            assert!(!directory.join(name).exists(), "{name} is removed");
+        }
+        assert!(kept_guard.exists(), "an indexed host keeps its claim file");
     }
 
     #[test]
