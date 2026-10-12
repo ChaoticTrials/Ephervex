@@ -2511,19 +2511,9 @@ async fn run_server_command(
         ServerCommand::Output { id, lines } => {
             let snapshot = app.server_output(*id, *lines)?;
             if json {
-                print_json(&serde_json::json!({
-                    "server_id": id,
-                    "capture_health": format!("{:?}", snapshot.health),
-                    "retention": {
-                        "removed_segments": snapshot.retention.removed_segments,
-                        "removed_bytes": snapshot.retention.removed_bytes,
-                        "removed_lines": snapshot.retention.removed_lines,
-                        "earliest_retained_at": snapshot.retention.earliest_retained_at,
-                    },
-                    "pruned_while_reading": snapshot.pruned_while_reading,
-                    "lines": snapshot.lines.iter().map(captured_line_json).collect::<Vec<_>>(),
-                }));
+                print_json(&server_output_json(*id, &snapshot));
             } else {
+                report_capture_gaps(&snapshot);
                 for line in snapshot.lines {
                     print_captured_line(&line);
                 }
@@ -8133,6 +8123,66 @@ fn runtime_name(runtime: &RuntimeClassification) -> &'static str {
     }
 }
 
+fn server_output_json(
+    id: ServerId,
+    snapshot: &ephervex_core::CaptureSnapshot,
+) -> serde_json::Value {
+    let detail = match &snapshot.health {
+        CaptureHealth::Available => None,
+        CaptureHealth::Unavailable { detail } => Some(detail.as_str()),
+    };
+    serde_json::json!({
+        "server_id": id,
+        "capture_health": capture_health_name(&snapshot.health),
+        "capture_unavailable_detail": detail,
+        "retention": {
+            "removed_segments": snapshot.retention.removed_segments,
+            "removed_bytes": snapshot.retention.removed_bytes,
+            "removed_lines": snapshot.retention.removed_lines,
+            "earliest_retained_at": snapshot.retention.earliest_retained_at,
+        },
+        "pruned_while_reading": snapshot.pruned_while_reading,
+        "lines": snapshot.lines.iter().map(captured_line_json).collect::<Vec<_>>(),
+    })
+}
+
+/// Says why the lines shown are not the whole history.
+///
+/// On stderr so stdout stays the captured lines, like `report_window`.
+fn report_capture_gaps(snapshot: &ephervex_core::CaptureSnapshot) {
+    for notice in capture_gap_notices(snapshot) {
+        eprintln!("{notice}");
+    }
+}
+
+fn capture_gap_notices(snapshot: &ephervex_core::CaptureSnapshot) -> Vec<String> {
+    let mut notices = Vec::new();
+    if let CaptureHealth::Unavailable { detail } = &snapshot.health {
+        notices.push(ephervex_i18n::lookup_args(
+            "server-output-capture-unavailable",
+            [("detail", MessageArg::from(detail.clone()))],
+        ));
+    }
+    let retention = &snapshot.retention;
+    if retention.removed_lines > 0 || retention.removed_segments > 0 {
+        let lines = MessageArg::from(i64::try_from(retention.removed_lines).unwrap_or(i64::MAX));
+        notices.push(match retention.earliest_retained_at {
+            Some(since) => ephervex_i18n::lookup_args(
+                "server-output-pruned-since",
+                [
+                    ("lines", lines),
+                    ("since", MessageArg::from(since.to_string())),
+                ],
+            ),
+            None => ephervex_i18n::lookup_args("server-output-pruned", [("lines", lines)]),
+        });
+    }
+    if snapshot.pruned_while_reading {
+        notices.push(ephervex_i18n::lookup("server-output-pruned-while-reading"));
+    }
+    notices
+}
+
 fn capture_health_name(health: &CaptureHealth) -> &'static str {
     match health {
         CaptureHealth::Available => "available",
@@ -8607,6 +8657,104 @@ mod tests {
 
         let compatible = optional_status_json(&OptionalStatus::Compatible);
         assert_eq!(compatible["compatible"], true);
+    }
+
+    fn capture_snapshot(
+        health: CaptureHealth,
+        retention: ephervex_core::CaptureRetention,
+        pruned_while_reading: bool,
+    ) -> ephervex_core::CaptureSnapshot {
+        ephervex_core::CaptureSnapshot {
+            lines: Vec::new(),
+            health,
+            retention,
+            pruned_while_reading,
+        }
+    }
+
+    #[test]
+    fn server_output_json_names_capture_health_like_server_status_and_keeps_the_detail_apart() {
+        let id = ServerId::new();
+        let unavailable = capture_snapshot(
+            CaptureHealth::Unavailable {
+                detail: "disk full".to_owned(),
+            },
+            ephervex_core::CaptureRetention::default(),
+            false,
+        );
+        let json = server_output_json(id, &unavailable);
+        assert_eq!(json["capture_health"], "unavailable");
+        assert_eq!(json["capture_unavailable_detail"], "disk full");
+
+        let available = capture_snapshot(
+            CaptureHealth::Available,
+            ephervex_core::CaptureRetention::default(),
+            false,
+        );
+        let json = server_output_json(id, &available);
+        assert_eq!(json["capture_health"], "available");
+        assert_eq!(json["capture_unavailable_detail"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn complete_available_capture_has_no_gap_notices() {
+        let snapshot = capture_snapshot(
+            CaptureHealth::Available,
+            ephervex_core::CaptureRetention::default(),
+            false,
+        );
+        assert!(capture_gap_notices(&snapshot).is_empty());
+    }
+
+    #[test]
+    fn unavailable_capture_is_reported_with_its_detail() {
+        let snapshot = capture_snapshot(
+            CaptureHealth::Unavailable {
+                detail: "disk full".to_owned(),
+            },
+            ephervex_core::CaptureRetention::default(),
+            false,
+        );
+        let notices = capture_gap_notices(&snapshot);
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].contains("unavailable"), "{notices:?}");
+        assert!(notices[0].contains("disk full"), "{notices:?}");
+    }
+
+    #[test]
+    fn pruned_history_reports_the_removed_lines_and_the_earliest_kept_instant() {
+        let retention: ephervex_core::CaptureRetention =
+            serde_json::from_value(serde_json::json!({
+                "removed_segments": 2,
+                "removed_bytes": 4096,
+                "removed_lines": 120,
+                "earliest_retained_at": "2026-10-11T12:00:00Z",
+            }))
+            .expect("retention");
+        let since = retention.earliest_retained_at.expect("earliest instant");
+        let snapshot = capture_snapshot(CaptureHealth::Available, retention, true);
+        let notices = capture_gap_notices(&snapshot);
+        assert_eq!(notices.len(), 2, "{notices:?}");
+        assert!(notices[0].contains("120"), "{notices:?}");
+        assert!(notices[0].contains(&since.to_string()), "{notices:?}");
+        assert!(
+            notices[1].contains("while it was being read"),
+            "{notices:?}"
+        );
+    }
+
+    #[test]
+    fn pruned_history_without_a_retained_line_still_reports_the_removed_lines() {
+        let retention = ephervex_core::CaptureRetention {
+            removed_segments: 1,
+            removed_bytes: 10,
+            removed_lines: 1,
+            earliest_retained_at: None,
+        };
+        let snapshot = capture_snapshot(CaptureHealth::Available, retention, false);
+        let notices = capture_gap_notices(&snapshot);
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].starts_with("1 older line"), "{notices:?}");
     }
 
     #[test]

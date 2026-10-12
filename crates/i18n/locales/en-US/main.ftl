@@ -284,6 +284,20 @@ server-output-dropped = { $lines ->
         [one] 1 line of server output was skipped.
        *[other] { $lines } lines of server output were skipped.
     }
+# $detail is the technical reason the server's captured output cannot be read.
+server-output-capture-unavailable = Captured output is unavailable: { $detail }
+# $lines is how many captured lines the retention limits removed. The output
+# listed starts after them.
+server-output-pruned = { $lines ->
+        [one] 1 older line of captured output was removed to stay within the retention limits.
+       *[other] { $lines } older lines of captured output were removed to stay within the retention limits.
+    }
+# $since is the timestamp of the oldest captured line that is still kept.
+server-output-pruned-since = { $lines ->
+        [one] 1 older line of captured output was removed to stay within the retention limits. The earliest line kept is from { $since }.
+       *[other] { $lines } older lines of captured output were removed to stay within the retention limits. The earliest line kept is from { $since }.
+    }
+server-output-pruned-while-reading = Part of the captured output was removed while it was being read, so some lines are missing.
 server-made-persistent = { $name } moved with it, to { $path }.
 server-not-made-persistent = { $name } could not be moved and is still temporary: { $value }
 # Following a symlinked folder could copy a shared mods directory, or walk out
