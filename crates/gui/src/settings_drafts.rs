@@ -44,6 +44,16 @@ impl<T: PartialEq + Clone> DraftField<T> {
         self.submitted.push_back(value);
     }
 
+    /// Whether a save started from this field has not finished yet.
+    pub fn is_saving(&self) -> bool {
+        !self.submitted.is_empty()
+    }
+
+    /// Forgets the newest submission, for a save that never reached the backend.
+    pub fn withdraw(&mut self) {
+        self.submitted.pop_back();
+    }
+
     /// What a finished save puts in the field: the stored value, unless the
     /// user has typed since pressing Save or another save is still running.
     pub fn finish(&mut self, shown: &T, succeeded: bool) -> Option<T> {
@@ -68,6 +78,50 @@ pub struct SettingsDrafts {
     pub artifact_cache_limit_index: DraftField<i32>,
     pub artifact_cache_custom_value: DraftField<String>,
     pub artifact_cache_custom_unit: DraftField<String>,
+}
+
+impl SettingsDrafts {
+    /// Whether a save of this group has started and not finished.
+    pub fn is_saving(&self, save: SettingsSave) -> bool {
+        match save {
+            SettingsSave::JavaSettings => {
+                self.java_auto_detect.is_saving()
+                    || self.java_auto_download.is_saving()
+                    || self.java_memory_min.is_saving()
+                    || self.java_memory_max.is_saving()
+                    || self.java_preferred_path.is_saving()
+            }
+            SettingsSave::StorageRoot => self.persistent_root.is_saving(),
+            SettingsSave::MicrosoftClientId => self.microsoft_client_id.is_saving(),
+            SettingsSave::UserAgent => self.user_agent.is_saving(),
+            SettingsSave::ArtifactCacheLimit => {
+                self.artifact_cache_limit_index.is_saving()
+                    || self.artifact_cache_custom_value.is_saving()
+                    || self.artifact_cache_custom_unit.is_saving()
+            }
+        }
+    }
+
+    /// Forgets the newest save of this group, for one that never reached the backend.
+    pub fn withdraw(&mut self, save: SettingsSave) {
+        match save {
+            SettingsSave::JavaSettings => {
+                self.java_auto_detect.withdraw();
+                self.java_auto_download.withdraw();
+                self.java_memory_min.withdraw();
+                self.java_memory_max.withdraw();
+                self.java_preferred_path.withdraw();
+            }
+            SettingsSave::StorageRoot => self.persistent_root.withdraw(),
+            SettingsSave::MicrosoftClientId => self.microsoft_client_id.withdraw(),
+            SettingsSave::UserAgent => self.user_agent.withdraw(),
+            SettingsSave::ArtifactCacheLimit => {
+                self.artifact_cache_limit_index.withdraw();
+                self.artifact_cache_custom_value.withdraw();
+                self.artifact_cache_custom_unit.withdraw();
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -164,5 +218,56 @@ mod tests {
         field.fold(&false, true);
         assert_eq!(field.fold(&false, true), None);
         assert_eq!(field.fold(&true, true), Some(true));
+    }
+
+    #[test]
+    fn a_field_is_saving_from_submission_until_its_save_finishes() {
+        let mut field = DraftField::default();
+        field.fold(&text(""), text("a"));
+        assert!(!field.is_saving());
+        field.submit(text("b"));
+        assert!(field.is_saving());
+        field.finish(&text("b"), true);
+        assert!(!field.is_saving());
+    }
+
+    #[test]
+    fn a_refused_save_stops_the_field_saving() {
+        let mut field = DraftField::default();
+        field.fold(&text(""), text("a"));
+        field.submit(text("bad"));
+        field.finish(&text("bad"), false);
+        assert!(!field.is_saving());
+    }
+
+    #[test]
+    fn a_withdrawn_submission_stops_the_field_saving_and_keeps_earlier_ones() {
+        let mut field = DraftField::default();
+        field.submit(text("b"));
+        field.submit(text("c"));
+        field.withdraw();
+        assert!(field.is_saving());
+        field.withdraw();
+        assert!(!field.is_saving());
+    }
+
+    #[test]
+    fn a_group_is_saving_while_any_of_its_fields_is() {
+        let mut drafts = SettingsDrafts::default();
+        drafts.java_memory_max.submit(text("4096"));
+        assert!(drafts.is_saving(SettingsSave::JavaSettings));
+        assert!(!drafts.is_saving(SettingsSave::StorageRoot));
+        drafts.artifact_cache_custom_unit.submit(text("GiB"));
+        assert!(drafts.is_saving(SettingsSave::ArtifactCacheLimit));
+        drafts.withdraw(SettingsSave::JavaSettings);
+        assert!(!drafts.is_saving(SettingsSave::JavaSettings));
+    }
+
+    #[test]
+    fn the_two_provider_identifiers_save_independently() {
+        let mut drafts = SettingsDrafts::default();
+        drafts.microsoft_client_id.submit(text("id"));
+        assert!(drafts.is_saving(SettingsSave::MicrosoftClientId));
+        assert!(!drafts.is_saving(SettingsSave::UserAgent));
     }
 }

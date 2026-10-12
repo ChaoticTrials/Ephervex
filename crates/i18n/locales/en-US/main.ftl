@@ -2643,6 +2643,8 @@ gui-reset-default = Reset to Default
 gui-client-id-reset = Restored the Ephervex Client ID default.
 gui-user-agent-reset = Restored the Ephervex User-Agent default.
 gui-save-api-settings = Save API Settings
+gui-saving = Saving...
+gui-save-in-progress-hint = A save is already running. This is available again when it finishes.
 gui-curseforge = CurseForge
 # Shown where this build carries a key of its own, so CurseForge works
 # without the user doing anything.

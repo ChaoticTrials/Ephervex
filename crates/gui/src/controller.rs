@@ -5747,9 +5747,17 @@ fn register_settings(
 
     let sender = commands.clone();
     let held = Rc::clone(drafts);
+    let weak = ui.as_weak();
     ui.on_save_storage_settings(move |root| {
-        held.borrow_mut().persistent_root.submit(root.to_string());
-        send(&sender, Command::SaveStorageRoot(root.into()));
+        let submitted = root.to_string();
+        start_settings_save(
+            &weak,
+            &held,
+            &sender,
+            &[SettingsSave::StorageRoot],
+            move |drafts| drafts.persistent_root.submit(submitted),
+            Command::SaveStorageRoot(root.into()),
+        );
     });
     register_artifact_cache(ui, commands, drafts);
     let sender = commands.clone();
@@ -5758,12 +5766,18 @@ fn register_settings(
     let held = Rc::clone(drafts);
     let weak = ui.as_weak();
     ui.on_reset_storage_root(move || {
-        if let Some(ui) = weak.upgrade() {
-            held.borrow_mut()
-                .persistent_root
-                .submit(ui.get_persistent_root().to_string());
-        }
-        send(&sender, Command::SaveStorageRoot(String::new()));
+        let shown = weak
+            .upgrade()
+            .map(|ui| ui.get_persistent_root().to_string())
+            .unwrap_or_default();
+        start_settings_save(
+            &weak,
+            &held,
+            &sender,
+            &[SettingsSave::StorageRoot],
+            |drafts| drafts.persistent_root.submit(shown),
+            Command::SaveStorageRoot(String::new()),
+        );
     });
     register_watched_folders(ui, commands);
 
@@ -5792,16 +5806,23 @@ fn register_settings(
                     return;
                 }
             };
-            {
-                let mut held = held.borrow_mut();
-                held.java_auto_detect.submit(auto_detect);
-                held.java_auto_download.submit(auto_download);
-                held.java_memory_min.submit(minimum.to_string());
-                held.java_memory_max.submit(maximum.to_string());
-                held.java_preferred_path.submit(preferred_path.to_string());
-            }
-            send(
+            let (min_text, max_text, path_text) = (
+                minimum.to_string(),
+                maximum.to_string(),
+                preferred_path.to_string(),
+            );
+            start_settings_save(
+                &weak,
+                &held,
                 &sender,
+                &[SettingsSave::JavaSettings],
+                move |drafts| {
+                    drafts.java_auto_detect.submit(auto_detect);
+                    drafts.java_auto_download.submit(auto_download);
+                    drafts.java_memory_min.submit(min_text);
+                    drafts.java_memory_max.submit(max_text);
+                    drafts.java_preferred_path.submit(path_text);
+                },
                 Command::SaveJavaSettings {
                     auto_detect,
                     auto_download,
@@ -7471,7 +7492,9 @@ fn apply_event(
             stamp_host_lifecycle(ui, &lifecycle.borrow());
         }
         Event::SettingsSaveFinished { save, succeeded } => {
-            finish_settings_save(ui, &mut settings_drafts.borrow_mut(), save, succeeded);
+            let mut drafts = settings_drafts.borrow_mut();
+            finish_settings_save(ui, &mut drafts, save, succeeded);
+            show_settings_saving(ui, &drafts);
         }
         Event::MinecraftPreferencesSaveFinished { .. }
         | Event::MinecraftPreferencePreview { .. }
@@ -8410,14 +8433,18 @@ fn register_provider_identifiers(
 ) {
     let sender = commands.clone();
     let held = Rc::clone(drafts);
+    let weak = ui.as_weak();
     ui.on_save_api_settings(move |client_id, user_agent| {
-        {
-            let mut held = held.borrow_mut();
-            held.microsoft_client_id.submit(client_id.to_string());
-            held.user_agent.submit(user_agent.to_string());
-        }
-        send(
+        let (id_text, agent_text) = (client_id.to_string(), user_agent.to_string());
+        start_settings_save(
+            &weak,
+            &held,
             &sender,
+            &[SettingsSave::MicrosoftClientId, SettingsSave::UserAgent],
+            move |drafts| {
+                drafts.microsoft_client_id.submit(id_text);
+                drafts.user_agent.submit(agent_text);
+            },
             Command::SaveApiSettings {
                 client_id: client_id.into(),
                 user_agent: user_agent.into(),
@@ -8429,23 +8456,35 @@ fn register_provider_identifiers(
     let held = Rc::clone(drafts);
     let weak = ui.as_weak();
     ui.on_reset_microsoft_client_id(move || {
-        if let Some(ui) = weak.upgrade() {
-            held.borrow_mut()
-                .microsoft_client_id
-                .submit(ui.get_microsoft_client_id().to_string());
-        }
-        send(&sender, Command::ResetMicrosoftClientId);
+        let shown = weak
+            .upgrade()
+            .map(|ui| ui.get_microsoft_client_id().to_string())
+            .unwrap_or_default();
+        start_settings_save(
+            &weak,
+            &held,
+            &sender,
+            &[SettingsSave::MicrosoftClientId],
+            |drafts| drafts.microsoft_client_id.submit(shown),
+            Command::ResetMicrosoftClientId,
+        );
     });
     let sender = commands.clone();
     let held = Rc::clone(drafts);
     let weak = ui.as_weak();
     ui.on_reset_user_agent(move || {
-        if let Some(ui) = weak.upgrade() {
-            held.borrow_mut()
-                .user_agent
-                .submit(ui.get_user_agent().to_string());
-        }
-        send(&sender, Command::ResetUserAgent);
+        let shown = weak
+            .upgrade()
+            .map(|ui| ui.get_user_agent().to_string())
+            .unwrap_or_default();
+        start_settings_save(
+            &weak,
+            &held,
+            &sender,
+            &[SettingsSave::UserAgent],
+            |drafts| drafts.user_agent.submit(shown),
+            Command::ResetUserAgent,
+        );
     });
 
     let sender = commands.clone();
@@ -8515,17 +8554,19 @@ fn register_artifact_cache(
     ui.on_measure_artifact_cache(move || send(&sender, Command::MeasureArtifactCache));
     let sender = commands.clone();
     let held = Rc::clone(drafts);
+    let weak = ui.as_weak();
     ui.on_save_artifact_cache_limit(move |selection, custom_value, custom_unit| {
-        {
-            let mut held = held.borrow_mut();
-            held.artifact_cache_limit_index.submit(selection);
-            held.artifact_cache_custom_value
-                .submit(custom_value.to_string());
-            held.artifact_cache_custom_unit
-                .submit(custom_unit.to_string());
-        }
-        send(
+        let (value_text, unit_text) = (custom_value.to_string(), custom_unit.to_string());
+        start_settings_save(
+            &weak,
+            &held,
             &sender,
+            &[SettingsSave::ArtifactCacheLimit],
+            move |drafts| {
+                drafts.artifact_cache_limit_index.submit(selection);
+                drafts.artifact_cache_custom_value.submit(value_text);
+                drafts.artifact_cache_custom_unit.submit(unit_text);
+            },
             Command::SaveArtifactCacheLimit {
                 // A negative index can only mean the view has no entry selected,
                 // which the typed resolution treats as a custom size - so the
@@ -9921,10 +9962,53 @@ thread_local! {
 }
 
 fn send(sender: &Sender<Command>, command: Command) {
+    deliver(sender, command);
+}
+
+/// Hands a command to the worker, saying whether it was taken.
+fn deliver(sender: &Sender<Command>, command: Command) -> bool {
     if sender.send(command).is_err() {
         tracing::error!("the GUI core worker stopped unexpectedly");
         WORKER_STOPPED.set(true);
+        return false;
     }
+    true
+}
+
+/// Starts a settings save unless one of its groups is still saving.
+///
+/// The groups stay marked as saving until their finish events arrive, which is
+/// what keeps their buttons from queuing a second identical command.
+fn start_settings_save(
+    ui: &slint::Weak<AppWindow>,
+    drafts: &Rc<RefCell<SettingsDrafts>>,
+    sender: &Sender<Command>,
+    groups: &[SettingsSave],
+    submit: impl FnOnce(&mut SettingsDrafts),
+    command: Command,
+) {
+    let mut held = drafts.borrow_mut();
+    if groups.iter().any(|group| held.is_saving(*group)) {
+        return;
+    }
+    submit(&mut held);
+    if !deliver(sender, command) {
+        for group in groups {
+            held.withdraw(*group);
+        }
+    }
+    if let Some(ui) = ui.upgrade() {
+        show_settings_saving(&ui, &held);
+    }
+}
+
+/// Shows which settings groups have a save under way.
+fn show_settings_saving(ui: &AppWindow, drafts: &SettingsDrafts) {
+    ui.set_java_saving(drafts.is_saving(SettingsSave::JavaSettings));
+    ui.set_storage_root_saving(drafts.is_saving(SettingsSave::StorageRoot));
+    ui.set_microsoft_client_id_saving(drafts.is_saving(SettingsSave::MicrosoftClientId));
+    ui.set_user_agent_saving(drafts.is_saving(SettingsSave::UserAgent));
+    ui.set_artifact_cache_limit_saving(drafts.is_saving(SettingsSave::ArtifactCacheLimit));
 }
 
 fn take_worker_stopped() -> bool {
@@ -14938,6 +15022,102 @@ mod tests {
         apply_settings_fields(&ui, &stored_settings("/data", 512, ""), &mut drafts);
 
         assert_eq!(ui.get_persistent_root(), "/not/allowed");
+    }
+
+    fn settings_with_channel() -> (
+        AppWindow,
+        std::sync::mpsc::Receiver<Command>,
+        Sender<Command>,
+        Rc<RefCell<SettingsDrafts>>,
+    ) {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().expect("window");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let drafts = Rc::new(RefCell::new(SettingsDrafts::default()));
+        register_settings(&ui, &sender, &drafts);
+        (ui, receiver, sender, drafts)
+    }
+
+    fn finish(ui: &AppWindow, drafts: &Rc<RefCell<SettingsDrafts>>, save: SettingsSave, ok: bool) {
+        let mut held = drafts.borrow_mut();
+        finish_settings_save(ui, &mut held, save, ok);
+        show_settings_saving(ui, &held);
+    }
+
+    #[test]
+    fn a_second_settings_save_is_not_sent_while_the_first_is_running() {
+        let (ui, commands, _sender, drafts) = settings_with_channel();
+
+        ui.invoke_save_storage_settings("/data".into());
+        assert!(ui.get_storage_root_saving());
+        ui.invoke_save_storage_settings("/data".into());
+        ui.invoke_reset_storage_root();
+        assert_eq!(commands.try_iter().count(), 1);
+
+        finish(&ui, &drafts, SettingsSave::StorageRoot, true);
+        assert!(!ui.get_storage_root_saving());
+        ui.invoke_save_storage_settings("/data".into());
+        assert_eq!(commands.try_iter().count(), 1);
+    }
+
+    #[test]
+    fn a_failed_settings_save_releases_its_buttons() {
+        let (ui, commands, _sender, drafts) = settings_with_channel();
+
+        ui.invoke_save_java_settings(true, false, "512".into(), "2048".into(), "".into());
+        assert!(ui.get_java_saving());
+        finish(&ui, &drafts, SettingsSave::JavaSettings, false);
+        assert!(!ui.get_java_saving());
+
+        ui.invoke_save_artifact_cache_limit(0, "".into(), "GiB".into());
+        assert!(ui.get_artifact_cache_limit_saving());
+        finish(&ui, &drafts, SettingsSave::ArtifactCacheLimit, false);
+        assert!(!ui.get_artifact_cache_limit_saving());
+        assert_eq!(commands.try_iter().count(), 2);
+    }
+
+    #[test]
+    fn a_refused_java_memory_range_does_not_leave_the_save_running() {
+        let (ui, commands, _sender, _drafts) = settings_with_channel();
+
+        ui.invoke_save_java_settings(true, false, "9000".into(), "1000".into(), "".into());
+
+        assert!(!ui.get_java_saving());
+        assert_eq!(commands.try_iter().count(), 0);
+    }
+
+    #[test]
+    fn the_api_save_waits_for_both_identifier_saves_to_finish() {
+        let (ui, commands, _sender, drafts) = settings_with_channel();
+
+        ui.invoke_save_api_settings("id".into(), "agent".into());
+        assert!(ui.get_microsoft_client_id_saving() && ui.get_user_agent_saving());
+        ui.invoke_reset_microsoft_client_id();
+        ui.invoke_reset_user_agent();
+        ui.invoke_save_api_settings("id".into(), "agent".into());
+        assert_eq!(commands.try_iter().count(), 1);
+
+        finish(&ui, &drafts, SettingsSave::MicrosoftClientId, true);
+        assert!(!ui.get_microsoft_client_id_saving() && ui.get_user_agent_saving());
+        ui.invoke_save_api_settings("id".into(), "agent".into());
+        assert_eq!(commands.try_iter().count(), 0);
+
+        finish(&ui, &drafts, SettingsSave::UserAgent, true);
+        assert!(!ui.get_user_agent_saving());
+        ui.invoke_reset_user_agent();
+        assert_eq!(commands.try_iter().count(), 1);
+    }
+
+    #[test]
+    fn a_settings_save_the_worker_never_received_does_not_leave_buttons_disabled() {
+        let (ui, commands, sender, _drafts) = settings_with_channel();
+        drop(commands);
+
+        ui.invoke_save_storage_settings("/data".into());
+
+        assert!(!ui.get_storage_root_saving());
+        assert!(take_worker_stopped());
+        drop(sender);
     }
 
     #[test]

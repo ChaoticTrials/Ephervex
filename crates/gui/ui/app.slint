@@ -286,6 +286,13 @@ export component AppWindow inherits Window {
     in-out property <string> minecraft-preserved-notice;
     in-out property <string> minecraft-unusable-notice;
     in-out property <bool> minecraft-saving: false;
+    // A save started from each settings group and not yet finished. The
+    // group's Save and Reset buttons stay disabled until it is.
+    in-out property <bool> java-saving: false;
+    in-out property <bool> storage-root-saving: false;
+    in-out property <bool> microsoft-client-id-saving: false;
+    in-out property <bool> user-agent-saving: false;
+    in-out property <bool> artifact-cache-limit-saving: false;
     in-out property <[PendingEntityRow]> pending-instances;
     in-out property <[PendingEntityRow]> pending-servers;
     // Every instance's pending linked server, for the overview, which
@@ -1746,7 +1753,7 @@ export component AppWindow inherits Window {
                                     TextField { text <=> root.java-preferred-path; accessible-name: GuiI18n.text("gui-java-preferred"); placeholder: "/usr/bin/java"; width: 260px; }
                                 }
                             }
-                            ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-java-save"); tone: "primary"; clicked => { root.save-java-settings(root.java-auto-detect, root.java-auto-download, root.java-memory-min, root.java-memory-max, root.java-preferred-path); } } }
+                            ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: root.java-saving ? GuiI18n.text("gui-saving") : GuiI18n.text("gui-java-save"); accessible-name: GuiI18n.text("gui-java-save"); tone: "primary"; enabled: !root.java-saving; hint: GuiI18n.text("gui-save-in-progress-hint"); clicked => { root.save-java-settings(root.java-auto-detect, root.java-auto-download, root.java-memory-min, root.java-memory-max, root.java-preferred-path); } } }
                             // The list is its own thing, and the button that
                             // rebuilds it belongs beside it rather than beside the
                             // Save that has nothing to do with it.
@@ -1795,6 +1802,7 @@ export component AppWindow inherits Window {
                                     effective: root.effective-microsoft-client-id;
                                     custom: root.microsoft-client-id-is-custom;
                                     value <=> root.microsoft-client-id;
+                                    saving: root.microsoft-client-id-saving;
                                     reset => { root.reset-microsoft-client-id(); }
                                 }
                                 OverrideCard {
@@ -1805,10 +1813,11 @@ export component AppWindow inherits Window {
                                     effective: root.effective-user-agent;
                                     custom: root.user-agent-is-custom;
                                     value <=> root.user-agent;
+                                    saving: root.user-agent-saving;
                                     reset => { root.reset-user-agent(); }
                                 }
                             }
-                            ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-api-settings"); tone: "primary"; clicked => { root.save-api-settings(root.microsoft-client-id, root.user-agent); } } }
+                            ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: root.microsoft-client-id-saving || root.user-agent-saving ? GuiI18n.text("gui-saving") : GuiI18n.text("gui-save-api-settings"); accessible-name: GuiI18n.text("gui-save-api-settings"); tone: "primary"; enabled: !root.microsoft-client-id-saving && !root.user-agent-saving; hint: GuiI18n.text("gui-save-in-progress-hint"); clicked => { root.save-api-settings(root.microsoft-client-id, root.user-agent); } } }
                             SectionTitle { title: GuiI18n.text("gui-curseforge"); detail: root.curseforge-build-key-available ? GuiI18n.text("gui-curseforge-detail-default") : GuiI18n.text("gui-curseforge-detail-required"); }
                             Rectangle { height: curseforge-card.preferred-height; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; curseforge-card := VerticalLayout { padding: 16px; spacing: 8px;
                                 HorizontalLayout { Heading { text: GuiI18n.text("gui-curseforge-api-key"); font-size: Theme.row-heading-size; } Rectangle { horizontal-stretch: 1; } Pill { text: root.curseforge-key-configured ? GuiI18n.text("gui-curseforge-key-configured") : root.curseforge-key-default-in-use ? GuiI18n.text("gui-curseforge-key-default-in-use") : GuiI18n.text("gui-curseforge-key-not-configured"); tone-color: root.curseforge-key-configured ? Theme.accent : root.curseforge-key-default-in-use ? Theme.text-secondary : Theme.danger; } }
@@ -1842,7 +1851,7 @@ export component AppWindow inherits Window {
                                 BodyText { text: GuiI18n.value("gui-effective-location", root.storage-root); color: Theme.text-secondary; overflow: elide; }
                                 BodyText { text: GuiI18n.value("gui-default-location-path", root.default-persistent-root); color: Theme.text-muted; overflow: elide; }
                             } }
-                            ActionRow { if root.persistent-root-is-custom : AppButton { text: GuiI18n.text("gui-reset-default"); clicked => { root.reset-storage-root(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-storage-root"); tone: "primary"; clicked => { root.save-storage-settings(root.persistent-root); } } }
+                            ActionRow { if root.persistent-root-is-custom : AppButton { text: GuiI18n.text("gui-reset-default"); enabled: !root.storage-root-saving; hint: GuiI18n.text("gui-save-in-progress-hint"); clicked => { root.reset-storage-root(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: root.storage-root-saving ? GuiI18n.text("gui-saving") : GuiI18n.text("gui-save-storage-root"); accessible-name: GuiI18n.text("gui-save-storage-root"); tone: "primary"; enabled: !root.storage-root-saving; hint: GuiI18n.text("gui-save-in-progress-hint"); clicked => { root.save-storage-settings(root.persistent-root); } } }
                             BodyText { text: GuiI18n.text("gui-storage-change-future-only"); color: Theme.text-muted; wrap: word-wrap; }
                             Divider { }
                             SectionTitle { title: GuiI18n.text("gui-watched-download-folders"); detail: GuiI18n.text("gui-watched-download-folders-detail"); }
@@ -1910,7 +1919,7 @@ export component AppWindow inherits Window {
                                         // with the controls it saves rather than
                                         // with their labels.
                                         FieldLabel { text: " "; }
-                                        AppButton { text: GuiI18n.text("gui-save-artifact-cache-limit"); tone: "primary"; clicked => { root.save-artifact-cache-limit(root.artifact-cache-limit-index, root.artifact-cache-custom-value, root.artifact-cache-custom-unit); } }
+                                        AppButton { text: root.artifact-cache-limit-saving ? GuiI18n.text("gui-saving") : GuiI18n.text("gui-save-artifact-cache-limit"); accessible-name: GuiI18n.text("gui-save-artifact-cache-limit"); tone: "primary"; enabled: !root.artifact-cache-limit-saving; hint: GuiI18n.text("gui-save-in-progress-hint"); clicked => { root.save-artifact-cache-limit(root.artifact-cache-limit-index, root.artifact-cache-custom-value, root.artifact-cache-custom-unit); } }
                                     }
                                 }
                                 BodyText { text: GuiI18n.text("gui-artifact-cache-cleanup-note"); color: Theme.text-muted; wrap: word-wrap; }
