@@ -624,9 +624,6 @@ impl<'a> Resolver<'a> {
             if self.request.cancel.is_cancelled() {
                 return Err(ModPlatformError::Canceled);
             }
-            if round == MAX_RESOLUTION_ROUNDS {
-                return Err(ModPlatformError::ResolutionDidNotConverge { iterations: round });
-            }
 
             self.refold();
             self.refused.retain(|project, refusal| {
@@ -643,6 +640,10 @@ impl<'a> Resolver<'a> {
                 }
                 break;
             };
+            // The last round only observes: it allows no further action.
+            if round == MAX_RESOLUTION_ROUNDS {
+                return Err(ModPlatformError::ResolutionDidNotConverge { iterations: round });
+            }
 
             let (pin, declarers) = self.constraints.get(&next).map_or_else(
                 || (None, BTreeSet::new()),
@@ -3211,6 +3212,80 @@ mod tests {
             shared.requested_by,
             vec!["LEFT".to_owned(), "RIGHT".to_owned()],
             "both requesters are recorded even though one file is installed"
+        );
+    }
+
+    // -- resolution ceiling ------------------------------------------------
+
+    /// A chain of `length` projects where each requires the next, so resolving
+    /// it takes exactly `length` actions. The last project's release is
+    /// incompatible with the instance when `broken_tail` is set.
+    fn chain_of(length: usize, broken_tail: bool) -> Catalog {
+        (0..length).fold(Catalog::default(), |catalog, index| {
+            let id = format!("P{index}");
+            let release = if broken_tail && index + 1 == length {
+                version("v1", &id, &["1.21.1"], &["neoforge"])
+            } else {
+                compatible("v1", &id)
+            };
+            let release = if index + 1 < length {
+                needs(
+                    release,
+                    ModRelationKind::Required,
+                    &format!("P{}", index + 1),
+                )
+            } else {
+                release
+            };
+            catalog.with(&id, vec![release])
+        })
+    }
+
+    #[tokio::test]
+    async fn a_graph_needing_fewer_actions_than_the_ceiling_resolves() {
+        let catalog = chain_of(MAX_RESOLUTION_ROUNDS - 1, false);
+
+        let plan = plan(&catalog, InstallSelection::new("P0")).await;
+        assert_eq!(plan.dependencies.len(), MAX_RESOLUTION_ROUNDS - 2);
+    }
+
+    #[tokio::test]
+    async fn a_graph_completing_on_the_last_allowed_action_is_converged() {
+        let catalog = chain_of(MAX_RESOLUTION_ROUNDS, false);
+
+        let plan = plan(&catalog, InstallSelection::new("P0")).await;
+        assert_eq!(plan.dependencies.len(), MAX_RESOLUTION_ROUNDS - 1);
+    }
+
+    #[tokio::test]
+    async fn a_graph_needing_one_action_beyond_the_ceiling_is_refused() {
+        let catalog = chain_of(MAX_RESOLUTION_ROUNDS + 1, false);
+
+        let error = plan_with(&catalog, InstallSelection::new("P0"), &[])
+            .await
+            .expect_err("must refuse");
+        assert!(matches!(
+            error,
+            ModPlatformError::ResolutionDidNotConverge {
+                iterations: MAX_RESOLUTION_ROUNDS
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_refusal_recorded_by_the_last_allowed_action_is_reported_as_itself() {
+        let catalog = chain_of(MAX_RESOLUTION_ROUNDS, true);
+
+        let error = plan_with(&catalog, InstallSelection::new("P0"), &[])
+            .await
+            .expect_err("must refuse");
+        assert!(
+            matches!(
+                error,
+                ModPlatformError::NoCompatibleVersion { ref project_id, .. }
+                    if *project_id == format!("P{}", MAX_RESOLUTION_ROUNDS - 1)
+            ),
+            "{error:?}"
         );
     }
 
