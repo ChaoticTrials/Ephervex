@@ -329,3 +329,21 @@ fn import_errors_escape_control_characters_in_archive_paths_but_json_stays_exact
         );
     }
 }
+
+#[test]
+fn an_address_with_an_uppercase_scheme_goes_through_download_consent_not_the_file_path() {
+    let sandbox = Sandbox::new();
+    for address in [
+        "HTTPS://example.invalid/pack.mrpack",
+        "Https://example.invalid/pack.mrpack",
+        "  HTTPS://example.invalid/pack.mrpack  ",
+    ] {
+        let refused = sandbox.run(&["--json", "import", address, "--inspect"]);
+        assert!(!refused.status.success(), "{address}: {refused:?}");
+        let stderr = String::from_utf8(refused.stderr).expect("UTF-8 output");
+        assert!(
+            stderr.contains("has not been agreed to"),
+            "{address} was not treated as an address: {stderr}"
+        );
+    }
+}

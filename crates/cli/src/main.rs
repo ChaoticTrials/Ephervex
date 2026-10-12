@@ -7160,9 +7160,14 @@ async fn fetch_if_address(
     Ok(Some(staged))
 }
 
+/// URI schemes are case-insensitive (RFC 3986 section 3.1), so `HTTPS://` is an address too.
 fn looks_like_an_address(argument: &str) -> bool {
     let trimmed = argument.trim();
-    trimmed.starts_with("http://") || trimmed.starts_with("https://")
+    ["http://", "https://"].iter().any(|scheme| {
+        trimmed
+            .get(..scheme.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(scheme))
+    })
 }
 
 /// Whether this address may be downloaded from, and whether to remember it.
@@ -8630,6 +8635,31 @@ fn localized_failure(error: &CoreError) -> (String, Option<String>) {
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_address_is_recognized_whatever_the_case_of_its_scheme() {
+        for address in [
+            "http://example.org/p.mrpack",
+            "https://example.org/p.mrpack",
+            "HTTPS://example.org/p.mrpack",
+            "Http://example.org/p.mrpack",
+            "  HtTpS://example.org/p.mrpack",
+        ] {
+            assert!(looks_like_an_address(address), "{address}");
+        }
+        for path in [
+            "pack.mrpack",
+            "./https.mrpack",
+            "/tmp/https://x",
+            "ftp://example.org/p.mrpack",
+            "http:/example.org",
+            "htt",
+            "\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}",
+            "",
+        ] {
+            assert!(!looks_like_an_address(path), "{path}");
+        }
+    }
 
     #[test]
     fn a_question_is_written_to_the_question_sink_and_the_typed_line_is_returned() {
