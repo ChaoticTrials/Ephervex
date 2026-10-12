@@ -442,7 +442,11 @@ impl MinecraftPreferenceDescriptor {
             problem,
         };
 
-        let raw = text.trim();
+        // Text and Enum payloads are stored verbatim, so edge whitespace is part of the value.
+        let raw = match self.value_shape() {
+            PreferenceValueShape::Text | PreferenceValueShape::Enum => text,
+            _ => text.trim(),
+        };
         let raw = LEGACY_VALUE_ALIASES
             .iter()
             .find(|(preference, spelling, _)| *preference == self.id && *spelling == raw)
@@ -691,6 +695,7 @@ impl ConfiguredPreferences {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
+    use crate::catalog::EnumValuePresentation;
     use crate::input::{MouseButton, PhysicalKey};
 
     fn catalog() -> &'static MinecraftPreferenceCatalog {
@@ -924,6 +929,65 @@ mod tests {
                 "{name} {text} must survive a second round trip"
             );
         }
+    }
+
+    #[test]
+    fn a_text_value_keeps_its_edge_whitespace_through_a_stored_round_trip() {
+        let text_preference = MinecraftPreferenceDescriptor {
+            presentation: PreferencePresentation::Text { default: None },
+            ..descriptor("language").clone()
+        };
+        for stored in [" foo ", "\u{a0}foo", "foo  ", "   "] {
+            let value = text_preference
+                .parse_stored_value(stored)
+                .unwrap_or_else(|error| panic!("{stored:?}: {error}"));
+            assert_eq!(value, MinecraftPreferenceValue::Text(stored.to_owned()));
+            assert_eq!(value.to_stored_text(), stored);
+        }
+    }
+
+    #[test]
+    fn an_enum_value_keeps_its_edge_whitespace_through_a_stored_round_trip() {
+        let enum_preference = MinecraftPreferenceDescriptor {
+            presentation: PreferencePresentation::Enum {
+                default: None,
+                values: vec![EnumValuePresentation {
+                    technical_value: " foo ".to_owned(),
+                    enum_constant: None,
+                    translation_key: None,
+                    ordinal: None,
+                }],
+            },
+            ..descriptor("attack_indicator").clone()
+        };
+        let value = enum_preference
+            .parse_stored_value(" foo ")
+            .expect("the enumerated value, spaces included");
+        assert_eq!(value, MinecraftPreferenceValue::Enum(" foo ".to_owned()));
+        assert_eq!(value.to_stored_text(), " foo ");
+        assert_eq!(
+            enum_preference
+                .parse_stored_value("foo")
+                .expect_err("the trimmed spelling is a different value")
+                .problem,
+            PreferenceValueProblem::NotEnumerated
+        );
+    }
+
+    #[test]
+    fn whitespace_around_a_numeric_or_boolean_stored_value_is_still_ignored() {
+        assert_eq!(
+            descriptor("render_distance")
+                .parse_stored_value(" 16 ")
+                .expect("valid"),
+            MinecraftPreferenceValue::Integer(16)
+        );
+        assert_eq!(
+            descriptor("fullscreen")
+                .parse_stored_value(" true\t")
+                .expect("valid"),
+            MinecraftPreferenceValue::Boolean(true)
+        );
     }
 
     #[test]
