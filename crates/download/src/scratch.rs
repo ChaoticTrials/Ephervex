@@ -1,7 +1,7 @@
-//! Ownership of scratch directories, so one a dead process left behind can be
-//! collected and one a live process is using never is.
+//! Ownership of scratch directories and files, so one a dead process left
+//! behind can be collected and one a live process is using never is.
 //!
-//! A scratch directory is claimed by holding an exclusive `flock` on a marker
+//! A scratch entry is claimed by holding an exclusive `flock` on a marker
 //! file next to it, named after it with an `.owner` suffix. The kernel drops the
 //! lock when the holder's last descriptor closes, including when the holder is
 //! killed or the machine loses power, so liveness is never inferred from a pid.
@@ -13,10 +13,10 @@
 //! its own live scratch directory from an abandoned one, so every marker this
 //! process holds or is sweeping is also registered in the process.
 //!
-//! The marker is created and locked before the directory exists and is removed
-//! only after the directory is gone, so a marker without a lock always means
-//! the directory (if any) is abandoned. A directory with no marker has no
-//! provable owner and is left alone.
+//! The marker is created and locked before the entry exists and is removed
+//! only after the entry is gone, so a marker without a lock always means the
+//! entry (if any) is abandoned. An entry with no marker has no provable owner
+//! and is left alone.
 
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -68,7 +68,7 @@ fn claim_key(marker: &Path) -> io::Result<PathBuf> {
     Ok(std::fs::canonicalize(parent)?.join(name))
 }
 
-/// Appended to a scratch directory's name to name its marker.
+/// Appended to a scratch entry's name to name its marker.
 const MARKER_SUFFIX: &str = ".owner";
 
 /// How long a claim waits out a marker locked by a sweep before concluding a
@@ -76,10 +76,10 @@ const MARKER_SUFFIX: &str = ".owner";
 const CONTENTION_RETRIES: u32 = 10;
 const CONTENTION_PAUSE: std::time::Duration = std::time::Duration::from_millis(5);
 
-/// The claim on one scratch directory, held for as long as this value lives.
+/// The claim on one scratch entry, held for as long as this value lives.
 ///
 /// Dropping it without [`Self::release`] gives up the lock but leaves the
-/// marker, which is how a sweep finds a directory whose removal was cut short.
+/// marker, which is how a sweep finds an entry whose removal was cut short.
 #[derive(Debug)]
 pub struct ScratchOwner {
     lock: Option<File>,
@@ -151,7 +151,7 @@ impl ScratchOwner {
         }
     }
 
-    /// Gives up the claim once the directory has been removed or published.
+    /// Gives up the claim once the entry has been removed or published.
     pub fn release(self) {
         match std::fs::remove_file(&self.marker) {
             Ok(()) => {}
@@ -163,11 +163,11 @@ impl ScratchOwner {
     }
 }
 
-/// Removes every scratch directory in `parent` whose name `is_scratch` accepts
-/// and whose owner is gone, with its marker. Returns how many directories or
-/// stray markers were collected.
+/// Removes every scratch directory or file in `parent` whose name `is_scratch`
+/// accepts and whose owner is gone, with its marker. Returns how many entries
+/// or stray markers were collected.
 ///
-/// A directory with no marker, or whose marker is locked, is never touched.
+/// An entry with no marker, or whose marker is locked, is never touched.
 /// Marker names come from the filesystem, so only a name that is a single
 /// ordinary path component is ever turned into a path to remove.
 pub fn sweep_abandoned(parent: &Path, is_scratch: impl Fn(&str) -> bool) -> usize {
@@ -217,14 +217,14 @@ fn reclaim(marker: &Path, scratch: &Path) -> bool {
     if !matches!(try_lock(&file), Ok(true)) || !names_same_file(&file, marker) {
         return false;
     }
-    match std::fs::remove_dir_all(scratch) {
+    match remove_entry(scratch) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => {
             warn!(
                 path = %scratch.display(),
                 %error,
-                "could not remove an abandoned scratch directory"
+                "could not remove an abandoned scratch entry"
             );
             return false;
         }
@@ -233,12 +233,23 @@ fn reclaim(marker: &Path, scratch: &Path) -> bool {
     // locked or sees it replaced, never both removed and held.
     let removed = std::fs::remove_file(marker).is_ok();
     if removed {
-        debug!(path = %scratch.display(), "collected an abandoned scratch directory");
+        debug!(path = %scratch.display(), "collected an abandoned scratch entry");
     }
     removed
 }
 
-fn marker_path(scratch: &Path) -> io::Result<PathBuf> {
+/// Removes a scratch directory with its contents, or a scratch file or link.
+fn remove_entry(path: &Path) -> io::Result<()> {
+    if std::fs::symlink_metadata(path)?.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
+}
+
+/// The marker that claims `scratch`, which exists exactly while a claim on it
+/// is held or its collection is pending.
+pub fn marker_path(scratch: &Path) -> io::Result<PathBuf> {
     let name = scratch
         .file_name()
         .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
@@ -306,6 +317,20 @@ mod tests {
         let root = tempfile::tempdir().expect("temp dir");
         let owner = ScratchOwner::claim(&root.path().join("client-7-0")).expect("claim");
         let scratch = scratch_in(root.path(), "client-7-0");
+        drop(owner);
+
+        assert_eq!(sweep_abandoned(root.path(), |_| true), 1);
+
+        assert!(!scratch.exists());
+        assert!(!root.path().join("client-7-0.owner").exists());
+    }
+
+    #[test]
+    fn a_file_whose_owner_is_gone_is_collected_with_its_marker() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let owner = ScratchOwner::claim(&root.path().join("client-7-0")).expect("claim");
+        let scratch = root.path().join("client-7-0");
+        std::fs::write(&scratch, b"partial").expect("write partial");
         drop(owner);
 
         assert_eq!(sweep_abandoned(root.path(), |_| true), 1);

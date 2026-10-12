@@ -31,6 +31,9 @@
 //! * a file is written to a unique sibling and renamed over its destination, so
 //!   an instance that has the previous file mapped keeps a complete file and a
 //!   concurrent unpack never exposes a partial one (ADR 0011),
+//! * a sibling is claimed with an `flock` owner marker while it is written, so
+//!   the next unpack removes one an interrupted launcher left behind and never
+//!   one another unpack is still writing,
 //! * `extract.exclude` from the metadata is applied as a *filter* on top, never
 //!   as a substitute for the checks above.
 //!
@@ -42,7 +45,9 @@
 use std::io::{Read as _, Write as _};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
+use ephervex_download::scratch::{self, ScratchOwner};
 use tracing::{debug, trace};
 
 /// Largest a single unpacked native may be.
@@ -148,6 +153,7 @@ pub fn extract(
         path: destination.to_path_buf(),
         source,
     })?;
+    sweep_abandoned_temporaries(destination, 0);
 
     let mut report = NativesReport::default();
     for index in 0..zip.len() {
@@ -226,6 +232,90 @@ static TEMPORARY_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Most unique temporary names tried before giving up on a directory.
 const MAX_TEMPORARY_ATTEMPTS: usize = 16;
 
+/// Most directory levels below the natives directory searched for leftovers.
+const MAX_SWEEP_DEPTH: usize = 4;
+
+/// How old a temporary with no owner marker must be before it is collected.
+///
+/// Only an unpack that predates owner markers writes one, and writing a
+/// single native takes seconds.
+const UNOWNED_TEMPORARY_MIN_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Whether `name` has the shape of a temporary [`create_temporary_sibling`]
+/// makes: `.<native>.<pid>.<counter>.part`.
+fn is_temporary_name(name: &str) -> bool {
+    let Some(rest) = name
+        .strip_prefix('.')
+        .and_then(|rest| rest.strip_suffix(".part"))
+    else {
+        return false;
+    };
+    let mut parts = rest.rsplitn(3, '.');
+    let is_number = |part: Option<&str>| {
+        part.is_some_and(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+    };
+    is_number(parts.next())
+        && is_number(parts.next())
+        && parts.next().is_some_and(|native| !native.is_empty())
+}
+
+/// Removes temporaries an interrupted unpack left in `directory` and in the
+/// real directories below it.
+///
+/// One is collected when its owner marker is unlocked, which a running unpack
+/// in any process holds for as long as it writes, or when it has no marker and
+/// has not been modified for [`UNOWNED_TEMPORARY_MIN_AGE`]. Links are never
+/// followed.
+fn sweep_abandoned_temporaries(directory: &Path, depth: usize) {
+    let collected = scratch::sweep_abandoned(directory, is_temporary_name);
+    if collected > 0 {
+        debug!(directory = %directory.display(), collected, "removed abandoned native temporaries");
+    }
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        let path = entry.path();
+        if kind.is_dir() {
+            if depth < MAX_SWEEP_DEPTH {
+                sweep_abandoned_temporaries(&path, depth + 1);
+            }
+            continue;
+        }
+        if !kind.is_file() || !entry.file_name().to_str().is_some_and(is_temporary_name) {
+            continue;
+        }
+        remove_unowned_temporary(&path);
+    }
+}
+
+/// Removes `path` when no owner marker accounts for it and it is old enough.
+///
+/// The decision is made while holding the claim on the name, as a writer must
+/// before it creates a temporary there, so a file found under the claim cannot
+/// belong to a running unpack.
+fn remove_unowned_temporary(path: &Path) {
+    if scratch::marker_path(path).is_ok_and(|marker| std::fs::symlink_metadata(marker).is_ok()) {
+        return;
+    }
+    let Ok(owner) = ScratchOwner::claim(path) else {
+        return;
+    };
+    let stale = std::fs::symlink_metadata(path)
+        .ok()
+        .filter(std::fs::Metadata::is_file)
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|age| age >= UNOWNED_TEMPORARY_MIN_AGE);
+    if stale && std::fs::remove_file(path).is_ok() {
+        debug!(path = %path.display(), "removed an unowned native temporary");
+    }
+    owner.release();
+}
+
 /// Creates the directories between `destination` and `destination/relative`,
 /// refusing any that is already a link or a non-directory.
 ///
@@ -299,7 +389,8 @@ fn write_executable(path: &Path, bytes: &[u8]) -> Result<(), NativesError> {
         .parent()
         .ok_or_else(|| write_error(std::io::Error::other("native has no parent directory")))?;
 
-    let (mut file, temporary) = create_temporary_sibling(path, parent).map_err(write_error)?;
+    let (mut file, temporary, owner) =
+        create_temporary_sibling(path, parent).map_err(write_error)?;
     let published = (|| {
         file.write_all(bytes)?;
         #[cfg(unix)]
@@ -310,21 +401,23 @@ fn write_executable(path: &Path, bytes: &[u8]) -> Result<(), NativesError> {
         drop(file);
         std::fs::rename(&temporary, path)
     })();
-    if let Err(source) = published {
+    if published.is_err() {
         let _ = std::fs::remove_file(&temporary);
-        return Err(write_error(source));
     }
-    Ok(())
+    // The marker goes last, after the temporary is renamed or removed.
+    owner.release();
+    published.map_err(write_error)
 }
 
-/// Exclusively creates a uniquely named file next to `path`.
+/// Exclusively creates a uniquely named file next to `path`, claimed by the
+/// returned owner until the caller releases it.
 ///
 /// `create_new` refuses an existing name, including a link, so the temporary
 /// can never be a way to write through something already there.
 fn create_temporary_sibling(
     path: &Path,
     parent: &Path,
-) -> std::io::Result<(std::fs::File, PathBuf)> {
+) -> std::io::Result<(std::fs::File, PathBuf, ScratchOwner)> {
     let name = path.file_name().unwrap_or_default();
     for _ in 0..MAX_TEMPORARY_ATTEMPTS {
         let counter = TEMPORARY_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -332,14 +425,24 @@ fn create_temporary_sibling(
         temporary_name.push(name);
         temporary_name.push(format!(".{}.{counter}.part", std::process::id()));
         let temporary = parent.join(temporary_name);
+        // Claimed before the file exists, so a sweep never sees it unowned.
+        let owner = match ScratchOwner::claim(&temporary) {
+            Ok(owner) => owner,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(error) => return Err(error),
+        };
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&temporary)
         {
-            Ok(file) => return Ok((file, temporary)),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
+            Ok(file) => return Ok((file, temporary, owner)),
+            Err(error) => {
+                owner.release();
+                if error.kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err(error);
+                }
+            }
         }
     }
     Err(std::io::Error::new(
@@ -538,8 +641,145 @@ mod tests {
         ] {
             for entry in std::fs::read_dir(directory).expect("read dir") {
                 let name = entry.expect("entry").file_name();
-                assert!(!name.to_string_lossy().ends_with(".part"), "{name:?}");
+                let name = name.to_string_lossy();
+                assert!(
+                    !name.ends_with(".part") && !name.ends_with(".owner"),
+                    "{name}"
+                );
             }
+        }
+    }
+
+    fn leave_temporary(directory: &Path, name: &str) -> PathBuf {
+        std::fs::create_dir_all(directory).expect("directory");
+        let path = directory.join(name);
+        std::fs::write(&path, b"partial").expect("write temporary");
+        path
+    }
+
+    fn age(path: &Path, by: Duration) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .expect("open")
+            .set_modified(std::time::SystemTime::now() - by)
+            .expect("set mtime");
+    }
+
+    #[test]
+    fn an_unpack_removes_temporaries_an_interrupted_unpack_left_behind() {
+        let archive = jar(&[("liblwjgl.so", b"elf")]);
+        let destination = tempfile::tempdir().expect("temp dir");
+        let top = destination.path().join(".libold.so.4242.0.part");
+        let nested = destination
+            .path()
+            .join("linux")
+            .join(".libold.so.4242.1.part");
+        for path in [&top, &nested] {
+            let parent = path.parent().expect("parent");
+            drop(ScratchOwner::claim(path).expect("claim"));
+            leave_temporary(parent, path.file_name().unwrap().to_str().unwrap());
+        }
+
+        extract(archive.path(), destination.path(), &[]).expect("unpack");
+
+        for path in [&top, &nested] {
+            assert!(!path.exists(), "{path:?}");
+            assert!(!scratch::marker_path(path).expect("marker").exists());
+        }
+        assert!(destination.path().join("liblwjgl.so").is_file());
+    }
+
+    #[test]
+    fn an_unpack_never_removes_a_temporary_another_unpack_is_writing() {
+        let archive = jar(&[("liblwjgl.so", b"elf")]);
+        let destination = tempfile::tempdir().expect("temp dir");
+        let live = destination.path().join(".libbig.so.4242.0.part");
+        let owner = ScratchOwner::claim(&live).expect("claim");
+        leave_temporary(destination.path(), ".libbig.so.4242.0.part");
+        // Even a long-unmodified file is live while its owner holds the marker.
+        age(&live, Duration::from_secs(10 * 24 * 60 * 60));
+
+        extract(archive.path(), destination.path(), &[]).expect("unpack");
+
+        assert_eq!(std::fs::read(&live).expect("read"), b"partial");
+        owner.release();
+    }
+
+    #[test]
+    fn an_old_temporary_without_an_owner_marker_is_removed_and_a_recent_one_is_kept() {
+        let archive = jar(&[("liblwjgl.so", b"elf")]);
+        let destination = tempfile::tempdir().expect("temp dir");
+        let old = leave_temporary(destination.path(), ".libold.so.4242.0.part");
+        age(&old, UNOWNED_TEMPORARY_MIN_AGE + Duration::from_secs(60));
+        let recent = leave_temporary(destination.path(), ".librecent.so.4242.1.part");
+
+        extract(archive.path(), destination.path(), &[]).expect("unpack");
+
+        assert!(!old.exists());
+        assert!(!scratch::marker_path(&old).expect("marker").exists());
+        assert!(recent.is_file());
+        assert!(!scratch::marker_path(&recent).expect("marker").exists());
+    }
+
+    #[test]
+    fn files_that_are_not_native_temporaries_are_never_removed() {
+        let archive = jar(&[("liblwjgl.so", b"elf")]);
+        let destination = tempfile::tempdir().expect("temp dir");
+        let kept: Vec<_> = [
+            ".notes.part",
+            ".lib.so.x.1.part",
+            "..1.2.part",
+            "lib.so.4242.0.part",
+        ]
+        .into_iter()
+        .map(|name| {
+            let path = leave_temporary(destination.path(), name);
+            age(&path, UNOWNED_TEMPORARY_MIN_AGE * 2);
+            path
+        })
+        .collect();
+
+        extract(archive.path(), destination.path(), &[]).expect("unpack");
+
+        for path in kept {
+            assert!(path.is_file(), "{path:?}");
+        }
+    }
+
+    #[test]
+    fn a_link_named_like_a_temporary_is_never_followed_or_removed() {
+        let archive = jar(&[("liblwjgl.so", b"elf")]);
+        let destination = tempfile::tempdir().expect("temp dir");
+        let outside = tempfile::tempdir().expect("outside dir");
+        let victim = leave_temporary(outside.path(), "victim");
+        age(&victim, UNOWNED_TEMPORARY_MIN_AGE * 2);
+        let link = destination.path().join(".libold.so.4242.0.part");
+        std::os::unix::fs::symlink(&victim, &link).expect("link");
+
+        extract(archive.path(), destination.path(), &[]).expect("unpack");
+
+        assert!(victim.is_file());
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .expect("link kept")
+                .is_symlink()
+        );
+    }
+
+    #[test]
+    fn temporary_names_are_recognized_by_their_exact_shape() {
+        assert!(is_temporary_name(".liblwjgl.so.4242.0.part"));
+        assert!(is_temporary_name(".a.b.c.12.345.part"));
+        for name in [
+            "liblwjgl.so.4242.0.part",
+            ".liblwjgl.so.4242.part",
+            ".liblwjgl.so.x.0.part",
+            "..4242.0.part",
+            ".liblwjgl.so.4242.0",
+            ".liblwjgl.so.4242.0.part.owner",
+        ] {
+            assert!(!is_temporary_name(name), "{name}");
         }
     }
 

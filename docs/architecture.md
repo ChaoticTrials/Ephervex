@@ -471,6 +471,12 @@ whatever pid namespace or host shared the directory. The next install, server
 creation, cache clear, or limited-budget collection pass removes abandoned ones; a
 directory with no marker has no provable owner and is never removed.
 
+Unpacking a pre-1.19 natives jar writes each file to a hidden `.<name>.<pid>.<n>.part`
+sibling in the shared natives directory and renames it into place. The sibling is claimed
+the same way, so the next unpack removes one an interrupted launcher left behind and never
+one another unpack is still writing. A sibling with no marker, as an older version
+left, is removed only once it has gone a day unmodified.
+
 The budget is a `u64` byte count or Unlimited, defaulting to 10 GiB. A settings
 screen offers presets up to 100 GiB, a custom size in mebibytes, gibibytes, or
 tebibytes, and Unlimited; the stored value is always bytes, so no unit choice
