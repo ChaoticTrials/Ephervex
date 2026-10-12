@@ -46,6 +46,10 @@ project-supplied rainbow mascot. Its logo and favicon are resized from the x4
 artwork in `allay_logos_upscayl_inputs.zip`. Use `?seasonPreview=pride` locally
 to preview it across navigation,
 or `?seasonPreview=off` to disable seasonal colors in the current tab.
+Christmas runs December 24 through 26 in local time, with evergreen and red
+surfaces and the project-supplied Santa mascot from the x4 artwork. Preview it
+locally with
+`?seasonPreview=christmas`.
 Seasonal branding keeps the default launcher screenshots.
 Run `node --test tests/seasonal-theme.test.mjs` to check date boundaries and previews.
 

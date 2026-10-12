@@ -109,6 +109,28 @@
   background: linear-gradient(90deg, color-mix(in srgb, #45aa77 17%, var(--site-surface-alt)), color-mix(in srgb, #9760c6 20%, var(--site-surface-alt)));
 }
 
+:global(html[data-season='christmas']) .pathGrid a:nth-child(4n + 1),
+:global(html[data-season='christmas']) .pathGrid a:nth-child(4n) {
+  border-top: 4px solid #b52b3d;
+  background: linear-gradient(135deg, color-mix(in srgb, #b52b3d 22%, var(--site-surface)), var(--site-surface) 86%);
+}
+:global(html[data-season='christmas']) .pathGrid a:nth-child(4n + 2) {
+  border-top: 4px solid #24744c;
+  background: linear-gradient(135deg, color-mix(in srgb, #24744c 26%, var(--site-surface)), var(--site-surface) 86%);
+}
+:global(html[data-season='christmas']) .pathGrid a:nth-child(4n + 3) {
+  border-top: 4px solid #d2a34a;
+  background: linear-gradient(135deg, color-mix(in srgb, #d2a34a 20%, var(--site-surface)), var(--site-surface) 86%);
+}
+:global(html[data-season='christmas']) .pathGrid a:nth-child(4n + 2) span { color: #216b46; }
+:global(html[data-season='christmas']) .pathGrid a:nth-child(4n + 3) span { color: #856019; }
+:global(html[data-theme='dark'][data-season='christmas']) .pathGrid a:nth-child(4n + 2) span { color: #8dd3a5; }
+:global(html[data-theme='dark'][data-season='christmas']) .pathGrid a:nth-child(4n + 3) span { color: #f4d09a; }
+:global(html[data-season='christmas']) .preview figcaption {
+  border-top: 4px solid #b52b3d;
+  background: linear-gradient(90deg, color-mix(in srgb, #24744c 23%, var(--site-surface-alt)), color-mix(in srgb, #b52b3d 21%, var(--site-surface-alt)));
+}
+
 @media (max-width: 700px) {
   .pathGrid { grid-template-columns: 1fr; }
   .quickLinks a { flex: 1 1 100%; }

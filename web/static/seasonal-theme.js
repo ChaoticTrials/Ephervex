@@ -5,7 +5,7 @@
   const previewKey = 'ephervex-season-preview';
   const query = new URLSearchParams(location.search);
   const previewQuery = query.get('seasonPreview');
-  const seasons = ['halloween', 'pride'];
+  const seasons = ['halloween', 'pride', 'christmas'];
   let preview = null;
 
   if (previewHost) {
@@ -19,7 +19,8 @@
     }
   }
 
-  const scheduled = now.getMonth() === 5 ? 'pride'
+  const scheduled = now.getMonth() === 11 && now.getDate() >= 24 && now.getDate() <= 26 ? 'christmas'
+    : now.getMonth() === 5 ? 'pride'
     : now.getMonth() === 9 && now.getDate() === 31 ? 'halloween' : null;
   const season = preview === 'off' ? null : seasons.includes(preview) ? preview : scheduled;
   if (!season) return;

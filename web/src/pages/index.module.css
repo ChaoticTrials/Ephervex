@@ -367,3 +367,54 @@
   background: #304e71;
 }
 
+
+:global(html[data-season='christmas']) .hero {
+  color: #fffdf4;
+  background:
+    radial-gradient(circle at 85% 18%, color-mix(in srgb, #e7bf83 22%, transparent), transparent 32%),
+    linear-gradient(125deg, #113d2b, #1d6140 58%, #16462f);
+}
+:global(html[data-season='christmas']) .hero::before {
+  background-image:
+    radial-gradient(circle, color-mix(in srgb, #fff5db 68%, transparent) 1px, transparent 2px),
+    radial-gradient(circle, color-mix(in srgb, #fff5db 43%, transparent) 1px, transparent 2px);
+  background-position: 0 0, 37px 61px;
+  background-size: 117px 113px, 159px 151px;
+}
+:global(html[data-season='christmas']) .heroCopy > p,
+:global(html[data-season='christmas']) .supportLine { color: #e1eee1; }
+:global(html[data-season='christmas']) .hero h1 span { color: #ffb4aa; }
+:global(html[data-season='christmas']) .eyebrow,
+:global(html[data-season='christmas']) .supportLine span {
+  border-color: color-mix(in srgb, #f2d4ad 55%, transparent);
+  color: #fff0cf;
+  background: color-mix(in srgb, #fff9e8 10%, transparent);
+}
+:global(html[data-season='christmas']) .secondaryAction {
+  border-color: #c4dbc8;
+  color: #fffdf4;
+}
+:global(html[data-season='christmas']) .secondaryAction:hover {
+  color: #fffdf4;
+  background: color-mix(in srgb, #fff 12%, transparent);
+}
+:global(html[data-season='christmas']) .heroVisual { border-color: #c6d6c0; }
+:global(html[data-season='christmas']) .featureCard:nth-child(odd) { border-top: 4px solid #a62535; }
+:global(html[data-season='christmas']) .featureCard:nth-child(even) { border-top: 4px solid #24744c; }
+:global(html[data-season='christmas']) .cta {
+  color: #fffaf3;
+  background: linear-gradient(110deg, #7d1c29, #a62535);
+}
+:global(html[data-season='christmas']) .cta .sectionLabel { color: #ffe0a8; }
+:global(html[data-season='christmas']) .cta .primaryAction {
+  color: #173b2b;
+  background: #fff5db;
+}
+:global(html[data-season='christmas']) .cta .primaryAction:hover { background: #fff; }
+:global(html[data-theme='dark'][data-season='christmas']) .hero {
+  background:
+    radial-gradient(circle at 84% 16%, color-mix(in srgb, #ab3742 35%, transparent), transparent 35%),
+    linear-gradient(125deg, #0b291d, #194b30 62%, #2f3230);
+}
+:global(html[data-theme='dark'][data-season='christmas']) .featureCard:nth-child(odd) { border-top-color: #e96e78; }
+:global(html[data-theme='dark'][data-season='christmas']) .featureCard:nth-child(even) { border-top-color: #72bf91; }

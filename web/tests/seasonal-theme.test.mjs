@@ -48,3 +48,22 @@ test('branding uses the deployment subpath and updates replaced navigation image
   update();
   assert.equal(images[1].src, images[0].src);
 });
+
+test('Christmas covers December 24 through 26 only', () => {
+  assert.equal(season(12, 23), undefined);
+  for (let day = 24; day <= 26; day++) assert.equal(season(12, day), 'christmas');
+  assert.equal(season(12, 27), undefined);
+  assert.equal(season(1, 1), undefined);
+  assert.equal(season(2, 1, '?seasonPreview=christmas', 'localhost'), 'christmas');
+});
+test('every seasonal palette supplies the shared light and dark color tokens', () => {
+  const base = readFileSync(new URL('../src/css/custom.css', import.meta.url), 'utf8');
+  const seasonal = readFileSync(new URL('../src/css/seasons.css', import.meta.url), 'utf8');
+  const palettes = (css, name) => [...css.matchAll(new RegExp(`html(?:\\[data-theme='dark'\\])?\\[data-season='${name}'\\] \\{([^}]+)\\}`, 'g'))]
+    .map((match) => [...match[1].matchAll(/(--[a-z-]+):/g)].map((token) => token[1]));
+  const expected = palettes(base, 'halloween');
+  for (const name of ['pride', 'christmas']) {
+    const actual = palettes(seasonal, name);
+    for (let mode = 0; mode < 2; mode++) assert.deepEqual(actual[mode], expected[mode], `${name} palette ${mode}`);
+  }
+});

@@ -835,3 +835,37 @@ html[data-season='pride'] .archive-entry:nth-child(4n + 1) { border-left: 4px so
 html[data-season='pride'] .archive-entry:nth-child(4n + 2) { border-left: 4px solid #ec9639; }
 html[data-season='pride'] .archive-entry:nth-child(4n + 3) { border-left: 4px solid #45aa77; }
 html[data-season='pride'] .archive-entry:nth-child(4n) { border-left: 4px solid #468bc9; }
+
+html[data-season='christmas'] .archive-root {
+  --archive-hero-accent: #ffe0a8;
+  --archive-hero-foreground: #fffdf4;
+  --archive-hero-muted: #e8f1e6;
+  --archive-hero-line: color-mix(in srgb, #fff5de 48%, transparent);
+  --archive-hero-card: color-mix(in srgb, #fff5de 10%, transparent);
+}
+html[data-season='christmas'] .archive-hero,
+html[data-season='christmas'] .archive-detail-head {
+  background:
+    radial-gradient(circle at 84% 16%, color-mix(in srgb, #b52b3d 39%, transparent), transparent 38%),
+    linear-gradient(115deg, #123c2a, #215b3e 62%, #543135);
+}
+html[data-season='christmas'] .archive-hero h1 em { color: #ffb4aa; }
+html[data-season='christmas'] .archive-stats button:nth-child(4n + 1),
+html[data-season='christmas'] .archive-stats button:nth-child(4n) {
+  border-top-color: #b52b3d;
+  background: color-mix(in srgb, #b52b3d 14%, var(--site-surface));
+}
+html[data-season='christmas'] .archive-stats button:nth-child(4n + 2) {
+  border-top-color: #24744c;
+  background: color-mix(in srgb, #24744c 17%, var(--site-surface));
+}
+html[data-season='christmas'] .archive-stats button:nth-child(4n + 3) {
+  border-top-color: #d2a34a;
+  background: color-mix(in srgb, #d2a34a 15%, var(--site-surface));
+}
+html[data-season='christmas'] .archive-filter-panel {
+  border-top: 5px solid #b52b3d;
+  background: linear-gradient(115deg, color-mix(in srgb, #24744c 12%, var(--site-surface)), color-mix(in srgb, #b52b3d 11%, var(--site-surface)));
+}
+html[data-season='christmas'] .archive-entry:nth-child(odd) { border-left: 4px solid #b52b3d; }
+html[data-season='christmas'] .archive-entry:nth-child(even) { border-left: 4px solid #24744c; }

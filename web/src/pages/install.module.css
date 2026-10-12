@@ -228,3 +228,36 @@
 :global(html[data-season='pride']) .instructionsHeader {
   background: linear-gradient(90deg, color-mix(in srgb, #45aa77 13%, var(--site-surface-alt)), color-mix(in srgb, #9760c6 17%, var(--site-surface-alt)));
 }
+
+:global(html[data-season='christmas']) .hero {
+  color: #fffdf4;
+  background:
+    radial-gradient(circle at 87% 18%, color-mix(in srgb, #b52b3d 41%, transparent), transparent 38%),
+    linear-gradient(115deg, #123c2a, #215b3e 62%, #543135);
+}
+:global(html[data-season='christmas']) .hero p { color: #e8f1e6; }
+:global(html[data-season='christmas']) .kicker { color: #ffe0a8; }
+:global(html[data-season='christmas']) .chooser { overflow: hidden; }
+:global(html[data-season='christmas']) .chooser::before {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 6px;
+  background: var(--season-ribbon);
+  content: '';
+}
+:global(html[data-season='christmas']) .method:nth-child(4n + 1),
+:global(html[data-season='christmas']) .method:nth-child(4n) {
+  border-top: 4px solid #b52b3d;
+  background: color-mix(in srgb, #b52b3d 12%, var(--site-bg));
+}
+:global(html[data-season='christmas']) .method:nth-child(4n + 2) {
+  border-top: 4px solid #24744c;
+  background: color-mix(in srgb, #24744c 14%, var(--site-bg));
+}
+:global(html[data-season='christmas']) .method:nth-child(4n + 3) {
+  border-top: 4px solid #d2a34a;
+  background: color-mix(in srgb, #d2a34a 14%, var(--site-bg));
+}
+:global(html[data-season='christmas']) .instructionsHeader {
+  background: linear-gradient(90deg, color-mix(in srgb, #24744c 16%, var(--site-surface-alt)), color-mix(in srgb, #b52b3d 16%, var(--site-surface-alt)));
+}
