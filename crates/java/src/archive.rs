@@ -29,7 +29,8 @@
 //! Lexical validation alone cannot see several links composing into an escape.
 //! This module therefore collects the complete tar link graph, rejects link
 //! destinations nested beneath another link, resolves targets through graph
-//! links, and creates links only after the entire graph is safe.
+//! links, and creates links only after the entire graph is safe. Every link is
+//! resolved once, so validation time grows linearly with the entry names.
 //!
 //! # Limits
 //!
@@ -44,11 +45,12 @@
 //! makes the whole install useless, which is a failure mode worth stating out
 //! loud because it would otherwise only surface at launch.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::ffi::OsString;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Components, Path, PathBuf};
 
 use ephervex_pack::path::{safe_link_target, safe_relative_path};
 use flate2::read::GzDecoder;
@@ -390,110 +392,177 @@ fn validated_link_target<R: Read>(
 }
 
 fn validate_link_graph(links: &[PendingLink]) -> Result<(), ArchiveError> {
-    let mut graph = BTreeMap::new();
-    for link in links {
-        if graph
-            .insert(link.resolved.relative.clone(), link.target.clone())
-            .is_some()
-        {
-            return Err(ArchiveError::UnsafePath {
-                entry: link.resolved.name.clone(),
-            });
-        }
-    }
-
-    for link in links {
-        // Creating a link below another archive link follows that ancestor in
-        // the destination path before the new link is created. Reject the
-        // layout outright so the lexical parent used by target resolution is
-        // also the parent where the filesystem operation will land. The graph
-        // is complete here, so this covers forward references as well as links
-        // that appeared earlier in the tar stream.
-        if link
-            .resolved
-            .relative
-            .parent()
-            .into_iter()
-            .flat_map(Path::ancestors)
-            .any(|ancestor| graph.contains_key(ancestor))
-        {
-            return Err(ArchiveError::UnsafePath {
-                entry: link.resolved.name.clone(),
-            });
-        }
-
-        if !link_resolves_inside(&link.resolved.relative, &link.target, &graph) {
-            return Err(ArchiveError::UnsafePath {
-                entry: link.resolved.name.clone(),
-            });
-        }
-    }
-    Ok(())
+    LinkResolver::new(links)?.validate()
 }
 
-#[derive(Debug)]
-enum LinkComponent {
-    Normal(OsString),
-    Parent,
+const ROOT: usize = 0;
+
+#[derive(Clone, Copy)]
+enum Resolution {
+    Unresolved,
+    InProgress,
+    /// The directory node the link's target finally resolves to.
+    Done(usize),
 }
 
-fn link_resolves_inside(
-    link_path: &Path,
-    target: &Path,
-    graph: &BTreeMap<PathBuf, PathBuf>,
-) -> bool {
-    let mut resolved: Vec<OsString> = link_path
-        .parent()
-        .into_iter()
-        .flat_map(Path::components)
-        .filter_map(|component| match component {
-            std::path::Component::Normal(value) => Some(value.to_os_string()),
-            _ => None,
-        })
-        .collect();
-    let mut remaining = link_components(target);
-    let mut visited = BTreeSet::new();
+/// A link being resolved, suspended while a link it passes through resolves.
+struct Frame<'a> {
+    link: usize,
+    components: Components<'a>,
+    at: usize,
+}
 
-    while let Some(component) = remaining.pop_front() {
-        match component {
-            LinkComponent::Parent => {
-                if resolved.pop().is_none() {
-                    return false;
+/// Resolves every archive link through the complete link graph.
+///
+/// Paths are interned as nodes of one tree, so a position is a single index
+/// and stepping into or out of a directory is constant time. Each link is
+/// resolved once and its destination reused by every path that crosses it,
+/// which keeps the work linear in the total size of the entry names.
+struct LinkResolver<'a> {
+    links: &'a [PendingLink],
+    children: HashMap<(usize, &'a OsStr), usize>,
+    parents: Vec<usize>,
+    link_at: Vec<Option<usize>>,
+    link_node: Vec<usize>,
+    state: Vec<Resolution>,
+    #[cfg(test)]
+    steps: u64,
+}
+
+impl<'a> LinkResolver<'a> {
+    fn new(links: &'a [PendingLink]) -> Result<Self, ArchiveError> {
+        let mut resolver = Self {
+            links,
+            children: HashMap::new(),
+            parents: vec![ROOT],
+            link_at: vec![None],
+            link_node: Vec::with_capacity(links.len()),
+            state: vec![Resolution::Unresolved; links.len()],
+            #[cfg(test)]
+            steps: 0,
+        };
+        for (index, link) in links.iter().enumerate() {
+            let mut node = ROOT;
+            for component in link.resolved.relative.components() {
+                if let Component::Normal(name) = component {
+                    node = resolver.child(node, name);
                 }
             }
-            LinkComponent::Normal(value) => {
-                let mut candidate: PathBuf = resolved.iter().collect();
-                candidate.push(&value);
-                if let Some(next_target) = graph.get(&candidate) {
-                    if !visited.insert(candidate) {
+            if resolver.link_at[node].replace(index).is_some() {
+                return Err(ArchiveError::UnsafePath {
+                    entry: link.resolved.name.clone(),
+                });
+            }
+            resolver.link_node.push(node);
+        }
+        Ok(resolver)
+    }
+
+    fn child(&mut self, parent: usize, name: &'a OsStr) -> usize {
+        match self.children.entry((parent, name)) {
+            Entry::Occupied(entry) => *entry.get(),
+            Entry::Vacant(entry) => {
+                let node = self.parents.len();
+                self.parents.push(parent);
+                self.link_at.push(None);
+                entry.insert(node);
+                node
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn tick(&mut self) {
+        self.steps += 1;
+    }
+
+    fn validate(&mut self) -> Result<(), ArchiveError> {
+        for index in 0..self.links.len() {
+            // Creating a link below another archive link follows that ancestor
+            // in the destination path before the new link is created. Reject
+            // the layout outright so the lexical parent used by target
+            // resolution is also the parent where the filesystem operation
+            // will land. The graph is complete here, so this covers forward
+            // references as well as links earlier in the tar stream.
+            if self.has_link_ancestor(index) || !self.resolve(index) {
+                return Err(ArchiveError::UnsafePath {
+                    entry: self.links[index].resolved.name.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn has_link_ancestor(&mut self, index: usize) -> bool {
+        let mut node = self.parents[self.link_node[index]];
+        while node != ROOT {
+            #[cfg(test)]
+            self.tick();
+            if self.link_at[node].is_some() {
+                return true;
+            }
+            node = self.parents[node];
+        }
+        false
+    }
+
+    /// Whether the target of `start` stays inside the root and is not part of a
+    /// cycle. Iterative, because a hostile archive can chain links as deep as
+    /// its entry limit allows.
+    fn resolve(&mut self, start: usize) -> bool {
+        if !matches!(self.state[start], Resolution::Unresolved) {
+            return true;
+        }
+        self.state[start] = Resolution::InProgress;
+        let mut frames = vec![Frame {
+            link: start,
+            components: self.links[start].target.components(),
+            at: self.parents[self.link_node[start]],
+        }];
+
+        while let Some(frame) = frames.last_mut() {
+            #[cfg(test)]
+            self.tick();
+            match frame.components.next() {
+                None => {
+                    let (link, at) = (frame.link, frame.at);
+                    self.state[link] = Resolution::Done(at);
+                    frames.pop();
+                    if let Some(waiting) = frames.last_mut() {
+                        waiting.at = at;
+                    }
+                }
+                Some(Component::CurDir) => {}
+                Some(Component::ParentDir | Component::RootDir | Component::Prefix(_)) => {
+                    if frame.at == ROOT {
                         return false;
                     }
-                    let expansion = link_components(next_target);
-                    for nested in expansion.into_iter().rev() {
-                        remaining.push_front(nested);
+                    frame.at = self.parents[frame.at];
+                }
+                Some(Component::Normal(name)) => {
+                    let candidate = self.child(frame.at, name);
+                    let Some(next) = self.link_at[candidate] else {
+                        frame.at = candidate;
+                        continue;
+                    };
+                    match self.state[next] {
+                        Resolution::Done(node) => frame.at = node,
+                        Resolution::InProgress => return false,
+                        Resolution::Unresolved => {
+                            let at = frame.at;
+                            self.state[next] = Resolution::InProgress;
+                            frames.push(Frame {
+                                link: next,
+                                components: self.links[next].target.components(),
+                                at,
+                            });
+                        }
                     }
-                } else {
-                    resolved.push(value);
                 }
             }
         }
+        true
     }
-    true
-}
-
-fn link_components(path: &Path) -> VecDeque<LinkComponent> {
-    path.components()
-        .filter_map(|component| match component {
-            std::path::Component::Normal(value) => {
-                Some(LinkComponent::Normal(value.to_os_string()))
-            }
-            std::path::Component::ParentDir => Some(LinkComponent::Parent),
-            std::path::Component::CurDir => None,
-            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
-                Some(LinkComponent::Parent)
-            }
-        })
-        .collect()
 }
 
 fn create_symlink(resolved: &ResolvedEntry, link: &Path) -> Result<(), ArchiveError> {
@@ -976,6 +1045,124 @@ mod tests {
         assert!(matches!(error, ArchiveError::UnsafePath { .. }));
         assert!(!root.join("a").exists());
         assert!(!root.join("b").exists());
+    }
+
+    fn pending_link(path: &str, target: &str) -> PendingLink {
+        PendingLink {
+            resolved: ResolvedEntry {
+                target: Path::new("/root").join(path),
+                relative: PathBuf::from(path),
+                name: path.to_owned(),
+            },
+            target: PathBuf::from(target),
+        }
+    }
+
+    /// Validates `links` and returns the verdict with the work it took.
+    fn validate_counting(links: &[PendingLink]) -> (Result<(), ArchiveError>, u64) {
+        let mut resolver = LinkResolver::new(links).expect("distinct link paths");
+        let verdict = resolver.validate();
+        (verdict, resolver.steps)
+    }
+
+    /// `l{n}` -> `l{n-1}` -> ... -> `l0` -> `release`, listed in `order`.
+    fn link_chain(length: usize, step: &str, reverse: bool) -> Vec<PendingLink> {
+        let mut links = vec![pending_link("l0", "release")];
+        for index in 1..length {
+            links.push(pending_link(
+                &format!("l{index}"),
+                &format!("l{}{step}", index - 1),
+            ));
+        }
+        if reverse {
+            links.reverse();
+        }
+        links
+    }
+
+    #[test]
+    fn link_validation_work_grows_linearly_with_chained_links() {
+        for (step, reverse) in [("", false), ("", true), ("/sub", false), ("/sub", true)] {
+            for length in [1_000_usize, 4_000, 16_000] {
+                let (verdict, steps) = validate_counting(&link_chain(length, step, reverse));
+                verdict.expect("a chain that stays inside the root is accepted");
+                assert!(
+                    steps <= 8 * length as u64,
+                    "{length} chained links took {steps} steps (step {step:?}, reverse {reverse})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_deep_link_chain_is_validated_without_recursion() {
+        let (verdict, _) = validate_counting(&link_chain(200_000, "", true));
+        verdict.expect("a deep chain is accepted");
+    }
+
+    #[test]
+    fn a_long_link_cycle_is_refused_in_linear_work() {
+        let length = 20_000;
+        let mut links = link_chain(length, "", false);
+        links[0] = pending_link("l0", &format!("l{}", length - 1));
+
+        let (verdict, steps) = validate_counting(&links);
+
+        assert!(matches!(verdict, Err(ArchiveError::UnsafePath { .. })));
+        assert!(steps <= 8 * length as u64, "{steps}");
+    }
+
+    #[test]
+    fn a_long_link_chain_that_ends_outside_the_root_is_refused() {
+        let length = 5_000;
+        let mut links = link_chain(length, "", false);
+        links[0] = pending_link("l0", "../outside");
+
+        for reverse in [false, true] {
+            if reverse {
+                links.reverse();
+            }
+            let (verdict, steps) = validate_counting(&links);
+            assert!(matches!(verdict, Err(ArchiveError::UnsafePath { .. })));
+            assert!(steps <= 8 * length as u64, "{steps}");
+        }
+    }
+
+    #[test]
+    fn links_nested_under_a_deep_directory_resolve_in_linear_work() {
+        let depth = "d/".repeat(200);
+        let length = 2_000_u64;
+        let mut links = vec![pending_link(&format!("{depth}l0"), "../release")];
+        for index in 1..length {
+            links.push(pending_link(
+                &format!("{depth}l{index}"),
+                &format!("l{}", index - 1),
+            ));
+        }
+
+        let (verdict, steps) = validate_counting(&links);
+
+        verdict.expect("links inside the root are accepted");
+        assert!(steps <= 8 * 200 * length, "{steps}");
+        assert!(steps >= length);
+    }
+
+    #[test]
+    fn a_link_below_a_link_is_refused_by_the_ancestor_check() {
+        let links = vec![pending_link("a", "."), pending_link("a/b", "c")];
+
+        let (verdict, _) = validate_counting(&links);
+
+        assert!(matches!(verdict, Err(ArchiveError::UnsafePath { .. })));
+    }
+
+    #[test]
+    fn a_path_that_crosses_one_link_twice_without_looping_is_accepted() {
+        let links = vec![pending_link("d", "x"), pending_link("via", "d/../d/file")];
+
+        let (verdict, _) = validate_counting(&links);
+
+        verdict.expect("crossing a link twice is not a cycle");
     }
 
     #[test]
