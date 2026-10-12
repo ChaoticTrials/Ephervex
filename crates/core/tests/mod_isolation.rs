@@ -1423,6 +1423,7 @@ async fn catalog_and_loader_changes_are_refused_while_a_session_owns_the_host() 
             instance,
             &LinkedModRequest::Update {
                 target: target.to_path_buf(),
+                version: None,
             },
             &[],
             &reporter,

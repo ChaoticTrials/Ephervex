@@ -384,11 +384,6 @@ pub enum Command {
     CancelModAcquisition {
         id: u64,
     },
-    UpdateMod {
-        instance: InstanceId,
-        path: PathBuf,
-        servers: Vec<ServerId>,
-    },
     /// Works out what removing one mod would take with it. `request` names the
     /// ask, and the plan that answers it carries the same number back.
     PlanModRemoval {
@@ -3652,28 +3647,9 @@ fn run_worker(
                     ModOperation {
                         instance,
                         path,
-                        version: Some(version),
+                        version,
                         servers,
                         operation: "changing-mod-version",
-                    },
-                );
-            }
-            Command::UpdateMod {
-                instance,
-                path,
-                servers,
-            } => {
-                apply_mod_operation(
-                    app.paths().clone(),
-                    &events,
-                    &acquisition_waits,
-                    &changing,
-                    ModOperation {
-                        instance,
-                        path,
-                        version: None,
-                        servers,
-                        operation: "updating-mod",
                     },
                 );
             }
@@ -9572,29 +9548,23 @@ fn kill_instance(
     }
 }
 
-/// One version change or update, as the thread that carries it out needs it.
+/// One version change, as the thread that carries it out needs it.
 ///
-/// `version` is the exact release to move to, or `None` for the newest that
-/// fits this client - the same two choices [`Command::ChangeModVersion`] and
-/// [`Command::UpdateMod`] name.
+/// `version` is always an exact release: an update is applied as the release
+/// its confirmation named, so a release published since cannot replace it.
 struct ModOperation {
     instance: InstanceId,
     path: PathBuf,
-    version: Option<String>,
+    version: String,
     servers: Vec<ServerId>,
     operation: &'static str,
 }
 
 impl ModOperation {
     fn request(&self) -> LinkedModRequest {
-        match &self.version {
-            Some(version) => LinkedModRequest::ChangeVersion {
-                target: self.path.clone(),
-                version: version.clone(),
-            },
-            None => LinkedModRequest::Update {
-                target: self.path.clone(),
-            },
+        LinkedModRequest::ChangeVersion {
+            target: self.path.clone(),
+            version: self.version.clone(),
         }
     }
 }
@@ -10790,6 +10760,7 @@ fn version_change_request(path: &Path, version: &str) -> LinkedModRequest {
     if version.is_empty() {
         LinkedModRequest::Update {
             target: path.to_path_buf(),
+            version: None,
         }
     } else {
         LinkedModRequest::ChangeVersion {

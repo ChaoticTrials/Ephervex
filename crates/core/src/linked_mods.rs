@@ -91,9 +91,17 @@ pub enum LinkedModRequest {
         target: PathBuf,
         version: String,
     },
-    /// The newest release that fits the *client*, for a mod it already has.
+    /// A release that fits the *client*, for a mod it already has.
     Update {
         target: PathBuf,
+        /// The exact release to move to. `None` takes the newest that fits the
+        /// client.
+        ///
+        /// Pinned for the same reason as [`Self::Install`]: whatever applies a
+        /// confirmed plan names the release the plan resolved, so a release
+        /// published after the confirmation cannot reach the client or any
+        /// selected server unseen.
+        version: Option<String>,
     },
     Remove {
         target: PathBuf,
@@ -118,7 +126,7 @@ impl LinkedModRequest {
         match self {
             Self::Install { .. } => None,
             Self::ChangeVersion { target, .. }
-            | Self::Update { target }
+            | Self::Update { target, .. }
             | Self::Remove { target } => Some(target),
         }
     }
@@ -689,12 +697,12 @@ impl App {
                     .await?;
                 self.mutation_half(plan, reporter, &cancel).await
             }
-            LinkedModRequest::Update { target } => {
+            LinkedModRequest::Update { target, version } => {
                 let plan = self
                     .plan_mod_version_change(
                         client,
                         target,
-                        &ModVersionChoice::NewestCompatible,
+                        &update_choice(version.as_deref()),
                         reporter,
                         &cancel,
                     )
@@ -802,9 +810,17 @@ impl App {
                     .await?;
                 self.applied_mutation_half(mutation, reporter, cancel).await
             }
-            LinkedModRequest::Update { target } => {
+            LinkedModRequest::Update { target, version } => {
+                // The same pin ChangeVersion applies: a release that was
+                // withdrawn or no longer fits fails the operation.
                 let mutation = self
-                    .update_managed_mod(client, target, reporter, cancel)
+                    .change_managed_mod_version(
+                        client,
+                        target,
+                        &update_choice(version.as_deref()),
+                        reporter,
+                        cancel,
+                    )
                     .await?;
                 self.applied_mutation_half(mutation, reporter, cancel).await
             }
@@ -1442,6 +1458,17 @@ fn install_request(
     }
 }
 
+/// The release choice an update names: the pinned release, or the newest that
+/// fits the client.
+///
+/// One builder for planning and for applying, so the two cannot disagree about
+/// what was asked for.
+fn update_choice(version: Option<&str>) -> ModVersionChoice {
+    version.map_or(ModVersionChoice::NewestCompatible, |version| {
+        ModVersionChoice::Exact(version.to_owned())
+    })
+}
+
 /// The root an install plan names.
 fn root_of_install(plan: &ModInstallPlan) -> LinkedModRoot {
     LinkedModRoot {
@@ -1970,6 +1997,16 @@ mod tests {
     fn update(target: &str) -> LinkedModRequest {
         LinkedModRequest::Update {
             target: PathBuf::from(target),
+            version: None,
+        }
+    }
+
+    /// The same update as a confirmation carries it, pinned to the release the
+    /// plan resolved.
+    fn confirmed_update(target: &str, plan: &LinkedModPlan) -> LinkedModRequest {
+        LinkedModRequest::Update {
+            target: PathBuf::from(target),
+            version: plan.root.version_id.clone(),
         }
     }
 
@@ -2488,6 +2525,102 @@ mod tests {
                 "libproj-LIBV1.jar".to_owned(),
                 "rootproj-ROOTV2.jar".to_owned()
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_confirmed_update_applies_the_release_it_confirmed() {
+        let world = world().await;
+        let server = world.link_server("Reproduction Server", MINECRAFT);
+        apply(&world, &install("ROOTPROJ"), &[server]).await;
+        apply(&world, &change(ROOT_V2, "ROOTV1"), &[server]).await;
+
+        let confirmation = plan(&world, &update(ROOT_V1)).await;
+        assert_eq!(confirmation.root.version_id.as_deref(), Some("ROOTV2"));
+        assert_eq!(
+            target(&confirmation, server).state,
+            LinkedTargetState::WillChangeVersion {
+                from: "ROOTV1".to_owned(),
+                to: "ROOTV2".to_owned(),
+            }
+        );
+
+        world.late.publish();
+        world.forget_cached_catalog();
+        assert_eq!(
+            plan(&world, &update(ROOT_V1))
+                .await
+                .root
+                .version_id
+                .as_deref(),
+            Some("ROOTV4"),
+            "an unpinned update now takes the new release, which is exactly what \
+             applying the confirmation must not do"
+        );
+        world.forget_cached_catalog();
+
+        let outcome = apply(&world, &confirmed_update(ROOT_V1, &confirmation), &[server]).await;
+
+        assert!(result_for(&outcome, server).succeeded());
+        assert_eq!(outcome.root.version_id.as_deref(), Some("ROOTV2"));
+        assert_eq!(
+            installed_version(
+                world
+                    .app
+                    .pack_recipe(world.client)
+                    .expect("recipe")
+                    .as_ref()
+            ),
+            Some("ROOTV2".to_owned()),
+            "the client got what the confirmation said, not what the catalog now prefers"
+        );
+        assert_eq!(
+            installed_version(Some(&world.server_recipe(server))),
+            Some("ROOTV2".to_owned()),
+            "and so did every selected server"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_confirmed_update_to_a_release_that_no_longer_fits_fails_instead_of_substituting() {
+        let world = world().await;
+        let server = world.link_server("Reproduction Server", MINECRAFT);
+        apply(&world, &install("ROOTPROJ"), &[server]).await;
+        apply(&world, &change(ROOT_V2, "ROOTV1"), &[server]).await;
+
+        // A release of the same project that this client cannot run, standing
+        // in for one withdrawn between the confirmation and the apply.
+        let error = world
+            .app
+            .apply_linked_mod_operation(
+                world.client,
+                &LinkedModRequest::Update {
+                    target: PathBuf::from(ROOT_V1),
+                    version: Some("ROOTV3".to_owned()),
+                },
+                &[server],
+                &silent(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("a release that does not fit is refused");
+
+        assert!(
+            matches!(
+                error,
+                CoreError::ModPlatform(ModPlatformError::IncompatibleSelectedVersion { .. })
+            ),
+            "the refusal names the release rather than updating to a near miss: {error}"
+        );
+        assert_eq!(
+            installed_version(
+                world
+                    .app
+                    .pack_recipe(world.client)
+                    .expect("recipe")
+                    .as_ref()
+            ),
+            Some("ROOTV1".to_owned())
         );
     }
 
