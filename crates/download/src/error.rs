@@ -40,6 +40,9 @@ pub enum DownloadError {
     },
 
     /// Connection, TLS, timeout, or truncated-body failure.
+    ///
+    /// Build it with [`DownloadError::transport`]: the source must not carry
+    /// the request URL, which reqwest renders with its query string.
     #[error("transport failure for {url}")]
     Transport {
         url: String,
@@ -128,6 +131,18 @@ pub enum DownloadError {
 }
 
 impl DownloadError {
+    /// A transport failure labeled with the redacted address.
+    ///
+    /// reqwest's own message appends the full request URL, query string and
+    /// post-redirect target included, so the URL is dropped from the source.
+    #[must_use]
+    pub fn transport(url: String, source: reqwest::Error) -> Self {
+        Self::Transport {
+            url,
+            source: source.without_url(),
+        }
+    }
+
     /// Whether retrying the identical request could plausibly succeed.
     ///
     /// The distinction matters because retrying the wrong things is actively

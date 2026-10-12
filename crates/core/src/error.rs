@@ -33,7 +33,8 @@ use crate::verify::RepairRefusal;
 ///
 /// `Display` on a `thiserror` enum prints only the outermost message, so a
 /// wrapper reaches the log without the artifact, status, or io error that
-/// explains it. Every url a download error names is already redacted.
+/// explains it. A download error never names the query or credentials of a url,
+/// nor the text of one that failed to parse; they are dropped where it is built.
 #[derive(Debug)]
 pub struct ErrorChain<'a>(pub &'a dyn std::error::Error);
 
@@ -1318,6 +1319,30 @@ mod tests {
             "vanilla installation failed: http 404 from \
              https://piston-meta.mojang.com/v1/packages/x/26.1.2.json"
         );
+    }
+
+    /// reqwest renders the full request URL, query string included, in the
+    /// message of its own error.
+    #[tokio::test]
+    async fn a_failed_transfer_logs_no_part_of_the_signed_query_string() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let url = format!("http://{address}/artifact.jar?token=request-secret");
+        let source = reqwest::Client::new().get(&url).send().await.unwrap_err();
+        assert!(
+            source.to_string().contains("request-secret"),
+            "the fixture must carry the URL the log would otherwise print"
+        );
+
+        let error = ephervex_download::DownloadError::transport(
+            ephervex_download::redacted(&url.parse().unwrap()),
+            source,
+        );
+
+        let logged = ErrorChain(&error).to_string();
+        assert!(!logged.contains("request-secret"), "{logged}");
+        assert!(logged.contains("/artifact.jar"), "{logged}");
     }
 
     /// An error that renders its own source must not have it repeated.

@@ -696,9 +696,7 @@ fn request_for(
     // policy so loopback integration tests can exercise the full pipeline.
     let url = Url::parse(address).map_err(|_| PackError::DownloadUrlRejected {
         path: file.display_name(),
-        source: UrlPolicyError::Malformed {
-            url: address.to_owned(),
-        },
+        source: UrlPolicyError::Malformed,
     })?;
     let mut request = DownloadRequest::new(url, destination)
         // Every published hash is checked, not just the one that chose the

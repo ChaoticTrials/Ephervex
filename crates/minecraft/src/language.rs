@@ -240,11 +240,8 @@ impl LanguageCatalogs {
             .resolve(minecraft_version, reporter, cancel)
             .await?;
         let index_ref = metadata.asset_index()?;
-        let index_url = Url::parse(&index_ref.artifact.url).map_err(|_| {
-            ephervex_download::UrlPolicyError::Malformed {
-                url: index_ref.artifact.url.clone(),
-            }
-        })?;
+        let index_url = Url::parse(&index_ref.artifact.url)
+            .map_err(|_| ephervex_download::UrlPolicyError::Malformed)?;
         let index = self
             .read_asset_index(
                 &index_ref.id,
@@ -341,11 +338,8 @@ impl LanguageCatalogs {
         let sha1 = &object.hash;
         let digest = sha1.digest();
         let prefix = digest.get(..2).unwrap_or(digest);
-        let url = Url::parse(&format!("{}/{prefix}/{digest}", self.assets_base)).map_err(|_| {
-            ephervex_download::UrlPolicyError::Malformed {
-                url: self.assets_base.clone(),
-            }
-        })?;
+        let url = Url::parse(&format!("{}/{prefix}/{digest}", self.assets_base))
+            .map_err(|_| ephervex_download::UrlPolicyError::Malformed)?;
         let destination = self.layout.asset_object(sha1)?;
         let request = DownloadRequest::new(url, &destination)
             .verifying(sha1.clone())

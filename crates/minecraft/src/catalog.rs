@@ -135,9 +135,7 @@ impl VersionCatalog {
         layout: CacheLayout,
         manifest_url: &str,
     ) -> MinecraftResult<Self> {
-        let manifest_url = Url::parse(manifest_url).map_err(|_| UrlPolicyError::Malformed {
-            url: manifest_url.to_owned(),
-        })?;
+        let manifest_url = Url::parse(manifest_url).map_err(|_| UrlPolicyError::Malformed)?;
         Ok(Self {
             cache: MetadataCache::new(layout.clone()),
             manifest_key: MetadataKey::new(VERSION_MANIFEST_CACHE_KEY)?,
@@ -312,9 +310,7 @@ impl VersionCatalog {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> MinecraftResult<VersionMetadata> {
-        let url = Url::parse(&record.url).map_err(|_| UrlPolicyError::Malformed {
-            url: record.url.clone(),
-        })?;
+        let url = Url::parse(&record.url).map_err(|_| UrlPolicyError::Malformed)?;
         // The digest names the file; the manifest's URL does not get a say in
         // where it lands.
         let destination =

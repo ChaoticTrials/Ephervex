@@ -670,9 +670,7 @@ fn request_for(planned: &PlannedArtifact) -> LaunchResult<DownloadRequest> {
 /// mean the offline tests could not point the pipeline at a loopback server -
 /// which is exactly the trade `VersionCatalog` already makes.
 fn url(value: &str) -> Result<reqwest::Url, UrlPolicyError> {
-    reqwest::Url::parse(value).map_err(|_| UrlPolicyError::Malformed {
-        url: value.to_owned(),
-    })
+    reqwest::Url::parse(value).map_err(|_| UrlPolicyError::Malformed)
 }
 
 #[cfg(test)]

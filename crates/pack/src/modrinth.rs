@@ -287,8 +287,7 @@ fn normalize_file(
             path: declared_path,
             // Every address was refused; the last refusal is as good an
             // explanation as the first and is the one the log ends on.
-            source: last_rejection
-                .unwrap_or(ephervex_download::UrlPolicyError::Malformed { url: String::new() }),
+            source: last_rejection.unwrap_or(ephervex_download::UrlPolicyError::Malformed),
         });
     }
 

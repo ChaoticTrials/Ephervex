@@ -1387,12 +1387,7 @@ fn read_zip_bytes(installer: &Path, entry: &str, limit: u64) -> LoaderResult<Vec
 }
 
 fn parse_library_url(raw: &str) -> LoaderResult<Url> {
-    Url::parse(raw).map_err(|_| {
-        UrlPolicyError::Malformed {
-            url: raw.to_owned(),
-        }
-        .into()
-    })
+    Url::parse(raw).map_err(|_| UrlPolicyError::Malformed.into())
 }
 
 fn processor_main_class(path: &Path) -> LoaderResult<String> {

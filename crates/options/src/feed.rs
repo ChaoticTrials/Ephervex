@@ -119,9 +119,7 @@ impl FeedSource {
             Self::Gist { api_base, id, .. } => format!("{api_base}/gists/{id}"),
             Self::Document { url } => url.clone(),
         };
-        Url::parse(&raw).map_err(|_| UrlPolicyError::Malformed {
-            url: describe_document(&raw),
-        })
+        Url::parse(&raw).map_err(|_| UrlPolicyError::Malformed)
     }
 
     /// A short stable description for logs. Never a credential-bearing URL.
@@ -265,19 +263,13 @@ impl OptionsFeed {
             FeedSource::Gist { .. } => DomainAllowlist::new(FEED_HOSTS.iter().copied()),
             FeedSource::Document { .. } => {
                 let entry = source.entry_url()?;
-                let host = entry.host_str().ok_or_else(|| UrlPolicyError::Malformed {
-                    url: source.describe(),
-                })?;
+                let host = entry.host_str().ok_or(UrlPolicyError::Malformed)?;
                 DomainAllowlist::new([host])
             }
         };
         Ok(Self {
             cache: MetadataCache::new(layout),
-            key: MetadataKey::new(OPTIONS_FEED_CACHE_KEY).map_err(|_| {
-                UrlPolicyError::Malformed {
-                    url: OPTIONS_FEED_CACHE_KEY.to_owned(),
-                }
-            })?,
+            key: MetadataKey::new(OPTIONS_FEED_CACHE_KEY).map_err(|_| UrlPolicyError::Malformed)?,
             allowlist,
             manager,
             source,
@@ -527,7 +519,7 @@ mod tests {
         };
         assert!(!source.describe().contains("FAKE_REVIEW_VALUE"));
         let error = source.entry_url().expect_err("unparsable url");
-        assert!(matches!(error, UrlPolicyError::Malformed { .. }));
+        assert!(matches!(error, UrlPolicyError::Malformed));
         assert!(!error.to_string().contains("FAKE_REVIEW_VALUE"));
     }
 

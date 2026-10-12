@@ -8,6 +8,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1668,6 +1669,129 @@ async fn a_batch_failure_is_not_blamed_on_a_request_whose_url_prefixes_the_faile
     // Both addresses appear in the message, so the text alone cannot say which request failed.
     assert!(error.to_string().contains(requests[0].url().as_str()));
     assert_eq!(error.index(), 1);
+}
+
+/// Everything a log line made from `error` could print: each cause's message
+/// the way `ErrorChain` joins them, and the `Debug` form.
+fn everything_printed(error: &DownloadError) -> String {
+    let mut text = format!("{error:?}\n{error}");
+    let mut cause = std::error::Error::source(error);
+    while let Some(inner) = cause {
+        let _ = write!(text, "\n{inner}\n{inner:?}");
+        cause = inner.source();
+    }
+    text
+}
+
+/// A loopback address nothing listens on, so connecting to it is refused.
+async fn refused_origin() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let address = listener.local_addr().expect("local address");
+    drop(listener);
+    format!("http://{address}")
+}
+
+#[tokio::test]
+async fn a_refused_connection_does_not_print_the_requests_query_string() {
+    let origin = refused_origin().await;
+    let dir = TempDir::new().expect("temp dir");
+    let url = reqwest::Url::parse(&format!("{origin}/signed.jar?token=request-secret"))
+        .expect("loopback url");
+
+    let error = manager(RetryPolicy::none())
+        .download(
+            &DownloadRequest::new(url, dir.path().join("signed.jar")),
+            &OperationReporter::silent("download"),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("nothing is listening");
+
+    assert!(matches!(error, DownloadError::Transport { .. }), "{error}");
+    let printed = everything_printed(&error);
+    assert!(!printed.contains("request-secret"), "{printed}");
+    assert!(printed.contains("/signed.jar"), "{printed}");
+}
+
+#[tokio::test]
+async fn a_failure_after_a_redirect_does_not_print_the_redirect_targets_query_string() {
+    let refused = refused_origin().await;
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/signed.jar"))
+        .respond_with(ResponseTemplate::new(302).insert_header(
+            "location",
+            format!("{refused}/final.jar?token=redirect-secret").as_str(),
+        ))
+        .mount(&server)
+        .await;
+    let dir = TempDir::new().expect("temp dir");
+
+    let error = manager(RetryPolicy::none())
+        .download(
+            &request(
+                &server,
+                "/signed.jar?token=request-secret",
+                &dir.path().join("signed.jar"),
+            ),
+            &OperationReporter::silent("download"),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("the redirect target refuses connections");
+
+    assert!(matches!(error, DownloadError::Transport { .. }), "{error}");
+    let printed = everything_printed(&error);
+    assert!(!printed.contains("redirect-secret"), "{printed}");
+    assert!(!printed.contains("request-secret"), "{printed}");
+}
+
+#[tokio::test]
+async fn a_body_cut_short_does_not_print_the_requests_query_string() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let address = listener.local_addr().expect("local address");
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let _ = read_request_head(&mut stream).await;
+            // Announces more than it sends, then hangs up.
+            let _ = stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\nConnection: close\r\n\r\nabc",
+                )
+                .await;
+            let _ = stream.shutdown().await;
+        }
+    });
+    let dir = TempDir::new().expect("temp dir");
+    let url = reqwest::Url::parse(&format!("http://{address}/signed.jar?token=request-secret"))
+        .expect("loopback url");
+
+    let error = manager(RetryPolicy::none())
+        .download(
+            &DownloadRequest::new(url, dir.path().join("signed.jar")),
+            &OperationReporter::silent("download"),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("the body is truncated");
+
+    assert!(matches!(error, DownloadError::Transport { .. }), "{error}");
+    let printed = everything_printed(&error);
+    assert!(!printed.contains("request-secret"), "{printed}");
+}
+
+#[test]
+fn an_address_that_does_not_parse_is_not_echoed_by_the_request_parser() {
+    let error = DownloadRequest::parse("not a url?token=request-secret", "/tmp/unused")
+        .expect_err("not a url");
+
+    assert!(matches!(error, UrlPolicyError::Malformed), "{error}");
+    let printed = format!("{error} {error:?}");
+    assert!(!printed.contains("request-secret"), "{printed}");
 }
 
 #[tokio::test]

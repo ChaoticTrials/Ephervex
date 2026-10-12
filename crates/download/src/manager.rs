@@ -292,9 +292,7 @@ impl DownloadRequest {
     /// Parses a URL and applies the transport policy, rejecting anything that
     /// is not HTTPS or that embeds credentials.
     pub fn parse(url: &str, destination: impl Into<PathBuf>) -> Result<Self, UrlPolicyError> {
-        let parsed = Url::parse(url.trim()).map_err(|_| UrlPolicyError::Malformed {
-            url: url.trim().to_owned(),
-        })?;
+        let parsed = Url::parse(url.trim()).map_err(|_| UrlPolicyError::Malformed)?;
         check_transport(&parsed, false)?;
         Ok(Self::new(parsed, destination))
     }
@@ -927,10 +925,8 @@ impl Transfer<'_, '_> {
             () = self.cancel.cancelled() => return Err(self.canceled()),
             sent = builder.send() => sent,
         };
-        let response = sent.map_err(|source| DownloadError::Transport {
-            url: self.url_label.clone(),
-            source,
-        })?;
+        let response =
+            sent.map_err(|source| DownloadError::transport(self.url_label.clone(), source))?;
 
         let status = response.status();
         // The scope of whichever confining client sent the request.
@@ -1026,10 +1022,8 @@ impl Transfer<'_, '_> {
                 next = stream.next() => next,
             };
             let Some(chunk) = next else { break };
-            let chunk = chunk.map_err(|source| DownloadError::Transport {
-                url: self.url_label.clone(),
-                source,
-            })?;
+            let chunk =
+                chunk.map_err(|source| DownloadError::transport(self.url_label.clone(), source))?;
 
             written = written.saturating_add(chunk.len() as u64);
             // The tighter of the two applies: a manager-wide ceiling sized for

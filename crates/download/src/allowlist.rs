@@ -79,8 +79,11 @@ pub const CURSEFORGE_ARTIFACT_HOSTS: &[&str] = &[
 #[non_exhaustive]
 pub enum UrlPolicyError {
     /// Not a URL at all.
-    #[error("`{url}` is not a well-formed url")]
-    Malformed { url: String },
+    ///
+    /// Carries no part of the rejected text: a string that does not parse
+    /// cannot be redacted reliably, and it may hold a token in its query.
+    #[error("the address is not a well-formed url")]
+    Malformed,
 
     /// `file://`, `http://`, `data:`, `ftp://`, and friends. Rejecting these is
     /// the whole point: a pack must not be able to name a local path.
@@ -278,9 +281,7 @@ impl DomainAllowlist {
     /// This is the function importers should call. It returns the parsed URL so
     /// a caller cannot accidentally validate one string and then fetch another.
     pub fn validate(&self, raw: &str) -> Result<Url, UrlPolicyError> {
-        let url = Url::parse(raw.trim()).map_err(|_| UrlPolicyError::Malformed {
-            url: raw.trim().to_owned(),
-        })?;
+        let url = Url::parse(raw.trim()).map_err(|_| UrlPolicyError::Malformed)?;
         self.validate_url(&url)?;
         Ok(url)
     }
@@ -442,7 +443,17 @@ mod tests {
     #[test]
     fn a_relative_path_is_refused_rather_than_resolved() {
         let error = modrinth().validate("../../etc/shadow").unwrap_err();
-        assert!(matches!(error, UrlPolicyError::Malformed { .. }));
+        assert!(matches!(error, UrlPolicyError::Malformed));
+    }
+
+    #[test]
+    fn a_malformed_address_is_refused_without_echoing_its_text() {
+        let error = modrinth()
+            .validate("cdn.modrinth.com/data?token=request-secret")
+            .unwrap_err();
+        assert_eq!(error, UrlPolicyError::Malformed);
+        let printed = format!("{error} {error:?}");
+        assert!(!printed.contains("request-secret"), "{printed}");
     }
 
     #[test]
