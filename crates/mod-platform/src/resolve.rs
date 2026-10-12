@@ -261,6 +261,9 @@ pub struct ExternalDependency {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbeddedNote {
     pub project_id: Option<String>,
+    /// The release the relation pins, when it names no project and the release
+    /// could not be read to learn which one owns it.
+    pub version_id: Option<String>,
     pub file_name: Option<String>,
     pub declared_by: String,
 }
@@ -370,6 +373,14 @@ enum Normalized {
     External {
         kind: ModRelationKind,
         file_name: String,
+    },
+    /// An embedded or incompatible relation that pins a release and names no
+    /// project, whose release the provider could not describe. Neither kind
+    /// installs anything, so the plan carries on without the owner: an embedded
+    /// one is noted, and an incompatible one is matched by release id.
+    UnidentifiedRelease {
+        kind: ModRelationKind,
+        version_id: String,
     },
     /// An optional relation that pins a release and names no project, whose
     /// owning project could not be learned. It stays an offer that says so,
@@ -1011,11 +1022,14 @@ impl<'a> Resolver<'a> {
         // extra is looked up apart from the rest, because failing to judge it
         // must not fail the install. A selection that such a relation might
         // have offered is refused once the graph has settled.
-        let (optional_pins, required_pins): (Vec<&ModDependency>, Vec<&ModDependency>) = version
+        let (optional_pins, other_pins): (Vec<&ModDependency>, Vec<&ModDependency>) = version
             .dependencies
             .iter()
             .filter(|dependency| dependency.pins_only_a_version())
             .partition(|dependency| dependency.kind == ModRelationKind::Optional);
+        let (required_pins, inert_pins): (Vec<&ModDependency>, Vec<&ModDependency>) = other_pins
+            .into_iter()
+            .partition(|dependency| dependency.kind == ModRelationKind::Required);
         let pinned: Vec<String> = required_pins
             .iter()
             .filter_map(|dependency| dependency.version_id.clone())
@@ -1028,6 +1042,16 @@ impl<'a> Resolver<'a> {
                 .versions_by_id(&pinned, self.request.reporter, self.request.cancel)
                 .await?
         };
+        // An embedded or incompatible relation installs nothing, so a release
+        // the provider refuses to describe must not refuse the plan.
+        let inert_pinned: Vec<String> = inert_pins
+            .iter()
+            .filter_map(|dependency| dependency.version_id.clone())
+            .filter(|version_id| !pinned.contains(version_id))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        looked_up.extend(self.lookup_owners(&inert_pinned).await?);
         let optional_pinned: BTreeSet<String> = optional_pins
             .iter()
             .filter_map(|dependency| dependency.version_id.clone())
@@ -1305,6 +1329,7 @@ impl<'a> Resolver<'a> {
                         ..
                     } => self.embedded.push(EmbeddedNote {
                         project_id: Some(project_id),
+                        version_id: None,
                         file_name: None,
                         declared_by: source.clone(),
                     }),
@@ -1325,9 +1350,18 @@ impl<'a> Resolver<'a> {
                                 status: OptionalStatus::Unverified(unverified),
                             });
                     }
+                    Normalized::UnidentifiedRelease {
+                        kind: ModRelationKind::Embedded,
+                        version_id,
+                    } => self.embedded.push(EmbeddedNote {
+                        project_id: None,
+                        version_id: Some(version_id),
+                        file_name: None,
+                        declared_by: source.clone(),
+                    }),
                     // Required relations are edges, and incompatible ones are
                     // checked against the settled graph rather than listed.
-                    Normalized::Project { .. } => {}
+                    Normalized::Project { .. } | Normalized::UnidentifiedRelease { .. } => {}
                 }
             }
         }
@@ -1478,6 +1512,7 @@ impl<'a> Resolver<'a> {
             }
             ModRelationKind::Embedded => self.embedded.push(EmbeddedNote {
                 project_id: None,
+                version_id: None,
                 file_name: Some(file_name.clone()),
                 declared_by: source.to_owned(),
             }),
@@ -1499,23 +1534,50 @@ impl<'a> Resolver<'a> {
     fn check_conflicts(&self) -> ModPlatformResult<()> {
         for ((source, _), relations) in &self.edges {
             for relation in relations {
-                let Normalized::Project {
-                    kind: ModRelationKind::Incompatible,
-                    project_id,
-                    pinned_version,
-                } = relation
-                else {
-                    continue;
+                let conflicting = match relation {
+                    Normalized::Project {
+                        kind: ModRelationKind::Incompatible,
+                        project_id,
+                        pinned_version,
+                    } => self
+                        .is_present(project_id, pinned_version.as_deref())
+                        .then(|| project_id.clone()),
+                    Normalized::UnidentifiedRelease {
+                        kind: ModRelationKind::Incompatible,
+                        version_id,
+                    } => self.owner_of_present_release(version_id),
+                    _ => None,
                 };
-                if self.is_present(project_id, pinned_version.as_deref()) {
+                if let Some(conflicting) = conflicting {
                     return Err(ModPlatformError::IncompatibleDependency {
                         declared_by: source.clone(),
-                        conflicting: project_id.clone(),
+                        conflicting,
                     });
                 }
             }
         }
         Ok(())
+    }
+
+    /// The project whose release `version_id` the finished plan leaves on the
+    /// instance, for a relation that pinned the release without naming a project.
+    ///
+    /// Release ids are unique to the provider, so matching one needs no owner.
+    fn owner_of_present_release(&self, version_id: &str) -> Option<String> {
+        self.resolved
+            .iter()
+            .find(|(_, resolution)| resolution.version.id == version_id)
+            .map(|(project_id, _)| project_id.clone())
+            .or_else(|| {
+                self.request
+                    .installed
+                    .iter()
+                    .find(|entry| {
+                        entry.version_id == version_id
+                            && !self.resolved.contains_key(&entry.project_id)
+                    })
+                    .map(|entry| entry.project_id.clone())
+            })
     }
 
     /// Whether the finished plan leaves `project_id` on the instance, at
@@ -1608,13 +1670,23 @@ fn normalize(
         // A pinned version and no project: the project is *derived* from the
         // version rather than guessed.
         (None, Some(version_id)) => {
-            let version = looked_up
+            let Some(version) = looked_up
                 .iter()
                 .find(|candidate| candidate.id == version_id)
-                .ok_or_else(|| ModPlatformError::VersionUnknown {
-                    provider: ModProvider::Modrinth,
-                    version_id: version_id.to_owned(),
-                })?;
+            else {
+                return match dependency.kind {
+                    ModRelationKind::Embedded | ModRelationKind::Incompatible => {
+                        Ok(Normalized::UnidentifiedRelease {
+                            kind: dependency.kind,
+                            version_id: version_id.to_owned(),
+                        })
+                    }
+                    _ => Err(ModPlatformError::VersionUnknown {
+                        provider: ModProvider::Modrinth,
+                        version_id: version_id.to_owned(),
+                    }),
+                };
+            };
             Ok(Normalized::Project {
                 kind: dependency.kind,
                 project_id: version.project_id.clone(),
@@ -2663,6 +2735,156 @@ mod tests {
             let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
             assert_eq!(plan.root.version.id, "v1", "{kind:?}");
         }
+    }
+
+    fn primary_file_ambiguous() -> ModPlatformError {
+        ModPlatformError::AmbiguousPrimaryFile {
+            version_id: "lib-v1".to_owned(),
+            found: 2,
+        }
+    }
+
+    fn file_unavailable() -> ModPlatformError {
+        ModPlatformError::FileUnavailable {
+            provider: ModProvider::Modrinth,
+            project_id: "LIB".to_owned(),
+            file_id: "lib-file".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unusable_release_pinned_without_a_project_by_an_embedded_or_incompatible_relation_does_not_refuse_the_plan()
+     {
+        for failure in [
+            hashes_missing as fn() -> ModPlatformError,
+            primary_file_ambiguous,
+            file_unavailable,
+        ] {
+            for kind in [ModRelationKind::Embedded, ModRelationKind::Incompatible] {
+                let catalog = optional_of(pins(compatible("v1", "ROOT"), kind, "lib-v1"))
+                    .with("LIB", vec![compatible("lib-v1", "LIB")])
+                    .failing_for(failure, &["lib-v1"]);
+
+                let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+                assert_eq!(plan.root.version.id, "v1", "{kind:?}");
+                assert_eq!(
+                    plan.embedded.len(),
+                    usize::from(kind == ModRelationKind::Embedded),
+                    "{kind:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_lookup_of_a_release_pinned_without_a_project_by_an_embedded_relation_is_not_a_refusal_of_the_release()
+     {
+        let catalog = optional_of(pins(
+            compatible("v1", "ROOT"),
+            ModRelationKind::Embedded,
+            "lib-v1",
+        ))
+        .with("LIB", vec![compatible("lib-v1", "LIB")])
+        .failing_for(unreachable, &["lib-v1"]);
+
+        plan_with(&catalog, InstallSelection::new("ROOT"), &[])
+            .await
+            .expect_err("a provider that cannot answer says nothing about the release");
+    }
+
+    #[tokio::test]
+    async fn a_release_pinned_without_a_project_that_the_catalog_does_not_know_is_noted_when_embedded()
+     {
+        let catalog = optional_of(pins(
+            compatible("v1", "ROOT"),
+            ModRelationKind::Embedded,
+            "gone-v1",
+        ));
+
+        let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+        assert_eq!(
+            plan.embedded,
+            vec![EmbeddedNote {
+                project_id: None,
+                version_id: Some("gone-v1".to_owned()),
+                file_name: None,
+                declared_by: "ROOT".to_owned(),
+            }]
+        );
+
+        let incompatible = optional_of(pins(
+            compatible("v1", "ROOT"),
+            ModRelationKind::Incompatible,
+            "gone-v1",
+        ));
+        let plan = plan_with(&incompatible, InstallSelection::new("ROOT"), &[])
+            .await
+            .expect("an incompatibility with an unknown release cannot be present");
+        assert!(plan.embedded.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_incompatible_release_still_refuses_an_installed_copy_of_it() {
+        let catalog = optional_of(pins(
+            compatible("v1", "ROOT"),
+            ModRelationKind::Incompatible,
+            "lib-v1",
+        ))
+        .with("LIB", vec![compatible("lib-v1", "LIB")])
+        .failing_for(hashes_missing, &["lib-v1"]);
+
+        let installed = [InstalledProject {
+            project_id: "LIB".to_owned(),
+            version_id: "lib-v1".to_owned(),
+        }];
+        let error = plan_with(&catalog, InstallSelection::new("ROOT"), &installed)
+            .await
+            .expect_err("the conflict must still be found");
+        assert!(matches!(
+            error,
+            ModPlatformError::IncompatibleDependency { ref conflicting, .. } if conflicting == "LIB"
+        ));
+
+        let other = [InstalledProject {
+            project_id: "LIB".to_owned(),
+            version_id: "lib-v2".to_owned(),
+        }];
+        plan_with(&catalog, InstallSelection::new("ROOT"), &other)
+            .await
+            .expect("another release of the project does not conflict");
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_incompatible_release_still_refuses_the_same_release_in_the_plan() {
+        // The owner lookup and its single-release retry fail, then the project's
+        // own release list resolves the pinned release.
+        let mut catalog = declares_b1_incompatible(vec![at(compatible("b1", "B"), 0)])
+            .failing_for(hashes_missing, &["b1"]);
+        catalog.failures_before_recovery = Some(std::sync::atomic::AtomicUsize::new(2));
+
+        let error = plan_with(&catalog, InstallSelection::new("ROOT"), &[])
+            .await
+            .expect_err("the conflict must still be found");
+        assert!(matches!(
+            error,
+            ModPlatformError::IncompatibleDependency { ref conflicting, .. } if conflicting == "B"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_canceled_lookup_of_a_release_pinned_without_a_project_by_an_embedded_relation_stops_the_plan()
+     {
+        let catalog = optional_of(pins(
+            compatible("v1", "ROOT"),
+            ModRelationKind::Embedded,
+            "lib-v1",
+        ))
+        .failing_for(canceled, &["lib-v1"]);
+
+        let error = plan_with(&catalog, InstallSelection::new("ROOT"), &[])
+            .await
+            .expect_err("a canceled lookup stops the plan");
+        assert!(error.is_cancellation());
     }
 
     #[tokio::test]

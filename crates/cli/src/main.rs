@@ -5414,6 +5414,7 @@ fn print_mod_plan(plan: &ModInstallPlan, json: bool) {
             })).collect::<Vec<_>>(),
             "embedded": plan.embedded.iter().map(|embedded| serde_json::json!({
                 "project_id": embedded.project_id,
+                "version_id": embedded.version_id,
                 "file_name": embedded.file_name,
                 "declared_by": embedded.declared_by,
             })).collect::<Vec<_>>(),
