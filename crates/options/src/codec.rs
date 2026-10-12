@@ -180,11 +180,11 @@ impl OptionCodec {
                 if !tokens.iter().any(|candidate| candidate == token) {
                     return Err(Unrepresentable::NotInDomain);
                 }
-                Ok(if *quoted {
-                    format!("\"{token}\"")
+                if *quoted {
+                    serde_json::to_string(token).map_err(|_| Unrepresentable::Unwritable)
                 } else {
-                    token.clone()
-                })
+                    Ok(token.clone())
+                }
             }
             (Self::KeyNameGlfw, SettingValue::KeyBinding(binding)) => Ok(binding.to_glfw_name()),
             (Self::KeyCodeLwjgl2, SettingValue::KeyBinding(binding)) => binding
@@ -452,6 +452,28 @@ mod tests {
         let outside = SettingValue::Text("fancy".to_owned());
         assert_eq!(raw.encode(&outside), Err(Unrepresentable::NotInDomain));
         assert_eq!(json.encode(&outside), Err(Unrepresentable::NotInDomain));
+    }
+
+    #[test]
+    fn a_quoted_token_round_trips_through_json_string_decoding() {
+        let tokens = vec![
+            "plain".to_owned(),
+            "a\"b".to_owned(),
+            "a\\b".to_owned(),
+            "\\\"".to_owned(),
+            "caf\u{e9}".to_owned(),
+        ];
+        let codec = OptionCodec::EnumToken {
+            tokens: tokens.clone(),
+            quoted: true,
+        };
+        assert!(codec.is_well_formed());
+        for token in tokens {
+            let encoded = codec.encode(&SettingValue::Text(token.clone())).unwrap();
+            let decoded: String = serde_json::from_str(&encoded)
+                .unwrap_or_else(|error| panic!("{encoded} is not a JSON string: {error}"));
+            assert_eq!(decoded, token, "{encoded}");
+        }
     }
 
     #[test]
