@@ -246,7 +246,7 @@ pub struct PreferenceApplication {
     pub schema: Option<String>,
     /// Whether the knowledge used was the bundled baseline or the remote feed.
     pub source: CompatibilitySource,
-    /// Whether the instance had no `options.txt` before this.
+    /// Whether this call created `options.txt` because the instance had none.
     pub created_file: bool,
     /// Preferences that were managed and written.
     pub applied: Vec<PreferenceId>,
@@ -448,13 +448,11 @@ pub fn apply_plan(
         }
     }
 
-    let existing = read_options(&path)?;
-    report.created_file = existing.is_none();
-
     let writes = plan.assignments();
     if writes.is_empty() {
         // Writing the file back would rewrite an imported pack's own options
-        // for no reason.
+        // for no reason, and an options file this call has no use for need
+        // not even be readable.
         tracing::debug!(
             version = plan.minecraft_version,
             "no global Minecraft preferences to apply; leaving options.txt alone"
@@ -462,6 +460,9 @@ pub fn apply_plan(
         report.applied.clear();
         return Ok(report);
     }
+
+    let existing = read_options(&path)?;
+    report.created_file = existing.is_none();
 
     let mut updated = existing.unwrap_or_else(ParsedOptions::empty);
     // A file this build creates has to say which release wrote it. The game

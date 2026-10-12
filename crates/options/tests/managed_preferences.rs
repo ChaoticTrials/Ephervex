@@ -410,6 +410,47 @@ fn an_unmanaged_preference_writes_nothing_at_all() {
 }
 
 #[test]
+fn an_unreadable_options_path_does_not_fail_an_application_with_nothing_to_write() {
+    let base = tempfile::tempdir().expect("temp dir");
+    let options = base.path().join(OPTIONS_FILE_NAME);
+    std::fs::create_dir(&options).expect("a directory where the file would be");
+
+    let report = apply(
+        base.path(),
+        "1.20.1",
+        &ConfiguredPreferences::new(),
+        LanguageAvailability::Verified,
+    );
+
+    assert!(!report.changed_anything());
+    assert!(!report.created_file, "nothing was created");
+    assert!(options.is_dir(), "the path is left exactly as found");
+}
+
+#[test]
+fn an_unreadable_options_path_still_fails_an_application_that_has_something_to_write() {
+    let base = tempfile::tempdir().expect("temp dir");
+    std::fs::create_dir(base.path().join(OPTIONS_FILE_NAME)).expect("a directory");
+
+    let result = apply_managed_preferences(
+        base.path(),
+        "1.20.1",
+        &managed(&[("gui_scale", MinecraftPreferenceValue::Integer(3))]),
+        catalog(),
+        &OptionsCompatibility::bundled(),
+        LanguageAvailability::Verified,
+    );
+
+    assert!(
+        matches!(
+            result,
+            Err(ephervex_options::OptionsError::Unreadable { .. })
+        ),
+        "{result:?}"
+    );
+}
+
+#[test]
 fn a_files_unrelated_and_mod_added_lines_survive_an_edit() {
     let base = tempfile::tempdir().expect("temp dir");
     let original = "version:3465\nguiScale:0\njei:configVersion:2\naKeyNobodyKnows:{\"a\":1}\n";
