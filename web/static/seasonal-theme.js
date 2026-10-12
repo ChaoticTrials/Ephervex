@@ -3,10 +3,30 @@
   const previewHost = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname)
     || /^(?:10\.\d+\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+)$/.test(location.hostname);
   const previewKey = 'ephervex-season-preview';
+  const preferenceKey = 'ephervex-seasonal-theme';
   const query = new URLSearchParams(location.search);
   const previewQuery = query.get('seasonPreview');
   const seasons = ['halloween', 'pride', 'christmas', 'april-fools'];
   let preview = null;
+  let enabled = true;
+
+  try {
+    enabled = localStorage.getItem(preferenceKey) !== 'off';
+  } catch {
+    // Private browsing settings can make local storage unavailable.
+  }
+
+  globalThis.ephervexSeasonalTheme = {
+    enabled,
+    setEnabled(value) {
+      try {
+        localStorage.setItem(preferenceKey, value ? 'on' : 'off');
+        location.reload();
+      } catch {
+        // Keep the current page usable when storage is unavailable.
+      }
+    },
+  };
 
   if (previewHost) {
     try {
@@ -23,7 +43,7 @@
     : now.getMonth() === 11 && now.getDate() >= 24 && now.getDate() <= 26 ? 'christmas'
     : now.getMonth() === 5 ? 'pride'
     : now.getMonth() === 9 && now.getDate() === 31 ? 'halloween' : null;
-  const season = preview === 'off' ? null : seasons.includes(preview) ? preview : scheduled;
+  const season = !enabled || preview === 'off' ? null : seasons.includes(preview) ? preview : scheduled;
   if (!season) return;
 
   document.documentElement.dataset.season = season;

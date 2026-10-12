@@ -70,6 +70,7 @@ const config: Config = {
         {to: '/road-to-v1/', label: 'Road to v1', position: 'left'},
         {type: 'docsVersionDropdown', position: 'right'},
         {type: 'search', position: 'right'},
+        {type: 'custom-seasonToggle', position: 'right'},
         {href: repository, label: 'GitHub', position: 'right'},
       ],
     },

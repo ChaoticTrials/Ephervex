@@ -55,6 +55,9 @@ surfaces and the project-supplied jester mascot from the x4 artwork. Preview it
 locally with
 `?seasonPreview=april-fools`.
 Seasonal branding keeps the default launcher screenshots.
+Visitors can turn seasonal themes off or back on with the `Seasonal` button in
+the navigation bar or mobile menu. The choice is saved in their browser and
+applies on later visits.
 Run `node --test tests/seasonal-theme.test.mjs` to check date boundaries and previews.
 
 From the repository root, regenerate and synchronize the default 1080p assets:

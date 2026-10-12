@@ -3,9 +3,9 @@ import vm from 'node:vm';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 const script = readFileSync(new URL('../static/seasonal-theme.js', import.meta.url), 'utf8');
-function season(month, day, search = '', hostname = 'example.com') {
+function season(month, day, search = '', hostname = 'example.com', preference = 'on') {
   const document = {documentElement: {dataset: {}}, currentScript: {src: 'https://example.com/preview/seasonal-theme.js'}, addEventListener() {}};
-  vm.runInNewContext(script, {Date: class extends Date {getMonth() {return month - 1;} getDate() {return day;}}, location: {hostname, search}, document, URL, URLSearchParams, sessionStorage: {setItem() {}, getItem() {return new URLSearchParams(search).get('seasonPreview');}}});
+  vm.runInNewContext(script, {Date: class extends Date {getMonth() {return month - 1;} getDate() {return day;}}, location: {hostname, search}, document, URL, URLSearchParams, localStorage: {getItem() {return preference;}}, sessionStorage: {setItem() {}, getItem() {return new URLSearchParams(search).get('seasonPreview');}}});
   return document.documentElement.dataset.season;
 }
 test('Pride covers all of June and stops at its boundaries', () => {
@@ -24,6 +24,28 @@ test('previews are restricted to local hosts and can disable a scheduled season'
   assert.equal(season(6, 1, '?seasonPreview=off', 'localhost'), undefined);
   assert.equal(season(2, 1, '?halloweenPreview=1', 'localhost'), undefined);
   assert.equal(season(10, 31, '?halloweenPreview=0', 'localhost'), 'halloween');
+});
+test('visitor preference disables scheduled and previewed themes across visits', () => {
+  assert.equal(season(6, 1, '', 'example.com', 'off'), undefined);
+  assert.equal(season(6, 1, '', 'example.com', 'on'), 'pride');
+  assert.equal(season(2, 1, '?seasonPreview=christmas', 'localhost', 'off'), undefined);
+});
+test('visitor preference control persists its choice and reloads the page', () => {
+  const stored = new Map();
+  let reloads = 0;
+  const context = {
+    Date: class extends Date {getMonth() {return 0;} getDate() {return 1;}},
+    location: {hostname: 'example.com', search: '', reload() {reloads++;}},
+    document: {documentElement: {dataset: {}}, currentScript: {src: 'https://example.com/seasonal-theme.js'}},
+    URL, URLSearchParams,
+    localStorage: {getItem: (key) => stored.get(key), setItem: (key, value) => stored.set(key, value)},
+  };
+  vm.runInNewContext(script, context);
+  context.ephervexSeasonalTheme.setEnabled(false);
+  assert.equal(stored.get('ephervex-seasonal-theme'), 'off');
+  context.ephervexSeasonalTheme.setEnabled(true);
+  assert.equal(stored.get('ephervex-seasonal-theme'), 'on');
+  assert.equal(reloads, 2);
 });
 test('branding uses the deployment subpath and updates replaced navigation images', () => {
   const images = [{src: 'default-logo.png'}];
