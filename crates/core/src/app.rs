@@ -763,6 +763,9 @@ impl App {
                     })
             })
             .transpose()?;
+        if let Some(java) = &java_override {
+            ephervex_storage::utf8_path(&java.path)?;
+        }
         let _claim = self.claim_stopped_client(id)?;
         let mut record = self.client(id)?;
         self.validate_jvm_override(jvm_override.as_ref())?;
@@ -1070,16 +1073,19 @@ impl App {
     /// memory range as one coherent setting.
     pub fn set_java_settings(&mut self, settings: &GlobalJavaSettings) -> CoreResult<()> {
         EffectiveJvmSettings::resolve(settings, None).validate_memory_range()?;
+        let preferred_path = settings
+            .preferred_path
+            .as_deref()
+            .map(ephervex_storage::utf8_path)
+            .transpose()?
+            .unwrap_or_default();
         self.mutate_config(|config| {
             config.java.auto_detect = settings.auto_detect;
             config.java.auto_download = settings.auto_download;
             config.java.min_memory_mib = settings.min_memory_mib;
             config.java.max_memory_mib = settings.max_memory_mib;
             config.java.jvm_args.clone_from(&settings.jvm_args);
-            config.java.preferred_path = settings
-                .preferred_path
-                .as_ref()
-                .map_or_else(String::new, |path| path.to_string_lossy().into_owned());
+            preferred_path.clone_into(&mut config.java.preferred_path);
         })
     }
 
@@ -1528,8 +1534,9 @@ impl App {
             .transpose()?;
 
         let setting = root
-            .as_ref()
-            .map(|path| path.to_string_lossy().into_owned());
+            .as_deref()
+            .map(|path| ephervex_storage::utf8_path(path).map(str::to_owned))
+            .transpose()?;
         // Only this one field is overridable, so re-deriving is a replacement
         // rather than a re-resolution of the other roots (see `Paths`).
         //
@@ -1585,12 +1592,14 @@ impl App {
                     .collect::<Result<Vec<_>, _>>()
             })
             .transpose()?;
-        let setting = absolute.map(|folders| {
-            folders
-                .into_iter()
-                .map(|path| path.to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-        });
+        let setting = absolute
+            .map(|folders| {
+                folders
+                    .iter()
+                    .map(|path| ephervex_storage::utf8_path(path).map(str::to_owned))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
         self.mutate_config(|config| {
             config.watched_download_folders.clone_from(&setting);
         })
@@ -2594,6 +2603,101 @@ mod tests {
         let reopened = app_rooted_at(base.path());
         assert_eq!(reopened.config().persistent_instance_root, configured);
         assert_eq!(reopened.paths().persistent_instances_dir(), in_use);
+    }
+
+    #[cfg(unix)]
+    fn non_utf8_path(base: &std::path::Path) -> PathBuf {
+        use std::os::unix::ffi::OsStrExt as _;
+        base.join(std::ffi::OsStr::from_bytes(b"d\xff"))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_persistent_instance_root_that_is_not_utf8_is_refused_and_not_saved() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let configured = app.config().persistent_instance_root.clone();
+        let in_use = app.paths().persistent_instances_dir();
+        let bad = non_utf8_path(base.path());
+
+        let error = app
+            .set_persistent_instance_root(Some(&bad))
+            .expect_err("a root with no text form is refused");
+
+        assert_eq!(error.message_id(), "error-paths-not-utf8");
+        assert_eq!(error.failing_path(), Some(bad.clone()));
+        assert!(!bad.exists(), "the refused root must not be created");
+        assert_eq!(app.config().persistent_instance_root, configured);
+        assert_eq!(app.paths().persistent_instances_dir(), in_use);
+        let reopened = app_rooted_at(base.path());
+        assert_eq!(reopened.config().persistent_instance_root, configured);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_preferred_java_path_that_is_not_utf8_is_refused_and_not_saved() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let before = app.java_settings();
+        let bad = non_utf8_path(base.path());
+
+        let error = app
+            .set_java_settings(&GlobalJavaSettings {
+                preferred_path: Some(bad.clone()),
+                max_memory_mib: before.max_memory_mib + 512,
+                ..before.clone()
+            })
+            .expect_err("a Java path with no text form is refused");
+
+        assert_eq!(error.message_id(), "error-paths-not-utf8");
+        assert_eq!(error.failing_path(), Some(bad));
+        assert_eq!(app.java_settings(), before, "no part of the change applies");
+        assert_eq!(app_rooted_at(base.path()).java_settings(), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_watched_download_folder_that_is_not_utf8_is_refused_and_not_saved() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.set_watched_download_folders(Some(&[PathBuf::from("/srv/downloads")]))
+            .expect("set a valid folder");
+        let configured = app.watched_download_folders();
+        let bad = non_utf8_path(base.path());
+
+        let error = app
+            .set_watched_download_folders(Some(&[PathBuf::from("/srv/other"), bad.clone()]))
+            .expect_err("a folder with no text form is refused");
+
+        assert_eq!(error.message_id(), "error-paths-not-utf8");
+        assert_eq!(error.failing_path(), Some(bad));
+        assert_eq!(app.watched_download_folders(), configured);
+        assert_eq!(
+            app_rooted_at(base.path()).watched_download_folders(),
+            configured
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_instance_java_override_that_is_not_utf8_is_refused_and_not_saved() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let client = app
+            .create_client_for_test(NewClient::new("java", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        let bad = non_utf8_path(base.path());
+
+        let error = app
+            .set_client_runtime_settings(
+                client.id,
+                Some(ephervex_model::JavaOverride::new(&bad)),
+                None,
+            )
+            .expect_err("a Java path with no text form is refused");
+
+        assert_eq!(error.message_id(), "error-paths-not-utf8");
+        assert_eq!(app.client(client.id).expect("read").java_override, None);
     }
 
     #[test]

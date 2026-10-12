@@ -37,6 +37,14 @@ pub enum PathError {
     /// The temporary root exists but cannot safely hold private instances.
     #[error("the temporary directory {path} is unsafe: {reason}")]
     UnsafeTemporaryDirectory { path: PathBuf, reason: &'static str },
+    /// A path to persist is not valid UTF-8.
+    ///
+    /// Instance records and the configuration file are JSON and TOML, which can
+    /// only hold text. Storing such a path would either fail late or turn it
+    /// into a different path, so it is refused before anything is written.
+    /// Commands that only read are unaffected.
+    #[error("the path {} is not valid UTF-8", .path.display())]
+    NotUtf8 { path: PathBuf },
 }
 
 impl PathError {
@@ -48,8 +56,19 @@ impl PathError {
             Self::DirectoryCreation { .. } | Self::UnsafeTemporaryDirectory { .. } => {
                 "error-paths-directory-creation"
             }
+            Self::NotUtf8 { .. } => "error-paths-not-utf8",
         }
     }
+}
+
+/// The text of `path`, or [`PathError::NotUtf8`] when it has no lossless text form.
+///
+/// The one check for every path the launcher persists as text, so that a
+/// setting never reads back as a different path than the one that was chosen.
+pub fn utf8_path(path: &Path) -> Result<&str, PathError> {
+    path.to_str().ok_or_else(|| PathError::NotUtf8 {
+        path: path.to_path_buf(),
+    })
 }
 
 /// The file name of the launcher configuration inside the config root.
@@ -821,6 +840,21 @@ mod tests {
         assert_eq!(
             PathError::NoHomeDirectory.message_id(),
             "error-paths-no-home-directory"
+        );
+        assert_eq!(
+            PathError::NotUtf8 {
+                path: PathBuf::new()
+            }
+            .message_id(),
+            "error-paths-not-utf8"
+        );
+    }
+
+    #[test]
+    fn a_utf8_path_is_returned_as_the_text_it_was() {
+        assert_eq!(
+            utf8_path(Path::new("/srv/ephervex")).unwrap(),
+            "/srv/ephervex"
         );
     }
 }

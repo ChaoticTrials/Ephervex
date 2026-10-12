@@ -130,6 +130,28 @@ fn common_json_commands_survive_a_data_root_that_is_not_valid_utf8() {
 }
 
 #[test]
+fn creating_an_instance_under_a_data_root_that_is_not_valid_utf8_names_the_encoding() {
+    let sandbox = Sandbox::with_data_root(&invalid_name("data"));
+
+    let output = sandbox.run(&[
+        "--json",
+        "instance",
+        "create",
+        "Repro",
+        "--minecraft",
+        "1.20.1",
+        "--persistent",
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(r#""message_id": "error-paths-not-utf8""#),
+        "the error names the encoding, not unwritable metadata:\n{stderr}"
+    );
+}
+
+#[test]
 fn reconcile_reports_conflicting_roots_whose_names_are_not_valid_utf8() {
     let sandbox = Sandbox::with_data_root(OsStr::new("data"));
     let created = sandbox.json(&[

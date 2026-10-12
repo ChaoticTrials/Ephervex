@@ -68,7 +68,7 @@ pub use lock::{
     RunningLaunch, force_release, running_launches, running_state, validate_launch_id,
 };
 pub use metadata::{METADATA_VERSION, MetadataError};
-pub use paths::{PathError, Paths};
+pub use paths::{PathError, Paths, utf8_path};
 pub use reconcile::{
     ClientRootConflict, ReconciledRecord, ReconciliationReport, RecordRef, ServerRootConflict,
     reconcile,

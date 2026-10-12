@@ -216,6 +216,9 @@ error-paths-no-home-directory = Ephervex could not work out where your home dire
 error-paths-directory-creation = A required directory could not be created.
 .action = Check permissions on { $path }.
 
+error-paths-not-utf8 = A path Ephervex has to store is not valid UTF-8.
+.action = Ephervex refuses rather than saving a different path. Use a location whose names are valid UTF-8, or correct the XDG and TMPDIR variables if this is one of Ephervex's own directories: { $path }.
+
 ## Index and migration errors 
 
 error-index-unopenable = The launcher index database could not be opened.

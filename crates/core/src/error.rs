@@ -1027,7 +1027,8 @@ fn path_failing_path(error: &ephervex_storage::PathError) -> Option<PathBuf> {
     use ephervex_storage::PathError;
     match error {
         PathError::DirectoryCreation { path, .. }
-        | PathError::UnsafeTemporaryDirectory { path, .. } => Some(path.clone()),
+        | PathError::UnsafeTemporaryDirectory { path, .. }
+        | PathError::NotUtf8 { path } => Some(path.clone()),
         PathError::NoHomeDirectory => None,
     }
 }
@@ -1169,6 +1170,10 @@ mod tests {
             MinecraftError::VersionMetadataCorrupt { id: String::new() }.message_id(),
             MinecraftError::CachedVersionMetadataDamaged { id: String::new() }.message_id(),
             ephervex_storage::PathError::NoHomeDirectory.message_id(),
+            ephervex_storage::PathError::NotUtf8 {
+                path: PathBuf::new(),
+            }
+            .message_id(),
             ServerError::ReadinessTimeout {
                 target: "127.0.0.1:25565".to_owned(),
                 timeout_seconds: 120,

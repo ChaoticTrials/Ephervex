@@ -1272,6 +1272,9 @@ fn from_json_option<T: serde::de::DeserializeOwned>(
 /// previous run at the same id is not, and silently merging into it would
 /// produce an instance that reproduces the wrong thing.
 fn ensure_free_root(root: &Path) -> Result<(), RegistryError> {
+    // Every root checked here is about to be recorded in metadata, which holds
+    // text only.
+    crate::paths::utf8_path(root)?;
     match std::fs::read_dir(root) {
         Ok(mut entries) => {
             if entries.next().is_some() {
@@ -1744,6 +1747,54 @@ mod tests {
     ) -> Result<ServerCommit<ServerRecord>, RegistryError> {
         let claim = registry.claim_host(RecordRef::Server(id))?;
         registry.relocate_server(id, &claim, StorageClass::Persistent, progress)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn instances_cannot_be_created_under_a_root_that_is_not_utf8() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let directory = tempfile::tempdir().expect("temp dir");
+        let base = directory.path();
+        let data = base.join(std::ffi::OsStr::from_bytes(b"data\xff"));
+        let paths = Paths::from_roots(
+            base.join("config"),
+            &data,
+            base.join("cache"),
+            base.join("state"),
+            base.join("temp"),
+        );
+        paths.ensure_base_directories().expect("directories");
+        let registry = Registry::open(paths.clone()).expect("open the registry");
+
+        let client = registry
+            .create_client(
+                NewClient::new("client", "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(StorageClass::Persistent),
+            )
+            .expect_err("a root with no text form cannot be recorded");
+        let server = registry
+            .prepare_server(
+                NewServer::new("server", "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(StorageClass::Persistent),
+            )
+            .expect_err("a root with no text form cannot be recorded");
+
+        for error in [client, server] {
+            assert!(
+                matches!(&error, RegistryError::Path(PathError::NotUtf8 { path }) if path.starts_with(&data)),
+                "{error:?}"
+            );
+            assert_eq!(error.message_id(), "error-paths-not-utf8");
+        }
+        assert!(registry.list_clients().expect("list").is_empty());
+        assert_eq!(
+            std::fs::read_dir(paths.persistent_instances_dir())
+                .expect("instances dir")
+                .count(),
+            0,
+            "no root may be left behind"
+        );
     }
 
     #[test]
