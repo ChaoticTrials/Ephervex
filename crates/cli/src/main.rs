@@ -6002,15 +6002,21 @@ async fn show_login_prompts(
     }
 }
 
+/// `signed_in` is true only for an authenticated default account, so an offline
+/// account reads the same as in text mode; its `kind` is under `default`.
+fn account_status_json(status: &AccountStatus) -> serde_json::Value {
+    serde_json::json!({
+        "signed_in": status.active.as_ref().is_some_and(AccountSummary::is_authenticated),
+        "default": status.active.as_ref().map(account_json),
+        "accounts": status.accounts.iter().map(account_json).collect::<Vec<_>>(),
+        "session_active": status.session_active,
+        "credential_storage": status.credential_storage.map(CredentialStorage::as_str),
+    })
+}
+
 fn show_account_status(status: &AccountStatus, json: bool) {
     if json {
-        print_json(&serde_json::json!({
-            "signed_in": status.is_signed_in(),
-            "default": status.active.as_ref().map(account_json),
-            "accounts": status.accounts.iter().map(account_json).collect::<Vec<_>>(),
-            "session_active": status.session_active,
-            "credential_storage": status.credential_storage.map(CredentialStorage::as_str),
-        }));
+        print_json(&account_status_json(status));
         return;
     }
 
@@ -9550,6 +9556,47 @@ mod tests {
             account_storage_label(&account, None),
             ephervex_i18n::lookup("auth-storage-not-saved")
         );
+    }
+
+    fn status_with(kind: ephervex_model::AccountKind) -> AccountStatus {
+        let mut account = microsoft_summary(CredentialPresence::NotApplicable);
+        account.kind = kind;
+        AccountStatus {
+            active: Some(account.clone()),
+            accounts: vec![account],
+            session_active: false,
+            credential_storage: None,
+        }
+    }
+
+    #[test]
+    fn the_status_json_does_not_call_an_offline_default_account_signed_in() {
+        let json = account_status_json(&status_with(ephervex_model::AccountKind::Offline));
+
+        assert_eq!(json["signed_in"], false);
+        assert_eq!(json["default"]["kind"], "offline");
+        assert_eq!(json["default"]["authenticated"], false);
+    }
+
+    #[test]
+    fn the_status_json_calls_a_microsoft_default_account_signed_in() {
+        let json = account_status_json(&status_with(ephervex_model::AccountKind::Microsoft));
+
+        assert_eq!(json["signed_in"], true);
+        assert_eq!(json["default"]["kind"], "microsoft");
+    }
+
+    #[test]
+    fn the_status_json_reports_no_default_account_as_not_signed_in() {
+        let json = account_status_json(&AccountStatus {
+            active: None,
+            accounts: Vec::new(),
+            session_active: false,
+            credential_storage: None,
+        });
+
+        assert_eq!(json["signed_in"], false);
+        assert!(json["default"].is_null(), "{json}");
     }
 
     #[test]
