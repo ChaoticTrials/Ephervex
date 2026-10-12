@@ -286,6 +286,11 @@ fn duplicating_an_instance_copies_its_files_without_re_applying_preferences() {
     assert_eq!(copy["storage"], "temporary");
     assert_eq!(copy["minecraft_version"], original["minecraft_version"]);
     assert_eq!(
+        copy["skipped_links"],
+        serde_json::json!([]),
+        "a copy that left nothing out says so"
+    );
+    assert_eq!(
         options_of(&copy),
         "guiScale:4\n",
         "the copy keeps the options file the original had"
@@ -308,6 +313,33 @@ fn duplicating_an_instance_copies_its_files_without_re_applying_preferences() {
             .expect("array")
             .len(),
         2
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn duplicating_an_instance_with_json_reports_the_symlinked_folders_it_did_not_copy() {
+    let sandbox = Sandbox::new();
+    let original = sandbox.create("Linked", "1.20.1");
+    let id = original["id"].as_str().expect("id");
+    let root = PathBuf::from(original["root"].as_str().expect("root"));
+
+    let outside = sandbox.base().join("shared-saves");
+    std::fs::create_dir_all(&outside).expect("mkdir");
+    let minecraft = root.join("minecraft");
+    std::fs::create_dir_all(&minecraft).expect("mkdir");
+    std::os::unix::fs::symlink(&outside, minecraft.join("saves")).expect("symlink");
+
+    let copy = sandbox.json(&["--json", "instance", "duplicate", id, "--temporary"]);
+
+    assert_eq!(
+        copy["skipped_links"],
+        serde_json::json!(["minecraft/saves"])
+    );
+    let copied_root = PathBuf::from(copy["root"].as_str().expect("root"));
+    assert!(
+        !copied_root.join("minecraft/saves").exists(),
+        "the link target was not followed into the copy"
     );
 }
 

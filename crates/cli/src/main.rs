@@ -2108,8 +2108,12 @@ async fn run_instance_command(
                 AbsentModPolicy::Keep
             };
             let copy = app.duplicate_client(*id, &request, absent)?;
-            print_instance(app, &copy.record, json)?;
-            if !json {
+            if json {
+                let mut value = instance_json(app, &copy.record)?;
+                value["skipped_links"] = json_paths(&copy.skipped_links);
+                print_json(&value);
+            } else {
+                print_instance(app, &copy.record, json)?;
                 eprintln!(
                     "{}",
                     ephervex_i18n::lookup_args(
@@ -2117,8 +2121,8 @@ async fn run_instance_command(
                         [("name", MessageArg::from(copy.record.name.as_str()))]
                     )
                 );
+                report_skipped_links(&copy.skipped_links);
             }
-            report_skipped_links(&copy.skipped_links, json);
         }
         InstanceCommand::Recipe {
             id,
@@ -7759,9 +7763,10 @@ fn print_folder(path: Option<&Path>, folder: &str, json: bool) -> anyhow::Result
     }
 }
 
-/// Reports the symlinked folders a duplication did not follow.
-fn report_skipped_links(skipped: &[PathBuf], json: bool) {
-    if skipped.is_empty() || json {
+/// Reports the symlinked folders a duplication did not follow. `--json` output
+/// carries them in the `skipped_links` field instead.
+fn report_skipped_links(skipped: &[PathBuf]) {
+    if skipped.is_empty() {
         return;
     }
     eprintln!(
