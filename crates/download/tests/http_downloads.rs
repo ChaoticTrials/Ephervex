@@ -39,10 +39,14 @@ fn manager(retry: RetryPolicy) -> DownloadManager {
 }
 
 fn manager_with(retry: RetryPolicy, concurrency: usize) -> DownloadManager {
+    manager_with_http(retry, concurrency, HttpConfig::for_loopback_tests())
+}
+
+fn manager_with_http(retry: RetryPolicy, concurrency: usize, http: HttpConfig) -> DownloadManager {
     DownloadManager::new(DownloaderConfig {
         concurrency,
         retry,
-        http: HttpConfig::for_loopback_tests(),
+        http,
         allow_resume: true,
         max_bytes: None,
     })
@@ -1343,7 +1347,15 @@ async fn the_file_named_beside_a_batch_count_advances_with_it() {
     let (sink, mut events) = ChannelSink::new();
     let sink: Arc<dyn ProgressSink> = sink;
     let reporter = OperationReporter::new("download-batch", true, sink);
-    let manager = manager_with(RetryPolicy::none(), 8);
+    // A gated request must outlive every earlier release; a timed-out one counts as landed.
+    let manager = manager_with_http(
+        RetryPolicy::none(),
+        8,
+        HttpConfig {
+            read_timeout: Duration::from_secs(120),
+            ..HttpConfig::for_loopback_tests()
+        },
+    );
     let cancel = CancellationToken::new();
     let batch = manager.download_all(&requests, &reporter, &cancel);
 
