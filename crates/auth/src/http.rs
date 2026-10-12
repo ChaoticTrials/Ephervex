@@ -32,7 +32,7 @@
 
 use std::time::Duration;
 
-use ephervex_download::{HttpConfig, redacted};
+use ephervex_download::{HttpConfig, redacted, status_is_transient};
 use reqwest::{Client, RequestBuilder, Response, Url};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -203,6 +203,25 @@ impl OAuthErrorBody {
             },
         }
     }
+
+    /// Like [`Self::into_error`], for a document that arrived with `status`.
+    ///
+    /// A code with no typed meaning says nothing about whether a retry could
+    /// pass, so when the response status is transient the status decides and
+    /// the failure stays retryable. Codes with a typed meaning keep it.
+    #[must_use]
+    pub fn into_error_for_status(self, stage: AuthStage, status: u16) -> AuthError {
+        match self.into_error() {
+            AuthError::OAuth { code, .. } if status_is_transient(status) => {
+                debug!(
+                    status,
+                    code, "transient status kept over an unrecognized OAuth code"
+                );
+                AuthError::HttpStatus { stage, status }
+            }
+            error => error,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -367,6 +386,50 @@ mod tests {
         }
         .into_error();
         assert!(error.requires_interactive_login(), "{error:?}");
+    }
+
+    #[test]
+    fn an_unrecognized_oauth_code_on_a_transient_status_stays_transient() {
+        for status in [429, 500, 503] {
+            let error = OAuthErrorBody {
+                error: "temporarily_unavailable".to_owned(),
+                error_description: String::new(),
+            }
+            .into_error_for_status(AuthStage::Microsoft, status);
+            assert!(
+                matches!(error, AuthError::HttpStatus { status: s, .. } if s == status),
+                "{status}: {error:?}"
+            );
+            assert!(error.is_transient(), "{status}");
+        }
+    }
+
+    #[test]
+    fn an_unrecognized_oauth_code_on_a_permanent_status_keeps_its_wording() {
+        let error = OAuthErrorBody {
+            error: "invalid_scope".to_owned(),
+            error_description: "AADSTS70011: bad scope".to_owned(),
+        }
+        .into_error_for_status(AuthStage::Microsoft, 400);
+        assert!(matches!(error, AuthError::OAuth { .. }), "{error:?}");
+        assert!(!error.is_transient());
+    }
+
+    #[test]
+    fn typed_oauth_codes_keep_their_meaning_on_a_transient_status() {
+        let error = OAuthErrorBody {
+            error: "invalid_grant".to_owned(),
+            error_description: String::new(),
+        }
+        .into_error_for_status(AuthStage::Microsoft, 503);
+        assert!(error.requires_interactive_login(), "{error:?}");
+
+        let error = OAuthErrorBody {
+            error: "access_denied".to_owned(),
+            error_description: String::new(),
+        }
+        .into_error_for_status(AuthStage::Microsoft, 503);
+        assert!(matches!(error, AuthError::Declined), "{error:?}");
     }
 
     #[test]

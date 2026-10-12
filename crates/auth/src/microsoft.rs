@@ -314,7 +314,11 @@ impl MicrosoftClient {
                             description: error.error_description,
                         });
                     }
-                    _ => return Err(error.into_error()),
+                    _ => {
+                        return Err(
+                            error.into_error_for_status(AuthStage::Microsoft, response.status)
+                        );
+                    }
                 }
             }
         };
@@ -381,14 +385,15 @@ impl MicrosoftClient {
 }
 
 /// Turns a non-2xx token response into an error, preferring Microsoft's own
-/// OAuth document over the bare status when one is present.
+/// OAuth document over the bare status when one is present, unless the status
+/// is transient and the document's code has no typed meaning.
 fn oauth_failure(response: &RawResponse, stage: AuthStage) -> AuthError {
     response.parse::<OAuthErrorBody>(stage).map_or_else(
         |_| AuthError::HttpStatus {
             stage,
             status: response.status,
         },
-        OAuthErrorBody::into_error,
+        |body| body.into_error_for_status(stage, response.status),
     )
 }
 
@@ -501,6 +506,23 @@ mod tests {
         assert!(
             url.starts_with("https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize?")
         );
+    }
+
+    #[test]
+    fn a_transient_token_response_with_an_oauth_body_is_reported_as_transient() {
+        let response = RawResponse {
+            status: 503,
+            body: r#"{"error":"temporarily_unavailable","error_description":"try later"}"#
+                .to_owned(),
+        };
+        assert!(oauth_failure(&response, AuthStage::Microsoft).is_transient());
+
+        let response = RawResponse {
+            status: 400,
+            body: r#"{"error":"invalid_grant"}"#.to_owned(),
+        };
+        let error = oauth_failure(&response, AuthStage::Microsoft);
+        assert!(error.requires_interactive_login(), "{error:?}");
     }
 
     #[test]
