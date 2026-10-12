@@ -1036,13 +1036,31 @@ impl App {
         credential_store()
     }
 
+    /// [`Self::keyring`] for a pending cleanup, which retries on every sign-in
+    /// and must not warn each time the Secret Service is still missing.
+    #[cfg(test)]
+    fn keyring_for_cleanup(&self) -> Result<Arc<dyn CredentialStore>, AuthError> {
+        self.test_keyring.open()
+    }
+
+    /// [`Self::keyring`] for a pending cleanup, which retries on every sign-in
+    /// and must not warn each time the Secret Service is still missing.
+    #[cfg(not(test))]
+    #[expect(
+        clippy::unused_self,
+        reason = "a test build reads its keyring from the App"
+    )]
+    fn keyring_for_cleanup(&self) -> Result<Arc<dyn CredentialStore>, AuthError> {
+        KeyringStore::open_quietly().map(|store| -> Arc<dyn CredentialStore> { Arc::new(store) })
+    }
+
     /// Deletes the stored credentials of accounts removed while the keyring
     /// could not be reached, once it can be.
     fn finish_keyring_cleanup(&mut self) {
         if self.reload_config().is_err() || self.config().keyring_cleanup.is_empty() {
             return;
         }
-        if let Ok(store) = self.keyring() {
+        if let Ok(store) = self.keyring_for_cleanup() {
             self.clean_up_keyring(store.as_ref());
         }
     }

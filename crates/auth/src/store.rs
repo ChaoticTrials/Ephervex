@@ -178,10 +178,27 @@ impl KeyringStore {
     /// unavailable" becomes a typed error the frontend can render, rather than
     /// a failure discovered at the moment the user finishes signing in.
     pub fn open() -> AuthResult<Self> {
-        match CredentialStorage::probe() {
+        Self::open_from_probe(CredentialStorage::probe(), true)
+    }
+
+    /// [`Self::open`] for background work the user did not just ask for: a
+    /// missing Secret Service is logged at debug level instead of as a warning.
+    pub fn open_quietly() -> AuthResult<Self> {
+        Self::open_from_probe(CredentialStorage::probe(), false)
+    }
+
+    fn open_from_probe(
+        probe: Result<CredentialStorage, String>,
+        warn_user: bool,
+    ) -> AuthResult<Self> {
+        match probe {
             Ok(_) => Ok(Self::new()),
             Err(detail) => {
-                warn!(%detail, "the desktop secret service is unavailable");
+                if warn_user {
+                    warn!(%detail, "the desktop secret service is unavailable");
+                } else {
+                    debug!(%detail, "the desktop secret service is unavailable");
+                }
                 Err(AuthError::SecretStorageUnavailable { detail })
             }
         }
@@ -312,6 +329,51 @@ mod tests {
             CredentialKey::CurseForgeApiKey.entry_name(),
             "curseforge-api-key"
         );
+    }
+
+    /// Captures the level of every event emitted while `run` executes.
+    fn levels_logged_by(run: impl FnOnce()) -> Vec<tracing::Level> {
+        use std::sync::Arc;
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        struct Levels(Arc<Mutex<Vec<tracing::Level>>>);
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Levels {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _context: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                self.0
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(*event.metadata().level());
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(Levels(Arc::clone(&seen)));
+        tracing::subscriber::with_default(subscriber, run);
+        seen.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    #[test]
+    fn opening_without_a_secret_service_warns_only_when_the_caller_asked_for_it() {
+        let missing = || Err("no secret service".to_owned());
+
+        let loud = levels_logged_by(|| {
+            assert!(KeyringStore::open_from_probe(missing(), true).is_err());
+        });
+        assert_eq!(loud, [tracing::Level::WARN]);
+
+        let quiet = levels_logged_by(|| {
+            let error = KeyringStore::open_from_probe(missing(), false).expect_err("unavailable");
+            assert!(matches!(
+                error,
+                AuthError::SecretStorageUnavailable { detail } if detail == "no secret service"
+            ));
+        });
+        assert_eq!(quiet, [tracing::Level::DEBUG]);
     }
 
     #[test]
