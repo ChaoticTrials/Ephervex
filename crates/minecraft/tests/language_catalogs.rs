@@ -320,3 +320,83 @@ async fn a_stale_cache_is_refreshed_and_the_refreshed_copy_replaces_it_atomicall
         "the stale entry was served instead of being refreshed"
     );
 }
+
+/// A resolver whose language cache is `cache` and expired, but whose version
+/// catalog has its own empty cache and an unreachable provider, so a refresh
+/// cannot succeed.
+fn expired_with_unreachable_provider(
+    unreachable: &MockServer,
+    cache: &tempfile::TempDir,
+) -> (LanguageCatalogs, tempfile::TempDir) {
+    let versions_cache = tempfile::tempdir().expect("temp dir");
+    let versions = VersionCatalog::new(
+        manager(),
+        CacheLayout::new(versions_cache.path()),
+        &format!("{}{MANIFEST_PATH}", unreachable.uri()),
+    )
+    .expect("catalog builds");
+    let layout = CacheLayout::new(cache.path());
+    let catalogs = LanguageCatalogs::new(versions, manager(), layout.clone())
+        .with_assets_base(&unreachable.uri())
+        .with_cache(MetadataCache::with_ttl(layout, Duration::ZERO));
+    (catalogs, versions_cache)
+}
+
+#[tokio::test]
+async fn an_expired_catalog_is_served_when_the_refresh_fails() {
+    let server = MockServer::start().await;
+    mount(&server, PACK_METADATA).await;
+    let cache = tempfile::tempdir().expect("temp dir");
+    let fetched = resolve(&server, &cache).await;
+    drop(server);
+
+    let unreachable = MockServer::start().await;
+    let (catalogs, _versions_cache) = expired_with_unreachable_provider(&unreachable, &cache);
+    let answer = catalogs
+        .resolve("1.20.1", &reporter(), &CancellationToken::new())
+        .await
+        .expect("the retained catalog answers when the provider cannot");
+
+    assert_eq!(answer, fetched);
+    assert!(
+        !unreachable
+            .received_requests()
+            .await
+            .expect("log")
+            .is_empty(),
+        "the expired catalog was served without attempting a refresh"
+    );
+}
+
+#[tokio::test]
+async fn a_canceled_refresh_is_reported_instead_of_serving_the_expired_catalog() {
+    let server = MockServer::start().await;
+    mount(&server, PACK_METADATA).await;
+    let cache = tempfile::tempdir().expect("temp dir");
+    resolve(&server, &cache).await;
+    drop(server);
+
+    let unreachable = MockServer::start().await;
+    let (catalogs, _versions_cache) = expired_with_unreachable_provider(&unreachable, &cache);
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    let error = catalogs
+        .resolve("1.20.1", &reporter(), &cancel)
+        .await
+        .expect_err("a cancellation must not be answered with stale data");
+    assert!(error.is_cancellation(), "{error:?}");
+}
+
+#[tokio::test]
+async fn a_failed_refresh_without_a_retained_catalog_is_reported() {
+    let unreachable = MockServer::start().await;
+    let cache = tempfile::tempdir().expect("temp dir");
+    let (catalogs, _versions_cache) = expired_with_unreachable_provider(&unreachable, &cache);
+
+    let error = catalogs
+        .resolve("1.20.1", &reporter(), &CancellationToken::new())
+        .await
+        .expect_err("nothing is cached to fall back on");
+    assert!(matches!(error, MinecraftError::ManifestUnavailable { .. }));
+}

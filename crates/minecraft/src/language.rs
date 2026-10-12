@@ -173,6 +173,10 @@ impl LanguageCatalogs {
 
     /// Resolves one release's catalog, using the cache when it is still fresh.
     ///
+    /// When the cached copy has expired and the refresh fails, the retained
+    /// copy is returned instead of the failure. A cancellation is never
+    /// swallowed that way.
+    ///
     /// Validation happens before the cache is written, so a truncated or
     /// unrecognizable `pack.mcmeta` cannot replace a catalog that worked.
     #[instrument(skip(self, reporter, cancel), fields(version = minecraft_version))]
@@ -183,18 +187,54 @@ impl LanguageCatalogs {
         cancel: &CancellationToken,
     ) -> MinecraftResult<LanguageCatalog> {
         let key = Self::key(minecraft_version)?;
-        if let Some(entry) = self.cache.peek(&key).await
-            && !entry.freshness().is_stale()
-            && let Ok(catalog) = entry.parse::<LanguageCatalog>()
-            && catalog.is_plausible()
-        {
-            debug!(
-                version = minecraft_version,
-                "serving a cached language catalog"
-            );
-            return Ok(catalog);
-        }
+        let retained = self.cache.peek(&key).await.and_then(|entry| {
+            let stale = entry.freshness().is_stale();
+            let catalog = entry
+                .parse::<LanguageCatalog>()
+                .ok()
+                .filter(LanguageCatalog::is_plausible)?;
+            Some((catalog, stale))
+        });
+        let stale = match retained {
+            Some((catalog, false)) => {
+                debug!(
+                    version = minecraft_version,
+                    "serving a cached language catalog"
+                );
+                return Ok(catalog);
+            }
+            Some((catalog, true)) => Some(catalog),
+            None => None,
+        };
 
+        match self
+            .refresh(minecraft_version, &key, reporter, cancel)
+            .await
+        {
+            Err(error) if !error.is_cancellation() && !cancel.is_cancelled() => {
+                if let Some(catalog) = stale {
+                    debug!(
+                        version = minecraft_version,
+                        %error,
+                        "serving a stale language catalog because the refresh failed"
+                    );
+                    Ok(catalog)
+                } else {
+                    Err(error)
+                }
+            }
+            outcome => outcome,
+        }
+    }
+
+    /// Fetches the catalog from the release's metadata and caches it.
+    async fn refresh(
+        &self,
+        minecraft_version: &str,
+        key: &MetadataKey,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> MinecraftResult<LanguageCatalog> {
         let metadata = self
             .catalog
             .resolve(minecraft_version, reporter, cancel)
@@ -236,7 +276,7 @@ impl LanguageCatalogs {
             .ok()
             .and_then(|text| serde_json::value::RawValue::from_string(text).ok())
         {
-            if let Err(error) = self.cache.store(&key, &index_url, payload).await {
+            if let Err(error) = self.cache.store(key, &index_url, payload).await {
                 debug!(version = minecraft_version, %error, "could not cache the language catalog");
             }
         } else {
