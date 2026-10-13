@@ -74,10 +74,11 @@ pub use reconcile::{
     reconcile,
 };
 pub use records::{
-    ClientCommitWarning, ClientRecord, DUPLICATE_NAME_SUFFIX, DuplicateClient, DuplicatedClient,
-    FileDisposition, ImportSource, JavaOverride, JvmSettings, NewClient, NewServer, ServerCommit,
-    ServerCommitWarning, ServerCreationSource, ServerNetworkSettings, ServerOperatorIdentity,
-    ServerOperatorProfile, ServerOperatorSetup, ServerPortSelection, ServerRecord,
+    ClientCommit, ClientCommitWarning, ClientRecord, Commit, DUPLICATE_NAME_SUFFIX,
+    DuplicateClient, DuplicatedClient, FileDisposition, ImportSource, JavaOverride, JvmSettings,
+    NewClient, NewServer, ServerCommit, ServerCommitWarning, ServerCreationSource,
+    ServerNetworkSettings, ServerOperatorIdentity, ServerOperatorProfile, ServerOperatorSetup,
+    ServerPortSelection, ServerRecord,
 };
 pub use registry::{HostClaim, RecipeClaim, Registry, RegistryError};
 pub use removal::remove_tree_if_present;

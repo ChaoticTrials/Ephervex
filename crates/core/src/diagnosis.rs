@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 use ephervex_download::OperationReporter;
 use ephervex_java::{JavaError, JavaPathChoice, JavaSourceKind, PinSource, RejectionReason};
 use ephervex_model::LoaderSelection;
-use ephervex_storage::DiagnosticKind;
 use ephervex_storage::diagnostics::{MAX_VIEW_BYTES, TextAnchor};
+use ephervex_storage::{ClientCommitWarning, DiagnosticKind};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
 
@@ -532,6 +532,9 @@ pub struct FixOutcome {
     /// What the fix would have changed but never reached because the run was
     /// canceled, by the name the preview showed.
     pub skipped: Vec<String>,
+    /// For a client change: conditions on the saved metadata the user should
+    /// hear about.
+    pub client_warnings: Vec<ClientCommitWarning>,
     /// For a restore: the repair's own report.
     pub repair: Option<RepairReport>,
 }
@@ -793,7 +796,7 @@ impl App {
                 let result = match host {
                     InstalledHost::Instance(id) => self
                         .set_client_runtime_settings(id, None, facts.jvm_override)
-                        .map(drop),
+                        .map(|committed| outcome.client_warnings = committed.warnings),
                     InstalledHost::Server(id) => self
                         .set_server_runtime_settings(id, None, facts.jvm_override)
                         .map(drop),

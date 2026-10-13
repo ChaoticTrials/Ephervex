@@ -324,6 +324,14 @@ instance-duplicate-skipped-links = { $count ->
 instance-folder-unavailable = That folder does not exist yet.
 .action = { $folder } appears once the game has written it, and Ephervex will not create an empty one that suggests otherwise.
 
+# A change to an instance that was saved while syncing its metadata directory
+# to disk failed. $detail is the operating system's description of the failure.
+instance-change-not-durable = The change was saved, but its metadata directory could not be synced to disk, so it may be lost if the machine loses power: { $detail }
+
+# A change to an instance that was saved while updating the instance index
+# failed. $detail describes the failure.
+instance-change-index-out-of-sync = The change was saved, but the instance index could not be updated, so lists may show the old value until the next reconciliation: { $detail }
+
 ## Logs and crash reports
 #
 # File names, paths, byte counts, and the text of a log or crash report are

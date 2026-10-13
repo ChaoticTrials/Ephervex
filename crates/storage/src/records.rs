@@ -456,14 +456,15 @@ pub enum FileDisposition {
     Keep,
 }
 
-/// A canonical server mutation that committed even if its SQLite mirror did not.
+/// A canonical mutation that committed even when something after the commit
+/// point did not fully succeed, with the conditions to report to the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServerCommit<T> {
+pub struct Commit<T, W> {
     pub record: T,
-    pub warnings: Vec<ServerCommitWarning>,
+    pub warnings: Vec<W>,
 }
 
-impl<T> ServerCommit<T> {
+impl<T, W> Commit<T, W> {
     #[must_use]
     pub const fn clean(record: T) -> Self {
         Self {
@@ -472,6 +473,12 @@ impl<T> ServerCommit<T> {
         }
     }
 }
+
+/// A canonical server mutation that committed even if its SQLite mirror did not.
+pub type ServerCommit<T> = Commit<T, ServerCommitWarning>;
+
+/// A canonical client mutation that committed, with the conditions to report.
+pub type ClientCommit<T> = Commit<T, ClientCommitWarning>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerCommitWarning {

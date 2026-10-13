@@ -33,8 +33,8 @@ use ephervex_options::{
 };
 use ephervex_pack::{PackSide, SourceStore};
 use ephervex_storage::{
-    ClientFolder, ClientRecord, Config, DUPLICATE_NAME_SUFFIX, DuplicateClient, DuplicatedClient,
-    ServerCommit, ServerFolder, ServerRecord,
+    ClientCommit, ClientCommitWarning, ClientFolder, ClientRecord, Config, DUPLICATE_NAME_SUFFIX,
+    DuplicateClient, DuplicatedClient, ServerCommit, ServerFolder, ServerRecord,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{instrument, warn};
@@ -509,6 +509,20 @@ pub fn name_with_suffix(base: &str, suffix: &str) -> String {
     sanitized_entity_name(&format!("{}{suffix}", kept.trim_end())).unwrap_or_default()
 }
 
+/// The localized sentence telling a user what a client commit warning means.
+#[must_use]
+pub fn client_commit_warning_message(warning: &ClientCommitWarning) -> String {
+    let (id, detail) = match warning {
+        ClientCommitWarning::IndexOutOfSync { detail } => {
+            ("instance-change-index-out-of-sync", detail)
+        }
+        ClientCommitWarning::MetadataNotDurable { detail } => {
+            ("instance-change-not-durable", detail)
+        }
+    };
+    ephervex_i18n::lookup_args(id, [("detail", ephervex_i18n::Arg::from(detail.as_str()))])
+}
+
 impl App {
     // -- renaming ----------------------------------------------------------
 
@@ -523,11 +537,15 @@ impl App {
     /// and inventing a suffix to tell them apart would name them something
     /// neither was asked to be called.
     #[instrument(skip(self))]
-    pub fn rename_client(&self, instance: InstanceId, name: &str) -> CoreResult<ClientRecord> {
+    pub fn rename_client(
+        &self,
+        instance: InstanceId,
+        name: &str,
+    ) -> CoreResult<ClientCommit<ClientRecord>> {
         let name = validated_entity_name(name)?;
         Ok(self
             .registry_for_services()
-            .modify_client(instance, |record| record.name = name)?)
+            .modify_client_committed(instance, |record| record.name = name)?)
     }
 
     /// Renames a dedicated server, on the same terms.
@@ -755,6 +773,8 @@ mod tests {
         let renamed = app
             .rename_client(original.id, "Chest bug, NeoForge 47")
             .expect("rename");
+        assert!(renamed.warnings.is_empty());
+        let renamed = renamed.record;
 
         assert_eq!(renamed.name, "Chest bug, NeoForge 47");
         assert_eq!(renamed.id, original.id);
@@ -771,6 +791,56 @@ mod tests {
     }
 
     #[test]
+    fn every_client_commit_warning_has_a_localized_message_carrying_its_detail() {
+        for warning in [
+            ClientCommitWarning::IndexOutOfSync {
+                detail: "disk I/O error".to_owned(),
+            },
+            ClientCommitWarning::MetadataNotDurable {
+                detail: "input/output error".to_owned(),
+            },
+        ] {
+            let message = client_commit_warning_message(&warning);
+
+            let (ClientCommitWarning::IndexOutOfSync { detail }
+            | ClientCommitWarning::MetadataNotDurable { detail }) = &warning;
+            assert!(message.contains(detail.as_str()), "`{message}`");
+            assert!(message.starts_with("The change was saved"), "`{message}`");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn renaming_an_instance_whose_metadata_directory_cannot_sync_still_commits_and_warns() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let original = create(&app, "Before", "1.20.1");
+        let directory = ephervex_storage::metadata::client_metadata_path(&original.root)
+            .parent()
+            .expect("metadata directory")
+            .to_path_buf();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o300))
+            .expect("restrict metadata directory");
+        let unsyncable = std::fs::File::open(&directory).is_err();
+        let result = unsyncable.then(|| app.rename_client(original.id, "After"));
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .expect("restore metadata directory");
+        let Some(result) = result else {
+            return;
+        };
+
+        let committed = result.expect("the published metadata is a committed rename");
+        assert_eq!(committed.record.name, "After");
+        assert!(matches!(
+            committed.warnings.as_slice(),
+            [ephervex_storage::ClientCommitWarning::MetadataNotDurable { .. }]
+        ));
+        assert_eq!(app.client(original.id).expect("client").name, "After");
+    }
+
+    #[test]
     fn a_renamed_instance_keeps_every_other_thing_about_it() {
         let base = tempfile::tempdir().expect("temp dir");
         let app = app_rooted_at(base.path());
@@ -778,7 +848,8 @@ mod tests {
 
         let renamed = app
             .rename_client(original.id, "Repro, narrowed")
-            .expect("rename");
+            .expect("rename")
+            .record;
 
         assert_eq!(renamed.minecraft_version, original.minecraft_version);
         assert_eq!(renamed.loader, original.loader);

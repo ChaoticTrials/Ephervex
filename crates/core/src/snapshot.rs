@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use ephervex_model::{LoaderSelection, SnapshotId};
-use ephervex_storage::{CloneMethod, ServerRecord, clone_file};
+use ephervex_storage::{ClientCommitWarning, CloneMethod, ServerRecord, clone_file};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio_util::sync::CancellationToken;
 
@@ -101,6 +101,8 @@ impl Default for SnapshotRestoreOptions {
 pub struct SnapshotRestore {
     pub restored: SnapshotRecord,
     pub safety_snapshot: Option<SnapshotRecord>,
+    /// Conditions on the restored client metadata the user should hear about.
+    pub warnings: Vec<ClientCommitWarning>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -526,8 +528,8 @@ impl App {
                 source,
             })?;
 
-        let previous_server = match self.synchronize_restored_host(host, &layout.root) {
-            Ok(previous_server) => previous_server,
+        let (previous_server, warnings) = match self.synchronize_restored_host(host, &layout.root) {
+            Ok(synchronized) => synchronized,
             Err(error) => {
                 let rollback = transaction.rollback();
                 let message = match rollback {
@@ -563,6 +565,7 @@ impl App {
         Ok(SnapshotRestore {
             restored,
             safety_snapshot,
+            warnings,
         })
     }
 
@@ -666,12 +669,13 @@ impl App {
 
     /// Records the restored host's metadata. For a server, returns the record
     /// it replaced, which tells the linked client's server list what the
-    /// entry showed before.
+    /// entry showed before. For a client, returns the warnings on the
+    /// committed metadata.
     fn synchronize_restored_host(
         &self,
         host: InstalledHost,
         root: &Path,
-    ) -> Result<Option<ServerRecord>, SnapshotError> {
+    ) -> Result<(Option<ServerRecord>, Vec<ClientCommitWarning>), SnapshotError> {
         match host {
             InstalledHost::Instance(id) => {
                 let current = self.client(id).map_err(snapshot_core_error)?;
@@ -694,11 +698,12 @@ impl App {
                 }
                 restored.root = current.root;
                 restored.storage = current.storage;
-                self.registry()
-                    .update_client(&mut restored)
+                let warnings = self
+                    .registry()
+                    .update_client_committed(&mut restored)
                     .map_err(crate::CoreError::from)
                     .map_err(snapshot_core_error)?;
-                Ok(None)
+                Ok((None, warnings))
             }
             InstalledHost::Server(id) => {
                 let current = self.server(id).map_err(snapshot_core_error)?;
@@ -725,7 +730,7 @@ impl App {
                     .update_server(&mut restored)
                     .map_err(crate::CoreError::from)
                     .map_err(snapshot_core_error)?;
-                Ok(Some(current))
+                Ok((Some(current), Vec::new()))
             }
         }
     }

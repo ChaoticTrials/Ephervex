@@ -356,6 +356,48 @@ async fn using_the_recommended_java_previews_both_runtimes_and_changes_only_this
 }
 
 #[tokio::test]
+async fn using_the_recommended_java_reports_a_metadata_directory_that_could_not_sync() {
+    let fixture = Fixture::with_mods(&[]).await;
+    let mut app = fixture.app();
+    let launcher_java = fake_java(&fixture.root.join("launcher-jdk"), "21.0.8");
+    let mut settings = app.java_settings();
+    settings.preferred_path = Some(launcher_java);
+    app.set_java_settings(&settings).unwrap();
+    fixture.pin_java("17.0.12", None);
+    let diagnosis = fixture.diagnose(false).await;
+    let fix = diagnosis.findings[0].fix.clone().unwrap();
+    let metadata = app.client(fixture.id).unwrap().root.join(".launcher");
+    std::fs::set_permissions(&metadata, std::fs::Permissions::from_mode(0o300)).unwrap();
+    let unsyncable = std::fs::File::open(&metadata).is_err();
+
+    let outcome = if unsyncable {
+        Some(
+            app.apply_fix(
+                fixture.host(),
+                &fix,
+                &OperationReporter::silent("fixing"),
+                &CancellationToken::new(),
+            )
+            .await,
+        )
+    } else {
+        None
+    };
+    std::fs::set_permissions(&metadata, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let Some(outcome) = outcome else {
+        return;
+    };
+
+    let outcome = outcome.unwrap();
+    assert!(outcome.is_complete());
+    assert!(matches!(
+        outcome.client_warnings.as_slice(),
+        [ephervex_core::ClientCommitWarning::MetadataNotDurable { .. }]
+    ));
+    assert_eq!(app.client(fixture.id).unwrap().java_override, None);
+}
+
+#[tokio::test]
 async fn custom_jvm_arguments_are_customized_and_the_report_leaves_out_their_values() {
     let fixture = Fixture::with_mods(&[]).await;
     fixture.pin_java(

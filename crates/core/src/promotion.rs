@@ -25,7 +25,7 @@ use std::path::PathBuf;
 
 use ephervex_download::OperationReporter;
 use ephervex_model::{InstanceId, Progress, ServerId, StorageClass};
-use ephervex_storage::{ClientRecord, ServerRecord};
+use ephervex_storage::{ClientCommit, ClientCommitWarning, ClientRecord, ServerRecord};
 use tracing::{info, instrument, warn};
 
 use crate::app::App;
@@ -98,6 +98,8 @@ pub struct PromotionWarning {
 #[derive(Debug)]
 pub struct PromotionOutcome {
     pub instance: ClientRecord,
+    /// Conditions on the saved instance metadata the user should hear about.
+    pub instance_warnings: Vec<ClientCommitWarning>,
     pub servers: Vec<ServerRecord>,
     pub warnings: Vec<PromotionWarning>,
 }
@@ -174,7 +176,10 @@ impl App {
         }
 
         reporter.set_stage(Some("operation-stage-relocating-files".to_owned()));
-        let moved = self.registry_for_services().relocate_client(
+        let ClientCommit {
+            record: moved,
+            warnings: instance_warnings,
+        } = self.registry_for_services().relocate_client(
             instance,
             &claim,
             StorageClass::Persistent,
@@ -215,6 +220,7 @@ impl App {
         );
         Ok(PromotionOutcome {
             instance: moved,
+            instance_warnings,
             servers,
             warnings,
         })

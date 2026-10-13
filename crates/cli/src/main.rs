@@ -24,33 +24,34 @@ use clap_complete::Shell;
 use ephervex_core::{
     AccountRemoval, AccountStatus, AccountSummary, ApiSettings, App, ArgumentForm, Artifact,
     ArtifactCacheHealth, AssetIndexRef, AuthEvent, AuthObserver, BundleContents, BundleSelection,
-    BundledDocumentHealth, CancellationToken, CaptureHealth, CapturedLine, ClientFolder,
-    ClientRecord, CloneMethod, Compatibility, Config, ConfigurationHealth, ControlResponse,
-    CoreError, CrashReview, CreatedClient, CredentialBackendHealth, CredentialOutcome,
-    CredentialPresence, CredentialStorage, DEFAULT_DIAGNOSTIC_BYTES, DEFAULT_SEARCH_LIMIT,
-    DependencyKnowledge, DependencyRefreshReport, DependentMods, DiagnosticEntry, DiagnosticKind,
-    DiagnosticRequest, DiagnosticScope, DiagnosticSearch, DirectoryState, DuplicateClient,
-    EULA_CONFIRMATION_PHRASE, EntitlementLookup, Entitlements, EulaStatus, FileDisposition,
-    Freshness, GameExit, ImpactedMod, ImportRequest, ImportedPack, IncompatibilityReason,
-    InstallationHealth, InstalledHost, InstalledMods, Integrity, IsolationRequest, IsolationRound,
-    IsolationSession, IsolationStep, JavaHealth, JavaPathChoice, JavaPlan, JavaPlanRequest,
-    JavaRuntime, JavaTarget, LaunchAndConnectEvent, LaunchAndConnectObserver,
-    LaunchAndConnectOptions, LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver,
-    LaunchOptions, LaunchOutcome, LaunchState, LoginFlow, LoginOptions, LoginRequest,
-    MAX_SEARCH_MATCHES, MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod,
-    ManagedModInstallation, ManagedModSnapshot, ModInstallPlan, ModInstallRequest, ModPresence,
-    ModProjectDetails, ModRelations, ModSearchQuery, ModSearchResults, NetworkAccess, NewClient,
-    NewServer, OperationReporter, OptionalCandidate, OptionalSelection, OptionalStatus, OutputLine,
-    PackAnalysis, PackRecipe, PackSide, Paths, PlanWarning, PlannedMod, PreferenceApplication,
-    PreferenceId, PreferenceKey, ProcessMonitor, PromotionRequest, PromotionWarning,
-    ReconciliationReport, RelatedMod, ReleaseListing, RequiredMods, RequirementBasis, RoundAnswer,
-    RuntimeClassification, RuntimeInventory, SearchOptions, SecretString, ServerCommitWarning,
-    ServerContentSource, ServerCreateOptions, ServerEvent, ServerExit, ServerFolder,
-    ServerNetworkChange, ServerObserver, ServerPersistenceHealth, ServerRecord, ServerWarning,
-    Session, SharedArtifactReport, SideRequirement, SkipReason, SnapshotOrigin, SnapshotRecord,
-    SnapshotRestoreOptions, StartedServerLifetime, SuspectConfidence, SuspectReason,
-    TerminationRequests, TextAnchor, TextView, UnknownServerFiles, UnverifiedOptional,
-    VerificationReport, VersionMetadata, VersionRecord, format_binary_bytes,
+    BundledDocumentHealth, CancellationToken, CaptureHealth, CapturedLine, ClientCommit,
+    ClientCommitWarning, ClientFolder, ClientRecord, CloneMethod, Compatibility, Config,
+    ConfigurationHealth, ControlResponse, CoreError, CrashReview, CreatedClient,
+    CredentialBackendHealth, CredentialOutcome, CredentialPresence, CredentialStorage,
+    DEFAULT_DIAGNOSTIC_BYTES, DEFAULT_SEARCH_LIMIT, DependencyKnowledge, DependencyRefreshReport,
+    DependentMods, DiagnosticEntry, DiagnosticKind, DiagnosticRequest, DiagnosticScope,
+    DiagnosticSearch, DirectoryState, DuplicateClient, EULA_CONFIRMATION_PHRASE, EntitlementLookup,
+    Entitlements, EulaStatus, FileDisposition, Freshness, GameExit, ImpactedMod, ImportRequest,
+    ImportedPack, IncompatibilityReason, InstallationHealth, InstalledHost, InstalledMods,
+    Integrity, IsolationRequest, IsolationRound, IsolationSession, IsolationStep, JavaHealth,
+    JavaPathChoice, JavaPlan, JavaPlanRequest, JavaRuntime, JavaTarget, LaunchAndConnectEvent,
+    LaunchAndConnectObserver, LaunchAndConnectOptions, LaunchAndConnectOutcome, LaunchEvent,
+    LaunchFeatures, LaunchObserver, LaunchOptions, LaunchOutcome, LaunchState, LoginFlow,
+    LoginOptions, LoginRequest, MAX_SEARCH_MATCHES, MINECRAFT_EULA_REFERENCE, ManagedInstallation,
+    ManagedMod, ManagedModInstallation, ManagedModSnapshot, ModInstallPlan, ModInstallRequest,
+    ModPresence, ModProjectDetails, ModRelations, ModSearchQuery, ModSearchResults, NetworkAccess,
+    NewClient, NewServer, OperationReporter, OptionalCandidate, OptionalSelection, OptionalStatus,
+    OutputLine, PackAnalysis, PackRecipe, PackSide, Paths, PlanWarning, PlannedMod,
+    PreferenceApplication, PreferenceId, PreferenceKey, ProcessMonitor, PromotionRequest,
+    PromotionWarning, ReconciliationReport, RelatedMod, ReleaseListing, RequiredMods,
+    RequirementBasis, RoundAnswer, RuntimeClassification, RuntimeInventory, SearchOptions,
+    SecretString, ServerCommitWarning, ServerContentSource, ServerCreateOptions, ServerEvent,
+    ServerExit, ServerFolder, ServerNetworkChange, ServerObserver, ServerPersistenceHealth,
+    ServerRecord, ServerWarning, Session, SharedArtifactReport, SideRequirement, SkipReason,
+    SnapshotOrigin, SnapshotRecord, SnapshotRestoreOptions, StartedServerLifetime,
+    SuspectConfidence, SuspectReason, TerminationRequests, TextAnchor, TextView,
+    UnknownServerFiles, UnverifiedOptional, VerificationReport, VersionMetadata, VersionRecord,
+    format_binary_bytes,
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{
@@ -1977,6 +1978,7 @@ fn run_snapshot_command(app: &App, command: &SnapshotCommand, json: bool) -> any
                 print_json(&serde_json::json!({
                     "restored": restored.restored,
                     "safety_snapshot": restored.safety_snapshot,
+                    "warnings": client_commit_warnings_json(&restored.warnings),
                 }));
             } else {
                 outln!(
@@ -1987,6 +1989,7 @@ fn run_snapshot_command(app: &App, command: &SnapshotCommand, json: bool) -> any
                 if let Some(safety) = restored.safety_snapshot {
                     outln!("Safety snapshot: {} ({})", safety.label, safety.id);
                 }
+                print_client_commit_warnings(&restored.warnings);
             }
         }
         SnapshotCommand::Rename { host, id, label } => {
@@ -2289,6 +2292,7 @@ fn run_instance_persist(
             "instance": outcome.instance.id.to_string(),
             "root": json_path(&outcome.instance.root),
             "storage": outcome.instance.storage.to_string(),
+            "instance_warnings": client_commit_warnings_json(&outcome.instance_warnings),
             "servers": outcome
                 .servers
                 .iter()
@@ -2319,6 +2323,7 @@ fn run_instance_persist(
             ]
         )
     );
+    print_client_commit_warnings(&outcome.instance_warnings);
     for server in &outcome.servers {
         outln!(
             "  {}",
@@ -7668,7 +7673,7 @@ fn run_instance_runtime(app: &App, command: &InstanceCommand, json: bool) -> any
     else {
         return Ok(());
     };
-    let record = apply_instance_runtime(
+    let committed = apply_instance_runtime(
         app,
         *id,
         RuntimeArgs {
@@ -7679,7 +7684,7 @@ fn run_instance_runtime(app: &App, command: &InstanceCommand, json: bool) -> any
             clear: *clear,
         },
     )?;
-    print_instance_runtime(&record, json);
+    print_instance_runtime(&committed.record, &committed.warnings, json);
     Ok(())
 }
 
@@ -7691,7 +7696,7 @@ fn apply_instance_runtime(
     app: &App,
     id: InstanceId,
     args: RuntimeArgs<'_>,
-) -> anyhow::Result<ClientRecord> {
+) -> anyhow::Result<ClientCommit<ClientRecord>> {
     if args.clear {
         return Ok(app.set_client_runtime_settings(id, None, None)?);
     }
@@ -7701,7 +7706,7 @@ fn apply_instance_runtime(
         || !args.jvm_args.is_empty();
     let record = app.client(id)?;
     if !asked {
-        return Ok(record);
+        return Ok(ClientCommit::clean(record));
     }
     let java = args.java.map(JavaOverride::new).or(record.java_override);
     let mut jvm = record.jvm_override.unwrap_or_default();
@@ -7714,7 +7719,7 @@ fn apply_instance_runtime(
 }
 
 /// What one instance pins for itself, and what it leaves to the global setting.
-fn print_instance_runtime(record: &ClientRecord, json: bool) {
+fn print_instance_runtime(record: &ClientRecord, warnings: &[ClientCommitWarning], json: bool) {
     let java = record
         .java_override
         .as_ref()
@@ -7727,6 +7732,7 @@ fn print_instance_runtime(record: &ClientRecord, json: bool) {
             "min_memory_mib": jvm.and_then(|jvm| jvm.min_memory_mib),
             "max_memory_mib": jvm.and_then(|jvm| jvm.max_memory_mib),
             "jvm_args": jvm.map(|jvm| jvm.jvm_args.clone()).unwrap_or_default(),
+            "warnings": client_commit_warnings_json(warnings),
         }));
         return;
     }
@@ -7751,6 +7757,32 @@ fn print_instance_runtime(record: &ClientRecord, json: bool) {
             args.join(" ")
         }
     );
+    print_client_commit_warnings(warnings);
+}
+
+fn client_commit_warnings_json(warnings: &[ClientCommitWarning]) -> Vec<serde_json::Value> {
+    warnings
+        .iter()
+        .map(|warning| match warning {
+            ClientCommitWarning::IndexOutOfSync { detail } => serde_json::json!({
+                "kind": "index_out_of_sync",
+                "detail": detail,
+            }),
+            ClientCommitWarning::MetadataNotDurable { detail } => serde_json::json!({
+                "kind": "metadata_not_durable",
+                "detail": detail,
+            }),
+        })
+        .collect()
+}
+
+fn print_client_commit_warnings(warnings: &[ClientCommitWarning]) {
+    for warning in warnings {
+        eprintln!(
+            "{}",
+            ephervex_core::instance::client_commit_warning_message(warning)
+        );
+    }
 }
 
 fn print_folder(path: Option<&Path>, folder: &str, json: bool) -> anyhow::Result<()> {

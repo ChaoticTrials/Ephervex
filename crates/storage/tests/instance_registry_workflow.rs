@@ -25,7 +25,9 @@ use tempfile::TempDir;
 /// Makes an instance persistent under its host claim, the way a caller must.
 fn promote(registry: &Registry, id: InstanceId) -> Result<ClientRecord, RegistryError> {
     let claim = registry.claim_host(RecordRef::Client(id))?;
-    registry.relocate_client(id, &claim, StorageClass::Persistent, &mut |_| {})
+    registry
+        .relocate_client(id, &claim, StorageClass::Persistent, &mut |_| {})
+        .map(|committed| committed.record)
 }
 
 /// Lays every application root, including the temporary one, inside a

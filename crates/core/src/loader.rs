@@ -38,6 +38,7 @@ use ephervex_download::OperationReporter;
 use ephervex_minecraft::Platform;
 use ephervex_mod_platform::{IncompatibilityReason, InstanceTarget, ModVersionInfo};
 use ephervex_model::{InstanceId, LoaderKind, LoaderSelection, ModProvider};
+use ephervex_storage::{ClientCommit, ClientCommitWarning};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
 
@@ -94,6 +95,8 @@ pub struct LoaderVersionChange {
     pub plan: LoaderVersionPlan,
     /// The selection the instance now records.
     pub loader: LoaderSelection,
+    /// Conditions on the saved change the user should hear about.
+    pub warnings: Vec<ClientCommitWarning>,
 }
 
 impl App {
@@ -262,9 +265,11 @@ impl App {
 
         // Only now. Everything above can fail without the instance having
         // changed at all.
-        let record = self.registry().modify_client(instance, |current| {
-            current.loader = selection.clone();
-        })?;
+        let ClientCommit { record, warnings } =
+            self.registry()
+                .modify_client_committed(instance, |current| {
+                    current.loader = selection.clone();
+                })?;
         Self::align_recipe_loader(&record, &gate)?;
 
         info!(
@@ -276,6 +281,7 @@ impl App {
         Ok(LoaderVersionChange {
             plan,
             loader: selection,
+            warnings,
         })
     }
 
@@ -296,6 +302,7 @@ impl App {
         Ok(LoaderVersionChange {
             plan,
             loader: selection,
+            warnings: Vec::new(),
         })
     }
 

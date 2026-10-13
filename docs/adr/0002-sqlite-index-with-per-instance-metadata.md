@@ -44,7 +44,9 @@ Schema changes go through an ordered migration runner keyed on SQLite's
   the update counts as committed: the index is still updated and the failure is
   reported as a warning on the committed result instead of an error. The same
   holds when the index write itself fails after the file was published; the
-  next reconciliation adopts the canonical record.
+  next reconciliation adopts the canonical record. The CLI (including
+  `--json`) and the GUI report these warnings for the client changes a user
+  asks for.
 - The index row can lag the metadata file after an index write failed behind a
   committed update. A change to an existing record therefore starts from the
   metadata file when the root exists, never from the index row, so it cannot

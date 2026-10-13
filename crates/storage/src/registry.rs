@@ -54,9 +54,10 @@ use crate::metadata::{self, MetadataError};
 use crate::paths::{PathError, Paths, create_dir_all};
 use crate::reconcile::RecordRef;
 use crate::records::{
-    ClientCommitWarning, ClientRecord, DUPLICATE_NAME_SUFFIX, DuplicateClient, DuplicatedClient,
-    FileDisposition, ImportSource, JavaOverride, JvmSettings, NewClient, NewServer, ServerCommit,
-    ServerCommitWarning, ServerCreationSource, ServerNetworkSettings, ServerRecord,
+    ClientCommit, ClientCommitWarning, ClientRecord, DUPLICATE_NAME_SUFFIX, DuplicateClient,
+    DuplicatedClient, FileDisposition, ImportSource, JavaOverride, JvmSettings, NewClient,
+    NewServer, ServerCommit, ServerCommitWarning, ServerCreationSource, ServerNetworkSettings,
+    ServerRecord,
 };
 
 const CLIENT_COLUMNS: &str = "id, name, root, storage_class, minecraft_version, loader_kind, \
@@ -332,11 +333,11 @@ impl Registry {
         claim: &HostClaim,
         storage: StorageClass,
         progress: &mut dyn FnMut(usize),
-    ) -> Result<ClientRecord, RegistryError> {
+    ) -> Result<ClientCommit<ClientRecord>, RegistryError> {
         let record = self.client(id)?;
         claim.require(RecordRef::Client(id), &record.root)?;
         if record.storage == storage {
-            return Ok(record);
+            return Ok(ClientCommit::clean(record));
         }
 
         let destination = self.paths.instance_root(storage, id);
@@ -346,7 +347,7 @@ impl Registry {
         refuse_unhealthy_source(&source, &destination, |root| {
             canonical_client_at(root, id).map(drop)
         })?;
-        let (record, report) = move_host(
+        let (committed, report) = move_host(
             &source,
             &destination,
             names_this_instance,
@@ -358,10 +359,14 @@ impl Registry {
                 let mut current = canonical_client_at(host_files_root(&source, &destination), id)?;
                 current.root.clone_from(&destination);
                 current.storage = storage;
-                self.update_client(&mut current)?;
-                Ok(current)
+                let warnings = self.update_client_committed(&mut current)?;
+                Ok(ClientCommit {
+                    record: current,
+                    warnings,
+                })
             },
         )?;
+        let record = &committed.record;
 
         tracing::info!(
             instance_id = %id,
@@ -372,7 +377,7 @@ impl Registry {
             links = report.links,
             "moved a client instance to a different storage root"
         );
-        Ok(record)
+        Ok(committed)
     }
 
     /// The same move for a dedicated server.
@@ -655,10 +660,20 @@ impl Registry {
         id: InstanceId,
         change: impl FnOnce(&mut ClientRecord),
     ) -> Result<ClientRecord, RegistryError> {
+        Ok(self.modify_client_committed(id, change)?.record)
+    }
+
+    /// [`Self::modify_client`] that also reports a published but unsynced
+    /// metadata file as a warning on the committed change.
+    pub fn modify_client_committed(
+        &self,
+        id: InstanceId,
+        change: impl FnOnce(&mut ClientRecord),
+    ) -> Result<ClientCommit<ClientRecord>, RegistryError> {
         let mut record = self.client_for_update(id)?;
         change(&mut record);
-        self.update_client(&mut record)?;
-        Ok(record)
+        let warnings = self.update_client_committed(&mut record)?;
+        Ok(ClientCommit { record, warnings })
     }
 
     /// The client as its canonical metadata holds it, at the root the index
@@ -1799,7 +1814,9 @@ mod tests {
         progress: &mut dyn FnMut(usize),
     ) -> Result<ClientRecord, RegistryError> {
         let claim = registry.claim_host(RecordRef::Client(id))?;
-        registry.relocate_client(id, &claim, StorageClass::Persistent, progress)
+        registry
+            .relocate_client(id, &claim, StorageClass::Persistent, progress)
+            .map(|committed| committed.record)
     }
 
     fn move_server(
@@ -2948,6 +2965,52 @@ mod tests {
             .expect("the tree claim is independent");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_move_whose_metadata_directory_cannot_sync_is_recorded_and_warns() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new("x", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        let destination = registry
+            .paths()
+            .instance_root(StorageClass::Persistent, client.id);
+        std::fs::create_dir_all(destination.parent().expect("parent")).expect("mkdir");
+        std::fs::rename(&client.root, &destination).expect("the move's rename");
+        let directory = metadata::client_metadata_path(&destination)
+            .parent()
+            .expect("metadata directory")
+            .to_path_buf();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o300))
+            .expect("restrict metadata directory");
+        let unsyncable = std::fs::File::open(&directory).is_err();
+        let result = unsyncable.then(|| {
+            let claim = registry
+                .claim_host(RecordRef::Client(client.id))
+                .expect("claim");
+            registry.relocate_client(client.id, &claim, StorageClass::Persistent, &mut |_| {})
+        });
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .expect("restore metadata directory");
+        let Some(result) = result else {
+            return;
+        };
+
+        let committed = result.expect("the published metadata is a committed move");
+        assert_eq!(committed.record.storage, StorageClass::Persistent);
+        assert!(matches!(
+            committed.warnings.as_slice(),
+            [ClientCommitWarning::MetadataNotDurable { .. }]
+        ));
+        assert_eq!(
+            registry.client(client.id).expect("row").storage,
+            StorageClass::Persistent
+        );
+    }
+
     #[test]
     fn a_retry_finishes_a_rename_an_earlier_move_could_not_record() {
         let environment = TestEnvironment::new();
@@ -3350,5 +3413,41 @@ mod tests {
                 .id,
             foreign.id
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_modified_client_whose_metadata_directory_cannot_sync_returns_the_warning_with_the_record()
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = created_client(&registry);
+        let directory = metadata::client_metadata_path(&client.root)
+            .parent()
+            .expect("metadata directory")
+            .to_path_buf();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o300))
+            .expect("restrict metadata directory");
+        let unsyncable = std::fs::File::open(&directory).is_err();
+        let result = unsyncable.then(|| {
+            registry.modify_client_committed(client.id, |current| {
+                current.name = "after".to_owned();
+            })
+        });
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .expect("restore metadata directory");
+        let Some(result) = result else {
+            return;
+        };
+
+        let committed = result.expect("the published metadata is a committed change");
+        assert_eq!(committed.record.name, "after");
+        assert!(matches!(
+            committed.warnings.as_slice(),
+            [ClientCommitWarning::MetadataNotDurable { .. }]
+        ));
+        assert_eq!(registry.client(client.id).expect("row").name, "after");
     }
 }

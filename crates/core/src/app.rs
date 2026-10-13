@@ -36,8 +36,9 @@ use ephervex_model::{
 };
 use ephervex_options::{OptionsCompatibility, OptionsFeed};
 use ephervex_storage::{
-    ApplicationTextScale, ApplicationTheme, ClientRecord, Config, FileDisposition, JavaConfig,
-    NewClient, Paths, ReconciliationReport, Registry, ServerRecord, Storage, TechnicalTextSize,
+    ApplicationTextScale, ApplicationTheme, ClientCommit, ClientRecord, Config, FileDisposition,
+    JavaConfig, NewClient, Paths, ReconciliationReport, Registry, ServerRecord, Storage,
+    TechnicalTextSize,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{instrument, warn};
@@ -770,12 +771,12 @@ impl App {
         id: InstanceId,
         java_override: Option<ephervex_model::JavaOverride>,
         jvm_override: Option<ephervex_model::JvmSettings>,
-    ) -> CoreResult<ClientRecord> {
+    ) -> CoreResult<ClientCommit<ClientRecord>> {
         let java_override = normalized_java_override(java_override)?;
         let _claim = self.claim_stopped_client(id)?;
         self.client(id)?;
         self.validate_jvm_override(jvm_override.as_ref())?;
-        Ok(self.registry().modify_client(id, |record| {
+        Ok(self.registry().modify_client_committed(id, |record| {
             record.java_override = java_override;
             record.jvm_override = jvm_override;
         })?)
@@ -804,8 +805,8 @@ impl App {
         &self,
         id: InstanceId,
         allow: bool,
-    ) -> CoreResult<ClientRecord> {
-        Ok(self.registry().modify_client(id, |record| {
+    ) -> CoreResult<ClientCommit<ClientRecord>> {
+        Ok(self.registry().modify_client_committed(id, |record| {
             record.allow_pack_mod_version_changes = allow;
         })?)
     }
@@ -2042,7 +2043,8 @@ mod tests {
                     jvm_args: vec!["-XX:+UseZGC".to_owned()],
                 }),
             )
-            .expect("pin");
+            .expect("pin")
+            .record;
         assert_eq!(
             pinned
                 .java_override
@@ -2065,7 +2067,8 @@ mod tests {
         // `None` restores the global setting rather than pinning today's value.
         let cleared = reopened
             .set_client_runtime_settings(created.id, None, None)
-            .expect("clear");
+            .expect("clear")
+            .record;
         assert!(cleared.java_override.is_none());
         assert!(cleared.jvm_override.is_none());
     }
@@ -2089,7 +2092,8 @@ mod tests {
 
         let changed = app
             .set_allow_pack_mod_version_changes(created.id, true)
-            .expect("setting");
+            .expect("setting")
+            .record;
 
         assert_eq!(changed.name, "renamed");
         assert!(changed.allow_pack_mod_version_changes);
@@ -2206,7 +2210,8 @@ mod tests {
                 Some(ephervex_model::JavaOverride::new(relative)),
                 None,
             )
-            .expect("pin");
+            .expect("pin")
+            .record;
 
         let stored = pinned.java_override.expect("a pinned java").path;
         assert!(stored.is_absolute(), "stored as `{}`", stored.display());
@@ -2241,7 +2246,8 @@ mod tests {
 
         let updated = app
             .set_allow_pack_mod_version_changes(created.id, false)
-            .expect("opt out");
+            .expect("opt out")
+            .record;
         assert!(!updated.allow_pack_mod_version_changes);
 
         // Reopened, because the point of the setting is that it survives.
@@ -2252,7 +2258,8 @@ mod tests {
         let _lock = ephervex_storage::LaunchLock::acquire(&stored.root).expect("acquire lock");
         let running = reopened
             .set_allow_pack_mod_version_changes(created.id, true)
-            .expect("a running copy does not take the decision away");
+            .expect("a running copy does not take the decision away")
+            .record;
         assert!(running.allow_pack_mod_version_changes);
     }
 

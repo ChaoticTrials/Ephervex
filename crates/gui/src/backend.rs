@@ -10,6 +10,7 @@ use std::thread;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use ephervex_core::ClientCommitWarning;
 use ephervex_core::ControlResponse;
 use ephervex_core::ManagedModInstallation;
 use ephervex_core::ManagedMutationReport;
@@ -2888,11 +2889,12 @@ fn run_worker(
                     (!jvm.pins_nothing()).then_some(jvm),
                 );
                 match result {
-                    Ok(_) => {
+                    Ok(committed) => {
                         let _ = events.send(Event::Toast {
                             message: lookup("gui-instance-runtime-saved"),
                             error: false,
                         });
+                        send_client_commit_warnings(&events, &committed.warnings);
                         send_snapshot(&mut app, &events);
                         // The form starts over from what was stored, which
                         // also says whether anything is pinned now.
@@ -2954,7 +2956,8 @@ fn run_worker(
                 // is still reported, because then nothing on screen changed.
                 if !refuse_while_changing(&changing, InstalledHost::Instance(instance), &events) {
                     match app.set_allow_pack_mod_version_changes(instance, allow) {
-                        Ok(_) => {
+                        Ok(committed) => {
+                            send_client_commit_warnings(&events, &committed.warnings);
                             send_snapshot(&mut app, &events);
                             // The setting decides what each row may have done
                             // to it, so the list it decides for is re-read
@@ -3556,6 +3559,7 @@ fn run_worker(
                                 ),
                                 error: false,
                             });
+                            send_client_commit_warnings(&events, &change.warnings);
                             send_snapshot(&mut app, &events);
                         }
                         Err(error) => {
@@ -3802,13 +3806,14 @@ fn run_worker(
                     },
                     move |app, _reporter, cancel| async move {
                         let _in_flight = in_flight;
-                        app.restore_snapshot(
-                            host,
-                            snapshot,
-                            SnapshotRestoreOptions { safety_snapshot },
-                            &cancel,
-                        )
-                        .map_err(CoreError::from)?;
+                        let restore = app
+                            .restore_snapshot(
+                                host,
+                                snapshot,
+                                SnapshotRestoreOptions { safety_snapshot },
+                                &cancel,
+                            )
+                            .map_err(CoreError::from)?;
                         let data = host_snapshots_data(&app, host)?;
                         let _ = reports.send(Event::HostSnapshots(data));
                         // A restore rewrites the game directory underneath the
@@ -3834,6 +3839,7 @@ fn run_worker(
                                 send_server_workspace(&app, server, &reports);
                             }
                         }
+                        send_client_commit_warnings(&reports, &restore.warnings);
                         Ok(OperationReport::Toast(lookup("gui-snapshot-restored")))
                     },
                 );
@@ -4198,6 +4204,7 @@ fn run_worker(
                         let _in_flight = in_flight;
                         let outcome = match app.apply_fix(host, &fix, &reporter, &cancel).await {
                             Ok(outcome) => {
+                                send_client_commit_warnings(&reports, &outcome.client_warnings);
                                 diagnosis_view::outcome_view(&fix, &outcome, &localized_error)
                             }
                             Err(error) => {
@@ -4930,12 +4937,13 @@ fn run_worker(
                     continue;
                 }
                 match app.rename_client(id, &name) {
-                    Ok(record) => {
+                    Ok(committed) => {
                         let _ = events.send(Event::CloseModal(ModalScope::RENAME));
                         let _ = events.send(Event::Toast {
-                            message: localized_value("gui-renamed", &record.name),
+                            message: localized_value("gui-renamed", &committed.record.name),
                             error: false,
                         });
+                        send_client_commit_warnings(&events, &committed.warnings);
                         send_snapshot(&mut app, &events);
                     }
                     Err(error) => send_modal_error(&events, &error),
@@ -6291,6 +6299,7 @@ fn promote_instance(
                 ),
                 error: false,
             });
+            send_client_commit_warnings(events, &outcome.instance_warnings);
             for warning in &outcome.warnings {
                 let _ = events.send(Event::Toast {
                     message: localized_values(
@@ -11364,6 +11373,18 @@ fn compatibility_summary(game_versions: &[String], loaders: &[String]) -> String
         (false, true) => versions,
         (true, false) => loaders,
         (false, false) => localized_values("gui-target-summary", &versions, &loaders),
+    }
+}
+
+/// Tells the user that a saved change to an instance may not survive a power
+/// loss. The change itself is in effect, so this is shown beside the
+/// confirmation rather than replacing it.
+fn send_client_commit_warnings(events: &Sender<Event>, warnings: &[ClientCommitWarning]) {
+    for warning in warnings {
+        let _ = events.send(Event::Toast {
+            message: ephervex_core::instance::client_commit_warning_message(warning),
+            error: true,
+        });
     }
 }
 
