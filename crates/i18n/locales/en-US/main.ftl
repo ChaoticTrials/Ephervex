@@ -2882,6 +2882,7 @@ gui-diagnostic-search-window-matches = { $count ->
    *[other] Search found { $count } matches in this window.
 }
 gui-client-already-running = The client is already running.
+gui-linked-client-missing = The linked client no longer exists.
 gui-port-required = Enter a port from 1 to 65535.
 gui-port-digits-only = Ports contain digits only.
 gui-port-range = Port must be from 1 to 65535.

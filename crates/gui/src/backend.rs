@@ -5826,10 +5826,7 @@ fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
         presentation.pair = PairPresentation::of(server.id.into(), &pairs, &clients, &servers);
         presentation.snapshot_deletion_note =
             snapshot_deletion_note(app, InstalledHost::Server(server.id));
-        if let Some((can_connect, reason)) = connection_states.remove(&server.id) {
-            presentation.can_connect = can_connect;
-            presentation.connect_reason = reason;
-        }
+        presentation.apply_connection_state(connection_states.remove(&server.id));
         server_rows.push(presentation);
     }
     let accounts = app

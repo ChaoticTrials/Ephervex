@@ -373,6 +373,24 @@ impl ServerPresentation {
             pair: None,
         }
     }
+
+    /// Applies the Launch Client and Connect availability found for this
+    /// server. A server that names a linked client the registry no longer
+    /// lists has no availability, and says so instead of showing a silently
+    /// disabled button.
+    pub fn apply_connection_state(&mut self, state: Option<(bool, String)>) {
+        match state {
+            Some((can_connect, reason)) => {
+                self.can_connect = can_connect;
+                self.connect_reason = reason;
+            }
+            None if !self.linked_client_id.is_empty() => {
+                self.can_connect = false;
+                self.connect_reason = lookup("gui-linked-client-missing");
+            }
+            None => {}
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1680,6 +1698,38 @@ mod tests {
             InstancePresentation::from_record(&record, 1, 0, None, [(linked, Ok(availability))]);
         assert_eq!(item.launch_and_connect.len(), 1);
         assert!(item.launch_and_connect[0].enabled);
+    }
+
+    #[test]
+    fn a_server_whose_linked_client_is_not_listed_gives_the_reason_connect_is_disabled() {
+        let mut status = server(RuntimeClassification::Stopped);
+        status.record.linked_client_id = Some(InstanceId::new());
+        let mut item = ServerPresentation::from_status(&status);
+        item.apply_connection_state(None);
+        assert!(!item.can_connect);
+        assert_eq!(item.connect_reason, lookup("gui-linked-client-missing"));
+        assert!(!item.connect_reason.is_empty());
+    }
+
+    #[test]
+    fn a_standalone_server_has_no_connect_state() {
+        let mut item = ServerPresentation::from_status(&server(RuntimeClassification::Stopped));
+        item.apply_connection_state(None);
+        assert!(!item.can_connect);
+        assert!(item.connect_reason.is_empty());
+    }
+
+    #[test]
+    fn a_found_connection_state_is_applied_unchanged() {
+        let mut status = server(RuntimeClassification::Stopped);
+        status.record.linked_client_id = Some(InstanceId::new());
+        let mut item = ServerPresentation::from_status(&status);
+        item.apply_connection_state(Some((true, String::new())));
+        assert!(item.can_connect);
+        assert!(item.connect_reason.is_empty());
+        item.apply_connection_state(Some((false, "busy".to_owned())));
+        assert!(!item.can_connect);
+        assert_eq!(item.connect_reason, "busy");
     }
 
     #[test]
