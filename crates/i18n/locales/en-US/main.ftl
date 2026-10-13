@@ -766,8 +766,8 @@ launch-output-dropped = { $lines ->
        *[other] { $lines } lines of Minecraft output were skipped.
     }
 
-# $code is the process exit status.
 launch-exited-cleanly = Minecraft exited normally.
+# $code is the process exit status.
 launch-exited-with-code = Minecraft exited with code { $code }.
 # $signal is a POSIX signal number.
 launch-exited-with-signal = Minecraft was stopped by signal { $signal }.
