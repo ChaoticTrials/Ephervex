@@ -215,7 +215,6 @@ fn server_properties_save_says_why_for_each_state_that_blocks_it() {
         ("unknown", "gui-hint-save-server-uncontrolled"),
         ("needs-recovery", "gui-hint-server-needs-recovery"),
         ("stopping", "gui-hint-save-server-stopping"),
-        ("failed", "gui-hint-save-server-failed"),
     ] {
         let mut row = server_in_state(state_kind);
         row.can_stop = state_kind == "running";
@@ -229,10 +228,12 @@ fn server_properties_save_says_why_for_each_state_that_blocks_it() {
         );
     }
 
-    support::show_server(&ui, server(false), "Properties");
-    settle(&ui);
-    assert!(enabled(&ui, "gui-save-changes"));
-    assert_eq!(reason(&ui, "gui-save-changes"), "");
+    for state_kind in ["stopped", "failed"] {
+        support::show_server(&ui, server_in_state(state_kind), "Properties");
+        settle(&ui);
+        assert!(enabled(&ui, "gui-save-changes"), "{state_kind}");
+        assert_eq!(reason(&ui, "gui-save-changes"), "", "{state_kind}");
+    }
 }
 
 #[test]

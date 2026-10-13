@@ -2667,7 +2667,6 @@ gui-hint-stop-server-uncontrolled = Ephervex has no live control channel to this
 gui-hint-stop-client-unsupervised = Another run of the launcher started this game, so it cannot be stopped the ordinary way. Use Force Stop.
 gui-hint-save-requires-stopped = Settings are saved while the server is stopped. Stop it first.
 gui-hint-save-server-stopping = The server is still stopping. Settings can be saved once it has stopped.
-gui-hint-save-server-failed = This server's last run failed. Settings can be saved after it is started again and stopped.
 gui-hint-save-server-uncontrolled = A process for this server may still be running that Ephervex does not control, so settings cannot be saved. Stop it outside Ephervex first.
 gui-hint-search-running = A search is already running. This is available again when it finishes.
 gui-hint-results-loading = Results are still loading.

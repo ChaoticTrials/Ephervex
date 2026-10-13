@@ -62,6 +62,10 @@ export global ServerHints {
         }
         return GuiI18n.text("gui-hint-restart-server-unavailable");
     }
+    // A failed run leaves the server stopped, so its settings stay editable.
+    pure public function can-save(state-kind: string) -> bool {
+        return state-kind == "stopped" || state-kind == "failed";
+    }
     pure public function save(state-kind: string) -> string {
         if (uncontrolled(state-kind)) {
             return GuiI18n.text("gui-hint-save-server-uncontrolled");
@@ -71,9 +75,6 @@ export global ServerHints {
         }
         if (state-kind == "stopping") {
             return GuiI18n.text("gui-hint-save-server-stopping");
-        }
-        if (state-kind == "failed") {
-            return GuiI18n.text("gui-hint-save-server-failed");
         }
         return GuiI18n.text("gui-hint-save-requires-stopped");
     }
