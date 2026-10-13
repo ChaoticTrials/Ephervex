@@ -778,13 +778,23 @@ impl Registry {
 
         // The relationship is owned canonically by each server. Clear every
         // metadata record before SQLite's ON DELETE SET NULL mirrors it.
+        // Every record is read and checked before any is written, so a server
+        // whose metadata is unreadable or names another server refuses the
+        // deletion without having changed the others.
+        let mut linked = Vec::new();
         for server_id in self.linked_server_ids(id)? {
             let indexed = self.server(server_id)?;
-            let mut server = if indexed.root.is_dir() {
-                metadata::read_server_metadata(&indexed.root)?
+            let server = if indexed.root.is_dir() {
+                let mut canonical = canonical_server_at(&indexed.root, server_id)?;
+                canonical.root = indexed.root;
+                canonical.storage = indexed.storage;
+                canonical
             } else {
                 indexed
             };
+            linked.push(server);
+        }
+        for mut server in linked {
             server.linked_client_id = None;
             let _committed = self.update_server_committed(&mut server)?;
         }
@@ -3676,5 +3686,129 @@ mod tests {
         let current = registry.current_client(client.id).expect("current");
 
         assert_eq!(current.name, "before");
+    }
+
+    #[test]
+    fn deleting_a_client_refuses_a_linked_server_root_holding_another_servers_metadata() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new("c", "1.20.1", LoaderSelection::vanilla()))
+            .expect("client");
+        let linked = registry
+            .create_server(NewServer::linked("linked", client.id))
+            .expect("linked");
+        let other = registry
+            .create_server(NewServer::new(
+                "other",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("other");
+        let mut foreign = other.clone();
+        foreign.linked_client_id = Some(client.id);
+        metadata::write_server_metadata(&linked.root, &foreign).expect("copied directory");
+        let other_before =
+            std::fs::read(metadata::server_metadata_path(&other.root)).expect("read");
+        let other_row_before = registry.server(other.id).expect("row");
+
+        let error = registry
+            .delete_client(client.id, crate::FileDisposition::Remove)
+            .expect_err("foreign metadata refuses the deletion");
+
+        assert!(matches!(error, RegistryError::ServerUnknown { id } if id == linked.id));
+        assert_eq!(
+            std::fs::read(metadata::server_metadata_path(&other.root)).expect("read"),
+            other_before,
+            "the other server's metadata is untouched"
+        );
+        let other_row_after = registry.server(other.id).expect("row");
+        assert_eq!(other_row_after.updated_at, other_row_before.updated_at);
+        assert_eq!(other_row_after.linked_client_id, None);
+        assert!(client.root.is_dir(), "no files were removed");
+        assert!(registry.client(client.id).is_ok(), "the client is kept");
+    }
+
+    #[test]
+    fn deleting_a_client_checks_every_linked_server_before_changing_any() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new("c", "1.20.1", LoaderSelection::vanilla()))
+            .expect("client");
+        let healthy = registry
+            .create_server(NewServer::linked("a-healthy", client.id))
+            .expect("healthy");
+        let damaged = registry
+            .create_server(NewServer::linked("b-damaged", client.id))
+            .expect("damaged");
+        std::fs::write(metadata::server_metadata_path(&damaged.root), "not json").expect("damage");
+
+        let error = registry
+            .delete_client(client.id, crate::FileDisposition::Keep)
+            .expect_err("unreadable metadata refuses the deletion");
+
+        assert!(matches!(error, RegistryError::Metadata(_)));
+        let on_disk = metadata::read_server_metadata(&healthy.root).expect("metadata");
+        assert_eq!(on_disk.linked_client_id, Some(client.id));
+        assert_eq!(
+            registry.server(healthy.id).expect("row").linked_client_id,
+            Some(client.id)
+        );
+    }
+
+    #[test]
+    fn deleting_a_client_unlinks_a_server_at_its_indexed_root_even_when_its_metadata_names_a_stale_root()
+     {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new("c", "1.20.1", LoaderSelection::vanilla()))
+            .expect("client");
+        let server = registry
+            .create_server(NewServer::linked("s", client.id))
+            .expect("server");
+        let mut stale = server.clone();
+        stale.root = environment.base().join("elsewhere");
+        metadata::write_server_metadata(&server.root, &stale).expect("stale root");
+
+        registry
+            .delete_client(client.id, crate::FileDisposition::Keep)
+            .expect("delete");
+
+        let on_disk = metadata::read_server_metadata(&server.root).expect("metadata");
+        assert_eq!(on_disk.linked_client_id, None);
+        assert_eq!(on_disk.root, server.root, "published at the indexed root");
+        assert!(!environment.base().join("elsewhere").exists());
+        assert_eq!(registry.server(server.id).expect("row").root, server.root);
+    }
+
+    #[test]
+    fn deleting_a_client_keeps_the_indexed_storage_class_of_a_linked_server() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new("c", "1.20.1", LoaderSelection::vanilla()))
+            .expect("client");
+        let server = registry
+            .create_server(NewServer::linked("s", client.id))
+            .expect("server");
+        let mut contradicting = server.clone();
+        contradicting.storage = match server.storage {
+            StorageClass::Temporary => StorageClass::Persistent,
+            StorageClass::Persistent => StorageClass::Temporary,
+        };
+        metadata::write_server_metadata(&server.root, &contradicting).expect("storage class");
+
+        registry
+            .delete_client(client.id, crate::FileDisposition::Keep)
+            .expect("delete");
+
+        let on_disk = metadata::read_server_metadata(&server.root).expect("metadata");
+        assert_eq!(on_disk.storage, server.storage);
+        assert_eq!(
+            registry.server(server.id).expect("row").storage,
+            server.storage
+        );
     }
 }

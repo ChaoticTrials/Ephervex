@@ -254,6 +254,29 @@ fn reconcile_listed_clients(
     Ok(())
 }
 
+/// Forgets a stale temporary client. A linked server whose canonical metadata
+/// is unreadable or names another server keeps the client and is reported as
+/// unhealthy, so one damaged server does not stop the rest of the pass.
+fn forget_stale_client(
+    registry: &Registry,
+    id: InstanceId,
+    entry: &ReconciledRecord,
+    report: &mut ReconciliationReport,
+) -> Result<bool, RegistryError> {
+    match registry.delete_client(id, FileDisposition::Keep) {
+        Ok(()) => Ok(true),
+        Err(RegistryError::ServerUnknown { .. } | RegistryError::Metadata(_)) => {
+            tracing::warn!(
+                instance_id = %id,
+                "a linked server's canonical metadata is unhealthy; keeping the stale temporary instance"
+            );
+            report.persistence_unhealthy.push(entry.clone());
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn reconcile_client(
     registry: &Registry,
     mut record: ClientRecord,
@@ -269,8 +292,9 @@ fn reconcile_client(
         // tampered record pointing elsewhere must not bypass that boundary;
         // forget it without deleting the path, which may belong to a user
         // or to another account on the machine.
-        registry.delete_client(record.id, FileDisposition::Keep)?;
-        report.removed_stale_temporary.push(entry);
+        if forget_stale_client(registry, record.id, &entry, report)? {
+            report.removed_stale_temporary.push(entry);
+        }
         return Ok(());
     }
 
@@ -306,13 +330,14 @@ fn reconcile_client(
         // `Keep` because there is nothing left to remove, and because
         // asking the filesystem to delete a path the OS already cleared is
         // how a race turns into an error dialog.
-        registry.delete_client(record.id, FileDisposition::Keep)?;
-        tracing::debug!(
-            instance_id = %record.id,
-            root = %record.root.display(),
-            "dropped a stale temporary instance whose directory the OS cleared"
-        );
-        report.removed_stale_temporary.push(entry);
+        if forget_stale_client(registry, record.id, &entry, report)? {
+            tracing::debug!(
+                instance_id = %record.id,
+                root = %record.root.display(),
+                "dropped a stale temporary instance whose directory the OS cleared"
+            );
+            report.removed_stale_temporary.push(entry);
+        }
     } else {
         // Not expected. Keep everything; say so.
         if !record.attention.contains(&AttentionReason::MissingRoot) {
@@ -1686,6 +1711,58 @@ mod tests {
                 .contains(&AttentionReason::BestEffortServerConversion)
         );
         assert_eq!(on_disk.storage, StorageClass::Persistent);
+    }
+
+    #[test]
+    fn a_stale_temporary_client_linked_to_a_server_with_foreign_metadata_is_kept_and_reported() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let stale = registry
+            .create_published_client(NewClient::new(
+                "stale",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("stale client");
+        let vanished = registry
+            .create_published_client(NewClient::new("gone", "1.20.1", LoaderSelection::vanilla()))
+            .expect("vanished client");
+        let linked = registry
+            .create_server(NewServer::linked("linked", stale.id))
+            .expect("linked server");
+        let other = registry
+            .create_server(NewServer::new(
+                "other",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("other server");
+        metadata::write_server_metadata(&linked.root, &other).expect("copied directory");
+        let other_before =
+            std::fs::read(metadata::server_metadata_path(&other.root)).expect("metadata");
+        std::fs::remove_dir_all(&stale.root).expect("clear stale");
+        std::fs::remove_dir_all(&vanished.root).expect("clear vanished");
+
+        let report = reconcile(&registry).expect("the pass completes");
+
+        assert!(
+            report
+                .persistence_unhealthy
+                .iter()
+                .any(|entry| entry.reference == RecordRef::Client(stale.id))
+        );
+        assert!(registry.client(stale.id).is_ok(), "the client is kept");
+        assert_eq!(report.removed_stale_temporary.len(), 1);
+        assert_eq!(
+            report.removed_stale_temporary[0].reference,
+            RecordRef::Client(vanished.id),
+            "the rest of the pass still runs"
+        );
+        assert_eq!(
+            std::fs::read(metadata::server_metadata_path(&other.root)).expect("metadata"),
+            other_before,
+            "the other server's metadata is untouched"
+        );
     }
 
     #[test]
