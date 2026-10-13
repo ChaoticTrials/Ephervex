@@ -291,6 +291,16 @@ fn a_recipe_from_a_newer_build_is_refused_rather_than_partly_read() {
 }
 
 #[test]
+fn catalog_choices_in_help_do_not_name_how_the_spelling_is_derived() {
+    let sandbox = Sandbox::new();
+    let help = sandbox.run(&["mod", "search", "--help"]);
+    assert!(help.status.success());
+    let text = String::from_utf8_lossy(&help.stdout);
+    assert!(text.contains("curseforge"), "{text}");
+    assert!(!text.contains("derived from the variant"), "{text}");
+}
+
+#[test]
 fn a_catalog_can_be_chosen_and_an_unknown_one_is_refused() {
     // The catalog is part of the request rather than an application-wide
     // setting, and only the ones this build can browse are accepted.

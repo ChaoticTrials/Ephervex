@@ -322,8 +322,8 @@ impl TrustArg {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CatalogArg {
     Modrinth,
-    /// Spelled the way CurseForge spells it, rather than the hyphenated name
-    /// derived from the variant.
+    // Spelled the way CurseForge spells it, rather than the hyphenated name
+    // derived from the variant.
     #[value(name = "curseforge")]
     CurseForge,
 }
@@ -1011,8 +1011,7 @@ enum InstanceCommand {
         #[arg(long, value_name = "MIB")]
         max_memory: Option<u32>,
         /// One extra JVM argument. Repeatable, and replaces the pinned list.
-        ///
-        /// `allow_hyphen_values` because every JVM argument begins with one.
+        // Hyphen values are allowed because every JVM argument begins with one.
         #[arg(long = "jvm-arg", value_name = "ARG", allow_hyphen_values = true)]
         jvm_args: Vec<String>,
         /// Remove every override and follow the global settings again.

@@ -148,3 +148,15 @@ fn a_relative_java_path_is_pinned_as_the_absolute_path_it_named() {
     let elsewhere = sandbox.json(&["--json", "instance", "runtime", &id]);
     assert_eq!(elsewhere["java"], pinned["java"]);
 }
+
+#[test]
+fn runtime_help_describes_the_jvm_argument_option_without_naming_parser_internals() {
+    let sandbox = Sandbox::new();
+
+    let help = sandbox.run_in(sandbox.directory.path(), &["instance", "runtime", "--help"]);
+    assert!(help.status.success());
+    let text = String::from_utf8_lossy(&help.stdout);
+
+    assert!(text.contains("--jvm-arg"), "help was:\n{text}");
+    assert!(!text.contains("allow_hyphen_values"), "help was:\n{text}");
+}
