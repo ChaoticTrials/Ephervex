@@ -5,9 +5,11 @@
 //! nothing here needs the network.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::process::{Command, Output};
+use std::process::Output;
 
 use tempfile::TempDir;
+
+mod binary_sandbox;
 
 const SERVER: &str = "00000000-0000-4000-8000-000000000001";
 
@@ -16,7 +18,7 @@ fn run(sandbox: &TempDir, args: &[&str]) -> Output {
     for child in ["config", "data", "cache", "state", "tmp"] {
         std::fs::create_dir_all(base.join(child)).expect("create root");
     }
-    Command::new(env!("CARGO_BIN_EXE_ephervex"))
+    binary_sandbox::ephervex_command()
         .args(args)
         .env("HOME", base)
         .env("XDG_CONFIG_HOME", base.join("config"))

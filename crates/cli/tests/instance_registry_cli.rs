@@ -8,10 +8,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 use tempfile::TempDir;
 
+mod binary_sandbox;
 mod support;
 
 /// A disposable home directory for one test.
@@ -40,7 +41,7 @@ impl Sandbox {
     /// Runs `ephervex` with every root redirected into the sandbox.
     fn run(&self, args: &[&str]) -> Output {
         let base = self.base();
-        Command::new(env!("CARGO_BIN_EXE_ephervex"))
+        binary_sandbox::ephervex_command()
             .args(args)
             .env("HOME", base)
             .env("XDG_CONFIG_HOME", base.join("config"))

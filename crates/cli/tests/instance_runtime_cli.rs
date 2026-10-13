@@ -6,10 +6,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 use tempfile::TempDir;
 
+mod binary_sandbox;
 mod support;
 
 struct Sandbox {
@@ -28,7 +29,7 @@ impl Sandbox {
 
     fn run_in(&self, working: &Path, args: &[&str]) -> Output {
         let base = self.directory.path();
-        Command::new(env!("CARGO_BIN_EXE_ephervex"))
+        binary_sandbox::ephervex_command()
             .args(args)
             .current_dir(working)
             .env("HOME", base)

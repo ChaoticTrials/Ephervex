@@ -7,10 +7,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 use tempfile::TempDir;
 
+mod binary_sandbox;
 mod support;
 
 struct Sandbox {
@@ -37,15 +38,8 @@ impl Sandbox {
 
     fn run(&self, args: &[&str]) -> Output {
         let base = self.base();
-        Command::new(env!("CARGO_BIN_EXE_ephervex"))
+        binary_sandbox::ephervex_command()
             .args(args)
-            // The Secret Service is found through the session bus address, or
-            // failing that `$XDG_RUNTIME_DIR/bus`. Both lead nowhere here.
-            .env(
-                "DBUS_SESSION_BUS_ADDRESS",
-                format!("unix:path={}", base.join("no-session-bus").display()),
-            )
-            .env_remove("XDG_RUNTIME_DIR")
             .env("HOME", base)
             .env("XDG_CONFIG_HOME", base.join("config"))
             .env("XDG_DATA_HOME", base.join("data"))

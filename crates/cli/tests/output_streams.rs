@@ -8,7 +8,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::io::Read as _;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+
+mod binary_sandbox;
 
 /// Runs a command, reads a little of its output, then stops reading.
 ///
@@ -16,7 +18,7 @@ use std::process::{Command, Stdio};
 /// a panic would show up.
 fn abandoned_midway(args: &[&str]) -> (Option<i32>, String) {
     let base = tempfile::tempdir().expect("temp dir");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ephervex"))
+    let mut child = binary_sandbox::ephervex_command()
         .args(args)
         .env("HOME", base.path())
         .env("XDG_CONFIG_HOME", base.path().join("config"))
@@ -135,7 +137,7 @@ fn a_json_listing_piped_into_something_that_stops_reading_does_not_panic() {
 #[test]
 fn a_completion_script_read_to_the_end_is_still_complete() {
     let base = tempfile::tempdir().expect("temp dir");
-    let output = Command::new(env!("CARGO_BIN_EXE_ephervex"))
+    let output = binary_sandbox::ephervex_command()
         .args(["completions", "bash"])
         .env("HOME", base.path())
         .env("EPHERVEX_LOG", "error")

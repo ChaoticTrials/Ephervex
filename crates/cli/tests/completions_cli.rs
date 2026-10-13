@@ -2,12 +2,14 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
-use std::process::{Command, Output};
+use std::process::Output;
+
+mod binary_sandbox;
 
 const SUPPORTED_SHELLS: &[&str] = &["bash", "elvish", "fish", "powershell", "zsh"];
 
 fn run(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_ephervex"))
+    binary_sandbox::ephervex_command()
         .args(args)
         .env("HTTP_PROXY", "http://127.0.0.1:9")
         .env("HTTPS_PROXY", "http://127.0.0.1:9")

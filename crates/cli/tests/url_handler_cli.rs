@@ -5,9 +5,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 use tempfile::TempDir;
+
+mod binary_sandbox;
 
 const ENTRY: &str = "ephervex-url-handler.desktop";
 
@@ -55,7 +57,7 @@ impl Sandbox {
 
     fn run(&self, args: &[&str]) -> Output {
         let base = self.base();
-        let output = Command::new(env!("CARGO_BIN_EXE_ephervex"))
+        let output = binary_sandbox::ephervex_command()
             .args(args)
             .env("HOME", base)
             .env("XDG_CONFIG_HOME", base.join("config"))

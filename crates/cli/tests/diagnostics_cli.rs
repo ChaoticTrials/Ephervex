@@ -11,10 +11,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 use tempfile::TempDir;
 
+mod binary_sandbox;
 mod support;
 
 /// A credential-shaped string, spelled so a substring search cannot miss it and
@@ -56,7 +57,7 @@ impl Sandbox {
     /// test about what reaches the launcher log does not depend on the default.
     fn run_with_log_level(&self, args: &[&str], level: &str) -> Output {
         let base = self.base();
-        Command::new(env!("CARGO_BIN_EXE_ephervex"))
+        binary_sandbox::ephervex_command()
             .args(args)
             .env("HOME", base)
             .env("XDG_CONFIG_HOME", base.join("config"))

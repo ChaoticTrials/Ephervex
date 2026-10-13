@@ -10,10 +10,11 @@
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStringExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 use tempfile::TempDir;
 
+mod binary_sandbox;
 mod support;
 
 /// A directory name that is not valid UTF-8.
@@ -50,7 +51,7 @@ impl Sandbox {
 
     fn run(&self, args: &[&str]) -> Output {
         let base = self.base();
-        Command::new(env!("CARGO_BIN_EXE_ephervex"))
+        binary_sandbox::ephervex_command()
             .args(args)
             .env("HOME", base)
             .env("XDG_CONFIG_HOME", base.join("config"))

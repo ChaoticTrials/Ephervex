@@ -7,9 +7,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 use tempfile::TempDir;
+
+mod binary_sandbox;
 
 struct Sandbox {
     directory: TempDir,
@@ -34,7 +36,7 @@ impl Sandbox {
 
     fn run(&self, args: &[&str]) -> Output {
         let base = self.base();
-        Command::new(env!("CARGO_BIN_EXE_ephervex"))
+        binary_sandbox::ephervex_command()
             .args(args)
             // Deliberately run from the filesystem root: a listing that needed
             // the repository it was built in would be a listing a released
