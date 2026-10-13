@@ -343,7 +343,9 @@ impl Registry {
         storage: StorageClass,
         progress: &mut dyn FnMut(usize),
     ) -> Result<ClientCommit<ClientRecord>, RegistryError> {
-        let record = self.client(id)?;
+        // The row as indexed, so a retry after a failed index write still
+        // finds the instance in its old storage class and repairs the row.
+        let record = self.indexed_client(id)?;
         claim.require(RecordRef::Client(id), &record.root)?;
         if record.storage == storage {
             return Ok(ClientCommit::clean(record));
@@ -554,8 +556,24 @@ impl Registry {
         })
     }
 
-    /// Reads one client instance.
+    /// Reads one client instance, addressed where its files are.
+    ///
+    /// A row that still names a vacated temporary root while the finished
+    /// files stand at the persistent root, which a move whose index write
+    /// failed leaves behind, is returned at the persistent root. Launching,
+    /// duplicating, mutating, and deleting the instance then act on the files
+    /// that exist (ADR 0002, ADR 0025). Reconciliation reads the row as the
+    /// index holds it, through [`Self::indexed_client`].
     pub fn client(&self, id: InstanceId) -> Result<ClientRecord, RegistryError> {
+        Ok(self.following_moved_files(self.indexed_client(id)?))
+    }
+
+    /// One client instance exactly as the index row holds it.
+    ///
+    /// For code that repairs or retries what the row says, such as
+    /// reconciliation and a repeated move. Everything that acts on the
+    /// instance's files reads [`Self::client`].
+    pub fn indexed_client(&self, id: InstanceId) -> Result<ClientRecord, RegistryError> {
         self.index
             .connection()
             .query_row(
@@ -700,7 +718,7 @@ impl Registry {
     /// missing: only the index could hold them, so that newer row is current
     /// once the root returns, as reconciliation adopts it.
     pub fn current_client(&self, id: InstanceId) -> Result<ClientRecord, RegistryError> {
-        let indexed = self.following_moved_files(self.client(id)?);
+        let indexed = self.client(id)?;
         if !indexed.root.is_dir() {
             return Ok(indexed);
         }
@@ -3170,7 +3188,10 @@ mod tests {
         let canonical = metadata::read_client_metadata(&destination).expect("metadata");
         assert_eq!(canonical.storage, StorageClass::Persistent);
         assert_eq!(canonical.root, destination);
-        assert_eq!(registry.client(client.id).expect("row").root, client.root);
+        assert_eq!(
+            registry.indexed_client(client.id).expect("row").root,
+            client.root
+        );
     }
 
     #[test]
@@ -3222,6 +3243,91 @@ mod tests {
 
         assert_eq!(record.root, client.root);
         assert_eq!(record.storage, StorageClass::Temporary);
+    }
+
+    #[test]
+    fn a_client_whose_move_could_not_update_the_index_is_read_at_its_persistent_root() {
+        for copy in [false, true] {
+            let environment = TestEnvironment::new();
+            let registry = environment.registry();
+            let client = created_client(&registry);
+
+            crate::relocate::force_copy(copy);
+            let (_, destination) = move_client_with_failing_index(&registry, &client);
+            crate::relocate::force_copy(false);
+
+            let read = registry.client(client.id).expect("read");
+            assert_eq!(read.root, destination, "copy: {copy}");
+            assert_eq!(read.storage, StorageClass::Persistent, "copy: {copy}");
+            assert_eq!(
+                registry.indexed_client(client.id).expect("row").root,
+                client.root,
+                "the row itself is not rewritten by a read"
+            );
+
+            let duplicated = registry
+                .duplicate_client(client.id, &DuplicateClient::default())
+                .expect("a duplicate copies the files where they are");
+            assert!(duplicated.record.root.is_dir(), "copy: {copy}");
+        }
+    }
+
+    #[test]
+    fn a_client_that_vanished_without_a_move_is_still_read_at_the_root_the_index_names() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = created_client(&registry);
+        std::fs::remove_dir_all(&client.root).expect("the OS clears the temporary root");
+
+        let read = registry.client(client.id).expect("read");
+
+        assert_eq!(read.root, client.root);
+        assert_eq!(read.storage, StorageClass::Temporary);
+    }
+
+    #[test]
+    fn deleting_a_client_whose_move_could_not_update_the_index_removes_the_files_where_they_are() {
+        for copy in [false, true] {
+            let environment = TestEnvironment::new();
+            let registry = environment.registry();
+            let client = created_client(&registry);
+
+            crate::relocate::force_copy(copy);
+            let (_, destination) = move_client_with_failing_index(&registry, &client);
+            crate::relocate::force_copy(false);
+            restore_index_writes(&registry);
+
+            registry
+                .delete_client(client.id, FileDisposition::Remove)
+                .expect("delete");
+
+            assert!(!destination.exists(), "copy: {copy}");
+            assert!(!client.root.exists(), "copy: {copy}");
+            let report = crate::reconcile::reconcile(&registry).expect("reconcile");
+            assert!(report.reindexed.is_empty(), "copy: {copy}");
+            assert!(registry.list_clients().expect("list").is_empty());
+        }
+    }
+
+    #[test]
+    fn retrying_a_move_whose_index_write_failed_repairs_the_index_row() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = created_client(&registry);
+        let (_, destination) = move_client_with_failing_index(&registry, &client);
+        restore_index_writes(&registry);
+
+        let claim = registry
+            .claim_host(RecordRef::Client(client.id))
+            .expect("claim");
+        let retried = registry
+            .relocate_client(client.id, &claim, StorageClass::Persistent, &mut |_| {})
+            .expect("retry");
+
+        assert!(retried.warnings.is_empty());
+        let row = registry.indexed_client(client.id).expect("row");
+        assert_eq!(row.root, destination);
+        assert_eq!(row.storage, StorageClass::Persistent);
     }
 
     fn prepare_unfinished_restore(root: &Path, part: crate::restore::RestorePart) {

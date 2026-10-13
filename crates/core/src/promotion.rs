@@ -144,7 +144,10 @@ impl App {
     /// then may not be running when they answer.
     #[instrument(skip(self), fields(instance = %instance))]
     pub fn plan_instance_promotion(&self, instance: InstanceId) -> CoreResult<PromotionPlan> {
-        let record = self.client(instance)?;
+        // The row as indexed: a promotion whose index write failed is retried
+        // against it, which repairs the row instead of refusing a move that
+        // already happened.
+        let record = self.registry().indexed_client(instance)?;
         self.refuse_promoting(&record)?;
 
         let mut servers = Vec::new();
@@ -189,7 +192,7 @@ impl App {
         let claim = self
             .registry()
             .claim_host(ephervex_storage::RecordRef::Client(instance))?;
-        let record = self.client(instance)?;
+        let record = self.registry().indexed_client(instance)?;
         self.refuse_promoting(&record)?;
 
         // Every selected server is checked before anything moves, so a busy one
@@ -360,6 +363,115 @@ mod tests {
 
     fn silent() -> OperationReporter {
         OperationReporter::silent("operation-promoting-instance")
+    }
+
+    /// Promotes an instance whose index writes fail, so the row keeps naming
+    /// the vacated temporary root. Writes are accepted again on return.
+    fn promote_with_failing_index(app: &App, client: &ClientRecord) -> PromotionOutcome {
+        let index = app.registry().index().connection();
+        index
+            .execute_batch(
+                "CREATE TRIGGER refuse_index_writes BEFORE UPDATE ON instances
+                 BEGIN SELECT RAISE(ABORT, 'index is read-only'); END;",
+            )
+            .expect("install failing trigger");
+        let outcome = app
+            .promote_instance(client.id, &PromotionRequest::client_only(), &silent())
+            .expect("the published metadata is a committed promotion");
+        index
+            .execute_batch("DROP TRIGGER refuse_index_writes;")
+            .expect("accept index writes again");
+        outcome
+    }
+
+    #[test]
+    fn a_promoted_instance_whose_index_write_failed_is_duplicated_and_deleted_at_its_persistent_root()
+     {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let client = temporary_client(&app, "Repro");
+        let persistent = app
+            .paths()
+            .instance_root(StorageClass::Persistent, client.id);
+        let outcome = promote_with_failing_index(&app, &client);
+        assert_eq!(outcome.instance.root, persistent);
+        assert_eq!(
+            app.registry().indexed_client(client.id).expect("row").root,
+            client.root,
+            "the row still names the vacated root"
+        );
+
+        let read = app.client(client.id).expect("read");
+        assert_eq!(read.root, persistent);
+        assert_eq!(read.storage, StorageClass::Persistent);
+        let copy = app
+            .duplicate_client(
+                client.id,
+                &ephervex_storage::DuplicateClient::default(),
+                ephervex_model::AbsentModPolicy::default(),
+            )
+            .expect("the files are copied from where they are");
+        assert!(copy.record.root.is_dir());
+        assert_eq!(copy.record.storage, StorageClass::Persistent);
+
+        app.delete_client(client.id, ephervex_storage::FileDisposition::Remove)
+            .expect("delete");
+
+        assert!(
+            !persistent.exists(),
+            "the deleted instance's files are gone"
+        );
+        assert!(app.client(client.id).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_launch_of_a_promoted_instance_whose_index_write_failed_is_seen_at_its_persistent_root()
+     {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.add_offline_account("Notch").expect("account");
+        let client = temporary_client(&app, "Repro");
+        let persistent = app
+            .paths()
+            .instance_root(StorageClass::Persistent, client.id);
+        promote_with_failing_index(&app, &client);
+        let _held = ephervex_storage::LaunchLock::acquire(&persistent).expect("a launch is held");
+
+        let running = app.running_processes().expect("query");
+        assert_eq!(running.len(), 1, "the running launch is listed");
+        let error = app
+            .launch(
+                client.id,
+                &crate::LaunchOptions::default(),
+                &ephervex_minecraft::LaunchObserver::silent(),
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect_err("the instance is already launched");
+        assert_eq!(error.message_id(), "error-launch-already-running");
+        app.delete_client(client.id, ephervex_storage::FileDisposition::Remove)
+            .expect_err("a running instance is not deleted");
+        assert!(persistent.is_dir());
+    }
+
+    #[test]
+    fn a_promotion_whose_index_write_failed_can_be_repeated_to_repair_the_row() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let client = temporary_client(&app, "Repro");
+        let persistent = app
+            .paths()
+            .instance_root(StorageClass::Persistent, client.id);
+        promote_with_failing_index(&app, &client);
+
+        let repeated = app
+            .promote_instance(client.id, &PromotionRequest::client_only(), &silent())
+            .expect("the move that already happened is not refused");
+
+        assert!(repeated.instance_warnings.is_empty());
+        let row = app.registry().indexed_client(client.id).expect("row");
+        assert_eq!(row.root, persistent);
+        assert_eq!(row.storage, StorageClass::Persistent);
     }
 
     #[test]

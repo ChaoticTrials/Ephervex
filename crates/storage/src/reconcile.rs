@@ -240,7 +240,7 @@ fn reconcile_listed_clients(
         if matches!(probe, HostProbe::Mutating) {
             continue;
         }
-        let record = match registry.client(listed.id) {
+        let record = match registry.indexed_client(listed.id) {
             Ok(record) => record,
             Err(RegistryError::InstanceUnknown { .. }) => continue,
             Err(error) => return Err(error),

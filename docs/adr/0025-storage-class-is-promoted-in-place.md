@@ -86,10 +86,12 @@ record is corrected rather than deleted. Without this, an interrupted promotion
 would cost the instance its linked servers on the next start. A staging
 directory is never adopted; reconciliation reports it and leaves it alone.
 
-A change to such a client made before the next reconciliation, for example after
-the move's index write failed, follows the files in the same way: it is applied to
-the metadata at the persistent root and repairs the row, instead of being written
-to a row that names a directory that no longer exists.
+A client read before the next reconciliation, for example after the move's index
+write failed, follows the files in the same way: reading it, launching it,
+duplicating it, changing it, and deleting it with its files all address the
+persistent root, and a change repairs the row, instead of acting on a row that
+names a directory that no longer exists. Reconciliation and a repeated promotion
+read the row as indexed, so they still find the old storage class and repair it.
 
 **Linked servers are a per-server choice, not a cascade.** A server has its own
 storage class and its own world. Every temporary linked server is offered,

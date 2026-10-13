@@ -169,7 +169,11 @@ impl App {
             // Every launch, not just the first: a second account running
             // alongside is a second row, or it would be invisible and could
             // not be stopped.
-            let launches = ephervex_storage::running_launches(&record.root);
+            // At the root the files are in, which a listed row can lag.
+            let root = self
+                .client(record.id)
+                .map_or_else(|_| record.root.clone(), |current| current.root);
+            let launches = ephervex_storage::running_launches(&root);
             let shared_log = self.last_log_line(DiagnosticScope::Client(record.id));
             for launch in launches {
                 running.push(RunningProcess {
