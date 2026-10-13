@@ -677,9 +677,11 @@ impl Registry {
     }
 
     /// The client as its canonical metadata holds it, at the root the index
-    /// names. A client whose root is missing has only its index row.
+    /// names, or at the persistent root its files were moved to when the row
+    /// still names the vacated temporary one. A client whose root is missing
+    /// has only its index row.
     fn client_for_update(&self, id: InstanceId) -> Result<ClientRecord, RegistryError> {
-        let indexed = self.client(id)?;
+        let indexed = self.following_moved_files(self.client(id)?);
         if !indexed.root.is_dir() {
             return Ok(indexed);
         }
@@ -687,6 +689,28 @@ impl Registry {
         canonical.root = indexed.root;
         canonical.storage = indexed.storage;
         Ok(canonical)
+    }
+
+    /// The record addressed at the persistent root when its row still names a
+    /// vacated temporary one and the finished files stand there. A move whose
+    /// index write failed leaves exactly this, and a change applied to the row
+    /// alone would never reach the metadata (ADR 0002, ADR 0025). The next
+    /// write then repairs the row.
+    fn following_moved_files(&self, indexed: ClientRecord) -> ClientRecord {
+        if indexed.root.is_dir() || !indexed.storage.vanishing_is_expected() {
+            return indexed;
+        }
+        let moved = self
+            .paths
+            .instance_root(StorageClass::Persistent, indexed.id);
+        if !crate::reconcile::is_finished_client_root(&moved, indexed.id) {
+            return indexed;
+        }
+        ClientRecord {
+            root: moved,
+            storage: StorageClass::Persistent,
+            ..indexed
+        }
     }
 
     /// Replaces the SQLite recovery copy of an indexed client with its
@@ -3032,6 +3056,96 @@ mod tests {
             registry.client(client.id).expect("indexed").root,
             destination
         );
+    }
+
+    /// Moves a client whose index writes fail, returning it with the root it
+    /// left and the root it moved to.
+    fn move_client_with_failing_index(
+        registry: &Registry,
+        client: &ClientRecord,
+    ) -> (ClientCommit<ClientRecord>, PathBuf) {
+        let destination = registry
+            .paths()
+            .instance_root(StorageClass::Persistent, client.id);
+        fail_index_writes(registry, "instances");
+        let claim = registry
+            .claim_host(RecordRef::Client(client.id))
+            .expect("claim");
+        let committed = registry
+            .relocate_client(client.id, &claim, StorageClass::Persistent, &mut |_| {})
+            .expect("the published metadata is a committed move");
+        (committed, destination)
+    }
+
+    #[test]
+    fn a_move_whose_index_write_fails_is_recorded_and_warns() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = created_client(&registry);
+
+        let (committed, destination) = move_client_with_failing_index(&registry, &client);
+
+        assert!(matches!(
+            committed.warnings.as_slice(),
+            [ClientCommitWarning::IndexOutOfSync { .. }]
+        ));
+        assert_eq!(committed.record.root, destination);
+        assert_eq!(committed.record.storage, StorageClass::Persistent);
+        let canonical = metadata::read_client_metadata(&destination).expect("metadata");
+        assert_eq!(canonical.storage, StorageClass::Persistent);
+        assert_eq!(canonical.root, destination);
+        assert_eq!(registry.client(client.id).expect("row").root, client.root);
+    }
+
+    #[test]
+    fn a_client_stays_addressable_at_its_new_root_when_the_move_could_not_update_the_index() {
+        for copy in [false, true] {
+            let environment = TestEnvironment::new();
+            let registry = environment.registry();
+            let client = created_client(&registry);
+
+            crate::relocate::force_copy(copy);
+            let (_, destination) = move_client_with_failing_index(&registry, &client);
+            crate::relocate::force_copy(false);
+            restore_index_writes(&registry);
+            assert!(
+                !client.root.exists() || !copy,
+                "a copy's source is discarded"
+            );
+
+            let renamed = registry
+                .modify_client(client.id, |record| record.name = "after".to_owned())
+                .expect("the change follows the moved files");
+
+            assert_eq!(renamed.root, destination);
+            assert_eq!(renamed.storage, StorageClass::Persistent);
+            assert_eq!(
+                metadata::read_client_metadata(&destination)
+                    .expect("metadata")
+                    .name,
+                "after",
+                "copy: {copy}"
+            );
+            let row = registry.client(client.id).expect("row");
+            assert_eq!(row.root, destination, "copy: {copy}");
+            assert_eq!(row.storage, StorageClass::Persistent);
+            assert_eq!(row.name, "after");
+        }
+    }
+
+    #[test]
+    fn a_change_to_a_vanished_temporary_client_is_not_redirected_when_nothing_moved() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = created_client(&registry);
+        std::fs::remove_dir_all(&client.root).expect("the OS clears the temporary root");
+
+        let record = registry
+            .modify_client(client.id, |record| record.name = "after".to_owned())
+            .expect("only the row changes");
+
+        assert_eq!(record.root, client.root);
+        assert_eq!(record.storage, StorageClass::Temporary);
     }
 
     fn prepare_unfinished_restore(root: &Path, part: crate::restore::RestorePart) {

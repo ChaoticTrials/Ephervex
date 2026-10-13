@@ -1076,7 +1076,7 @@ fn resolve_orphaned_client(
 /// All three conditions matter. The directory has to look like an instance, its
 /// metadata has to name this instance rather than another one, and it must not
 /// carry the incomplete marker, which no finished move leaves behind (ADR 0025).
-fn is_finished_client_root(root: &Path, id: InstanceId) -> bool {
+pub(crate) fn is_finished_client_root(root: &Path, id: InstanceId) -> bool {
     metadata::is_client_instance_root(root)
         && !metadata::is_incomplete(root)
         && metadata::read_client_metadata(root).is_ok_and(|found| found.id == id)

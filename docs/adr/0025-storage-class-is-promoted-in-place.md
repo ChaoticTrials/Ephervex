@@ -86,6 +86,11 @@ record is corrected rather than deleted. Without this, an interrupted promotion
 would cost the instance its linked servers on the next start. A staging
 directory is never adopted; reconciliation reports it and leaves it alone.
 
+A change to such a client made before the next reconciliation, for example after
+the move's index write failed, follows the files in the same way: it is applied to
+the metadata at the persistent root and repairs the row, instead of being written
+to a row that names a directory that no longer exists.
+
 **Linked servers are a per-server choice, not a cascade.** A server has its own
 storage class and its own world. Every temporary linked server is offered,
 selected by default, because a persistent client whose server disappears on the
