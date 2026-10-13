@@ -8,7 +8,7 @@
 //! # The lease is the whole safety argument
 //!
 //! Every service that fetches or consumes reusable artifacts runs inside
-//! [`App::with_artifact_cache`]. That takes a shared lease before the work
+//! `App::with_artifact_cache`. That takes a shared lease before the work
 //! starts, holds it until the work is completely finished - including the copy
 //! into an instance, the unpack into a runtime, the spawn of a JVM whose
 //! classpath names cache paths - and only then lets maintenance try to run.

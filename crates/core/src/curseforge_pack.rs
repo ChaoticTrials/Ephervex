@@ -4,12 +4,11 @@
 //!
 //! A CurseForge export manifest names each of its files by project id and file
 //! id and nothing else: no name, no size, no hash, no address. `ephervex-pack`
-//! therefore parses one into a recipe plus a list of
-//! [`PendingProviderFile`](ephervex_pack::PendingProviderFile) entries, and
-//! stops. This module is the half that asks CurseForge, and it lives here for
-//! the same reason every other cross-boundary sequence does: the pack crate
-//! knows archives and recipes, the mod-platform crate knows the API, and
-//! neither should learn the other.
+//! therefore parses one into a recipe plus a list of [`PendingProviderFile`]
+//! entries, and stops. This module is the half that asks CurseForge, and it
+//! lives here for the same reason every other cross-boundary sequence does: the
+//! pack crate knows archives and recipes, the mod-platform crate knows the API,
+//! and neither should learn the other.
 //!
 //! A frontend never orchestrates this. It analyzes an archive, asks core to
 //! resolve it, and gets back an analysis it can display and import - the same
@@ -23,7 +22,7 @@
 //! is used. Nothing here lists a project's versions, and nothing picks a newer
 //! file when the declared one is gone: a missing exact file fails the import.
 //! The one file this module *does* choose between is two files the manifest
-//! itself declared for the same project - see [`resolve_duplicate_projects`]
+//! itself declared for the same project - see `resolve_duplicate_projects`
 //! and ADR 0031 - which is a defect in the pack's own declaration, not a
 //! missing file this module went looking for a substitute for.
 //!
@@ -41,7 +40,7 @@
 //! still come from CurseForge, which serves them only to an authenticated
 //! request. So an artifact whose verified copy is still in the shared store is
 //! installed with no credential at all, and one the cache budget has collected
-//! needs the key back. [`ProviderCredentials`] is where that decision is made,
+//! needs the key back. `ProviderCredentials` is where that decision is made,
 //! per artifact and from the provider identity the recipe records.
 //!
 //! # Nothing an API answer says is written down

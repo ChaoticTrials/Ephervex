@@ -21,13 +21,17 @@
 //! # Provenance
 //!
 //! A server reconstructed from an imported pack gets the pack's content through
-//! reconstruction, and those entries stay [`ModOrigin::PackDeclared`] — the
-//! pack's declaration is a historical record, not a wish list, so nothing here
+//! reconstruction, and those entries stay
+//! [`PackDeclared`](ephervex_model::ModOrigin::PackDeclared): the pack's
+//! declaration is a historical record, not a wish list, so nothing here
 //! rewrites one to pretend a later mod or a later release shipped with it. A
-//! mod synced afterwards is [`ModOrigin::UserSelected`] on the server, and what
-//! it drags in is [`ModOrigin::RequiredDependency`], exactly as on a client. The
-//! three stay tellable apart in the server's own retained recipe, which is
-//! where the server's ownership is proven and re-read after a restart.
+//! mod synced afterwards is
+//! [`UserSelected`](ephervex_model::ModOrigin::UserSelected) on the server, and
+//! what it drags in is
+//! [`RequiredDependency`](ephervex_model::ModOrigin::RequiredDependency),
+//! exactly as on a client. The three stay tellable apart in the server's own
+//! retained recipe, which is where the server's ownership is proven and
+//! re-read after a restart.
 //!
 //! # Not globally atomic, on purpose
 //!
@@ -328,8 +332,10 @@ pub struct LinkedTargetPlan {
     pub minecraft_version: String,
     pub loader: LoaderSelection,
     pub state: LinkedTargetState,
-    /// Whether this target starts selected. See [`default_selection`] for the
-    /// policy and why it is conservative.
+    /// Whether this target starts selected. A server that already manages
+    /// the root stays in step, one that does not joins only when the project
+    /// declares the server side required, and a blocked target is never
+    /// selected.
     pub selected_by_default: bool,
     /// Mods this target would write, the root first.
     pub installs: Vec<PlannedFile>,

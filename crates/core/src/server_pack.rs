@@ -1,7 +1,7 @@
 //! Building a server from a published server archive.
 //!
 //! The other way to give a server its content is to replay the client's
-//! retained recipe ([`App::materialize_linked_server_recipe`]). That path exists
+//! retained recipe (`App::materialize_linked_server_recipe`). That path exists
 //! because a client pack is all there is when a pack declares nothing about
 //! servers, which is the CurseForge export format's normal state. It is a
 //! reconstruction, and it can only ever be as good as what the client's manifest
