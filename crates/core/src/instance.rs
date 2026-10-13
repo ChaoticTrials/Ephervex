@@ -525,10 +525,9 @@ impl App {
     #[instrument(skip(self))]
     pub fn rename_client(&self, instance: InstanceId, name: &str) -> CoreResult<ClientRecord> {
         let name = validated_entity_name(name)?;
-        let mut record = self.client(instance)?;
-        record.name = name;
-        self.registry_for_services().update_client(&mut record)?;
-        Ok(record)
+        Ok(self
+            .registry_for_services()
+            .modify_client(instance, |record| record.name = name)?)
     }
 
     /// Renames a dedicated server, on the same terms.

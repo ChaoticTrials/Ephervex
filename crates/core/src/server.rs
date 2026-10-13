@@ -2824,6 +2824,39 @@ mod tests {
     }
 
     #[test]
+    fn a_server_setting_change_keeps_a_committed_rename_the_index_row_lags_behind() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let server = app
+            .registry_for_services()
+            .create_server(NewServer::new(
+                "indexed",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("scaffold");
+        let mut renamed = server.clone();
+        renamed.name = "renamed".to_owned();
+        ephervex_storage::metadata::write_server_metadata(&server.root, &renamed)
+            .expect("canonical write");
+        assert_eq!(app.server(server.id).expect("row").name, "indexed");
+
+        let committed = app
+            .set_server_runtime_settings(
+                server.id,
+                Some(JavaOverride::new("/opt/jdk/bin/java")),
+                None,
+            )
+            .expect("update runtime settings");
+
+        assert_eq!(committed.record.name, "renamed");
+        let canonical = ephervex_storage::metadata::read_server_metadata(&server.root)
+            .expect("canonical metadata");
+        assert_eq!(canonical.name, "renamed");
+        assert_eq!(app.server(server.id).expect("row").name, "renamed");
+    }
+
+    #[test]
     fn a_relative_server_java_override_is_stored_as_an_absolute_path() {
         let directory = tempfile::tempdir().expect("temp dir");
         let app = test_app(directory.path());

@@ -45,6 +45,10 @@ Schema changes go through an ordered migration runner keyed on SQLite's
   reported as a warning on the committed result instead of an error. The same
   holds when the index write itself fails after the file was published; the
   next reconciliation adopts the canonical record.
+- The index row can lag the metadata file after an index write failed behind a
+  committed update. A change to an existing record therefore starts from the
+  metadata file when the root exists, never from the index row, so it cannot
+  write older fields back over a committed one.
 - `bundled` is used because the target machine has no system SQLite development
   package, and pinning the library version removes a class of "works on my
   distro" failures.

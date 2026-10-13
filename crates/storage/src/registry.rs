@@ -640,20 +640,38 @@ impl Registry {
 
     /// Applies one change to a client's current record and persists it.
     ///
-    /// The record is read here, immediately before the write, so only the
-    /// fields `change` touches differ from what is stored. Operations that
+    /// The record is read here, immediately before the write, from the
+    /// canonical metadata when the root exists, because the index row lags it
+    /// after an index write failed behind a committed update (ADR 0002). Only
+    /// the fields `change` touches differ from what is stored. Operations that
     /// spend minutes downloading must use this instead of writing back the
     /// record they read when they started: a rename, a setting, or an
     /// attention flag stored meanwhile would be reverted.
+    ///
+    /// Metadata that is unreadable or names another instance refuses the
+    /// change instead of being replaced by the index copy.
     pub fn modify_client(
         &self,
         id: InstanceId,
         change: impl FnOnce(&mut ClientRecord),
     ) -> Result<ClientRecord, RegistryError> {
-        let mut record = self.client(id)?;
+        let mut record = self.client_for_update(id)?;
         change(&mut record);
         self.update_client(&mut record)?;
         Ok(record)
+    }
+
+    /// The client as its canonical metadata holds it, at the root the index
+    /// names. A client whose root is missing has only its index row.
+    fn client_for_update(&self, id: InstanceId) -> Result<ClientRecord, RegistryError> {
+        let indexed = self.client(id)?;
+        if !indexed.root.is_dir() {
+            return Ok(indexed);
+        }
+        let mut canonical = canonical_client_at(&indexed.root, id)?;
+        canonical.root = indexed.root;
+        canonical.storage = indexed.storage;
+        Ok(canonical)
     }
 
     /// Replaces the SQLite recovery copy of an indexed client with its
@@ -3242,5 +3260,95 @@ mod tests {
             .expect_err("the index is the only record, so its failure is the update's failure");
 
         assert!(matches!(error, RegistryError::Index(_)));
+    }
+
+    fn fail_index_writes(registry: &Registry, table: &str) {
+        registry
+            .index()
+            .connection()
+            .execute_batch(&format!(
+                "CREATE TRIGGER refuse_index_writes BEFORE UPDATE ON {table}
+                 BEGIN SELECT RAISE(ABORT, 'index is read-only'); END;"
+            ))
+            .expect("install failing trigger");
+    }
+
+    fn restore_index_writes(registry: &Registry) {
+        registry
+            .index()
+            .connection()
+            .execute_batch("DROP TRIGGER refuse_index_writes;")
+            .expect("drop failing trigger");
+    }
+
+    #[test]
+    fn a_client_change_after_a_lagging_index_write_keeps_the_committed_fields() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = created_client(&registry);
+
+        fail_index_writes(&registry, "instances");
+        registry
+            .modify_client(client.id, |record| record.name = "renamed".to_owned())
+            .expect("the published metadata is a committed mutation");
+        restore_index_writes(&registry);
+        assert_eq!(registry.client(client.id).expect("row").name, "before");
+
+        let launched = registry
+            .modify_client(client.id, |record| {
+                record.last_launched_at = Some(Utc::now());
+            })
+            .expect("later change");
+
+        assert_eq!(launched.name, "renamed");
+        let canonical = metadata::read_client_metadata(&client.root).expect("metadata");
+        let indexed = registry.client(client.id).expect("row");
+        for record in [&canonical, &indexed] {
+            assert_eq!(record.name, "renamed");
+            assert!(record.last_launched_at.is_some());
+        }
+    }
+
+    #[test]
+    fn a_client_change_with_a_missing_root_starts_from_the_index_row() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new("kept", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        std::fs::remove_dir_all(&client.root).expect("remove root");
+
+        let changed = registry
+            .modify_client(client.id, |record| {
+                record.add_attention(AttentionReason::MissingRoot);
+            })
+            .expect("index-only change");
+
+        assert_eq!(changed.name, "kept");
+        assert!(changed.attention.contains(&AttentionReason::MissingRoot));
+    }
+
+    #[test]
+    fn a_client_change_refuses_metadata_that_names_another_instance() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new("kept", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        let mut foreign = client.clone();
+        foreign.id = InstanceId::new();
+        metadata::write_client_metadata(&client.root, &foreign).expect("foreign write");
+
+        let error = registry
+            .modify_client(client.id, |record| record.name = "changed".to_owned())
+            .expect_err("foreign metadata blocks the change");
+
+        assert!(matches!(error, RegistryError::InstanceUnknown { .. }));
+        assert_eq!(
+            metadata::read_client_metadata(&client.root)
+                .expect("metadata")
+                .id,
+            foreign.id
+        );
     }
 }

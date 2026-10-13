@@ -773,12 +773,12 @@ impl App {
     ) -> CoreResult<ClientRecord> {
         let java_override = normalized_java_override(java_override)?;
         let _claim = self.claim_stopped_client(id)?;
-        let mut record = self.client(id)?;
+        self.client(id)?;
         self.validate_jvm_override(jvm_override.as_ref())?;
-        record.java_override = java_override;
-        record.jvm_override = jvm_override;
-        self.registry().update_client(&mut record)?;
-        Ok(record)
+        Ok(self.registry().modify_client(id, |record| {
+            record.java_override = java_override;
+            record.jvm_override = jvm_override;
+        })?)
     }
 
     /// Refuses an override that, layered over the current global settings,
@@ -805,10 +805,9 @@ impl App {
         id: InstanceId,
         allow: bool,
     ) -> CoreResult<ClientRecord> {
-        let mut record = self.client(id)?;
-        record.allow_pack_mod_version_changes = allow;
-        self.registry().update_client(&mut record)?;
-        Ok(record)
+        Ok(self.registry().modify_client(id, |record| {
+            record.allow_pack_mod_version_changes = allow;
+        })?)
     }
 
     /// The servers linked to a client.
@@ -2069,6 +2068,32 @@ mod tests {
             .expect("clear");
         assert!(cleared.java_override.is_none());
         assert!(cleared.jvm_override.is_none());
+    }
+
+    #[test]
+    fn a_client_setting_change_keeps_a_committed_rename_the_index_row_lags_behind() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let created = app
+            .create_client_for_test(NewClient::new(
+                "indexed",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        let mut renamed = created.clone();
+        renamed.name = "renamed".to_owned();
+        ephervex_storage::metadata::write_client_metadata(&created.root, &renamed)
+            .expect("canonical write");
+        assert_eq!(app.client(created.id).expect("row").name, "indexed");
+
+        let changed = app
+            .set_allow_pack_mod_version_changes(created.id, true)
+            .expect("setting");
+
+        assert_eq!(changed.name, "renamed");
+        assert!(changed.allow_pack_mod_version_changes);
+        assert_eq!(app.client(created.id).expect("row").name, "renamed");
     }
 
     #[test]

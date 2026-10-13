@@ -489,9 +489,9 @@ impl App {
         if !report.recovery_issues.is_empty() {
             match host {
                 InstalledHost::Instance(id) => {
-                    let mut record = self.client(id)?;
-                    record.add_attention(AttentionReason::InterruptedMutation);
-                    self.registry().update_client(&mut record)?;
+                    self.registry().modify_client(id, |record| {
+                        record.add_attention(AttentionReason::InterruptedMutation);
+                    })?;
                 }
                 InstalledHost::Server(id) => {
                     if let Err(error) =
