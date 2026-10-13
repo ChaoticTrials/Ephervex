@@ -234,11 +234,11 @@ pub(crate) async fn stored_file_matches_until(
 
 /// A regular file at a stored path, judged against a request.
 ///
-/// The verdict describes exactly the file `_pin` has open. Keeping the handle
+/// The verdict describes exactly the file `pin` has open. Keeping the handle
 /// pins its inode, so `identity` stays unique to this file until the caller
 /// is done acting on the verdict.
 pub(crate) struct StoredFile {
-    _pin: File,
+    pub(crate) pin: File,
     pub(crate) identity: Option<FileIdentity>,
     pub(crate) len: u64,
     pub(crate) matches: bool,
@@ -288,7 +288,7 @@ pub(crate) async fn inspect_stored_file(
         }
     };
     Ok(StoredFileState::Present(StoredFile {
-        _pin: file,
+        pin: file,
         identity: FileIdentity::of(&metadata),
         len,
         matches,

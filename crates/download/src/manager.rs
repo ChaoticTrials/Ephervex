@@ -1238,8 +1238,8 @@ async fn revalidate_cached(
         let Some(identity) = stored.identity else {
             return Ok(None);
         };
-        // `stored` stays open across the discard, which keeps the inode unique.
-        let discard = discard_unless_replaced(destination, identity)
+        // The open handle goes with the discard, which keeps the inode unique.
+        let discard = discard_unless_replaced(destination, identity, stored.pin)
             .await
             .map_err(|source| DownloadError::io(ArtifactStep::ReadCached, destination, source))?;
         if discard == Discard::Removed {

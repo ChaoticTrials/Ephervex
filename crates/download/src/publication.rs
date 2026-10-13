@@ -148,14 +148,18 @@ pub(crate) async fn rename_into_place(from: &Path, to: &Path) -> io::Result<()> 
 
 /// Removes `path` only while it is still the file with `inspected` identity.
 ///
-/// The caller keeps the inspected file open until this returns, so its inode
-/// number cannot have been reused by a later publication.
+/// `pin` is the open handle of the inspected file. It moves into the blocking
+/// task and is released only after the comparison, so the inode number cannot
+/// be reused by a later publication even when the caller stops awaiting and
+/// the task is still waiting for the directory lock.
 pub(crate) async fn discard_unless_replaced(
     path: &Path,
     inspected: FileIdentity,
+    pin: impl Send + 'static,
 ) -> io::Result<Discard> {
     let path = path.to_path_buf();
     blocking(move || {
+        let _pin = pin;
         let _lock = lock_directory(parent_of(&path));
         match std::fs::symlink_metadata(&path) {
             Ok(current) if FileIdentity::of(&current) == Some(inspected) => {
@@ -187,7 +191,7 @@ mod tests {
         let path = dir.path().join("artifact");
         std::fs::write(&path, b"corrupt").unwrap();
 
-        let outcome = discard_unless_replaced(&path, identity(&path))
+        let outcome = discard_unless_replaced(&path, identity(&path), ())
             .await
             .unwrap();
 
@@ -207,7 +211,7 @@ mod tests {
         std::fs::write(&staged, b"verified").unwrap();
         rename_into_place(&staged, &path).await.unwrap();
 
-        let outcome = discard_unless_replaced(&path, inspected).await.unwrap();
+        let outcome = discard_unless_replaced(&path, inspected, ()).await.unwrap();
 
         assert_eq!(outcome, Discard::Replaced);
         assert_eq!(std::fs::read(&path).unwrap(), b"verified");
@@ -222,7 +226,7 @@ mod tests {
         let _pinned = std::fs::File::open(&path).unwrap();
         std::fs::remove_file(&path).unwrap();
 
-        let outcome = discard_unless_replaced(&path, inspected).await.unwrap();
+        let outcome = discard_unless_replaced(&path, inspected, ()).await.unwrap();
 
         assert_eq!(outcome, Discard::Removed);
     }
@@ -259,7 +263,7 @@ mod tests {
         let holder = lock_directory(dir.path());
         let discarding = tokio::spawn({
             let path = path.clone();
-            async move { discard_unless_replaced(&path, inspected).await }
+            async move { discard_unless_replaced(&path, inspected, ()).await }
         });
         tokio::time::sleep(Duration::from_millis(150)).await;
         assert!(path.exists(), "removed while the directory was locked");
@@ -267,5 +271,58 @@ mod tests {
         drop(holder);
         assert_eq!(discarding.await.unwrap().unwrap(), Discard::Removed);
         assert!(!path.exists());
+    }
+
+    /// Reports through `released` when it is dropped.
+    struct ReleaseProbe {
+        released: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Drop for ReleaseProbe {
+        fn drop(&mut self) {
+            self.released
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_abandoned_discard_keeps_the_inspected_handle_until_its_comparison_ran() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("artifact");
+        std::fs::write(&path, b"corrupt").unwrap();
+        let inspected = identity(&path);
+        let released = Arc::new(AtomicBool::new(false));
+        let probe = ReleaseProbe {
+            released: Arc::clone(&released),
+        };
+
+        let holder = lock_directory(dir.path());
+        let discarding = tokio::spawn({
+            let path = path.clone();
+            async move { discard_unless_replaced(&path, inspected, probe).await }
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        discarding.abort();
+        assert!(discarding.await.unwrap_err().is_cancelled());
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            !released.load(Ordering::SeqCst),
+            "the inspected handle was released while the comparison was still waiting"
+        );
+
+        drop(holder);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !released.load(Ordering::SeqCst) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the handle was never released after the comparison"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!path.exists(), "the inspected file was not discarded");
     }
 }

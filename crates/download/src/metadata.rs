@@ -437,13 +437,13 @@ pub enum ConditionalStore<T> {
 /// A cached document together with the file it was read from.
 ///
 /// Holds that file open so its identity cannot be reused by a later
-/// publication before [`MetadataCache::discard`] has compared it.
+/// publication until [`MetadataCache::discard`] has compared it.
 #[derive(Debug)]
 pub struct InspectedMetadata {
     entry: CachedMetadata,
     path: PathBuf,
     identity: Option<FileIdentity>,
-    _file: fs::File,
+    file: fs::File,
 }
 
 impl InspectedMetadata {
@@ -552,7 +552,7 @@ impl MetadataCache {
             entry: entry.with_freshness(freshness),
             path,
             identity,
-            _file: file,
+            file,
         })
     }
 
@@ -860,8 +860,8 @@ impl MetadataCache {
         let Some(identity) = inspected.identity else {
             return;
         };
-        // `inspected` stays open across the call, which keeps the inode unique.
-        match discard_unless_replaced(&inspected.path, identity).await {
+        // The open handle goes with the discard, which keeps the inode unique.
+        match discard_unless_replaced(&inspected.path, identity, inspected.file).await {
             Ok(Discard::Removed) => {}
             Ok(Discard::Replaced) => {
                 debug!(
