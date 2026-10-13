@@ -778,6 +778,97 @@ fn cancel_restores_the_exact_pre_isolation_mod_state_through_the_snapshot() {
 }
 
 #[test]
+fn canceling_a_session_reports_an_index_write_that_failed_after_the_restore_was_published() {
+    let fixture = Fixture::new();
+    let app = fixture.app();
+    let cancel = CancellationToken::new();
+    app.begin_isolation(fixture.host, request(&["pin"]), &cancel)
+        .unwrap();
+    Registry::open(fixture.paths.clone())
+        .unwrap()
+        .index()
+        .connection()
+        .execute_batch(
+            "CREATE TRIGGER refuse_instance_updates BEFORE UPDATE ON instances
+             BEGIN SELECT RAISE(ABORT, 'index unavailable'); END;",
+        )
+        .unwrap();
+
+    let canceled = app.cancel_isolation(fixture.host, &cancel).unwrap();
+
+    assert!(matches!(
+        canceled.warnings.as_slice(),
+        [ephervex_storage::ClientCommitWarning::IndexOutOfSync { .. }]
+    ));
+    assert!(app.isolation_state(fixture.host).unwrap().is_none());
+    assert_eq!(
+        enabled_files(&fixture),
+        [
+            "a.jar",
+            "b.jar",
+            "base.jar",
+            "c.jar",
+            "d.jar",
+            "e.jar",
+            "pin.jar",
+            "shared.jar"
+        ]
+    );
+}
+
+#[test]
+fn canceling_a_server_session_reports_an_index_write_that_failed_after_the_restore_was_published() {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = Paths::rooted_at(directory.path());
+    let server = Registry::open(paths.clone())
+        .unwrap()
+        .create_server(NewServer::new(
+            "Isolation",
+            "1.20.1",
+            LoaderSelection::vanilla(),
+        ))
+        .unwrap();
+    let mods = server.root.join("server/mods");
+    std::fs::create_dir_all(&mods).unwrap();
+    std::fs::write(mods.join("a.jar"), b"a").unwrap();
+    let host = InstalledHost::Server(server.id);
+    let app = App::open_at(paths.clone()).unwrap();
+    let cancel = CancellationToken::new();
+    app.begin_isolation(host, request(&[]), &cancel).unwrap();
+    Registry::open(paths)
+        .unwrap()
+        .index()
+        .connection()
+        .execute_batch(
+            "CREATE TRIGGER refuse_server_updates BEFORE UPDATE ON servers
+             BEGIN SELECT RAISE(ABORT, 'index unavailable'); END;",
+        )
+        .unwrap();
+
+    let canceled = app.cancel_isolation(host, &cancel).unwrap();
+
+    assert!(matches!(
+        canceled.server_warnings.as_slice(),
+        [ephervex_storage::ServerCommitWarning::IndexOutOfSync { .. }]
+    ));
+    assert!(canceled.warnings.is_empty());
+    assert!(app.isolation_state(host).unwrap().is_none());
+}
+
+#[test]
+fn canceling_a_session_with_a_healthy_index_reports_no_warnings() {
+    let fixture = Fixture::new();
+    let app = fixture.app();
+    let cancel = CancellationToken::new();
+    app.begin_isolation(fixture.host, request(&["pin"]), &cancel)
+        .unwrap();
+
+    let canceled = app.cancel_isolation(fixture.host, &cancel).unwrap();
+
+    assert!(canceled.warnings.is_empty());
+}
+
+#[test]
 fn a_snapshot_restore_is_refused_while_a_session_owns_the_host() {
     let fixture = Fixture::new();
     let app = fixture.app();

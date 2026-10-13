@@ -4360,11 +4360,19 @@ fn run_mod_isolate(app: &App, command: &IsolateCommand, json: bool) -> anyhow::R
             }
         }
         IsolateCommand::Cancel { host } => {
-            app.cancel_isolation(host.host()?, &CancellationToken::new())?;
+            let canceled = app.cancel_isolation(host.host()?, &CancellationToken::new())?;
             if json {
-                print_json(&serde_json::json!({ "canceled": true }));
+                print_json(&serde_json::json!({
+                    "canceled": true,
+                    "warnings": client_commit_warnings_json(&canceled.warnings)
+                        .into_iter()
+                        .chain(server_commit_warnings_json(&canceled.server_warnings))
+                        .collect::<Vec<_>>(),
+                }));
             } else {
                 outln!("Isolation canceled. The pre-isolation state was restored.");
+                print_client_commit_warnings(&canceled.warnings);
+                print_server_commit_warnings(&canceled.server_warnings);
             }
         }
     }

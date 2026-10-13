@@ -222,6 +222,7 @@ fn the_cli_cancel_restores_the_pre_isolation_configuration() {
         &instance,
     ]);
     assert_eq!(canceled["canceled"], true);
+    assert_eq!(canceled["warnings"], json!([]));
     assert_eq!(enabled(&root), before);
     assert!(!root.join(".launcher/isolation.json").exists());
 }

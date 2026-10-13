@@ -126,11 +126,11 @@ pub use instance::{
     global_minecraft_preferences, name_with_suffix, validated_entity_name,
 };
 pub use isolation::{
-    IsolationCandidate, IsolationConfidence, IsolationError, IsolationLinkedServer,
-    IsolationMissingDependency, IsolationOutcome, IsolationPlan, IsolationReconciliation,
-    IsolationReport, IsolationRequest, IsolationResultCandidate, IsolationRound,
-    IsolationRoundKind, IsolationRoundRecord, IsolationSession, IsolationStep, RoundAnswer,
-    RoundContradiction,
+    IsolationCancel, IsolationCandidate, IsolationConfidence, IsolationError,
+    IsolationLinkedServer, IsolationMissingDependency, IsolationOutcome, IsolationPlan,
+    IsolationReconciliation, IsolationReport, IsolationRequest, IsolationResultCandidate,
+    IsolationRound, IsolationRoundKind, IsolationRoundRecord, IsolationSession, IsolationStep,
+    RoundAnswer, RoundContradiction,
 };
 pub use launch::{LaunchOptions, LaunchOutcome};
 pub use licenses::{

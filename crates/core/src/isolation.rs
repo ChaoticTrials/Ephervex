@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use ephervex_download::OperationReporter;
 use ephervex_model::SnapshotId;
+use ephervex_storage::{ClientCommitWarning, ServerCommitWarning};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
@@ -323,6 +324,16 @@ pub enum IsolationReconciliation {
     AlreadyApplied,
     /// The intended configuration was reapplied through resume.
     Reapplied,
+}
+
+/// What canceling a session restored, and what the user should hear about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IsolationCancel {
+    /// Conditions on the restored client metadata. The restore is in effect
+    /// either way.
+    pub warnings: Vec<ClientCommitWarning>,
+    /// Conditions on the restored server metadata.
+    pub server_warnings: Vec<ServerCommitWarning>,
 }
 
 /// Final report returned after the durable session marker is removed.
@@ -855,25 +866,30 @@ impl App {
         &self,
         host: InstalledHost,
         cancel: &CancellationToken,
-    ) -> CoreResult<()> {
+    ) -> CoreResult<IsolationCancel> {
         self.refuse_isolation_while_running(host)?;
         let path = self.isolation_path(host)?;
         let session = self.read_required_session(host)?;
-        match self.restore_isolation_snapshot(host, session.safety_snapshot, cancel) {
-            Ok(_) => {}
-            // The snapshot was deleted before deletion was refused. Re-enabling
-            // the recorded starting mods is the closest remaining restore.
-            Err(SnapshotError::NotFound { .. }) => {
-                self.apply_isolation_configuration(
-                    host,
-                    &session,
-                    &session.plan.initially_enabled,
-                )?;
-            }
-            Err(error) => return Err(error.into()),
-        }
+        let (warnings, server_warnings) =
+            match self.restore_isolation_snapshot(host, session.safety_snapshot, cancel) {
+                Ok(restore) => (restore.warnings, restore.server_warnings),
+                // The snapshot was deleted before deletion was refused. Re-enabling
+                // the recorded starting mods is the closest remaining restore.
+                Err(SnapshotError::NotFound { .. }) => {
+                    self.apply_isolation_configuration(
+                        host,
+                        &session,
+                        &session.plan.initially_enabled,
+                    )?;
+                    (Vec::new(), Vec::new())
+                }
+                Err(error) => return Err(error.into()),
+            };
         remove_session(&path)?;
-        Ok(())
+        Ok(IsolationCancel {
+            warnings,
+            server_warnings,
+        })
     }
 
     fn read_required_session(&self, host: InstalledHost) -> CoreResult<IsolationSession> {

@@ -4122,13 +4122,15 @@ fn run_worker(
                     },
                     move |app, _reporter, cancel| async move {
                         let _in_flight = in_flight;
-                        app.cancel_isolation(host, &cancel)?;
+                        let canceled = app.cancel_isolation(host, &cancel)?;
                         let _ = reports.send(Event::Isolation {
                             generation,
                             open: false,
                             data: inactive_isolation_data(host),
                         });
                         send_host_mods(&app, host, &reports, &refreshed, false);
+                        send_client_commit_warnings(&reports, &canceled.warnings);
+                        send_server_commit_warnings(&reports, &canceled.server_warnings);
                         Ok(OperationReport::Toast(lookup("gui-isolation-canceled")))
                     },
                 );
