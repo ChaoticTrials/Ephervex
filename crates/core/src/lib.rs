@@ -69,6 +69,8 @@ pub mod server_pack;
 pub mod single_instance;
 pub mod snapshot;
 pub mod termination;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 pub mod url_handler;
 pub mod verify;
 

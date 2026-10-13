@@ -11,6 +11,11 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Lets the tests of a crate that links this one replace the desktop keyring with
+# an in-memory store. Only a dev-dependency enables it; no shipped binary does.
+test-support = []
+
 [dependencies]
 ephervex-model.workspace = true
 ephervex-storage.workspace = true

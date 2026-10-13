@@ -48,6 +48,9 @@ x11rb.workspace = true
 slint-build.workspace = true
 
 [dev-dependencies]
+# Unit tests open an `App` on a temporary root, which isolates files but not the
+# desktop keyring; this lets them swap in an in-memory credential store.
+ephervex-core = { workspace = true, features = ["test-support"] }
 # A headless window, so what the markup actually does with a pointer event is
 # testable rather than only observable by hand.
 i-slint-backend-testing.workspace = true

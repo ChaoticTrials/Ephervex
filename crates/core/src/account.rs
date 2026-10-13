@@ -1085,6 +1085,10 @@ impl App {
         reason = "a test build reads its keyring from the App"
     )]
     fn keyring_for_cleanup(&self) -> Result<Arc<dyn CredentialStore>, AuthError> {
+        #[cfg(feature = "test-support")]
+        if let Some(store) = crate::test_support::installed_store() {
+            return Ok(store);
+        }
         KeyringStore::open_quietly().map(|store| -> Arc<dyn CredentialStore> { Arc::new(store) })
     }
 
@@ -1429,6 +1433,10 @@ fn validated_user_agent(user_agent: Option<&str>) -> CoreResult<String> {
 /// initialization behind a `LazyLock`, so calling this repeatedly costs a
 /// struct literal and nothing more.
 pub(crate) fn credential_store() -> Result<Arc<dyn CredentialStore>, AuthError> {
+    #[cfg(feature = "test-support")]
+    if let Some(store) = crate::test_support::installed_store() {
+        return Ok(store);
+    }
     KeyringStore::open().map(|store| -> Arc<dyn CredentialStore> { Arc::new(store) })
 }
 

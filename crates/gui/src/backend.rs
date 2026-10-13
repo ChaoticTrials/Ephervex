@@ -11814,6 +11814,26 @@ mod tests {
 
     use super::*;
 
+    /// Keeps a test that builds a snapshot from reaching the desktop keyring,
+    /// which a temporary root does not isolate.
+    fn without_desktop_keyring() {
+        ephervex_core::test_support::use_in_memory_credential_store();
+    }
+
+    #[test]
+    fn an_app_opened_after_installing_the_in_memory_store_reports_session_only_storage() {
+        without_desktop_keyring();
+        let base = tempfile::tempdir().expect("a disposable root");
+        let app = App::open_at(ephervex_core::Paths::rooted_at(base.path())).expect("an app");
+
+        let status = app.account_status().expect("an account status");
+
+        assert_eq!(
+            status.credential_storage,
+            Some(ephervex_core::CredentialStorage::SessionOnly)
+        );
+    }
+
     fn logical(paths: &[&str]) -> Vec<PathBuf> {
         paths.iter().map(PathBuf::from).collect()
     }
@@ -12598,6 +12618,7 @@ mod tests {
     /// read again once it runs.
     #[test]
     fn a_running_game_refreshes_the_rows_that_said_it_was_starting() {
+        without_desktop_keyring();
         let base = tempfile::tempdir().expect("a disposable root");
         let paths = ephervex_core::Paths::rooted_at(base.path());
         let (events, received) = mpsc::channel();
@@ -12619,6 +12640,7 @@ mod tests {
 
     #[test]
     fn a_snapshot_from_an_app_opened_earlier_shows_the_settings_saved_since() {
+        without_desktop_keyring();
         let base = tempfile::tempdir().expect("a disposable root");
         let paths = ephervex_core::Paths::rooted_at(base.path());
         let mut detached = App::open_at(paths.clone()).expect("the detached app opens");
@@ -13661,6 +13683,7 @@ mod tests {
     /// probe through threads of their own, so those results still arrive.
     #[test]
     fn work_moved_off_the_command_loop_still_reports_its_result() {
+        without_desktop_keyring();
         let root = tempfile::tempdir().expect("root");
         let paths = Paths::rooted_at(root.path());
         let (commands, command_rx) = mpsc::channel();
@@ -13707,6 +13730,7 @@ mod tests {
 
     #[test]
     fn a_server_start_is_cancelable_while_it_prepares_and_stops_offering_cancel_once_it_runs() {
+        without_desktop_keyring();
         let root = tempfile::tempdir().expect("root");
         let paths = Paths::rooted_at(root.path());
         let (events, received) = std::sync::mpsc::channel();
@@ -13952,6 +13976,7 @@ mod tests {
 
     #[test]
     fn linked_server_completion_targets_the_server_without_waiting_for_the_client() {
+        without_desktop_keyring();
         let root = tempfile::tempdir().expect("root");
         let paths = Paths::rooted_at(root.path());
         let (events, received) = std::sync::mpsc::channel();
@@ -13996,6 +14021,7 @@ mod tests {
 
     #[test]
     fn a_pair_start_server_row_is_cancelable_while_it_prepares_and_settles_when_the_server_exits() {
+        without_desktop_keyring();
         let root = tempfile::tempdir().expect("root");
         let paths = Paths::rooted_at(root.path());
         let (events, received) = std::sync::mpsc::channel();
@@ -14089,6 +14115,7 @@ mod tests {
 
     #[test]
     fn a_pair_start_server_row_records_a_crash_after_start_as_failed() {
+        without_desktop_keyring();
         let root = tempfile::tempdir().expect("root");
         let paths = Paths::rooted_at(root.path());
         let (events, received) = std::sync::mpsc::channel();
@@ -14120,6 +14147,7 @@ mod tests {
 
     #[test]
     fn a_pair_start_server_row_fails_when_supervision_ends_after_the_server_started() {
+        without_desktop_keyring();
         let root = tempfile::tempdir().expect("root");
         let paths = Paths::rooted_at(root.path());
         let (events, received) = std::sync::mpsc::channel();
@@ -14148,6 +14176,7 @@ mod tests {
 
     #[test]
     fn a_pair_start_server_row_settles_with_the_run_outcome_when_preparation_ends_the_start() {
+        without_desktop_keyring();
         let root = tempfile::tempdir().expect("root");
         let paths = Paths::rooted_at(root.path());
         let server = ServerId::new();
