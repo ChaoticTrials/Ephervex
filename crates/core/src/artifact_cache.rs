@@ -95,7 +95,8 @@ impl App {
         &mut self,
         limit: ArtifactCacheLimit,
     ) -> CoreResult<ArtifactCacheStatus> {
-        self.mutate_config(|config| config.cache.set_artifact_limit(limit))?;
+        self.mutate_config_off_worker(move |config| config.cache.set_artifact_limit(limit))
+            .await?;
         info!(%limit, "set the artifact cache budget");
         self.maintain_artifact_cache().await;
         self.artifact_cache_status().await

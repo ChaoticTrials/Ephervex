@@ -362,11 +362,12 @@ impl App {
     ) -> CoreResult<StagedPack> {
         let remembered: Vec<String> = consents.remembered().map(str::to_owned).collect();
         if !remembered.is_empty() {
-            self.mutate_config(|config| {
+            self.mutate_config_off_worker(move |config| {
                 for host in &remembered {
                     config.import.trust(host);
                 }
-            })?;
+            })
+            .await?;
         }
         if !consents.agrees_to(source.host()) && !self.pack_host_is_trusted(source) {
             return Err(CoreError::PackHostNotTrusted {

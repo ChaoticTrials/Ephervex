@@ -242,11 +242,28 @@ impl App {
         // Taken before anything writes, and held until the game exits. A
         // second launch of the same instance is refused here rather than
         // discovered when two processes fight over `saves/`.
-        let mut lock = match options.additional.as_deref() {
-            Some(id) => LaunchLock::acquire_additional(&record.root, id)?,
-            None => LaunchLock::acquire(&record.root)?,
-        };
-        drop(claim);
+        let mut lock = HeldLaunch::take(&record.root, options.additional.as_deref(), claim).await?;
+
+        let outcome = self
+            .run_locked_launch(&record, options, observer, cancel, reporter, &mut lock)
+            .await;
+        lock.release().await;
+        outcome
+    }
+
+    /// Everything a launch does once it holds the instance, ending when the game
+    /// has exited or the launch has failed. The caller releases the lock after
+    /// this returns, so it is released on every way out.
+    async fn run_locked_launch(
+        &mut self,
+        record: &ClientRecord,
+        options: &LaunchOptions,
+        observer: &LaunchObserver,
+        cancel: &CancellationToken,
+        reporter: &OperationReporter,
+        lock: &mut HeldLaunch,
+    ) -> CoreResult<LaunchOutcome> {
+        let instance = record.id;
 
         // Establish identity before metadata or artifacts are fetched. A
         // missing account is locally knowable and should fail without network.
@@ -270,7 +287,7 @@ impl App {
 
         let installed = self
             .install_version(
-                &record,
+                record,
                 &metadata,
                 &java.runtime.executable,
                 options,
@@ -284,7 +301,7 @@ impl App {
             &installed.installation.plan,
             &LaunchSettings {
                 java: java.runtime.executable.clone(),
-                game_directory: game_directory(&record),
+                game_directory: game_directory(record),
                 identity: identity.clone(),
                 features: options.features.clone(),
                 jvm: JvmOptions {
@@ -319,7 +336,7 @@ impl App {
         // A lock this run no longer holds is refused here, and dropping the
         // process on the way out ends the game rather than leaving it running
         // beside the launch that holds the instance now.
-        lock.record_game_pid(process.pid())?;
+        lock.record_game_pid(process.pid()).await?;
         observer.emit(LaunchEvent::Running { pid: process.pid() });
 
         // Recorded before the wait, so a launch that never returns - a game
@@ -448,6 +465,76 @@ fn identity_of(session: &Session) -> PlayerIdentity {
     }
 }
 
+/// The launch lock of a launch in progress.
+///
+/// Taking it, recording the game's pid, and releasing it wait on the instance's
+/// ownership guard, which another launcher process can hold for seconds, so each
+/// runs on the blocking pool rather than a runtime worker. Dropping it without
+/// [`Self::release`], as a launch dropped mid-run does, still releases the lock,
+/// on the dropping thread.
+#[derive(Debug)]
+struct HeldLaunch {
+    path: PathBuf,
+    lock: Option<LaunchLock>,
+}
+
+impl HeldLaunch {
+    /// Takes the instance's lock, or one that runs alongside it for an
+    /// additional launch named `additional`, and then lets go of `claim`.
+    ///
+    /// The claim moves into the blocking work so it is never held across an
+    /// await point: the lock, once taken, is what keeps other changes out.
+    async fn take(
+        root: &std::path::Path,
+        additional: Option<&str>,
+        claim: ephervex_storage::HostClaim,
+    ) -> CoreResult<Self> {
+        let root = root.to_owned();
+        let additional = additional.map(str::to_owned);
+        let lock = crate::blocking::off_worker(move || {
+            let lock = match additional {
+                Some(id) => LaunchLock::acquire_additional(&root, &id),
+                None => LaunchLock::acquire(&root),
+            };
+            drop(claim);
+            lock
+        })
+        .await
+        .ok_or(LaunchError::Canceled)??;
+        Ok(Self {
+            path: lock.path().to_path_buf(),
+            lock: Some(lock),
+        })
+    }
+
+    /// Records the game's process id in the lock file.
+    async fn record_game_pid(&mut self, pid: u32) -> CoreResult<()> {
+        let Some(mut lock) = self.lock.take() else {
+            return Err(ephervex_storage::LockError::Lost {
+                path: self.path.clone(),
+            }
+            .into());
+        };
+        let (lock, recorded) = crate::blocking::off_worker(move || {
+            let recorded = lock.record_game_pid(pid);
+            (lock, recorded)
+        })
+        .await
+        .ok_or(LaunchError::Canceled)?;
+        self.lock = Some(lock);
+        Ok(recorded?)
+    }
+
+    /// Releases the lock, so the instance can be launched again once this returns.
+    async fn release(mut self) {
+        if let Some(lock) = self.lock.take() {
+            // Dropped on the blocking pool; a runtime that is already gone
+            // drops it there as the closure is discarded.
+            let _ = crate::blocking::off_worker(move || drop(lock)).await;
+        }
+    }
+}
+
 /// `<instance>/minecraft/`, where saves, options, logs, and crash reports live.
 fn game_directory(record: &ClientRecord) -> PathBuf {
     ephervex_storage::metadata::client_game_dir(&record.root)
@@ -471,6 +558,70 @@ mod tests {
                 .with_storage(StorageClass::Temporary),
         )
         .expect("create")
+    }
+
+    fn claim_of(app: &App, client: &ClientRecord) -> ephervex_storage::HostClaim {
+        app.registry()
+            .claim_host(ephervex_storage::RecordRef::Client(client.id))
+            .expect("the instance is not claimed")
+    }
+
+    #[tokio::test]
+    async fn a_contended_ownership_guard_does_not_stall_the_runtime_while_a_launch_takes_its_lock()
+    {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let client = vanilla(&app, "1.20.1");
+        let root = client.root.clone();
+        let directory = ephervex_storage::metadata::metadata_dir(&root);
+        std::fs::create_dir_all(&directory).expect("metadata dir");
+        // A descriptor of its own, as another launcher process would have.
+        let other_launcher = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(directory.join("launch.guard"))
+            .expect("guard file");
+        rustix::fs::flock(&other_launcher, rustix::fs::FlockOperation::LockExclusive)
+            .expect("flock");
+
+        let taking = HeldLaunch::take(&root, None, claim_of(&app, &client));
+        tokio::pin!(taking);
+        crate::blocking::assert_other_tasks_run_while(taking.as_mut()).await;
+
+        drop(other_launcher);
+        let held = taking.await.expect("taken once the guard is free");
+        assert!(held.path.exists());
+        held.release().await;
+        assert!(
+            ephervex_storage::running_state(&root).is_none(),
+            "released lock leaves the instance free"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_released_launch_lock_is_gone_before_release_returns() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let client = vanilla(&app, "1.20.1");
+        let root = client.root.clone();
+        let mut held = HeldLaunch::take(&root, None, claim_of(&app, &client))
+            .await
+            .expect("lock");
+        held.record_game_pid(std::process::id())
+            .await
+            .expect("recorded");
+        assert_eq!(
+            ephervex_storage::running_state(&root).and_then(|state| state.game_pid),
+            Some(std::process::id())
+        );
+
+        held.release().await;
+
+        assert!(ephervex_storage::running_state(&root).is_none());
+        HeldLaunch::take(&root, None, claim_of(&app, &client))
+            .await
+            .expect("the instance can be launched again");
     }
 
     #[tokio::test]

@@ -1628,6 +1628,32 @@ impl App {
         Ok(())
     }
 
+    /// [`Self::mutate_config`] for an async caller: the wait for the
+    /// configuration lock, which another process can hold for seconds, happens on
+    /// the blocking pool instead of holding a runtime worker.
+    ///
+    /// The whole update runs there, so the lock is released before this
+    /// returns to the runtime. `change` returns a value the caller reads back,
+    /// such as whether a record was found.
+    pub(crate) async fn mutate_config_off_worker<R: Default + Send + 'static>(
+        &mut self,
+        change: impl FnOnce(&mut Config) -> R + Send + 'static,
+    ) -> CoreResult<R> {
+        let paths = self.paths().clone();
+        let (updated, result) = crate::blocking::off_worker(move || {
+            let mut result = R::default();
+            Config::update(&paths, |config| result = change(config))
+                .map(|updated| (updated, result))
+        })
+        .await
+        .ok_or_else(|| ephervex_storage::ConfigError::Unwritable {
+            path: self.paths().config_file(),
+            source: std::io::Error::other("the runtime shut down"),
+        })??;
+        self.adopt_config(updated);
+        Ok(result)
+    }
+
     /// Rereads the configuration file, picking up what another `App` or
     /// process wrote since this one last read or wrote it.
     ///
@@ -1712,6 +1738,38 @@ mod tests {
 
     fn app_rooted_at(base: &std::path::Path) -> App {
         App::open_at(Paths::rooted_at(base)).expect("app should open against a temporary root")
+    }
+
+    /// Another process holds the configuration lock for as long as the guard
+    /// returned lives.
+    fn hold_config_lock_like_another_process(paths: &Paths) -> std::fs::File {
+        std::fs::create_dir_all(paths.config_dir()).expect("config dir");
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(paths.config_dir().join("config.lock"))
+            .expect("lock file");
+        rustix::fs::flock(&held, rustix::fs::FlockOperation::LockExclusive).expect("flock");
+        held
+    }
+
+    #[tokio::test]
+    async fn a_contended_configuration_lock_does_not_stall_the_runtime() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let other_process = hold_config_lock_like_another_process(app.paths());
+
+        {
+            let update =
+                app.mutate_config_off_worker(|config| config.display.show_linked_servers = false);
+            tokio::pin!(update);
+            crate::blocking::assert_other_tasks_run_while(update.as_mut()).await;
+
+            drop(other_process);
+            update.await.expect("written once the lock is free");
+        }
+        assert!(!app.config().display.show_linked_servers);
     }
 
     #[test]

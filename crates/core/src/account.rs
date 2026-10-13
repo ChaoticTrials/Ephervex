@@ -593,7 +593,7 @@ impl App {
         // fail as such instead of resuming against an empty session store.
         let provider = self.build_account_provider(false)?;
         let session = provider.resume(id, observer, cancel).await?;
-        self.adopt(session)
+        self.adopt(session).await
     }
 
     /// A session that is ready to launch with, refreshing if it has to.
@@ -658,7 +658,7 @@ impl App {
         }
         let provider = self.build_account_provider(false)?;
         let session = provider.resume(id, observer, cancel).await?;
-        self.adopt(session)
+        self.adopt(session).await
     }
 
     /// The account whose session-only credential this process holds, when a
@@ -683,7 +683,7 @@ impl App {
         let session = provider.resume(id, observer, cancel).await?;
         // A session-only session writes no account record, even when the
         // account is also recorded from an earlier persistent sign-in.
-        self.adopt(session)
+        self.adopt(session).await
     }
 
     /// Forgets this process's session-only sign-in, credential included.
@@ -1113,8 +1113,8 @@ impl App {
     ///
     /// Only an account the configuration still names is updated. One removed
     /// while the resume ran stays removed, and the resume fails as signed out.
-    fn adopt(&mut self, session: Session) -> CoreResult<&Session> {
-        self.refresh_recorded_account(&session)?;
+    async fn adopt(&mut self, session: Session) -> CoreResult<&Session> {
+        self.refresh_recorded_account(&session).await?;
         self.hold_session(session)
     }
 
@@ -1226,10 +1226,22 @@ impl App {
 
     /// [`Self::record_account`] for a resume: refuses to bring back an
     /// account that is no longer recorded.
-    fn refresh_recorded_account(&mut self, session: &Session) -> CoreResult<()> {
-        self.write_account_metadata(session, |config, id, name, at| {
-            config.refresh_account(id, name, session.account.kind, at)
-        })
+    ///
+    /// Waits for the configuration lock off the runtime workers, since a resume
+    /// runs on one.
+    async fn refresh_recorded_account(&mut self, session: &Session) -> CoreResult<()> {
+        let Some((id, name, at)) = persistent_account_metadata(session) else {
+            return Ok(());
+        };
+        let kind = session.account.kind;
+        let recorded = self
+            .mutate_config_off_worker(move |config| config.refresh_account(&id, &name, kind, &at))
+            .await?;
+        if recorded {
+            Ok(())
+        } else {
+            Err(CoreError::Auth(AuthError::NotSignedIn))
+        }
     }
 
     /// Applies `write` to the configuration under its lock, for a session that
@@ -1240,29 +1252,16 @@ impl App {
         session: &Session,
         write: impl FnOnce(&mut ephervex_storage::Config, &str, &str, &str) -> bool,
     ) -> CoreResult<()> {
-        let id = session.account.id.to_string();
-        let name = session.account.name.clone();
-        let at = session
-            .account
-            .authenticated_at
-            .to_rfc3339_opts(SecondsFormat::Secs, true);
-
-        // Only for a login that will still be here next time. A session-only
-        // login writing an account into `config.toml` would make the next run
-        // claim a login whose credential does not exist.
-        if session
-            .storage()
-            .is_some_and(CredentialStorage::is_persistent)
-        {
-            let mut recorded = false;
-            self.mutate_config(|config| recorded = write(config, &id, &name, &at))?;
-            if !recorded {
-                return Err(CoreError::Auth(AuthError::NotSignedIn));
-            }
+        let Some((id, name, at)) = persistent_account_metadata(session) else {
+            return Ok(());
+        };
+        let mut recorded = false;
+        self.mutate_config(|config| recorded = write(config, &id, &name, &at))?;
+        if recorded {
+            Ok(())
         } else {
-            debug!(account = %id, "session-only login; nothing written to the configuration");
+            Err(CoreError::Auth(AuthError::NotSignedIn))
         }
-        Ok(())
     }
 
     /// Keeps a recorded session in memory for launches.
@@ -1272,6 +1271,30 @@ impl App {
             .as_ref()
             .ok_or(CoreError::Auth(AuthError::NotSignedIn))
     }
+}
+
+/// The id, name, and authentication time to record for `session`, as the
+/// configuration stores them.
+///
+/// `None` for a session that will not outlast this process: a session-only
+/// login writing an account into `config.toml` would make the next run claim a
+/// login whose credential does not exist.
+fn persistent_account_metadata(session: &Session) -> Option<(String, String, String)> {
+    if !session
+        .storage()
+        .is_some_and(CredentialStorage::is_persistent)
+    {
+        debug!(account = %session.account.id, "session-only login; nothing written to the configuration");
+        return None;
+    }
+    Some((
+        session.account.id.to_string(),
+        session.account.name.clone(),
+        session
+            .account
+            .authenticated_at
+            .to_rfc3339_opts(SecondsFormat::Secs, true),
+    ))
 }
 
 /// The keyring a test build uses instead of Secret Service.
@@ -1800,8 +1823,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_resume_finishing_after_the_account_was_removed_does_not_record_it_again() {
+    #[tokio::test]
+    async fn a_resume_finishing_after_the_account_was_removed_does_not_record_it_again() {
         let base = tempfile::tempdir().expect("temp dir");
         let mut resuming = app_rooted_at(base.path());
         let id = Uuid::new_v4();
@@ -1816,6 +1839,7 @@ mod tests {
 
         let error = resuming
             .adopt(microsoft_session(id))
+            .await
             .expect_err("the account is gone");
 
         assert!(
@@ -1828,8 +1852,8 @@ mod tests {
         assert!(resuming.session().is_none());
     }
 
-    #[test]
-    fn a_resume_keeps_the_pending_cleanup_of_the_account_it_updates() {
+    #[tokio::test]
+    async fn a_resume_keeps_the_pending_cleanup_of_the_account_it_updates() {
         let base = tempfile::tempdir().expect("temp dir");
         let mut app = app_rooted_at(base.path());
         let id = Uuid::new_v4();
@@ -1837,7 +1861,7 @@ mod tests {
         app.mutate_config(|config| config.record_keyring_cleanup(&id.to_string()))
             .expect("record");
 
-        app.adopt(microsoft_session(id)).expect("adopted");
+        app.adopt(microsoft_session(id)).await.expect("adopted");
 
         assert_eq!(app.config().keyring_cleanup, [id.to_string()]);
     }

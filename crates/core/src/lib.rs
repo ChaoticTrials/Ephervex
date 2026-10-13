@@ -27,6 +27,7 @@ mod acquisition;
 pub mod app;
 pub mod artifact_cache;
 mod artwork;
+mod blocking;
 pub mod bundle;
 pub mod connection;
 pub mod crash_analysis;
