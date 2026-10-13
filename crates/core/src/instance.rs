@@ -605,7 +605,7 @@ impl App {
         let _claim = self.claim_stopped_client(source)?;
         let name = match chosen_name {
             Some(name) => name,
-            None => name_with_suffix(&self.client(source)?.name, DUPLICATE_NAME_SUFFIX),
+            None => name_with_suffix(&self.current_client(source)?.name, DUPLICATE_NAME_SUFFIX),
         };
         let request = DuplicateClient {
             name: Some(name),
@@ -988,6 +988,32 @@ mod tests {
         }
 
         assert_eq!(app.list_clients().expect("list").len(), 1);
+    }
+
+    #[test]
+    fn the_default_name_of_a_duplicate_follows_a_committed_rename_the_index_row_lags_behind() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let original = create(&app, "before", "1.20.1");
+        let mut renamed = original.clone();
+        renamed.name = "after".to_owned();
+        ephervex_storage::metadata::write_client_metadata(&original.root, &renamed)
+            .expect("canonical write");
+        assert_eq!(app.client(original.id).expect("row").name, "before");
+
+        let copy = app
+            .duplicate_client(
+                original.id,
+                &DuplicateClient::default(),
+                AbsentModPolicy::default(),
+            )
+            .expect("duplicate");
+
+        let expected = format!("after{DUPLICATE_NAME_SUFFIX}");
+        assert_eq!(copy.record.name, expected);
+        let canonical =
+            ephervex_storage::metadata::read_client_metadata(&copy.record.root).expect("metadata");
+        assert_eq!(canonical.name, expected);
     }
 
     #[test]

@@ -50,7 +50,10 @@ Schema changes go through an ordered migration runner keyed on SQLite's
 - The index row can lag the metadata file after an index write failed behind a
   committed update. A change to an existing record therefore starts from the
   metadata file when the root exists, never from the index row, so it cannot
-  write older fields back over a committed one.
+  write older fields back over a committed one. Launch and Java planning,
+  duplication, and a server linked to a client read the same way, so none of
+  them plans from a Minecraft version, loader, or override the user already
+  replaced.
 - `bundled` is used because the target machine has no system SQLite development
   package, and pinning the library version removes a class of "works on my
   distro" failures.

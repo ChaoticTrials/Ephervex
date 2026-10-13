@@ -237,7 +237,7 @@ impl App {
         let claim = self
             .registry()
             .claim_host(ephervex_storage::RecordRef::Client(instance))?;
-        let record = self.client(instance)?;
+        let record = self.current_client(instance)?;
 
         // Taken before anything writes, and held until the game exits. A
         // second launch of the same instance is refused here rather than
@@ -650,6 +650,43 @@ mod tests {
             "authentication failures retain the shared LaunchError::AuthenticationRequired type"
         );
         assert_eq!(error.message_id(), "error-auth-not-signed-in");
+    }
+
+    #[tokio::test]
+    async fn a_launch_plans_from_the_canonical_metadata_and_refuses_metadata_of_another_instance() {
+        // The record is read before an account is needed, so metadata that
+        // names another instance is refused rather than replaced by the index
+        // row the launch would otherwise have planned from.
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let client = vanilla(&app, "1.20.1");
+        let mut foreign = client.clone();
+        foreign.id = ephervex_model::InstanceId::new();
+        ephervex_storage::metadata::write_client_metadata(&client.root, &foreign)
+            .expect("foreign write");
+
+        let error = app
+            .launch(
+                client.id,
+                &LaunchOptions {
+                    dry_run: true,
+                    ..LaunchOptions::default()
+                },
+                &LaunchObserver::silent(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("the metadata is not this instance's");
+
+        assert!(
+            matches!(
+                error,
+                crate::CoreError::Storage(crate::StorageError::Registry(
+                    ephervex_storage::RegistryError::InstanceUnknown { .. }
+                ))
+            ),
+            "{error:?}"
+        );
     }
 
     #[tokio::test]

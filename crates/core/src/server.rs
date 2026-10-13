@@ -462,7 +462,7 @@ impl App {
         let Some(client_id) = record.linked_client_id else {
             return Ok(None);
         };
-        let client = self.client(client_id)?;
+        let client = self.current_client(client_id)?;
         let source = ephervex_storage::metadata::source_dir(&client.root);
         let store = SourceStore::new(&source);
         let recipe = if store.has_recipe() {
@@ -3796,6 +3796,44 @@ mod tests {
         ));
         assert!(app.list_servers().expect("servers").is_empty());
         assert!(!server.root.exists());
+    }
+
+    #[test]
+    fn a_linked_server_is_checked_against_the_loader_the_index_row_lags_behind() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let old = LoaderSelection::exact(ephervex_model::LoaderKind::NeoForge, "21.1.100");
+        let new = LoaderSelection::exact(ephervex_model::LoaderKind::NeoForge, "21.1.172");
+        let client = app
+            .registry_for_services()
+            .create_client(ephervex_storage::NewClient::new("client", "1.21.1", old))
+            .expect("client");
+        app.registry_for_services()
+            .publish_client(&client)
+            .expect("publish");
+        let mut committed = client.clone();
+        committed.loader = new.clone();
+        ephervex_storage::metadata::write_client_metadata(&client.root, &committed)
+            .expect("canonical write");
+        SourceStore::new(ephervex_storage::metadata::source_dir(&client.root))
+            .write_recipe(&PackRecipe::for_manual_instance(
+                "client".to_owned(),
+                "1.21.1".to_owned(),
+                new.clone(),
+            ))
+            .expect("recipe");
+        let mut server = app
+            .registry_for_services()
+            .prepare_server(NewServer::linked("linked", client.id))
+            .expect("prepare");
+        assert_eq!(server.loader, new);
+
+        let (_, recipe) = app
+            .linked_server_recipe(&mut server, &UnknownServerFiles::default())
+            .expect("the recipe matches the committed client")
+            .expect("linked");
+
+        assert_eq!(recipe.loader, new);
     }
 
     fn scaffolded_server(app: &App) -> ServerRecord {

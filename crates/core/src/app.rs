@@ -620,6 +620,14 @@ impl App {
         Ok(self.registry().client(id)?)
     }
 
+    /// Fetches one client instance as its canonical metadata holds it.
+    ///
+    /// Launch and Java planning use this so a lagging index row cannot plan a
+    /// loader build or override the user already replaced.
+    pub(crate) fn current_client(&self, id: InstanceId) -> CoreResult<ClientRecord> {
+        Ok(self.registry().current_client(id)?)
+    }
+
     /// Fetches one server.
     pub fn server(&self, id: ServerId) -> CoreResult<ServerRecord> {
         Ok(self.registry().server(id)?)
@@ -1111,17 +1119,7 @@ impl App {
         request: &JavaPlanRequest,
     ) -> CoreResult<JavaPlan> {
         let required = self.required_java(minecraft_version).await?;
-        let (loader, java_override, jvm_override) = match request.target {
-            JavaTarget::VersionOnly => (ephervex_model::LoaderSelection::vanilla(), None, None),
-            JavaTarget::Client(id) => {
-                let record = self.client(id)?;
-                (record.loader, record.java_override, record.jvm_override)
-            }
-            JavaTarget::Server(id) => {
-                let record = self.server(id)?;
-                (record.loader, record.java_override, record.jvm_override)
-            }
-        };
+        let (loader, java_override, jvm_override) = self.java_target_selection(request.target)?;
         self.plan_java_for_selection(
             minecraft_version,
             required,
@@ -1131,6 +1129,28 @@ impl App {
             request,
         )
         .await
+    }
+
+    /// The loader and overrides a Java plan layers over the global settings.
+    fn java_target_selection(
+        &self,
+        target: JavaTarget,
+    ) -> CoreResult<(
+        ephervex_model::LoaderSelection,
+        Option<ephervex_model::JavaOverride>,
+        Option<ephervex_model::JvmSettings>,
+    )> {
+        Ok(match target {
+            JavaTarget::VersionOnly => (ephervex_model::LoaderSelection::vanilla(), None, None),
+            JavaTarget::Client(id) => {
+                let record = self.current_client(id)?;
+                (record.loader, record.java_override, record.jvm_override)
+            }
+            JavaTarget::Server(id) => {
+                let record = self.server(id)?;
+                (record.loader, record.java_override, record.jvm_override)
+            }
+        })
     }
 
     pub(crate) async fn plan_java_for_unindexed_server(
@@ -2098,6 +2118,54 @@ mod tests {
         assert_eq!(changed.name, "renamed");
         assert!(changed.allow_pack_mod_version_changes);
         assert_eq!(app.client(created.id).expect("row").name, "renamed");
+    }
+
+    /// A client whose canonical metadata holds a newer loader build and Java
+    /// override than its index row, as after an index write failed behind a
+    /// committed update.
+    fn client_with_lagging_index_row(app: &App) -> (ClientRecord, ClientRecord) {
+        let created = app
+            .create_client_for_test(NewClient::new(
+                "lagging",
+                "1.21.1",
+                LoaderSelection::exact(ephervex_model::LoaderKind::NeoForge, "21.1.100"),
+            ))
+            .expect("create");
+        let mut committed = created.clone();
+        committed.loader = LoaderSelection::exact(ephervex_model::LoaderKind::NeoForge, "21.1.172");
+        committed.java_override = Some(ephervex_model::JavaOverride::new("/opt/jdk/bin/java"));
+        ephervex_storage::metadata::write_client_metadata(&created.root, &committed)
+            .expect("canonical write");
+        let row = app.client(created.id).expect("row");
+        assert_eq!(row.loader.version.as_deref(), Some("21.1.100"));
+        (committed, row)
+    }
+
+    #[test]
+    fn the_current_client_is_the_committed_record_while_the_index_row_lags() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let (committed, _row) = client_with_lagging_index_row(&app);
+
+        let current = app.current_client(committed.id).expect("current");
+
+        assert_eq!(current.loader, committed.loader);
+        assert_eq!(current.java_override, committed.java_override);
+    }
+
+    #[test]
+    fn a_java_plan_for_a_client_layers_the_committed_loader_and_overrides() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let (committed, _row) = client_with_lagging_index_row(&app);
+
+        let (loader, java_override, jvm_override) = app
+            .java_target_selection(JavaTarget::Client(committed.id))
+            .expect("selection");
+
+        assert_eq!(loader, committed.loader);
+        assert_eq!(java_override, committed.java_override);
+        assert_eq!(jvm_override, committed.jvm_override);
     }
 
     #[test]

@@ -468,7 +468,7 @@ impl Registry {
         source: InstanceId,
         request: &DuplicateClient,
     ) -> Result<DuplicatedClient, RegistryError> {
-        let original = self.client(source)?;
+        let original = self.current_client(source)?;
         if !original.root.is_dir() {
             return Err(RegistryError::RootMissing {
                 path: original.root.clone(),
@@ -670,7 +670,7 @@ impl Registry {
         id: InstanceId,
         change: impl FnOnce(&mut ClientRecord),
     ) -> Result<ClientCommit<ClientRecord>, RegistryError> {
-        let mut record = self.client_for_update(id)?;
+        let mut record = self.current_client(id)?;
         change(&mut record);
         let warnings = self.update_client_committed(&mut record)?;
         Ok(ClientCommit { record, warnings })
@@ -680,7 +680,13 @@ impl Registry {
     /// names, or at the persistent root its files were moved to when the row
     /// still names the vacated temporary one. A client whose root is missing
     /// has only its index row.
-    fn client_for_update(&self, id: InstanceId) -> Result<ClientRecord, RegistryError> {
+    ///
+    /// Anything that plans from a client's current Minecraft version, loader,
+    /// or overrides reads this instead of [`Self::client`], whose row lags the
+    /// metadata after an index write failed behind a committed update
+    /// (ADR 0002). Metadata that is unreadable or names another instance is an
+    /// error, never replaced by the index copy.
+    pub fn current_client(&self, id: InstanceId) -> Result<ClientRecord, RegistryError> {
         let indexed = self.following_moved_files(self.client(id)?);
         if !indexed.root.is_dir() {
             return Ok(indexed);
@@ -848,7 +854,7 @@ impl Registry {
                 loader,
             } => (None, minecraft_version, loader),
             ServerCreationSource::LinkedClient { client_id } => {
-                let client = self.client(client_id)?;
+                let client = self.current_client(client_id)?;
                 (Some(client_id), client.minecraft_version, client.loader)
             }
         };
@@ -3563,5 +3569,112 @@ mod tests {
             [ClientCommitWarning::MetadataNotDurable { .. }]
         ));
         assert_eq!(registry.client(client.id).expect("row").name, "after");
+    }
+
+    /// Commits a loader and Java override change whose index write fails, so
+    /// the row keeps the loader and overrides the client was created with.
+    fn client_with_lagging_loader_and_overrides(
+        registry: &Registry,
+    ) -> (ClientRecord, LoaderSelection) {
+        let client = registry
+            .create_published_client(NewClient::new(
+                "client",
+                "1.21.1",
+                LoaderSelection::exact(LoaderKind::NeoForge, "21.1.100"),
+            ))
+            .expect("create");
+        let loader = LoaderSelection::exact(LoaderKind::NeoForge, "21.1.172");
+
+        fail_index_writes(registry, "instances");
+        registry
+            .modify_client(client.id, |record| {
+                record.loader = loader.clone();
+                record.java_override = Some(JavaOverride::new("/opt/jdk/bin/java"));
+            })
+            .expect("the published metadata is a committed mutation");
+        restore_index_writes(registry);
+        let lagging = registry.client(client.id).expect("row");
+        assert_eq!(lagging.loader.version.as_deref(), Some("21.1.100"));
+        assert!(lagging.java_override.is_none());
+        (client, loader)
+    }
+
+    #[test]
+    fn the_current_client_is_the_canonical_record_while_the_index_row_lags() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let (client, loader) = client_with_lagging_loader_and_overrides(&registry);
+
+        let current = registry.current_client(client.id).expect("current");
+
+        assert_eq!(current.loader, loader);
+        assert_eq!(
+            current.java_override,
+            Some(JavaOverride::new("/opt/jdk/bin/java"))
+        );
+        assert_eq!(current.root, client.root);
+    }
+
+    #[test]
+    fn a_duplicate_takes_the_committed_settings_the_index_row_lags_behind() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let (client, loader) = client_with_lagging_loader_and_overrides(&registry);
+
+        let duplicate = registry
+            .duplicate_client(client.id, &DuplicateClient::default())
+            .expect("duplicate")
+            .record;
+
+        assert_eq!(duplicate.loader, loader);
+        assert_eq!(
+            duplicate.java_override,
+            Some(JavaOverride::new("/opt/jdk/bin/java"))
+        );
+        let canonical = metadata::read_client_metadata(&duplicate.root).expect("metadata");
+        assert_eq!(canonical.loader, loader);
+        assert_eq!(registry.client(duplicate.id).expect("row").loader, loader);
+    }
+
+    #[test]
+    fn a_linked_server_takes_the_loader_the_index_row_lags_behind() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let (client, loader) = client_with_lagging_loader_and_overrides(&registry);
+
+        let server = registry
+            .prepare_server(NewServer::linked("server", client.id))
+            .expect("prepare linked server");
+
+        assert_eq!(server.loader, loader);
+        assert_eq!(server.minecraft_version, "1.21.1");
+    }
+
+    #[test]
+    fn a_linked_server_is_refused_when_the_clients_metadata_names_another_instance() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = created_client(&registry);
+        let mut foreign = client.clone();
+        foreign.id = InstanceId::new();
+        metadata::write_client_metadata(&client.root, &foreign).expect("foreign write");
+
+        let error = registry
+            .prepare_server(NewServer::linked("server", client.id))
+            .expect_err("foreign metadata blocks the selection");
+
+        assert!(matches!(error, RegistryError::InstanceUnknown { .. }));
+    }
+
+    #[test]
+    fn a_client_with_a_missing_root_is_current_from_the_index_row() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = created_client(&registry);
+        std::fs::remove_dir_all(&client.root).expect("remove root");
+
+        let current = registry.current_client(client.id).expect("current");
+
+        assert_eq!(current.name, "before");
     }
 }
