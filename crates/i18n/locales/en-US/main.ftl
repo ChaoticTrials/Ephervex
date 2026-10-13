@@ -1829,6 +1829,14 @@ error-mod-canceled = The operation was canceled.
 
 ## Dedicated servers
 
+# A change to a server that was saved while syncing its metadata directory to
+# disk failed. $detail is the operating system's description of the failure.
+server-change-not-durable = The change was saved, but the server's metadata directory could not be synced to disk, so it may be lost if the machine loses power: { $detail }
+
+# A change to a server that was saved while updating the server index failed.
+# $detail describes the failure.
+server-change-index-out-of-sync = The change was saved, but the server index could not be updated, so lists may show the old value until the next reconciliation: { $detail }
+
 error-server-property-invalid = That server property value is invalid.
 .action = Correct the value and try again.
 error-server-property-protected = That property has a dedicated server setting.

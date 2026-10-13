@@ -1195,6 +1195,7 @@ mod tests {
             )],
             skipped: Vec::new(),
             client_warnings: Vec::new(),
+            server_warnings: Vec::new(),
             repair: None,
         };
 
@@ -1213,6 +1214,7 @@ mod tests {
             failed: Vec::new(),
             skipped: vec!["B".to_owned(), "C".to_owned()],
             client_warnings: Vec::new(),
+            server_warnings: Vec::new(),
             repair: None,
         };
 
@@ -1244,6 +1246,7 @@ mod tests {
             failed: Vec::new(),
             skipped: vec!["mods/b.jar".to_owned()],
             client_warnings: Vec::new(),
+            server_warnings: Vec::new(),
             repair: Some(repair),
         };
 

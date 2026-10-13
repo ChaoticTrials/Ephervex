@@ -23,8 +23,8 @@ use ephervex_server::{
 };
 use ephervex_storage::{
     FileDisposition, MetadataError, NetworkAccess, NewServer, RegistryError, ServerCommit,
-    ServerNetworkSettings, ServerOperatorIdentity, ServerOperatorProfile, ServerOperatorSetup,
-    ServerPortSelection, ServerRecord,
+    ServerCommitWarning, ServerNetworkSettings, ServerOperatorIdentity, ServerOperatorProfile,
+    ServerOperatorSetup, ServerPortSelection, ServerRecord,
 };
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -132,6 +132,18 @@ impl ProgressSink for ServerDownloadProgress {
                 operation.clone(),
             )));
     }
+}
+
+/// The localized sentence telling a user what a server commit warning means.
+#[must_use]
+pub fn server_commit_warning_message(warning: &ServerCommitWarning) -> String {
+    let (id, detail) = match warning {
+        ServerCommitWarning::IndexOutOfSync { detail } => {
+            ("server-change-index-out-of-sync", detail)
+        }
+        ServerCommitWarning::MetadataNotDurable { detail } => ("server-change-not-durable", detail),
+    };
+    ephervex_i18n::lookup_args(id, [("detail", ephervex_i18n::Arg::from(detail.as_str()))])
 }
 
 impl App {
@@ -3270,6 +3282,75 @@ mod tests {
         let properties =
             std::fs::read_to_string(server_properties_path(&server)).expect("properties file");
         assert!(properties.contains("server-port=25571"), "{properties}");
+    }
+
+    #[test]
+    fn every_server_commit_warning_has_a_localized_message_carrying_its_detail() {
+        for warning in [
+            ServerCommitWarning::IndexOutOfSync {
+                detail: "disk I/O error".to_owned(),
+            },
+            ServerCommitWarning::MetadataNotDurable {
+                detail: "input/output error".to_owned(),
+            },
+        ] {
+            let message = server_commit_warning_message(&warning);
+
+            let (ServerCommitWarning::IndexOutOfSync { detail }
+            | ServerCommitWarning::MetadataNotDurable { detail }) = &warning;
+            assert!(message.contains(detail.as_str()), "`{message}`");
+            assert!(message.starts_with("The change was saved"), "`{message}`");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn using_automatic_java_on_a_server_whose_metadata_directory_cannot_sync_commits_and_warns()
+     {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let server = app
+            .registry_for_services()
+            .create_server(NewServer::new(
+                "unsynced java fix",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("scaffold");
+        let metadata_directory = ephervex_storage::metadata::server_metadata_path(&server.root)
+            .parent()
+            .expect("metadata directory")
+            .to_path_buf();
+        std::fs::set_permissions(&metadata_directory, std::fs::Permissions::from_mode(0o300))
+            .expect("restrict metadata directory");
+        let unsyncable = std::fs::File::open(&metadata_directory).is_err();
+        let result = if unsyncable {
+            Some(
+                app.apply_fix(
+                    crate::InstalledHost::Server(server.id),
+                    &crate::DiagnosticFix::UseAutomaticJava,
+                    &OperationReporter::silent("fixing"),
+                    &CancellationToken::new(),
+                )
+                .await,
+            )
+        } else {
+            None
+        };
+        std::fs::set_permissions(&metadata_directory, std::fs::Permissions::from_mode(0o700))
+            .expect("restore metadata directory");
+        let Some(result) = result else {
+            return;
+        };
+
+        let outcome = result.expect("published metadata is a committed fix");
+        assert!(outcome.is_complete());
+        assert!(matches!(
+            outcome.server_warnings.as_slice(),
+            [ServerCommitWarning::MetadataNotDurable { .. }]
+        ));
     }
 
     #[cfg(unix)]

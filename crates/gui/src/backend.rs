@@ -14,6 +14,7 @@ use ephervex_core::ClientCommitWarning;
 use ephervex_core::ControlResponse;
 use ephervex_core::ManagedModInstallation;
 use ephervex_core::ManagedMutationReport;
+use ephervex_core::ServerCommitWarning;
 use ephervex_core::live_diagnostics::TailedLine;
 use ephervex_core::{
     App, AuthEvent, AuthObserver, CancellationToken, ClientFolder, ClientModOutcome, ClientModPlan,
@@ -4205,6 +4206,7 @@ fn run_worker(
                         let outcome = match app.apply_fix(host, &fix, &reporter, &cancel).await {
                             Ok(outcome) => {
                                 send_client_commit_warnings(&reports, &outcome.client_warnings);
+                                send_server_commit_warnings(&reports, &outcome.server_warnings);
                                 diagnosis_view::outcome_view(&fix, &outcome, &localized_error)
                             }
                             Err(error) => {
@@ -11383,6 +11385,18 @@ fn send_client_commit_warnings(events: &Sender<Event>, warnings: &[ClientCommitW
     for warning in warnings {
         let _ = events.send(Event::Toast {
             message: ephervex_core::instance::client_commit_warning_message(warning),
+            error: true,
+        });
+    }
+}
+
+/// Tells the user that a saved change to a server may not survive a power
+/// loss. The change itself is in effect, so this is shown beside the
+/// confirmation rather than replacing it.
+fn send_server_commit_warnings(events: &Sender<Event>, warnings: &[ServerCommitWarning]) {
+    for warning in warnings {
+        let _ = events.send(Event::Toast {
+            message: ephervex_core::server::server_commit_warning_message(warning),
             error: true,
         });
     }

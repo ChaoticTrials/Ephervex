@@ -19,7 +19,7 @@ use ephervex_download::OperationReporter;
 use ephervex_java::{JavaError, JavaPathChoice, JavaSourceKind, PinSource, RejectionReason};
 use ephervex_model::LoaderSelection;
 use ephervex_storage::diagnostics::{MAX_VIEW_BYTES, TextAnchor};
-use ephervex_storage::{ClientCommitWarning, DiagnosticKind};
+use ephervex_storage::{ClientCommitWarning, DiagnosticKind, ServerCommitWarning};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
 
@@ -535,6 +535,9 @@ pub struct FixOutcome {
     /// For a client change: conditions on the saved metadata the user should
     /// hear about.
     pub client_warnings: Vec<ClientCommitWarning>,
+    /// For a server change: conditions on the saved metadata the user should
+    /// hear about.
+    pub server_warnings: Vec<ServerCommitWarning>,
     /// For a restore: the repair's own report.
     pub repair: Option<RepairReport>,
 }
@@ -799,7 +802,7 @@ impl App {
                         .map(|committed| outcome.client_warnings = committed.warnings),
                     InstalledHost::Server(id) => self
                         .set_server_runtime_settings(id, None, facts.jvm_override)
-                        .map(drop),
+                        .map(|committed| outcome.server_warnings = committed.warnings),
                 };
                 let name = facts
                     .java_override
