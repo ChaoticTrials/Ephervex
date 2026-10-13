@@ -991,8 +991,6 @@ error-mod-not-managed = That mod is no longer part of this instance.
 error-mod-identity-incomplete = One of this instance's mods has no provider identity, so its dependencies cannot be worked out.
 .action = Mods with no identity have to be managed by hand.
 error-mod-dependency-not-movable = That change would also move a mod that the pack declared, that you chose, or that another mod needs at its current release. Change that mod's version first.
-# $value is a URL with its query and fragment removed, because a confirmation
-# prompt is not the place to print an identifier or a token.
 error-single-instance-unavailable = Ephervex could not reach the launcher that is already running.
 .action = The link was not handed over. Close the other Ephervex window and try again.
 error-url-handler-unavailable = Ephervex could not change which application opens its links.
@@ -1956,8 +1954,8 @@ gui-trusted-pack-hosts-detail = Ephervex may download a modpack archive from the
 gui-no-trusted-pack-hosts = None yet. The first time a link points at a site, Ephervex asks, and your answer appears here.
 gui-forget-pack-host = Forget
 gui-open-pack-link = Open a modpack
-# $value is the address with its query and fragment removed, so a link's
-# identifiers and tokens are not printed in a prompt.
+# The address follows on its own line, with its query and fragment removed so a
+# link's identifiers and tokens are not printed in a prompt.
 gui-open-pack-link-detail = A link asked Ephervex to download a modpack from:
 # The download of an agreed link was redirected to another site. The address
 # shown has its query and fragment removed.
