@@ -1978,7 +1978,10 @@ fn run_snapshot_command(app: &App, command: &SnapshotCommand, json: bool) -> any
                 print_json(&serde_json::json!({
                     "restored": restored.restored,
                     "safety_snapshot": restored.safety_snapshot,
-                    "warnings": client_commit_warnings_json(&restored.warnings),
+                    "warnings": client_commit_warnings_json(&restored.warnings)
+                        .into_iter()
+                        .chain(server_commit_warnings_json(&restored.server_warnings))
+                        .collect::<Vec<_>>(),
                 }));
             } else {
                 outln!(
@@ -1990,6 +1993,7 @@ fn run_snapshot_command(app: &App, command: &SnapshotCommand, json: bool) -> any
                     outln!("Safety snapshot: {} ({})", safety.label, safety.id);
                 }
                 print_client_commit_warnings(&restored.warnings);
+                print_server_commit_warnings(&restored.server_warnings);
             }
         }
         SnapshotCommand::Rename { host, id, label } => {
@@ -2293,6 +2297,23 @@ fn run_instance_persist(
             "root": json_path(&outcome.instance.root),
             "storage": outcome.instance.storage.to_string(),
             "instance_warnings": client_commit_warnings_json(&outcome.instance_warnings),
+            "server_commit_warnings": outcome
+                .server_commit_warnings
+                .iter()
+                .map(|warning| {
+                    let mut value = server_commit_warnings_json(std::slice::from_ref(
+                        &warning.warning,
+                    ));
+                    let mut entry = value.pop().unwrap_or_default();
+                    if let Some(object) = entry.as_object_mut() {
+                        object.insert(
+                            "server".to_owned(),
+                            serde_json::Value::String(warning.server.to_string()),
+                        );
+                    }
+                    entry
+                })
+                .collect::<Vec<_>>(),
             "servers": outcome
                 .servers
                 .iter()
@@ -2334,6 +2355,12 @@ fn run_instance_persist(
                     ("path", MessageArg::from(server.root.as_path())),
                 ]
             )
+        );
+    }
+    for warning in &outcome.server_commit_warnings {
+        eprintln!(
+            "  {}",
+            ephervex_core::promotion::promoted_server_warning_message(warning)
         );
     }
     for warning in &outcome.warnings {
@@ -7776,6 +7803,15 @@ fn client_commit_warnings_json(warnings: &[ClientCommitWarning]) -> Vec<serde_js
         .collect()
 }
 
+fn print_server_commit_warnings(warnings: &[ServerCommitWarning]) {
+    for warning in warnings {
+        eprintln!(
+            "{}",
+            ephervex_core::server::server_commit_warning_message(warning)
+        );
+    }
+}
+
 fn print_client_commit_warnings(warnings: &[ClientCommitWarning]) {
     for warning in warnings {
         eprintln!(
@@ -8341,23 +8377,7 @@ fn print_server_commit(record: &ServerRecord, warnings: &[ServerCommitWarning], 
         if let Some(object) = value.as_object_mut() {
             object.insert(
                 "warnings".to_owned(),
-                serde_json::Value::Array(
-                    warnings
-                        .iter()
-                        .map(|warning| match warning {
-                            ServerCommitWarning::IndexOutOfSync { detail } => serde_json::json!({
-                                "kind": "index_out_of_sync",
-                                "detail": detail,
-                            }),
-                            ServerCommitWarning::MetadataNotDurable { detail } => {
-                                serde_json::json!({
-                                    "kind": "metadata_not_durable",
-                                    "detail": detail,
-                                })
-                            }
-                        })
-                        .collect(),
-                ),
+                serde_json::Value::Array(server_commit_warnings_json(warnings)),
             );
         }
         print_json(&value);
@@ -8376,6 +8396,22 @@ fn print_server_commit(record: &ServerRecord, warnings: &[ServerCommitWarning], 
             }
         }
     }
+}
+
+fn server_commit_warnings_json(warnings: &[ServerCommitWarning]) -> Vec<serde_json::Value> {
+    warnings
+        .iter()
+        .map(|warning| match warning {
+            ServerCommitWarning::IndexOutOfSync { detail } => serde_json::json!({
+                "kind": "index_out_of_sync",
+                "detail": detail,
+            }),
+            ServerCommitWarning::MetadataNotDurable { detail } => serde_json::json!({
+                "kind": "metadata_not_durable",
+                "detail": detail,
+            }),
+        })
+        .collect()
 }
 
 fn captured_line_json(line: &CapturedLine) -> serde_json::Value {
@@ -8862,6 +8898,26 @@ mod tests {
         let notices = capture_gap_notices(&snapshot);
         assert_eq!(notices.len(), 1);
         assert!(notices[0].starts_with("1 older line"), "{notices:?}");
+    }
+
+    #[test]
+    fn server_commit_warnings_print_as_kind_and_detail_entries() {
+        let warnings = [
+            ServerCommitWarning::IndexOutOfSync {
+                detail: "index unavailable".to_owned(),
+            },
+            ServerCommitWarning::MetadataNotDurable {
+                detail: "input/output error".to_owned(),
+            },
+        ];
+
+        assert_eq!(
+            server_commit_warnings_json(&warnings),
+            vec![
+                serde_json::json!({"kind": "index_out_of_sync", "detail": "index unavailable"}),
+                serde_json::json!({"kind": "metadata_not_durable", "detail": "input/output error"}),
+            ]
+        );
     }
 
     #[test]

@@ -3841,6 +3841,7 @@ fn run_worker(
                             }
                         }
                         send_client_commit_warnings(&reports, &restore.warnings);
+                        send_server_commit_warnings(&reports, &restore.server_warnings);
                         Ok(OperationReport::Toast(lookup("gui-snapshot-restored")))
                     },
                 );
@@ -6302,6 +6303,12 @@ fn promote_instance(
                 error: false,
             });
             send_client_commit_warnings(events, &outcome.instance_warnings);
+            for warning in &outcome.server_commit_warnings {
+                let _ = events.send(Event::Toast {
+                    message: ephervex_core::promotion::promoted_server_warning_message(warning),
+                    error: true,
+                });
+            }
             for warning in &outcome.warnings {
                 let _ = events.send(Event::Toast {
                     message: localized_values(
@@ -11390,9 +11397,9 @@ fn send_client_commit_warnings(events: &Sender<Event>, warnings: &[ClientCommitW
     }
 }
 
-/// Tells the user that a saved change to a server may not survive a power
-/// loss. The change itself is in effect, so this is shown beside the
-/// confirmation rather than replacing it.
+/// Tells the user that a saved change to a server may not survive a power loss
+/// or is missing from lists. The change itself is in effect, so this is shown
+/// beside the confirmation rather than replacing it.
 fn send_server_commit_warnings(events: &Sender<Event>, warnings: &[ServerCommitWarning]) {
     for warning in warnings {
         let _ = events.send(Event::Toast {

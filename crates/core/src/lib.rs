@@ -164,7 +164,8 @@ pub use pack_url::{
     MAX_PACK_ARCHIVE_BYTES, PackConsents, PackSource, StagedPack,
 };
 pub use promotion::{
-    PromotableServer, PromotionOutcome, PromotionPlan, PromotionRequest, PromotionWarning,
+    PromotableServer, PromotedServerWarning, PromotionOutcome, PromotionPlan, PromotionRequest,
+    PromotionWarning,
 };
 pub use running::{ProcessMonitor, ProcessUsage, RunningProcess};
 pub use server::{

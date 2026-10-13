@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use ephervex_model::{LoaderSelection, SnapshotId};
-use ephervex_storage::{ClientCommitWarning, CloneMethod, ServerRecord, clone_file};
+use ephervex_storage::{
+    ClientCommitWarning, CloneMethod, ServerCommitWarning, ServerRecord, clone_file,
+};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio_util::sync::CancellationToken;
 
@@ -103,6 +105,16 @@ pub struct SnapshotRestore {
     pub safety_snapshot: Option<SnapshotRecord>,
     /// Conditions on the restored client metadata the user should hear about.
     pub warnings: Vec<ClientCommitWarning>,
+    /// Conditions on the restored server metadata the user should hear about.
+    pub server_warnings: Vec<ServerCommitWarning>,
+}
+
+/// What recording a restored host's metadata replaced and reported.
+struct SynchronizedHost {
+    /// For a server, the record it replaced.
+    previous_server: Option<ServerRecord>,
+    client_warnings: Vec<ClientCommitWarning>,
+    server_warnings: Vec<ServerCommitWarning>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -528,7 +540,11 @@ impl App {
                 source,
             })?;
 
-        let (previous_server, warnings) = match self.synchronize_restored_host(host, &layout.root) {
+        let SynchronizedHost {
+            previous_server,
+            client_warnings: warnings,
+            server_warnings,
+        } = match self.synchronize_restored_host(host, &layout.root) {
             Ok(synchronized) => synchronized,
             Err(error) => {
                 let rollback = transaction.rollback();
@@ -566,6 +582,7 @@ impl App {
             restored,
             safety_snapshot,
             warnings,
+            server_warnings,
         })
     }
 
@@ -669,13 +686,13 @@ impl App {
 
     /// Records the restored host's metadata. For a server, returns the record
     /// it replaced, which tells the linked client's server list what the
-    /// entry showed before. For a client, returns the warnings on the
-    /// committed metadata.
+    /// entry showed before. Also returns the warnings on the committed
+    /// metadata.
     fn synchronize_restored_host(
         &self,
         host: InstalledHost,
         root: &Path,
-    ) -> Result<(Option<ServerRecord>, Vec<ClientCommitWarning>), SnapshotError> {
+    ) -> Result<SynchronizedHost, SnapshotError> {
         match host {
             InstalledHost::Instance(id) => {
                 let current = self.client(id).map_err(snapshot_core_error)?;
@@ -703,7 +720,11 @@ impl App {
                     .update_client_committed(&mut restored)
                     .map_err(crate::CoreError::from)
                     .map_err(snapshot_core_error)?;
-                Ok((None, warnings))
+                Ok(SynchronizedHost {
+                    previous_server: None,
+                    client_warnings: warnings,
+                    server_warnings: Vec::new(),
+                })
             }
             InstalledHost::Server(id) => {
                 let current = self.server(id).map_err(snapshot_core_error)?;
@@ -726,11 +747,16 @@ impl App {
                 }
                 restored.root.clone_from(&current.root);
                 restored.storage = current.storage;
-                self.registry()
-                    .update_server(&mut restored)
+                let committed = self
+                    .registry()
+                    .update_server_committed(&mut restored)
                     .map_err(crate::CoreError::from)
                     .map_err(snapshot_core_error)?;
-                Ok((Some(current), Vec::new()))
+                Ok(SynchronizedHost {
+                    previous_server: Some(current),
+                    client_warnings: Vec::new(),
+                    server_warnings: committed.warnings,
+                })
             }
         }
     }
@@ -1604,6 +1630,51 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn restoring_a_server_snapshot_reports_an_index_failure_after_the_metadata_is_restored() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let app = App::open_at(Paths::rooted_at(temporary.path())).expect("open app");
+        let server = app
+            .registry_for_services()
+            .create_server(ephervex_storage::NewServer::new(
+                "Repro Server",
+                "1.21.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create server");
+        let snapshot = app
+            .create_snapshot(
+                InstalledHost::Server(server.id),
+                "before",
+                SnapshotOrigin::Manual,
+                &CancellationToken::new(),
+            )
+            .expect("create snapshot");
+        app.registry_for_services()
+            .index()
+            .connection()
+            .execute_batch(
+                "CREATE TRIGGER refuse_server_updates BEFORE UPDATE ON servers
+                 BEGIN SELECT RAISE(ABORT, 'index unavailable'); END;",
+            )
+            .expect("install failure");
+
+        let restore = app
+            .restore_snapshot(
+                InstalledHost::Server(server.id),
+                snapshot.id,
+                SnapshotRestoreOptions::default(),
+                &CancellationToken::new(),
+            )
+            .expect("the restored metadata is a committed restore");
+
+        assert!(matches!(
+            restore.server_warnings.as_slice(),
+            [ephervex_storage::ServerCommitWarning::IndexOutOfSync { .. }]
+        ));
+        assert!(restore.warnings.is_empty());
     }
 
     #[test]

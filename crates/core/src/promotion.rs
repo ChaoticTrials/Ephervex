@@ -25,7 +25,9 @@ use std::path::PathBuf;
 
 use ephervex_download::OperationReporter;
 use ephervex_model::{InstanceId, Progress, ServerId, StorageClass};
-use ephervex_storage::{ClientCommit, ClientCommitWarning, ClientRecord, ServerRecord};
+use ephervex_storage::{
+    ClientCommit, ClientCommitWarning, ClientRecord, ServerCommitWarning, ServerRecord,
+};
 use tracing::{info, instrument, warn};
 
 use crate::app::App;
@@ -94,6 +96,32 @@ pub struct PromotionWarning {
     pub error: CoreError,
 }
 
+/// A condition on a moved server's saved metadata the user should hear about.
+#[derive(Debug)]
+pub struct PromotedServerWarning {
+    pub server: ServerId,
+    pub name: String,
+    pub warning: ServerCommitWarning,
+}
+
+/// The localized sentence telling a user what a moved server's warning means,
+/// led by the server it is about.
+#[must_use]
+pub fn promoted_server_warning_message(warning: &PromotedServerWarning) -> String {
+    ephervex_i18n::lookup_args(
+        "server-made-persistent-warning",
+        [
+            ("name", ephervex_i18n::Arg::from(warning.name.as_str())),
+            (
+                "warning",
+                ephervex_i18n::Arg::from(crate::server::server_commit_warning_message(
+                    &warning.warning,
+                )),
+            ),
+        ],
+    )
+}
+
 /// What a promotion did.
 #[derive(Debug)]
 pub struct PromotionOutcome {
@@ -101,6 +129,8 @@ pub struct PromotionOutcome {
     /// Conditions on the saved instance metadata the user should hear about.
     pub instance_warnings: Vec<ClientCommitWarning>,
     pub servers: Vec<ServerRecord>,
+    /// Conditions on the saved metadata of the servers that moved.
+    pub server_commit_warnings: Vec<PromotedServerWarning>,
     pub warnings: Vec<PromotionWarning>,
 }
 
@@ -187,6 +217,7 @@ impl App {
         )?;
 
         let mut servers = Vec::new();
+        let mut server_commit_warnings = Vec::new();
         let mut warnings = Vec::new();
         for (server, server_claim) in selected.into_iter().zip(&server_claims) {
             match self.registry_for_services().relocate_server(
@@ -195,7 +226,16 @@ impl App {
                 StorageClass::Persistent,
                 &mut file_progress(reporter),
             ) {
-                Ok(commit) => servers.push(commit.record),
+                Ok(commit) => {
+                    server_commit_warnings.extend(commit.warnings.into_iter().map(|warning| {
+                        PromotedServerWarning {
+                            server: server.id,
+                            name: commit.record.name.clone(),
+                            warning,
+                        }
+                    }));
+                    servers.push(commit.record);
+                }
                 Err(error) => {
                     warn!(
                         server_id = %server.id,
@@ -222,6 +262,7 @@ impl App {
             instance: moved,
             instance_warnings,
             servers,
+            server_commit_warnings,
             warnings,
         })
     }
@@ -403,6 +444,46 @@ mod tests {
             app.linked_server_ids(client.id).expect("links"),
             vec![server],
             "moving does not detach a server from its client"
+        );
+    }
+
+    #[test]
+    fn a_moved_server_whose_index_update_fails_is_reported_as_moved_with_a_warning() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let client = temporary_client(&app, "Repro");
+        let server = linked_server(&app, base.path(), client.id, "server");
+        let plan = app.plan_instance_promotion(client.id).expect("plan");
+        app.registry_for_services()
+            .index()
+            .connection()
+            .execute_batch(
+                "CREATE TRIGGER refuse_server_updates BEFORE UPDATE ON servers
+                 BEGIN SELECT RAISE(ABORT, 'index unavailable'); END;",
+            )
+            .expect("install failure");
+
+        let outcome = app
+            .promote_instance(client.id, &PromotionRequest::all_of(&plan), &silent())
+            .expect("promote");
+
+        assert!(outcome.warnings.is_empty(), "the server did move");
+        assert_eq!(outcome.servers.len(), 1);
+        assert_eq!(outcome.servers[0].id, server);
+        let [warning] = outcome.server_commit_warnings.as_slice() else {
+            panic!(
+                "expected one warning, got {:?}",
+                outcome.server_commit_warnings
+            );
+        };
+        assert_eq!(warning.server, server);
+        assert_eq!(warning.name, "server");
+        assert!(matches!(
+            warning.warning,
+            ServerCommitWarning::IndexOutOfSync { .. }
+        ));
+        assert!(
+            promoted_server_warning_message(warning).starts_with("server: The change was saved")
         );
     }
 

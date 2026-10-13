@@ -332,6 +332,10 @@ instance-change-not-durable = The change was saved, but its metadata directory c
 # failed. $detail describes the failure.
 instance-change-index-out-of-sync = The change was saved, but the instance index could not be updated, so lists may show the old value until the next reconciliation: { $detail }
 
+# $name is a server name, $warning is the sentence of server-change-not-durable
+# or server-change-index-out-of-sync.
+server-made-persistent-warning = { $name }: { $warning }
+
 ## Logs and crash reports
 #
 # File names, paths, byte counts, and the text of a log or crash report are
