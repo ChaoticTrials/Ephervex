@@ -711,12 +711,14 @@ impl App {
 
     /// Replaces the server-specific Java and JVM overrides as one canonical
     /// metadata mutation. `None` restores the corresponding global setting.
+    /// A relative Java path is stored as an absolute one.
     pub fn set_server_runtime_settings(
         &self,
         id: ServerId,
         java_override: Option<JavaOverride>,
         jvm_override: Option<JvmSettings>,
     ) -> CoreResult<ServerCommit<ServerRecord>> {
+        let java_override = crate::app::normalized_java_override(java_override)?;
         let (_claim, mut record) = self.claim_stopped_server(id)?;
         self.validate_jvm_override(jvm_override.as_ref())?;
         record.java_override = java_override;
@@ -2819,6 +2821,69 @@ mod tests {
         let indexed = app.server(server.id).expect("indexed recovery copy");
         assert_eq!(indexed.java_override, Some(java_override));
         assert_eq!(indexed.jvm_override, Some(jvm_override));
+    }
+
+    #[test]
+    fn a_relative_server_java_override_is_stored_as_an_absolute_path() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let server = app
+            .registry_for_services()
+            .create_server(NewServer::new(
+                "relative java",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("scaffold");
+
+        let committed = app
+            .set_server_runtime_settings(server.id, Some(JavaOverride::new("jdk/bin/java")), None)
+            .expect("update runtime settings");
+
+        let stored = committed
+            .record
+            .java_override
+            .expect("override is stored")
+            .path;
+        assert!(stored.is_absolute(), "{stored:?}");
+        assert!(stored.ends_with("jdk/bin/java"), "{stored:?}");
+        let canonical = ephervex_storage::metadata::read_server_metadata(&server.root)
+            .expect("canonical metadata");
+        assert_eq!(canonical.java_override, Some(JavaOverride::new(stored)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_server_java_override_that_is_not_utf8_is_refused_and_not_saved() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let server = app
+            .registry_for_services()
+            .create_server(NewServer::new(
+                "non-utf8 java",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("scaffold");
+        let bad = directory.path().join(std::ffi::OsStr::from_bytes(b"j\xff"));
+
+        let error = app
+            .set_server_runtime_settings(server.id, Some(JavaOverride::new(&bad)), None)
+            .expect_err("a Java path with no text form is refused");
+
+        assert_eq!(error.message_id(), "error-paths-not-utf8");
+        assert_eq!(error.failing_path(), Some(bad));
+        assert!(
+            app.server(server.id)
+                .expect("server")
+                .java_override
+                .is_none()
+        );
+        let canonical = ephervex_storage::metadata::read_server_metadata(&server.root)
+            .expect("canonical metadata");
+        assert!(canonical.java_override.is_none());
     }
 
     #[test]

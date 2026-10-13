@@ -263,6 +263,26 @@ pub struct App {
     pub(crate) test_keyring: crate::account::TestKeyring,
 }
 
+/// Makes a Java override absolute and refuses one with no text form, before
+/// anything is claimed or written. A relative path would resolve against
+/// whichever directory the next command runs in, so the instance or server
+/// would launch a different Java.
+pub(crate) fn normalized_java_override(
+    java_override: Option<ephervex_model::JavaOverride>,
+) -> CoreResult<Option<ephervex_model::JavaOverride>> {
+    let Some(java) = java_override else {
+        return Ok(None);
+    };
+    let absolute = std::path::absolute(&java.path).map_err(|source| {
+        ephervex_storage::PathError::DirectoryCreation {
+            path: java.path.clone(),
+            source,
+        }
+    })?;
+    ephervex_storage::utf8_path(&absolute)?;
+    Ok(Some(ephervex_model::JavaOverride::new(absolute)))
+}
+
 impl App {
     /// Every third-party dependency this build ships, and the terms each is
     /// under.
@@ -751,21 +771,7 @@ impl App {
         java_override: Option<ephervex_model::JavaOverride>,
         jvm_override: Option<ephervex_model::JvmSettings>,
     ) -> CoreResult<ClientRecord> {
-        // A relative path would resolve against whichever directory the next
-        // command runs in, so the instance would launch a different Java.
-        let java_override = java_override
-            .map(|java| {
-                std::path::absolute(&java.path)
-                    .map(ephervex_model::JavaOverride::new)
-                    .map_err(|source| ephervex_storage::PathError::DirectoryCreation {
-                        path: java.path,
-                        source,
-                    })
-            })
-            .transpose()?;
-        if let Some(java) = &java_override {
-            ephervex_storage::utf8_path(&java.path)?;
-        }
+        let java_override = normalized_java_override(java_override)?;
         let _claim = self.claim_stopped_client(id)?;
         let mut record = self.client(id)?;
         self.validate_jvm_override(jvm_override.as_ref())?;
