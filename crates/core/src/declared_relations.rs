@@ -174,7 +174,7 @@ impl App {
     fn host_target(&self, host: InstalledHost) -> CoreResult<InstanceTarget> {
         Ok(match host {
             InstalledHost::Instance(id) => {
-                let record = self.client(id)?;
+                let record = self.current_client(id)?;
                 InstanceTarget::new(record.minecraft_version, record.loader.kind)
             }
             InstalledHost::Server(id) => {
@@ -528,6 +528,32 @@ mod tests {
         )
         .await
         .expect("the host's own state is readable")
+    }
+
+    #[test]
+    fn availability_is_judged_against_the_committed_target_while_the_index_row_lags() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = App::open_at(Paths::rooted_at(base.path())).expect("app");
+        let client = app
+            .create_client_for_test(NewClient::new(
+                "lagging",
+                MINECRAFT,
+                LoaderSelection::exact(LoaderKind::Forge, "47.1.106"),
+            ))
+            .expect("client");
+        app.commit_client_without_index_for_test(client.id, |committed| {
+            committed.loader = LoaderSelection::exact(LoaderKind::NeoForge, "21.1.172");
+        })
+        .expect("commit");
+
+        let target = app
+            .host_target(InstalledHost::Instance(client.id))
+            .expect("target");
+
+        assert_eq!(
+            target,
+            InstanceTarget::new(MINECRAFT.to_owned(), LoaderKind::NeoForge)
+        );
     }
 
     #[tokio::test]

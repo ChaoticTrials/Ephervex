@@ -768,6 +768,57 @@ mod browsing {
     }
 
     #[tokio::test]
+    async fn browsing_targets_the_committed_selection_while_the_index_row_lags() {
+        let server = catalog().await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_against(base.path(), &server);
+        let instance = app
+            .create_client_for_test(NewClient::new(
+                "Lagging",
+                "1.20.1",
+                LoaderSelection::exact(LoaderKind::Forge, "47.1.106"),
+            ))
+            .expect("create")
+            .id;
+        app.commit_client_without_index_for_test(instance, |committed| {
+            committed.loader = LoaderSelection::exact(LoaderKind::NeoForge, "47.1.106");
+        })
+        .expect("commit");
+        assert_eq!(
+            app.client(instance).expect("row").loader.kind,
+            LoaderKind::Forge
+        );
+
+        let results = app
+            .search_mods(
+                instance,
+                ModProvider::CurseForge,
+                &ModSearchQuery::new("root"),
+            )
+            .await
+            .expect("a search");
+        assert_eq!(results.hits.len(), 1, "the NeoForge build fits");
+        let details = app
+            .mod_project(
+                instance,
+                ModProvider::CurseForge,
+                &ROOT_PROJECT.to_string(),
+                false,
+            )
+            .await
+            .expect("project details");
+        assert_eq!(
+            details.default_version.as_deref(),
+            Some(ROOT_NEWEST.to_string().as_str())
+        );
+        let plan = app
+            .plan_mod_installation(instance, &request(ROOT_PROJECT))
+            .await
+            .expect("a plan");
+        assert_eq!(plan.root.version.id, ROOT_NEWEST.to_string());
+    }
+
+    #[tokio::test]
     async fn reading_the_catalog_writes_nothing_to_the_cache_directory() {
         // The published third-party API terms forbid saving what the API
         // returns. Asserted against the launcher's real cache root, so a

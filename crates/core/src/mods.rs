@@ -1135,7 +1135,7 @@ impl App {
         catalog: ModProvider,
         query: &ModSearchQuery,
     ) -> CoreResult<ModSearchResults> {
-        let record = self.client(instance)?;
+        let record = self.current_client(instance)?;
         let target = target_for(&record);
         let provider = self.mod_provider(catalog)?;
         Ok(provider
@@ -1184,7 +1184,7 @@ impl App {
         reference: &str,
         include_incompatible: bool,
     ) -> CoreResult<ModProjectDetails> {
-        let record = self.client(instance)?;
+        let record = self.current_client(instance)?;
         let target = target_for(&record);
         let provider = self.mod_provider(catalog)?;
         let loader = ephervex_mod_platform::loader_name_for(provider, &target)?;
@@ -1222,7 +1222,7 @@ impl App {
         instance: InstanceId,
         request: &ModInstallRequest,
     ) -> CoreResult<ModInstallPlan> {
-        let record = self.client(instance)?;
+        let record = self.current_client(instance)?;
         self.plan_for(
             &record,
             request,
@@ -1258,7 +1258,7 @@ impl App {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<InstalledMods> {
-        let record = self.client(instance)?;
+        let record = self.current_client(instance)?;
         let plan = self
             .plan_for(&record, request, InstalledPolicy::Preserve, reporter)
             .await?;
@@ -1577,7 +1577,7 @@ impl App {
             metadata: MetadataAvailability::Local,
             mods_are_the_users: match host {
                 InstalledHost::Instance(instance) => self
-                    .client(instance)
+                    .current_client(instance)
                     .is_ok_and(|record| record.allow_pack_mod_version_changes),
                 InstalledHost::Server(_) => false,
             },
@@ -3010,6 +3010,55 @@ mod tests {
         assert_eq!(source.kind, ImportSourceKind::ModrinthPack);
         assert_eq!(source.name, "Reproduction Pack");
         assert_eq!(source.version.as_deref(), Some("3.2.1"));
+    }
+
+    #[tokio::test]
+    async fn the_view_reports_the_committed_pack_ownership_opt_in_while_the_index_row_lags() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, instance) = imported_instance(base.path(), &["journeymap.jar"]).await;
+        app.commit_client_without_index_for_test(instance, |committed| {
+            committed.allow_pack_mod_version_changes = true;
+        })
+        .expect("commit");
+        assert!(!app.client(instance).unwrap().allow_pack_mod_version_changes);
+
+        let snapshot = app.managed_mod_snapshot(instance).expect("snapshot");
+
+        assert!(snapshot.mods_are_the_users);
+    }
+
+    #[tokio::test]
+    async fn a_pack_mod_removal_follows_the_committed_opt_out_while_the_index_row_lags() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, instance) = imported_instance(base.path(), &["journeymap.jar"]).await;
+        app.set_allow_pack_mod_version_changes(instance, true)
+            .expect("opt in");
+        app.commit_client_without_index_for_test(instance, |committed| {
+            committed.allow_pack_mod_version_changes = false;
+        })
+        .expect("commit");
+        assert!(app.client(instance).unwrap().allow_pack_mod_version_changes);
+
+        let error = app
+            .plan_mod_removal(
+                instance,
+                Path::new("mods/journeymap.jar"),
+                &OperationReporter::silent("test"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("the pack owns the mod again");
+
+        assert!(
+            matches!(
+                error,
+                CoreError::ModMutationRestricted {
+                    restriction: crate::mutation::MutationRestriction::PackOwned,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
     }
 
     #[tokio::test]

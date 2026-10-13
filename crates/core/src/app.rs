@@ -615,6 +615,22 @@ impl App {
             .record)
     }
 
+    /// Commits a change to a client's canonical metadata alone, leaving its
+    /// index row as it was: the state after an index write failed behind a
+    /// committed update.
+    #[cfg(test)]
+    pub(crate) fn commit_client_without_index_for_test(
+        &self,
+        id: InstanceId,
+        change: impl FnOnce(&mut ClientRecord),
+    ) -> CoreResult<ClientRecord> {
+        let mut record = self.current_client(id)?;
+        change(&mut record);
+        ephervex_storage::metadata::write_client_metadata(&record.root, &record)
+            .map_err(ephervex_storage::RegistryError::from)?;
+        Ok(record)
+    }
+
     /// Fetches one client instance.
     pub fn client(&self, id: InstanceId) -> CoreResult<ClientRecord> {
         Ok(self.registry().client(id)?)
@@ -622,8 +638,10 @@ impl App {
 
     /// Fetches one client instance as its canonical metadata holds it.
     ///
-    /// Launch and Java planning use this so a lagging index row cannot plan a
-    /// loader build or override the user already replaced.
+    /// Anything that plans from a client's Minecraft version, loader, overrides,
+    /// or flags reads this so a lagging index row cannot plan from a selection
+    /// the user already replaced. A reader that only needs the root path may
+    /// use [`Self::client`].
     pub(crate) fn current_client(&self, id: InstanceId) -> CoreResult<ClientRecord> {
         Ok(self.registry().current_client(id)?)
     }

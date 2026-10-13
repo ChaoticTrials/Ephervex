@@ -50,13 +50,14 @@ Schema changes go through an ordered migration runner keyed on SQLite's
 - The index row can lag the metadata file after an index write failed behind a
   committed update. A change to an existing record therefore starts from the
   metadata file when the root exists, never from the index row, so it cannot
-  write older fields back over a committed one. Launch and Java planning,
-  duplication, and a server linked to a client read the same way, so none of
-  them plans from a Minecraft version, loader, or override the user already
-  replaced. The one row that outranks the file is a newer one flagged as having
-  a missing root: changes made while the root was absent reached only the
-  index, so reads and reconciliation both treat that row as current when the
-  root returns.
+  write older fields back over a committed one. Every reader whose result
+  depends on a client's Minecraft version, loader, overrides, or pack-mod
+  opt-in reads the same way (launch and Java planning, duplication, loader and
+  mod planning, diagnosis, snapshots, and the checks tied to a linked server),
+  so none of them plans from a selection the user already replaced. The one row
+  that outranks the file is a newer one flagged as having a missing root:
+  changes made while the root was absent reached only the index, so reads and
+  reconciliation both treat that row as current when the root returns.
 - An indexed root whose metadata names a different record, as in a copied
   directory, refuses changes and moves with an error that names the root. The
   record can still be forgotten with its files kept, which does not use that

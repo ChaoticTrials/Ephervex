@@ -841,7 +841,7 @@ impl App {
     fn host_facts(&self, host: InstalledHost) -> CoreResult<HostFacts> {
         Ok(match host {
             InstalledHost::Instance(id) => {
-                let record = self.client(id)?;
+                let record = self.current_client(id)?;
                 HostFacts {
                     minecraft_version: record.minecraft_version,
                     loader: record.loader,
@@ -1622,6 +1622,7 @@ fn redact_home(path: &Path, home: Option<&Path>) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
     use super::*;
 
     fn reported(requested_by: &str, range: &str) -> LoaderReportedDependency {
@@ -1631,6 +1632,42 @@ mod tests {
             expected_range: range.to_owned(),
             actual: None,
         }
+    }
+
+    #[test]
+    fn host_facts_are_the_committed_selection_while_the_index_row_lags() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = App::open_at(ephervex_storage::Paths::rooted_at(base.path())).expect("app");
+        let client = app
+            .create_client_for_test(ephervex_storage::NewClient::new(
+                "lagging",
+                "1.21.1",
+                ephervex_model::LoaderSelection::exact(
+                    ephervex_model::LoaderKind::NeoForge,
+                    "21.1.100",
+                ),
+            ))
+            .expect("client");
+        let committed = app
+            .commit_client_without_index_for_test(client.id, |committed| {
+                committed.loader = ephervex_model::LoaderSelection::exact(
+                    ephervex_model::LoaderKind::NeoForge,
+                    "21.1.172",
+                );
+                committed.java_override =
+                    Some(ephervex_model::JavaOverride::new("/opt/jdk/bin/java"));
+            })
+            .expect("commit");
+
+        let facts = app
+            .host_facts(InstalledHost::Instance(client.id))
+            .expect("facts");
+
+        assert_eq!(facts.loader, committed.loader);
+        assert_eq!(
+            facts.java_override,
+            Some(std::path::PathBuf::from("/opt/jdk/bin/java"))
+        );
     }
 
     #[test]

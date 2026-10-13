@@ -924,7 +924,7 @@ impl App {
             // allowed to move a pack mod's version and a server refusing the
             // same move is the two of them disagreeing about the same pack.
             let opted_in = self
-                .client(client)
+                .current_client(client)
                 .is_ok_and(|client| client.allow_pack_mod_version_changes);
             if entry.origin.is_pack_owned() && !opted_in {
                 return Some(blocked(&record, root, LinkedTargetBlock::PackOwned));
@@ -2373,14 +2373,8 @@ mod tests {
         );
     }
 
-    /// A linked server exists to reproduce one instance. An instance allowed to
-    /// move a pack mod's version, beside a server refusing the same move, is
-    /// the pair disagreeing about the pack they share.
-    #[tokio::test]
-    async fn the_clients_pack_mod_opt_in_reaches_the_servers_linked_to_it() {
-        let world = world().await;
-        let server = world.link_server("Reproduction Server", MINECRAFT);
-
+    /// The server's pack declares the root project, as an import would have.
+    fn declare_root_in_the_servers_pack(world: &World, server: ServerId) {
         let store = SourceStore::new(ephervex_storage::metadata::source_dir(
             &world.server_root(server),
         ));
@@ -2404,6 +2398,17 @@ mod tests {
             relations: None,
         });
         store.write_recipe(&recipe).expect("write recipe");
+    }
+
+    /// A linked server exists to reproduce one instance. An instance allowed to
+    /// move a pack mod's version, beside a server refusing the same move, is
+    /// the pair disagreeing about the pack they share.
+    #[tokio::test]
+    async fn the_clients_pack_mod_opt_in_reaches_the_servers_linked_to_it() {
+        let world = world().await;
+        let server = world.link_server("Reproduction Server", MINECRAFT);
+
+        declare_root_in_the_servers_pack(&world, server);
 
         world
             .app
@@ -2415,6 +2420,33 @@ mod tests {
             target(&plan, server).state,
             LinkedTargetState::Blocked(LinkedTargetBlock::PackOwned),
             "the instance said its pack's mods may move, and this is its server"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_clients_committed_opt_in_reaches_its_servers_while_the_index_row_lags() {
+        let world = world().await;
+        let server = world.link_server("Reproduction Server", MINECRAFT);
+        declare_root_in_the_servers_pack(&world, server);
+        world
+            .app
+            .commit_client_without_index_for_test(world.client, |committed| {
+                committed.allow_pack_mod_version_changes = true;
+            })
+            .expect("commit");
+        assert!(
+            !world
+                .app
+                .client(world.client)
+                .expect("row")
+                .allow_pack_mod_version_changes
+        );
+
+        let plan = plan(&world, &install("ROOTPROJ")).await;
+
+        assert_ne!(
+            target(&plan, server).state,
+            LinkedTargetState::Blocked(LinkedTargetBlock::PackOwned),
         );
     }
 

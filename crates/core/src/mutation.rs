@@ -481,7 +481,7 @@ impl App {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<ModVersionChoices> {
-        let record = self.client(instance)?;
+        let record = self.current_client(instance)?;
         let snapshot = self.managed_mod_snapshot(instance)?;
         let entry = entry_at(&snapshot, target)?;
         let mutability = effective_mutability(entry, record.allow_pack_mod_version_changes);
@@ -693,7 +693,7 @@ impl App {
 
     /// Loads everything a mutation needs and checks that it is allowed at all.
     fn mutation_context(&self, instance: InstanceId, target: &Path) -> CoreResult<MutationContext> {
-        let record = self.client(instance)?;
+        let record = self.current_client(instance)?;
         let snapshot = self.managed_mod_snapshot(instance)?;
         let entry = entry_at(&snapshot, target)?.clone();
 

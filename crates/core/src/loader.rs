@@ -109,7 +109,7 @@ impl App {
         &self,
         instance: InstanceId,
     ) -> CoreResult<ephervex_loaders::LoaderVersionListing> {
-        let record = self.client(instance)?;
+        let record = self.current_client(instance)?;
         if record.loader.kind == LoaderKind::Vanilla {
             return Err(CoreError::LoaderFamilyFixed {
                 loader: LoaderKind::Vanilla,
@@ -126,7 +126,7 @@ impl App {
         instance: InstanceId,
         exact: &str,
     ) -> CoreResult<LoaderVersionPlan> {
-        let record = self.client(instance)?;
+        let record = self.current_client(instance)?;
         if record.loader.kind == LoaderKind::Vanilla {
             return Err(CoreError::LoaderFamilyFixed {
                 loader: LoaderKind::Vanilla,
@@ -210,7 +210,7 @@ impl App {
         self.refuse_while_running(instance)?;
         self.refuse_mod_change_during_isolation(InstalledHost::Instance(instance))?;
         let plan = self.plan_loader_version_change(instance, exact).await?;
-        let record = self.client(instance)?;
+        let record = self.current_client(instance)?;
 
         if plan.needs_confirmation() && !accept_incompatible_mods {
             return Err(CoreError::LoaderChangeBlockedByMods {
@@ -469,6 +469,84 @@ mod tests {
                 "expected a refusal naming the family: {result:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn loader_builds_are_planned_for_the_committed_family_while_the_index_row_lags() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let record = app
+            .create_client_for_test(NewClient::new(
+                "Lagging",
+                "1.21.1",
+                LoaderSelection::exact(LoaderKind::NeoForge, "21.1.100"),
+            ))
+            .expect("create");
+        app.commit_client_without_index_for_test(record.id, |committed| {
+            committed.loader = LoaderSelection::vanilla();
+        })
+        .expect("commit");
+        assert_eq!(
+            app.client(record.id).expect("row").loader.kind,
+            LoaderKind::NeoForge
+        );
+
+        let reporter = OperationReporter::silent("test");
+        let cancel = CancellationToken::new();
+        for result in [
+            app.loader_versions_for_instance(record.id).await.err(),
+            app.plan_loader_version_change(record.id, "21.1.172")
+                .await
+                .err(),
+            app.change_loader_version(record.id, "21.1.172", true, &reporter, &cancel)
+                .await
+                .err(),
+        ] {
+            assert!(
+                matches!(
+                    result,
+                    Some(CoreError::LoaderFamilyFixed {
+                        loader: LoaderKind::Vanilla
+                    })
+                ),
+                "expected the committed vanilla selection to be honored: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn loader_builds_are_listed_for_the_committed_minecraft_version_while_the_index_row_lags()
+    {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let record = app
+            .create_client_for_test(NewClient::new(
+                "Lagging",
+                "1.21.1",
+                LoaderSelection::exact(LoaderKind::NeoForge, "21.1.100"),
+            ))
+            .expect("create");
+        app.commit_client_without_index_for_test(record.id, |committed| {
+            committed.minecraft_version = "1.12.2".to_owned();
+        })
+        .expect("commit");
+
+        let error = app
+            .loader_versions_for_instance(record.id)
+            .await
+            .expect_err("NeoForge was never published for the committed release");
+
+        assert!(
+            matches!(
+                &error,
+                CoreError::Loader(ephervex_loaders::LoaderError::LoaderNeverPublished {
+                    minecraft,
+                    ..
+                })
+                    if minecraft == "1.12.2"
+            ),
+            "{error:?}"
+        );
     }
 
     #[tokio::test]

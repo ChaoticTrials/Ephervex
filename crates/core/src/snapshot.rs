@@ -595,7 +595,7 @@ impl App {
 
         let (minecraft_version, loader) = match capture.host {
             InstalledHost::Instance(id) => {
-                let record = self.client(id).map_err(snapshot_core_error)?;
+                let record = self.current_client(id).map_err(snapshot_core_error)?;
                 (record.minecraft_version, record.loader)
             }
             InstalledHost::Server(id) => {
@@ -1040,6 +1040,35 @@ mod tests {
     use ephervex_storage::{DuplicateClient, NewClient, NewServer, Paths};
 
     use super::*;
+
+    #[test]
+    fn a_snapshot_records_the_committed_target_while_the_index_row_lags() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let app = App::open_at(Paths::rooted_at(temporary.path())).expect("open app");
+        let client = app
+            .create_client_for_test(NewClient::new(
+                "snapshot",
+                "1.21.1",
+                LoaderSelection::exact(LoaderKind::NeoForge, "21.1.100"),
+            ))
+            .expect("client");
+        let committed = app
+            .commit_client_without_index_for_test(client.id, |committed| {
+                committed.loader = LoaderSelection::exact(LoaderKind::NeoForge, "21.1.172");
+            })
+            .expect("commit");
+
+        let snapshot = app
+            .create_snapshot(
+                InstalledHost::Instance(client.id),
+                "lagging",
+                SnapshotOrigin::Manual,
+                &CancellationToken::new(),
+            )
+            .expect("snapshot");
+
+        assert_eq!(snapshot.loader, committed.loader);
+    }
 
     #[test]
     fn failed_capture_cleans_staging_and_leaves_live_state_untouched() {

@@ -639,7 +639,7 @@ impl App {
             return Ok(None);
         };
         let last_started = match host {
-            InstalledHost::Instance(id) => self.client(id)?.last_launched_at,
+            InstalledHost::Instance(id) => self.current_client(id)?.last_launched_at,
             InstalledHost::Server(id) => self.server(id)?.last_started_at,
         };
         let from_last_run = match (report.modified, last_started) {
@@ -739,6 +739,46 @@ mod tests {
 \tMod ID: 'registrate', Requested by: 'flywheel', Expected range: '[1.3,)', Actual version: '[MISSING]'
 [12:00:02] [main/INFO] [net.neoforged.fml.loading.ImmediateWindowHandler/]: Loading ImmediateWindowProvider fmlearlywindow
 ";
+
+    #[test]
+    fn a_crash_older_than_the_committed_launch_is_not_reviewed_while_the_index_row_lags() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = App::open_at(ephervex_storage::Paths::rooted_at(base.path())).expect("app");
+        let client = app
+            .create_client_for_test(ephervex_storage::NewClient::new(
+                "lagging",
+                "1.21.1",
+                ephervex_model::LoaderSelection::vanilla(),
+            ))
+            .expect("client");
+        let reports =
+            ephervex_storage::metadata::client_game_dir(&client.root).join("crash-reports");
+        std::fs::create_dir_all(&reports).expect("crash reports directory");
+        std::fs::write(
+            reports.join("crash-2026-08-30_18.09.07-client.txt"),
+            "---- Minecraft Crash Report ----\n",
+        )
+        .expect("write crash report");
+        app.commit_client_without_index_for_test(client.id, |committed| {
+            committed.last_launched_at = Some(chrono::Utc::now() + chrono::TimeDelta::hours(1));
+        })
+        .expect("commit");
+        assert!(
+            app.client(client.id)
+                .expect("row")
+                .last_launched_at
+                .is_none()
+        );
+
+        let review = app
+            .crash_review(InstalledHost::Instance(client.id))
+            .expect("review");
+
+        assert!(
+            review.is_none(),
+            "the report predates the launch the metadata records"
+        );
+    }
 
     #[test]
     fn the_loader_s_unmet_dependencies_are_read_exactly_as_it_logged_them() {

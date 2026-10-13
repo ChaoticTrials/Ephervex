@@ -229,7 +229,7 @@ impl App {
         client_id: InstanceId,
         server_id: ServerId,
     ) -> CoreResult<LaunchAndConnectAvailability> {
-        let client = self.client(client_id)?;
+        let client = self.current_client(client_id)?;
         let server = self.canonical_server_for_mutation(server_id)?;
         match server.linked_client_id {
             None => return Err(ConnectError::ServerNotLinked { server: server_id }.into()),
@@ -658,6 +658,30 @@ mod tests {
             address: IpAddr::V4(Ipv4Addr::LOCALHOST),
             port: NonZeroU16::new(port).expect("port"),
         }
+    }
+
+    #[test]
+    fn availability_compares_the_committed_client_target_while_the_index_row_lags() {
+        let directory = tempfile::tempdir().expect("directory");
+        let app = app_rooted_at(directory.path());
+        let (client, server) = installed_linked_server(&app, ServerNetworkSettings::default());
+        app.commit_client_without_index_for_test(client.id, |committed| {
+            committed.loader = LoaderSelection::exact(LoaderKind::Forge, "47.4.5");
+        })
+        .expect("commit");
+        assert_eq!(
+            app.client(client.id)
+                .expect("row")
+                .loader
+                .version
+                .as_deref(),
+            Some("47.4.0")
+        );
+
+        assert!(matches!(
+            app.launch_and_connect_availability(client.id, server.id),
+            Err(CoreError::Connect(ConnectError::TargetMismatch { .. }))
+        ));
     }
 
     #[test]

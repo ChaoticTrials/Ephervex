@@ -355,7 +355,7 @@ impl App {
         &self,
         instance: InstanceId,
     ) -> CoreResult<SharedArtifactReport> {
-        let record = self.client(instance)?;
+        let record = self.current_client(instance)?;
         let loader_libraries_uncovered = record.loader.kind != LoaderKind::Vanilla;
         let Some(metadata) = self
             .minecraft()?
@@ -756,6 +756,33 @@ async fn check(path: &Path, expected: &[Hash]) -> Integrity {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use std::path::Path;
+
+    #[tokio::test]
+    async fn shared_artifact_checks_follow_the_committed_loader_while_the_index_row_lags() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = App::open_at(Paths::rooted_at(base.path())).expect("app");
+        let client = app
+            .create_client_for_test(NewClient::new(
+                "lagging",
+                "1.21.1",
+                LoaderSelection::exact(LoaderKind::NeoForge, "21.1.100"),
+            ))
+            .expect("client");
+        app.commit_client_without_index_for_test(client.id, |committed| {
+            committed.loader = LoaderSelection::vanilla();
+        })
+        .expect("commit");
+
+        let report = app
+            .verify_shared_artifacts(client.id)
+            .await
+            .expect("report");
+
+        assert!(
+            !report.loader_libraries_uncovered,
+            "a vanilla client has no loader libraries to leave uncovered"
+        );
+    }
 
     #[test]
     fn a_failed_repair_rollback_returns_a_typed_recovery_issue() {
