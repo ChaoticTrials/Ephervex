@@ -3136,7 +3136,7 @@ async fn end_launch_on_requests(mut requests: impl StopRequests, signals: Launch
     if !signals.server_stopping.load(Ordering::Relaxed) {
         // Canceled first: after a hangup the terminal may refuse the write.
         signals.stop.cancel();
-        note("stopping Minecraft…");
+        note(&ephervex_i18n::lookup("launch-stopping"));
         requests.next().await;
     }
     // Said by the stop itself, only when a server this launch started is
@@ -5999,7 +5999,7 @@ async fn show_login_prompts(
             }
             // Progress, on stderr so `--json` stdout stays machine-readable.
             AuthEvent::Stage(stage) => {
-                eprintln!("{}…", ephervex_i18n::lookup(stage.message_id()));
+                eprintln!("{}...", ephervex_i18n::lookup(stage.message_id()));
             }
             _ => {}
         }

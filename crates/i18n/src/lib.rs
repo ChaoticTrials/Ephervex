@@ -453,6 +453,17 @@ mod tests {
     }
 
     #[test]
+    fn no_message_uses_the_unicode_ellipsis() {
+        // User-facing text trails off with three ASCII periods.
+        let source = include_str!("../locales/en-US/main.ftl");
+        let offenders: Vec<&str> = source
+            .lines()
+            .filter(|line| !line.starts_with('#') && line.contains('\u{2026}'))
+            .collect();
+        assert!(offenders.is_empty(), "Unicode ellipsis in: {offenders:?}");
+    }
+
+    #[test]
     fn no_message_defines_the_same_attribute_twice() {
         // Fluent keeps only the first attribute of a given name, so a second
         // `.action` is unreachable. It usually means a message was inserted
@@ -820,6 +831,7 @@ mod tests {
             "error-launch-canceled",
             "launch-preparing",
             "launch-starting",
+            "launch-stopping",
             "launch-output-dropped",
             "server-output-dropped",
             "launch-account-offline",
