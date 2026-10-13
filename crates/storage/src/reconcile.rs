@@ -105,6 +105,12 @@ pub struct ReconciliationReport {
     /// presented as a finished one is the failure this state exists to
     /// prevent.
     pub unfinished_instances: Vec<ReconciledRecord>,
+    /// Directories found on disk whose names are not valid UTF-8.
+    ///
+    /// Metadata and the index hold text only, so such a root cannot be
+    /// recorded under its real name. It is left where it is and never indexed,
+    /// rather than indexed under a different path.
+    pub non_utf8_roots: Vec<ReconciledRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,6 +141,7 @@ impl ReconciliationReport {
             && self.client_conflicts.is_empty()
             && self.server_conflicts.is_empty()
             && self.unfinished_instances.is_empty()
+            && self.non_utf8_roots.is_empty()
     }
 
     /// Whether anything here needs the user's attention.
@@ -148,6 +155,7 @@ impl ReconciliationReport {
             || !self.client_conflicts.is_empty()
             || !self.server_conflicts.is_empty()
             || !self.unfinished_instances.is_empty()
+            || !self.non_utf8_roots.is_empty()
     }
 }
 
@@ -179,6 +187,7 @@ pub fn reconcile(registry: &Registry) -> Result<ReconciliationReport, RegistryEr
             persistence_unhealthy = report.persistence_unhealthy.len(),
             client_conflicts = report.client_conflicts.len(),
             server_conflicts = report.server_conflicts.len(),
+            non_utf8_roots = report.non_utf8_roots.len(),
             "startup reconciliation complete"
         );
     }
@@ -710,6 +719,10 @@ fn reindex_orphaned_clients(
             continue;
         }
 
+        if refuse_non_utf8_root(RecordRef::Client(id), &record.name, &directory, report) {
+            continue;
+        }
+
         // Trust where the directory actually is over where the metadata says it
         // was: instances get moved, and the file travels with them.
         record.root.clone_from(&directory);
@@ -851,6 +864,13 @@ fn reindex_orphaned_servers(
             continue;
         }
 
+        if crate::paths::utf8_path(&directory).is_err() {
+            let name = metadata::read_server_metadata(&directory)
+                .map_or_else(|_| id.to_string(), |record| record.name);
+            refuse_non_utf8_root(RecordRef::Server(id), &name, &directory, report);
+            continue;
+        }
+
         // The host's claim is held until this root is dealt with. A restore or
         // move still running owns the files, and one that was abandoned is
         // recovered before anything is read from them.
@@ -910,6 +930,34 @@ fn reindex_orphaned_servers(
     }
 
     Ok(())
+}
+
+/// Reports `directory` and returns `true` when its name is not valid UTF-8.
+///
+/// Canonical metadata and the index store the root as text, so recording such a
+/// directory would store a different path than the one on disk. It is refused
+/// the same way creation, duplication and moves refuse it, but reported rather
+/// than failing the rest of reconciliation.
+fn refuse_non_utf8_root(
+    reference: RecordRef,
+    name: &str,
+    directory: &Path,
+    report: &mut ReconciliationReport,
+) -> bool {
+    if crate::paths::utf8_path(directory).is_ok() {
+        return false;
+    }
+    tracing::warn!(
+        path = %directory.display(),
+        "a directory found on disk has a name that is not valid UTF-8; leaving it unindexed"
+    );
+    report.non_utf8_roots.push(ReconciledRecord {
+        reference,
+        name: name.to_owned(),
+        root: directory.to_path_buf(),
+        storage: StorageClass::Persistent,
+    });
+    true
 }
 
 /// Recovers the restore of a server directory the index has lost and returns
@@ -2176,6 +2224,110 @@ mod tests {
         assert_eq!(
             registry.client(client.id).expect("indexed").root,
             client.root
+        );
+    }
+
+    #[cfg(unix)]
+    fn non_utf8_name(prefix: &str) -> std::ffi::OsString {
+        use std::os::unix::ffi::OsStringExt as _;
+        let mut bytes = prefix.as_bytes().to_vec();
+        bytes.push(0xff);
+        std::ffi::OsString::from_vec(bytes)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_orphaned_client_root_whose_name_is_not_utf8_is_reported_and_not_indexed() {
+        let environment = TestEnvironment::new();
+        let (client, server) = {
+            let registry = environment.registry();
+            let client = registry
+                .create_published_client(
+                    NewClient::new("original", "1.20.1", LoaderSelection::vanilla())
+                        .with_storage(StorageClass::Persistent),
+                )
+                .expect("create client");
+            let server = registry
+                .create_server(
+                    NewServer::new("bystander", "1.20.1", LoaderSelection::vanilla())
+                        .with_storage(StorageClass::Persistent),
+                )
+                .expect("create server");
+            (client, server)
+        };
+        environment.destroy_database();
+        let registry = environment.registry();
+        let moved = client.root.with_file_name(non_utf8_name("moved"));
+        std::fs::rename(&client.root, &moved).expect("rename the root");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.non_utf8_roots.len(), 1);
+        assert_eq!(
+            report.non_utf8_roots[0].reference,
+            RecordRef::Client(client.id)
+        );
+        assert_eq!(report.non_utf8_roots[0].root, moved);
+        assert_eq!(report.non_utf8_roots[0].name, "original");
+        assert!(report.needs_attention());
+        assert!(matches!(
+            registry.client(client.id),
+            Err(RegistryError::InstanceUnknown { .. })
+        ));
+        assert_eq!(
+            report.reindexed.len(),
+            1,
+            "one bad directory does not stop the rest of the pass"
+        );
+        assert_eq!(report.reindexed[0].reference, RecordRef::Server(server.id));
+        assert!(moved.is_dir(), "the directory is left where it is");
+
+        let again = reconcile(&registry).expect("a second pass reports it again");
+        assert_eq!(again.non_utf8_roots.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_orphaned_server_root_whose_name_is_not_utf8_is_reported_and_not_indexed() {
+        let environment = TestEnvironment::new();
+        let (client, server) = {
+            let registry = environment.registry();
+            let client = registry
+                .create_published_client(
+                    NewClient::new("bystander", "1.20.1", LoaderSelection::vanilla())
+                        .with_storage(StorageClass::Persistent),
+                )
+                .expect("create client");
+            let server = registry
+                .create_server(
+                    NewServer::new("orphan", "1.20.1", LoaderSelection::vanilla())
+                        .with_storage(StorageClass::Persistent),
+                )
+                .expect("create server");
+            (client, server)
+        };
+        environment.destroy_database();
+        let registry = environment.registry();
+        let moved = server.root.with_file_name(non_utf8_name("moved"));
+        std::fs::rename(&server.root, &moved).expect("rename the root");
+
+        let report = reconcile(&registry).expect("the pass is not aborted");
+
+        assert_eq!(report.non_utf8_roots.len(), 1);
+        assert_eq!(
+            report.non_utf8_roots[0].reference,
+            RecordRef::Server(server.id)
+        );
+        assert_eq!(report.non_utf8_roots[0].root, moved);
+        assert_eq!(report.non_utf8_roots[0].name, "orphan");
+        assert!(registry.server(server.id).is_err());
+        assert_eq!(report.reindexed.len(), 1);
+        assert_eq!(report.reindexed[0].reference, RecordRef::Client(client.id));
+        assert_eq!(
+            metadata::read_server_metadata(&moved)
+                .expect("canonical metadata is untouched")
+                .root,
+            server.root
         );
     }
 

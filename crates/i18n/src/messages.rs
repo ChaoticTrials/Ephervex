@@ -85,6 +85,20 @@ pub fn unfinished_instances_action() -> String {
     fl!(LANGUAGE_LOADER, "reconcile-unfinished-instances", "action")
 }
 
+/// "N directories were not added because their names are not valid UTF-8."
+///
+/// The directories are never indexed under a different path.
+#[must_use]
+pub fn non_utf8_roots(count: usize) -> String {
+    fl!(LANGUAGE_LOADER, "reconcile-non-utf8-roots", count = count)
+}
+
+/// The next step offered alongside [`non_utf8_roots`].
+#[must_use]
+pub fn non_utf8_roots_action() -> String {
+    fl!(LANGUAGE_LOADER, "reconcile-non-utf8-roots", "action")
+}
+
 /// "Corrected N index entries from the metadata stored with their files."
 ///
 /// Canonical metadata beside the files wins over a disagreeing index copy.
@@ -232,11 +246,16 @@ mod tests {
             persistence_unhealthy(3),
             "3 instances or servers have metadata that cannot be read."
         );
+        assert_eq!(
+            non_utf8_roots(1),
+            "1 directory was not added because its name is not valid UTF-8."
+        );
         for action in [
             client_conflicts_action(),
             server_conflicts_action(),
             interrupted_hosts_action(),
             persistence_unhealthy_action(),
+            non_utf8_roots_action(),
         ] {
             assert!(!action.is_empty());
         }

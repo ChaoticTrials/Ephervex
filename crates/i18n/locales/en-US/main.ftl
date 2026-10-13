@@ -120,6 +120,12 @@ reconcile-server-conflicts = { $count ->
     }
 .action = Ephervex did not choose between the directories. Move or delete the copies you do not want, then run reconcile again.
 
+reconcile-non-utf8-roots = { $count ->
+        [one] { $count } directory was not added because its name is not valid UTF-8.
+       *[other] { $count } directories were not added because their names are not valid UTF-8.
+    }
+.action = Ephervex refuses rather than indexing them under a different path. Rename the directories to use valid UTF-8 names, then run reconcile again.
+
 reconcile-nothing-to-do = Everything in the index matches what is on disk.
 
 # $name is user-authored, $path is a filesystem path. Untranslated.
@@ -127,6 +133,9 @@ reconcile-persistent-root-missing-detail = { $name } expected its files at { $pa
 
 # $name is user-authored, $path is a filesystem path. Untranslated.
 reconcile-unfinished-instance-detail = { $name } was never finished at { $path }.
+
+# $name is user-authored, $path is a filesystem path. Untranslated.
+reconcile-non-utf8-root-detail = { $name } is at { $path }.
 
 # $name is user-authored, $path is a filesystem path. Untranslated.
 reconcile-attention-detail = { $name } at { $path }

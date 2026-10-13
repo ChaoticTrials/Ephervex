@@ -1518,8 +1518,9 @@ Instance and server metadata and the configuration file hold text, so a path
 that is not valid UTF-8 is never stored. Creating, moving, or duplicating an
 instance or server whose root has such a name, and saving a Java path, an
 instance root, or a watched download folder that has one, fail with a message
-that names the encoding before anything is written. Commands that only read
-keep working under such a data root.
+that names the encoding before anything is written. Reconciliation does not
+index such a directory found on disk; it reports it and continues with the rest.
+Commands that only read keep working under such a data root.
 
 ## Third-party licenses
 

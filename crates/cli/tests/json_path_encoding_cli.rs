@@ -193,7 +193,7 @@ fn reconcile_reports_conflicting_roots_whose_names_are_not_valid_utf8() {
 }
 
 #[test]
-fn reconcile_reports_a_reindexed_root_whose_name_is_not_valid_utf8() {
+fn reconcile_refuses_to_reindex_a_root_whose_name_is_not_valid_utf8() {
     let origin = Sandbox::with_data_root(OsStr::new("data"));
     let created = origin.json(&[
         "--json",
@@ -222,9 +222,12 @@ fn reconcile_reports_a_reindexed_root_whose_name_is_not_valid_utf8() {
 
     let report = sandbox.json(&["--json", "reconcile"]);
 
-    let reindexed = report["reindexed"].as_array().expect("array");
-    assert_eq!(reindexed.len(), 1, "{report}");
-    assert!(text(&reindexed[0]["root"], "root").contains('\u{fffd}'));
+    assert!(report["reindexed"].as_array().expect("array").is_empty());
+    let refused = report["non_utf8_roots"].as_array().expect("array");
+    assert_eq!(refused.len(), 1, "{report}");
+    assert!(text(&refused[0]["root"], "root").contains('\u{fffd}'));
+    assert_eq!(report["needs_attention"], true);
+    assert!(moved.is_dir(), "the directory is left where it is");
 }
 
 #[test]

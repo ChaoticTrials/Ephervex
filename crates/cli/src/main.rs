@@ -6766,6 +6766,7 @@ fn show_reconciliation(report: &ReconciliationReport, json: bool) {
             "interrupted_hosts": reconciled_json(&report.interrupted_hosts),
             "restores_rolled_back": reconciled_json(&report.restores_rolled_back),
             "persistence_unhealthy": reconciled_json(&report.persistence_unhealthy),
+            "non_utf8_roots": reconciled_json(&report.non_utf8_roots),
             "client_conflicts": conflicts_json(
                 report.client_conflicts.iter().map(|c| (c.id.to_string(), &c.roots)),
             ),
@@ -6873,6 +6874,25 @@ fn show_reconciliation_warnings(report: &ReconciliationReport) {
             "{}",
             ephervex_i18n::messages::persistence_unhealthy_action()
         );
+    }
+    if !report.non_utf8_roots.is_empty() {
+        outln!(
+            "{}",
+            ephervex_i18n::messages::non_utf8_roots(report.non_utf8_roots.len())
+        );
+        for entry in &report.non_utf8_roots {
+            outln!(
+                "  {}",
+                ephervex_i18n::lookup_args(
+                    "reconcile-non-utf8-root-detail",
+                    [
+                        ("name", MessageArg::from(entry.name.as_str())),
+                        ("path", MessageArg::from(entry.root.as_path())),
+                    ]
+                )
+            );
+        }
+        outln!("{}", ephervex_i18n::messages::non_utf8_roots_action());
     }
     if !report.client_conflicts.is_empty() {
         outln!(
