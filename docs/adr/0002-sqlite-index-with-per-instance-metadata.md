@@ -54,6 +54,11 @@ Schema changes go through an ordered migration runner keyed on SQLite's
   duplication, and a server linked to a client read the same way, so none of
   them plans from a Minecraft version, loader, or override the user already
   replaced.
+- An indexed root whose metadata names a different record, as in a copied
+  directory, refuses changes and moves with an error that names the root. The
+  record can still be forgotten with its files kept, which does not use that
+  metadata. Deleting its files is refused, because the directory is not
+  verifiably the host's.
 - `bundled` is used because the target machine has no system SQLite development
   package, and pinning the library version removes a class of "works on my
   distro" failures.

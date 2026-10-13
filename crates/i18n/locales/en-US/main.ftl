@@ -246,6 +246,13 @@ error-index-schema-from-future = The launcher index database was written by a ne
 error-registry-instance-unknown = No such instance.
 error-registry-server-unknown = No such server.
 
+# The record is listed, but its directory holds another record's metadata.
+error-registry-instance-metadata-foreign = The metadata at { $path } belongs to a different instance.
+.action = The directory was probably copied from another instance, so this one cannot be changed or moved. Delete the instance and keep its files to remove the record without using that metadata.
+
+error-registry-server-metadata-foreign = The metadata at { $path } belongs to a different server.
+.action = The directory was probably copied from another server, so this one cannot be changed or moved. Delete the server and keep its files to remove the record without using that metadata.
+
 error-registry-metadata-unwritable = The instance metadata file could not be written.
 .action = Check that { $path } is writable. Ephervex writes this file before touching the index so a crash leaves a recoverable instance rather than a dangling record.
 

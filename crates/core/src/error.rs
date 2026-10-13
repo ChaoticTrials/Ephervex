@@ -492,6 +492,19 @@ impl From<ephervex_java::MemoryRangeViolation> for CoreError {
 }
 
 impl CoreError {
+    /// Whether the metadata at an indexed instance or server root names a
+    /// different record, so the host can be forgotten but not changed.
+    #[must_use]
+    pub(crate) fn is_foreign_host_metadata(&self) -> bool {
+        matches!(
+            self,
+            Self::Storage(StorageError::Registry(
+                ephervex_storage::RegistryError::InstanceMetadataForeign { .. }
+                    | ephervex_storage::RegistryError::ServerMetadataForeign { .. }
+            ))
+        )
+    }
+
     /// The `ephervex-i18n` message id describing this failure to a user.
     ///
     /// Delegating rather than re-deriving keeps one message id per failure
@@ -990,6 +1003,8 @@ fn registry_failing_path(error: &ephervex_storage::RegistryError) -> Option<Path
         | RegistryError::RestoreUnfinished { path }
         | RegistryError::HostGuardUnusable { path, .. }
         | RegistryError::RootMissing { path }
+        | RegistryError::InstanceMetadataForeign { path }
+        | RegistryError::ServerMetadataForeign { path }
         | RegistryError::Io { path, .. }
         | RegistryError::Index(IndexError::Unopenable { path, .. }) => Some(path.clone()),
         RegistryError::Metadata(inner) => metadata_failing_path(inner),

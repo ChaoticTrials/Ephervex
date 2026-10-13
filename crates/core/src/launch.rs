@@ -682,8 +682,8 @@ mod tests {
             matches!(
                 error,
                 crate::CoreError::Storage(crate::StorageError::Registry(
-                    ephervex_storage::RegistryError::InstanceUnknown { .. }
-                ))
+                    ephervex_storage::RegistryError::InstanceMetadataForeign { ref path }
+                )) if *path == client.root
             ),
             "{error:?}"
         );

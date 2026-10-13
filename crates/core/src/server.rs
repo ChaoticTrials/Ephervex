@@ -595,7 +595,11 @@ impl App {
     }
 
     pub fn delete_server(&self, id: ServerId, files: FileDisposition) -> CoreResult<()> {
-        let (_claim, record) = self.claim_stopped_server(id)?;
+        let _claim = self
+            .registry()
+            .claim_host(ephervex_storage::RecordRef::Server(id))?;
+        let record = self.server_for_deletion(id, files)?;
+        refuse_if_running(&record)?;
         self.delete_claimed_server(&record, files)
     }
 
@@ -625,7 +629,7 @@ impl App {
     ) -> CoreResult<()> {
         let mut running = Vec::new();
         for id in self.linked_server_ids(client)? {
-            let record = self.canonical_server_for_mutation(id)?;
+            let record = self.server_for_deletion(id, files)?;
             let runtime = settled_runtime(&record.root)?;
             if stoppable_for_deletion(&runtime) {
                 running.push(record);
@@ -1070,10 +1074,29 @@ impl App {
         let mut canonical = ephervex_storage::metadata::read_server_metadata(&indexed.root)
             .map_err(metadata_core_error)?;
         if canonical.id != id {
-            return Err(RegistryError::ServerUnknown { id }.into());
+            return Err(RegistryError::ServerMetadataForeign { path: indexed.root }.into());
         }
         canonical.root = indexed.root;
         Ok(canonical)
+    }
+
+    /// The server a deletion acts on.
+    ///
+    /// A server whose root holds another server's metadata cannot be changed,
+    /// but it can be forgotten with its files kept: the record then comes from
+    /// the index and that metadata is not used. Deleting its files is refused,
+    /// because the directory is not verifiably this server's.
+    pub(super) fn server_for_deletion(
+        &self,
+        id: ServerId,
+        files: FileDisposition,
+    ) -> CoreResult<ServerRecord> {
+        match self.canonical_server_for_mutation(id) {
+            Err(error) if files == FileDisposition::Keep && error.is_foreign_host_metadata() => {
+                self.server(id)
+            }
+            result => result,
+        }
     }
 
     /// Records `reason` on a server's canonical metadata.
@@ -2260,6 +2283,189 @@ mod tests {
             assert_eq!(error.message_id(), "error-registry-host-busy", "{error}");
         }
         assert!(server.root.is_dir(), "the refused deletion removed nothing");
+    }
+
+    /// A server whose directory was copied from another server, so its root
+    /// holds that server's metadata.
+    fn copy_foreign_metadata_into(server: &ServerRecord) -> Vec<u8> {
+        let mut foreign = server.clone();
+        foreign.id = ServerId::new();
+        ephervex_storage::metadata::write_server_metadata(&server.root, &foreign)
+            .expect("foreign write");
+        std::fs::read(ephervex_storage::metadata::server_metadata_path(
+            &server.root,
+        ))
+        .expect("read")
+    }
+
+    #[test]
+    fn changes_to_a_server_whose_root_holds_another_servers_metadata_name_that_root() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let server = scaffolded_server(&app);
+        let metadata_before = copy_foreign_metadata_into(&server);
+
+        let settings = app
+            .set_server_runtime_settings(server.id, None, None)
+            .expect_err("settings");
+        let property = app
+            .set_server_property(server.id, "motd", "changed")
+            .expect_err("property");
+        let deletion = app
+            .delete_server(server.id, FileDisposition::Remove)
+            .expect_err("deleting the files of an unverifiable directory");
+
+        for error in [settings, property, deletion] {
+            assert_eq!(
+                error.message_id(),
+                "error-registry-server-metadata-foreign",
+                "{error}"
+            );
+            assert_eq!(error.failing_path().as_deref(), Some(server.root.as_path()));
+        }
+        assert!(server.root.is_dir(), "the refused deletion removed nothing");
+        assert_eq!(
+            std::fs::read(ephervex_storage::metadata::server_metadata_path(
+                &server.root
+            ))
+            .expect("read"),
+            metadata_before
+        );
+        assert!(app.server(server.id).is_ok(), "the record is kept");
+    }
+
+    #[test]
+    fn a_server_whose_root_holds_another_servers_metadata_is_forgotten_with_its_files_kept() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let server = scaffolded_server(&app);
+        let metadata_before = copy_foreign_metadata_into(&server);
+
+        app.delete_server(server.id, FileDisposition::Keep)
+            .expect("forgetting the record needs no readable metadata");
+
+        assert!(app.server(server.id).is_err());
+        assert_eq!(
+            std::fs::read(ephervex_storage::metadata::server_metadata_path(
+                &server.root
+            ))
+            .expect("read"),
+            metadata_before,
+            "the directory is left as it was"
+        );
+    }
+
+    #[test]
+    fn deleting_a_client_names_the_linked_server_root_that_holds_another_servers_metadata() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let (_, server) = linked_server_in_client_with_entry(&app);
+        let client_id = server.linked_client_id.expect("linked");
+        let client = app.client(client_id).expect("client");
+        copy_foreign_metadata_into(&server);
+
+        let error = app
+            .delete_client(client_id, FileDisposition::Remove)
+            .expect_err("the server's files cannot be verified");
+
+        assert_eq!(
+            error.message_id(),
+            "error-registry-server-metadata-foreign",
+            "{error}"
+        );
+        assert_eq!(error.failing_path().as_deref(), Some(server.root.as_path()));
+        assert!(client.root.is_dir() && server.root.is_dir());
+        assert!(app.client(client_id).is_ok() && app.server(server.id).is_ok());
+    }
+
+    #[test]
+    fn deleting_a_client_whose_root_holds_another_instances_metadata_names_that_root() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let client = app
+            .registry_for_services()
+            .create_client(ephervex_storage::NewClient::new(
+                "Copied Client",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("client");
+        app.registry_for_services()
+            .publish_client(&client)
+            .expect("publish");
+        let mut foreign = client.clone();
+        foreign.id = ephervex_model::InstanceId::new();
+        ephervex_storage::metadata::write_client_metadata(&client.root, &foreign)
+            .expect("foreign write");
+
+        let error = app
+            .delete_client(client.id, FileDisposition::Remove)
+            .expect_err("the files cannot be verified");
+
+        assert_eq!(
+            error.message_id(),
+            "error-registry-instance-metadata-foreign",
+            "{error}"
+        );
+        assert_eq!(error.failing_path().as_deref(), Some(client.root.as_path()));
+        assert!(client.root.is_dir());
+
+        app.delete_client(client.id, FileDisposition::Keep)
+            .expect("the record is forgotten");
+        assert!(app.client(client.id).is_err());
+        assert!(client.root.is_dir(), "the files are kept");
+    }
+
+    #[tokio::test]
+    async fn a_refused_client_deletion_leaves_its_linked_servers_untouched() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let (_, server) = linked_server_in_client_with_entry(&app);
+        let client_id = server.linked_client_id.expect("linked");
+        let client = app.client(client_id).expect("client");
+        let mut foreign = client.clone();
+        foreign.id = ephervex_model::InstanceId::new();
+        ephervex_storage::metadata::write_client_metadata(&client.root, &foreign)
+            .expect("foreign write");
+
+        let plain = app
+            .delete_client(client_id, FileDisposition::Remove)
+            .expect_err("plain deletion");
+        let stopping = app
+            .delete_client_stopping_linked_servers(client_id, FileDisposition::Remove)
+            .await
+            .expect_err("deletion that stops servers");
+
+        for error in [plain, stopping] {
+            assert_eq!(
+                error.message_id(),
+                "error-registry-instance-metadata-foreign",
+                "{error}"
+            );
+        }
+        assert!(client.root.is_dir() && server.root.is_dir());
+        assert!(app.client(client_id).is_ok() && app.server(server.id).is_ok());
+    }
+
+    #[test]
+    fn a_client_is_forgotten_with_a_linked_server_whose_root_holds_another_servers_metadata() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let (_, server) = linked_server_in_client_with_entry(&app);
+        let client_id = server.linked_client_id.expect("linked");
+        let client = app.client(client_id).expect("client");
+        copy_foreign_metadata_into(&server);
+
+        let deleted = app
+            .delete_client(client_id, FileDisposition::Keep)
+            .expect("both records are forgotten");
+
+        assert_eq!(deleted.len(), 1);
+        assert!(app.client(client_id).is_err() && app.server(server.id).is_err());
+        assert!(
+            client.root.is_dir() && server.root.is_dir(),
+            "files are kept"
+        );
     }
 
     #[tokio::test]

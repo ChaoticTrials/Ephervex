@@ -674,6 +674,8 @@ impl App {
         files: FileDisposition,
         _claim: &ephervex_storage::HostClaim,
     ) -> CoreResult<Vec<ServerRecord>> {
+        self.registry()
+            .refuse_removing_foreign_client_files(id, files)?;
         let mut servers = Vec::new();
         // Every server is checked before any is deleted, so a refusal removes nothing.
         // Each stays claimed until the client is gone, so none starts in between.
@@ -681,7 +683,7 @@ impl App {
             let claim = self
                 .registry()
                 .claim_host(ephervex_storage::RecordRef::Server(server))?;
-            let record = self.canonical_server_for_mutation(server)?;
+            let record = self.server_for_deletion(server, files)?;
             let runtime = crate::server::settled_runtime(&record.root)?;
             if crate::server::stoppable_for_deletion(&runtime) {
                 return Err(crate::CoreError::LinkedServerRunning { name: record.name });
@@ -711,6 +713,8 @@ impl App {
         files: FileDisposition,
     ) -> CoreResult<Vec<ServerRecord>> {
         let claim = self.claim_stopped_client(id)?;
+        self.registry()
+            .refuse_removing_foreign_client_files(id, files)?;
         self.stop_linked_servers_for_deletion(id, files).await?;
         self.delete_claimed_client(id, files, &claim)
     }

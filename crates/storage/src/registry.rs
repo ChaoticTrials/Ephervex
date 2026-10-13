@@ -78,6 +78,13 @@ pub enum RegistryError {
     /// No server with that id is indexed.
     #[error("no server with id {id}")]
     ServerUnknown { id: ServerId },
+    /// The metadata at an indexed instance root names a different instance,
+    /// as when the directory was copied from another one.
+    #[error("the metadata at {path} belongs to a different instance")]
+    InstanceMetadataForeign { path: PathBuf },
+    /// The same for a server.
+    #[error("the metadata at {path} belongs to a different server")]
+    ServerMetadataForeign { path: PathBuf },
     /// The directory chosen for a new instance already has contents.
     #[error("the instance directory {path} already contains files")]
     RootOccupied { path: PathBuf },
@@ -135,6 +142,8 @@ impl RegistryError {
         match self {
             Self::InstanceUnknown { .. } => "error-registry-instance-unknown",
             Self::ServerUnknown { .. } => "error-registry-server-unknown",
+            Self::InstanceMetadataForeign { .. } => "error-registry-instance-metadata-foreign",
+            Self::ServerMetadataForeign { .. } => "error-registry-server-metadata-foreign",
             Self::RootOccupied { .. } => "error-registry-root-occupied",
             Self::RestoreUnfinished { .. } => "error-registry-restore-unfinished",
             Self::HostBusy { .. } => "error-registry-host-busy",
@@ -769,12 +778,17 @@ impl Registry {
     /// reconciliation uses when the directory is already gone, and what
     /// "forget this instance" uses when the user wants to keep the files
     /// (ADR 0006).
+    ///
+    /// Removing files is refused when the root holds another instance's
+    /// metadata, because the directory is not verifiably this instance's.
+    /// Forgetting the record does not read that metadata.
     pub fn delete_client(
         &self,
         id: InstanceId,
         files: FileDisposition,
     ) -> Result<(), RegistryError> {
         let record = self.client(id)?;
+        self.refuse_removing_foreign_client_files(id, files)?;
 
         // The relationship is owned canonically by each server. Clear every
         // metadata record before SQLite's ON DELETE SET NULL mirrors it.
@@ -811,6 +825,23 @@ impl Registry {
         self.discard_host_guards(RecordRef::Client(id));
 
         tracing::info!(instance_id = %id, ?files, "removed client instance from the index");
+        Ok(())
+    }
+
+    /// Refuses removing the files of a client whose root holds another
+    /// instance's metadata. Callers that delete other records first run this
+    /// before the first change, so a refusal removes nothing.
+    pub fn refuse_removing_foreign_client_files(
+        &self,
+        id: InstanceId,
+        files: FileDisposition,
+    ) -> Result<(), RegistryError> {
+        let record = self.client(id)?;
+        if files == FileDisposition::Remove
+            && metadata::read_client_metadata(&record.root).is_ok_and(|found| found.id != id)
+        {
+            return Err(RegistryError::InstanceMetadataForeign { path: record.root });
+        }
         Ok(())
     }
 
@@ -1065,6 +1096,11 @@ impl Registry {
     /// Removes a server from the index, and optionally from disk.
     pub fn delete_server(&self, id: ServerId, files: FileDisposition) -> Result<(), RegistryError> {
         let record = self.server(id)?;
+        if files == FileDisposition::Remove
+            && metadata::read_server_metadata(&record.root).is_ok_and(|found| found.id != id)
+        {
+            return Err(RegistryError::ServerMetadataForeign { path: record.root });
+        }
 
         if files == FileDisposition::Remove {
             remove_tree(&record.root)?;
@@ -1411,7 +1447,8 @@ fn ensure_free_root(root: &Path) -> Result<(), RegistryError> {
 }
 
 /// A client's record as its canonical metadata at `root` holds it, refusing
-/// metadata that is unreadable or names another instance (ADR 0002).
+/// metadata that is unreadable or names another instance (ADR 0002). Foreign
+/// metadata is its own failure, so the user is told which directory holds it.
 ///
 /// The stored root and storage class are whatever the file last said; the
 /// caller sets the ones it is changing.
@@ -1421,7 +1458,9 @@ pub(crate) fn canonical_client_at(
 ) -> Result<ClientRecord, RegistryError> {
     let found = metadata::read_client_metadata(root)?;
     if found.id != id {
-        return Err(RegistryError::InstanceUnknown { id });
+        return Err(RegistryError::InstanceMetadataForeign {
+            path: root.to_path_buf(),
+        });
     }
     Ok(found)
 }
@@ -1433,7 +1472,9 @@ pub(crate) fn canonical_server_at(
 ) -> Result<ServerRecord, RegistryError> {
     let found = metadata::read_server_metadata(root)?;
     if found.id != id {
-        return Err(RegistryError::ServerUnknown { id });
+        return Err(RegistryError::ServerMetadataForeign {
+            path: root.to_path_buf(),
+        });
     }
     Ok(found)
 }
@@ -3536,12 +3577,137 @@ mod tests {
             .modify_client(client.id, |record| record.name = "changed".to_owned())
             .expect_err("foreign metadata blocks the change");
 
-        assert!(matches!(error, RegistryError::InstanceUnknown { .. }));
+        assert!(
+            matches!(&error, RegistryError::InstanceMetadataForeign { path } if *path == client.root),
+            "{error}"
+        );
+        assert_eq!(
+            error.message_id(),
+            "error-registry-instance-metadata-foreign"
+        );
         assert_eq!(
             metadata::read_client_metadata(&client.root)
                 .expect("metadata")
                 .id,
             foreign.id
+        );
+    }
+
+    #[test]
+    fn moving_a_client_refuses_metadata_that_names_another_instance_and_leaves_it_in_place() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new("kept", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        let mut foreign = client.clone();
+        foreign.id = InstanceId::new();
+        metadata::write_client_metadata(&client.root, &foreign).expect("foreign write");
+        let claim = registry
+            .claim_host(RecordRef::Client(client.id))
+            .expect("claim");
+
+        let error = registry
+            .relocate_client(client.id, &claim, StorageClass::Persistent, &mut |_| {})
+            .expect_err("foreign metadata refuses the move");
+
+        assert!(
+            matches!(&error, RegistryError::InstanceMetadataForeign { path } if *path == client.root),
+            "{error}"
+        );
+        assert!(client.root.is_dir(), "the files stay where they were");
+        let row = registry.client(client.id).expect("row");
+        assert_eq!(row.root, client.root);
+        assert_eq!(row.storage, client.storage);
+    }
+
+    #[test]
+    fn moving_a_server_refuses_metadata_that_names_another_server_and_leaves_it_in_place() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = registry
+            .create_server(NewServer::new("kept", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        let mut foreign = server.clone();
+        foreign.id = ServerId::new();
+        metadata::write_server_metadata(&server.root, &foreign).expect("foreign write");
+        let claim = registry
+            .claim_host(RecordRef::Server(server.id))
+            .expect("claim");
+
+        let error = registry
+            .relocate_server(server.id, &claim, StorageClass::Persistent, &mut |_| {})
+            .expect_err("foreign metadata refuses the move");
+
+        assert!(
+            matches!(&error, RegistryError::ServerMetadataForeign { path } if *path == server.root),
+            "{error}"
+        );
+        assert_eq!(error.message_id(), "error-registry-server-metadata-foreign");
+        assert!(server.root.is_dir(), "the files stay where they were");
+        let row = registry.server(server.id).expect("row");
+        assert_eq!(row.root, server.root);
+        assert_eq!(row.storage, server.storage);
+    }
+
+    #[test]
+    fn a_client_whose_root_holds_another_instances_metadata_is_forgotten_but_its_files_are_not_removed()
+     {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new("kept", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        let mut foreign = client.clone();
+        foreign.id = InstanceId::new();
+        metadata::write_client_metadata(&client.root, &foreign).expect("foreign write");
+
+        let error = registry
+            .delete_client(client.id, crate::FileDisposition::Remove)
+            .expect_err("the directory is not verifiably this instance's");
+
+        assert!(
+            matches!(&error, RegistryError::InstanceMetadataForeign { path } if *path == client.root),
+            "{error}"
+        );
+        assert!(client.root.is_dir());
+        assert!(registry.client(client.id).is_ok(), "the record is kept");
+
+        registry
+            .delete_client(client.id, crate::FileDisposition::Keep)
+            .expect("the row is forgotten");
+
+        assert!(client.root.is_dir(), "the files are kept");
+        assert!(matches!(
+            registry.client(client.id),
+            Err(RegistryError::InstanceUnknown { .. })
+        ));
+    }
+
+    #[test]
+    fn a_server_whose_root_holds_another_servers_metadata_is_forgotten_without_reading_it() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = registry
+            .create_server(NewServer::new("kept", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        let mut foreign = server.clone();
+        foreign.id = ServerId::new();
+        metadata::write_server_metadata(&server.root, &foreign).expect("foreign write");
+        let before = std::fs::read(metadata::server_metadata_path(&server.root)).expect("read");
+
+        registry
+            .delete_server(server.id, crate::FileDisposition::Keep)
+            .expect("the row is forgotten");
+
+        assert!(matches!(
+            registry.server(server.id),
+            Err(RegistryError::ServerUnknown { .. })
+        ));
+        assert_eq!(
+            std::fs::read(metadata::server_metadata_path(&server.root)).expect("read"),
+            before,
+            "the directory is left untouched"
         );
     }
 
@@ -3673,7 +3839,10 @@ mod tests {
             .prepare_server(NewServer::linked("server", client.id))
             .expect_err("foreign metadata blocks the selection");
 
-        assert!(matches!(error, RegistryError::InstanceUnknown { .. }));
+        assert!(
+            matches!(&error, RegistryError::InstanceMetadataForeign { path } if *path == client.root),
+            "{error:?}"
+        );
     }
 
     #[test]
@@ -3716,7 +3885,10 @@ mod tests {
             .delete_client(client.id, crate::FileDisposition::Remove)
             .expect_err("foreign metadata refuses the deletion");
 
-        assert!(matches!(error, RegistryError::ServerUnknown { id } if id == linked.id));
+        assert!(
+            matches!(&error, RegistryError::ServerMetadataForeign { path } if *path == linked.root),
+            "{error:?}"
+        );
         assert_eq!(
             std::fs::read(metadata::server_metadata_path(&other.root)).expect("read"),
             other_before,

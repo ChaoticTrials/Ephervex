@@ -550,6 +550,8 @@ mod tests {
             "error-index-schema-from-future",
             "error-registry-instance-unknown",
             "error-registry-server-unknown",
+            "error-registry-instance-metadata-foreign",
+            "error-registry-server-metadata-foreign",
             "error-registry-metadata-unwritable",
             "error-registry-metadata-unreadable",
             "error-registry-metadata-invalid",
@@ -633,6 +635,22 @@ mod tests {
                 .expect("a next step")
                 .contains("kept the record")
         );
+    }
+
+    #[test]
+    fn foreign_host_metadata_names_the_directory_and_the_way_to_forget_the_record() {
+        for id in [
+            "error-registry-instance-metadata-foreign",
+            "error-registry-server-metadata-foreign",
+        ] {
+            let path = [("path", Arg::from("/data/copy"))];
+            let summary = lookup_args(id, path.clone());
+            let action = lookup_attribute_args(id, "action", path).expect("a next step");
+            assert!(summary.contains("/data/copy"), "{summary}");
+            assert!(action.contains("keep its files"), "{action}");
+            assert_ne!(summary, lookup("error-registry-instance-unknown"));
+            assert_ne!(summary, lookup("error-registry-server-unknown"));
+        }
     }
 
     #[test]

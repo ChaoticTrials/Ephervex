@@ -265,7 +265,11 @@ fn forget_stale_client(
 ) -> Result<bool, RegistryError> {
     match registry.delete_client(id, FileDisposition::Keep) {
         Ok(()) => Ok(true),
-        Err(RegistryError::ServerUnknown { .. } | RegistryError::Metadata(_)) => {
+        Err(
+            RegistryError::ServerUnknown { .. }
+            | RegistryError::ServerMetadataForeign { .. }
+            | RegistryError::Metadata(_),
+        ) => {
             tracing::warn!(
                 instance_id = %id,
                 "a linked server's canonical metadata is unhealthy; keeping the stale temporary instance"
