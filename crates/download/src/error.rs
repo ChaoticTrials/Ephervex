@@ -116,7 +116,6 @@ pub enum DownloadError {
         source: Box<DownloadError>,
     },
 
-    /// The manager's concurrency semaphore was closed, i.e. the process is
     /// The configured credential cannot be sent in an HTTP header.
     ///
     /// Names the address and nothing else. The rejected value is a secret, and
@@ -125,6 +124,7 @@ pub enum DownloadError {
     #[error("the configured credential cannot be sent to {url}")]
     CredentialUnusable { url: String },
 
+    /// The manager's concurrency semaphore was closed, i.e. the process is
     /// shutting down.
     #[error("download manager is shutting down")]
     ShuttingDown,
