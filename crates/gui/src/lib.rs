@@ -8,6 +8,7 @@ pub mod file_drop;
 mod jvm_arguments;
 mod memory_input;
 pub mod minecraft_defaults;
+mod mod_path_key;
 pub mod monospace;
 mod palette;
 pub mod presentation;

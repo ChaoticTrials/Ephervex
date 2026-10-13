@@ -6971,7 +6971,7 @@ fn isolation_plan_data(host: InstalledHost, plan: &IsolationPlan) -> IsolationDa
         .initially_enabled
         .iter()
         .map(|path| IsolationCandidateData {
-            path: path.to_string_lossy().into_owned(),
+            path: crate::mod_path_key::encode(path),
             display_path: isolation_mod_display(path),
             name: names.get(path).map_or_else(
                 || {
@@ -9746,7 +9746,7 @@ async fn await_manual_acquisition(
     let _ = events.send(Event::ModAcquisitionRequired(ModAcquisitionData {
         id: wait.id(),
         instance: host.to_owned(),
-        logical_path: path.display().to_string(),
+        logical_path: crate::mod_path_key::encode(path),
         name: blocked
             .first()
             .and_then(|file| file.project_name.clone())
@@ -10637,7 +10637,7 @@ fn send_mod_relations(
         Ok(relations) => {
             let _ = events.send(Event::ModRelations(ModRelationsData {
                 host: host.id(),
-                logical_path: path.display().to_string(),
+                logical_path: crate::mod_path_key::encode(path),
                 view: crate::presentation::ModRelationPresentation::new(&relations, declared),
             }));
         }
@@ -10676,7 +10676,7 @@ async fn mod_versions(app: &App, instance: InstanceId, path: &Path) -> ModVersio
                 .collect();
             ModVersionsData {
                 instance: instance.to_string(),
-                logical_path: path.display().to_string(),
+                logical_path: crate::mod_path_key::encode(path),
                 title: choices.project.title.clone(),
                 installed_version: installed,
                 notice: restriction_text(choices.mutability.restriction),
@@ -10694,7 +10694,7 @@ async fn mod_versions(app: &App, instance: InstanceId, path: &Path) -> ModVersio
             tracing::warn!(%error, "mod versions could not be listed");
             ModVersionsData {
                 instance: instance.to_string(),
-                logical_path: path.display().to_string(),
+                logical_path: crate::mod_path_key::encode(path),
                 notice: localized_error(&error),
                 ..ModVersionsData::default()
             }
@@ -10725,7 +10725,7 @@ fn removal_plan_data(linked: &LinkedModPlan) -> ModRemovalPlanData {
     ModRemovalPlanData {
         request: 0,
         instance: plan.instance.to_string(),
-        logical_path: plan.target.display().to_string(),
+        logical_path: crate::mod_path_key::encode(&plan.target),
         name: plan.name.clone(),
         dependencies: plan
             .collected_dependencies()
@@ -10819,7 +10819,7 @@ fn linked_section(plan: &LinkedModPlan) -> LinkedSectionData {
         path: plan
             .request
             .target()
-            .map(|path| path.display().to_string())
+            .map(crate::mod_path_key::encode)
             .unwrap_or_default(),
         version: plan.root.version_id.clone().unwrap_or_default(),
         name: plan.root.name.clone(),
@@ -11283,7 +11283,7 @@ fn managed_mod_data(
     });
     ManagedModData {
         project_id: entry.identity.project_id().unwrap_or_default().to_owned(),
-        logical_path: entry.logical_path.display().to_string(),
+        logical_path: crate::mod_path_key::encode(&entry.logical_path),
         can_manage: mutability.can_list_versions,
         can_change_version: mutability.can_change_version,
         can_update: mutability.can_update,
@@ -11615,7 +11615,7 @@ fn set_mod_enabled(
                 }
                 view.cascade_paths()
                     .into_iter()
-                    .map(|path| (PathBuf::from(path), true))
+                    .map(|path| (crate::mod_path_key::decode(&path), true))
                     .collect()
             }
             Err(error) => {
@@ -11645,7 +11645,7 @@ fn set_mod_enabled(
                 }
                 view.cascade_paths()
                     .into_iter()
-                    .map(|path| (PathBuf::from(path), false))
+                    .map(|path| (crate::mod_path_key::decode(&path), false))
                     .collect()
             }
             Err(error) => {
@@ -11706,7 +11706,7 @@ fn delete_mod(
     let paths: Vec<PathBuf> = if view.has_cascade() {
         view.cascade_paths()
             .into_iter()
-            .map(PathBuf::from)
+            .map(|path| crate::mod_path_key::decode(&path))
             .collect()
     } else {
         vec![path.to_path_buf()]
@@ -12056,6 +12056,29 @@ mod tests {
         );
         assert_eq!(data.unrecorded, ["Alpha.jar", "zeta.jar"]);
         assert_eq!(data.missing, ["zeta.jar: library"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn isolation_candidates_keep_the_exact_path_of_a_jar_that_is_not_valid_utf8() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let host = InstalledHost::Instance(ephervex_model::InstanceId::new());
+        let odd = PathBuf::from(std::ffi::OsString::from_vec(b"mods/odd\xff.jar".to_vec()));
+        let plan = IsolationPlan {
+            pinned: Vec::new(),
+            pinned_closure: Vec::new(),
+            candidates: Vec::new(),
+            available: vec![odd.clone()],
+            initially_enabled: vec![odd.clone()],
+            unrecorded: Vec::new(),
+            unidentifiable: Vec::new(),
+            missing: Vec::new(),
+            linked_servers: Vec::new(),
+        };
+        let data = isolation_plan_data(host, &plan);
+        assert_eq!(data.candidates.len(), 1);
+        assert_eq!(crate::mod_path_key::decode(&data.candidates[0].path), odd);
     }
 
     #[test]

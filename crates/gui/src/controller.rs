@@ -31,6 +31,7 @@ use crate::file_drop::{FileDrop, FileDrops};
 use crate::minecraft_defaults::{
     self, LanguageCatalogState, MinecraftDefaultsModel, WindowAspect, WindowAxis, window_anchor,
 };
+use crate::mod_path_key;
 use crate::presentation::{
     self, ImportErrorKind, ImportFailure, ImportPresentation, ModImpactPresentation,
     ModRequirementPresentation, ThirdPartyLicenses, ToastStack, parse_network, validate_ip,
@@ -2973,7 +2974,7 @@ fn register_isolation_actions(ui: &AppWindow, commands: &Sender<Command>, worksp
         let Some(setup) = flow.setup_mut(host) else {
             return;
         };
-        let path = PathBuf::from(path.as_str());
+        let path = mod_path_key::decode(path.as_str());
         if selected {
             setup.pinned.insert(path);
         } else {
@@ -3640,14 +3641,14 @@ fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>, workspace: &
             &sender,
             Command::LoadModRelations {
                 host: InstalledHost::Instance(instance),
-                path: PathBuf::from(path.as_str()),
+                path: mod_path_key::decode(path.as_str()),
             },
         );
         send(
             &sender,
             Command::LoadModVersions {
                 instance,
-                path: PathBuf::from(path.as_str()),
+                path: mod_path_key::decode(path.as_str()),
             },
         );
         // Last, because the worker takes these in order: both offline answers
@@ -3656,7 +3657,7 @@ fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>, workspace: &
             &sender,
             Command::ResolveDeclaredRelations {
                 host: InstalledHost::Instance(instance),
-                path: PathBuf::from(path.as_str()),
+                path: mod_path_key::decode(path.as_str()),
             },
         );
     });
@@ -4000,7 +4001,7 @@ fn register_mod_mutations(ui: &AppWindow, commands: &Sender<Command>, workspace:
                 &sender,
                 Command::ChangeModVersion {
                     instance,
-                    path: PathBuf::from(path.as_str()),
+                    path: mod_path_key::decode(path.as_str()),
                     version: version.to_string(),
                     servers: chosen_linked_servers(&ui),
                 },
@@ -4027,7 +4028,7 @@ fn register_mod_mutations(ui: &AppWindow, commands: &Sender<Command>, workspace:
                 Command::PlanModApply {
                     request,
                     instance,
-                    path: PathBuf::from(path.as_str()),
+                    path: mod_path_key::decode(path.as_str()),
                     version: version.to_string(),
                 },
             );
@@ -4047,7 +4048,7 @@ fn register_mod_mutations(ui: &AppWindow, commands: &Sender<Command>, workspace:
                 Command::PlanModRemoval {
                     request,
                     instance,
-                    path: PathBuf::from(path.as_str()),
+                    path: mod_path_key::decode(path.as_str()),
                 },
             );
         }
@@ -4062,7 +4063,7 @@ fn register_mod_mutations(ui: &AppWindow, commands: &Sender<Command>, workspace:
                 &sender,
                 Command::RemoveMod {
                     instance,
-                    path: PathBuf::from(path.as_str()),
+                    path: mod_path_key::decode(path.as_str()),
                     servers: chosen_linked_servers(&ui),
                 },
             );
@@ -4262,7 +4263,7 @@ fn register_mod_state_actions(
             &sender,
             Command::RestoreModFile {
                 host,
-                path: PathBuf::from(path.as_str()),
+                path: mod_path_key::decode(path.as_str()),
             },
         );
     });
@@ -4276,7 +4277,7 @@ fn register_mod_state_actions(
             &sender,
             Command::SetModEnabled {
                 host,
-                path: PathBuf::from(path.as_str()),
+                path: mod_path_key::decode(path.as_str()),
                 enabled,
             },
         );
@@ -4306,7 +4307,7 @@ fn register_dependency_actions(ui: &AppWindow, commands: &Sender<Command>) {
         if ui.get_mod_impact_remember() {
             send(&sender, Command::SaveDependencyWarning(false));
         }
-        let target = PathBuf::from(ui.get_mod_impact_path().as_str());
+        let target = mod_path_key::decode(ui.get_mod_impact_path().as_str());
         if ui.get_mod_impact_deleting() {
             // The jars that stop loading go too when the user agreed to it.
             // Taking only the one named would leave the others installed and
@@ -4316,7 +4317,7 @@ fn register_dependency_actions(ui: &AppWindow, commands: &Sender<Command>) {
                 paths.extend(
                     ui.get_mod_impact_breaks()
                         .iter()
-                        .map(|row| PathBuf::from(row.logical_path.as_str())),
+                        .map(|row| mod_path_key::decode(row.logical_path.as_str())),
                 );
             }
             paths.push(target.clone());
@@ -4333,7 +4334,7 @@ fn register_dependency_actions(ui: &AppWindow, commands: &Sender<Command>) {
                 changes.extend(
                     others
                         .iter()
-                        .map(|row| (PathBuf::from(row.logical_path.as_str()), enabling)),
+                        .map(|row| (mod_path_key::decode(row.logical_path.as_str()), enabling)),
                 );
             }
             changes.push((target, enabling));
@@ -4354,7 +4355,7 @@ fn register_dependency_actions(ui: &AppWindow, commands: &Sender<Command>) {
             &sender,
             Command::RefreshModDependencies {
                 host,
-                reload: (!path.is_empty()).then(|| PathBuf::from(path.as_str())),
+                reload: (!path.is_empty()).then(|| mod_path_key::decode(path.as_str())),
             },
         );
     });
@@ -4621,7 +4622,7 @@ fn register_local_mod_actions(
         let Some(host) = backend::parse_mod_host(&kind, &host) else {
             return;
         };
-        let path = PathBuf::from(path.as_str());
+        let path = mod_path_key::decode(path.as_str());
         // Deleting a jar takes it out of the loader's view exactly as turning
         // it off does, so it asks the same question first.
         if let Some(ui) = handle.upgrade()
@@ -6857,7 +6858,9 @@ fn isolation_candidate_rows(setup: &IsolationSetup) -> Vec<IsolationCandidateRow
                 || candidate.path.to_lowercase().contains(&query)
         })
         .map(|candidate| IsolationCandidateRow {
-            selected: setup.pinned.contains(&PathBuf::from(&candidate.path)),
+            selected: setup
+                .pinned
+                .contains(&mod_path_key::decode(&candidate.path)),
             path: candidate.path.clone().into(),
             display_path: candidate.display_path.clone().into(),
             name: candidate.name.clone().into(),
@@ -11697,6 +11700,60 @@ mod tests {
             rows[0].selected,
             "filtering must not clear a pinned candidate"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_row_action_on_a_jar_that_is_not_valid_utf8_addresses_that_exact_file() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let odd = PathBuf::from(std::ffi::OsString::from_vec(b"mods/odd\xff.jar".to_vec()));
+        let key = SharedString::from(mod_path_key::encode(&odd));
+        let ui = test_window();
+        let (sender, commands) = std::sync::mpsc::channel();
+        register_mod_state_actions(
+            &ui,
+            &sender,
+            &Rc::new(RefCell::new(LocalModDrop::default())),
+        );
+        let id = SharedString::from(ephervex_model::InstanceId::new().to_string());
+
+        ui.invoke_set_mod_enabled("client".into(), id.clone(), key.clone(), false);
+        ui.invoke_restore_mod_file("client".into(), id, key);
+
+        let sent: Vec<_> = commands.try_iter().collect();
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [
+                    Command::SetModEnabled { path: toggled, enabled: false, .. },
+                    Command::RestoreModFile { path: restored, .. },
+                ] if *toggled == odd && *restored == odd
+            ),
+            "{sent:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pinned_jar_that_is_not_valid_utf8_stays_selected_in_the_candidate_list() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let odd = PathBuf::from(std::ffi::OsString::from_vec(b"mods/odd\xff.jar".to_vec()));
+        let mut setup = IsolationSetup {
+            candidates: vec![backend::IsolationCandidateData {
+                path: mod_path_key::encode(&odd),
+                display_path: "odd".to_owned(),
+                name: "Odd".to_owned(),
+            }],
+            ..IsolationSetup::default()
+        };
+        setup.pinned.insert(odd);
+
+        let rows = isolation_candidate_rows(&setup);
+
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].selected);
     }
 
     /// A standalone server is named for its exact target, the same way a new

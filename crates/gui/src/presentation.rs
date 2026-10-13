@@ -1022,7 +1022,7 @@ impl From<&ImpactedMod> for ImpactRowPresentation {
     fn from(entry: &ImpactedMod) -> Self {
         Self {
             name: entry.name.clone(),
-            logical_path: entry.logical_path.to_string_lossy().into_owned(),
+            logical_path: crate::mod_path_key::encode(&entry.logical_path),
             distance: i32::try_from(entry.distance).unwrap_or(i32::MAX),
         }
     }
@@ -1056,7 +1056,7 @@ impl ModImpactPresentation {
         Self {
             host_kind: host_kind.to_owned(),
             host_id: host_id.to_owned(),
-            path: impact.target.logical_path.to_string_lossy().into_owned(),
+            path: crate::mod_path_key::encode(&impact.target.logical_path),
             name: impact.target.name.clone(),
             deleting,
             breaks: impact.breaks.iter().map(Into::into).collect(),
@@ -1123,7 +1123,7 @@ impl ModRequirementPresentation {
         Self {
             host_kind: host_kind.to_owned(),
             host_id: host_id.to_owned(),
-            path: needs.target.logical_path.to_string_lossy().into_owned(),
+            path: crate::mod_path_key::encode(&needs.target.logical_path),
             name: needs.target.name.clone(),
             disabled: needs.disabled.iter().map(Into::into).collect(),
             absent: needs.absent.iter().map(Into::into).collect(),
@@ -1374,6 +1374,67 @@ mod tests {
         let paths = view.cascade_paths();
         assert_eq!(paths.first().map(String::as_str), Some("mods/LibX.jar"));
         assert_eq!(paths.last().map(String::as_str), Some("mods/SkyGUIs.jar"));
+    }
+
+    #[cfg(unix)]
+    fn impacted_at(path: &[u8]) -> ImpactedMod {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        ImpactedMod {
+            logical_path: std::path::PathBuf::from(std::ffi::OsString::from_vec(path.to_vec())),
+            ..impacted("placeholder.jar", 1)
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cascade_addresses_jars_whose_names_are_not_valid_utf8() {
+        let impact = DependentMods {
+            target: impacted_at(b"mods/lib\xff.jar"),
+            breaks: vec![impacted_at(b"mods/user\xfe.jar")],
+            ..library_impact()
+        };
+        let view = ModImpactPresentation::new("client", "an-id", false, &impact);
+        let decoded: Vec<_> = view
+            .cascade_paths()
+            .iter()
+            .map(|key| crate::mod_path_key::decode(key))
+            .collect();
+        assert_eq!(
+            decoded,
+            [
+                impact.breaks[0].logical_path.clone(),
+                impact.target.logical_path.clone()
+            ]
+        );
+        assert_eq!(
+            crate::mod_path_key::decode(&view.breaks[0].logical_path),
+            impact.breaks[0].logical_path
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enabling_addresses_jars_whose_names_are_not_valid_utf8() {
+        let needs = RequiredMods {
+            target: impacted_at(b"mods/sky\xff.jar"),
+            disabled: vec![impacted_at(b"mods/lib\xfe.jar")],
+            absent: Vec::new(),
+            incompatible: Vec::new(),
+        };
+        let view = ModRequirementPresentation::new("client", "an-id", &needs);
+        let decoded: Vec<_> = view
+            .cascade_paths()
+            .iter()
+            .map(|key| crate::mod_path_key::decode(key))
+            .collect();
+        assert_eq!(
+            decoded,
+            [
+                needs.disabled[0].logical_path.clone(),
+                needs.target.logical_path.clone()
+            ]
+        );
     }
 
     #[test]
