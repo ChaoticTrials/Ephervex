@@ -496,7 +496,7 @@ impl ResumeState {
 ///    full `200` otherwise, which this code treats as "start over".
 /// 3. The interrupted response advertised `Accept-Ranges: bytes` and delivered
 ///    its body verbatim rather than transparently decoded - see
-///    [`byte_offsets_are_meaningful`], because a `Range` counts octets of the
+///    `byte_offsets_are_meaningful`, because a `Range` counts octets of the
 ///    encoded representation while the `.part` file holds decoded ones.
 /// 4. The returned `Content-Range` starts at exactly the offset that was asked
 ///    for. Anything else restarts the transfer.
