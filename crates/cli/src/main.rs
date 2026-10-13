@@ -8384,18 +8384,7 @@ fn print_server_commit(record: &ServerRecord, warnings: &[ServerCommitWarning], 
         return;
     }
     print_server(record, false);
-    for warning in warnings {
-        match warning {
-            ServerCommitWarning::IndexOutOfSync { detail } => {
-                eprintln!("server committed, but its query index is out of sync: {detail}");
-            }
-            ServerCommitWarning::MetadataNotDurable { detail } => {
-                eprintln!(
-                    "server committed, but its metadata directory could not be synced to disk: {detail}"
-                );
-            }
-        }
-    }
+    print_server_commit_warnings(warnings);
 }
 
 fn server_commit_warnings_json(warnings: &[ServerCommitWarning]) -> Vec<serde_json::Value> {
