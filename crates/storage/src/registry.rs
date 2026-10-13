@@ -573,15 +573,17 @@ impl Registry {
 
     /// Persists changes to a client instance.
     ///
-    /// A metadata directory sync failure is logged and does not fail the
-    /// update; [`Self::update_client_committed`] reports it to the caller.
+    /// A metadata directory sync failure, or an index failure after the
+    /// metadata was published, is logged and does not fail the update;
+    /// [`Self::update_client_committed`] reports it to the caller.
     pub fn update_client(&self, record: &mut ClientRecord) -> Result<(), RegistryError> {
         let _warnings = self.update_client_committed(record)?;
         Ok(())
     }
 
     /// Persists changes to a client instance and reports a published but
-    /// unsynced metadata file as a warning on the committed update.
+    /// unsynced metadata file, or an index mirror that failed after
+    /// publication, as a warning on the committed update.
     ///
     /// `updated_at` is stamped here rather than by the caller so it cannot be
     /// forgotten. The metadata file is refreshed only when the root still
@@ -594,10 +596,17 @@ impl Registry {
     ) -> Result<Vec<ClientCommitWarning>, RegistryError> {
         record.updated_at = Utc::now();
 
+        // An instance the index does not list, such as one that is not yet
+        // published, must be refused before anything is written.
+        if !self.is_indexed(RecordRef::Client(record.id))? {
+            return Err(RegistryError::InstanceUnknown { id: record.id });
+        }
+
         // A directory sync failure after the rename leaves the new metadata
         // visible, so the mutation is committed and the index must follow it.
         let mut warnings = Vec::new();
-        if record.root.is_dir() {
+        let published = record.root.is_dir();
+        if published {
             if let AtomicPublication::Unsynced(error) =
                 metadata::publish_client_metadata(&record.root, record)?
             {
@@ -614,7 +623,18 @@ impl Registry {
             );
         }
 
-        self.update_client_row(record)?;
+        // Once `instance.json` is published the mutation is committed, so a
+        // failing index mirror is a warning. Without a published file the
+        // index is the only record and its failure is the update's failure.
+        if let Err(error) = self.update_client_row(record) {
+            if !published {
+                return Err(error);
+            }
+            tracing::warn!(instance_id = %record.id, %error, "client metadata was published but the index could not be updated");
+            warnings.push(ClientCommitWarning::IndexOutOfSync {
+                detail: error.to_string(),
+            });
+        }
         Ok(warnings)
     }
 
@@ -3121,5 +3141,106 @@ mod tests {
             "after"
         );
         assert_eq!(registry.client(client.id).expect("row").name, "after");
+    }
+
+    fn created_client(registry: &Registry) -> ClientRecord {
+        registry
+            .create_published_client(NewClient::new(
+                "before",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create")
+    }
+
+    #[test]
+    fn a_client_index_write_failure_after_publication_is_a_warning_on_a_committed_update() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = created_client(&registry);
+        registry
+            .index()
+            .connection()
+            .execute_batch(
+                "CREATE TRIGGER refuse_instance_updates BEFORE UPDATE ON instances
+                 BEGIN SELECT RAISE(ABORT, 'index unavailable'); END;",
+            )
+            .expect("install failure");
+        let mut record = client.clone();
+        record.name = "after".to_owned();
+
+        let warnings = registry
+            .update_client_committed(&mut record)
+            .expect("the published metadata is a committed mutation");
+
+        assert!(matches!(
+            warnings.as_slice(),
+            [ClientCommitWarning::IndexOutOfSync { .. }]
+        ));
+        assert_eq!(
+            metadata::read_client_metadata(&client.root)
+                .expect("metadata")
+                .name,
+            "after"
+        );
+        assert_eq!(registry.client(client.id).expect("row").name, "before");
+        let mut again = record.clone();
+        again.name = "again".to_owned();
+        registry
+            .update_client(&mut again)
+            .expect("callers of the plain update see a committed update");
+    }
+
+    #[test]
+    fn a_client_missing_from_the_index_is_refused_before_its_metadata_is_written() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = created_client(&registry);
+        registry
+            .index()
+            .connection()
+            .execute(
+                "DELETE FROM instances WHERE id = ?1",
+                params![client.id.to_string()],
+            )
+            .expect("drop the row");
+        let mut record = client.clone();
+        record.name = "after".to_owned();
+
+        let error = registry
+            .update_client_committed(&mut record)
+            .expect_err("an unlisted instance is not mutable");
+
+        assert!(matches!(error, RegistryError::InstanceUnknown { .. }));
+        assert_eq!(
+            metadata::read_client_metadata(&client.root)
+                .expect("metadata")
+                .name,
+            "before"
+        );
+    }
+
+    #[test]
+    fn a_client_update_fails_when_the_index_fails_and_no_metadata_was_published() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = created_client(&registry);
+        std::fs::remove_dir_all(&client.root).expect("remove the instance root");
+        registry
+            .index()
+            .connection()
+            .execute_batch(
+                "CREATE TRIGGER refuse_instance_updates BEFORE UPDATE ON instances
+                 BEGIN SELECT RAISE(ABORT, 'index unavailable'); END;",
+            )
+            .expect("install failure");
+        let mut record = client.clone();
+        record.name = "after".to_owned();
+
+        let error = registry
+            .update_client_committed(&mut record)
+            .expect_err("the index is the only record, so its failure is the update's failure");
+
+        assert!(matches!(error, RegistryError::Index(_)));
     }
 }

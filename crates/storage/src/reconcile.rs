@@ -1238,7 +1238,7 @@ mod tests {
     use chrono::Utc;
     use ephervex_model::LoaderSelection;
 
-    use crate::records::{NewClient, NewServer};
+    use crate::records::{ClientCommitWarning, NewClient, NewServer};
     use crate::test_support::TestEnvironment;
 
     #[test]
@@ -2376,9 +2376,13 @@ mod tests {
         // The metadata write lands and the index write fails.
         client.name = "after".to_owned();
         fail_index_writes(&registry, true);
-        registry
-            .update_client(&mut client)
-            .expect_err("the index write fails");
+        let warnings = registry
+            .update_client_committed(&mut client)
+            .expect("the published metadata is a committed mutation");
+        assert!(matches!(
+            warnings.as_slice(),
+            [ClientCommitWarning::IndexOutOfSync { .. }]
+        ));
         fail_index_writes(&registry, false);
         assert_eq!(registry.client(client.id).expect("read").name, "before");
 
@@ -2419,9 +2423,13 @@ mod tests {
         client.allow_pack_mod_version_changes = !client.allow_pack_mod_version_changes;
         client.add_attention(AttentionReason::InterruptedMutation);
         fail_index_writes(&registry, true);
-        registry
-            .update_client(&mut client)
-            .expect_err("the index write fails");
+        let warnings = registry
+            .update_client_committed(&mut client)
+            .expect("the published metadata is a committed mutation");
+        assert!(matches!(
+            warnings.as_slice(),
+            [ClientCommitWarning::IndexOutOfSync { .. }]
+        ));
         fail_index_writes(&registry, false);
 
         reconcile(&registry).expect("reconcile");

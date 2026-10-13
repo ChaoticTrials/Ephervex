@@ -42,7 +42,9 @@ Schema changes go through an ordered migration runner keyed on SQLite's
 - `instance.json` and `server.json` are the commit points. If only the
   directory sync after their rename fails, the new file is already visible, so
   the update counts as committed: the index is still updated and the failure is
-  reported as a warning on the committed result instead of an error.
+  reported as a warning on the committed result instead of an error. The same
+  holds when the index write itself fails after the file was published; the
+  next reconciliation adopts the canonical record.
 - `bundled` is used because the target machine has no system SQLite development
   package, and pinning the library version removes a class of "works on my
   distro" failures.

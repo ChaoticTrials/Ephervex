@@ -486,6 +486,9 @@ pub enum ServerCommitWarning {
 /// A condition on a client mutation that committed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientCommitWarning {
+    /// The canonical metadata was published, but mirroring it into the query
+    /// index failed. Reconciliation adopts the canonical record.
+    IndexOutOfSync { detail: String },
     /// The canonical metadata file was published and is visible, but syncing
     /// its directory failed, so the mutation may not survive a power loss.
     MetadataNotDurable { detail: String },
