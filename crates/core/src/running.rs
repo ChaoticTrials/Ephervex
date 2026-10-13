@@ -217,7 +217,7 @@ impl App {
 
     /// Ends a launch this process is not supervising, and releases its lock.
     ///
-    /// The ordinary stop is cancelling the run that owns the launch, which
+    /// The ordinary stop is canceling the run that owns the launch, which
     /// kills the game and waits for its real exit. This is the other case: a
     /// launch left by a previous run of the launcher, or one whose supervisor
     /// is wedged, where the instance is stuck claiming to be busy.

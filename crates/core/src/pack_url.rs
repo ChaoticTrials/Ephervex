@@ -136,7 +136,7 @@ impl PackConsents {
 ///
 /// The archive is an input to the import, not a thing the launcher keeps: what
 /// survives an import is the instance and the recipe retained inside it. Tying
-/// the file's life to this value is what stops a failed import, a cancelled
+/// the file's life to this value is what stops a failed import, a canceled
 /// one, or a frontend that forgot, from leaving downloads in the temporary
 /// root.
 #[derive(Debug)]

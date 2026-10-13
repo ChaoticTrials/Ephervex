@@ -95,7 +95,7 @@ fn a_clients_two_ways_to_stop_are_offered_separately() {
     assert_eq!(forced.borrow().as_slice(), ["repro-client"]);
 }
 
-/// A launch this run is not supervising cannot be cancelled, and says so by
+/// A launch this run is not supervising cannot be canceled, and says so by
 /// offering only the hammer.
 #[test]
 fn an_unsupervised_launch_cannot_be_stopped_the_ordinary_way() {
@@ -117,7 +117,7 @@ fn an_unsupervised_launch_cannot_be_stopped_the_ordinary_way() {
         .mock_single_click(PointerEventButton::Left);
     assert!(
         killed.borrow().is_empty(),
-        "cancelling a launch this run does not own would do nothing"
+        "canceling a launch this run does not own would do nothing"
     );
     assert_eq!(
         ui.get_page(),

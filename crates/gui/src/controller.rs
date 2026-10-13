@@ -6486,7 +6486,7 @@ fn register_window_size_preview(
 
 /// Entering, leaving, and completing key capture.
 ///
-/// Beginning and cancelling deliberately do not rebuild the rows: the control
+/// Beginning and canceling deliberately do not rebuild the rows: the control
 /// that just took focus lives inside the row, and rebuilding would destroy it
 /// mid-capture. That is why the capturing row is named by a property beside
 /// the model rather than by a field inside it.

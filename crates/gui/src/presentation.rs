@@ -750,7 +750,7 @@ fn invalid(message: &str) -> ValidationResult {
 /// one. Applying it anyway would put one instance's mods under another
 /// instance's name - a wrong answer, not a slow one.
 ///
-/// Discarding the late result is the whole remedy. Nothing is cancelled and no
+/// Discarding the late result is the whole remedy. Nothing is canceled and no
 /// navigation waits on a request: opening a workspace has already shown that
 /// instance's durable state, so a discarded enrichment costs titles the user
 /// was not waiting for.

@@ -1039,7 +1039,7 @@ pub struct RunningData {
     /// Whether commands can be sent to it. Servers only.
     pub controllable: bool,
     /// Whether this run can be stopped the ordinary way: the run that owns it
-    /// is this one, so cancelling it kills the game and waits for its exit.
+    /// is this one, so canceling it kills the game and waits for its exit.
     pub can_stop: bool,
 }
 

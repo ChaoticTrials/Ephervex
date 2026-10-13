@@ -120,7 +120,7 @@ fn declining_to_remember_still_downloads_but_records_nothing() {
 }
 
 #[test]
-fn cancelling_sends_nothing_at_all() {
+fn canceling_sends_nothing_at_all() {
     let ui = window();
     let answered = record_answers(&ui);
     consent_dialog(&ui);
