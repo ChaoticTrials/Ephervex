@@ -334,11 +334,36 @@ fn sync_parent(path: &Path) -> Result<(), MetadataError> {
 
 /// Writes `.launcher/instance.json` and `.launcher/warnings.json`.
 ///
-/// Call this *before* touching the index (see the module docs).
+/// Call this *before* touching the index (see the module docs). A directory
+/// sync failure after a file was published is an error here;
+/// [`publish_client_metadata`] reports it separately.
 pub fn write_client_metadata(root: &Path, record: &ClientRecord) -> Result<(), MetadataError> {
+    let path = client_metadata_path(root);
+    publish_client_metadata(root, record)?
+        .require_durable()
+        .map_err(|source| MetadataError::Unwritable { path, source })
+}
+
+/// Writes `.launcher/warnings.json` and `.launcher/instance.json`, reporting a
+/// directory sync failure after `instance.json` was published as
+/// [`AtomicPublication::Unsynced`].
+///
+/// `Err` means the previous `instance.json` is still in place.
+pub(crate) fn publish_client_metadata(
+    root: &Path,
+    record: &ClientRecord,
+) -> Result<AtomicPublication, MetadataError> {
     prepare_metadata_dir(root)?;
-    write_json(&client_metadata_path(root), &MetadataFile::new(record))?;
-    write_json(&warnings_path(root), &record.attention)
+    // `instance.json` is the entity commit point, so it goes last. The
+    // warnings file is a derived copy of the record's attention, and a failure
+    // writing it after the commit must not make a committed mutation look
+    // like a failed one.
+    let warnings = publish_json(&warnings_path(root), &record.attention)?;
+    let instance = publish_json(&client_metadata_path(root), &MetadataFile::new(record))?;
+    Ok(match (instance, warnings) {
+        (AtomicPublication::Durable, other) => other,
+        (unsynced, _) => unsynced,
+    })
 }
 
 /// Writes `.launcher/server.json`.
@@ -419,15 +444,6 @@ fn read_metadata<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, Metad
 fn prepare_metadata_dir(root: &Path) -> Result<(), MetadataError> {
     create_dir_all(&source_dir(root))?;
     Ok(())
-}
-
-fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), MetadataError> {
-    publish_json(path, value)?
-        .require_durable()
-        .map_err(|source| MetadataError::Unwritable {
-            path: path.to_path_buf(),
-            source,
-        })
 }
 
 fn publish_json<T: Serialize>(path: &Path, value: &T) -> Result<AtomicPublication, MetadataError> {

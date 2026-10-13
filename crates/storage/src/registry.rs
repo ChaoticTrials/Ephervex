@@ -54,8 +54,8 @@ use crate::metadata::{self, MetadataError};
 use crate::paths::{PathError, Paths, create_dir_all};
 use crate::reconcile::RecordRef;
 use crate::records::{
-    ClientRecord, DUPLICATE_NAME_SUFFIX, DuplicateClient, DuplicatedClient, FileDisposition,
-    ImportSource, JavaOverride, JvmSettings, NewClient, NewServer, ServerCommit,
+    ClientCommitWarning, ClientRecord, DUPLICATE_NAME_SUFFIX, DuplicateClient, DuplicatedClient,
+    FileDisposition, ImportSource, JavaOverride, JvmSettings, NewClient, NewServer, ServerCommit,
     ServerCommitWarning, ServerCreationSource, ServerNetworkSettings, ServerRecord,
 };
 
@@ -573,16 +573,39 @@ impl Registry {
 
     /// Persists changes to a client instance.
     ///
+    /// A metadata directory sync failure is logged and does not fail the
+    /// update; [`Self::update_client_committed`] reports it to the caller.
+    pub fn update_client(&self, record: &mut ClientRecord) -> Result<(), RegistryError> {
+        let _warnings = self.update_client_committed(record)?;
+        Ok(())
+    }
+
+    /// Persists changes to a client instance and reports a published but
+    /// unsynced metadata file as a warning on the committed update.
+    ///
     /// `updated_at` is stamped here rather than by the caller so it cannot be
     /// forgotten. The metadata file is refreshed only when the root still
     /// exists - a persistent instance whose directory vanished keeps its index
     /// row and its warning, and must not fail the update that records that
     /// warning.
-    pub fn update_client(&self, record: &mut ClientRecord) -> Result<(), RegistryError> {
+    pub fn update_client_committed(
+        &self,
+        record: &mut ClientRecord,
+    ) -> Result<Vec<ClientCommitWarning>, RegistryError> {
         record.updated_at = Utc::now();
 
+        // A directory sync failure after the rename leaves the new metadata
+        // visible, so the mutation is committed and the index must follow it.
+        let mut warnings = Vec::new();
         if record.root.is_dir() {
-            metadata::write_client_metadata(&record.root, record)?;
+            if let AtomicPublication::Unsynced(error) =
+                metadata::publish_client_metadata(&record.root, record)?
+            {
+                tracing::warn!(instance_id = %record.id, %error, "client metadata was published but its directory was not synced");
+                warnings.push(ClientCommitWarning::MetadataNotDurable {
+                    detail: error.to_string(),
+                });
+            }
         } else {
             tracing::debug!(
                 instance_id = %record.id,
@@ -591,7 +614,8 @@ impl Registry {
             );
         }
 
-        self.update_client_row(record)
+        self.update_client_row(record)?;
+        Ok(warnings)
     }
 
     /// Applies one change to a client's current record and persists it.
@@ -3053,5 +3077,49 @@ mod tests {
             "after"
         );
         assert_eq!(registry.server(server.id).expect("row").name, "after");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_client_metadata_directory_sync_failure_still_updates_the_index_and_warns() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new(
+                "before",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        let directory = metadata::client_metadata_path(&client.root)
+            .parent()
+            .expect("metadata directory")
+            .to_path_buf();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o300))
+            .expect("restrict metadata directory");
+        let unsyncable = std::fs::File::open(&directory).is_err();
+        let mut record = client.clone();
+        record.name = "after".to_owned();
+        let result = unsyncable.then(|| registry.update_client_committed(&mut record));
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .expect("restore metadata directory");
+        let Some(result) = result else {
+            return;
+        };
+
+        let warnings = result.expect("the published metadata is a committed mutation");
+        assert!(matches!(
+            warnings.as_slice(),
+            [ClientCommitWarning::MetadataNotDurable { .. }]
+        ));
+        assert_eq!(
+            metadata::read_client_metadata(&client.root)
+                .expect("metadata")
+                .name,
+            "after"
+        );
+        assert_eq!(registry.client(client.id).expect("row").name, "after");
     }
 }

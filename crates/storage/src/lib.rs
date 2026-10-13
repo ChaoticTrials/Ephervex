@@ -74,8 +74,8 @@ pub use reconcile::{
     reconcile,
 };
 pub use records::{
-    ClientRecord, DUPLICATE_NAME_SUFFIX, DuplicateClient, DuplicatedClient, FileDisposition,
-    ImportSource, JavaOverride, JvmSettings, NewClient, NewServer, ServerCommit,
+    ClientCommitWarning, ClientRecord, DUPLICATE_NAME_SUFFIX, DuplicateClient, DuplicatedClient,
+    FileDisposition, ImportSource, JavaOverride, JvmSettings, NewClient, NewServer, ServerCommit,
     ServerCommitWarning, ServerCreationSource, ServerNetworkSettings, ServerOperatorIdentity,
     ServerOperatorProfile, ServerOperatorSetup, ServerPortSelection, ServerRecord,
 };

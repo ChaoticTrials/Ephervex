@@ -483,6 +483,14 @@ pub enum ServerCommitWarning {
     MetadataNotDurable { detail: String },
 }
 
+/// A condition on a client mutation that committed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientCommitWarning {
+    /// The canonical metadata file was published and is visible, but syncing
+    /// its directory failed, so the mutation may not survive a power loss.
+    MetadataNotDurable { detail: String },
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
