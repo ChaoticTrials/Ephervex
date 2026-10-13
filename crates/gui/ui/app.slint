@@ -1,11 +1,12 @@
 // The application window: the properties and callbacks the Rust side reads and
 // invokes, the navigation shell, its pages, and its modals.
 
-import { AboutSlint, ComboBox, ListView, Palette, ScrollView, Spinner } from "std-widgets.slint";
-import { IndexComboBox, ValueComboBox } from "components/selection.slint";
+import { AboutSlint, ListView, Palette, ScrollView } from "std-widgets.slint";
+import { ChoiceBox, IndexComboBox, ValueComboBox } from "components/selection.slint";
 import { LoaderGlyph, ModArtwork } from "components/artwork.slint";
 import {
     AppButton,
+    BusySpinner,
     EmptyState,
     FavoriteToggle,
     FilterChip,
@@ -98,9 +99,9 @@ export component AppWindow inherits Window {
     default-font-size: Theme.body-size;
 
     // The shipped widgets paint from their own palette, which is writable
-    // and repaints every ComboBox, ScrollView, ListView, Slider and Spinner
-    // when it changes. Moved with this window's scheme so a widget never
-    // sits light on a dark page. `init` runs before the first frame.
+    // and repaints every ScrollView and ListView when it changes. Moved with
+    // this window's scheme so a widget never sits light on a dark page.
+    // `init` runs before the first frame.
     property <ColorScheme> widget-scheme: Theme.widget-scheme;
     init => { Palette.color-scheme = self.widget-scheme; }
     changed widget-scheme => { Palette.color-scheme = self.widget-scheme; }
@@ -962,7 +963,7 @@ export component AppWindow inherits Window {
                                     TextField { text <=> root.instance-query; placeholder: GuiI18n.text("gui-filter-instances"); input-type: InputType.search; width: 290px; accepted => { root.refresh(); } }
                                 }
                             }
-                            if root.loading && root.startup-error == "" : VerticalLayout { alignment: center; Spinner { indeterminate: true; width: 38px; height: 38px; } BodyText { text: GuiI18n.text("gui-loading-instances"); horizontal-alignment: center; } }
+                            if root.loading && root.startup-error == "" : VerticalLayout { alignment: center; BusySpinner { width: 38px; height: 38px; } BodyText { text: GuiI18n.text("gui-loading-instances"); horizontal-alignment: center; } }
                             if !root.loading && root.startup-error == "" && root.instances.length == 0 && root.pending-instances.length == 0 : EmptyState {
                                 title: GuiI18n.text("gui-no-client-instances");
                                 message: GuiI18n.text("gui-no-client-instances-detail");
@@ -1541,7 +1542,7 @@ export component AppWindow inherits Window {
                                     title: GuiI18n.text("gui-application-color-scheme");
                                     detail: GuiI18n.value("gui-application-color-scheme-detail", root.themes-folder);
                                     note: root.theme-problems;
-                                    ComboBox { width: 190px; accessible-label: GuiI18n.text("gui-application-color-scheme"); model: root.theme-labels; current-index <=> root.theme-index; selected(value) => { root.application-theme = root.theme-ids[self.current-index]; root.save-general-settings(root.application-text-scale, root.technical-text-size, root.application-theme, root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } }
+                                    ChoiceBox { width: 190px; accessible-label: GuiI18n.text("gui-application-color-scheme"); model: root.theme-labels; current-index <=> root.theme-index; selected(value) => { root.application-theme = root.theme-ids[self.current-index]; root.save-general-settings(root.application-text-scale, root.technical-text-size, root.application-theme, root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } }
                                 }
                                 SettingCard {
                                     row: root.settings-two-columns ? 3 : 7;
@@ -1898,7 +1899,7 @@ export component AppWindow inherits Window {
                                 HorizontalLayout { spacing: 10px; alignment: start;
                                     VerticalLayout { spacing: 4px;
                                         FieldLabel { text: GuiI18n.text("gui-artifact-cache-limit"); }
-                                        ComboBox {
+                                        ChoiceBox {
                                             width: 170px;
                                             accessible-label: GuiI18n.text("gui-artifact-cache-limit");
                                             model: root.artifact-cache-limit-labels;
@@ -2044,7 +2045,7 @@ export component AppWindow inherits Window {
                         }
                         if root.import-status-kind == "analyzing" || root.import-status-kind == "resolving" : HorizontalLayout {
                             spacing: 7px;
-                            Spinner { indeterminate: true; width: 16px; height: 16px; }
+                            BusySpinner { width: 16px; height: 16px; }
                             BodyText {
                                 text: root.import-status-kind == "resolving" ? GuiI18n.text("gui-import-resolving") : GuiI18n.text("gui-import-analyzing");
                                 color: Theme.text-secondary;

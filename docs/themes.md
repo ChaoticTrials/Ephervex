@@ -41,9 +41,11 @@ background = "#16181c"
 | `parent` | No, defaults to `"dark"` | The built-in theme to start from: `"dark"` or `"light"`. |
 | `[colors]` | No | The colors to change, by token name. |
 
-Every color you leave out is the parent's. The parent also decides whether the
-standard controls (dropdowns, scroll bars, spinners) are drawn dark or light,
-so pick the parent closest to your theme.
+Every color you leave out is the parent's, with one exception: a theme that
+sets `accent`, `background` or `text` and leaves out `toggle-knob`, `field` or
+`on-primary` respectively gets the color it set, as it did before those could
+be set on their own. The parent also decides whether the standard scroll bars
+and lists are drawn dark or light, so pick the parent closest to your theme.
 
 Colors are written as `"#rrggbb"`, or `"#rrggbbaa"` with an alpha channel, in
 hexadecimal. Nothing looser is accepted.
@@ -56,7 +58,8 @@ into the themes folder to try it, or use it as a list of what can be set.
 | Token | Used for |
 |---|---|
 | `background` | The window floor behind every page |
-| `surface` | Cards, panels, and fields |
+| `surface` | Cards and panels |
+| `field` | Text inputs and dropdowns |
 | `elevated` | A raised card, such as one under the pointer |
 | `overlay` | Popovers, which must read against an `elevated` card |
 | `border` | Borders and dividers |
@@ -66,15 +69,17 @@ into the themes folder to try it, or use it as a list of what can be set.
 | `selection-card` | A selected card |
 | `selection-strong` | A selected chip |
 | `toggle-on` | The track of a switch that is on |
+| `toggle-knob` | The knob of a switch that is on. Keep it apart from `toggle-on`. |
 | `capture-active` | A key binding field waiting for a key |
 | `accent` | Links, focus, and the main accent |
 | `accent-secondary` | A second accent for secondary highlights |
 | `success` | Success states and messages |
 | `warning` | Warnings |
 | `danger` | Errors and destructive actions |
-| `primary-fill` | A primary button. Its caption is `text`, so keep them apart. |
+| `primary-fill` | A primary button. Its caption is `on-primary`, so keep them apart. |
 | `primary-fill-hover` | A primary button under the pointer |
-| `danger-fill` | A destructive button. Its caption is `on-danger`. |
+| `on-primary` | The caption of a primary button |
+| `danger-fill` | A destructive button. Its caption is `on-danger`, so keep them apart. |
 | `danger-fill-hover` | A destructive button under the pointer |
 | `text` | Primary text |
 | `text-secondary` | Descriptions and secondary text |
@@ -91,7 +96,24 @@ into the themes folder to try it, or use it as a list of what can be set.
 | `scrim` | The wash behind a dialog; usually a translucent black |
 
 Keep text readable: `text`, `text-secondary` and `text-muted` are drawn on
-`background`, `surface` and `elevated`, and captions on the button fills.
+`background`, `surface`, `field` and `elevated`, and captions on the button fills.
+
+The built-in Light theme is held to the same hierarchy as Dark. A switch that is
+on keeps its knob apart from its track, button captions keep a readable ratio on
+their fills, and the scrim dims the page as firmly. The selection tints (the
+selected row, card, chip and navigation entry), the row fills and `warning`
+text are the same roles in both themes: `warning` is about 5:1 on `surface` in
+Light, and the selection tints read clearly against the surface under them. A
+disabled button has no fill, only a border and a muted caption, so it reads as
+inactive rather than as a secondary button.
+
+## What a theme does not reach
+
+Dropdowns, sliders and spinners are drawn from the colors above. Scroll bars,
+lists and the context menu on a right-click or a "Launch as" button are the
+toolkit's own controls: they follow the parent's light or dark look but take no
+colors from a theme, so a theme with a very different palette can leave them
+looking out of place.
 
 ## When a file has a problem
 

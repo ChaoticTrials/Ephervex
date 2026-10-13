@@ -13,7 +13,7 @@ use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{
     AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions,
 };
-use slint::platform::{Key, WindowEvent};
+use slint::platform::{Key, PointerEventButton, WindowEvent};
 use std::rc::Rc;
 
 use slint::{ComponentHandle, Model, ModelRc, PhysicalSize, SharedString, VecModel};
@@ -251,6 +251,75 @@ fn a_minecraft_default_dropdown_follows_the_stored_choice_after_the_user_picked(
     assert_eq!(shown(&ui, "Difficulty"), "Easy");
 }
 
+#[test]
+fn escape_closes_an_open_list_without_picking_what_was_highlighted() {
+    let ui = window();
+    ui.set_loading(false);
+    ui.set_loader_change_loading(false);
+    ui.set_loader_change_versions(strings(&["0.16.0", "0.15.11", "0.15.10"]));
+    ui.set_loader_change_selected("0.15.11".into());
+    ui.set_modal("loader-change".into());
+    settle(&ui);
+    let target = lookup("gui-loader-change-target");
+
+    dropdown(&ui, &target).invoke_accessible_expand_action();
+    settle(&ui);
+    assert_eq!(dropdown(&ui, &target).accessible_expanded(), Some(true));
+    press(&ui, Key::DownArrow);
+    press(&ui, Key::Escape);
+    settle(&ui);
+
+    assert_eq!(dropdown(&ui, &target).accessible_expanded(), Some(false));
+    assert_eq!(ui.get_loader_change_selected(), "0.15.11");
+    assert_eq!(shown(&ui, &target), "0.15.11");
+}
+
+#[test]
+fn pressing_an_entry_of_the_open_list_picks_it() {
+    let ui = window();
+    ui.set_loading(false);
+    ui.set_loader_change_loading(false);
+    ui.set_loader_change_versions(strings(&["0.16.0", "0.15.11", "0.15.10"]));
+    ui.set_loader_change_selected("0.16.0".into());
+    ui.set_modal("loader-change".into());
+    settle(&ui);
+    let target = lookup("gui-loader-change-target");
+
+    let closed = dropdown(&ui, &target);
+    closed.invoke_accessible_expand_action();
+    settle(&ui);
+    let entry = ElementHandle::find_by_accessible_label(&ui, "0.15.10")
+        .find(|element| element.accessible_role() == Some(AccessibleRole::ListItem))
+        .expect("the open list has an entry for 0.15.10");
+    // An entry reports its place in the list, which opens just below the
+    // dropdown.
+    let (list, at, size) = (
+        closed.absolute_position(),
+        entry.absolute_position(),
+        entry.size(),
+    );
+    let position = slint::LogicalPosition::new(
+        list.x + at.x + size.width / 2.0,
+        list.y + closed.size().height + 4.0 + at.y + size.height / 2.0,
+    );
+    ui.window()
+        .dispatch_event(WindowEvent::PointerMoved { position });
+    ui.window().dispatch_event(WindowEvent::PointerPressed {
+        position,
+        button: PointerEventButton::Left,
+    });
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(200));
+    ui.window().dispatch_event(WindowEvent::PointerReleased {
+        position,
+        button: PointerEventButton::Left,
+    });
+    settle(&ui);
+
+    assert_eq!(ui.get_loader_change_selected(), "0.15.10");
+    assert_eq!(shown(&ui, &target), "0.15.10");
+    assert_eq!(dropdown(&ui, &target).accessible_expanded(), Some(false));
+}
+
 /// The dropdown carrying `label`, not the text beside it that reads the same.
 fn dropdown(ui: &AppWindow, label: &str) -> ElementHandle {
     ElementHandle::find_by_accessible_label(ui, label)
@@ -277,6 +346,13 @@ fn pick_down(ui: &AppWindow, label: &str, steps: usize) {
             .dispatch_event(WindowEvent::KeyReleased { text: key.into() });
     }
     settle(ui);
+}
+
+fn press(ui: &AppWindow, key: Key) {
+    ui.window()
+        .dispatch_event(WindowEvent::KeyPressed { text: key.into() });
+    ui.window()
+        .dispatch_event(WindowEvent::KeyReleased { text: key.into() });
 }
 
 fn strings(entries: &[&str]) -> ModelRc<SharedString> {

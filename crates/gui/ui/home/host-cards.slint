@@ -1,9 +1,9 @@
 // The client and server lists: host cards, the pending creation card, and the inspector.
 
-import { Spinner } from "std-widgets.slint";
 import { LoaderGlyph } from "../components/artwork.slint";
 import {
     AppButton,
+    BusySpinner,
     EmptyState,
     IconButton,
     LaunchAsButton,
@@ -63,7 +63,7 @@ export component PendingCard inherits Rectangle {
                 BodyText { text: item.storage; color: item.storage-kind == "temporary" ? Theme.warning : Theme.success; font-size: Theme.caption-size; }
                 Pill { text: item.state; tone-color: Theme.accent; }
             }
-            HorizontalLayout { alignment: center; Spinner { indeterminate: true; width: 18px; height: 18px; } }
+            HorizontalLayout { alignment: center; BusySpinner { width: 18px; height: 18px; } }
         }
     }
 }

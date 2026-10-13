@@ -16,6 +16,7 @@ parent = "dark"
 # Surfaces, from the window floor up to a popover.
 background = "#16181c"
 surface = "#1d1f23"
+field = "#16181c"
 elevated = "#26292f"
 overlay = "#33363d"
 border = "#34363c"
@@ -27,6 +28,7 @@ selection = "#1a2f23"
 selection-card = "#182a20"
 selection-strong = "#1f4a31"
 toggle-on = "#128a45"
+toggle-knob = "#ecf9fb"
 capture-active = "#153a26"
 
 # Tones.
@@ -40,6 +42,7 @@ danger = "#ff496e"
 # light caption on it stays readable.
 primary-fill = "#0f7a3c"
 primary-fill-hover = "#118444"
+on-primary = "#ecf9fb"
 danger-fill = "#6e2233"
 danger-fill-hover = "#8a2a40"
 

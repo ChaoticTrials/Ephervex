@@ -1,16 +1,225 @@
 // Dropdowns whose selection always follows the value the application holds.
 //
-// The stock ComboBox shows model[current-index] and nothing else: a write to
-// its current-value is ignored, and the first pick the user makes replaces any
-// binding on its current-index. These wrappers keep the application's value as
-// the input and move the index to match whenever the value or the entries
-// change, so the entry shown is the entry the dialog submits.
+// The dropdown itself, `ChoiceBox`, keeps whatever index it is given and shows
+// the entry there, or nothing when the index is in no entry. The wrappers keep
+// the application's value as the input and move the index to match whenever
+// the value or the entries change, so the entry shown is the entry the dialog
+// submits.
 //
 // Each wrapper is a plain box that takes the size hints of the dropdown inside
-// it, so it sits in a layout exactly as a stock dropdown would, and a stretch
+// it, so it sits in a layout exactly as a bare dropdown would, and a stretch
 // set where it is placed applies.
 
-import { ComboBox } from "std-widgets.slint";
+import { ListView } from "std-widgets.slint";
+import { FocusRing } from "controls.slint";
+import { Theme } from "../theme.slint";
+
+// A dropdown over `model`, painted from the same tokens as `TextField` so a
+// form that mixes the two reads as one set of fields. The shipped dropdown
+// takes its colors from a palette of its own that no theme can set.
+//
+// Opening is a click, Enter or Space. In the list the arrow keys, Home and End
+// move the highlight, Enter or Space picks it and Escape closes without a
+// pick; closed, the arrow keys step through the entries. A pick is reported
+// once through `selected`, and the index is only ever written by a pick.
+export component ChoiceBox inherits Rectangle {
+    in property <[string]> model;
+    in property <bool> enabled: true;
+    in-out property <int> current-index: 0;
+    out property <string> current-value: root.current-index >= 0 && root.current-index < root.model.length
+        ? root.model[root.current-index]
+        : "";
+    out property <bool> open: popup.is-open;
+    callback selected(value: string);
+    // The entry the open list would pick.
+    private property <int> highlight;
+    private property <length> popup-padding: 4px;
+    private property <int> visible-items: min(6, root.model.length);
+    min-width: 160px;
+    min-height: Theme.control-height;
+    preferred-height: Theme.control-height;
+    max-height: Theme.control-height;
+    horizontal-stretch: 1;
+    vertical-stretch: 0;
+    forward-focus: keys;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: root.open || keys.has-focus ? Theme.accent : area.has-hover && root.enabled ? Theme.text-muted : Theme.border;
+    background: Theme.field;
+    accessible-role: combobox;
+    accessible-enabled: root.enabled;
+    accessible-expandable: true;
+    accessible-expanded: root.open;
+    accessible-value: root.current-value;
+    accessible-action-expand => { root.show-list(); }
+
+    function show-list() {
+        if (root.enabled && root.model.length > 0) {
+            root.highlight = Math.max(root.current-index, 0);
+            popup.show();
+        }
+    }
+    function pick(index: int) {
+        if (index >= 0 && index < root.model.length) {
+            root.current-index = index;
+            root.selected(root.model[index]);
+        }
+    }
+    // Moves the closed dropdown's selection, the way the arrow keys do.
+    function step(by: int) {
+        if (root.enabled && root.model.length > 0) {
+            root.pick(Math.clamp(root.current-index + by, 0, root.model.length - 1));
+        }
+    }
+
+    Text {
+        x: 11px;
+        width: parent.width - 36px;
+        height: parent.height;
+        text: root.current-value;
+        color: root.enabled ? Theme.text : Theme.text-muted;
+        font-size: Theme.body-size;
+        overflow: elide;
+        vertical-alignment: center;
+    }
+    Text {
+        x: parent.width - 22px;
+        height: parent.height;
+        text: "\u{25be}";
+        color: root.enabled ? Theme.text-secondary : Theme.text-muted;
+        font-size: Theme.label-size;
+        vertical-alignment: center;
+    }
+    if keys.has-focus && !root.open && root.enabled : FocusRing { target-width: root.width; target-height: root.height; }
+    keys := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == Key.DownArrow) {
+                root.step(1);
+            } else if (event.text == Key.UpArrow) {
+                root.step(-1);
+            } else if (event.text == Key.Return || event.text == " ") {
+                root.show-list();
+            } else {
+                return reject;
+            }
+            return accept;
+        }
+    }
+    area := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.not-allowed;
+        clicked => {
+            keys.focus();
+            root.show-list();
+        }
+    }
+
+    popup := PopupWindow {
+        x: 0;
+        y: root.height + 4px;
+        width: root.width;
+        height: root.visible-items * Theme.control-height + 2 * root.popup-padding;
+        close-policy: close-on-click-outside;
+        forward-focus: list-keys;
+
+        list-keys := FocusScope {
+            // Brings the highlighted entry into the visible part of the list.
+            function reveal() {
+                let top = root.highlight * Theme.control-height;
+                let visible = root.visible-items * Theme.control-height;
+                if (top < -list.viewport-y) {
+                    list.viewport-y = -top;
+                } else if (top + Theme.control-height > -list.viewport-y + visible) {
+                    list.viewport-y = -(top + Theme.control-height - visible);
+                }
+            }
+            init => { self.reveal(); }
+            key-pressed(event) => {
+                if (event.text == Key.DownArrow) {
+                    root.highlight = Math.min(root.highlight + 1, root.model.length - 1);
+                } else if (event.text == Key.UpArrow) {
+                    root.highlight = Math.max(root.highlight - 1, 0);
+                } else if (event.text == Key.Home) {
+                    root.highlight = 0;
+                } else if (event.text == Key.End) {
+                    root.highlight = root.model.length - 1;
+                } else if (event.text == Key.Return || event.text == " ") {
+                    root.pick(root.highlight);
+                    popup.close();
+                    return accept;
+                } else if (event.text == Key.Escape) {
+                    popup.close();
+                    return accept;
+                } else {
+                    return reject;
+                }
+                self.reveal();
+                return accept;
+            }
+
+            Rectangle {
+                border-radius: 6px;
+                border-width: 1px;
+                border-color: Theme.border;
+                background: Theme.overlay;
+                drop-shadow-blur: 16px;
+                drop-shadow-offset-y: 6px;
+                drop-shadow-color: Theme.shadow;
+                list := ListView {
+                    x: root.popup-padding;
+                    y: root.popup-padding;
+                    width: parent.width - 2 * root.popup-padding;
+                    height: parent.height - 2 * root.popup-padding;
+                    for entry[index] in root.model : Rectangle {
+                        height: Theme.control-height;
+                        border-radius: 4px;
+                        background: index == root.highlight ? Theme.selection : transparent;
+                        accessible-role: list-item;
+                        accessible-label: entry;
+                        accessible-item-selectable: true;
+                        accessible-item-selected: index == root.current-index;
+                        accessible-item-index: index;
+                        accessible-action-default => {
+                            root.pick(index);
+                            popup.close();
+                        }
+                        Rectangle {
+                            x: 0;
+                            y: (parent.height - self.height) / 2;
+                            width: 3px;
+                            height: 16px;
+                            border-radius: 2px;
+                            background: index == root.current-index ? Theme.accent : transparent;
+                        }
+                        Text {
+                            x: 12px;
+                            width: parent.width - 24px;
+                            height: parent.height;
+                            text: entry;
+                            color: index == root.current-index ? Theme.accent : Theme.text;
+                            font-size: Theme.body-size;
+                            font-weight: index == root.current-index ? 600 : 400;
+                            overflow: elide;
+                            vertical-alignment: center;
+                        }
+                        TouchArea {
+                            changed has-hover => {
+                                if (self.has-hover) {
+                                    root.highlight = index;
+                                }
+                            }
+                            clicked => {
+                                root.pick(index);
+                                popup.close();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 // A dropdown over `model` that shows the entry at `index`. The wrapper never
 // writes `index`, so a caller's binding survives the user's picks.
@@ -38,7 +247,7 @@ export component IndexComboBox inherits Rectangle {
     changed index => { root.follow(); }
     changed model => { root.follow(); }
 
-    box := ComboBox {
+    box := ChoiceBox {
         width: parent.width;
         height: parent.height;
         model: root.model;
@@ -68,8 +277,8 @@ export component ValueComboBox inherits Rectangle {
     vertical-stretch: 0;
 
     // Clears the selection when the entry shown is not the value held. Runs
-    // after every index change, so the box's own clamp of the index to the
-    // new entries cannot leave another entry showing.
+    // after every index change, so a pick that was never the value held cannot
+    // leave another entry showing.
     function clear-unmatched() {
         if (box.current-value != root.value) {
             box.current-index = -1;
@@ -79,7 +288,7 @@ export component ValueComboBox inherits Rectangle {
     changed value => { root.clear-unmatched(); }
     changed model => { root.clear-unmatched(); }
 
-    box := ComboBox {
+    box := ChoiceBox {
         width: parent.width;
         height: parent.height;
         model: root.model;

@@ -1,5 +1,5 @@
 // Local development shortcuts. Every action targets the displayed server.
-import { ComboBox } from "std-widgets.slint";
+import { ChoiceBox } from "../components/selection.slint";
 import { AppButton, TextField } from "../components/controls.slint";
 import { BodyText } from "../components/text.slint";
 import { GuiI18n } from "../globals.slint";
@@ -30,7 +30,7 @@ export component ServerFiles inherits Rectangle {
         BodyText { text: GuiI18n.text("gui-server-files-detail"); wrap: word-wrap; }
         HorizontalLayout {
             spacing: 8px;
-            location := ComboBox {
+            location := ChoiceBox {
                 horizontal-stretch: 1;
                 min-width: 0px;
                 accessible-label: GuiI18n.text("gui-server-folder-location");

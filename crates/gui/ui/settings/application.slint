@@ -1,7 +1,6 @@
 // Application settings panels: provider overrides and disk usage.
 
-import { Spinner } from "std-widgets.slint";
-import { AppButton, Pill, TextField } from "../components/controls.slint";
+import { AppButton, BusySpinner, Pill, TextField } from "../components/controls.slint";
 import { BodyText, Divider, Heading, SectionTitle } from "../components/text.slint";
 import { GuiI18n } from "../globals.slint";
 import { DiskUsageRow } from "../models.slint";
@@ -68,7 +67,7 @@ export component DiskUsagePanel inherits VerticalLayout {
     BodyText { text: GuiI18n.text("gui-disk-usage-metric"); color: Theme.text-secondary; wrap: word-wrap; }
     if root.state == "measuring" : HorizontalLayout {
         spacing: 8px;
-        Spinner { indeterminate: true; width: 16px; height: 16px; }
+        BusySpinner { width: 16px; height: 16px; }
         BodyText { text: root.progress != "" ? root.progress : GuiI18n.text("gui-disk-usage-measuring"); horizontal-stretch: 1; wrap: word-wrap; }
     }
     if root.state == "idle" : BodyText { text: GuiI18n.text("gui-disk-usage-idle"); color: Theme.text-muted; wrap: word-wrap; }

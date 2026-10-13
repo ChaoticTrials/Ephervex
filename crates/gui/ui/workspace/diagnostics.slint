@@ -2,8 +2,8 @@
 // failed run points at, the fixes it can preview, and what to attach to a
 // bug report.
 
-import { ScrollView, Spinner } from "std-widgets.slint";
-import { AppButton, Pill, Toggle } from "../components/controls.slint";
+import { ScrollView } from "std-widgets.slint";
+import { AppButton, BusySpinner, Pill, Toggle } from "../components/controls.slint";
 import { BodyText, Divider, Heading, SectionTitle } from "../components/text.slint";
 import { GuiI18n } from "../globals.slint";
 import { BundlePartRow, DiagnosticCheckRow, DiagnosticFindingRow, FixChangeRow, HostView } from "../models.slint";
@@ -64,7 +64,7 @@ export component DiagnosticBundlePanel inherits VerticalLayout {
     if root.result != "" : BodyText { text: root.result; wrap: word-wrap; }
     if root.parts.length > 0 || root.result-path != "" : HorizontalLayout {
         spacing: 8px;
-        if root.exporting : VerticalLayout { alignment: center; Spinner { indeterminate: true; width: 16px; height: 16px; } }
+        if root.exporting : VerticalLayout { alignment: center; BusySpinner { width: 16px; height: 16px; } }
         Rectangle { horizontal-stretch: 1; }
         if root.result-path != "" : AppButton { text: GuiI18n.text("gui-bundle-show-folder"); clicked => { root.open-folder(); } }
         if root.parts.length > 0 : AppButton { text: GuiI18n.text("gui-bundle-export"); tone: "primary"; enabled: root.selected-count > 0 && !root.exporting; hint: root.exporting ? GuiI18n.text("gui-hint-export-running") : GuiI18n.text("gui-hint-select-export-item"); clicked => { root.export(); } }
@@ -224,7 +224,7 @@ component FixPanel inherits Rectangle {
         BodyText { text: root.host.fix-title; color: Theme.text-secondary; wrap: word-wrap; }
         if root.host.fix-state == "loading" : HorizontalLayout {
             spacing: 8px;
-            VerticalLayout { alignment: center; Spinner { indeterminate: true; width: 16px; height: 16px; } }
+            VerticalLayout { alignment: center; BusySpinner { width: 16px; height: 16px; } }
             BodyText { text: GuiI18n.text("gui-fix-loading"); horizontal-stretch: 1; wrap: word-wrap; }
         }
         if root.host.fix-state == "failed" : BodyText { text: root.host.fix-error; color: Theme.danger; wrap: word-wrap; }
@@ -236,7 +236,7 @@ component FixPanel inherits Rectangle {
         }
         HorizontalLayout {
             spacing: 8px;
-            if root.host.fix-state == "applying" : VerticalLayout { alignment: center; Spinner { indeterminate: true; width: 16px; height: 16px; } }
+            if root.host.fix-state == "applying" : VerticalLayout { alignment: center; BusySpinner { width: 16px; height: 16px; } }
             if root.host.fix-state == "applying" : BodyText { text: GuiI18n.text("gui-fix-applying"); vertical-alignment: center; }
             Rectangle { horizontal-stretch: 1; }
             AppButton { text: GuiI18n.text("gui-fix-cancel"); enabled: root.host.fix-state != "applying"; hint: GuiI18n.text("gui-hint-fix-applying"); clicked => { root.cancel(); } }
@@ -365,7 +365,7 @@ export component DiagnosticsSurface inherits Rectangle {
                     if root.state == "unchecked" : BodyText { text: GuiI18n.text("gui-diagnosis-unchecked"); wrap: word-wrap; }
                     if root.state == "working" : HorizontalLayout {
                         spacing: 8px;
-                        VerticalLayout { alignment: center; Spinner { indeterminate: true; width: 16px; height: 16px; } }
+                        VerticalLayout { alignment: center; BusySpinner { width: 16px; height: 16px; } }
                         BodyText { text: root.host.diagnosis-progress != "" ? root.host.diagnosis-progress : GuiI18n.text("gui-diagnosis-working"); horizontal-stretch: 1; wrap: word-wrap; }
                     }
                     if root.state == "failed" : Heading { text: GuiI18n.text("gui-diagnosis-failed"); font-size: Theme.row-heading-size; color: Theme.danger; wrap: word-wrap; }

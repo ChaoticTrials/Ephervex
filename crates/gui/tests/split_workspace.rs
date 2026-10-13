@@ -700,7 +700,7 @@ fn properties_form(difficulty: &str, gamemode: &str) -> AppWindow {
 
 /// The difficulty and game mode combo boxes, in the order the form lays them out.
 fn choice_boxes(ui: &AppWindow) -> Vec<ElementHandle> {
-    let mut boxes: Vec<ElementHandle> = ElementHandle::find_by_element_type_name(ui, "ComboBox")
+    let mut boxes: Vec<ElementHandle> = ElementHandle::find_by_element_type_name(ui, "ChoiceBox")
         .filter(|element| element.accessible_role() == Some(AccessibleRole::Combobox))
         .collect();
     boxes.sort_by(|a, b| {

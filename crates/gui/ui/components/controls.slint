@@ -59,6 +59,25 @@ export component FocusEdge inherits FocusScope {
     }
 }
 
+// The outline drawn around a control that has keyboard focus, outside the
+// control and clear of its own edge. Primary buttons, checked switches,
+// selected chips and hovered controls already have an accent border, so a ring
+// inside it would only thicken a line that is there anyway. Sized to the
+// control it is placed in.
+export component FocusRing inherits Rectangle {
+    in property <length> ring-radius: 6px;
+    // The size of the control the ring surrounds.
+    in property <length> target-width;
+    in property <length> target-height;
+    x: -(Theme.focus-ring-offset + Theme.focus-ring-width);
+    y: -(Theme.focus-ring-offset + Theme.focus-ring-width);
+    width: root.target-width + 2 * (Theme.focus-ring-offset + Theme.focus-ring-width);
+    height: root.target-height + 2 * (Theme.focus-ring-offset + Theme.focus-ring-width);
+    border-radius: root.ring-radius + Theme.focus-ring-offset + Theme.focus-ring-width;
+    border-width: Theme.focus-ring-width;
+    border-color: Theme.accent;
+}
+
 // Keyboard focus for a control that the component around it draws.
 //
 // Laid over the control and under its `TouchArea`, so a click is still the
@@ -82,19 +101,7 @@ component KeyboardFocus inherits FocusScope {
         }
         return reject;
     }
-    // Drawn outside the control, clear of its own edge. Primary buttons,
-    // checked switches, selected chips and hovered controls already have an
-    // accent border, so a ring inside it would only thicken a line that is
-    // there anyway.
-    if root.has-focus && root.enabled : ring := Rectangle {
-        x: -(Theme.focus-ring-offset + Theme.focus-ring-width);
-        y: -(Theme.focus-ring-offset + Theme.focus-ring-width);
-        width: root.width + 2 * (Theme.focus-ring-offset + Theme.focus-ring-width);
-        height: root.height + 2 * (Theme.focus-ring-offset + Theme.focus-ring-width);
-        border-radius: root.ring-radius + Theme.focus-ring-offset + Theme.focus-ring-width;
-        border-width: Theme.focus-ring-width;
-        border-color: Theme.accent;
-    }
+    if root.has-focus && root.enabled : ring := FocusRing { target-width: root.width; target-height: root.height; ring-radius: root.ring-radius; }
 }
 
 export component AppButton inherits Rectangle {
@@ -126,7 +133,7 @@ export component AppButton inherits Rectangle {
     border-radius: 6px;
     border-width: 1px;
     border-color: !enabled ? Theme.border : tone == "primary" ? Theme.accent : tone == "danger" ? Theme.danger : Theme.border;
-    background: !enabled ? Theme.surface : area.pressed ? Theme.background : area.has-hover ? (tone == "primary" ? Theme.primary-fill-hover : tone == "danger" ? Theme.danger-fill-hover : Theme.elevated) : tone == "primary" ? Theme.primary-fill : tone == "danger" ? Theme.danger-fill : Theme.surface;
+    background: !enabled ? transparent : area.pressed ? (tone == "primary" ? Theme.primary-fill.darker(0.2) : tone == "danger" ? Theme.danger-fill.darker(0.1) : Theme.background) : area.has-hover ? (tone == "primary" ? Theme.primary-fill-hover : tone == "danger" ? Theme.danger-fill-hover : Theme.elevated) : tone == "primary" ? Theme.primary-fill : tone == "danger" ? Theme.danger-fill : Theme.surface;
     accessible-role: button;
     accessible-label: root.accessible-name;
     accessible-enabled: enabled;
@@ -140,7 +147,7 @@ export component AppButton inherits Rectangle {
         text: root.text;
         width: root.width - 28px;
         overflow: elide;
-        color: !root.enabled ? Theme.text-muted : root.tone == "danger" ? Theme.on-danger : Theme.text;
+        color: !root.enabled ? Theme.text-muted : root.tone == "danger" ? Theme.on-danger : root.tone == "primary" ? Theme.on-primary : Theme.text;
         font-size: Theme.body-size;
         font-weight: root.tone == "primary" ? 600 : 400;
         horizontal-alignment: center;
@@ -256,7 +263,7 @@ export component TextField inherits Rectangle {
     border-radius: 6px;
     border-width: 1px;
     border-color: invalid ? Theme.danger : input.has-focus ? Theme.accent : Theme.border;
-    background: Theme.background;
+    background: Theme.field;
     accessible-role: text-input;
     accessible-label: accessible-name;
     accessible-enabled: enabled;
@@ -360,7 +367,7 @@ export component Toggle inherits Rectangle {
         y: 3px;
         width: 17px; height: 17px;
         border-radius: 9px;
-        background: root.enabled ? (root.checked ? Theme.accent : Theme.text-secondary) : Theme.text-muted;
+        background: root.enabled ? (root.checked ? Theme.toggle-knob : Theme.text-secondary) : Theme.text-muted;
         animate x { duration: 100ms; }
     }
     KeyboardFocus { width: root.width; height: root.height; ring-radius: 12px; enabled: root.enabled; activated => { root.request(); } }
@@ -374,6 +381,174 @@ export component Toggle inherits Rectangle {
             root.toggled(root.checked);
         } else {
             root.toggled(!root.checked);
+        }
+    }
+}
+
+// A ring with an arc that turns while something the user is waiting on is in
+// progress. The shipped spinner takes its color from the system accent, which
+// no palette can set, so the one every screen shows is drawn here. Only an
+// image or text can be rotated, so the arc's end points are moved instead.
+export component BusySpinner inherits Rectangle {
+    accessible-role: progress-indicator;
+    private property <length> stroke: max(2px, root.width / 8);
+    private property <angle> head: 360deg * Math.mod(animation-tick() / 1s, 1);
+    private property <angle> tail: root.head + 100deg;
+    Rectangle {
+        border-radius: root.width / 2;
+        border-width: root.stroke;
+        border-color: Theme.border;
+    }
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 100;
+        viewbox-height: 100;
+        commands: "M \{50 + 42 * Math.cos(root.head)} \{50 + 42 * Math.sin(root.head)} A 42 42 0 0 1 \{50 + 42 * Math.cos(root.tail)} \{50 + 42 * Math.sin(root.tail)}";
+        stroke: Theme.accent;
+        stroke-width: root.stroke;
+        stroke-line-cap: round;
+    }
+}
+
+// A horizontal slider whose track, fill and handle are palette colors. The
+// shipped slider takes its fill from the system accent, which no palette can
+// set.
+//
+// `value` is only ever read. A drag is held here and handed back through
+// `released` when the pointer lets go, because the row a slider sits in
+// re-renders whenever its value changes, and a control that took the
+// caller's binding over mid-drag would lose it.
+export component ValueSlider inherits Rectangle {
+    in property <float> minimum: 0;
+    in property <float> maximum: 100;
+    in property <float> step: 1;
+    in property <float> value;
+    in property <bool> enabled: true;
+    callback released(float);
+    private property <length> handle-size: 16px;
+    private property <length> travel: root.width - root.handle-size;
+    private property <bool> dragging;
+    private property <float> drag-value;
+    // Where on the handle a drag took hold, so grabbing it does not move it.
+    private property <length> grab-offset;
+    // A keyboard change, shown until the caller reports a value of its own.
+    private property <bool> nudged;
+    private property <float> nudged-value;
+    private property <float> shown: root.dragging ? root.drag-value : root.nudged ? root.nudged-value : root.value;
+    private property <float> fraction: root.maximum > root.minimum
+        ? Math.clamp((root.shown - root.minimum) / (root.maximum - root.minimum), 0, 1)
+        : 0;
+    min-width: 80px;
+    height: Theme.control-height;
+    horizontal-stretch: 0;
+    accessible-role: slider;
+    accessible-enabled: root.enabled;
+    accessible-value: "\{root.shown}";
+    accessible-value-minimum: root.minimum;
+    accessible-value-maximum: root.maximum;
+    accessible-value-step: root.step;
+    accessible-action-increment => { root.nudge(root.shown + root.step); }
+    accessible-action-decrement => { root.nudge(root.shown - root.step); }
+    accessible-action-set-value(value) => { root.nudge(value.to-float()); }
+    changed value => { root.nudged = false; }
+
+    // The value under a pointer position, held to the range and snapped to
+    // the step.
+    function value-at(position: length) -> float {
+        let ratio = root.travel > 0px
+            ? Math.clamp((position - root.handle-size / 2) / root.travel, 0, 1)
+            : 0;
+        let raw = root.minimum + ratio * (root.maximum - root.minimum);
+        if (root.step <= 0) {
+            return raw;
+        }
+        return Math.clamp(root.minimum + Math.round((raw - root.minimum) / root.step) * root.step, root.minimum, root.maximum);
+    }
+    function nudge(target: float) {
+        if (!root.enabled) {
+            return;
+        }
+        root.nudged-value = Math.clamp(target, root.minimum, root.maximum);
+        root.nudged = true;
+        root.released(root.nudged-value);
+    }
+
+    Rectangle {
+        x: root.handle-size / 2;
+        width: root.width - root.handle-size;
+        y: (root.height - self.height) / 2;
+        height: 4px;
+        border-radius: 2px;
+        background: Theme.border;
+        Rectangle {
+            x: 0px;
+            width: root.fraction * parent.width;
+            height: parent.height;
+            border-radius: parent.border-radius;
+            background: root.enabled ? Theme.accent : Theme.text-muted;
+        }
+    }
+    handle := Rectangle {
+        x: root.fraction * root.travel;
+        y: (root.height - self.height) / 2;
+        width: root.handle-size;
+        height: root.handle-size;
+        border-radius: root.handle-size / 2;
+        border-width: 2px;
+        border-color: root.enabled ? Theme.accent : Theme.text-muted;
+        background: Theme.overlay;
+        if keys.has-focus && root.enabled : FocusRing { target-width: handle.width; target-height: handle.height; ring-radius: root.handle-size / 2; }
+    }
+    keys := FocusScope {
+        enabled: root.enabled;
+        changed has-focus => { if (!self.has-focus) { root.nudged = false; } }
+        key-pressed(event) => {
+            let page = root.step * 10;
+            if (event.text == Key.LeftArrow || event.text == Key.DownArrow) {
+                root.nudge(root.shown - root.step);
+            } else if (event.text == Key.RightArrow || event.text == Key.UpArrow) {
+                root.nudge(root.shown + root.step);
+            } else if (event.text == Key.PageDown) {
+                root.nudge(root.shown - page);
+            } else if (event.text == Key.PageUp) {
+                root.nudge(root.shown + page);
+            } else if (event.text == Key.Home) {
+                root.nudge(root.minimum);
+            } else if (event.text == Key.End) {
+                root.nudge(root.maximum);
+            } else {
+                return reject;
+            }
+            return accept;
+        }
+        TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: MouseCursor.pointer;
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.cancel) {
+                    root.dragging = false;
+                    return;
+                }
+                if (event.button != PointerEventButton.left) {
+                    return;
+                }
+                if (event.kind == PointerEventKind.down) {
+                    keys.focus();
+                    let center = root.fraction * root.travel + root.handle-size / 2;
+                    root.grab-offset = Math.abs(self.mouse-x - center) <= root.handle-size / 2 ? self.mouse-x - center : 0px;
+                    root.drag-value = root.value-at(self.mouse-x - root.grab-offset);
+                    root.dragging = true;
+                } else if (event.kind == PointerEventKind.up && root.dragging) {
+                    root.dragging = false;
+                    root.released(root.drag-value);
+                }
+            }
+            moved => {
+                if (root.dragging) {
+                    root.drag-value = root.value-at(self.mouse-x - root.grab-offset);
+                }
+            }
         }
     }
 }

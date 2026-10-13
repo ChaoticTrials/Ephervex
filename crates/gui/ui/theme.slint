@@ -29,6 +29,9 @@ export global Theme {
     out property <length> readout-size: 32px * text-scale;
     out property <color> background: palette.background;
     out property <color> surface: palette.surface;
+    // The fill of a text input and of a dropdown, which share one treatment
+    // so a form that mixes the two reads as one set of fields.
+    out property <color> field: palette.field;
     out property <color> elevated: palette.elevated;
     // One step past `elevated`, for a popover that has to read against
     // whatever is behind it - including a card that is `elevated` itself
@@ -51,6 +54,8 @@ export global Theme {
     // waiting for a key. Both are an accent held far enough back that what
     // sits on them stays readable.
     out property <color> toggle-on: palette.toggle-on;
+    // The knob of a switch that is on, which has to stand apart from its track.
+    out property <color> toggle-knob: palette.toggle-knob;
     out property <color> capture-active: palette.capture-active;
     out property <color> accent: palette.accent;
     out property <color> accent-secondary: palette.accent-secondary;
@@ -63,13 +68,16 @@ export global Theme {
     // alpha over the surface behind it does not.
     out property <color> primary-fill: palette.primary-fill;
     out property <color> primary-fill-hover: palette.primary-fill-hover;
+    // A caption on a primary button, held apart from `text` so a palette whose
+    // text is dark can still put a light caption on its fill.
+    out property <color> on-primary: palette.on-primary;
     out property <color> danger-fill: palette.danger-fill;
     out property <color> danger-fill-hover: palette.danger-fill-hover;
     out property <color> text: palette.text;
     out property <color> text-secondary: palette.text-secondary;
     out property <color> text-muted: palette.text-muted;
-    // A caption on a filled destructive button, which `text` is not quite
-    // bright enough to carry.
+    // A caption on a destructive button's fill, which `text` does not carry
+    // on every palette.
     out property <color> on-danger: palette.on-danger;
     // An error line in a console. `danger` is a border and a button tone;
     // a page of fixed-width text needs it lifted to stay readable.

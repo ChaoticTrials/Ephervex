@@ -20,6 +20,7 @@ const BUILT_IN: [ApplicationColorScheme; 2] =
 pub(crate) const PALETTE_COLORS: &[&str] = &[
     "background",
     "surface",
+    "field",
     "elevated",
     "overlay",
     "border",
@@ -29,6 +30,7 @@ pub(crate) const PALETTE_COLORS: &[&str] = &[
     "selection-card",
     "selection-strong",
     "toggle-on",
+    "toggle-knob",
     "capture-active",
     "accent",
     "accent-secondary",
@@ -37,6 +39,7 @@ pub(crate) const PALETTE_COLORS: &[&str] = &[
     "danger",
     "primary-fill",
     "primary-fill-hover",
+    "on-primary",
     "danger-fill",
     "danger-fill-hover",
     "text",
@@ -54,11 +57,21 @@ pub(crate) const PALETTE_COLORS: &[&str] = &[
     "scrim",
 ];
 
+/// Tokens that were once the color of another token. A theme file written
+/// before they could be set separately keeps its look: when it sets the old
+/// token and leaves the new one out, the new one follows it.
+const INHERITS_WHEN_UNSET: [(&str, &str); 3] = [
+    ("toggle-knob", "accent"),
+    ("field", "background"),
+    ("on-primary", "text"),
+];
+
 /// The palette field behind a color token.
 fn color_mut<'a>(palette: &'a mut ThemePalette, token: &str) -> Option<&'a mut Color> {
     Some(match token {
         "background" => &mut palette.background,
         "surface" => &mut palette.surface,
+        "field" => &mut palette.field,
         "elevated" => &mut palette.elevated,
         "overlay" => &mut palette.overlay,
         "border" => &mut palette.border,
@@ -68,6 +81,7 @@ fn color_mut<'a>(palette: &'a mut ThemePalette, token: &str) -> Option<&'a mut C
         "selection-card" => &mut palette.selection_card,
         "selection-strong" => &mut palette.selection_strong,
         "toggle-on" => &mut palette.toggle_on,
+        "toggle-knob" => &mut palette.toggle_knob,
         "capture-active" => &mut palette.capture_active,
         "accent" => &mut palette.accent,
         "accent-secondary" => &mut palette.accent_secondary,
@@ -76,6 +90,7 @@ fn color_mut<'a>(palette: &'a mut ThemePalette, token: &str) -> Option<&'a mut C
         "danger" => &mut palette.danger,
         "primary-fill" => &mut palette.primary_fill,
         "primary-fill-hover" => &mut palette.primary_fill_hover,
+        "on-primary" => &mut palette.on_primary,
         "danger-fill" => &mut palette.danger_fill,
         "danger-fill-hover" => &mut palette.danger_fill_hover,
         "text" => &mut palette.text,
@@ -117,6 +132,20 @@ fn user_palette(ui: &AppWindow, theme: &UserTheme) -> ThemePalette {
     for (token, color) in &theme.colors {
         if let Some(field) = color_mut(&mut palette, token) {
             *field = *color;
+        }
+    }
+    let set_by_theme = |name: &str| {
+        theme
+            .colors
+            .iter()
+            .find(|(set, _)| *set == name)
+            .map(|(_, color)| *color)
+    };
+    for (token, replaces) in INHERITS_WHEN_UNSET {
+        if set_by_theme(token).is_none()
+            && let Some((field, color)) = color_mut(&mut palette, token).zip(set_by_theme(replaces))
+        {
+            *field = color;
         }
     }
     palette
@@ -259,15 +288,70 @@ mod tests {
         let themes = [user(
             "mine",
             ApplicationColorScheme::Light,
-            &[("accent", marker)],
+            &[("border", marker)],
         )];
 
         apply_theme(&ui, &ApplicationTheme::User("mine".to_owned()), &themes);
 
         let mut expected = built_in_palette(&ui, ApplicationColorScheme::Light);
-        expected.accent = marker;
+        expected.border = marker;
         assert_eq!(ui.global::<Theme>().get_palette(), expected);
-        assert_eq!(ui.global::<Theme>().get_accent(), marker);
+        assert_eq!(ui.global::<Theme>().get_border(), marker);
+    }
+
+    /// A theme file written before a token could be set on its own keeps its
+    /// look: the new token follows the token it used to be, and a theme that
+    /// sets the new token itself is taken at its word.
+    #[test]
+    fn a_token_split_from_another_follows_it_until_the_theme_sets_it() {
+        let ui = window();
+        let old = Color::from_argb_u8(255, 1, 2, 3);
+        let own = Color::from_argb_u8(255, 4, 5, 6);
+        let themes = [
+            user(
+                "old",
+                ApplicationColorScheme::Light,
+                &[("accent", old), ("background", old), ("text", old)],
+            ),
+            user(
+                "new",
+                ApplicationColorScheme::Light,
+                &[
+                    ("accent", old),
+                    ("background", old),
+                    ("text", old),
+                    ("toggle-knob", own),
+                    ("field", own),
+                    ("on-primary", own),
+                ],
+            ),
+            user(
+                "untouched",
+                ApplicationColorScheme::Light,
+                &[("border", old)],
+            ),
+        ];
+        let palette_of = |id: &str| {
+            apply_theme(&ui, &ApplicationTheme::User(id.to_owned()), &themes);
+            ui.global::<Theme>().get_palette()
+        };
+
+        let palette = palette_of("old");
+        assert_eq!(
+            [palette.toggle_knob, palette.field, palette.on_primary],
+            [old; 3]
+        );
+        let palette = palette_of("new");
+        assert_eq!(
+            [palette.toggle_knob, palette.field, palette.on_primary],
+            [own; 3]
+        );
+        let light = built_in_palette(&ui, ApplicationColorScheme::Light);
+        let palette = palette_of("untouched");
+        assert_eq!(
+            [palette.toggle_knob, palette.field, palette.on_primary],
+            [light.toggle_knob, light.field, light.on_primary]
+        );
     }
 
     #[test]
@@ -442,6 +526,100 @@ mod tests {
             ] {
                 assert!(!markup.contains(reach), "{path} reads `{reach}`");
             }
+        }
+    }
+
+    /// The WCAG contrast ratio of two opaque colors.
+    fn contrast(a: Color, b: Color) -> f64 {
+        fn luminance(color: Color) -> f64 {
+            let linear = |channel: u8| {
+                let value = f64::from(channel) / 255.0;
+                if value <= 0.039_28 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * linear(color.red())
+                + 0.7152 * linear(color.green())
+                + 0.0722 * linear(color.blue())
+        }
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    fn built_ins() -> Vec<(ApplicationColorScheme, ThemePalette)> {
+        let ui = window();
+        SCHEMES
+            .into_iter()
+            .map(|scheme| (scheme, built_in_palette(&ui, scheme)))
+            .collect()
+    }
+
+    /// A switch that is on is its knob over its track. A palette that paints
+    /// both in one color leaves a flat pill with nothing to say where it is set.
+    #[test]
+    fn the_knob_of_a_switch_that_is_on_stands_apart_from_its_track() {
+        for (scheme, palette) in built_ins() {
+            let ratio = contrast(palette.toggle_knob, palette.toggle_on);
+            assert!(ratio >= 3.0, "{scheme:?}: knob over track is {ratio:.2}:1");
+        }
+    }
+
+    /// The caption of a filled button is read against the fill it sits on, at
+    /// rest and under the pointer.
+    #[test]
+    fn button_captions_are_readable_on_their_fills() {
+        for (scheme, palette) in built_ins() {
+            for (caption, fill, name, minimum) in [
+                (palette.on_primary, palette.primary_fill, "primary", 4.0),
+                (
+                    palette.on_primary,
+                    palette.primary_fill_hover,
+                    "primary hover",
+                    3.0,
+                ),
+                (palette.on_danger, palette.danger_fill, "danger", 4.5),
+                (
+                    palette.on_danger,
+                    palette.danger_fill_hover,
+                    "danger hover",
+                    4.5,
+                ),
+            ] {
+                let ratio = contrast(caption, fill);
+                assert!(
+                    ratio >= minimum,
+                    "{scheme:?} {name}: {ratio:.2}:1 is under {minimum}:1"
+                );
+            }
+        }
+    }
+
+    /// Text typed into a field, and the text a dropdown shows, sits on `field`.
+    #[test]
+    fn text_is_readable_on_a_field() {
+        for (scheme, palette) in built_ins() {
+            let ratio = contrast(palette.text, palette.field);
+            assert!(ratio >= 7.0, "{scheme:?}: text on a field is {ratio:.2}:1");
+            let ratio = contrast(palette.text_secondary, palette.field);
+            assert!(
+                ratio >= 4.5,
+                "{scheme:?}: secondary text on a field is {ratio:.2}:1"
+            );
+        }
+    }
+
+    /// A modal puts the page behind it out of reach, so the wash has to hold
+    /// back a light page as firmly as a dark one.
+    #[test]
+    fn every_built_in_scrim_dims_the_page_behind_a_dialog() {
+        for (scheme, palette) in built_ins() {
+            assert!(
+                palette.scrim.alpha() >= 0x99,
+                "{scheme:?}: scrim alpha {}",
+                palette.scrim.alpha()
+            );
         }
     }
 }

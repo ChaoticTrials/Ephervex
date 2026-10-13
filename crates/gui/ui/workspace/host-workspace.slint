@@ -1,8 +1,7 @@
 // A host workspace's chrome: pane header, surface tabs, workflow banner, and the pane host picker.
 
-import { Spinner } from "std-widgets.slint";
 import { LoaderGlyph } from "../components/artwork.slint";
-import { AppButton, IconButton, LaunchAsButton, Pill } from "../components/controls.slint";
+import { AppButton, BusySpinner, IconButton, LaunchAsButton, Pill } from "../components/controls.slint";
 import { BodyText, Divider, Heading } from "../components/text.slint";
 import { GuiI18n } from "../globals.slint";
 import {
@@ -304,7 +303,7 @@ export component HostWorkspace inherits Rectangle {
                     BodyText { text: root.workflow-summary; color: Theme.text-secondary; wrap: word-wrap; }
                     if root.occupied : HorizontalLayout {
                         spacing: 6px;
-                        Spinner { indeterminate: true; width: 14px; height: 14px; }
+                        BusySpinner { width: 14px; height: 14px; }
                         BodyText { text: root.occupied-text; horizontal-stretch: 1; wrap: word-wrap; }
                     }
                 }
@@ -326,7 +325,7 @@ export component HostWorkspace inherits Rectangle {
             background: Theme.surface;
             HorizontalLayout {
                 padding: 10px; spacing: 9px; cross-axis-alignment: center;
-                Spinner { indeterminate: true; width: 18px; height: 18px; }
+                BusySpinner { width: 18px; height: 18px; }
                 BodyText { text: root.occupied-text; horizontal-stretch: 1; wrap: word-wrap; }
             }
         }

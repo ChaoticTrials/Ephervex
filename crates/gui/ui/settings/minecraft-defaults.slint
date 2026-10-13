@@ -1,8 +1,7 @@
 // The Minecraft defaults screen: preference rows, key binding editor, and the window size picker.
 
-import { Slider } from "std-widgets.slint";
 import { IndexComboBox } from "../components/selection.slint";
-import { AppButton, Pill, TextField, Toggle } from "../components/controls.slint";
+import { AppButton, Pill, TextField, Toggle, ValueSlider } from "../components/controls.slint";
 import { ActionRow, BodyText, Eyebrow, FieldLabel } from "../components/text.slint";
 import { GuiI18n } from "../globals.slint";
 import { MinecraftPreferenceRow } from "../models.slint";
@@ -62,7 +61,7 @@ export component PreferenceKeyBindingEditor inherits Rectangle {
     border-radius: 6px;
     border-width: root.capturing ? 2px : 1px;
     border-color: root.capturing ? Theme.accent : scope.has-focus ? Theme.accent : Theme.border;
-    background: root.capturing ? Theme.capture-active : Theme.background;
+    background: root.capturing ? Theme.capture-active : Theme.field;
     accessible-role: button;
     accessible-label: root.accessible-name;
     accessible-value: root.text;
@@ -232,7 +231,7 @@ export component MinecraftPreferenceRowCard inherits Rectangle {
                         accepted => { root.commit-number(root.item.id, number-field.text); }
                         focus-lost => { root.commit-number(root.item.id, number-field.text); }
                     }
-                    if root.item.editor == "slider" : Slider {
+                    if root.item.editor == "slider" : ValueSlider {
                         width: root.compact ? 170px : 240px;
                         accessible-label: root.item.label;
                         minimum: root.item.number-min;
