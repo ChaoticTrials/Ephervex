@@ -1283,6 +1283,88 @@ async fn a_resume_stores_nothing_when_the_supplied_order_cannot_be_taken() {
     );
 }
 
+/// An order that is contended for `0` before it lets a change proceed, as a
+/// lock another process holds briefly.
+#[derive(Debug)]
+struct OrderContendedFor(Duration);
+
+impl CredentialChangeOrder for OrderContendedFor {
+    fn hold(&self) -> Result<ephervex_auth::CredentialChangeGuard, AuthError> {
+        std::thread::sleep(self.0);
+        Ok(ephervex_auth::CredentialChangeGuard::new(()))
+    }
+}
+
+/// Runs `work` beside a task that ticks every 10 ms and returns how often it
+/// ticked, which a wait that held the runtime's only thread would keep at zero.
+async fn ticks_during<T>(work: impl std::future::Future<Output = T>) -> (T, usize) {
+    let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let ticker = tokio::spawn({
+        let ticks = Arc::clone(&ticks);
+        async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                ticks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    });
+    let output = work.await;
+    ticker.abort();
+    (output, ticks.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+#[tokio::test]
+async fn a_resume_waiting_for_the_order_leaves_other_tasks_running() {
+    let server = MockServer::start().await;
+    mount_token(&server, 200, TOKEN_ROTATED).await;
+    mount_chain(&server).await;
+    let store = Arc::new(MemoryStore::new());
+    let key = CredentialKey::MicrosoftRefreshToken(account());
+    store
+        .store(&key, &SecretString::new("FAKE-MICROSOFT-REFRESH-TOKEN"))
+        .expect("seed");
+    let provider = provider(&server, store.clone())
+        .with_change_order(Arc::new(OrderContendedFor(Duration::from_millis(200))));
+
+    let (resumed, ticks) = ticks_during(provider.resume(
+        account(),
+        &AuthObserver::silent(),
+        &CancellationToken::new(),
+    ))
+    .await;
+
+    resumed.expect("the resume finishes once the order is free");
+    // The replacement and the final check each wait 200 ms for the order.
+    assert!(ticks >= 10, "other tasks ran only {ticks} times");
+}
+
+#[tokio::test]
+async fn discarding_a_rejected_credential_waiting_for_the_order_leaves_other_tasks_running() {
+    let server = MockServer::start().await;
+    mount_token(&server, 400, INVALID_GRANT).await;
+    let store = Arc::new(MemoryStore::new());
+    let key = CredentialKey::MicrosoftRefreshToken(account());
+    store
+        .store(&key, &SecretString::new("FAKE-EXPIRED-REFRESH-TOKEN"))
+        .expect("seed");
+    let provider = provider(&server, store.clone())
+        .with_change_order(Arc::new(OrderContendedFor(Duration::from_millis(200))));
+
+    let (resumed, ticks) = ticks_during(provider.resume(
+        account(),
+        &AuthObserver::silent(),
+        &CancellationToken::new(),
+    ))
+    .await;
+
+    assert!(matches!(
+        resumed,
+        Err(AuthError::ReauthenticationRequired { .. })
+    ));
+    assert!(store.load(&key).expect("load").is_none());
+    assert!(ticks >= 5, "other tasks ran only {ticks} times");
+}
+
 #[tokio::test]
 async fn a_rejected_credential_is_not_removed_once_a_newer_one_replaced_it() {
     let server = MockServer::start().await;

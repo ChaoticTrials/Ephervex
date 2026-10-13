@@ -35,7 +35,7 @@ use ephervex_auth::{
     AccountProvider, AuthError, AuthObserver, AuthResult, CredentialChangeGuard,
     CredentialChangeOrder, CredentialKey, CredentialRemoval, CredentialStorage, CredentialStore,
     KeyringStore, Login, LoginRequest, MemoryStore, MicrosoftAccountProvider, ProcessChangeOrder,
-    SecretString, Session,
+    SecretString, Session, hold_off_worker,
 };
 use ephervex_download::HttpConfig;
 use ephervex_model::AccountKind;
@@ -87,6 +87,14 @@ impl CredentialChangeOrder for ConfigDirectoryOrder {
                 },
             })
     }
+}
+
+/// Whether `login`'s credential outlives this process.
+fn login_is_persistent(login: &Login) -> bool {
+    login
+        .session
+        .storage()
+        .is_some_and(CredentialStorage::is_persistent)
 }
 
 /// How much life a Minecraft token needs left on it to be worth reusing.
@@ -562,10 +570,11 @@ impl App {
     ) -> CoreResult<&Session> {
         // Before the login stores a new credential, which a pending cleanup
         // for the same account must not then delete.
-        self.finish_keyring_cleanup();
+        self.finish_keyring_cleanup_off_worker().await;
         let provider = self.build_account_provider(options.allow_session_only)?;
         let login = provider.login(&options.request, observer, cancel).await?;
-        self.adopt_login(&provider, login)
+        let held = self.hold_login_changes_off_worker(&login).await?;
+        self.adopt_login_held(&provider, login, &held)
     }
 
     /// Re-establishes a session for the account already signed in.
@@ -587,7 +596,7 @@ impl App {
             // expires. Say so rather than failing later inside the keyring.
             return self.establish_offline_session();
         }
-        self.finish_keyring_cleanup();
+        self.finish_keyring_cleanup_off_worker().await;
         let id = self.active_account_id()?;
         // A configured account lives in the keyring, so an unreachable one must
         // fail as such instead of resuming against an empty session store.
@@ -1020,6 +1029,31 @@ impl App {
         Ok(self.credential_order().hold()?)
     }
 
+    /// [`Self::hold_credential_changes`] for async code: the wait happens on
+    /// the blocking pool, so a contended order does not stall other tasks.
+    ///
+    /// The change it covers must not await while the guard is held.
+    async fn hold_credential_changes_off_worker(&self) -> CoreResult<CredentialChangeGuard> {
+        let order: Arc<dyn CredentialChangeOrder> = Arc::new(self.credential_order());
+        Ok(hold_off_worker(&order).await?)
+    }
+
+    /// The order that covers storing `login`'s credential, off the async worker.
+    ///
+    /// A session-only credential lives in this process, so only this process
+    /// can race it.
+    async fn hold_login_changes_off_worker(
+        &self,
+        login: &Login,
+    ) -> CoreResult<CredentialChangeGuard> {
+        if login_is_persistent(login) {
+            self.hold_credential_changes_off_worker().await
+        } else {
+            let order: Arc<dyn CredentialChangeOrder> = Arc::new(ProcessChangeOrder);
+            Ok(hold_off_worker(&order).await?)
+        }
+    }
+
     /// The persistent keyring, or why it cannot be reached.
     #[cfg(test)]
     fn keyring(&self) -> Result<Arc<dyn CredentialStore>, AuthError> {
@@ -1057,12 +1091,35 @@ impl App {
     /// Deletes the stored credentials of accounts removed while the keyring
     /// could not be reached, once it can be.
     fn finish_keyring_cleanup(&mut self) {
-        if self.reload_config().is_err() || self.config().keyring_cleanup.is_empty() {
-            return;
-        }
-        if let Ok(store) = self.keyring_for_cleanup() {
+        if let Some(store) = self.keyring_for_pending_cleanup() {
             self.clean_up_keyring(store.as_ref());
         }
+    }
+
+    /// [`Self::finish_keyring_cleanup`] for async code, which waits for the
+    /// credential order off the async worker.
+    async fn finish_keyring_cleanup_off_worker(&mut self) {
+        let Some(store) = self.keyring_for_pending_cleanup() else {
+            return;
+        };
+        for pending in self.config().keyring_cleanup.clone() {
+            let cleaned = match self.hold_credential_changes_off_worker().await {
+                Ok(held) => self.finish_pending_cleanup_held(store.as_ref(), &pending, &held),
+                Err(error) => Err(error),
+            };
+            if let Err(error) = cleaned {
+                warn!(%error, account = %pending, "could not remove a removed account's credential yet");
+            }
+        }
+    }
+
+    /// The keyring to clean up with, when there is a cleanup to finish and the
+    /// keyring can be reached.
+    fn keyring_for_pending_cleanup(&mut self) -> Option<Arc<dyn CredentialStore>> {
+        if self.reload_config().is_err() || self.config().keyring_cleanup.is_empty() {
+            return None;
+        }
+        self.keyring_for_cleanup().ok()
     }
 
     /// [`Self::finish_keyring_cleanup`] with a keyring already open.
@@ -1086,7 +1143,17 @@ impl App {
         store: &dyn CredentialStore,
         pending: &str,
     ) -> CoreResult<()> {
-        let _held = self.hold_credential_changes()?;
+        let held = self.hold_credential_changes()?;
+        self.finish_pending_cleanup_held(store, pending, &held)
+    }
+
+    /// [`Self::finish_pending_cleanup`] under the credential order `held` proves.
+    fn finish_pending_cleanup_held(
+        &mut self,
+        store: &dyn CredentialStore,
+        pending: &str,
+        _held: &CredentialChangeGuard,
+    ) -> CoreResult<()> {
         self.reload_config()?;
         if !self.config().keyring_cleanup.iter().any(|p| p == pending) {
             return Ok(());
@@ -1126,22 +1193,16 @@ impl App {
     /// that dies between storing and recording therefore leaves a credential
     /// that a later cleanup deletes, never one nothing names. When the account
     /// cannot be recorded, the credential this login stored is deleted again.
-    fn adopt_login(
+    ///
+    /// `held` is the order from [`Self::hold_login_changes_off_worker`], kept
+    /// until the login is recorded.
+    fn adopt_login_held(
         &mut self,
         provider: &MicrosoftAccountProvider,
         login: Login,
+        held: &CredentialChangeGuard,
     ) -> CoreResult<&Session> {
-        let persistent = login
-            .session
-            .storage()
-            .is_some_and(CredentialStorage::is_persistent);
-        // A session-only credential lives in this process, so only this
-        // process can race it.
-        let held = if persistent {
-            self.hold_credential_changes()?
-        } else {
-            ProcessChangeOrder.hold()?
-        };
+        let persistent = login_is_persistent(&login);
         let id = login.session.account.id;
         let account = id.to_string();
 
@@ -1155,7 +1216,7 @@ impl App {
         }
         // A failed store may still have written the secret, and the entry may
         // already name an earlier credential, so it stays for a cleanup.
-        provider.keep_login(&login, &held)?;
+        provider.keep_login(&login, held)?;
         if let Err(error) = self.record_account(&login.session) {
             if stores_new_account {
                 self.discard_unrecorded_credential(id);
@@ -1177,6 +1238,22 @@ impl App {
             self.end_session_only();
         }
         self.hold_session(login.session)
+    }
+
+    /// [`Self::adopt_login_held`] taking the order itself, for a caller that may
+    /// block.
+    #[cfg(test)]
+    fn adopt_login(
+        &mut self,
+        provider: &MicrosoftAccountProvider,
+        login: Login,
+    ) -> CoreResult<&Session> {
+        let held = if login_is_persistent(&login) {
+            self.hold_credential_changes()?
+        } else {
+            ProcessChangeOrder.hold()?
+        };
+        self.adopt_login_held(provider, login, &held)
     }
 
     /// Deletes the credential a login just stored for an account that is not
@@ -2777,6 +2854,126 @@ mod tests {
                 })
                 .count()
         }
+    }
+
+    /// Checks that `pending` waits without holding the runtime: other tasks on
+    /// it keep running while it is parked, and it has not finished.
+    ///
+    /// A wait that held the worker would stall the ticker, and on a
+    /// current-thread runtime there is no other worker to run it.
+    async fn assert_other_tasks_run_while<F>(pending: std::pin::Pin<&mut F>)
+    where
+        F: std::future::Future,
+        F::Output: std::fmt::Debug,
+    {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let ticker = tokio::spawn({
+            let ticks = Arc::clone(&ticks);
+            async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    ticks.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+        tokio::select! {
+            biased;
+            outcome = pending => panic!("finished while the credential order was held: {outcome:?}"),
+            () = async {
+                while ticks.load(Ordering::SeqCst) < 10 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            } => {}
+        }
+        ticker.abort();
+    }
+
+    async fn profile_requested(server: &wiremock::MockServer) -> bool {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .any(|request| request.url.path() == "/minecraft/profile")
+    }
+
+    #[tokio::test]
+    async fn a_sign_in_waiting_for_the_credential_order_leaves_other_tasks_running() {
+        let server = wiremock::MockServer::start().await;
+        sign_in_services::mount(&server).await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.loopback_http = true;
+        app.auth_endpoints = Some(ephervex_auth::Endpoints::with_base(&server.uri()));
+        // Reports persistent storage, which is what the cross-process order covers.
+        let store = Arc::new(HookedStore {
+            inner: MemoryStore::new(),
+            after_store: Box::new(|| {}),
+        });
+        app.test_keyring = TestKeyring::Store(store.clone());
+        let id = Uuid::parse_str(sign_in_services::ACCOUNT).expect("uuid");
+        let options = LoginOptions {
+            request: LoginRequest {
+                flow: ephervex_auth::LoginFlow::DeviceCode,
+                timeout: std::time::Duration::from_secs(10),
+            },
+            allow_session_only: false,
+        };
+        let observer = AuthObserver::silent();
+        let cancel = CancellationToken::new();
+        let held = CredentialChangeLock::take(app.paths()).expect("lock");
+
+        let login = app.login(&options, &observer, &cancel);
+        tokio::pin!(login);
+        // The profile is the last service the sign-in asks, so it has reached
+        // the credential order once that has been requested.
+        tokio::select! {
+            biased;
+            outcome = &mut login => panic!("finished before the profile was requested: {outcome:?}"),
+            () = async {
+                while !profile_requested(&server).await {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            } => {}
+        }
+        assert_other_tasks_run_while(login.as_mut()).await;
+        assert!(store.load(&refresh_key(id)).expect("load").is_none());
+
+        drop(held);
+        login
+            .await
+            .expect("the sign-in finishes once the order is free");
+        assert!(store.load(&refresh_key(id)).expect("load").is_some());
+    }
+
+    #[tokio::test]
+    async fn a_pending_cleanup_waiting_for_the_credential_order_leaves_other_tasks_running() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let id = Uuid::new_v4();
+        app.mutate_config(|config| config.record_keyring_cleanup(&id.to_string()))
+            .expect("record the earlier removal's cleanup");
+        let store = keyring_holding(id);
+        app.test_keyring = TestKeyring::Store(store.clone());
+        let held = CredentialChangeLock::take(app.paths()).expect("lock");
+
+        let cleanup = app.finish_keyring_cleanup_off_worker();
+        tokio::pin!(cleanup);
+        assert_other_tasks_run_while(cleanup.as_mut()).await;
+        assert!(store.load(&refresh_key(id)).expect("load").is_some());
+
+        drop(held);
+        cleanup.await;
+        assert!(store.load(&refresh_key(id)).expect("load").is_none());
+        assert!(
+            app_rooted_at(base.path())
+                .config()
+                .keyring_cleanup
+                .is_empty()
+        );
     }
 
     #[tokio::test]

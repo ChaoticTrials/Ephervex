@@ -50,7 +50,9 @@ use crate::error::{AuthError, AuthResult};
 use crate::loopback::{LoopbackReceiver, Redirect};
 use crate::microsoft::{MicrosoftClient, MicrosoftTokens};
 use crate::minecraft::{EntitlementLookup, MinecraftServicesClient};
-use crate::order::{CredentialChangeGuard, CredentialChangeOrder, ProcessChangeOrder};
+use crate::order::{
+    CredentialChangeGuard, CredentialChangeOrder, ProcessChangeOrder, hold_off_worker,
+};
 use crate::pkce::Pkce;
 use crate::provider::{
     Account, AccountProvider, AuthEvent, AuthObserver, Credentials, Login, LoginFlow, LoginRequest,
@@ -290,13 +292,13 @@ impl MicrosoftAccountProvider {
     /// refresh ran, and the replacement must not bring it back. One that
     /// differs from `loaded` was already replaced by a newer login or resume,
     /// which this one must not overwrite.
-    fn publish_replacement(
+    async fn publish_replacement(
         &self,
         key: &CredentialKey,
         loaded: &SecretString,
         replacement: &SecretString,
     ) -> AuthResult<()> {
-        let _ordered = self.order.hold()?;
+        let _ordered = hold_off_worker(&self.order).await?;
         match self.credentials.load(key)? {
             None => Err(AuthError::NotSignedIn),
             Some(current) if current == *loaded => self.credentials.store(key, replacement),
@@ -306,8 +308,8 @@ impl MicrosoftAccountProvider {
 
     /// Removes the credential Microsoft rejected, unless it has changed since
     /// it was read.
-    fn discard_rejected(&self, key: &CredentialKey, rejected: &SecretString) {
-        let _ordered = match self.order.hold() {
+    async fn discard_rejected(&self, key: &CredentialKey, rejected: &SecretString) {
+        let _ordered = match hold_off_worker(&self.order).await {
             Ok(ordered) => ordered,
             Err(error) => {
                 warn!(%error, "could not remove the rejected credential");
@@ -326,8 +328,8 @@ impl MicrosoftAccountProvider {
     }
 
     /// Fails when the account signed out while a resume was running.
-    fn ensure_signed_in(&self, key: &CredentialKey) -> AuthResult<()> {
-        let _ordered = self.order.hold()?;
+    async fn ensure_signed_in(&self, key: &CredentialKey) -> AuthResult<()> {
+        let _ordered = hold_off_worker(&self.order).await?;
         match self.credentials.load(key)? {
             Some(_) => Ok(()),
             None => Err(AuthError::NotSignedIn),
@@ -371,7 +373,7 @@ impl AccountProvider for MicrosoftAccountProvider {
                 // The credential is dead. Leaving it in the keyring would make
                 // every later resume fail the same way while `account status`
                 // insisted a credential existed.
-                self.discard_rejected(&key, &refresh);
+                self.discard_rejected(&key, &refresh).await;
                 return Err(error);
             }
             Err(error) => return Err(error),
@@ -380,7 +382,8 @@ impl AccountProvider for MicrosoftAccountProvider {
         // Kept under the account that was asked for, before the later legs can
         // fail: the token it replaces is no longer the one to rely on.
         if let Some(replacement) = &tokens.refresh {
-            self.publish_replacement(&key, &refresh, replacement)?;
+            self.publish_replacement(&key, &refresh, replacement)
+                .await?;
         }
 
         let session = self.establish(&tokens.access, observer, cancel).await?;
@@ -392,7 +395,7 @@ impl AccountProvider for MicrosoftAccountProvider {
                 found: session.account.id,
             });
         }
-        self.ensure_signed_in(&key)?;
+        self.ensure_signed_in(&key).await?;
         Ok(session)
     }
 

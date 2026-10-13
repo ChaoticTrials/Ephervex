@@ -145,7 +145,9 @@ pub use error::{
 pub use microsoft::{DeviceCodePrompt, MicrosoftClient};
 pub use minecraft::{EntitlementLookup, Entitlements, MinecraftProfile};
 pub use offline::{OfflineAccount, offline_uuid};
-pub use order::{CredentialChangeGuard, CredentialChangeOrder, ProcessChangeOrder};
+pub use order::{
+    CredentialChangeGuard, CredentialChangeOrder, ProcessChangeOrder, hold_off_worker,
+};
 pub use pkce::Pkce;
 pub use provider::{
     Account, AccountProvider, AuthEvent, AuthObserver, Credentials, Login, LoginFlow, LoginRequest,
