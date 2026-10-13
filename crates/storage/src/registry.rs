@@ -695,12 +695,23 @@ impl Registry {
     /// metadata after an index write failed behind a committed update
     /// (ADR 0002). Metadata that is unreadable or names another instance is an
     /// error, never replaced by the index copy.
+    ///
+    /// The exception is a row that recorded changes while the root was
+    /// missing: only the index could hold them, so that newer row is current
+    /// once the root returns, as reconciliation adopts it.
     pub fn current_client(&self, id: InstanceId) -> Result<ClientRecord, RegistryError> {
         let indexed = self.following_moved_files(self.client(id)?);
         if !indexed.root.is_dir() {
             return Ok(indexed);
         }
         let mut canonical = canonical_client_at(&indexed.root, id)?;
+        if client_index_is_newer(&indexed, &canonical) {
+            let mut returned = indexed;
+            returned
+                .attention
+                .retain(|reason| reason != &AttentionReason::MissingRoot);
+            return Ok(returned);
+        }
         canonical.root = indexed.root;
         canonical.storage = indexed.storage;
         Ok(canonical)
@@ -1463,6 +1474,14 @@ pub(crate) fn canonical_client_at(
         });
     }
     Ok(found)
+}
+
+/// Whether an index row holds a later state than the canonical metadata.
+///
+/// Only a row flagged `MissingRoot` can: while the root was absent an update
+/// could reach the index alone.
+pub(crate) fn client_index_is_newer(row: &ClientRecord, canonical: &ClientRecord) -> bool {
+    row.attention.contains(&AttentionReason::MissingRoot) && row.updated_at > canonical.updated_at
 }
 
 /// The same for a dedicated server (ADR 0014).
@@ -3982,5 +4001,86 @@ mod tests {
             registry.server(server.id).expect("row").storage,
             server.storage
         );
+    }
+
+    /// A client changed while its root was missing, whose older metadata file
+    /// is back in place before reconciliation has run.
+    fn client_changed_while_its_root_was_missing(registry: &Registry) -> ClientRecord {
+        let client = created_client(registry);
+        let older = metadata::read_client_metadata(&client.root).expect("metadata");
+        std::fs::remove_dir_all(&client.root).expect("remove root");
+        let changed = registry
+            .modify_client(client.id, |record| {
+                record.add_attention(AttentionReason::MissingRoot);
+                record.java_override = Some(JavaOverride::new("/opt/jdk/bin/java"));
+                record.name = "renamed".to_owned();
+            })
+            .expect("index-only change");
+        std::fs::create_dir_all(&client.root).expect("restore root");
+        metadata::write_client_metadata(&client.root, &older).expect("restore metadata");
+        changed
+    }
+
+    #[test]
+    fn a_newer_index_row_is_current_once_a_missing_root_returns() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let changed = client_changed_while_its_root_was_missing(&registry);
+
+        let current = registry.current_client(changed.id).expect("current");
+
+        assert_eq!(current.name, "renamed");
+        assert_eq!(
+            current.java_override,
+            Some(JavaOverride::new("/opt/jdk/bin/java"))
+        );
+        assert!(!current.attention.contains(&AttentionReason::MissingRoot));
+    }
+
+    #[test]
+    fn a_client_change_after_a_missing_root_returns_keeps_the_index_only_edits() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let changed = client_changed_while_its_root_was_missing(&registry);
+
+        let updated = registry
+            .modify_client(changed.id, |record| {
+                record.last_launched_at = Some(Utc::now());
+            })
+            .expect("change");
+
+        assert_eq!(updated.name, "renamed");
+        assert_eq!(
+            updated.java_override,
+            Some(JavaOverride::new("/opt/jdk/bin/java"))
+        );
+        let canonical = metadata::read_client_metadata(&updated.root).expect("metadata");
+        assert_eq!(canonical.name, "renamed");
+        assert_eq!(canonical.java_override, updated.java_override);
+        assert!(!canonical.attention.contains(&AttentionReason::MissingRoot));
+    }
+
+    #[test]
+    fn an_index_row_without_the_missing_root_flag_never_outranks_the_metadata() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = created_client(&registry);
+        let mut newer_row = registry.client(client.id).expect("row");
+        newer_row.name = "index only".to_owned();
+        newer_row.updated_at = client.updated_at + chrono::Duration::seconds(60);
+        registry
+            .synchronize_client_index(&newer_row)
+            .expect("write the row");
+        assert!(
+            newer_row.updated_at
+                > metadata::read_client_metadata(&client.root)
+                    .expect("metadata")
+                    .updated_at
+        );
+        assert!(!newer_row.attention.contains(&AttentionReason::MissingRoot));
+
+        let current = registry.current_client(client.id).expect("current");
+
+        assert_eq!(current.name, "before");
     }
 }

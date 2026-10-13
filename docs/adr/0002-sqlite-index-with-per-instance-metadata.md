@@ -53,7 +53,10 @@ Schema changes go through an ordered migration runner keyed on SQLite's
   write older fields back over a committed one. Launch and Java planning,
   duplication, and a server linked to a client read the same way, so none of
   them plans from a Minecraft version, loader, or override the user already
-  replaced.
+  replaced. The one row that outranks the file is a newer one flagged as having
+  a missing root: changes made while the root was absent reached only the
+  index, so reads and reconciliation both treat that row as current when the
+  root returns.
 - An indexed root whose metadata names a different record, as in a copied
   directory, refuses changes and moves with an error that names the root. The
   record can still be forgotten with its files kept, which does not use that

@@ -29,6 +29,7 @@ use crate::metadata;
 use crate::records::{ClientRecord, FileDisposition, ServerRecord};
 use crate::registry::{
     HostProbe, Registry, RegistryError, canonical_client_at, canonical_server_at,
+    client_index_is_newer,
 };
 
 /// Which record a reconciliation entry refers to.
@@ -402,9 +403,7 @@ fn reconcile_present_client(
             } else {
                 let recorded_root_differs = canonical.root != record.root;
                 canonical.root.clone_from(&record.root);
-                let index_is_newer = record.attention.contains(&AttentionReason::MissingRoot)
-                    && record.updated_at > canonical.updated_at;
-                if index_is_newer {
+                if client_index_is_newer(&record, &canonical) {
                     adopted = true;
                 } else {
                     if record.attention.contains(&AttentionReason::MissingRoot) {
