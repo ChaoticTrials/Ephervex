@@ -151,48 +151,10 @@ jobs:
 
       - name: Provision the pinned host tools
         # Which architecture's assets to fetch, what they are named, and the
-        # digest each has to match all come from packaging/host-tools, so this
-        # step spells no architecture of its own and the build step below is
-        # told where they landed rather than assembling the paths a second time.
-        run: |
-          set -eu
-          . ./packaging/linux-baseline
-          . ./packaging/host-tools
-          mkdir -p host-tools
-          cd host-tools
-
-          fetch() {
-            url=$1; expected=$2
-            file=${url##*/}
-            curl --proto '=https' --tlsv1.2 -sSfL -o "${file}" "${url}"
-            actual=$(sha256sum "${file}" | cut -d' ' -f1)
-            if [ "${actual}" != "${expected}" ]; then
-              echo "ERROR: ${file} is not what packaging/host-tools pins." >&2
-              echo "  expected ${expected}" >&2
-              echo "  fetched  ${actual}" >&2
-              echo "Upstream publishes these under rolling tags. Check the new binary," >&2
-              echo "then update packaging/host-tools deliberately." >&2
-              exit 1
-            fi
-            chmod +x "${file}"
-            FETCHED=${file}
-          }
-
-          # Each pin is one "<url> <sha256>" pair, deliberately split into the
-          # two arguments `fetch` takes. Neither field can contain a space.
-          # shellcheck disable=SC2046
-          fetch $(ephervex_appimagetool "${EPHERVEX_BASELINE_ARCH}")
-          APPIMAGETOOL_FILE=${FETCHED}
-          # shellcheck disable=SC2046
-          fetch $(ephervex_appimage_runtime "${EPHERVEX_BASELINE_ARCH}")
-          RUNTIME_FILE=${FETCHED}
-
-          # appimagetool ships as an AppImage, and a container has no FUSE to
-          # mount one with, so it is extracted once and run from the AppDir.
-          "./${APPIMAGETOOL_FILE}" --appimage-extract >/dev/null
-
-          echo "APPIMAGETOOL=${PWD}/squashfs-root/AppRun" >> "$GITHUB_ENV"
-          echo "APPIMAGE_RUNTIME_FILE=${PWD}/${RUNTIME_FILE}" >> "$GITHUB_ENV"
+        # digest each has to match all come from packaging/host-tools. The script
+        # prints where appimagetool and the runtime landed, and the build step
+        # below is told that rather than assembling the paths a second time.
+        run: packaging/provision-host-tools.sh provision host-tools >> "$GITHUB_ENV"
 
       - name: Build and package the AppImage
         env:

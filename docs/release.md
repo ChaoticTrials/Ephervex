@@ -410,6 +410,9 @@ comes from and the SHA-256 the release procedure was verified against:
 the runtime (`runtime-x86_64` or `runtime-aarch64`) from
 `AppImage/type2-runtime`. Check what you install against that file before
 trusting it; the automated release checks it for you and refuses a mismatch.
+[`packaging/provision-host-tools.sh`](../packaging/provision-host-tools.sh) is the
+one place that fetches and checks them: the release workflows run its `provision`
+mode, and `./prepare_release.sh` runs its `verify` mode.
 
 Both architectures are pinned from one upstream state, so a digest that stops
 matching stops both rather than leaving one architecture on an older launcher
@@ -811,7 +814,10 @@ is published:
 It sets `[workspace.package] version`, updates `Cargo.lock` so a `--locked`
 build still works, regenerates the third-party license inventory, runs the gate
 above, commits exactly those four files as `chore: release <version>`, and tags
-`v<version>`. Then it prints the two `git push` commands and ends.
+`v<version>`. Before it edits anything it fetches the pinned host tools for every
+release architecture and stops if upstream has replaced one, because a release
+workflow would only find out after the tag is pushed. Then it prints the two
+`git push` commands and ends.
 
 Pushing is what builds and publishes, so it stays a separate deliberate act.
 Everything the script checks is something a release workflow would fail on

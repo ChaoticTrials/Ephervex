@@ -66,6 +66,16 @@ A published tag is not re-cut. Release the next version instead."
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
 note "releasing ${VERSION} from ${BRANCH}, currently ${CURRENT}"
 
+# --- the host tools the release workflow fetches ----------------------------
+# Upstream publishes appimagetool and the AppImage runtime under rolling tags,
+# so a pinned digest goes stale without anything in this repository changing.
+# The release workflow refuses a mismatch only after it has built and tested
+# everything, which is too late: the tag is already pushed. Fetching the same
+# pins now fails before anything is edited, for every release architecture,
+# because the architectures are pinned from one upstream state.
+step "checking the pinned host tools"
+"${REPO_ROOT}/packaging/provision-host-tools.sh" verify
+
 # --- the version -------------------------------------------------------------
 step "setting the workspace version"
 # Only the `version` under `[workspace.package]`. Every crate inherits from
