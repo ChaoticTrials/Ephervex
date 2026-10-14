@@ -5998,7 +5998,7 @@ fn register_minecraft_editors(
     let state = Rc::clone(minecraft);
     let sender = commands.clone();
     ui.on_minecraft_set_boolean(move |id, on| {
-        edit_minecraft_draft(&handle, &state, &sender, &id, |model, id| {
+        edit_minecraft_row(&handle, &state, &sender, &id, |model, id| {
             model.set_boolean(id, on);
         });
     });
@@ -6007,7 +6007,7 @@ fn register_minecraft_editors(
     let state = Rc::clone(minecraft);
     let sender = commands.clone();
     ui.on_minecraft_set_number(move |id, number| {
-        edit_minecraft_draft(&handle, &state, &sender, &id, |model, id| {
+        edit_minecraft_row(&handle, &state, &sender, &id, |model, id| {
             model.set_number(id, f64::from(number));
         });
     });
@@ -6016,7 +6016,7 @@ fn register_minecraft_editors(
     let state = Rc::clone(minecraft);
     let sender = commands.clone();
     ui.on_minecraft_set_enumeration(move |id, index| {
-        edit_minecraft_draft(&handle, &state, &sender, &id, |model, id| {
+        edit_minecraft_row(&handle, &state, &sender, &id, |model, id| {
             if let Ok(index) = usize::try_from(index) {
                 model.set_enumeration(id, index);
             }
@@ -6027,7 +6027,7 @@ fn register_minecraft_editors(
     let state = Rc::clone(minecraft);
     let sender = commands.clone();
     ui.on_minecraft_set_language(move |id, index| {
-        edit_minecraft_draft(&handle, &state, &sender, &id, |model, id| {
+        edit_minecraft_row(&handle, &state, &sender, &id, |model, id| {
             if let Ok(index) = usize::try_from(index) {
                 model.set_language(id, index);
             }
@@ -6063,7 +6063,7 @@ fn register_minecraft_editors(
     let state = Rc::clone(minecraft);
     let sender = commands.clone();
     ui.on_minecraft_commit_number(move |id, text| {
-        edit_minecraft_draft(&handle, &state, &sender, &id, |model, id| {
+        edit_minecraft_row(&handle, &state, &sender, &id, |model, id| {
             model.set_number_text(id, &text);
         });
     });
@@ -6073,7 +6073,7 @@ fn register_minecraft_editors(
     let state = Rc::clone(minecraft);
     let sender = commands.clone();
     ui.on_minecraft_commit_text(move |id, text| {
-        edit_minecraft_draft(&handle, &state, &sender, &id, |model, id| {
+        edit_minecraft_row(&handle, &state, &sender, &id, |model, id| {
             model.set_text(id, &text);
         });
     });
@@ -6085,6 +6085,8 @@ fn register_minecraft_editors(
     let armed = keys.clone();
     ui.on_minecraft_forget_preference(move |id| {
         // The rows are rebuilt below, which destroys the row being captured.
+        // A reset rebuilds because switches and sliders keep their own
+        // position after interaction and would not follow a row update.
         if let Some(ui) = handle.upgrade() {
             end_minecraft_capture(&ui, &state, &armed);
         }
@@ -6640,7 +6642,8 @@ fn edit_minecraft_draft(
 /// The draft changes exactly as it does for any other edit, but only the
 /// edited row is written back. Rebuilding the list would recreate the control
 /// the user is still in, which is how tabbing from one window size field to
-/// the other loses the field it just moved to.
+/// the other loses the field it just moved to, and how a slider, switch or
+/// dropdown stops taking keys after the first one.
 fn edit_minecraft_row(
     handle: &slint::Weak<AppWindow>,
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
@@ -7028,7 +7031,7 @@ fn apply_minecraft_event(
                 accepted
             };
             if accepted {
-                render_minecraft(ui, minecraft);
+                render_minecraft_in_place(ui, minecraft);
             }
         }
         Event::MinecraftLanguages {
@@ -7048,7 +7051,7 @@ fn apply_minecraft_event(
                 accepted
             };
             if accepted {
-                render_minecraft(ui, minecraft);
+                render_minecraft_in_place(ui, minecraft);
                 // The language verdict is part of what a release can do with
                 // the draft, so the preview is asked again now that it is
                 // known.
@@ -7063,8 +7066,37 @@ fn apply_minecraft_event(
 
 /// Rebuilds the visible rows and everything derived from the draft.
 fn render_minecraft(ui: &AppWindow, minecraft: &Rc<RefCell<MinecraftDefaultsModel>>) {
+    ui.set_minecraft_preference_rows(model(minecraft.borrow().rows()));
+    render_minecraft_summary(ui, minecraft);
+}
+
+/// Shows what a metadata answer changed without recreating any row's control.
+///
+/// The answers arrive after the edit that asked for them, while the user is
+/// still in the control they edited. When the same rows are on screen each is
+/// written back in place; a different set of rows is replaced.
+fn render_minecraft_in_place(ui: &AppWindow, minecraft: &Rc<RefCell<MinecraftDefaultsModel>>) {
+    let rows = minecraft.borrow().rows();
+    let shown = ui.get_minecraft_preference_rows();
+    let same_rows = shown.row_count() == rows.len()
+        && rows.iter().enumerate().all(|(index, row)| {
+            shown
+                .row_data(index)
+                .is_some_and(|shown| shown.id == row.id)
+        });
+    if same_rows {
+        for (index, row) in rows.into_iter().enumerate() {
+            shown.set_row_data(index, row);
+        }
+    } else {
+        ui.set_minecraft_preference_rows(model(rows));
+    }
+    render_minecraft_summary(ui, minecraft);
+}
+
+/// Shows everything the draft decides apart from the rows themselves.
+fn render_minecraft_summary(ui: &AppWindow, minecraft: &Rc<RefCell<MinecraftDefaultsModel>>) {
     let state = minecraft.borrow();
-    ui.set_minecraft_preference_rows(model(state.rows()));
     ui.set_minecraft_category_index(to_i32(state.category_index()));
     ui.set_minecraft_show_advanced(state.show_advanced());
     ui.set_minecraft_only_overridden(state.only_overridden());
@@ -7086,16 +7118,21 @@ fn render_minecraft(ui: &AppWindow, minecraft: &Rc<RefCell<MinecraftDefaultsMode
 /// Refreshes one row in place, leaving every other row's element alone.
 ///
 /// Replacing the whole list rebuilds the elements in it, which would take the
-/// pointer's grip on a control mid-gesture with it. Only the row that changed
-/// is written back.
+/// pointer's grip, or the keyboard focus, on a control mid-gesture with it.
+/// Only the row that changed is written back. An edit that changes which rows
+/// the filter shows leaves no row to write into, so the list is replaced then.
 fn refresh_minecraft_row(
     ui: &AppWindow,
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
     id: &ephervex_core::PreferenceId,
 ) {
     let state = minecraft.borrow();
-    if let Some((index, row)) = state.row_at(id) {
-        ui.get_minecraft_preference_rows().set_row_data(index, row);
+    let shown = ui.get_minecraft_preference_rows();
+    match state.row_at(id) {
+        Some((index, row)) if state.visible_entries().len() == shown.row_count() => {
+            shown.set_row_data(index, row);
+        }
+        _ => ui.set_minecraft_preference_rows(model(state.rows())),
     }
     drop(state);
     refresh_minecraft_totals(ui, minecraft);
@@ -10043,9 +10080,10 @@ mod tests {
     use crate::diagnosis_view::{DiagnosisView, FindingView, OutcomeView, PreviewView};
     use crate::presentation::ActivityPresentation;
     use crate::test_support::{ui_declaration, ui_markup};
-    use crate::ui::WorkspaceHostChoice;
+    use crate::ui::{MinecraftPreferenceRow, WorkspaceHostChoice};
     use ephervex_core::{ArtifactCacheLimit, DiagnosticFix, FindingClass};
     use ephervex_i18n::has;
+    use i_slint_backend_testing::{ElementHandle, ElementQuery};
 
     use super::*;
 
@@ -17137,9 +17175,7 @@ mod tests {
         // A resize settles its own row, so the control the pointer is on and
         // the field the user is in both survive it.
         assert!(production.contains("refresh_minecraft_row(&ui, &state, &preference);"));
-        assert!(
-            production.contains("ui.get_minecraft_preference_rows().set_row_data(index, row);")
-        );
+        assert!(production.contains("shown.set_row_data(index, row);"));
         // An orphaned sizing window would hold the event loop open with no way
         // back to the application.
         assert!(production.contains("ui.window().on_close_requested(move || {"));
@@ -18883,5 +18919,407 @@ mod tests {
         };
         assert!(changed("settings-tab"));
         assert!(changed("page"));
+    }
+
+    /// Tall enough to put every row of a category on screen, which is where a
+    /// query can find its controls.
+    const SCREEN_HEIGHT: u32 = 9000;
+
+    /// More Tab presses than the busiest window has focusable controls.
+    const TAB_LIMIT: usize = 400;
+
+    /// The Minecraft defaults screen as the app wires it, with the shipped
+    /// catalog loaded and the first row of the given editor kind on screen.
+    struct MinecraftScreen {
+        ui: AppWindow,
+        minecraft: Rc<RefCell<MinecraftDefaultsModel>>,
+        row: MinecraftPreferenceRow,
+        /// The row listed right after `row`, when the screen was asked for one.
+        following: Option<MinecraftPreferenceRow>,
+        sender: std::sync::mpsc::Sender<Command>,
+        // The wiring holds clones of the capture; keeping it here keeps it
+        // alive for the whole test.
+        _keys: BindingCapture,
+        commands: std::sync::mpsc::Receiver<Command>,
+    }
+
+    impl MinecraftScreen {
+        fn showing(editor: &str) -> Self {
+            Self::showing_where(|rows| rows.iter().position(|row| row.editor == editor))
+        }
+
+        /// A text field row with a row after it that a key can change, so the
+        /// control Tab leaves the field for can be told from a lost focus.
+        fn showing_field_before_a_keyboard_control() -> Self {
+            let mut screen = Self::showing_where(|rows| {
+                rows.windows(2).position(|pair| {
+                    matches!(pair[0].editor.as_str(), "number" | "text")
+                        && matches!(pair[1].editor.as_str(), "toggle" | "slider" | "enum")
+                })
+            });
+            let rows = screen.minecraft.borrow().rows();
+            let at = rows
+                .iter()
+                .position(|row| row.id == screen.row.id)
+                .expect("the row is listed");
+            screen.following = rows.get(at + 1).cloned();
+            screen
+        }
+
+        fn showing_where(select: impl Fn(&[MinecraftPreferenceRow]) -> Option<usize>) -> Self {
+            let ui = test_window();
+            let (sender, commands) = std::sync::mpsc::channel();
+            let minecraft = Rc::new(RefCell::new(MinecraftDefaultsModel::new()));
+            let keys = BindingCapture::default();
+            register_minecraft_defaults(&ui, &sender, &minecraft, &keys);
+
+            let catalog = ephervex_core::MinecraftPreferenceCatalog::bundled_shared()
+                .expect("the bundled catalog");
+            minecraft
+                .borrow_mut()
+                .apply_snapshot(ephervex_core::MinecraftPreferenceSnapshot {
+                    catalog_minecraft_version: catalog.canonical_minecraft_version.clone(),
+                    entries: catalog
+                        .descriptors
+                        .iter()
+                        .map(|descriptor| ephervex_core::MinecraftPreferenceEntry {
+                            descriptor: descriptor.clone(),
+                            managed: false,
+                            value: None,
+                        })
+                        .collect(),
+                    unusable: Vec::new(),
+                    unrecognized: 0,
+                });
+            minecraft.borrow_mut().set_show_advanced(true);
+            minecraft
+                .borrow_mut()
+                .set_preview_release(&catalog.canonical_minecraft_version);
+            let row = (0..minecraft_defaults::CATEGORIES.len())
+                .find_map(|category| {
+                    minecraft.borrow_mut().select_category(category);
+                    let rows = minecraft.borrow().rows();
+                    select(&rows).map(|index| rows[index].clone())
+                })
+                .expect("the catalog has a row of the wanted kind");
+            render_minecraft(&ui, &minecraft);
+
+            ui.window()
+                .set_size(slint::PhysicalSize::new(1480, SCREEN_HEIGHT));
+            ui.set_page(4);
+            ui.set_settings_tab("Minecraft".into());
+            ui.show().expect("show");
+            slint::platform::update_timers_and_animations();
+            Self {
+                ui,
+                minecraft,
+                row,
+                following: None,
+                sender,
+                _keys: keys,
+                commands,
+            }
+        }
+
+        /// Delivers the answer to the newest preview request, as the backend
+        /// does some time after the edit that asked for it.
+        fn answer_preview(&self) {
+            let generation = self
+                .commands
+                .try_iter()
+                .filter_map(|command| match command {
+                    Command::PreviewMinecraftPreferences { generation, .. } => Some(generation),
+                    _ => None,
+                })
+                .last()
+                .expect("an edit asks for a preview");
+            let release = self.minecraft.borrow().preview_release().to_owned();
+            let preview = ephervex_core::MinecraftPreferencePreview {
+                minecraft_version: release.clone(),
+                source: ephervex_core::CompatibilitySource::Bundled,
+                support: std::collections::BTreeMap::new(),
+                unrepresentable: std::collections::BTreeMap::new(),
+            };
+            apply_minecraft_event(
+                &self.ui,
+                Event::MinecraftPreferencePreview {
+                    generation,
+                    minecraft: release,
+                    preview,
+                },
+                &self.minecraft,
+                &self.sender,
+            );
+            slint::platform::update_timers_and_animations();
+        }
+
+        /// The row as the model currently describes it.
+        fn drafted(&self) -> MinecraftPreferenceRow {
+            let id = minecraft_preference_id(&self.row.id).expect("a catalog id");
+            self.minecraft
+                .borrow()
+                .row_at(&id)
+                .expect("the row stays on screen")
+                .1
+        }
+
+        /// The control for this row, found by the label the row gives it.
+        fn control(&self, role: i_slint_backend_testing::AccessibleRole) -> ElementHandle {
+            self.control_of(&self.row, role)
+        }
+
+        fn control_of(
+            &self,
+            row: &MinecraftPreferenceRow,
+            role: i_slint_backend_testing::AccessibleRole,
+        ) -> ElementHandle {
+            let mut found = ElementQuery::from_root(&self.ui)
+                .match_descendants()
+                .match_accessible_role(role)
+                .find_all()
+                .into_iter()
+                .filter(|element| element.accessible_label().as_ref() == Some(&row.label));
+            let control = found.next().expect("the row has its control on screen");
+            // A query can report one element several times, so uniqueness is
+            // judged by where the element sits.
+            let at = control.absolute_position();
+            assert!(
+                found.all(|other| other.absolute_position() == at),
+                "the control is not unique"
+            );
+            control
+        }
+
+        fn click(&self, control: &ElementHandle, across: f32) {
+            let at = control.absolute_position();
+            let size = control.size();
+            let position =
+                slint::LogicalPosition::new(at.x + size.width * across, at.y + size.height / 2.0);
+            let window = self.ui.window();
+            window.dispatch_event(slint::platform::WindowEvent::PointerMoved { position });
+            window.dispatch_event(slint::platform::WindowEvent::PointerPressed {
+                position,
+                button: slint::platform::PointerEventButton::Left,
+            });
+            window.dispatch_event(slint::platform::WindowEvent::PointerReleased {
+                position,
+                button: slint::platform::PointerEventButton::Left,
+            });
+            slint::platform::update_timers_and_animations();
+        }
+
+        fn press(&self, key: slint::platform::Key) {
+            self.press_text(SharedString::from(key));
+        }
+
+        fn press_text(&self, text: SharedString) {
+            let window = self.ui.window();
+            window.dispatch_event(slint::platform::WindowEvent::KeyPressed { text: text.clone() });
+            window.dispatch_event(slint::platform::WindowEvent::KeyReleased { text });
+            slint::platform::update_timers_and_animations();
+        }
+
+        /// Tabs until the keyboard focus ring is drawn on this control.
+        ///
+        /// Pressing keys on the way would change the controls Tab passes
+        /// through, so the ring is what says where the focus is.
+        fn tab_to(&self, control: &ElementHandle) {
+            let at = control.absolute_position();
+            let size = control.size();
+            for _ in 0..TAB_LIMIT {
+                self.press(slint::platform::Key::Tab);
+                let ringed = ElementQuery::from_root(&self.ui)
+                    .match_descendants()
+                    .match_id("KeyboardFocus::ring")
+                    .find_all()
+                    .into_iter()
+                    .any(|ring| {
+                        let ring = ring.absolute_position();
+                        ring.x >= at.x - 12.0
+                            && ring.x <= at.x + size.width
+                            && ring.y >= at.y - 12.0
+                            && ring.y <= at.y + size.height
+                    });
+                if ringed {
+                    return;
+                }
+            }
+            panic!("Tab never reached the control");
+        }
+
+        /// The row with this id as the model currently describes it.
+        fn drafted_row(&self, id: &SharedString) -> MinecraftPreferenceRow {
+            let id = minecraft_preference_id(id).expect("a catalog id");
+            self.minecraft
+                .borrow()
+                .row_at(&id)
+                .expect("the row stays on screen")
+                .1
+        }
+
+        /// Whether a key meant for the row's editor changes the row, which
+        /// only happens when that editor is the one holding the focus.
+        fn key_changes(&self, row: &MinecraftPreferenceRow) -> bool {
+            use slint::platform::Key;
+
+            let before = self.drafted_row(&row.id);
+            match row.editor.as_str() {
+                "toggle" => self.press_text(" ".into()),
+                "slider" => self.press(Key::RightArrow),
+                _ => {
+                    self.press(Key::DownArrow);
+                    self.press(Key::UpArrow);
+                }
+            }
+            let after = self.drafted_row(&row.id);
+            // A dropdown at either end moves only one way, so the pair of
+            // presses can end where it started; the draft still moved.
+            after.dirty != before.dirty
+                || after.bool_value != before.bool_value
+                || after.enum_index != before.enum_index
+                || (after.number_value - before.number_value).abs() > f32::EPSILON
+        }
+    }
+
+    #[test]
+    fn a_second_arrow_key_on_a_slider_still_reaches_the_same_slider() {
+        use i_slint_backend_testing::AccessibleRole;
+        use slint::platform::Key;
+
+        let screen = MinecraftScreen::showing("slider");
+        let slider = screen.control(AccessibleRole::Slider);
+        // A press on the rail focuses the slider and moves it there.
+        screen.click(&slider, 0.25);
+        let first = screen.drafted();
+        assert!(slider.is_valid(), "the edit rebuilt the slider");
+
+        screen.press(Key::RightArrow);
+        let second = screen.drafted();
+        assert!(slider.is_valid(), "the edit rebuilt the slider");
+        assert!(
+            (second.number_value - (first.number_value + first.number_step)).abs() < 1e-3,
+            "the first arrow key stepped the slider"
+        );
+
+        screen.press(Key::RightArrow);
+        let third = screen.drafted();
+        assert!(slider.is_valid(), "the edit rebuilt the slider");
+        assert!(
+            (third.number_value - (second.number_value + second.number_step)).abs() < 1e-3,
+            "the second arrow key must still reach the slider"
+        );
+    }
+
+    #[test]
+    fn a_second_activation_of_a_switch_still_reaches_the_same_switch() {
+        use i_slint_backend_testing::AccessibleRole;
+
+        let screen = MinecraftScreen::showing("toggle");
+        let switch = screen.control(AccessibleRole::Checkbox);
+        let before = screen.drafted().bool_value;
+
+        screen.tab_to(&switch);
+        screen.press_text(" ".into());
+        assert_eq!(screen.drafted().bool_value, !before);
+        assert!(switch.is_valid(), "the edit rebuilt the switch");
+
+        screen.press_text(" ".into());
+        assert!(switch.is_valid(), "the edit rebuilt the switch");
+        assert_eq!(
+            screen.drafted().bool_value,
+            before,
+            "the second activation must still reach the switch"
+        );
+        assert_eq!(switch.accessible_checked(), Some(before));
+    }
+
+    #[test]
+    fn a_second_arrow_key_on_a_dropdown_still_reaches_the_same_dropdown() {
+        use i_slint_backend_testing::AccessibleRole;
+        use slint::platform::Key;
+
+        let screen = MinecraftScreen::showing("enum");
+        let dropdown = screen.control(AccessibleRole::Combobox);
+        let start = screen.drafted().enum_index;
+        let steps = i32::try_from(screen.row.enum_labels.row_count()).unwrap_or(0);
+        // Each key goes the way that still has room, so a short list or an
+        // end position cannot make a key a no-op.
+        let toward_room = |index: i32| {
+            if index + 1 < steps {
+                (Key::DownArrow, index + 1)
+            } else {
+                (Key::UpArrow, index - 1)
+            }
+        };
+
+        // A click gives the dropdown the focus; the popup it opens is closed
+        // again, leaving the keyboard on the dropdown itself. Tab would pass
+        // other dropdowns on the way, and an arrow key changes those too.
+        screen.click(&dropdown, 0.5);
+        screen.press(Key::Escape);
+        let (key, expected) = toward_room(start);
+        screen.press(key);
+        assert_eq!(screen.drafted().enum_index, expected, "the first key");
+        assert!(dropdown.is_valid(), "the edit rebuilt the dropdown");
+
+        let (key, expected) = toward_room(expected);
+        screen.press(key);
+        assert!(dropdown.is_valid(), "the edit rebuilt the dropdown");
+        assert_eq!(
+            screen.drafted().enum_index,
+            expected,
+            "the second key must still reach the dropdown"
+        );
+    }
+
+    #[test]
+    fn a_preview_answer_after_an_edit_leaves_the_edited_control_in_place() {
+        use i_slint_backend_testing::AccessibleRole;
+        use slint::platform::Key;
+
+        let screen = MinecraftScreen::showing("slider");
+        let slider = screen.control(AccessibleRole::Slider);
+        screen.click(&slider, 0.25);
+        let first = screen.drafted();
+
+        // The answer to the edit's preview request arrives while the user is
+        // still in the slider.
+        screen.answer_preview();
+        assert!(slider.is_valid(), "the preview answer rebuilt the slider");
+
+        screen.press(Key::RightArrow);
+        assert!(
+            (screen.drafted().number_value - (first.number_value + first.number_step)).abs() < 1e-3,
+            "a key after the preview answer must still reach the slider"
+        );
+    }
+
+    #[test]
+    fn tabbing_out_of_a_committed_field_leaves_the_next_control_focusable() {
+        use i_slint_backend_testing::AccessibleRole;
+        use slint::platform::Key;
+
+        let screen = MinecraftScreen::showing_field_before_a_keyboard_control();
+        let following = screen.following.clone().expect("a row follows the field");
+        let field = screen.control(AccessibleRole::TextInput);
+        let before = screen.drafted().text_value;
+
+        screen.click(&field, 0.5);
+        screen.press_text("5".into());
+        // Leaving the field commits it, and the commit must not recreate the
+        // control Tab is moving to.
+        screen.press(Key::Tab);
+        assert!(field.is_valid(), "the commit rebuilt the field");
+        assert_ne!(
+            screen.drafted().text_value,
+            before,
+            "the commit reached the draft"
+        );
+
+        screen.answer_preview();
+        assert!(
+            screen.key_changes(&following),
+            "Tab out of the field left no control to take keys"
+        );
     }
 }
