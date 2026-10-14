@@ -1071,13 +1071,7 @@ impl App {
         if !indexed.root.is_dir() {
             return Err(RegistryError::RootMissing { path: indexed.root }.into());
         }
-        let mut canonical = ephervex_storage::metadata::read_server_metadata(&indexed.root)
-            .map_err(metadata_core_error)?;
-        if canonical.id != id {
-            return Err(RegistryError::ServerMetadataForeign { path: indexed.root }.into());
-        }
-        canonical.root = indexed.root;
-        Ok(canonical)
+        Ok(self.registry().current_server(id)?)
     }
 
     /// The server a deletion acts on.
@@ -1833,10 +1827,6 @@ fn snapshot_from_segments(
         retention,
         pruned_while_reading,
     })
-}
-
-fn metadata_core_error(error: MetadataError) -> CoreError {
-    RegistryError::Metadata(error).into()
 }
 
 fn storage_io(path: &Path, source: std::io::Error) -> CoreError {
@@ -3072,6 +3062,99 @@ mod tests {
             .expect("canonical metadata");
         assert_eq!(canonical.name, "renamed");
         assert_eq!(app.server(server.id).expect("row").name, "renamed");
+    }
+
+    #[test]
+    fn a_server_setting_change_reaches_the_persistent_root_its_promotion_moved_it_to() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let server = app
+            .registry_for_services()
+            .create_server(NewServer::new(
+                "promoted",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("scaffold");
+        let moved = app
+            .paths()
+            .server_root(ephervex_model::StorageClass::Persistent, server.id);
+        std::fs::create_dir_all(moved.parent().expect("parent")).expect("parent directory");
+        std::fs::rename(&server.root, &moved).expect("the promotion's rename");
+        let mut promoted = server.clone();
+        promoted.root.clone_from(&moved);
+        promoted.storage = ephervex_model::StorageClass::Persistent;
+        promoted.updated_at = Utc::now();
+        ephervex_storage::metadata::write_server_metadata(&moved, &promoted)
+            .expect("the promotion's metadata");
+        assert_eq!(
+            app.registry_for_services()
+                .indexed_server(server.id)
+                .expect("row")
+                .root,
+            server.root,
+            "the promotion never reached the index"
+        );
+
+        let committed = app
+            .set_server_runtime_settings(
+                server.id,
+                Some(JavaOverride::new("/opt/jdk/bin/java")),
+                None,
+            )
+            .expect("the change follows the moved files");
+
+        assert_eq!(committed.record.root, moved);
+        let canonical =
+            ephervex_storage::metadata::read_server_metadata(&moved).expect("canonical metadata");
+        assert_eq!(
+            canonical.java_override,
+            Some(JavaOverride::new("/opt/jdk/bin/java"))
+        );
+        let row = app
+            .registry_for_services()
+            .indexed_server(server.id)
+            .expect("row");
+        assert_eq!(row.root, moved);
+        assert_eq!(row.storage, ephervex_model::StorageClass::Persistent);
+    }
+
+    #[test]
+    fn a_server_setting_change_keeps_an_edit_made_while_its_root_was_missing() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let mut server = app
+            .registry_for_services()
+            .create_server(
+                NewServer::new("before", "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(ephervex_model::StorageClass::Persistent),
+            )
+            .expect("scaffold");
+        let away = server.root.with_extension("away");
+        std::fs::rename(&server.root, &away).expect("unmount");
+        server.name = "renamed".to_owned();
+        app.registry_for_services()
+            .update_server(&mut server)
+            .expect("index-only edit");
+        std::fs::rename(&away, &server.root).expect("remount");
+
+        let committed = app
+            .set_server_runtime_settings(
+                server.id,
+                Some(JavaOverride::new("/opt/jdk/bin/java")),
+                None,
+            )
+            .expect("update runtime settings");
+
+        assert_eq!(committed.record.name, "renamed");
+        let canonical = ephervex_storage::metadata::read_server_metadata(&server.root)
+            .expect("canonical metadata");
+        assert_eq!(canonical.name, "renamed");
+        assert!(
+            !canonical
+                .attention
+                .contains(&ephervex_model::AttentionReason::MissingRoot)
+        );
     }
 
     #[test]

@@ -152,7 +152,9 @@ impl App {
 
         let mut servers = Vec::new();
         for id in self.linked_server_ids(instance)? {
-            let server = self.server(id)?;
+            // As indexed, like the instance: a server whose row never learned
+            // of its move is offered again so the retry repairs it.
+            let server = self.registry().indexed_server(id)?;
             if server.storage == StorageClass::Persistent {
                 continue;
             }
@@ -292,10 +294,11 @@ impl App {
             {
                 continue;
             }
-            let server = self.server(*id)?;
-            // A persistent server is already where it would be moved to.
-            if server.storage != StorageClass::Persistent {
-                selected.push(server);
+            // A persistent server is already where it would be moved to. The
+            // row decides, so a move that only the row missed is repaired.
+            if self.registry().indexed_server(*id)?.storage != StorageClass::Persistent {
+                // Read where its files are, for the checks that act on them.
+                selected.push(self.server(*id)?);
             }
         }
         Ok(selected)
@@ -470,6 +473,54 @@ mod tests {
 
         assert!(repeated.instance_warnings.is_empty());
         let row = app.registry().indexed_client(client.id).expect("row");
+        assert_eq!(row.root, persistent);
+        assert_eq!(row.storage, StorageClass::Persistent);
+    }
+
+    #[test]
+    fn a_promotion_whose_server_index_write_failed_offers_the_server_again_and_repairs_its_row() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let client = temporary_client(&app, "Repro");
+        let server = linked_server(&app, base.path(), client.id, "linked");
+        let persistent = app.paths().server_root(StorageClass::Persistent, server);
+        let plan = app.plan_instance_promotion(client.id).expect("plan");
+        let index = app.registry().index().connection();
+        index
+            .execute_batch(
+                "CREATE TRIGGER refuse_instance_writes BEFORE UPDATE ON instances
+                 BEGIN SELECT RAISE(ABORT, 'index is read-only'); END;
+                 CREATE TRIGGER refuse_server_writes BEFORE UPDATE ON servers
+                 BEGIN SELECT RAISE(ABORT, 'index is read-only'); END;",
+            )
+            .expect("install failing triggers");
+        app.promote_instance(client.id, &PromotionRequest::all_of(&plan), &silent())
+            .expect("the published metadata is a committed promotion");
+        index
+            .execute_batch(
+                "DROP TRIGGER refuse_instance_writes; DROP TRIGGER refuse_server_writes;",
+            )
+            .expect("accept index writes again");
+        assert_eq!(app.server(server).expect("read").root, persistent);
+        assert_eq!(
+            app.registry().indexed_server(server).expect("row").storage,
+            StorageClass::Temporary,
+            "the row never learned of the move"
+        );
+
+        let retry_plan = app.plan_instance_promotion(client.id).expect("plan again");
+        assert_eq!(
+            retry_plan.servers.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![server],
+            "the server whose row lags is offered again"
+        );
+        let outcome = app
+            .promote_instance(client.id, &PromotionRequest::all_of(&retry_plan), &silent())
+            .expect("the move that already happened is not refused");
+
+        assert!(outcome.warnings.is_empty());
+        assert!(outcome.server_commit_warnings.is_empty());
+        let row = app.registry().indexed_server(server).expect("row");
         assert_eq!(row.root, persistent);
         assert_eq!(row.storage, StorageClass::Persistent);
     }

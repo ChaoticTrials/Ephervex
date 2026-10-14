@@ -357,9 +357,7 @@ impl Registry {
             let superseded = self
                 .committed_copy_superseding(&indexed)
                 .map(|_| indexed.root.clone());
-            let mut current = canonical_client_at(&record.root, id)?;
-            current.root = record.root;
-            current.storage = storage;
+            let mut current = current_client_of(record)?;
             let warnings = self.update_client_committed(&mut current)?;
             if let Some(stale) = superseded {
                 self.discard_superseded_client_root(&stale, id);
@@ -385,8 +383,12 @@ impl Registry {
             progress,
             || {
                 // Edits stored while the files moved are in the metadata, not
-                // in the record read before the move.
-                let mut current = canonical_client_at(host_files_root(&source, &destination), id)?;
+                // in the record read before the move. An edit only the row
+                // holds outranks the metadata (ADR 0002).
+                let mut current = client_with_newer_row(
+                    self.indexed_client(id)?,
+                    canonical_client_at(host_files_root(&source, &destination), id)?,
+                );
                 current.root.clone_from(&destination);
                 current.storage = storage;
                 let warnings = self.update_client_committed(&mut current)?;
@@ -424,13 +426,22 @@ impl Registry {
         storage: StorageClass,
         progress: &mut dyn FnMut(usize),
     ) -> Result<ServerCommit<ServerRecord>, RegistryError> {
-        let record = self.server(id)?;
-        claim.require(RecordRef::Server(id), &record.root)?;
+        // The files where they are, so a retry after a failed index write
+        // neither copies a stale temporary tree over the committed one nor
+        // leaves the row behind.
+        let indexed = self.indexed_server(id)?;
+        claim.require(RecordRef::Server(id), &indexed.root)?;
+        let record = self.following_moved_server(indexed.clone());
         if record.storage == storage {
-            return Ok(ServerCommit {
-                record,
-                warnings: Vec::new(),
-            });
+            if record.root == indexed.root {
+                return Ok(ServerCommit {
+                    record,
+                    warnings: Vec::new(),
+                });
+            }
+            // The move was committed and only the row never learned of it.
+            let mut current = current_server_of(record)?;
+            return self.update_server_committed(&mut current);
         }
 
         let destination = self.paths.server_root(storage, id);
@@ -450,9 +461,13 @@ impl Registry {
             |_| Ok(()),
             progress,
             || {
-                // The canonical file wins over the index row, which can lag it
+                // The canonical file wins over the index row, which can lag it,
+                // unless the row holds an edit made while the root was missing
                 // (ADR 0002).
-                let mut current = canonical_server_at(host_files_root(&source, &destination), id)?;
+                let mut current = server_with_newer_row(
+                    self.indexed_server(id)?,
+                    canonical_server_at(host_files_root(&source, &destination), id)?,
+                );
                 current.root.clone_from(&destination);
                 current.storage = storage;
                 self.update_server_committed(&mut current)
@@ -751,21 +766,7 @@ impl Registry {
     /// missing: only the index could hold them, so that newer row is current
     /// once the root returns, as reconciliation adopts it.
     pub fn current_client(&self, id: InstanceId) -> Result<ClientRecord, RegistryError> {
-        let indexed = self.client(id)?;
-        if !indexed.root.is_dir() {
-            return Ok(indexed);
-        }
-        let mut canonical = canonical_client_at(&indexed.root, id)?;
-        if client_index_is_newer(&indexed, &canonical) {
-            let mut returned = indexed;
-            returned
-                .attention
-                .retain(|reason| reason != &AttentionReason::MissingRoot);
-            return Ok(returned);
-        }
-        canonical.root = indexed.root;
-        canonical.storage = indexed.storage;
-        Ok(canonical)
+        current_client_of(self.client(id)?)
     }
 
     /// The record addressed at the persistent root when its row still names a
@@ -897,10 +898,15 @@ impl Registry {
     /// Removing files is refused when the root holds another instance's
     /// metadata, because the directory is not verifiably this instance's.
     /// Forgetting the record does not read that metadata.
+    ///
+    /// Unlinking rewrites each linked server's metadata, so the caller passes
+    /// the claims it holds on the servers it listed. A linked server none of
+    /// them covers refuses the deletion before any server is changed.
     pub fn delete_client(
         &self,
         id: InstanceId,
         files: FileDisposition,
+        claimed_servers: &[&HostClaim],
     ) -> Result<(), RegistryError> {
         let indexed = self.indexed_client(id)?;
         let record = self.following_moved_files(indexed.clone());
@@ -913,16 +919,17 @@ impl Registry {
         // deletion without having changed the others.
         let mut linked = Vec::new();
         for server_id in self.linked_server_ids(id)? {
-            let indexed = self.server(server_id)?;
-            let server = if indexed.root.is_dir() {
-                let mut canonical = canonical_server_at(&indexed.root, server_id)?;
-                canonical.root = indexed.root;
-                canonical.storage = indexed.storage;
-                canonical
-            } else {
-                indexed
-            };
-            linked.push(server);
+            // A server linked after the caller listed its servers is being
+            // changed under no claim, and rewriting it could overwrite that.
+            if !claimed_servers
+                .iter()
+                .any(|claim| claim.covers(RecordRef::Server(server_id)))
+            {
+                return Err(RegistryError::HostNotClaimed {
+                    path: self.server(server_id)?.root,
+                });
+            }
+            linked.push(self.current_server(server_id)?);
         }
         for mut server in linked {
             server.linked_client_id = None;
@@ -1109,8 +1116,25 @@ impl Registry {
         Ok(())
     }
 
-    /// Reads one server.
+    /// Reads one server, addressed where its files are.
+    ///
+    /// A row that still names a temporary root while the finished files stand
+    /// at the persistent root, which a move whose index write failed leaves
+    /// behind, is returned at the persistent root, whether the temporary root
+    /// was vacated or a copy could not remove it. Starting, mutating, and
+    /// deleting the server then act on the files that exist (ADR 0002,
+    /// ADR 0025). Reconciliation reads the row as the index holds it, through
+    /// [`Self::indexed_server`].
     pub fn server(&self, id: ServerId) -> Result<ServerRecord, RegistryError> {
+        Ok(self.following_moved_server(self.indexed_server(id)?))
+    }
+
+    /// One server exactly as the index row holds it.
+    ///
+    /// For code that repairs or retries what the row says, such as
+    /// reconciliation and a repeated move. Everything that acts on the
+    /// server's files reads [`Self::server`].
+    pub fn indexed_server(&self, id: ServerId) -> Result<ServerRecord, RegistryError> {
         self.index
             .connection()
             .query_row(
@@ -1123,6 +1147,42 @@ impl Registry {
                 other => RegistryError::from(other),
             })?
             .map_err(RegistryError::from)
+    }
+
+    /// The server as its canonical metadata holds it, at the root
+    /// [`Self::server`] addresses. A server whose root is missing has only its
+    /// index row.
+    ///
+    /// The row lags the metadata after an index write failed behind a
+    /// committed update, so anything that rewrites a server starts from this.
+    /// Metadata that is unreadable or names another server is an error, never
+    /// replaced by the index copy. A row that recorded changes while the root
+    /// was missing is the later state once the root returns (ADR 0002), as
+    /// [`Self::current_client`] applies for clients.
+    pub fn current_server(&self, id: ServerId) -> Result<ServerRecord, RegistryError> {
+        current_server_of(self.server(id)?)
+    }
+
+    /// The record addressed at the persistent root when its row still names a
+    /// temporary one that a move left behind and the finished files stand
+    /// there. The server counterpart of [`Self::client`]'s following (ADR 0025).
+    fn following_moved_server(&self, indexed: ServerRecord) -> ServerRecord {
+        if !indexed.storage.vanishing_is_expected() {
+            return indexed;
+        }
+        let moved = self.paths.server_root(StorageClass::Persistent, indexed.id);
+        if moved == indexed.root
+            || !crate::reconcile::is_finished_server_root(&moved, indexed.id)
+            || (indexed.root.is_dir()
+                && !is_committed_server_copy_of(&moved, &indexed.root, indexed.id))
+        {
+            return indexed;
+        }
+        ServerRecord {
+            root: moved,
+            storage: StorageClass::Persistent,
+            ..indexed
+        }
     }
 
     /// Lists every indexed server, newest first.
@@ -1220,7 +1280,8 @@ impl Registry {
 
     /// Removes a server from the index, and optionally from disk.
     pub fn delete_server(&self, id: ServerId, files: FileDisposition) -> Result<(), RegistryError> {
-        let record = self.server(id)?;
+        let indexed = self.indexed_server(id)?;
+        let record = self.following_moved_server(indexed.clone());
         if files == FileDisposition::Remove
             && metadata::read_server_metadata(&record.root).is_ok_and(|found| found.id != id)
         {
@@ -1229,6 +1290,11 @@ impl Registry {
 
         if files == FileDisposition::Remove {
             remove_tree(&record.root)?;
+            // The temporary copy a committed move could not remove would
+            // otherwise outlive the server it belonged to.
+            if indexed.root != record.root {
+                remove_tree(&indexed.root)?;
+            }
         }
 
         self.index
@@ -1598,6 +1664,61 @@ pub(crate) fn client_index_is_newer(row: &ClientRecord, canonical: &ClientRecord
     row.attention.contains(&AttentionReason::MissingRoot) && row.updated_at > canonical.updated_at
 }
 
+/// The client as its canonical metadata holds it at the row's root, or the row
+/// itself when the root is missing or the row is the later state.
+fn current_client_of(row: ClientRecord) -> Result<ClientRecord, RegistryError> {
+    if !row.root.is_dir() {
+        return Ok(row);
+    }
+    let canonical = canonical_client_at(&row.root, row.id)?;
+    Ok(client_with_newer_row(row, canonical))
+}
+
+/// The later of an index row and the canonical metadata of the same client,
+/// at the row's root and storage class. A newer row is current without the
+/// `MissingRoot` flag that only recorded why the file could not take the edit.
+fn client_with_newer_row(row: ClientRecord, mut canonical: ClientRecord) -> ClientRecord {
+    if client_index_is_newer(&row, &canonical) {
+        let mut returned = row;
+        returned
+            .attention
+            .retain(|reason| reason != &AttentionReason::MissingRoot);
+        return returned;
+    }
+    canonical.root = row.root;
+    canonical.storage = row.storage;
+    canonical
+}
+
+/// Whether a server's index row holds a later state than its canonical
+/// metadata, by the rule [`client_index_is_newer`] applies to clients.
+pub(crate) fn server_index_is_newer(row: &ServerRecord, canonical: &ServerRecord) -> bool {
+    row.attention.contains(&AttentionReason::MissingRoot) && row.updated_at > canonical.updated_at
+}
+
+/// [`current_client_of`] for a server.
+fn current_server_of(row: ServerRecord) -> Result<ServerRecord, RegistryError> {
+    if !row.root.is_dir() {
+        return Ok(row);
+    }
+    let canonical = canonical_server_at(&row.root, row.id)?;
+    Ok(server_with_newer_row(row, canonical))
+}
+
+/// [`client_with_newer_row`] for a server.
+fn server_with_newer_row(row: ServerRecord, mut canonical: ServerRecord) -> ServerRecord {
+    if server_index_is_newer(&row, &canonical) {
+        let mut returned = row;
+        returned
+            .attention
+            .retain(|reason| reason != &AttentionReason::MissingRoot);
+        return returned;
+    }
+    canonical.root = row.root;
+    canonical.storage = row.storage;
+    canonical
+}
+
 /// Whether the finished tree at `persistent` is a promotion committed after
 /// the metadata at `source`, a temporary copy the move could not remove.
 ///
@@ -1608,6 +1729,20 @@ fn is_committed_copy_of(persistent: &Path, source: &Path, id: InstanceId) -> boo
     let (Ok(promoted), Ok(stale)) = (
         metadata::read_client_metadata(persistent),
         metadata::read_client_metadata(source),
+    ) else {
+        return false;
+    };
+    promoted.id == id
+        && stale.id == id
+        && promoted.storage == StorageClass::Persistent
+        && promoted.updated_at > stale.updated_at
+}
+
+/// [`is_committed_copy_of`] for a server.
+fn is_committed_server_copy_of(persistent: &Path, source: &Path, id: ServerId) -> bool {
+    let (Ok(promoted), Ok(stale)) = (
+        metadata::read_server_metadata(persistent),
+        metadata::read_server_metadata(source),
     ) else {
         return false;
     };
@@ -1772,6 +1907,11 @@ pub struct HostClaim {
 }
 
 impl HostClaim {
+    /// Whether this claim is on `host`.
+    fn covers(&self, host: RecordRef) -> bool {
+        self.host == host
+    }
+
     /// Refuses a change to `host` under a claim that covers another.
     fn require(&self, host: RecordRef, root: &Path) -> Result<(), RegistryError> {
         if self.host == host {
@@ -2061,6 +2201,16 @@ mod tests {
         registry.relocate_server(id, &claim, StorageClass::Persistent, progress)
     }
 
+    /// Claims every server linked to a client, as a caller deleting it must.
+    fn claim_linked_servers(registry: &Registry, client: InstanceId) -> Vec<HostClaim> {
+        registry
+            .linked_server_ids(client)
+            .expect("linked")
+            .into_iter()
+            .map(|id| registry.claim_host(RecordRef::Server(id)).expect("claim"))
+            .collect()
+    }
+
     #[cfg(unix)]
     #[test]
     fn instances_cannot_be_created_under_a_root_that_is_not_utf8() {
@@ -2210,7 +2360,7 @@ mod tests {
             .create_published_client(NewClient::new("kept", "1.20.1", LoaderSelection::vanilla()))
             .expect("create");
         registry
-            .delete_client(kept.id, FileDisposition::Keep)
+            .delete_client(kept.id, FileDisposition::Keep, &[])
             .expect("forget");
         assert!(kept.root.is_dir(), "files must survive a forget");
         assert!(matches!(
@@ -2226,7 +2376,7 @@ mod tests {
             ))
             .expect("create");
         registry
-            .delete_client(removed.id, FileDisposition::Remove)
+            .delete_client(removed.id, FileDisposition::Remove, &[])
             .expect("delete");
         assert!(!removed.root.exists());
     }
@@ -2547,8 +2697,10 @@ mod tests {
             .create_server(NewServer::linked("server", client.id))
             .expect("create server");
 
+        let claims = claim_linked_servers(&registry, client.id);
+        let held: Vec<&HostClaim> = claims.iter().collect();
         registry
-            .delete_client(client.id, FileDisposition::Remove)
+            .delete_client(client.id, FileDisposition::Remove, &held)
             .expect("delete client");
         assert_eq!(
             metadata::read_server_metadata(&server.root)
@@ -3046,7 +3198,7 @@ mod tests {
         touch_both_guards(&registry, RecordRef::Client(client.id));
 
         registry
-            .delete_client(client.id, crate::FileDisposition::Remove)
+            .delete_client(client.id, crate::FileDisposition::Remove, &[])
             .expect("delete");
 
         assert_eq!(guard_files(&registry), Vec::<String>::new());
@@ -3080,7 +3232,7 @@ mod tests {
         let recipe = registry.try_claim_recipe(host).expect("try").expect("free");
 
         registry
-            .delete_client(client.id, crate::FileDisposition::Remove)
+            .delete_client(client.id, crate::FileDisposition::Remove, &[])
             .expect("delete");
         assert_eq!(
             guard_files(&registry).len(),
@@ -3111,7 +3263,7 @@ mod tests {
         );
 
         registry
-            .delete_client(gone.id, crate::FileDisposition::Remove)
+            .delete_client(gone.id, crate::FileDisposition::Remove, &[])
             .expect("delete");
 
         assert_eq!(
@@ -3413,7 +3565,7 @@ mod tests {
             restore_index_writes(&registry);
 
             registry
-                .delete_client(client.id, FileDisposition::Remove)
+                .delete_client(client.id, FileDisposition::Remove, &[])
                 .expect("delete");
 
             assert!(!destination.exists(), "copy: {copy}");
@@ -3555,7 +3707,7 @@ mod tests {
         restore_index_writes(&registry);
 
         registry
-            .delete_client(client.id, FileDisposition::Remove)
+            .delete_client(client.id, FileDisposition::Remove, &[])
             .expect("delete");
 
         assert!(!destination.exists());
@@ -4111,7 +4263,7 @@ mod tests {
         metadata::write_client_metadata(&client.root, &foreign).expect("foreign write");
 
         let error = registry
-            .delete_client(client.id, crate::FileDisposition::Remove)
+            .delete_client(client.id, crate::FileDisposition::Remove, &[])
             .expect_err("the directory is not verifiably this instance's");
 
         assert!(
@@ -4122,7 +4274,7 @@ mod tests {
         assert!(registry.client(client.id).is_ok(), "the record is kept");
 
         registry
-            .delete_client(client.id, crate::FileDisposition::Keep)
+            .delete_client(client.id, crate::FileDisposition::Keep, &[])
             .expect("the row is forgotten");
 
         assert!(client.root.is_dir(), "the files are kept");
@@ -4329,8 +4481,10 @@ mod tests {
             std::fs::read(metadata::server_metadata_path(&other.root)).expect("read");
         let other_row_before = registry.server(other.id).expect("row");
 
+        let claims = claim_linked_servers(&registry, client.id);
+        let held: Vec<&HostClaim> = claims.iter().collect();
         let error = registry
-            .delete_client(client.id, crate::FileDisposition::Remove)
+            .delete_client(client.id, crate::FileDisposition::Remove, &held)
             .expect_err("foreign metadata refuses the deletion");
 
         assert!(
@@ -4364,8 +4518,10 @@ mod tests {
             .expect("damaged");
         std::fs::write(metadata::server_metadata_path(&damaged.root), "not json").expect("damage");
 
+        let claims = claim_linked_servers(&registry, client.id);
+        let held: Vec<&HostClaim> = claims.iter().collect();
         let error = registry
-            .delete_client(client.id, crate::FileDisposition::Keep)
+            .delete_client(client.id, crate::FileDisposition::Keep, &held)
             .expect_err("unreadable metadata refuses the deletion");
 
         assert!(matches!(error, RegistryError::Metadata(_)));
@@ -4392,8 +4548,10 @@ mod tests {
         stale.root = environment.base().join("elsewhere");
         metadata::write_server_metadata(&server.root, &stale).expect("stale root");
 
+        let claims = claim_linked_servers(&registry, client.id);
+        let held: Vec<&HostClaim> = claims.iter().collect();
         registry
-            .delete_client(client.id, crate::FileDisposition::Keep)
+            .delete_client(client.id, crate::FileDisposition::Keep, &held)
             .expect("delete");
 
         let on_disk = metadata::read_server_metadata(&server.root).expect("metadata");
@@ -4420,8 +4578,10 @@ mod tests {
         };
         metadata::write_server_metadata(&server.root, &contradicting).expect("storage class");
 
+        let claims = claim_linked_servers(&registry, client.id);
+        let held: Vec<&HostClaim> = claims.iter().collect();
         registry
-            .delete_client(client.id, crate::FileDisposition::Keep)
+            .delete_client(client.id, crate::FileDisposition::Keep, &held)
             .expect("delete");
 
         let on_disk = metadata::read_server_metadata(&server.root).expect("metadata");
@@ -4644,5 +4804,605 @@ mod tests {
             .expect("index-only edit");
 
         assert!(!server.attention.contains(&AttentionReason::MissingRoot));
+    }
+
+    fn created_server(registry: &Registry) -> ServerRecord {
+        registry
+            .create_server(NewServer::new(
+                "before",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create")
+    }
+
+    fn persistent_server(registry: &Registry) -> ServerRecord {
+        registry
+            .create_server(
+                NewServer::new("before", "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(StorageClass::Persistent),
+            )
+            .expect("create")
+    }
+
+    /// Applies one change to a server's current record, as a caller must.
+    fn modify_server(
+        registry: &Registry,
+        id: ServerId,
+        change: impl FnOnce(&mut ServerRecord),
+    ) -> ServerRecord {
+        let mut record = registry.current_server(id).expect("current");
+        change(&mut record);
+        registry
+            .update_server_committed(&mut record)
+            .expect("commit")
+            .record
+    }
+
+    /// Moves a server whose index writes fail, returning the root it moved to.
+    fn move_server_with_failing_index(registry: &Registry, server: &ServerRecord) -> PathBuf {
+        let destination = registry
+            .paths()
+            .server_root(StorageClass::Persistent, server.id);
+        fail_index_writes(registry, "servers");
+        let committed = move_server(registry, server.id, &mut |_| {})
+            .expect("the published metadata is a committed move");
+        assert!(matches!(
+            committed.warnings.as_slice(),
+            [ServerCommitWarning::IndexOutOfSync { .. }]
+        ));
+        destination
+    }
+
+    /// A copy-mode move that is committed but leaves both the row and the
+    /// temporary source behind: the index write and the source removal fail.
+    fn move_server_leaving_row_and_source(registry: &Registry, server: &ServerRecord) -> PathBuf {
+        crate::relocate::force_copy(true);
+        crate::relocate::fail_discarding(Some(server.root.clone()));
+        let destination = move_server_with_failing_index(registry, server);
+        crate::relocate::fail_discarding(None);
+        crate::relocate::force_copy(false);
+        assert!(server.root.is_dir(), "the source could not be removed");
+        destination
+    }
+
+    #[test]
+    fn a_server_whose_move_could_not_update_the_index_is_read_at_its_persistent_root() {
+        for copy in [false, true] {
+            let environment = TestEnvironment::new();
+            let registry = environment.registry();
+            let server = created_server(&registry);
+
+            crate::relocate::force_copy(copy);
+            let destination = move_server_with_failing_index(&registry, &server);
+            crate::relocate::force_copy(false);
+
+            let read = registry.server(server.id).expect("read");
+            assert_eq!(read.root, destination, "copy: {copy}");
+            assert_eq!(read.storage, StorageClass::Persistent, "copy: {copy}");
+            let current = registry.current_server(server.id).expect("current");
+            assert_eq!(current.root, destination, "copy: {copy}");
+            assert_eq!(
+                registry.indexed_server(server.id).expect("row").root,
+                server.root,
+                "the row itself is not rewritten by a read"
+            );
+        }
+    }
+
+    #[test]
+    fn a_server_whose_move_left_both_its_row_and_its_temporary_copy_is_read_at_the_persistent_root()
+    {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = created_server(&registry);
+        let destination = move_server_leaving_row_and_source(&registry, &server);
+
+        let read = registry.server(server.id).expect("read");
+        let current = registry.current_server(server.id).expect("current");
+
+        assert_eq!(read.root, destination);
+        assert_eq!(read.storage, StorageClass::Persistent);
+        assert_eq!(current.root, destination);
+        assert_eq!(
+            registry.indexed_server(server.id).expect("row").root,
+            server.root
+        );
+    }
+
+    #[test]
+    fn a_server_that_vanished_without_a_move_is_still_read_at_the_root_the_index_names() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = created_server(&registry);
+        std::fs::remove_dir_all(&server.root).expect("the OS clears the temporary root");
+
+        let read = registry.server(server.id).expect("read");
+
+        assert_eq!(read.root, server.root);
+        assert_eq!(read.storage, StorageClass::Temporary);
+    }
+
+    #[test]
+    fn a_server_edit_after_a_move_that_could_not_update_the_index_reaches_the_persistent_copy() {
+        for copy in [false, true] {
+            let environment = TestEnvironment::new();
+            let registry = environment.registry();
+            let server = created_server(&registry);
+
+            crate::relocate::force_copy(copy);
+            let destination = move_server_with_failing_index(&registry, &server);
+            crate::relocate::force_copy(false);
+            restore_index_writes(&registry);
+
+            let changed = modify_server(&registry, server.id, |record| {
+                record.name = "after".to_owned();
+            });
+
+            assert_eq!(changed.root, destination, "copy: {copy}");
+            assert_eq!(changed.storage, StorageClass::Persistent);
+            assert_eq!(
+                metadata::read_server_metadata(&destination)
+                    .expect("metadata")
+                    .name,
+                "after",
+                "copy: {copy}"
+            );
+            let row = registry.indexed_server(server.id).expect("row");
+            assert_eq!(row.root, destination, "copy: {copy}");
+            assert_eq!(row.storage, StorageClass::Persistent);
+            assert_eq!(row.name, "after");
+        }
+    }
+
+    #[test]
+    fn a_server_edit_after_a_move_that_left_its_temporary_copy_leaves_the_stale_copy_alone() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = created_server(&registry);
+        let destination = move_server_leaving_row_and_source(&registry, &server);
+        restore_index_writes(&registry);
+
+        modify_server(&registry, server.id, |record| {
+            record.name = "after".to_owned();
+        });
+
+        assert_eq!(
+            metadata::read_server_metadata(&destination)
+                .expect("persistent metadata")
+                .name,
+            "after"
+        );
+        assert_eq!(
+            metadata::read_server_metadata(&server.root)
+                .expect("temporary metadata")
+                .name,
+            "before",
+            "the stale copy is not edited"
+        );
+    }
+
+    #[test]
+    fn deleting_a_server_whose_move_could_not_update_the_index_removes_the_files_where_they_are() {
+        for copy in [false, true] {
+            let environment = TestEnvironment::new();
+            let registry = environment.registry();
+            let server = created_server(&registry);
+
+            crate::relocate::force_copy(copy);
+            let destination = move_server_with_failing_index(&registry, &server);
+            crate::relocate::force_copy(false);
+            restore_index_writes(&registry);
+
+            registry
+                .delete_server(server.id, FileDisposition::Remove)
+                .expect("delete");
+
+            assert!(!destination.exists(), "copy: {copy}");
+            assert!(!server.root.exists(), "copy: {copy}");
+            let report = crate::reconcile::reconcile(&registry).expect("reconcile");
+            assert!(report.reindexed.is_empty(), "copy: {copy}");
+            assert!(registry.list_servers().expect("list").is_empty());
+        }
+    }
+
+    #[test]
+    fn deleting_a_server_whose_move_left_its_temporary_copy_removes_both_copies() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = created_server(&registry);
+        let destination = move_server_leaving_row_and_source(&registry, &server);
+        restore_index_writes(&registry);
+
+        registry
+            .delete_server(server.id, FileDisposition::Remove)
+            .expect("delete");
+
+        assert!(!destination.exists());
+        assert!(!server.root.exists());
+        let report = crate::reconcile::reconcile(&registry).expect("reconcile");
+        assert!(report.reindexed.is_empty());
+        assert!(registry.list_servers().expect("list").is_empty());
+    }
+
+    #[test]
+    fn retrying_a_server_move_whose_index_write_failed_repairs_the_row() {
+        for copy in [false, true] {
+            let environment = TestEnvironment::new();
+            let registry = environment.registry();
+            let server = created_server(&registry);
+            crate::relocate::force_copy(copy);
+            let destination = move_server_with_failing_index(&registry, &server);
+            crate::relocate::force_copy(false);
+            restore_index_writes(&registry);
+
+            let retried = move_server(&registry, server.id, &mut |_| {}).expect("retry");
+
+            assert!(retried.warnings.is_empty(), "copy: {copy}");
+            let row = registry.indexed_server(server.id).expect("row");
+            assert_eq!(row.root, destination, "copy: {copy}");
+            assert_eq!(row.storage, StorageClass::Persistent);
+        }
+    }
+
+    #[test]
+    fn retrying_a_server_move_that_left_its_temporary_copy_keeps_later_edits_and_repairs_the_row() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = created_server(&registry);
+        let destination = move_server_leaving_row_and_source(&registry, &server);
+        modify_server(&registry, server.id, |record| {
+            record.name = "after".to_owned();
+        });
+        restore_index_writes(&registry);
+
+        let retried = move_server(&registry, server.id, &mut |_| {}).expect("retry");
+
+        assert!(retried.warnings.is_empty());
+        assert_eq!(retried.record.root, destination);
+        assert_eq!(retried.record.name, "after");
+        let row = registry.indexed_server(server.id).expect("row");
+        assert_eq!(row.root, destination);
+        assert_eq!(row.storage, StorageClass::Persistent);
+        assert_eq!(row.name, "after");
+        assert_eq!(
+            metadata::read_server_metadata(&destination)
+                .expect("metadata")
+                .name,
+            "after",
+            "the committed copy is not replaced by the stale one"
+        );
+    }
+
+    #[test]
+    fn a_persistent_server_copy_older_than_the_temporary_one_the_row_names_is_not_followed() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = created_server(&registry);
+        let persistent = registry
+            .paths()
+            .server_root(StorageClass::Persistent, server.id);
+
+        crate::relocate::force_copy(true);
+        move_server(&registry, server.id, &mut |_| {}).expect("promote");
+        // Demoting copies the files back and cannot remove the persistent tree.
+        crate::relocate::fail_discarding(Some(persistent.clone()));
+        let claim = registry
+            .claim_host(RecordRef::Server(server.id))
+            .expect("claim");
+        let demoted = registry
+            .relocate_server(server.id, &claim, StorageClass::Temporary, &mut |_| {})
+            .expect("demote");
+        crate::relocate::fail_discarding(None);
+        crate::relocate::force_copy(false);
+        assert!(persistent.is_dir(), "the old persistent tree stays");
+
+        let read = registry.server(server.id).expect("read");
+
+        assert_eq!(read.root, demoted.record.root);
+        assert_eq!(read.storage, StorageClass::Temporary);
+    }
+
+    /// A persistent server changed while its root was missing, whose older
+    /// metadata file is back in place before reconciliation has run.
+    fn server_changed_while_its_root_was_missing(registry: &Registry) -> ServerRecord {
+        let server = persistent_server(registry);
+        let older = metadata::read_server_metadata(&server.root).expect("metadata");
+        let backup = server.root.with_extension("backup");
+        std::fs::rename(&server.root, &backup).expect("unmount");
+        let changed = modify_server(registry, server.id, |record| {
+            record.name = "renamed".to_owned();
+            record.java_override = Some(JavaOverride::new("/opt/jdk/bin/java"));
+        });
+        assert!(changed.attention.contains(&AttentionReason::MissingRoot));
+        std::fs::rename(&backup, &server.root).expect("remount");
+        assert_eq!(
+            metadata::read_server_metadata(&server.root)
+                .expect("metadata")
+                .name,
+            older.name
+        );
+        changed
+    }
+
+    #[test]
+    fn a_newer_index_row_is_the_current_server_once_a_missing_root_returns() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let changed = server_changed_while_its_root_was_missing(&registry);
+
+        let current = registry.current_server(changed.id).expect("current");
+
+        assert_eq!(current.name, "renamed");
+        assert_eq!(
+            current.java_override,
+            Some(JavaOverride::new("/opt/jdk/bin/java"))
+        );
+        assert!(!current.attention.contains(&AttentionReason::MissingRoot));
+    }
+
+    #[test]
+    fn a_server_row_without_the_missing_root_flag_never_outranks_the_metadata() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = created_server(&registry);
+        let mut newer_row = registry.server(server.id).expect("row");
+        newer_row.name = "index only".to_owned();
+        newer_row.updated_at = server.updated_at + chrono::Duration::seconds(60);
+        registry
+            .synchronize_server_index(&newer_row)
+            .expect("write the row");
+
+        let current = registry.current_server(server.id).expect("current");
+
+        assert_eq!(current.name, "before");
+    }
+
+    #[test]
+    fn moving_a_server_after_its_missing_root_returns_keeps_the_index_only_edits() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let changed = server_changed_while_its_root_was_missing(&registry);
+        let claim = registry
+            .claim_host(RecordRef::Server(changed.id))
+            .expect("claim");
+
+        let moved = registry
+            .relocate_server(changed.id, &claim, StorageClass::Temporary, &mut |_| {})
+            .expect("move")
+            .record;
+
+        assert_eq!(moved.name, "renamed");
+        assert_eq!(moved.java_override, changed.java_override);
+        assert!(!moved.attention.contains(&AttentionReason::MissingRoot));
+        let canonical = metadata::read_server_metadata(&moved.root).expect("metadata");
+        assert_eq!(canonical.name, "renamed");
+        assert_eq!(canonical.java_override, changed.java_override);
+        assert!(!canonical.attention.contains(&AttentionReason::MissingRoot));
+        let row = registry.indexed_server(changed.id).expect("row");
+        assert_eq!(row.name, "renamed");
+        assert_eq!(row.root, moved.root);
+    }
+
+    #[test]
+    fn moving_a_client_after_its_missing_root_returns_keeps_the_index_only_edits() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = persistent_client(&registry);
+        let backup = environment.base().join("backup");
+        std::fs::rename(&client.root, &backup).expect("unmount");
+        registry
+            .modify_client(client.id, |record| {
+                record.name = "renamed".to_owned();
+                record.java_override = Some(JavaOverride::new("/opt/jdk/bin/java"));
+            })
+            .expect("index-only change");
+        std::fs::rename(&backup, &client.root).expect("remount");
+        let claim = registry
+            .claim_host(RecordRef::Client(client.id))
+            .expect("claim");
+
+        let moved = registry
+            .relocate_client(client.id, &claim, StorageClass::Temporary, &mut |_| {})
+            .expect("move")
+            .record;
+
+        assert_eq!(moved.name, "renamed");
+        assert!(!moved.attention.contains(&AttentionReason::MissingRoot));
+        let canonical = metadata::read_client_metadata(&moved.root).expect("metadata");
+        assert_eq!(canonical.name, "renamed");
+        assert_eq!(
+            canonical.java_override,
+            Some(JavaOverride::new("/opt/jdk/bin/java"))
+        );
+        assert!(!canonical.attention.contains(&AttentionReason::MissingRoot));
+    }
+
+    #[test]
+    fn repairing_the_row_of_a_moved_host_keeps_the_edits_a_newer_row_holds() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = created_client(&registry);
+        let server = created_server(&registry);
+        let client_destination = move_client_with_failing_index(&registry, &client).1;
+        restore_index_writes(&registry);
+        let server_destination = move_server_with_failing_index(&registry, &server);
+        restore_index_writes(&registry);
+        let later = Utc::now() + chrono::Duration::seconds(60);
+        let mut client_row = registry.indexed_client(client.id).expect("row");
+        client_row.name = "row only".to_owned();
+        client_row.updated_at = later;
+        client_row.add_attention(AttentionReason::MissingRoot);
+        registry
+            .synchronize_client_index(&client_row)
+            .expect("row edit");
+        let mut server_row = registry.indexed_server(server.id).expect("row");
+        server_row.name = "row only".to_owned();
+        server_row.updated_at = later;
+        server_row.add_attention(AttentionReason::MissingRoot);
+        registry
+            .synchronize_server_index(&server_row)
+            .expect("row edit");
+
+        let claim = registry
+            .claim_host(RecordRef::Client(client.id))
+            .expect("claim");
+        let repaired = registry
+            .relocate_client(client.id, &claim, StorageClass::Persistent, &mut |_| {})
+            .expect("repair")
+            .record;
+        let server_claim = registry
+            .claim_host(RecordRef::Server(server.id))
+            .expect("claim");
+        let repaired_server = registry
+            .relocate_server(
+                server.id,
+                &server_claim,
+                StorageClass::Persistent,
+                &mut |_| {},
+            )
+            .expect("repair")
+            .record;
+
+        assert_eq!(repaired.root, client_destination);
+        assert_eq!(repaired.name, "row only");
+        assert!(!repaired.attention.contains(&AttentionReason::MissingRoot));
+        assert_eq!(
+            metadata::read_client_metadata(&client_destination)
+                .expect("metadata")
+                .name,
+            "row only"
+        );
+        assert_eq!(repaired_server.root, server_destination);
+        assert_eq!(repaired_server.name, "row only");
+        assert!(
+            !repaired_server
+                .attention
+                .contains(&AttentionReason::MissingRoot)
+        );
+        assert_eq!(
+            metadata::read_server_metadata(&server_destination)
+                .expect("metadata")
+                .name,
+            "row only"
+        );
+    }
+
+    #[test]
+    fn deleting_a_client_unlinks_a_server_keeping_the_edits_a_newer_index_row_holds() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = created_client(&registry);
+        let server = registry
+            .create_server(
+                NewServer::linked("before", client.id).with_storage(StorageClass::Persistent),
+            )
+            .expect("linked server");
+        let backup = server.root.with_extension("backup");
+        std::fs::rename(&server.root, &backup).expect("unmount");
+        let changed = modify_server(&registry, server.id, |record| {
+            record.name = "renamed".to_owned();
+        });
+        std::fs::rename(&backup, &server.root).expect("remount");
+        assert!(changed.attention.contains(&AttentionReason::MissingRoot));
+        let claim = registry
+            .claim_host(RecordRef::Server(server.id))
+            .expect("claim");
+
+        registry
+            .delete_client(client.id, FileDisposition::Keep, &[&claim])
+            .expect("delete");
+
+        let canonical = metadata::read_server_metadata(&server.root).expect("metadata");
+        assert_eq!(canonical.name, "renamed");
+        assert_eq!(canonical.linked_client_id, None);
+        assert!(!canonical.attention.contains(&AttentionReason::MissingRoot));
+        let row = registry.indexed_server(server.id).expect("row");
+        assert_eq!(row.name, "renamed");
+        assert_eq!(row.linked_client_id, None);
+    }
+
+    #[test]
+    fn deleting_a_client_unlinks_a_server_at_the_persistent_root_its_move_reached() {
+        for copy in [false, true] {
+            let environment = TestEnvironment::new();
+            let registry = environment.registry();
+            let client = created_client(&registry);
+            let server = registry
+                .create_server(NewServer::linked("before", client.id))
+                .expect("linked server");
+            crate::relocate::force_copy(copy);
+            let destination = move_server_with_failing_index(&registry, &server);
+            crate::relocate::force_copy(false);
+            restore_index_writes(&registry);
+            let claim = registry
+                .claim_host(RecordRef::Server(server.id))
+                .expect("claim");
+
+            registry
+                .delete_client(client.id, FileDisposition::Keep, &[&claim])
+                .expect("delete");
+
+            let canonical = metadata::read_server_metadata(&destination).expect("metadata");
+            assert_eq!(canonical.linked_client_id, None, "copy: {copy}");
+            let row = registry.indexed_server(server.id).expect("row");
+            assert_eq!(row.root, destination, "copy: {copy}");
+            assert_eq!(row.linked_client_id, None, "copy: {copy}");
+        }
+    }
+
+    #[test]
+    fn deleting_a_client_refuses_a_server_linked_after_the_callers_listing() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = created_client(&registry);
+        let listed = registry
+            .create_server(NewServer::linked("a-listed", client.id))
+            .expect("listed");
+        let claim = registry
+            .claim_host(RecordRef::Server(listed.id))
+            .expect("claim");
+        let late = registry
+            .create_server(NewServer::linked("b-late", client.id))
+            .expect("linked after the listing");
+        let late_before = std::fs::read(metadata::server_metadata_path(&late.root)).expect("read");
+        let listed_before =
+            std::fs::read(metadata::server_metadata_path(&listed.root)).expect("read");
+
+        let error = registry
+            .delete_client(client.id, FileDisposition::Remove, &[&claim])
+            .expect_err("a server no claim covers refuses the deletion");
+
+        assert!(
+            matches!(&error, RegistryError::HostNotClaimed { path } if *path == late.root),
+            "{error:?}"
+        );
+        assert_eq!(
+            std::fs::read(metadata::server_metadata_path(&late.root)).expect("read"),
+            late_before,
+            "the unclaimed server is not rewritten"
+        );
+        assert_eq!(
+            std::fs::read(metadata::server_metadata_path(&listed.root)).expect("read"),
+            listed_before,
+            "no claimed server is changed either"
+        );
+        assert_eq!(
+            registry.server(late.id).expect("row").linked_client_id,
+            Some(client.id)
+        );
+        assert!(client.root.is_dir(), "no files were removed");
+        assert!(registry.client(client.id).is_ok(), "the client is kept");
+
+        let late_claim = registry
+            .claim_host(RecordRef::Server(late.id))
+            .expect("claim");
+        registry
+            .delete_client(client.id, FileDisposition::Keep, &[&claim, &late_claim])
+            .expect("every linked server claimed");
+        assert_eq!(
+            registry.server(late.id).expect("row").linked_client_id,
+            None
+        );
     }
 }

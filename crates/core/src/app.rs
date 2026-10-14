@@ -695,27 +695,41 @@ impl App {
     ) -> CoreResult<Vec<ServerRecord>> {
         self.registry()
             .refuse_removing_foreign_client_files(id, files)?;
-        let mut servers = Vec::new();
-        // Every server is checked before any is deleted, so a refusal removes nothing.
+        let mut servers: Vec<(ServerRecord, ephervex_storage::HostClaim)> = Vec::new();
+        // Every listed server is checked before any is deleted, so a refusal removes nothing.
         // Each stays claimed until the client is gone, so none starts in between.
-        for server in self.linked_server_ids(id)? {
-            let claim = self
-                .registry()
-                .claim_host(ephervex_storage::RecordRef::Server(server))?;
-            let record = self.server_for_deletion(server, files)?;
-            let runtime = crate::server::settled_runtime(&record.root)?;
-            if crate::server::stoppable_for_deletion(&runtime) {
-                return Err(crate::CoreError::LinkedServerRunning { name: record.name });
+        // The listing is repeated until it holds only claimed servers, so one
+        // linked meanwhile is deleted with the client instead of being unlinked.
+        loop {
+            let mut claimed_more = false;
+            for server in self.linked_server_ids(id)? {
+                if servers.iter().any(|(record, _)| record.id == server) {
+                    continue;
+                }
+                let claim = self
+                    .registry()
+                    .claim_host(ephervex_storage::RecordRef::Server(server))?;
+                let record = self.server_for_deletion(server, files)?;
+                let runtime = crate::server::settled_runtime(&record.root)?;
+                if crate::server::stoppable_for_deletion(&runtime) {
+                    return Err(crate::CoreError::LinkedServerRunning { name: record.name });
+                }
+                if runtime.may_be_running() {
+                    return Err(crate::CoreError::LinkedServerUnstoppable { name: record.name });
+                }
+                servers.push((record, claim));
+                claimed_more = true;
             }
-            if runtime.may_be_running() {
-                return Err(crate::CoreError::LinkedServerUnstoppable { name: record.name });
+            if !claimed_more {
+                break;
             }
-            servers.push((record, claim));
         }
         for (server, _claim) in &servers {
             self.delete_claimed_server(server, files)?;
         }
-        self.registry().delete_client(id, files)?;
+        let claims: Vec<&ephervex_storage::HostClaim> =
+            servers.iter().map(|(_, claim)| claim).collect();
+        self.registry().delete_client(id, files, &claims)?;
         Ok(servers.into_iter().map(|(record, _)| record).collect())
     }
 

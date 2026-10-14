@@ -761,9 +761,14 @@ mod tests {
             app.launch_and_connect_availability(client.id, ServerId::new()),
             Err(CoreError::Storage(_))
         ));
+        let claim = app
+            .registry_for_services()
+            .claim_host(ephervex_storage::RecordRef::Server(linked.id))
+            .expect("claim the linked server");
         app.registry_for_services()
-            .delete_client(client.id, FileDisposition::Keep)
+            .delete_client(client.id, FileDisposition::Keep, &[&claim])
             .expect("delete client");
+        drop(claim);
         assert!(matches!(
             app.launch_and_connect_availability(client.id, linked.id),
             Err(CoreError::Storage(_))

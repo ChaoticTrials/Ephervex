@@ -245,7 +245,11 @@ fn no_entry_point_sees_an_instance_before_it_is_published() {
     // -- deletion and duplication ------------------------------------------
     assert!(
         matches!(
-            registry.delete_client(unpublished.id, ephervex_storage::FileDisposition::Remove),
+            registry.delete_client(
+                unpublished.id,
+                ephervex_storage::FileDisposition::Remove,
+                &[]
+            ),
             Err(ephervex_storage::RegistryError::InstanceUnknown { .. })
         ),
         "an unpublished instance is not deletable by id; only its creator can discard it"

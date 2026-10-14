@@ -86,24 +86,29 @@ record is corrected rather than deleted. Without this, an interrupted promotion
 would cost the instance its linked servers on the next start. A staging
 directory is never adopted; reconciliation reports it and leaves it alone.
 
-A client read before the next reconciliation, for example after the move's index
-write failed, follows the files in the same way: reading it, launching it,
-duplicating it, changing it, and deleting it with its files all address the
-persistent root, and a change repairs the row, instead of acting on a row that
-names a directory that no longer exists. The same holds when a copy could not
+A client or server read before the next reconciliation, for example after the
+move's index write failed, follows the files in the same way: reading it,
+starting it, duplicating a client, changing it, and deleting it with its files
+all address the persistent root, and a change repairs the row, instead of
+acting on a row that names a directory that no longer exists. The same holds when a copy could not
 remove the temporary source and it still stands: the persistent tree is
 followed when its metadata names it persistent and was written after the
 temporary one's, so a stale persistent tree left by a demotion never displaces
 the instance the row names. Deleting the instance with its files removes both
-trees. Reconciliation reads the row as indexed and repairs it to the persistent
-root when the temporary root is gone and when a committed persistent copy
-supersedes the temporary tree that still stands; it never stamps the stale
-tree. A persistent tree that is not the newer, persistent copy is left alone and
-reported as a conflicting root. Every repair of such a row, whether by a change,
-a repeated promotion, or reconciliation, then removes the superseded temporary
-tree, and a failure to remove it is logged. A repeated promotion follows the
-files, and repairs the row without copying the stale temporary tree over the
-committed one.
+trees. Unlinking a deleted client's servers rewrites each from the same
+followed record. Reconciliation of a client reads the row as indexed and
+repairs it to the persistent root when the temporary root is gone and when a
+committed persistent copy supersedes the temporary tree that still stands; it
+never stamps the stale tree. A persistent client tree that is not the newer,
+persistent copy is left alone and reported as a conflicting root. Every repair
+of such a client row, whether by a change, a repeated promotion, or
+reconciliation, then removes the superseded temporary tree, and a failure to
+remove it is logged. Reconciliation of a server repairs its row only when the
+temporary root is gone; while both trees stand it leaves the row alone and
+reports the persistent tree as a conflicting root, and the temporary tree is
+removed only when the server is deleted with its files. A repeated promotion
+follows the files, and repairs the row without copying the stale temporary tree
+over the committed one.
 
 **Linked servers are a per-server choice, not a cascade.** A server has its own
 storage class and its own world. Every temporary linked server is offered,

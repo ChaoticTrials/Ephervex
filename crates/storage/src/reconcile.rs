@@ -28,8 +28,8 @@ use ephervex_model::{AttentionReason, InstanceId, ServerId, StorageClass};
 use crate::metadata::{self, MetadataError};
 use crate::records::{ClientRecord, FileDisposition, ServerRecord};
 use crate::registry::{
-    HostProbe, Registry, RegistryError, canonical_client_at, canonical_server_at,
-    client_index_is_newer,
+    HostClaim, HostProbe, Registry, RegistryError, canonical_client_at, canonical_server_at,
+    client_index_is_newer, server_index_is_newer,
 };
 
 /// Which record a reconciliation entry refers to.
@@ -261,8 +261,8 @@ fn reconcile_listed_clients(
 /// server is claimed first and stays claimed until the client is gone. The
 /// client is kept, and the pass carries on, when:
 ///
-/// - a linked server is being changed or started elsewhere: not reported, the
-///   next pass finds it idle;
+/// - a linked server is being changed or started elsewhere, or was linked after
+///   the servers were listed: not reported, the next pass finds it idle;
 /// - a linked server's claim cannot be tried, or its canonical metadata cannot
 ///   be read, cannot be published, or names another server: reported as
 ///   unhealthy.
@@ -297,10 +297,19 @@ fn forget_stale_client(
         }
     }
 
-    let outcome = registry.delete_client(id, FileDisposition::Keep);
+    let held: Vec<&HostClaim> = claims.iter().collect();
+    let outcome = registry.delete_client(id, FileDisposition::Keep, &held);
     drop(claims);
     match outcome {
         Ok(()) => Ok(true),
+        // A server linked since the listing is claimed by the next pass.
+        Err(RegistryError::HostNotClaimed { .. }) => {
+            tracing::info!(
+                instance_id = %id,
+                "a server was linked to the stale temporary instance meanwhile; keeping it for now"
+            );
+            Ok(false)
+        }
         Err(
             error @ (RegistryError::ServerUnknown { .. }
             | RegistryError::ServerMetadataForeign { .. }
@@ -561,7 +570,7 @@ fn reconcile_listed_servers(
         if matches!(probe, HostProbe::Mutating) {
             continue;
         }
-        let record = match registry.server(listed.id) {
+        let record = match registry.indexed_server(listed.id) {
             Ok(record) => record,
             Err(RegistryError::ServerUnknown { .. }) => continue,
             Err(error) => return Err(error),
@@ -686,9 +695,7 @@ fn reconcile_server_against_metadata(
             } else {
                 let recorded_root_differs = canonical.root != record.root;
                 canonical.root.clone_from(&record.root);
-                let index_is_newer = record.attention.contains(&AttentionReason::MissingRoot)
-                    && record.updated_at > canonical.updated_at;
-                if index_is_newer {
+                if server_index_is_newer(&record, &canonical) {
                     adopted = true;
                 } else {
                     if record.attention.contains(&AttentionReason::MissingRoot) {
@@ -1015,7 +1022,7 @@ fn reindex_orphaned_servers(
         }
 
         if known.contains(&record.id) {
-            let indexed = registry.server(record.id)?;
+            let indexed = registry.indexed_server(record.id)?;
             if indexed.root != directory && indexed.root.is_dir() {
                 report.server_conflicts.push(ServerRootConflict {
                     id: record.id,
@@ -1205,7 +1212,7 @@ pub(crate) fn is_finished_client_root(root: &Path, id: InstanceId) -> bool {
 }
 
 /// The same three conditions for a dedicated server.
-fn is_finished_server_root(root: &Path, id: ServerId) -> bool {
+pub(crate) fn is_finished_server_root(root: &Path, id: ServerId) -> bool {
     metadata::is_server_root(root)
         && !metadata::is_incomplete(root)
         && metadata::read_server_metadata(root).is_ok_and(|found| found.id == id)
@@ -3242,7 +3249,7 @@ mod tests {
             .expect("create");
         let stale_listing = registry.list_clients().expect("list");
         registry
-            .delete_client(client.id, FileDisposition::Keep)
+            .delete_client(client.id, FileDisposition::Keep, &[])
             .expect("delete");
 
         let mut report = ReconciliationReport::default();
@@ -3587,7 +3594,7 @@ mod tests {
         let snapshot = snapshot_copy_of_a_persistent_client(&registry, &client);
         let _transaction = leave_client_restore_unfinished(&environment, &client, &snapshot);
         registry
-            .delete_client(client.id, FileDisposition::Keep)
+            .delete_client(client.id, FileDisposition::Keep, &[])
             .expect("lose the index row");
 
         let report = reconcile(&registry).expect("reconcile");
@@ -3617,7 +3624,7 @@ mod tests {
         let transaction = leave_client_restore_unfinished(&environment, &client, &snapshot);
         make_restore_unrecoverable(&transaction);
         registry
-            .delete_client(client.id, FileDisposition::Keep)
+            .delete_client(client.id, FileDisposition::Keep, &[])
             .expect("lose the index row");
 
         let report = reconcile(&registry).expect("reconcile");
@@ -3648,7 +3655,7 @@ mod tests {
         let other_process = hold_as_another_process(&registry, RecordRef::Client(client.id));
         let transaction = leave_client_restore_unfinished(&environment, &client, &snapshot);
         registry
-            .delete_client(client.id, FileDisposition::Keep)
+            .delete_client(client.id, FileDisposition::Keep, &[])
             .expect("lose the index row");
 
         let report = reconcile(&registry).expect("reconcile");
@@ -3668,7 +3675,7 @@ mod tests {
         let client = persistent_client(&registry, "half built");
         metadata::mark_incomplete(&client.root).expect("marker");
         registry
-            .delete_client(client.id, FileDisposition::Keep)
+            .delete_client(client.id, FileDisposition::Keep, &[])
             .expect("lose the index row");
 
         let report = reconcile(&registry).expect("reconcile");
