@@ -43,9 +43,9 @@ contents.
 - An instance created by hand acquires a recipe the first time something is
   installed into it, describing the instance it already is.
 - `SideRequirement` gains `Unknown`, recording an undeclared side as undeclared.
-  It never installs on its own. The `.mrpack` format cannot produce it: that
-  format has three environment values, and an omitted `env` object is defined to
-  mean required on both sides.
+  It never installs on its own. A `.mrpack` file whose `env` says `unknown` on a
+  side produces it, while an omitted `env` object is defined to mean required on
+  both sides.
 - The recipe format version is 2. A version 1 build would drop these entries
   silently and build a server missing them, so it refuses to read the file
   instead. Version 1 recipes still read; the new fields default.

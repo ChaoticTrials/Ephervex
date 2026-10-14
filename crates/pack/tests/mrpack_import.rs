@@ -28,7 +28,8 @@ use ephervex_download::{
 use ephervex_model::{LoaderKind, ModOrigin};
 use ephervex_pack::{
     ExtractionLimits, MaterializeRequest, OpenArtifacts, OptionalSelection, PackArchive, PackError,
-    PackFormat, PackPolicy, PackSide, SideRequirement, analyze, materialize, retained_recipe,
+    PackFormat, PackPolicy, PackSide, SideRequirement, UnknownServerFiles, analyze, materialize,
+    retained_recipe,
 };
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path as path_matcher};
@@ -963,5 +964,213 @@ async fn an_override_that_replaces_a_declared_non_mod_file_on_only_one_side_is_r
     assert!(
         matches!(error, PackError::OverrideShadowsDeclaredFile { ref path } if path == Path::new("resourcepacks/x.zip")),
         "{error:?}"
+    );
+}
+
+/// Builds a `.mrpack` whose files are `(path, bytes, client env, server env)`,
+/// served from `server`.
+async fn pack_declaring_files_with_environments(
+    workspace: &Path,
+    server: &MockServer,
+    declared: &[(&str, &[u8], &str, &str)],
+) -> PathBuf {
+    use sha1::Digest as _;
+    let mut files = Vec::new();
+    for (declared_path, body, client, side) in declared {
+        let name = Path::new(declared_path)
+            .file_name()
+            .expect("a file name")
+            .to_string_lossy()
+            .into_owned();
+        Mock::given(method("GET"))
+            .and(path_matcher(format!("/data/a/{name}")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.to_vec()))
+            .mount(server)
+            .await;
+        files.push(serde_json::json!({
+            "path": declared_path,
+            "hashes": {
+                "sha1": hex::encode(sha1::Sha1::digest(body)),
+                "sha512": hex::encode(sha2::Sha512::digest(body)),
+            },
+            "env": { "client": client, "server": side },
+            "downloads": [format!("{}/data/a/{name}", server.uri())],
+            "fileSize": body.len(),
+        }));
+    }
+    let index = serde_json::json!({
+        "formatVersion": 1,
+        "game": "minecraft",
+        "versionId": "1.0.0",
+        "name": "Undeclared environments",
+        "files": files,
+        "dependencies": { "minecraft": "1.20.1", "neoforge": "47.1.106" },
+    });
+
+    let archive = workspace.join("undeclared-environments.mrpack");
+    build_archive(&archive, index.to_string().as_bytes(), &[]);
+    archive
+}
+
+/// Imports a client from a pack with `unknown` on the client side, the server
+/// side, and both. The server and workspace stay alive with the result.
+async fn import_pack_with_undeclared_environments() -> (tempfile::TempDir, MockServer, Imported) {
+    let server = MockServer::start().await;
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let archive = pack_declaring_files_with_environments(
+        workspace.path(),
+        &server,
+        &[
+            ("mods/client-unknown.jar", b"one", "unknown", "required"),
+            ("mods/server-unknown.jar", b"two", "required", "unknown"),
+            ("mods/both-unknown.jar", b"three", "unknown", "unknown"),
+            (
+                "mods/server-unsupported.jar",
+                b"four",
+                "required",
+                "unsupported",
+            ),
+        ],
+    )
+    .await;
+
+    let imported = import(
+        workspace.path(),
+        &archive,
+        &loopback_policy(&server),
+        &OptionalSelection::none(),
+    )
+    .await;
+    (workspace, server, imported)
+}
+
+#[tokio::test]
+async fn a_file_whose_environment_is_unknown_waits_for_a_decision_on_that_side_only() {
+    let (_workspace, _server, imported) = import_pack_with_undeclared_environments().await;
+
+    // Nothing is installed on the strength of an undeclared side; a file that
+    // is required on this side still is.
+    assert!(!imported.game.join("mods/client-unknown.jar").exists());
+    assert!(!imported.game.join("mods/both-unknown.jar").exists());
+    assert!(imported.game.join("mods/server-unknown.jar").is_file());
+    assert!(imported.game.join("mods/server-unsupported.jar").is_file());
+
+    let recipe = retained_recipe(&imported.source).expect("recipe");
+    let sides: Vec<(String, SideRequirement, SideRequirement)> = recipe
+        .files
+        .iter()
+        .map(|file| (file.display_name(), file.client, file.server))
+        .collect();
+    assert_eq!(
+        sides,
+        vec![
+            (
+                "mods/client-unknown.jar".to_owned(),
+                SideRequirement::Unknown,
+                SideRequirement::Required
+            ),
+            (
+                "mods/server-unknown.jar".to_owned(),
+                SideRequirement::Required,
+                SideRequirement::Unknown
+            ),
+            (
+                "mods/both-unknown.jar".to_owned(),
+                SideRequirement::Unknown,
+                SideRequirement::Unknown
+            ),
+            (
+                "mods/server-unsupported.jar".to_owned(),
+                SideRequirement::Required,
+                SideRequirement::Unsupported
+            ),
+        ],
+        "unknown stays distinct from unsupported and from optional"
+    );
+
+    // The client is asked about exactly the files it has no declaration for.
+    let asked: Vec<(String, SideRequirement)> = recipe
+        .optional_components(PackSide::Client)
+        .iter()
+        .map(|component| {
+            (
+                component.logical_path.to_string_lossy().into_owned(),
+                component.requirement,
+            )
+        })
+        .collect();
+    assert_eq!(
+        asked,
+        vec![
+            (
+                "mods/client-unknown.jar".to_owned(),
+                SideRequirement::Unknown
+            ),
+            ("mods/both-unknown.jar".to_owned(), SideRequirement::Unknown),
+        ]
+    );
+
+    let client_plan: Vec<String> = recipe
+        .plan(PackSide::Client, &OptionalSelection::none())
+        .files
+        .iter()
+        .map(|file| file.display_name())
+        .collect();
+    assert_eq!(
+        client_plan,
+        ["mods/server-unknown.jar", "mods/server-unsupported.jar"]
+    );
+    let selected_plan: Vec<String> = recipe
+        .plan(
+            PackSide::Client,
+            &OptionalSelection::of(["mods/client-unknown.jar"]),
+        )
+        .files
+        .iter()
+        .map(|file| file.display_name())
+        .collect();
+    assert!(selected_plan.contains(&"mods/client-unknown.jar".to_owned()));
+}
+
+#[tokio::test]
+async fn server_reconstruction_asks_before_installing_a_file_whose_server_environment_is_unknown() {
+    let (_workspace, _server, imported) = import_pack_with_undeclared_environments().await;
+    let recipe = retained_recipe(&imported.source).expect("recipe");
+
+    // Server reconstruction installs what the pack requires, leaves out what it
+    // marks unsupported, and reports an undeclared server side as unconfirmed
+    // unless the caller confirms it.
+    let strict = recipe
+        .server_reconstruction_plan(&UnknownServerFiles::only(OptionalSelection::none()))
+        .expect("server plan");
+    let server_files: Vec<String> = strict
+        .files
+        .iter()
+        .map(|file| file.display_name())
+        .collect();
+    assert_eq!(server_files, ["mods/client-unknown.jar"]);
+    let unconfirmed: Vec<String> = strict
+        .unconfirmed_unknown
+        .iter()
+        .map(|file| file.display_name())
+        .collect();
+    assert_eq!(
+        unconfirmed,
+        ["mods/server-unknown.jar", "mods/both-unknown.jar"]
+    );
+
+    let confirmed = recipe
+        .server_reconstruction_plan(&UnknownServerFiles::only(OptionalSelection::of([
+            "mods/both-unknown.jar",
+        ])))
+        .expect("server plan");
+    let confirmed_files: Vec<String> = confirmed
+        .files
+        .iter()
+        .map(|file| file.display_name())
+        .collect();
+    assert_eq!(
+        confirmed_files,
+        ["mods/client-unknown.jar", "mods/both-unknown.jar"]
     );
 }

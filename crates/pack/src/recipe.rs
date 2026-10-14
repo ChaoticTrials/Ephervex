@@ -117,12 +117,11 @@ impl LayerPathFilter {
 ///
 /// [`Unknown`](Self::Unknown) is the fourth, and it is not a synonym for any of
 /// the others. It means the source declared nothing about this side. A
-/// `.mrpack` cannot produce it: that format has three environment values, and
-/// an *omitted* `env` object is defined to mean required on both sides. A
-/// Modrinth project can, because its `client_side`/`server_side` fields have an
-/// `unknown` value an author may leave in place. Reading that as `Required`
-/// would assert something the author declined to assert - and would put the mod
-/// into a reconstructed server on that assertion.
+/// `.mrpack` produces it when a file's `env` says `unknown`, as Modrinth's side
+/// types allow; an *omitted* `env` object is different and means required on
+/// both sides. Reading `unknown` as `Required` would assert something the
+/// author declined to assert - and would put the mod into a reconstructed
+/// server on that assertion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SideRequirement {

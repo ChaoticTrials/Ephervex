@@ -492,11 +492,11 @@ impl Default for RawEnv {
     }
 }
 
-/// The three environment values the format defines.
+/// The environment values the format defines: Modrinth's side types.
 ///
-/// Deliberately *not* tolerant of a fourth: an unknown value is a pack this
-/// build does not understand, and guessing which way it leans is how a
-/// server-only mod ends up in a client.
+/// A fifth value is a pack this build does not understand and is refused,
+/// because guessing which way it leans is how a server-only mod ends up in a
+/// client.
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum RawRequirement {
@@ -504,6 +504,7 @@ enum RawRequirement {
     Required,
     Optional,
     Unsupported,
+    Unknown,
 }
 
 impl From<RawRequirement> for SideRequirement {
@@ -512,6 +513,7 @@ impl From<RawRequirement> for SideRequirement {
             RawRequirement::Required => Self::Required,
             RawRequirement::Optional => Self::Optional,
             RawRequirement::Unsupported => Self::Unsupported,
+            RawRequirement::Unknown => Self::Unknown,
         }
     }
 }
@@ -792,7 +794,42 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_environment_value_is_refused_rather_than_leaned_one_way() {
+    fn an_unknown_environment_value_stays_distinct_from_unsupported_on_each_side() {
+        let files = format!(
+            "{}, {}, {}",
+            file_entry(
+                "mods/client.jar",
+                r#"{"client":"unknown","server":"required"}"#
+            ),
+            file_entry(
+                "mods/server.jar",
+                r#"{"client":"required","server":"unknown"}"#
+            ),
+            file_entry(
+                "mods/both.jar",
+                r#"{"client":"unknown","server":"unknown"}"#
+            ),
+        );
+        let parsed = parse_index(&index(r#"{"minecraft": "1.20.1"}"#, &files)).expect("valid");
+
+        let requirements: Vec<(SideRequirement, SideRequirement)> = parsed
+            .recipe
+            .files
+            .iter()
+            .map(|file| (file.client, file.server))
+            .collect();
+        assert_eq!(
+            requirements,
+            vec![
+                (SideRequirement::Unknown, SideRequirement::Required),
+                (SideRequirement::Required, SideRequirement::Unknown),
+                (SideRequirement::Unknown, SideRequirement::Unknown),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unrecognized_environment_value_is_refused_rather_than_leaned_one_way() {
         let document = index(
             r#"{"minecraft": "1.20.1"}"#,
             &file_entry("mods/a.jar", r#"{"client":"maybe","server":"required"}"#),
