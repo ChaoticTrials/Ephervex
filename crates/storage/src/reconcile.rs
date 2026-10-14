@@ -3423,6 +3423,64 @@ mod tests {
     }
 
     #[test]
+    fn a_server_edited_while_its_root_was_missing_without_a_prior_reconcile_keeps_the_edit() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = persistent_server(&registry, "original");
+        let backup = environment.base().join("backup");
+        std::fs::rename(&server.root, &backup).expect("unmount");
+        let mut edited = registry.server(server.id).expect("row");
+        edited.name = "renamed while unmounted".to_owned();
+        registry
+            .update_server(&mut edited)
+            .expect("index-only edit");
+        std::fs::rename(&backup, &server.root).expect("remount");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.recovered.len(), 1);
+        assert!(report.index_repaired.is_empty());
+        let after = registry.server(server.id).expect("read");
+        assert_eq!(after.name, "renamed while unmounted");
+        assert!(!after.attention.contains(&AttentionReason::MissingRoot));
+        assert_eq!(
+            metadata::read_server_metadata(&server.root)
+                .expect("metadata")
+                .name,
+            "renamed while unmounted"
+        );
+    }
+
+    #[test]
+    fn a_client_edited_while_its_root_was_missing_without_a_prior_reconcile_keeps_the_edit() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let record = persistent_client(&registry, "original");
+        let backup = environment.base().join("backup");
+        std::fs::rename(&record.root, &backup).expect("unmount");
+        registry
+            .modify_client(record.id, |client| {
+                client.name = "renamed while unmounted".to_owned();
+            })
+            .expect("index-only edit");
+        std::fs::rename(&backup, &record.root).expect("remount");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.recovered.len(), 1);
+        assert!(report.index_repaired.is_empty());
+        let after = registry.client(record.id).expect("read");
+        assert_eq!(after.name, "renamed while unmounted");
+        assert!(!after.attention.contains(&AttentionReason::MissingRoot));
+        assert_eq!(
+            metadata::read_client_metadata(&record.root)
+                .expect("metadata")
+                .name,
+            "renamed while unmounted"
+        );
+    }
+
+    #[test]
     fn a_server_whose_root_returns_elsewhere_unedited_is_recovered_at_the_new_directory() {
         let environment = TestEnvironment::new();
         let registry = environment.registry();

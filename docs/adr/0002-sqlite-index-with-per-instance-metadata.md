@@ -57,7 +57,9 @@ Schema changes go through an ordered migration runner keyed on SQLite's
   so none of them plans from a selection the user already replaced. The one row
   that outranks the file is a newer one flagged as having a missing root:
   changes made while the root was absent reached only the index, so reads and
-  reconciliation both treat that row as current when the root returns.
+  reconciliation both treat that row as current when the root returns. Such a
+  change to a persistent client or server flags its row itself; it does not
+  wait for a reconciliation pass to notice the missing root first.
 - An indexed root whose metadata names a different record, as in a copied
   directory, refuses changes and moves with an error that names the root. The
   record can still be forgotten with its files kept, which does not use that

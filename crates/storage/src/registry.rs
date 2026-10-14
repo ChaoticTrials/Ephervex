@@ -653,6 +653,11 @@ impl Registry {
                 root = %record.root.display(),
                 "instance root is missing; updating the index only"
             );
+            // Only the row can hold this edit, so it must outrank the older
+            // metadata file once the root returns (ADR 0002).
+            if !record.storage.vanishing_is_expected() {
+                record.add_attention(AttentionReason::MissingRoot);
+            }
         }
 
         // Once `instance.json` is published the mutation is committed, so a
@@ -1074,6 +1079,10 @@ impl Registry {
                     detail: error.to_string(),
                 });
             }
+        } else if !record.storage.vanishing_is_expected() {
+            // Only the row can hold this edit, so it must outrank the older
+            // metadata file once the root returns (ADR 0002).
+            record.add_attention(AttentionReason::MissingRoot);
         }
 
         let indexed = self.index.connection().execute(
@@ -4188,5 +4197,138 @@ mod tests {
         let current = registry.current_client(client.id).expect("current");
 
         assert_eq!(current.name, "before");
+    }
+
+    fn persistent_client(registry: &Registry) -> ClientRecord {
+        registry
+            .create_published_client(
+                NewClient::new("before", "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(StorageClass::Persistent),
+            )
+            .expect("create")
+    }
+
+    #[test]
+    fn a_client_edit_made_while_its_persistent_root_is_missing_flags_the_row_and_survives_the_roots_return()
+     {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = persistent_client(&registry);
+        let backup = environment.base().join("backup");
+        std::fs::rename(&client.root, &backup).expect("unmount");
+
+        let changed = registry
+            .modify_client(client.id, |record| {
+                record.java_override = Some(JavaOverride::new("/opt/jdk/bin/java"));
+                record.name = "renamed".to_owned();
+            })
+            .expect("index-only change");
+        std::fs::rename(&backup, &client.root).expect("remount");
+
+        assert!(changed.attention.contains(&AttentionReason::MissingRoot));
+        assert!(
+            registry
+                .client(client.id)
+                .expect("row")
+                .attention
+                .contains(&AttentionReason::MissingRoot)
+        );
+        let current = registry.current_client(client.id).expect("current");
+        assert_eq!(current.name, "renamed");
+        assert_eq!(
+            current.java_override,
+            Some(JavaOverride::new("/opt/jdk/bin/java"))
+        );
+        assert!(!current.attention.contains(&AttentionReason::MissingRoot));
+    }
+
+    #[test]
+    fn a_client_edit_made_while_its_root_is_missing_is_kept_by_the_next_change_after_the_root_returns()
+     {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = persistent_client(&registry);
+        let backup = environment.base().join("backup");
+        std::fs::rename(&client.root, &backup).expect("unmount");
+        registry
+            .modify_client(client.id, |record| {
+                record.java_override = Some(JavaOverride::new("/opt/jdk/bin/java"));
+            })
+            .expect("index-only change");
+        std::fs::rename(&backup, &client.root).expect("remount");
+
+        let updated = registry
+            .modify_client(client.id, |record| {
+                record.last_launched_at = Some(Utc::now());
+            })
+            .expect("change");
+
+        assert_eq!(
+            updated.java_override,
+            Some(JavaOverride::new("/opt/jdk/bin/java"))
+        );
+        let canonical = metadata::read_client_metadata(&client.root).expect("metadata");
+        assert_eq!(canonical.java_override, updated.java_override);
+        assert!(!canonical.attention.contains(&AttentionReason::MissingRoot));
+    }
+
+    #[test]
+    fn a_temporary_clients_edit_while_its_root_is_missing_is_not_flagged() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = created_client(&registry);
+        assert!(client.storage.vanishing_is_expected());
+        std::fs::remove_dir_all(&client.root).expect("remove root");
+
+        let changed = registry
+            .modify_client(client.id, |record| record.name = "renamed".to_owned())
+            .expect("index-only change");
+
+        assert!(!changed.attention.contains(&AttentionReason::MissingRoot));
+    }
+
+    #[test]
+    fn a_server_edit_made_while_its_persistent_root_is_missing_flags_the_row() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let mut server = registry
+            .create_server(
+                NewServer::new("server", "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(StorageClass::Persistent),
+            )
+            .expect("create");
+        std::fs::remove_dir_all(&server.root).expect("remove root");
+        server.name = "renamed".to_owned();
+
+        registry
+            .update_server(&mut server)
+            .expect("index-only edit");
+
+        assert!(server.attention.contains(&AttentionReason::MissingRoot));
+        let row = registry.server(server.id).expect("row");
+        assert_eq!(row.name, "renamed");
+        assert!(row.attention.contains(&AttentionReason::MissingRoot));
+    }
+
+    #[test]
+    fn a_temporary_servers_edit_while_its_root_is_missing_is_not_flagged() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let mut server = registry
+            .create_server(NewServer::new(
+                "server",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        assert!(server.storage.vanishing_is_expected());
+        std::fs::remove_dir_all(&server.root).expect("remove root");
+        server.name = "renamed".to_owned();
+
+        registry
+            .update_server(&mut server)
+            .expect("index-only edit");
+
+        assert!(!server.attention.contains(&AttentionReason::MissingRoot));
     }
 }
