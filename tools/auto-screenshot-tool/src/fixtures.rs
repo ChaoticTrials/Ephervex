@@ -381,7 +381,7 @@ pub(crate) fn account_rows() -> Vec<AccountRow> {
 
 pub(crate) fn install_base(ui: &AppWindow) {
     ui.set_loading(false);
-    ui.set_app_version("0.10.0".into());
+    ui.set_app_version(env!("CARGO_PKG_VERSION").into());
     ui.set_status_message(lookup("gui-ready").into());
     ui.set_storage_root("/demo/ephervex".into());
     ui.set_application_text_scale(100);
