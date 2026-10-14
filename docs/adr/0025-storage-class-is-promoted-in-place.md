@@ -108,6 +108,17 @@ temporary tree, and a failure to remove it is logged. For a server that holds
 for every write of its record, because each goes through the one that commits
 it. A repeated promotion follows the files, and repairs the row without copying
 the stale temporary tree over the committed one.
+The removal happens under the host's claim, so a move cannot produce a host at
+the temporary root between the decision that it is superseded and the removal.
+A writer that holds no claim takes it before it decides, and decides again
+under it; when another change holds the host, or the writer holds the claim
+itself, the temporary tree is left in place and reconciliation removes it once
+the host is idle, so it costs temporary space for a while and nothing else.
+Under the claim the tree goes only if the row names the finished persistent
+copy and the temporary metadata is older than that copy's, so a tree with an
+equal or newer stamp is kept as a possible live host. Every write stamps its
+record later than the state it replaces, so a clock that stepped back cannot
+make an older copy look newer.
 A snapshot restore of such a client or server reads the record it addresses
 before it publishes, because the incomplete marker it then sets keeps the
 persistent tree from being followed. It records the restored metadata at that

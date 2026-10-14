@@ -228,6 +228,14 @@ fn reconcile_clients(
     reconcile_listed_clients(registry, &listed, report)
 }
 
+/// The claim a probe holds, when nothing else is changing the host.
+fn held_claim(probe: &HostProbe) -> Option<&HostClaim> {
+    match probe {
+        HostProbe::Idle(claim) => Some(claim),
+        HostProbe::Mutating | HostProbe::Unusable => None,
+    }
+}
+
 /// Reconciles the clients of a listing taken earlier, deciding each from the
 /// record read after its claim rather than from the listing.
 fn reconcile_listed_clients(
@@ -245,12 +253,7 @@ fn reconcile_listed_clients(
             Err(RegistryError::InstanceUnknown { .. }) => continue,
             Err(error) => return Err(error),
         };
-        reconcile_client(
-            registry,
-            record,
-            matches!(probe, HostProbe::Idle(_)),
-            report,
-        )?;
+        reconcile_client(registry, record, held_claim(&probe), report)?;
     }
     Ok(())
 }
@@ -357,9 +360,10 @@ fn failing_server(
 fn reconcile_client(
     registry: &Registry,
     mut record: ClientRecord,
-    idle: bool,
+    claim: Option<&HostClaim>,
     report: &mut ReconciliationReport,
 ) -> Result<(), RegistryError> {
+    let idle = claim.is_some();
     let entry = client_entry(&record);
 
     if record.storage == StorageClass::Temporary
@@ -381,10 +385,19 @@ fn reconcile_client(
         return Ok(());
     }
 
+    // A temporary tree left beside the persistent root the row names was
+    // skipped by a write that could not claim the host.
+    let temporary = registry
+        .paths()
+        .instance_root(StorageClass::Temporary, record.id);
+    if let (Some(claim), true) = (claim, temporary.is_dir()) {
+        registry.discard_superseded_client_root(&temporary, record.id, claim);
+    }
+
     // A committed copy supersedes a temporary tree that a move could not
     // remove. Reconciling the stale tree would stamp it newer than the copy.
     if let Some(moved) = registry.committed_copy_superseding(&record) {
-        return follow_moved_client(registry, &record, &moved, idle, report);
+        return follow_moved_client(registry, &record, &moved, claim, report);
     }
 
     if record.root.is_dir() {
@@ -400,7 +413,7 @@ fn reconcile_client(
             .paths()
             .instance_root(StorageClass::Persistent, record.id);
         if is_finished_client_root(&moved, record.id) {
-            return follow_moved_client(registry, &record, &moved, idle, report);
+            return follow_moved_client(registry, &record, &moved, claim, report);
         }
 
         // Expected: the OS owns this directory's lifecycle (ADR 0006).
@@ -439,7 +452,7 @@ fn follow_moved_client(
     registry: &Registry,
     stale: &ClientRecord,
     moved: &Path,
-    idle: bool,
+    claim: Option<&HostClaim>,
     report: &mut ReconciliationReport,
 ) -> Result<(), RegistryError> {
     let stale_root = stale.root.is_dir().then(|| stale.root.clone());
@@ -449,8 +462,8 @@ fn follow_moved_client(
     moved.clone_into(&mut record.root);
     record.storage = StorageClass::Persistent;
     registry.update_client(&mut record)?;
-    if let Some(stale_root) = stale_root {
-        registry.discard_superseded_client_root(&stale_root, record.id);
+    if let (Some(stale_root), Some(claim)) = (stale_root, claim) {
+        registry.discard_superseded_client_root(&stale_root, record.id, claim);
     }
     tracing::info!(
         instance_id = %record.id,
@@ -458,7 +471,7 @@ fn follow_moved_client(
         "an instance's files were found at the persistent root; the record followed them"
     );
     report.relocated.push(client_entry(&record));
-    reconcile_present_client(registry, record, idle, report)
+    reconcile_present_client(registry, record, claim.is_some(), report)
 }
 
 /// Reconciles a client whose files are standing at `record.root`.
@@ -581,12 +594,7 @@ fn reconcile_listed_servers(
             Err(RegistryError::ServerUnknown { .. }) => continue,
             Err(error) => return Err(error),
         };
-        reconcile_server(
-            registry,
-            record,
-            matches!(probe, HostProbe::Idle(_)),
-            report,
-        )?;
+        reconcile_server(registry, record, held_claim(&probe), report)?;
     }
     Ok(())
 }
@@ -594,9 +602,10 @@ fn reconcile_listed_servers(
 fn reconcile_server(
     registry: &Registry,
     mut record: ServerRecord,
-    idle: bool,
+    claim: Option<&HostClaim>,
     report: &mut ReconciliationReport,
 ) -> Result<(), RegistryError> {
+    let idle = claim.is_some();
     let entry = server_entry(&record);
 
     if record.storage == StorageClass::Temporary
@@ -611,10 +620,17 @@ fn reconcile_server(
         return Ok(());
     }
 
+    let temporary = registry
+        .paths()
+        .server_root(StorageClass::Temporary, record.id);
+    if let (Some(claim), true) = (claim, temporary.is_dir()) {
+        registry.discard_superseded_server_root(&temporary, record.id, claim);
+    }
+
     // The same rule as a client's: a committed copy supersedes a temporary
     // tree that a move could not remove.
     if let Some(moved) = registry.committed_server_copy_superseding(&record) {
-        return follow_moved_server(registry, &record, &moved, idle, report);
+        return follow_moved_server(registry, &record, &moved, claim, report);
     }
 
     if record.root.is_dir() {
@@ -628,7 +644,7 @@ fn reconcile_server(
             .paths()
             .server_root(StorageClass::Persistent, record.id);
         if is_finished_server_root(&moved, record.id) {
-            return follow_moved_server(registry, &record, &moved, idle, report);
+            return follow_moved_server(registry, &record, &moved, claim, report);
         }
 
         registry.delete_server(record.id, FileDisposition::Keep)?;
@@ -656,21 +672,25 @@ fn follow_moved_server(
     registry: &Registry,
     stale: &ServerRecord,
     moved: &Path,
-    idle: bool,
+    claim: Option<&HostClaim>,
     report: &mut ReconciliationReport,
 ) -> Result<(), RegistryError> {
     let mut record = canonical_server_at(moved, stale.id)?;
     moved.clone_into(&mut record.root);
     record.storage = StorageClass::Persistent;
-    // Removes the superseded temporary tree once the row is repaired.
-    let _committed = registry.update_server_committed(&mut record)?;
+    // Removes the superseded temporary tree once the row is repaired, while
+    // the claim is held.
+    let _committed = match claim {
+        Some(claim) => registry.update_server_committed_claimed(&mut record, claim)?,
+        None => registry.update_server_committed(&mut record)?,
+    };
     tracing::info!(
         server_id = %record.id,
         root = %moved.display(),
         "a server's files were found at the persistent root; the record followed them"
     );
     report.relocated.push(server_entry(&record));
-    reconcile_present_server(registry, record, idle, report)
+    reconcile_present_server(registry, record, claim.is_some(), report)
 }
 
 /// Reconciles a server whose files are standing at `record.root`.
@@ -861,13 +881,7 @@ fn reindex_orphaned_clients(
                     continue;
                 }
                 if registry.committed_copy_superseding(entry) == Some(directory.clone()) {
-                    follow_moved_client(
-                        registry,
-                        entry,
-                        &directory,
-                        matches!(probe, HostProbe::Idle(_)),
-                        report,
-                    )?;
+                    follow_moved_client(registry, entry, &directory, held_claim(&probe), report)?;
                 } else {
                     report.client_conflicts.push(ClientRootConflict {
                         id,
@@ -1054,7 +1068,8 @@ fn reindex_orphaned_servers(
             let indexed = registry.indexed_server(record.id)?;
             if indexed.root != directory && indexed.root.is_dir() {
                 if registry.committed_server_copy_superseding(&indexed) == Some(directory.clone()) {
-                    follow_moved_server(registry, &indexed, &directory, idle, report)?;
+                    let claim = held_claim(&probe);
+                    follow_moved_server(registry, &indexed, &directory, claim, report)?;
                 } else {
                     report.server_conflicts.push(ServerRootConflict {
                         id: record.id,

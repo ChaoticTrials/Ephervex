@@ -528,7 +528,7 @@ impl App {
         // keeps a move from carrying the host away mid-restore, keeps a launch
         // from starting between the running check and the swap, and tells
         // reconciliation in another launcher that this restore is running.
-        let _claim = self.claim_snapshot_host(host)?;
+        let claim = self.claim_snapshot_host(host)?;
         self.refuse_snapshot_while_running(host)?;
         // The restore replaces the recipe wholesale, so a background write
         // that read the previous one must not land on top of it.
@@ -616,7 +616,12 @@ impl App {
                 path: transaction.directory().to_path_buf(),
                 source,
             })?;
-        self.settle_restored_host(host, previous_server.as_ref(), superseded.as_deref());
+        self.settle_restored_host(
+            host,
+            previous_server.as_ref(),
+            superseded.as_deref(),
+            &claim,
+        );
         Ok(SnapshotRestore {
             restored,
             safety_snapshot,
@@ -633,12 +638,14 @@ impl App {
         host: InstalledHost,
         previous_server: Option<&ServerRecord>,
         superseded: Option<&Path>,
+        claim: &ephervex_storage::HostClaim,
     ) {
         match host {
             InstalledHost::Instance(id) => {
                 self.sync_linked_server_lists_of_client(id);
                 if let Some(stale) = superseded {
-                    self.registry().discard_superseded_client_root(stale, id);
+                    self.registry()
+                        .discard_superseded_client_root(stale, id, claim);
                 }
             }
             InstalledHost::Server(id) => {
@@ -646,7 +653,8 @@ impl App {
                     self.sync_linked_server_list(&restored_server, previous_server);
                 }
                 if let Some(stale) = superseded {
-                    self.registry().discard_superseded_server_root(stale, id);
+                    self.registry()
+                        .discard_superseded_server_root(stale, id, claim);
                 }
             }
         }
