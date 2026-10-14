@@ -608,7 +608,7 @@ impl App {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn create_client_for_test(&self, request: NewClient) -> CoreResult<ClientRecord> {
         Ok(self
             .materialize_client(request, &PreferenceContext::offline())?
@@ -618,7 +618,7 @@ impl App {
     /// Commits a change to a client's canonical metadata alone, leaving its
     /// index row as it was: the state after an index write failed behind a
     /// committed update.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn commit_client_without_index_for_test(
         &self,
         id: InstanceId,
@@ -638,11 +638,12 @@ impl App {
 
     /// Fetches one client instance as its canonical metadata holds it.
     ///
-    /// Anything that plans from a client's Minecraft version, loader, overrides,
-    /// or flags reads this so a lagging index row cannot plan from a selection
-    /// the user already replaced. A reader that only needs the root path may
+    /// Anything that shows or plans from a client's Minecraft version, loader,
+    /// overrides, or flags reads this, so a lagging index row can neither be
+    /// displayed as the current selection nor seed a new value that writes a
+    /// replaced one back. A reader that only needs the name or root path may
     /// use [`Self::client`].
-    pub(crate) fn current_client(&self, id: InstanceId) -> CoreResult<ClientRecord> {
+    pub fn current_client(&self, id: InstanceId) -> CoreResult<ClientRecord> {
         Ok(self.registry().current_client(id)?)
     }
 

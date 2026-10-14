@@ -499,3 +499,42 @@ fn reconcile_names_an_instance_claimed_by_two_directories_in_both_output_modes()
             .is_empty()
     );
 }
+
+/// Rewrites a client's `instance.json` and leaves its SQLite index row as it was, which is what
+/// remains after a committed change whose index write failed.
+fn commit_metadata_only(root: &str, change: impl FnOnce(&mut serde_json::Value)) {
+    let path = Path::new(root).join(".launcher").join("instance.json");
+    let mut document: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("read the metadata"))
+            .expect("the metadata is JSON");
+    change(&mut document);
+    std::fs::write(&path, serde_json::to_vec(&document).expect("serialize")).expect("write");
+}
+
+#[test]
+fn showing_an_instance_reads_the_committed_version_and_loader_when_the_index_row_lags() {
+    let sandbox = Sandbox::new();
+    let record = sandbox.json(&[
+        "--json",
+        "instance",
+        "create",
+        "Lagging row",
+        "--minecraft",
+        "1.20.1",
+    ]);
+    let id = record["id"].as_str().expect("an id").to_owned();
+    commit_metadata_only(record["root"].as_str().expect("a root"), |document| {
+        document["minecraft_version"] = serde_json::json!("1.20.4");
+    });
+
+    let shown = sandbox.json(&["--json", "instance", "show", &id]);
+    assert_eq!(shown["minecraft_version"], "1.20.4");
+
+    let text = sandbox.run(&["instance", "show", &id]);
+    assert!(text.status.success());
+    assert!(
+        String::from_utf8_lossy(&text.stdout).contains("minecraft: 1.20.4"),
+        "stdout was:\n{}",
+        String::from_utf8_lossy(&text.stdout)
+    );
+}

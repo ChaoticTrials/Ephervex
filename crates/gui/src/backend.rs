@@ -9426,7 +9426,7 @@ fn analyze_import(
 }
 
 fn instance_runtime_data(app: &App, instance: InstanceId) -> CoreResult<InstanceRuntimeData> {
-    let record = app.client(instance)?;
+    let record = app.current_client(instance)?;
     let global = app.java_settings();
     let jvm = record.jvm_override.as_ref();
     let number = |value: Option<u32>| value.map(|mib| mib.to_string()).unwrap_or_default();
@@ -11834,6 +11834,46 @@ mod tests {
             status.credential_storage,
             Some(ephervex_core::CredentialStorage::SessionOnly)
         );
+    }
+
+    #[test]
+    fn the_runtime_panel_shows_the_committed_overrides_while_the_index_row_lags() {
+        without_desktop_keyring();
+        let base = tempfile::tempdir().expect("a disposable root");
+        let app = App::open_at(ephervex_core::Paths::rooted_at(base.path())).expect("an app");
+        let client = ephervex_core::test_support::create_client_offline(
+            &app,
+            NewClient::new("Runtime repro", "1.20.1", LoaderSelection::vanilla()),
+        )
+        .expect("a client");
+        app.set_client_runtime_settings(
+            client.id,
+            Some(ephervex_model::JavaOverride::new("/opt/jdk-17/bin/java")),
+            Some(ephervex_model::JvmSettings {
+                min_memory_mib: Some(1024),
+                max_memory_mib: None,
+                jvm_args: vec!["-Dfoo=1".to_owned()],
+            }),
+        )
+        .expect("pinned settings");
+        ephervex_core::test_support::commit_client_without_index(&app, client.id, |committed| {
+            committed.java_override =
+                Some(ephervex_model::JavaOverride::new("/opt/jdk-21/bin/java"));
+            committed.jvm_override = Some(ephervex_model::JvmSettings {
+                min_memory_mib: Some(2048),
+                max_memory_mib: Some(4096),
+                jvm_args: Vec::new(),
+            });
+        })
+        .expect("a committed change");
+
+        let runtime = instance_runtime_data(&app, client.id).expect("runtime data");
+
+        assert_eq!(runtime.java, "/opt/jdk-21/bin/java");
+        assert_eq!(runtime.min_memory, "2048");
+        assert_eq!(runtime.max_memory, "4096");
+        assert_eq!(runtime.jvm_args, "");
+        assert!(runtime.pinned);
     }
 
     fn logical(paths: &[&str]) -> Vec<PathBuf> {

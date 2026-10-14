@@ -2093,7 +2093,7 @@ async fn run_instance_command(
             print_created_instance(app, &created, json)?;
         }
         InstanceCommand::Show { id } => {
-            let record = app.client(*id)?;
+            let record = app.current_client(*id)?;
             print_instance(app, &record, json)?;
         }
         InstanceCommand::Duplicate {
@@ -7739,7 +7739,7 @@ fn apply_instance_runtime(
         || args.min_memory.is_some()
         || args.max_memory.is_some()
         || !args.jvm_args.is_empty();
-    let record = app.client(id)?;
+    let record = app.current_client(id)?;
     if !asked {
         return Ok(ClientCommit::clean(record));
     }

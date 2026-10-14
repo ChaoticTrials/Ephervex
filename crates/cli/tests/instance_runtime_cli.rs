@@ -235,3 +235,52 @@ fn a_change_saved_without_syncing_its_metadata_directory_reports_it_on_both_outp
         "stdout keeps only the settings"
     );
 }
+
+/// Rewrites a client's `instance.json` and leaves its SQLite index row as it was, which is what
+/// remains after a committed change whose index write failed.
+fn commit_metadata_only(root: &str, change: impl FnOnce(&mut serde_json::Value)) {
+    let path = Path::new(root).join(".launcher").join("instance.json");
+    let mut document: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("read the metadata"))
+            .expect("the metadata is JSON");
+    change(&mut document);
+    std::fs::write(&path, serde_json::to_vec(&document).expect("serialize")).expect("write");
+}
+
+#[test]
+fn a_runtime_option_derives_from_the_committed_pins_when_the_index_row_lags() {
+    let sandbox = Sandbox::new();
+    let record = sandbox.create_record();
+    let id = record["id"].as_str().expect("an id").to_owned();
+    sandbox.json(&[
+        "--json",
+        "instance",
+        "runtime",
+        &id,
+        "--java",
+        "/opt/jdk-17/bin/java",
+        "--min-memory",
+        "1024",
+        "--jvm-arg=-Dfoo=1",
+    ]);
+    commit_metadata_only(record["root"].as_str().expect("a root"), |document| {
+        document["java_override"] = serde_json::json!({ "path": "/opt/jdk-21/bin/java" });
+        document["jvm_override"] = serde_json::json!({
+            "min_memory_mib": 2048,
+            "max_memory_mib": 4096,
+            "jvm_args": ["-Dbar=2"],
+        });
+    });
+
+    let shown = sandbox.json(&["--json", "instance", "runtime", &id]);
+    assert_eq!(shown["java"], "/opt/jdk-21/bin/java");
+    assert_eq!(shown["min_memory_mib"], 2048);
+    assert_eq!(shown["max_memory_mib"], 4096);
+    assert_eq!(shown["jvm_args"], serde_json::json!(["-Dbar=2"]));
+
+    let changed = sandbox.json(&["--json", "instance", "runtime", &id, "--max-memory", "3072"]);
+    assert_eq!(changed["java"], "/opt/jdk-21/bin/java");
+    assert_eq!(changed["min_memory_mib"], 2048);
+    assert_eq!(changed["max_memory_mib"], 3072);
+    assert_eq!(changed["jvm_args"], serde_json::json!(["-Dbar=2"]));
+}
