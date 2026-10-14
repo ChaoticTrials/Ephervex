@@ -611,6 +611,103 @@ Details:\n\
     assert!(review.mods[0].is_actionable());
 }
 
+/// An early loading failure writes no `Mod List:` table. The report's own
+/// `Mod file:` line is what maps the named mod to its installed row.
+#[tokio::test]
+async fn a_loading_failure_report_without_a_mod_list_maps_the_named_mod_to_its_installed_jar() {
+    let fixture = Fixture::with_mods(&[("jea", &[]), ("create", &[])]).await;
+    fixture.write(
+        "minecraft/crash-reports/crash-2026-10-14_19.20.01-client.txt",
+        b"---- Minecraft Crash Report ----
+Description: Mod loading error has occurred
+
+-- Mod loading issue for: jea --
+Details:
+\tMod file: /srv/pack/server/mods/jea.jar
+\tFailure message: Mod jea requires jei 19.25.0.322 or above
+",
+    );
+
+    let review = fixture
+        .app()
+        .crash_review(fixture.host())
+        .unwrap()
+        .expect("the crash came after the last start");
+
+    let [entry] = review.mods.as_slice() else {
+        panic!("{:?}", review.mods);
+    };
+    assert_eq!(entry.suspect.mod_id, "jea");
+    assert_eq!(
+        entry.logical_path.as_deref(),
+        Some(Path::new("mods/jea.jar"))
+    );
+    assert!(entry.is_actionable());
+}
+
+/// Forge 1.20.1 writes `-- MOD <id> --` with a `Mod File:` line.
+#[tokio::test]
+async fn a_forge_loading_failure_report_without_a_mod_list_maps_the_named_mod_to_its_installed_jar()
+{
+    let fixture = Fixture::with_mods(&[("oculus", &[])]).await;
+    fixture.write(
+        "minecraft/crash-reports/crash-2026-10-14_19.22.40-server.txt",
+        b"---- Minecraft Crash Report ----
+Description: Exception in server tick loop
+
+-- MOD oculus --
+Details:
+\tMod File: C:\\servers\\pack\\mods\\oculus.jar
+\tFailure message: Oculus (oculus) has failed to load correctly
+",
+    );
+
+    let review = fixture
+        .app()
+        .crash_review(fixture.host())
+        .unwrap()
+        .expect("the crash came after the last start");
+
+    let [entry] = review.mods.as_slice() else {
+        panic!("{:?}", review.mods);
+    };
+    assert_eq!(entry.suspect.mod_id, "oculus");
+    assert_eq!(
+        entry.logical_path.as_deref(),
+        Some(Path::new("mods/oculus.jar"))
+    );
+    assert!(entry.is_actionable());
+}
+
+/// The named mod is only missing from the mods list when its jar really is.
+#[tokio::test]
+async fn a_loading_failure_naming_a_jar_the_host_does_not_have_maps_to_no_row() {
+    let fixture = Fixture::with_mods(&[("create", &[])]).await;
+    fixture.write(
+        "minecraft/crash-reports/crash-2026-10-14_19.20.01-client.txt",
+        b"---- Minecraft Crash Report ----
+Description: Mod loading error has occurred
+
+-- Mod loading issue for: jea --
+Details:
+\tMod file: /srv/pack/server/mods/jea.jar
+",
+    );
+
+    let review = fixture
+        .app()
+        .crash_review(fixture.host())
+        .unwrap()
+        .expect("the crash came after the last start");
+
+    let [entry] = review.mods.as_slice() else {
+        panic!("{:?}", review.mods);
+    };
+    assert_eq!(entry.suspect.mod_id, "jea");
+    assert_eq!(entry.logical_path, None);
+    assert!(!entry.is_actionable());
+}
+
 #[tokio::test]
 async fn the_loader_s_refusal_in_the_last_log_is_a_problem() {
     let fixture = Fixture::with_mods(&[]).await;

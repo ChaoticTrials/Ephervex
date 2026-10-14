@@ -5647,6 +5647,7 @@ fn print_crash_review(review: Option<&CrashReview>, json: bool) {
                 "mod_id": entry.suspect.mod_id,
                 "name": entry.suspect.label(),
                 "jar": entry.suspect.jar,
+                "reported_file": entry.suspect.reported_file,
                 "path": entry.logical_path.as_deref().map(json_path),
                 "presence": entry.presence.map(ModPresence::as_str),
                 "reason": entry.suspect.reason.as_str(),

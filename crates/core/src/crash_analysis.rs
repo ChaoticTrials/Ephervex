@@ -14,8 +14,10 @@
 //! Four independent forms of attribution, in descending order of how directly
 //! they say a mod's name:
 //!
-//! - `-- Mod loading issue for: <id> --` names a mod id outright, and the
-//!   section's `Mod file:` line gives the jar it came from.
+//! - `-- Mod loading issue for: <id> --` (NeoForge) and `-- MOD <id> --` (Forge)
+//!   name a mod id outright, and the section's `Mod file:` or `Mod File:` line
+//!   gives the jar it came from. An early loading failure has no `Mod List:`
+//!   table, so this line is then the only way to a file.
 //! - When the header carries no id, the run's log still names one:
 //!   `Mod '<id>' encountered an error in a deferred task`.
 //! - ModLauncher rewrites the class loader segment of a stack frame as
@@ -24,6 +26,10 @@
 //! - `Mod List:` under `-- System Details --` is a table of
 //!   `jar | display name | mod id | version | ...`, which turns any of the
 //!   above into a file name the mods list can act on.
+//!
+//! A report can come from another machine, so the directory of a `Mod file:`
+//! path is never followed. Only a jar directly inside a folder named `mods` is
+//! read, and only its name is kept, to be matched against the host's own rows.
 //!
 //! The game and the mod loader write their own frames and mod list rows the
 //! same way a mod does. They are evidence about the failure, never a mod that
@@ -55,7 +61,7 @@ use ephervex_storage::diagnostics::MAX_VIEW_BYTES;
 use crate::app::App;
 use crate::diagnostics::{DiagnosticRequest, DiagnosticScope};
 use crate::error::CoreResult;
-use crate::mods::{InstalledHost, ModPresence};
+use crate::mods::{InstalledHost, ManagedModEntry, ModPresence};
 
 /// Mojang's own client-only packages.
 ///
@@ -161,6 +167,10 @@ pub struct CrashSuspect {
     /// The jar the mod list gave for this id, when the table named one. This is
     /// what lets a suspect be matched to a row in a host's mods.
     pub jar: Option<String>,
+    /// The jar name the report's own mod loading section gave for this id,
+    /// when it named one inside a `mods` folder. Present even when the report
+    /// has no mod list table.
+    pub reported_file: Option<String>,
     /// The mod list's display name, when the table named one.
     pub display_name: Option<String>,
     pub reason: SuspectReason,
@@ -233,6 +243,7 @@ struct ModListRow {
 pub fn analyze_crash_report(report: &str, log: &str) -> CrashAnalysis {
     let mod_list = parse_mod_list(report);
     let failing = failing_region(report);
+    let reported_files = reported_mod_files(failing);
 
     let mut reasons: BTreeMap<String, SuspectReason> = BTreeMap::new();
     for (mod_id, reason) in named_mods(failing, log)
@@ -251,6 +262,7 @@ pub fn analyze_crash_report(report: &str, log: &str) -> CrashAnalysis {
             let row = mod_list.get(&mod_id);
             CrashSuspect {
                 jar: row.map(|row| row.jar.clone()),
+                reported_file: reported_files.get(&mod_id).cloned(),
                 display_name: row.map(|row| row.display_name.clone()),
                 mod_id,
                 reason,
@@ -331,6 +343,55 @@ fn mod_section_id(line: &str) -> Option<String> {
         .trim();
     // A header is one token. Anything else is prose that begins the same way.
     (!id.is_empty() && !id.contains(char::is_whitespace)).then(|| id.to_ascii_lowercase())
+}
+
+/// The jar each mod loading section names for its own mod, keyed by mod id.
+///
+/// The first section that names a usable file for an id wins.
+fn reported_mod_files(failing: &str) -> BTreeMap<String, String> {
+    let mut files = BTreeMap::new();
+    let mut section: Option<String> = None;
+    for line in failing.lines().map(str::trim) {
+        if line.starts_with("--") && line.ends_with("--") {
+            section = mod_section_id(line);
+            continue;
+        }
+        let Some(id) = section.as_ref() else { continue };
+        let Some(value) = strip_prefix_ignore_case(line, "Mod file:") else {
+            continue;
+        };
+        if let Some(name) = jar_in_mods_folder(value.trim()) {
+            files.entry(id.clone()).or_insert(name);
+        }
+    }
+    files
+}
+
+fn strip_prefix_ignore_case<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = line.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| &line[prefix.len()..])
+}
+
+/// The jar a `Mod file:` value names, when it sits directly in a `mods` folder.
+///
+/// Either separator is read because the report may have been written on another
+/// platform. A bare file name is accepted as the loader's own shorthand. A jar
+/// nested inside another jar is attributed to the jar that holds it. Anything
+/// outside a `mods` folder, and the loader's placeholder text, names no file.
+fn jar_in_mods_folder(value: &str) -> Option<String> {
+    let parts: Vec<&str> = value
+        .split(['/', '\\'])
+        .filter(|part| !part.is_empty())
+        .collect();
+    let is_jar = |name: &str| name.to_ascii_lowercase().ends_with(".jar");
+    if let [only] = parts.as_slice() {
+        return is_jar(only).then(|| (*only).to_owned());
+    }
+    parts
+        .windows(2)
+        .find(|pair| pair[0].eq_ignore_ascii_case("mods") && is_jar(pair[1]))
+        .map(|pair| pair[1].to_owned())
 }
 
 /// Mod ids named by the `TRANSFORMER/<id>@` segment of the failing stack's frames.
@@ -666,26 +727,17 @@ impl App {
         let known = self.host_mod_snapshot(host)?;
         // A module the mod list gives a jar for that is no file in this host's
         // `mods/` (such as one bundled inside another jar) is not something
-        // to disable. A suspect the table gave no jar for stays: it
-        // may be a mod that failed before it was listed.
-        analysis.suspects.retain(|suspect| {
-            suspect.jar.as_deref().is_none_or(|jar| {
-                known
-                    .mods
-                    .iter()
-                    .any(|entry| entry.file_name.eq_ignore_ascii_case(jar))
-            })
-        });
+        // to disable, unless the report's own section names a file the host has.
+        // A suspect the table gave no jar for stays: it may be a mod that
+        // failed before it was listed.
+        analysis
+            .suspects
+            .retain(|suspect| suspect.jar.is_none() || host_row(suspect, &known.mods).is_some());
         let mods = analysis
             .suspects
             .iter()
             .map(|suspect| {
-                let row = suspect.jar.as_deref().and_then(|jar| {
-                    known
-                        .mods
-                        .iter()
-                        .find(|entry| entry.file_name.eq_ignore_ascii_case(jar))
-                });
+                let row = host_row(suspect, &known.mods);
                 SuspectedMod {
                     suspect: suspect.clone(),
                     logical_path: row.map(|entry| entry.logical_path.clone()),
@@ -715,6 +767,24 @@ impl App {
         .map(|view| view.text)
         .unwrap_or_default()
     }
+}
+
+/// The row of the host's own mods a suspect's jar names.
+///
+/// Only the jar's name is compared, never a path from the report, so a report
+/// cannot point at a file outside the host's mods. The report's own section is
+/// tried before the mod list table.
+fn host_row<'a>(
+    suspect: &CrashSuspect,
+    mods: &'a [ManagedModEntry],
+) -> Option<&'a ManagedModEntry> {
+    [suspect.reported_file.as_deref(), suspect.jar.as_deref()]
+        .into_iter()
+        .flatten()
+        .find_map(|jar| {
+            mods.iter()
+                .find(|entry| entry.file_name.eq_ignore_ascii_case(jar))
+        })
 }
 
 fn diagnostic_scope(host: InstalledHost) -> DiagnosticScope {
@@ -1084,6 +1154,89 @@ Details:\n\
             ),
             "`Description:` is written first and says the least"
         );
+    }
+
+    /// NeoForge's early loading failure: no `Mod List:` table exists yet.
+    const NEOFORGE_EARLY_FAILURE_REPORT: &str = r"---- Minecraft Crash Report ----
+
+Time: 2026-10-14 19:20:01
+Description: Mod loading error has occurred
+
+java.lang.Exception: Mod Loading has failed
+
+-- Mod loading issue for: jea --
+Details:
+	Mod file: /srv/servers/pack/server/mods/JustEnoughAdvancements-21.1.1.jar
+	Failure message: Mod jea requires jei 19.25.0.322 or above
+		Currently, jei is not installed
+	Mod version: 21.1.1
+Stacktrace:
+	at net.neoforged.fml.ModLoader.lambda$dispatchParallelTask$0(ModLoader.java:200) ~[fmlcore-1.21.1.jar:?]
+";
+
+    /// Forge 1.20.1 spells the header and the file label differently.
+    const FORGE_EARLY_FAILURE_REPORT: &str = r"---- Minecraft Crash Report ----
+
+Time: 2026-10-14 19:22:40
+Description: Exception in server tick loop
+
+net.minecraftforge.fml.ModLoadingException: Oculus (oculus) encountered an error while loading
+
+-- MOD oculus --
+Details:
+	Mod File: C:\servers\pack\mods\oculus-mc1.20.1-1.7.0.jar
+	Failure message: Oculus (oculus) has failed to load correctly
+		java.lang.NoClassDefFoundError: net/minecraft/client/Minecraft
+	Mod Version: 1.7.0
+Stacktrace:
+	at java.base/java.lang.Thread.run(Thread.java:840) ~[?:?]
+";
+
+    #[test]
+    fn a_loading_section_names_the_jar_when_the_report_has_no_mod_list() {
+        let neoforge = analyze_crash_report(NEOFORGE_EARLY_FAILURE_REPORT, "");
+        let jea = suspect(&neoforge, "jea");
+        assert_eq!(jea.reason, SuspectReason::Named);
+        assert_eq!(jea.jar, None);
+        assert_eq!(
+            jea.reported_file.as_deref(),
+            Some("JustEnoughAdvancements-21.1.1.jar")
+        );
+
+        let forge = analyze_crash_report(FORGE_EARLY_FAILURE_REPORT, "");
+        assert_eq!(
+            suspect(&forge, "oculus").reported_file.as_deref(),
+            Some("oculus-mc1.20.1-1.7.0.jar"),
+            "a Windows path and the `Mod File:` spelling name the jar the same way"
+        );
+    }
+
+    #[test]
+    fn a_mod_file_outside_a_mods_folder_names_no_jar() {
+        for value in [
+            "/srv/servers/pack/libraries/evil.jar",
+            "/srv/servers/pack/mods/nested/evil.jar",
+            "/srv/servers/pack/mods/",
+            "<No mod information provided>",
+            "/srv/servers/pack/mods/readme.txt",
+        ] {
+            assert_eq!(jar_in_mods_folder(value), None, "{value}");
+        }
+    }
+
+    #[test]
+    fn a_mod_file_inside_a_mods_folder_keeps_only_the_jar_name() {
+        assert_eq!(
+            jar_in_mods_folder("/a/mods/../../etc/mods/real.jar"),
+            Some("real.jar".to_owned()),
+            "directories are never followed, only the final name is compared"
+        );
+        assert_eq!(
+            jar_in_mods_folder("mods/outer.jar/META-INF/jarjar/inner.jar"),
+            Some("outer.jar".to_owned()),
+            "a jar nested in another jar is the file that holds it"
+        );
+        assert_eq!(jar_in_mods_folder("bare.jar"), Some("bare.jar".to_owned()));
     }
 
     #[test]
