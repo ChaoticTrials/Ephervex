@@ -349,6 +349,15 @@ impl App {
     fn open_pack(archive: &Path) -> CoreResult<(PackArchive, PackAnalysis)> {
         let (opened, analysis) = ephervex_pack::analyze(archive, &Self::pack_policy())?;
         check_supported_release(&analysis.recipe.minecraft_version)?;
+        // Decided from the pinned version alone, so a pack whose loader build
+        // cannot be installed is refused before any file is downloaded.
+        if let Some(exact) = analysis.recipe.loader.version.as_deref() {
+            ephervex_loaders::require_supported_installer_format(
+                analysis.recipe.loader.kind,
+                &analysis.recipe.minecraft_version,
+                exact,
+            )?;
+        }
         Ok((opened, analysis))
     }
 
@@ -772,6 +781,33 @@ mod tests {
         let app = app_rooted_at(base.path());
         let error = import(&app, &archive).await.expect_err("must refuse");
         assert_eq!(error.message_id(), "error-minecraft-version-unsupported");
+        assert!(app.list_clients().expect("list").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_pack_pinning_a_forge_build_with_an_unsupported_installer_format_is_refused_before_any_instance_exists()
+     {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("older-forge.mrpack");
+        zip_file(
+            &archive,
+            &[(
+                "modrinth.index.json",
+                &index(r#"{"minecraft": "1.12.2", "forge": "14.23.5.2847"}"#),
+            )],
+        );
+
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let analysis = app.analyze_pack(&archive).expect_err("analysis refuses it");
+        let error = import(&app, &archive).await.expect_err("must refuse");
+
+        for error in [analysis, error] {
+            assert_eq!(
+                error.message_id(),
+                "error-loader-installer-format-unsupported"
+            );
+        }
         assert!(app.list_clients().expect("list").is_empty());
     }
 

@@ -116,6 +116,29 @@ impl InstallProfile {
         })
     }
 
+    /// Whether an `install_profile.json` is in the layout Forge used before it
+    /// shipped a separate `version.json`.
+    ///
+    /// That layout has no `spec` and embeds the launch metadata under
+    /// `versionInfo` beside an `install` section, so it cannot be read as an
+    /// [`InstallProfile`]. Anything that is not such a document, including text
+    /// that is not JSON, is left for [`InstallProfile::parse`] to judge.
+    #[must_use]
+    pub fn is_embedded_version_layout(json: &str) -> bool {
+        #[derive(Deserialize)]
+        struct Layout {
+            #[serde(default)]
+            spec: Option<serde::de::IgnoredAny>,
+            #[serde(default)]
+            install: Option<serde::de::IgnoredAny>,
+            #[serde(default, rename = "versionInfo")]
+            version_info: Option<serde::de::IgnoredAny>,
+        }
+        serde_json::from_str::<Layout>(json).is_ok_and(|layout| {
+            layout.spec.is_none() && layout.install.is_some() && layout.version_info.is_some()
+        })
+    }
+
     /// Whether this profile's install is driven by the processor pipeline.
     ///
     /// `spec` does not answer this and never has. Forge 1.12.2 is `spec` 0 with
@@ -280,6 +303,34 @@ mod tests {
             assert!(profile.processors[1].applies_to(InstallSide::Client));
             assert!(profile.processors[1].applies_to(InstallSide::Server));
         }
+    }
+
+    #[test]
+    fn a_profile_embedding_its_version_metadata_is_recognized_as_the_older_layout() {
+        let older = r#"{"install":{"profileName":"Forge","target":"forge-x","path":"net.minecraftforge:forge:1.12.2-14.23.5.2847","version":"Forge 14.23.5.2847","filePath":"forge-universal.jar","minecraft":"1.12.2"},"versionInfo":{"id":"1.12.2-forge1.12.2-14.23.5.2847","libraries":[]},"optionals":[]}"#;
+        assert!(InstallProfile::is_embedded_version_layout(older));
+        assert!(matches!(
+            InstallProfile::parse(older),
+            Err(LoaderError::MetadataInvalid { .. })
+        ));
+    }
+
+    #[test]
+    fn current_profiles_and_non_json_are_not_the_older_layout() {
+        for fixture in [
+            include_str!("../../../fixtures/loaders/forge-1.12.2-install-profile.json"),
+            include_str!("../../../fixtures/loaders/forge-1.16.3-install-profile.json"),
+            include_str!("../../../fixtures/loaders/forge-1.20.1-install-profile.json"),
+            include_str!("../../../fixtures/loaders/neoforge-26.1.2-install-profile.json"),
+            "not json",
+            "[]",
+        ] {
+            assert!(!InstallProfile::is_embedded_version_layout(fixture));
+        }
+        // A declared `spec` means the document is a current profile, whatever else it carries.
+        assert!(!InstallProfile::is_embedded_version_layout(
+            r#"{"spec":0,"install":{},"versionInfo":{}}"#
+        ));
     }
 
     #[test]

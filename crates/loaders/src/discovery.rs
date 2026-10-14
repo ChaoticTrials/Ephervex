@@ -57,6 +57,50 @@ pub fn supports_minecraft(loader: LoaderKind, minecraft: &str) -> bool {
         .unwrap_or(true)
 }
 
+/// The first Forge build for Minecraft 1.12.2 whose installer ships `version.json`
+/// beside a `spec` install profile.
+///
+/// Forge published 1.12.2 installers in two layouts. Earlier builds carry only an
+/// `install_profile.json` with `install` and `versionInfo` entries and no
+/// `version.json`, which the installer engine does not read. The boundary was
+/// established from the official installers of builds on either side of it;
+/// builds just below it were not each inspected, so a build this cutoff
+/// misjudges is still caught by the layout check made after the installer is
+/// downloaded.
+const FORGE_1_12_2_FIRST_MODERN_INSTALLER_BUILD: &str = "14.23.5.2851";
+
+/// Whether the installer for an exact build is in a layout this build installs.
+///
+/// Answerable offline from the version alone, so a listing can leave the build
+/// out and an exact selection can be refused before anything is downloaded.
+#[must_use]
+pub(crate) fn installer_format_supported(loader: LoaderKind, minecraft: &str, exact: &str) -> bool {
+    !(loader == LoaderKind::Forge
+        && minecraft == "1.12.2"
+        && compare_versions(exact, FORGE_1_12_2_FIRST_MODERN_INSTALLER_BUILD) == Ordering::Less)
+}
+
+/// Refuses an exact build whose installer uses a layout that is not installed.
+///
+/// # Errors
+///
+/// [`LoaderError::UnsupportedInstallerFormat`] when
+/// [`installer_format_supported`] is false for the build.
+pub fn require_supported_installer_format(
+    loader: LoaderKind,
+    minecraft: &str,
+    exact: &str,
+) -> LoaderResult<()> {
+    if installer_format_supported(loader, minecraft, exact) {
+        return Ok(());
+    }
+    Err(LoaderError::UnsupportedInstallerFormat {
+        loader,
+        minecraft: minecraft.to_owned(),
+        version: exact.to_owned(),
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoaderBuild {
     pub version: String,
@@ -229,6 +273,7 @@ pub(crate) fn forge_listing(
     let mut builds: Vec<_> = versions
         .iter()
         .filter_map(|published| published.strip_prefix(&prefix))
+        .filter(|version| installer_format_supported(LoaderKind::Forge, minecraft, version))
         .map(|version| LoaderBuild {
             version: version.to_owned(),
             prerelease: is_prerelease(version),
@@ -470,6 +515,91 @@ mod tests {
         assert_eq!(listed.stable.as_deref(), Some("47.4.10"));
         let no_recommended = forge_listing("1.12.2", &versions, &promotions, Freshness::Fetched);
         assert_eq!(no_recommended.stable, None);
+    }
+
+    #[test]
+    fn forge_1_12_2_builds_with_the_older_installer_layout_are_not_listed() {
+        let versions: Vec<String> = [
+            "1.12.2-14.23.0.2486",
+            "1.12.2-14.23.5.2847",
+            "1.12.2-14.23.5.2851",
+            "1.12.2-14.23.5.2859",
+            "1.12.2-14.23.5.2864",
+            "1.16.5-36.2.0",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        let promotions = BTreeMap::from([
+            ("1.12.2-latest".to_owned(), "14.23.5.2864".to_owned()),
+            ("1.12.2-recommended".to_owned(), "14.23.5.2859".to_owned()),
+        ]);
+
+        let listed = forge_listing("1.12.2", &versions, &promotions, Freshness::Fetched);
+
+        let offered: Vec<_> = listed.builds.iter().map(|b| b.version.as_str()).collect();
+        assert_eq!(
+            offered,
+            ["14.23.5.2864", "14.23.5.2859", "14.23.5.2851"],
+            "builds below the cutoff are absent and the rest keep newest-first order"
+        );
+        assert_eq!(listed.latest.as_deref(), Some("14.23.5.2864"));
+        assert_eq!(listed.stable.as_deref(), Some("14.23.5.2859"));
+    }
+
+    #[test]
+    fn a_promotion_pointing_at_an_unsupported_installer_layout_is_not_offered() {
+        let versions = vec![
+            "1.12.2-14.23.5.2847".to_owned(),
+            "1.12.2-14.23.5.2859".to_owned(),
+        ];
+        let promotions =
+            BTreeMap::from([("1.12.2-recommended".to_owned(), "14.23.5.2847".to_owned())]);
+
+        let listed = forge_listing("1.12.2", &versions, &promotions, Freshness::Fetched);
+
+        assert_eq!(listed.stable, None);
+    }
+
+    #[test]
+    fn the_installer_layout_cutoff_applies_only_to_forge_for_1_12_2() {
+        assert!(!installer_format_supported(
+            LoaderKind::Forge,
+            "1.12.2",
+            "14.23.5.2850"
+        ));
+        assert!(installer_format_supported(
+            LoaderKind::Forge,
+            "1.12.2",
+            "14.23.5.2851"
+        ));
+        // 36.2.0 is numerically below the 1.12.2 cutoff and is unaffected by it.
+        assert!(installer_format_supported(
+            LoaderKind::Forge,
+            "1.16.5",
+            "36.2.0"
+        ));
+        assert!(installer_format_supported(
+            LoaderKind::NeoForge,
+            "1.12.2",
+            "1.0.0"
+        ));
+    }
+
+    #[test]
+    fn an_exact_build_with_the_older_installer_layout_is_refused_by_name() {
+        let error = require_supported_installer_format(LoaderKind::Forge, "1.12.2", "14.23.5.2847")
+            .expect_err("older layout");
+        assert!(matches!(
+            &error,
+            LoaderError::UnsupportedInstallerFormat { version, .. } if version == "14.23.5.2847"
+        ));
+        assert_eq!(
+            error.message_id(),
+            "error-loader-installer-format-unsupported"
+        );
+        assert!(
+            require_supported_installer_format(LoaderKind::Forge, "1.12.2", "14.23.5.2859").is_ok()
+        );
     }
 
     #[test]

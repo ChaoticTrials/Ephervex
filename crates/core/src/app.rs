@@ -551,6 +551,13 @@ impl App {
         Self::require_published_loader(request.loader.kind, &request.minecraft_version)?;
 
         let selected = request.loader.version.as_deref().unwrap_or_default();
+        // A build left out of the listing for its installer layout is named for
+        // that, not reported as a build that does not exist.
+        ephervex_loaders::require_supported_installer_format(
+            request.loader.kind,
+            &request.minecraft_version,
+            selected,
+        )?;
         let listing = self
             .loader_versions(request.loader.kind, &request.minecraft_version)
             .await?;

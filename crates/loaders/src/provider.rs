@@ -7,7 +7,7 @@ use ephervex_minecraft::{RuleContext, VersionMetadata};
 use ephervex_model::{LoaderKind, LoaderVersionMode};
 use tokio_util::sync::CancellationToken;
 
-use crate::discovery::{LoaderCatalog, LoaderVersionListing};
+use crate::discovery::{LoaderCatalog, LoaderVersionListing, require_supported_installer_format};
 use crate::install::InstallerEngine;
 use crate::{InstalledClient, InstalledServer, LoaderError, LoaderResult};
 
@@ -55,7 +55,9 @@ pub trait LoaderProvider: std::fmt::Debug + Send + Sync {
         cancel: &CancellationToken,
     ) -> LoaderResult<String> {
         if mode == LoaderVersionMode::Exact {
-            return crate::provider::exact(self.kind(), exact).map(str::to_owned);
+            let exact = crate::provider::exact(self.kind(), exact)?;
+            require_supported_installer_format(self.kind(), minecraft, exact)?;
+            return Ok(exact.to_owned());
         }
         self.list_versions(minecraft, reporter, cancel)
             .await?
@@ -482,5 +484,27 @@ mod tests {
             .await
             .expect("exact selection must be local");
         assert_eq!(resolved, "47.4.10");
+    }
+
+    #[tokio::test]
+    async fn an_exact_pin_with_the_older_installer_layout_is_refused_locally() {
+        let manager =
+            DownloadManager::new(ephervex_download::DownloaderConfig::default()).expect("manager");
+        let provider = ForgeProvider::new(manager, CacheLayout::new("/tmp/ephervex-loader-test"))
+            .expect("provider");
+        let error = provider
+            .resolve_version(
+                "1.12.2",
+                LoaderVersionMode::Exact,
+                Some("14.23.5.2847"),
+                &OperationReporter::silent("exact"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("the older layout is not installed");
+        assert!(matches!(
+            error,
+            LoaderError::UnsupportedInstallerFormat { .. }
+        ));
     }
 }

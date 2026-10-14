@@ -136,10 +136,15 @@ impl App {
         // A build the loader's own catalog does not offer for this exact
         // release is refused here, before anything is downloaded, and named as
         // unavailable rather than as an installation failure.
+        let candidate = exact.trim();
+        ephervex_loaders::require_supported_installer_format(
+            record.loader.kind,
+            &record.minecraft_version,
+            candidate,
+        )?;
         let listing = self
             .loader_versions(record.loader.kind, &record.minecraft_version)
             .await?;
-        let candidate = exact.trim();
         if !listing
             .builds
             .iter()

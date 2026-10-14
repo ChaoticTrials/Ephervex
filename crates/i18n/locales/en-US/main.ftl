@@ -889,6 +889,9 @@ error-loader-identity-mismatch = The downloaded loader installer does not match 
 .action = Ephervex refused the installer instead of installing different software.
 error-loader-installer-invalid = The loader installer uses an unsupported or unsafe format.
 .action = Check for an Ephervex update before trying this installer again.
+# $version is the exact loader build whose installer uses the unsupported format.
+error-loader-installer-format-unsupported = { $loader } { $version } for Minecraft { $minecraft } uses an older installer format that Ephervex does not support.
+.action = Choose a newer { $loader } build for this Minecraft version. Ephervex does not substitute a different build.
 error-loader-installer-library-conflict = The loader installer declares two different files for library { $library }.
 .action = Ephervex refused the installer instead of choosing one. Choose a different loader build.
 error-loader-download-failed = A file required by the loader could not be downloaded or verified.

@@ -22,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument};
 use zip::ZipArchive;
 
+use crate::discovery::require_supported_installer_format;
 use crate::profile::{InstallProfile, InstallSide, Processor, ProfileArtifact};
 use crate::{LoaderError, LoaderResult};
 
@@ -378,6 +379,7 @@ impl InstallerEngine {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> LoaderResult<InstallerBundle> {
+        require_supported_installer_format(kind, minecraft, exact)?;
         let (coordinate, jar_url) = installer_location(kind, minecraft, exact)?;
         let digest = self
             .installer_digest(kind, minecraft, exact, &jar_url, reporter, cancel)
@@ -399,17 +401,28 @@ impl InstallerEngine {
 
         let archive = installer.clone();
         let read = tokio::task::spawn_blocking(move || {
-            Ok::<_, LoaderError>((
-                read_zip_entry(&archive, "install_profile.json")?,
-                read_zip_entry(&archive, "version.json")?,
-            ))
+            let profile = read_zip_entry(&archive, "install_profile.json")?;
+            // The older layout has no version.json to read; it is named for what
+            // it is before that entry is required.
+            if InstallProfile::is_embedded_version_layout(&profile) {
+                return Ok::<_, LoaderError>((profile, None));
+            }
+            let child = read_zip_entry(&archive, "version.json")?;
+            Ok((profile, Some(child)))
         })
         .await
         .map_err(|error| invalid_installer(&installer, &error.to_string()))??;
+        let (profile, Some(child)) = read else {
+            return Err(LoaderError::UnsupportedInstallerFormat {
+                loader: kind,
+                minecraft: minecraft.to_owned(),
+                version: exact.to_owned(),
+            });
+        };
         Ok(InstallerBundle {
             installer,
-            profile: InstallProfile::parse(&read.0)?,
-            child: VersionMetadata::parse(&read.1)?,
+            profile: InstallProfile::parse(&profile)?,
+            child: VersionMetadata::parse(&child)?,
         })
     }
 
@@ -2242,12 +2255,29 @@ mod tests {
     /// Places a Forge 1.20.1-47.4.10 installer carrying these documents, and its
     /// digest sidecar, in the caches an install reads before reaching the network.
     async fn cache_installer(engine: &InstallerEngine, profile: &str, version: &str) {
+        cache_installer_entries(
+            engine,
+            "1.20.1",
+            "47.4.10",
+            &[("install_profile.json", profile), ("version.json", version)],
+        )
+        .await;
+    }
+
+    /// Places a Forge installer for one exact build, holding exactly these
+    /// archive entries, in the caches an install reads before the network.
+    async fn cache_installer_entries(
+        engine: &InstallerEngine,
+        minecraft: &str,
+        exact: &str,
+        entries: &[(&str, &str)],
+    ) {
         use std::io::Write as _;
 
         let staged = engine.layout.root().join("staged-installer.jar");
         std::fs::create_dir_all(staged.parent().expect("parent")).expect("cache root");
         let mut archive = zip::ZipWriter::new(std::fs::File::create(&staged).expect("installer"));
-        for (name, body) in [("install_profile.json", profile), ("version.json", version)] {
+        for (name, body) in entries {
             archive
                 .start_file(name, zip::write::SimpleFileOptions::default())
                 .expect("entry");
@@ -2266,21 +2296,121 @@ mod tests {
         std::fs::rename(&staged, &cached).expect("cached installer");
 
         let (_, jar_url) =
-            installer_location(LoaderKind::Forge, "1.20.1", "47.4.10").expect("installer");
+            installer_location(LoaderKind::Forge, minecraft, exact).expect("installer");
         MetadataCache::new(engine.layout.clone())
             .store(
-                &installer_sidecar_key(
-                    LoaderKind::Forge,
-                    "1.20.1",
-                    "47.4.10",
-                    HashAlgorithm::Sha512,
-                )
-                .expect("key"),
+                &installer_sidecar_key(LoaderKind::Forge, minecraft, exact, HashAlgorithm::Sha512)
+                    .expect("key"),
                 &Url::parse(&format!("{jar_url}.sha512")).expect("sidecar url"),
                 serde_json::value::to_raw_value(digest.digest()).expect("sidecar"),
             )
             .await
             .expect("sidecar cached");
+    }
+
+    const OLDER_LAYOUT_PROFILE: &str = r#"{"install":{"profileName":"Forge","target":"x","path":"net.minecraftforge:forge:1.12.2-14.23.5.2860","version":"Forge 14.23.5.2860","filePath":"forge-universal.jar","minecraft":"1.12.2"},"versionInfo":{"id":"1.12.2-forge1.12.2-14.23.5.2860","libraries":[]},"optionals":[]}"#;
+
+    #[tokio::test]
+    async fn an_installer_in_the_older_layout_is_named_unsupported_not_invalid() {
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+        // The version is past the listing cutoff, so only the archive's own
+        // layout can identify the installer as unsupported.
+        cache_installer_entries(
+            &engine,
+            "1.12.2",
+            "14.23.5.2860",
+            &[("install_profile.json", OLDER_LAYOUT_PROFILE)],
+        )
+        .await;
+
+        let error = engine
+            .fetch_bundle(
+                LoaderKind::Forge,
+                "1.12.2",
+                "14.23.5.2860",
+                &OperationReporter::silent("installer-layout-test"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("the older layout is not installed");
+
+        assert!(matches!(
+            &error,
+            LoaderError::UnsupportedInstallerFormat { version, .. } if version == "14.23.5.2860"
+        ));
+        assert_eq!(
+            error.message_id(),
+            "error-loader-installer-format-unsupported"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_installer_missing_version_json_without_the_older_layout_stays_invalid() {
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+        cache_installer_entries(
+            &engine,
+            "1.20.1",
+            "47.4.10",
+            &[("install_profile.json", &profile_json(""))],
+        )
+        .await;
+
+        let error = engine
+            .fetch_bundle(
+                LoaderKind::Forge,
+                "1.20.1",
+                "47.4.10",
+                &OperationReporter::silent("installer-layout-test"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("a current profile with no version.json is malformed");
+
+        assert!(matches!(error, LoaderError::InstallerInvalid { .. }));
+    }
+
+    #[tokio::test]
+    async fn an_exact_build_with_the_older_layout_is_refused_before_any_download() {
+        // Nothing is cached, so a download attempt would surface as a download
+        // or metadata failure rather than the typed refusal.
+        let root = tempfile::tempdir().expect("root");
+        let engine = loopback_engine(root.path());
+
+        let client = engine
+            .install_loader_client(
+                LoaderKind::Forge,
+                "1.12.2",
+                "14.23.5.2847",
+                &vanilla_parent(),
+                &root.path().join("java"),
+                &RuleContext::new(Platform::host()),
+                &OperationReporter::silent("installer-layout-test"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("client install refuses the older layout");
+        let server = engine
+            .install_loader_server(
+                LoaderKind::Forge,
+                "1.12.2",
+                "14.23.5.2847",
+                &vanilla_parent(),
+                &root.path().join("java"),
+                &root.path().join("server"),
+                &OperationReporter::silent("installer-layout-test"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("server install refuses the older layout");
+
+        for error in [client, server] {
+            assert!(matches!(
+                error,
+                LoaderError::UnsupportedInstallerFormat { .. }
+            ));
+        }
     }
 
     fn library_path(engine: &InstallerEngine, coordinate: &str) -> PathBuf {

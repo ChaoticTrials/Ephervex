@@ -36,6 +36,13 @@ pub enum LoaderError {
     UnsupportedProfile { spec: u32 },
     #[error("the loader installer at {path} is invalid")]
     InstallerInvalid { path: PathBuf, detail: String },
+    /// The build's installer is a well-formed archive in a layout Ephervex does not install.
+    #[error("{loader} {version} for minecraft `{minecraft}` uses an unsupported installer format")]
+    UnsupportedInstallerFormat {
+        loader: ephervex_model::LoaderKind,
+        minecraft: String,
+        version: String,
+    },
     /// The install profile and the version metadata publish different files for one library.
     #[error(
         "the loader installer at {path} declares library `{library}` as {profile} ({profile_size} bytes) in install_profile.json and as {version} ({version_size} bytes) in {version_document}"
@@ -107,6 +114,7 @@ impl LoaderError {
             Self::UnsupportedProfile { .. } | Self::InstallerInvalid { .. } => {
                 "error-loader-installer-invalid"
             }
+            Self::UnsupportedInstallerFormat { .. } => "error-loader-installer-format-unsupported",
             Self::InstallerLibraryConflict { .. } => "error-loader-installer-library-conflict",
             Self::Download { .. } => "error-loader-download-failed",
             Self::Version(_) | Self::Inheritance(_) => "error-loader-version-metadata-invalid",
@@ -133,6 +141,15 @@ impl LoaderError {
                 ("loader", loader.to_string()),
                 ("minecraft", minecraft.clone()),
                 ("since", (*since).to_owned()),
+            ],
+            Self::UnsupportedInstallerFormat {
+                loader,
+                minecraft,
+                version,
+            } => vec![
+                ("loader", loader.to_string()),
+                ("minecraft", minecraft.clone()),
+                ("version", version.clone()),
             ],
             Self::InstallerLibraryConflict { library, .. } => vec![("library", library.clone())],
             _ => Vec::new(),

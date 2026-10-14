@@ -1573,7 +1573,11 @@ layer implements file drops there and not on Wayland, and Slint's own
 drag-and-drop carries text and images between elements of one application rather
 than a path from the desktop. The file dialog remains available everywhere, and
 the same X11-only boundary already applies to the Minecraft window-size picker's
-aspect hint. Fabric, Quilt, Minecraft snapshot releases, Windows, and macOS are
+aspect hint. Forge builds for Minecraft 1.12.2 older than 14.23.5.2851 ship an
+installer without `version.json`, which the installer engine does not read. They
+are left out of version lists, and selecting one by exact version, through a
+pack or otherwise, is refused as an unsupported installer format; no other
+build is substituted. Fabric, Quilt, Minecraft snapshot releases, Windows, and macOS are
 outside the supported scope recorded in ADR 0008.
 
 ## Verification
