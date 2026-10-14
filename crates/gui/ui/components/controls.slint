@@ -450,7 +450,7 @@ export component ValueSlider inherits Rectangle {
     accessible-value-step: root.step;
     accessible-action-increment => { root.nudge(root.shown + root.step); }
     accessible-action-decrement => { root.nudge(root.shown - root.step); }
-    accessible-action-set-value(value) => { root.nudge(value.to-float()); }
+    accessible-action-set-value(value) => { root.nudge(root.snapped(value.to-float())); }
     changed value => { root.nudged = false; }
 
     // The value under a pointer position, held to the range and snapped to
@@ -459,7 +459,11 @@ export component ValueSlider inherits Rectangle {
         let ratio = root.travel > 0px
             ? Math.clamp((position - root.handle-size / 2) / root.travel, 0, 1)
             : 0;
-        let raw = root.minimum + ratio * (root.maximum - root.minimum);
+        return root.snapped(root.minimum + ratio * (root.maximum - root.minimum));
+    }
+    // A value held to the range and moved to the nearest step, so the handle
+    // never rests between the values the caller stores.
+    function snapped(raw: float) -> float {
         if (root.step <= 0) {
             return raw;
         }

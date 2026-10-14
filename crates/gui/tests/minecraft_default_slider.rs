@@ -101,6 +101,21 @@ fn assistive_technology_can_set_the_value_directly() {
 }
 
 #[test]
+fn an_assistive_value_between_steps_is_reported_on_the_nearest_step() {
+    let (ui, reports) = window_with_slider(70.0);
+    let slider = slider(&ui);
+
+    slider.set_accessible_value("55.4");
+    slider.set_accessible_value("500");
+
+    assert_eq!(
+        *reports.borrow(),
+        [("fov".to_owned(), 55.0), ("fov".to_owned(), 110.0)]
+    );
+    assert_eq!(slider.accessible_value().as_deref(), Some("110"));
+}
+
+#[test]
 fn keys_move_a_focused_slider_to_either_end_of_its_range() {
     let (ui, reports) = window_with_slider(70.0);
     let slider = slider(&ui);

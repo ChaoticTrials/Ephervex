@@ -18966,6 +18966,40 @@ mod tests {
             screen
         }
 
+        /// The ids of every slider row the shipped catalog lists.
+        fn slider_ids() -> Vec<String> {
+            let mut minecraft = MinecraftDefaultsModel::new();
+            let catalog = ephervex_core::MinecraftPreferenceCatalog::bundled_shared()
+                .expect("the bundled catalog");
+            minecraft.apply_snapshot(ephervex_core::MinecraftPreferenceSnapshot {
+                catalog_minecraft_version: catalog.canonical_minecraft_version.clone(),
+                entries: catalog
+                    .descriptors
+                    .iter()
+                    .map(|descriptor| ephervex_core::MinecraftPreferenceEntry {
+                        descriptor: descriptor.clone(),
+                        managed: false,
+                        value: None,
+                    })
+                    .collect(),
+                unusable: Vec::new(),
+                unrecognized: 0,
+            });
+            minecraft.set_show_advanced(true);
+            minecraft.set_preview_release(&catalog.canonical_minecraft_version);
+            (0..minecraft_defaults::CATEGORIES.len())
+                .flat_map(|category| {
+                    minecraft.select_category(category);
+                    minecraft
+                        .rows()
+                        .iter()
+                        .filter(|row| row.editor == "slider")
+                        .map(|row| row.id.to_string())
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        }
+
         fn showing_where(select: impl Fn(&[MinecraftPreferenceRow]) -> Option<usize>) -> Self {
             let ui = test_window();
             let (sender, commands) = std::sync::mpsc::channel();
@@ -19292,6 +19326,65 @@ mod tests {
             (screen.drafted().number_value - (first.number_value + first.number_step)).abs() < 1e-3,
             "a key after the preview answer must still reach the slider"
         );
+    }
+
+    /// What a slider shows next to what its row's draft holds.
+    fn assert_slider_matches_draft(screen: &MinecraftScreen, how: &str) {
+        use i_slint_backend_testing::AccessibleRole;
+
+        let slider = screen.control(AccessibleRole::Slider);
+        let drafted = screen.drafted();
+        let shown = slider
+            .accessible_value()
+            .and_then(|text| text.parse::<f32>().ok())
+            .expect("the slider reports a number");
+        assert!(
+            (shown - drafted.number_value).abs() < 1e-3,
+            "`{}` after {how}: the handle shows {shown} but the draft holds {}",
+            drafted.id,
+            drafted.number_value
+        );
+    }
+
+    #[test]
+    fn a_slider_shows_the_value_its_draft_holds_after_a_pointer_release() {
+        use i_slint_backend_testing::AccessibleRole;
+
+        let sliders = MinecraftScreen::slider_ids();
+        assert!(!sliders.is_empty(), "the catalog has sliders");
+        for id in &sliders {
+            let screen = MinecraftScreen::showing_where(|rows| {
+                rows.iter().position(|row| row.id.as_str() == id)
+            });
+            let slider = screen.control(AccessibleRole::Slider);
+            for across in [0.21, 0.5, 0.77] {
+                screen.click(&slider, across);
+                assert_slider_matches_draft(&screen, &format!("a click at {across}"));
+            }
+        }
+    }
+
+    #[test]
+    fn a_slider_shows_the_value_its_draft_holds_after_an_assistive_value_between_steps() {
+        use i_slint_backend_testing::AccessibleRole;
+
+        for id in &MinecraftScreen::slider_ids() {
+            let screen = MinecraftScreen::showing_where(|rows| {
+                rows.iter().position(|row| row.id.as_str() == id)
+            });
+            let row = screen.drafted();
+            // Just past a step, so the draft's rounding lands on the step
+            // and may leave the stored value exactly where it was.
+            let between = row.number_min + row.number_step * 0.4;
+            // The first edit makes the row an override, which changes more
+            // than the slider; the second changes nothing but the slider.
+            for _ in 0..2 {
+                let slider = screen.control(AccessibleRole::Slider);
+                slider.set_accessible_value(format!("{between}"));
+                slint::platform::update_timers_and_animations();
+                assert_slider_matches_draft(&screen, &format!("an assistive value of {between}"));
+            }
+        }
     }
 
     #[test]
