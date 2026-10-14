@@ -1181,8 +1181,22 @@ impl Registry {
     /// temporary one that a move left behind and the finished files stand
     /// there. The server counterpart of [`Self::client`]'s following (ADR 0025).
     fn following_moved_server(&self, indexed: ServerRecord) -> ServerRecord {
+        match self.moved_server_root(&indexed) {
+            Some(moved) => ServerRecord {
+                root: moved,
+                storage: StorageClass::Persistent,
+                ..indexed
+            },
+            None => indexed,
+        }
+    }
+
+    /// The persistent root a move left the finished server at, when `indexed`
+    /// still names a temporary root that was vacated or that a committed copy
+    /// supersedes.
+    pub(crate) fn moved_server_root(&self, indexed: &ServerRecord) -> Option<PathBuf> {
         if !indexed.storage.vanishing_is_expected() {
-            return indexed;
+            return None;
         }
         let moved = self.paths.server_root(StorageClass::Persistent, indexed.id);
         if moved == indexed.root
@@ -1190,12 +1204,52 @@ impl Registry {
             || (indexed.root.is_dir()
                 && !is_committed_server_copy_of(&moved, &indexed.root, indexed.id))
         {
-            return indexed;
+            return None;
         }
-        ServerRecord {
-            root: moved,
-            storage: StorageClass::Persistent,
-            ..indexed
+        Some(moved)
+    }
+
+    /// The server counterpart of [`Self::committed_copy_superseding`].
+    pub(crate) fn committed_server_copy_superseding(
+        &self,
+        indexed: &ServerRecord,
+    ) -> Option<PathBuf> {
+        (indexed.root.is_dir()
+            && indexed.root == self.paths.server_root(StorageClass::Temporary, indexed.id))
+        .then(|| self.moved_server_root(indexed))
+        .flatten()
+    }
+
+    /// The temporary tree a committed persistent copy supersedes for a server
+    /// whose row still names it, when that tree still stands.
+    ///
+    /// Read before a workflow marks the persistent root incomplete, by the
+    /// rule of [`Self::superseded_client_root`], and passed to
+    /// [`Self::discard_superseded_server_root`] once the root is finished.
+    pub fn superseded_server_root(&self, id: ServerId) -> Result<Option<PathBuf>, RegistryError> {
+        let indexed = self.indexed_server(id)?;
+        Ok(self
+            .committed_server_copy_superseding(&indexed)
+            .map(|_| indexed.root))
+    }
+
+    /// Removes the temporary tree a committed persistent copy superseded, once
+    /// the copy is still verifiably the finished server. A failure costs
+    /// temporary space only, so it is logged.
+    pub fn discard_superseded_server_root(&self, stale: &Path, id: ServerId) {
+        let persistent = self.paths.server_root(StorageClass::Persistent, id);
+        if stale != self.paths.server_root(StorageClass::Temporary, id)
+            || !crate::reconcile::is_finished_server_root(&persistent, id)
+        {
+            return;
+        }
+        if let Err(error) = crate::relocate::discard_tree(stale) {
+            tracing::warn!(
+                server_id = %id,
+                root = %stale.display(),
+                %error,
+                "could not remove the temporary copy a committed move superseded"
+            );
         }
     }
 
@@ -1222,10 +1276,17 @@ impl Registry {
 
     /// Commits canonical metadata first and reports an index-mirror failure as
     /// a warning rather than rolling back an already durable mutation.
+    ///
+    /// A record written at the persistent root a committed move left, while the
+    /// row still names the temporary tree that move superseded, repairs the row
+    /// and removes that tree. Every server write goes through here, so a change,
+    /// a repeated promotion and reconciliation all do.
     pub fn update_server_committed(
         &self,
         record: &mut ServerRecord,
     ) -> Result<ServerCommit<ServerRecord>, RegistryError> {
+        // Publishing stamps the copy newer, so this is decided beforehand.
+        let superseded = self.server_root_superseded_by(record);
         record.updated_at = Utc::now();
 
         // A directory sync failure after the rename leaves the new metadata
@@ -1286,10 +1347,22 @@ impl Registry {
                 detail: error.to_string(),
             }),
         }
+        if let Some(stale) = superseded {
+            self.discard_superseded_server_root(&stale, record.id);
+        }
         Ok(ServerCommit {
             record: record.clone(),
             warnings,
         })
+    }
+
+    /// The temporary tree a write of `record` supersedes: the one its row names
+    /// while a committed copy stands at the persistent root `record` is written
+    /// to.
+    fn server_root_superseded_by(&self, record: &ServerRecord) -> Option<PathBuf> {
+        let indexed = self.indexed_server(record.id).ok()?;
+        let moved = self.committed_server_copy_superseding(&indexed)?;
+        (moved == record.root).then_some(indexed.root)
     }
 
     /// Removes a server from the index, and optionally from disk.
@@ -4970,29 +5043,92 @@ mod tests {
     }
 
     #[test]
-    fn a_server_edit_after_a_move_that_left_its_temporary_copy_leaves_the_stale_copy_alone() {
+    fn a_server_edit_after_a_move_that_left_its_temporary_copy_reaches_the_persistent_copy_and_removes_the_stale_one()
+     {
         let environment = TestEnvironment::new();
         let registry = environment.registry();
         let server = created_server(&registry);
         let destination = move_server_leaving_row_and_source(&registry, &server);
         restore_index_writes(&registry);
 
-        modify_server(&registry, server.id, |record| {
+        let changed = modify_server(&registry, server.id, |record| {
             record.name = "after".to_owned();
         });
 
+        assert_eq!(changed.root, destination);
         assert_eq!(
             metadata::read_server_metadata(&destination)
                 .expect("persistent metadata")
                 .name,
             "after"
         );
+        assert!(
+            !server.root.exists(),
+            "the stale temporary copy is removed once the row names the committed one"
+        );
+        let row = registry.indexed_server(server.id).expect("row");
+        assert_eq!(row.root, destination);
+        assert_eq!(row.storage, StorageClass::Persistent);
+        assert_eq!(row.name, "after");
+    }
+
+    #[test]
+    fn a_server_edit_that_cannot_remove_the_superseded_temporary_copy_still_repairs_the_row() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = created_server(&registry);
+        let destination = move_server_leaving_row_and_source(&registry, &server);
+        restore_index_writes(&registry);
+
+        crate::relocate::fail_discarding(Some(server.root.clone()));
+        let changed = modify_server(&registry, server.id, |record| {
+            record.name = "after".to_owned();
+        });
+        crate::relocate::fail_discarding(None);
+
+        assert_eq!(changed.root, destination);
+        assert!(server.root.is_dir(), "the copy that could not be removed");
+        let row = registry.indexed_server(server.id).expect("row");
+        assert_eq!(row.root, destination);
+        assert_eq!(row.name, "after");
+        assert_eq!(registry.server(server.id).expect("read").root, destination);
+    }
+
+    #[test]
+    fn a_server_edit_never_removes_a_temporary_copy_the_persistent_tree_does_not_supersede() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = created_server(&registry);
+        let persistent = registry
+            .paths()
+            .server_root(StorageClass::Persistent, server.id);
+
+        crate::relocate::force_copy(true);
+        move_server(&registry, server.id, &mut |_| {}).expect("promote");
+        crate::relocate::fail_discarding(Some(persistent.clone()));
+        let claim = registry
+            .claim_host(RecordRef::Server(server.id))
+            .expect("claim");
+        let demoted = registry
+            .relocate_server(server.id, &claim, StorageClass::Temporary, &mut |_| {})
+            .expect("demote");
+        crate::relocate::fail_discarding(None);
+        crate::relocate::force_copy(false);
+        drop(claim);
+
+        let changed = modify_server(&registry, server.id, |record| {
+            record.name = "after".to_owned();
+        });
+
+        assert_eq!(changed.root, demoted.record.root);
+        assert!(demoted.record.root.is_dir());
+        assert!(
+            persistent.is_dir(),
+            "the older persistent tree is left alone"
+        );
         assert_eq!(
-            metadata::read_server_metadata(&server.root)
-                .expect("temporary metadata")
-                .name,
-            "before",
-            "the stale copy is not edited"
+            registry.indexed_server(server.id).expect("row").root,
+            demoted.record.root
         );
     }
 
@@ -5060,14 +5196,39 @@ mod tests {
     }
 
     #[test]
+    fn retrying_a_server_move_that_left_its_temporary_copy_removes_the_superseded_copy() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = created_server(&registry);
+        let destination = move_server_leaving_row_and_source(&registry, &server);
+        restore_index_writes(&registry);
+
+        let retried = move_server(&registry, server.id, &mut |_| {}).expect("retry");
+
+        assert!(retried.warnings.is_empty());
+        assert_eq!(retried.record.root, destination);
+        assert!(
+            !server.root.exists(),
+            "nothing names the temporary tree now"
+        );
+        let row = registry.indexed_server(server.id).expect("row");
+        assert_eq!(row.root, destination);
+        assert_eq!(row.storage, StorageClass::Persistent);
+    }
+
+    #[test]
     fn retrying_a_server_move_that_left_its_temporary_copy_keeps_later_edits_and_repairs_the_row() {
         let environment = TestEnvironment::new();
         let registry = environment.registry();
         let server = created_server(&registry);
         let destination = move_server_leaving_row_and_source(&registry, &server);
+        // The copy still cannot be removed, so only the retry can.
+        crate::relocate::fail_discarding(Some(server.root.clone()));
         modify_server(&registry, server.id, |record| {
             record.name = "after".to_owned();
         });
+        crate::relocate::fail_discarding(None);
+        assert!(server.root.is_dir());
         restore_index_writes(&registry);
 
         let retried = move_server(&registry, server.id, &mut |_| {}).expect("retry");
@@ -5079,6 +5240,7 @@ mod tests {
         assert_eq!(row.root, destination);
         assert_eq!(row.storage, StorageClass::Persistent);
         assert_eq!(row.name, "after");
+        assert!(!server.root.exists());
         assert_eq!(
             metadata::read_server_metadata(&destination)
                 .expect("metadata")

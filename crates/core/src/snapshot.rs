@@ -122,7 +122,12 @@ enum RestoreTarget {
         /// is removed once the restore is final.
         superseded: Option<PathBuf>,
     },
-    Server(ServerRecord),
+    Server {
+        record: ServerRecord,
+        /// The temporary tree the record's persistent root supersedes, which
+        /// is removed once the restore is final.
+        superseded: Option<PathBuf>,
+    },
 }
 
 impl RestoreTarget {
@@ -132,14 +137,17 @@ impl RestoreTarget {
                 record: app.client(id)?,
                 superseded: app.registry().superseded_client_root(id)?,
             },
-            InstalledHost::Server(id) => Self::Server(app.server(id)?),
+            InstalledHost::Server(id) => Self::Server {
+                record: app.server(id)?,
+                superseded: app.registry().superseded_server_root(id)?,
+            },
         })
     }
 
     fn root(&self) -> &Path {
         match self {
             Self::Client { record, .. } => &record.root,
-            Self::Server(record) => &record.root,
+            Self::Server { record, .. } => &record.root,
         }
     }
 }
@@ -148,7 +156,7 @@ impl RestoreTarget {
 struct SynchronizedHost {
     /// For a server, the record it replaced.
     previous_server: Option<ServerRecord>,
-    /// For a client, the temporary tree the restored root supersedes.
+    /// The temporary tree the restored root supersedes.
     superseded: Option<PathBuf>,
     client_warnings: Vec<ClientCommitWarning>,
     server_warnings: Vec<ServerCommitWarning>,
@@ -637,6 +645,9 @@ impl App {
                 if let Ok(restored_server) = self.server(id) {
                     self.sync_linked_server_list(&restored_server, previous_server);
                 }
+                if let Some(stale) = superseded {
+                    self.registry().discard_superseded_server_root(stale, id);
+                }
             }
         }
     }
@@ -782,7 +793,10 @@ impl App {
                     server_warnings: Vec::new(),
                 })
             }
-            RestoreTarget::Server(current) => {
+            RestoreTarget::Server {
+                record: current,
+                superseded,
+            } => {
                 let path = ephervex_storage::metadata::server_metadata_path(&current.root);
                 let mut restored = ephervex_storage::metadata::read_server_metadata(&current.root)
                     .map_err(|error| SnapshotError::Unreadable {
@@ -807,7 +821,7 @@ impl App {
                     .map_err(snapshot_core_error)?;
                 Ok(SynchronizedHost {
                     previous_server: Some(current),
-                    superseded: None,
+                    superseded,
                     client_warnings: Vec::new(),
                     server_warnings: committed.warnings,
                 })
@@ -1512,8 +1526,8 @@ mod tests {
     }
 
     #[test]
-    fn restoring_a_server_whose_row_names_a_superseded_temporary_copy_records_the_persistent_root()
-    {
+    fn restoring_a_server_whose_row_names_a_superseded_temporary_copy_records_the_persistent_root_and_removes_the_copy()
+     {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let app = App::open_at(Paths::rooted_at(temporary.path())).expect("open app");
         let server = app
@@ -1551,10 +1565,6 @@ mod tests {
         let persistent_game = ephervex_storage::metadata::server_game_dir(&persistent);
         std::fs::write(persistent_game.join("state.txt"), b"changed").expect("change state");
         assert_eq!(app.server(server.id).expect("followed").root, persistent);
-        let stale_metadata = std::fs::read(ephervex_storage::metadata::server_metadata_path(
-            &server.root,
-        ))
-        .expect("stale metadata");
 
         let restore = app
             .restore_snapshot(
@@ -1577,13 +1587,9 @@ mod tests {
             std::fs::read(persistent_game.join("state.txt")).expect("restored state"),
             b"captured"
         );
-        assert_eq!(
-            std::fs::read(ephervex_storage::metadata::server_metadata_path(
-                &server.root
-            ))
-            .expect("stale metadata after the restore"),
-            stale_metadata,
-            "the superseded temporary tree is never written to"
+        assert!(
+            !server.root.exists(),
+            "the superseded temporary tree is removed once the restore is final"
         );
     }
 

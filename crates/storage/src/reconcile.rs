@@ -375,6 +375,12 @@ fn reconcile_client(
         return Ok(());
     }
 
+    // A restore interrupted at the persistent root a move left is that host's
+    // own, and it must be settled before the root can be recognized.
+    if !settle_restore_at_moved_client_root(registry, &record, idle, report) {
+        return Ok(());
+    }
+
     // A committed copy supersedes a temporary tree that a move could not
     // remove. Reconciling the stale tree would stamp it newer than the copy.
     if let Some(moved) = registry.committed_copy_superseding(&record) {
@@ -601,6 +607,16 @@ fn reconcile_server(
         return Ok(());
     }
 
+    if !settle_restore_at_moved_server_root(registry, &record, idle, report) {
+        return Ok(());
+    }
+
+    // The same rule as a client's: a committed copy supersedes a temporary
+    // tree that a move could not remove.
+    if let Some(moved) = registry.committed_server_copy_superseding(&record) {
+        return follow_moved_server(registry, &record, &moved, idle, report);
+    }
+
     if record.root.is_dir() {
         return reconcile_present_server(registry, record, idle, report);
     }
@@ -612,17 +628,7 @@ fn reconcile_server(
             .paths()
             .server_root(StorageClass::Persistent, record.id);
         if is_finished_server_root(&moved, record.id) {
-            record = canonical_server_at(&moved, record.id)?;
-            record.root.clone_from(&moved);
-            record.storage = StorageClass::Persistent;
-            let _committed = registry.update_server_committed(&mut record)?;
-            tracing::info!(
-                server_id = %record.id,
-                root = %moved.display(),
-                "a server's files were found at the persistent root; the record followed them"
-            );
-            report.relocated.push(server_entry(&record));
-            return reconcile_present_server(registry, record, idle, report);
+            return follow_moved_server(registry, &record, &moved, idle, report);
         }
 
         registry.delete_server(record.id, FileDisposition::Keep)?;
@@ -641,6 +647,30 @@ fn reconcile_server(
         report.missing_persistent.push(entry);
     }
     Ok(())
+}
+
+/// Repairs the row of a server whose files a move left at the persistent root,
+/// then reconciles them there. A temporary tree that still stands was
+/// superseded by the committed copy and is removed once the row names it.
+fn follow_moved_server(
+    registry: &Registry,
+    stale: &ServerRecord,
+    moved: &Path,
+    idle: bool,
+    report: &mut ReconciliationReport,
+) -> Result<(), RegistryError> {
+    let mut record = canonical_server_at(moved, stale.id)?;
+    moved.clone_into(&mut record.root);
+    record.storage = StorageClass::Persistent;
+    // Removes the superseded temporary tree once the row is repaired.
+    let _committed = registry.update_server_committed(&mut record)?;
+    tracing::info!(
+        server_id = %record.id,
+        root = %moved.display(),
+        "a server's files were found at the persistent root; the record followed them"
+    );
+    report.relocated.push(server_entry(&record));
+    reconcile_present_server(registry, record, idle, report)
 }
 
 /// Reconciles a server whose files are standing at `record.root`.
@@ -1007,9 +1037,8 @@ fn reindex_orphaned_servers(
         if matches!(probe, HostProbe::Mutating) {
             continue;
         }
-        let Some(mut record) =
-            resolve_orphaned_server(id, &directory, matches!(probe, HostProbe::Idle(_)), report)
-        else {
+        let idle = matches!(probe, HostProbe::Idle(_));
+        let Some(mut record) = resolve_orphaned_server(id, &directory, idle, report) else {
             continue;
         };
 
@@ -1024,10 +1053,14 @@ fn reindex_orphaned_servers(
         if known.contains(&record.id) {
             let indexed = registry.indexed_server(record.id)?;
             if indexed.root != directory && indexed.root.is_dir() {
-                report.server_conflicts.push(ServerRootConflict {
-                    id: record.id,
-                    roots: vec![indexed.root, directory],
-                });
+                if registry.committed_server_copy_superseding(&indexed) == Some(directory.clone()) {
+                    follow_moved_server(registry, &indexed, &directory, idle, report)?;
+                } else {
+                    report.server_conflicts.push(ServerRootConflict {
+                        id: record.id,
+                        roots: vec![indexed.root, directory],
+                    });
+                }
                 continue;
             }
             // The root came back under another directory, so it follows the
@@ -1198,6 +1231,94 @@ fn resolve_orphaned_client(
         return None;
     }
     Some(record)
+}
+
+/// Settles a restore interrupted at the persistent root a move left for an
+/// indexed temporary client, and returns whether reconciliation may go on.
+///
+/// The marker the restore set keeps the root from being recognized as the
+/// moved instance, so reconciling the row first would treat the stale
+/// temporary tree as the host, or forget the record of a vacated one together
+/// with its servers. The restore is rolled back here, when the host's claim is
+/// free, and the row then follows the recovered root. Anything else leaves the
+/// row exactly as it is for the orphan scan to report.
+fn settle_restore_at_moved_client_root(
+    registry: &Registry,
+    record: &ClientRecord,
+    idle: bool,
+    report: &mut ReconciliationReport,
+) -> bool {
+    if !record.storage.vanishing_is_expected() {
+        return true;
+    }
+    let moved = registry
+        .paths()
+        .instance_root(StorageClass::Persistent, record.id);
+    if moved == record.root
+        || !is_interrupted_restore_of(
+            &moved,
+            metadata::read_client_metadata(&moved).map(|found| found.id == record.id),
+        )
+    {
+        return true;
+    }
+    recover_restore_at_moved_root(&moved, client_entry(record), idle, report)
+}
+
+/// [`settle_restore_at_moved_client_root`] for a dedicated server.
+fn settle_restore_at_moved_server_root(
+    registry: &Registry,
+    record: &ServerRecord,
+    idle: bool,
+    report: &mut ReconciliationReport,
+) -> bool {
+    if !record.storage.vanishing_is_expected() {
+        return true;
+    }
+    let moved = registry
+        .paths()
+        .server_root(StorageClass::Persistent, record.id);
+    if moved == record.root
+        || !is_interrupted_restore_of(
+            &moved,
+            metadata::read_server_metadata(&moved).map(|found| found.id == record.id),
+        )
+    {
+        return true;
+    }
+    recover_restore_at_moved_root(&moved, server_entry(record), idle, report)
+}
+
+/// Whether `root` is marked incomplete by a restore that names this host.
+///
+/// A bare marker is an interrupted creation's, not a restore's, so a restore's
+/// journal has to stand beside it. A restore interrupted while it swapped the
+/// metadata leaves none to read, so the journal alone is the evidence then.
+fn is_interrupted_restore_of<E>(root: &Path, names_host: Result<bool, E>) -> bool {
+    metadata::is_incomplete(root) && has_interrupted_state(root) && names_host.unwrap_or(true)
+}
+
+/// Recovers the restore at `moved` and returns whether the root is settled.
+/// Without the host's claim a restore cannot be told from an abandoned one.
+/// The recovery is reported under `moved`, where it happened, not under the
+/// root the row names.
+fn recover_restore_at_moved_root(
+    moved: &Path,
+    entry: ReconciledRecord,
+    idle: bool,
+    report: &mut ReconciliationReport,
+) -> bool {
+    if !idle {
+        return false;
+    }
+    let entry = ReconciledRecord {
+        root: moved.to_path_buf(),
+        storage: StorageClass::Persistent,
+        ..entry
+    };
+    let recovery = recover_restore_state(moved, &entry, report);
+    !matches!(recovery, RestoreRecovery::Failed | RestoreRecovery::Unknown)
+        && !metadata::is_incomplete(moved)
 }
 
 /// Whether a finished client instance with this id is standing at `root`.
@@ -3976,5 +4097,465 @@ mod tests {
         let abandoned = reconcile(&registry).expect("reconcile");
         assert!(abandoned.unfinished_instances.is_empty());
         assert!(!staging.exists());
+    }
+
+    /// The server counterpart of [`promote_leaving_row_and_temporary_copy`].
+    fn promote_server_leaving_row_and_temporary_copy(
+        registry: &Registry,
+        server: &ServerRecord,
+    ) -> PathBuf {
+        crate::relocate::force_copy(true);
+        crate::relocate::fail_discarding(Some(server.root.clone()));
+        fail_index_writes(registry, true);
+        let claim = registry
+            .claim_host(RecordRef::Server(server.id))
+            .expect("claim");
+        let committed = registry
+            .relocate_server(server.id, &claim, StorageClass::Persistent, &mut |_| {})
+            .expect("the published metadata is a committed move");
+        assert!(!committed.warnings.is_empty());
+        drop(claim);
+        crate::relocate::fail_discarding(None);
+        crate::relocate::force_copy(false);
+        assert!(server.root.is_dir(), "the source could not be removed");
+        registry
+            .paths()
+            .server_root(StorageClass::Persistent, server.id)
+    }
+
+    fn temporary_server(registry: &Registry, name: &str) -> ServerRecord {
+        registry
+            .create_server(NewServer::new(name, "1.20.1", LoaderSelection::vanilla()))
+            .expect("create")
+    }
+
+    #[test]
+    fn a_committed_server_copy_beside_the_temporary_tree_the_row_names_is_followed_not_stamped() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = temporary_server(&registry, "before");
+        let persistent = promote_server_leaving_row_and_temporary_copy(&registry, &server);
+        // The stale tree keeps standing, and reconciling it would flag this
+        // and rewrite its metadata newer than the committed copy.
+        crate::relocate::fail_discarding(Some(server.root.clone()));
+        let interrupted = metadata::staging_dir(&server.root);
+        std::fs::create_dir_all(&interrupted).expect("interrupted state");
+        std::fs::write(interrupted.join("part"), b"x").expect("interrupted state");
+        let stale = metadata::read_server_metadata(&server.root).expect("stale metadata");
+        // An edit made on the committed copy after the move.
+        let mut edited = registry.current_server(server.id).expect("current");
+        edited.name = "after".to_owned();
+        registry.update_server(&mut edited).expect("edit");
+        fail_index_writes(&registry, false);
+
+        let report = reconcile(&registry).expect("reconcile");
+        crate::relocate::fail_discarding(None);
+
+        assert!(report.server_conflicts.is_empty());
+        assert_eq!(report.relocated.len(), 1);
+        assert!(report.interrupted_hosts.is_empty());
+        let row = registry.indexed_server(server.id).expect("row");
+        assert_eq!(row.root, persistent);
+        assert_eq!(row.storage, StorageClass::Persistent);
+        assert_eq!(row.name, "after");
+        assert!(row.attention.is_empty());
+        let read = registry.server(server.id).expect("read");
+        assert_eq!(read.root, persistent);
+        assert_eq!(read.name, "after");
+        assert_eq!(
+            metadata::read_server_metadata(&server.root)
+                .expect("the stale copy is still there")
+                .updated_at,
+            stale.updated_at,
+            "the stale copy is never stamped"
+        );
+    }
+
+    #[test]
+    fn a_retried_server_promotion_after_reconciling_a_committed_copy_keeps_the_committed_copy() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = temporary_server(&registry, "before");
+        let persistent = promote_server_leaving_row_and_temporary_copy(&registry, &server);
+        let interrupted = metadata::staging_dir(&server.root);
+        std::fs::create_dir_all(&interrupted).expect("interrupted state");
+        std::fs::write(interrupted.join("part"), b"x").expect("interrupted state");
+        let mut edited = registry.current_server(server.id).expect("current");
+        edited.name = "after".to_owned();
+        registry.update_server(&mut edited).expect("edit");
+        fail_index_writes(&registry, false);
+
+        reconcile(&registry).expect("reconcile");
+        let claim = registry
+            .claim_host(RecordRef::Server(server.id))
+            .expect("claim");
+        registry
+            .relocate_server(server.id, &claim, StorageClass::Persistent, &mut |_| {})
+            .expect("retry");
+
+        assert_eq!(
+            metadata::read_server_metadata(&persistent)
+                .expect("committed metadata")
+                .name,
+            "after",
+            "the committed copy is not replaced by the stale one"
+        );
+        assert_eq!(registry.server(server.id).expect("read").root, persistent);
+    }
+
+    #[test]
+    fn reconciling_a_committed_server_copy_removes_the_superseded_temporary_tree() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = temporary_server(&registry, "before");
+        let persistent = promote_server_leaving_row_and_temporary_copy(&registry, &server);
+        fail_index_writes(&registry, false);
+
+        reconcile(&registry).expect("reconcile");
+
+        assert!(
+            !server.root.exists(),
+            "nothing names the temporary tree now"
+        );
+        assert!(persistent.is_dir());
+        assert_eq!(
+            registry.indexed_server(server.id).expect("row").root,
+            persistent
+        );
+        let second = reconcile(&registry).expect("reconcile again");
+        assert!(second.is_empty());
+    }
+
+    #[test]
+    fn the_orphan_scan_repairs_the_row_of_a_committed_server_copy_instead_of_reporting_a_conflict()
+    {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = temporary_server(&registry, "before");
+        let persistent = promote_server_leaving_row_and_temporary_copy(&registry, &server);
+        fail_index_writes(&registry, false);
+
+        let mut report = ReconciliationReport::default();
+        reindex_orphaned_servers(&registry, &mut report).expect("scan");
+
+        assert!(report.server_conflicts.is_empty());
+        assert_eq!(report.relocated.len(), 1);
+        assert_eq!(
+            registry.indexed_server(server.id).expect("row").root,
+            persistent
+        );
+        assert!(!server.root.exists());
+    }
+
+    #[test]
+    fn a_persistent_server_tree_that_is_not_the_newer_copy_is_still_a_conflicting_root() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = temporary_server(&registry, "before");
+        let persistent = registry
+            .paths()
+            .server_root(StorageClass::Persistent, server.id);
+        crate::relocate::force_copy(true);
+        let claim = registry
+            .claim_host(RecordRef::Server(server.id))
+            .expect("claim");
+        registry
+            .relocate_server(server.id, &claim, StorageClass::Persistent, &mut |_| {})
+            .expect("promote");
+        // Demoting copies the files back and cannot remove the persistent tree.
+        crate::relocate::fail_discarding(Some(persistent.clone()));
+        let demoted = registry
+            .relocate_server(server.id, &claim, StorageClass::Temporary, &mut |_| {})
+            .expect("demote");
+        crate::relocate::fail_discarding(None);
+        crate::relocate::force_copy(false);
+        drop(claim);
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.server_conflicts.len(), 1);
+        assert!(persistent.is_dir());
+        assert!(demoted.record.root.is_dir());
+        assert_eq!(
+            registry.indexed_server(server.id).expect("row").root,
+            demoted.record.root
+        );
+    }
+
+    /// Publishes a restore at the persistent root of `client` that is never
+    /// finished, as a crash would leave it.
+    fn leave_client_restore_at_the_persistent_root(
+        environment: &TestEnvironment,
+        registry: &Registry,
+        client: &ClientRecord,
+        persistent: &Path,
+    ) -> crate::restore::RestoreTransaction {
+        let snapshot = snapshot_copy_of_a_persistent_client(registry, client);
+        let mut at_persistent = client.clone();
+        persistent.clone_into(&mut at_persistent.root);
+        leave_client_restore_unfinished(environment, &at_persistent, &snapshot)
+    }
+
+    fn leave_server_restore_at_the_persistent_root(
+        environment: &TestEnvironment,
+        registry: &Registry,
+        server: &ServerRecord,
+        persistent: &Path,
+    ) -> crate::restore::RestoreTransaction {
+        let snapshot = snapshot_copy_of_a_temporary_server(registry, server);
+        let mut at_persistent = server.clone();
+        persistent.clone_into(&mut at_persistent.root);
+        leave_server_restore_unfinished(environment, &at_persistent, &snapshot)
+    }
+
+    #[test]
+    fn a_restore_interrupted_at_the_committed_copy_of_a_superseded_client_is_recovered_and_followed()
+     {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new(
+                "before",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        let server = registry
+            .create_server(NewServer::linked("server", client.id))
+            .expect("create server");
+        let persistent = promote_leaving_row_and_temporary_copy(&registry, &client);
+        fail_index_writes(&registry, false);
+        let _transaction = leave_client_restore_at_the_persistent_root(
+            &environment,
+            &registry,
+            &client,
+            &persistent,
+        );
+        assert!(metadata::is_incomplete(&persistent));
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.restores_rolled_back.len(), 1);
+        assert_eq!(report.restores_rolled_back[0].root, persistent);
+        assert_eq!(
+            report.restores_rolled_back[0].storage,
+            StorageClass::Persistent
+        );
+        assert!(report.unfinished_instances.is_empty());
+        assert!(report.client_conflicts.is_empty());
+        assert!(!metadata::is_incomplete(&persistent));
+        let row = registry
+            .indexed_client(client.id)
+            .expect("the record survives");
+        assert_eq!(row.root, persistent);
+        assert_eq!(row.storage, StorageClass::Persistent);
+        assert_eq!(row.name, "before", "the restore was rolled back");
+        assert!(!client.root.exists(), "the superseded tree is removed");
+        assert_eq!(
+            registry.linked_server_ids(client.id).expect("links"),
+            vec![server.id]
+        );
+    }
+
+    #[test]
+    fn a_restore_interrupted_at_the_persistent_root_of_a_vacated_client_is_recovered_without_forgetting_it()
+     {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new(
+                "before",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        let server = registry
+            .create_server(NewServer::linked("server", client.id))
+            .expect("create server");
+        let persistent = promote_leaving_row_and_temporary_copy(&registry, &client);
+        std::fs::remove_dir_all(&client.root).expect("vacate the temporary root");
+        fail_index_writes(&registry, false);
+        let _transaction = leave_client_restore_at_the_persistent_root(
+            &environment,
+            &registry,
+            &client,
+            &persistent,
+        );
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.restores_rolled_back.len(), 1);
+        assert_eq!(report.restores_rolled_back[0].root, persistent);
+        assert_eq!(
+            report.restores_rolled_back[0].storage,
+            StorageClass::Persistent
+        );
+        assert!(report.removed_stale_temporary.is_empty());
+        assert!(!metadata::is_incomplete(&persistent));
+        let row = registry
+            .indexed_client(client.id)
+            .expect("the record survives");
+        assert_eq!(row.root, persistent);
+        assert_eq!(row.storage, StorageClass::Persistent);
+        assert_eq!(
+            registry.linked_server_ids(client.id).expect("links"),
+            vec![server.id],
+            "the linked server is still attached"
+        );
+    }
+
+    #[test]
+    fn a_restore_interrupted_at_the_persistent_root_of_a_vacated_client_is_kept_while_its_claim_cannot_be_tried()
+     {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new(
+                "before",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        let server = registry
+            .create_server(NewServer::linked("server", client.id))
+            .expect("create server");
+        let persistent = promote_leaving_row_and_temporary_copy(&registry, &client);
+        std::fs::remove_dir_all(&client.root).expect("vacate the temporary root");
+        fail_index_writes(&registry, false);
+        let _transaction = leave_client_restore_at_the_persistent_root(
+            &environment,
+            &registry,
+            &client,
+            &persistent,
+        );
+        let guards = registry.paths().move_guards_dir();
+        std::fs::remove_dir_all(&guards).ok();
+        std::fs::write(&guards, b"not a directory").expect("block the guard directory");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert!(report.restores_rolled_back.is_empty());
+        assert!(report.removed_stale_temporary.is_empty());
+        assert!(
+            metadata::is_incomplete(&persistent),
+            "left for a later pass"
+        );
+        assert_eq!(report.unfinished_instances.len(), 1);
+        let row = registry
+            .indexed_client(client.id)
+            .expect("the record survives");
+        assert_eq!(
+            row.root, client.root,
+            "the row is not repaired from a half-restored tree"
+        );
+        assert_eq!(
+            registry.linked_server_ids(client.id).expect("links"),
+            vec![server.id]
+        );
+    }
+
+    #[test]
+    fn a_restore_interrupted_at_the_committed_copy_of_a_superseded_server_is_recovered_and_followed()
+     {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = temporary_server(&registry, "before");
+        let persistent = promote_server_leaving_row_and_temporary_copy(&registry, &server);
+        fail_index_writes(&registry, false);
+        let _transaction = leave_server_restore_at_the_persistent_root(
+            &environment,
+            &registry,
+            &server,
+            &persistent,
+        );
+        assert!(metadata::is_incomplete(&persistent));
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.restores_rolled_back.len(), 1);
+        assert_eq!(report.restores_rolled_back[0].root, persistent);
+        assert_eq!(
+            report.restores_rolled_back[0].storage,
+            StorageClass::Persistent
+        );
+        assert!(report.unfinished_instances.is_empty());
+        assert!(report.server_conflicts.is_empty());
+        assert!(!metadata::is_incomplete(&persistent));
+        let row = registry
+            .indexed_server(server.id)
+            .expect("the record survives");
+        assert_eq!(row.root, persistent);
+        assert_eq!(row.storage, StorageClass::Persistent);
+        assert_eq!(row.name, "before", "the restore was rolled back");
+        assert!(!server.root.exists(), "the superseded tree is removed");
+    }
+
+    #[test]
+    fn a_restore_interrupted_at_the_persistent_root_of_a_vacated_server_is_recovered_without_forgetting_it()
+     {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = temporary_server(&registry, "before");
+        let persistent = promote_server_leaving_row_and_temporary_copy(&registry, &server);
+        std::fs::remove_dir_all(&server.root).expect("vacate the temporary root");
+        fail_index_writes(&registry, false);
+        let _transaction = leave_server_restore_at_the_persistent_root(
+            &environment,
+            &registry,
+            &server,
+            &persistent,
+        );
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.restores_rolled_back.len(), 1);
+        assert_eq!(report.restores_rolled_back[0].root, persistent);
+        assert_eq!(
+            report.restores_rolled_back[0].storage,
+            StorageClass::Persistent
+        );
+        assert!(report.removed_stale_temporary.is_empty());
+        assert!(!metadata::is_incomplete(&persistent));
+        let row = registry
+            .indexed_server(server.id)
+            .expect("the record survives");
+        assert_eq!(row.root, persistent);
+        assert_eq!(row.storage, StorageClass::Persistent);
+    }
+
+    #[test]
+    fn a_restore_interrupted_at_the_persistent_root_of_a_vacated_server_is_kept_while_its_claim_cannot_be_tried()
+     {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = temporary_server(&registry, "before");
+        let persistent = promote_server_leaving_row_and_temporary_copy(&registry, &server);
+        std::fs::remove_dir_all(&server.root).expect("vacate the temporary root");
+        fail_index_writes(&registry, false);
+        let _transaction = leave_server_restore_at_the_persistent_root(
+            &environment,
+            &registry,
+            &server,
+            &persistent,
+        );
+        let guards = registry.paths().move_guards_dir();
+        std::fs::remove_dir_all(&guards).ok();
+        std::fs::write(&guards, b"not a directory").expect("block the guard directory");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert!(report.restores_rolled_back.is_empty());
+        assert!(report.removed_stale_temporary.is_empty());
+        assert!(
+            metadata::is_incomplete(&persistent),
+            "left for a later pass"
+        );
+        let row = registry
+            .indexed_server(server.id)
+            .expect("the record survives");
+        assert_eq!(
+            row.root, server.root,
+            "the row is not repaired from a half-restored tree"
+        );
     }
 }

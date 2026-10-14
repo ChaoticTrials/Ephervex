@@ -96,25 +96,30 @@ followed when its metadata names it persistent and was written after the
 temporary one's, so a stale persistent tree left by a demotion never displaces
 the instance the row names. Deleting the instance with its files removes both
 trees. Unlinking a deleted client's servers rewrites each from the same
-followed record. Reconciliation of a client reads the row as indexed and
-repairs it to the persistent root when the temporary root is gone and when a
-committed persistent copy supersedes the temporary tree that still stands; it
-never stamps the stale tree. A persistent client tree that is not the newer,
-persistent copy is left alone and reported as a conflicting root. Every repair
-of such a client row, whether by a change, a repeated promotion, or
-reconciliation, then removes the superseded temporary tree, and a failure to
-remove it is logged. Reconciliation of a server repairs its row only when the
-temporary root is gone; while both trees stand it leaves the row alone and
-reports the persistent tree as a conflicting root, and the temporary tree is
-removed only when the server is deleted with its files. A repeated promotion
-follows the files, and repairs the row without copying the stale temporary tree
-over the committed one.
+followed record. Reconciliation of a client or a server reads the row as
+indexed and repairs it to the persistent root when the temporary root is gone
+and when a committed persistent copy supersedes the temporary tree that still
+stands; it never stamps the stale tree. The scan of the persistent root makes
+the same repair instead of reporting the committed copy as a conflict. A
+persistent tree that is not the newer, persistent copy is left alone and
+reported as a conflicting root. Every repair of such a row, whether by a
+change, a repeated promotion, or reconciliation, then removes the superseded
+temporary tree, and a failure to remove it is logged. For a server that holds
+for every write of its record, because each goes through the one that commits
+it. A repeated promotion follows the files, and repairs the row without copying
+the stale temporary tree over the committed one.
 A snapshot restore of such a client or server reads the record it addresses
 before it publishes, because the incomplete marker it then sets keeps the
 persistent tree from being followed. It records the restored metadata at that
 root and repairs the row to it, and never writes to the superseded temporary
-tree. For a client, it reads the superseded temporary tree before it publishes
-too, and removes it once the restore is final.
+tree. It reads the superseded temporary tree before it publishes too, and
+removes it once the restore is final.
+A restore interrupted at that persistent root is the host's own. Reconciliation
+recovers it there while it holds the host's claim, before it decides where the
+host is, and then follows the recovered root as above. It never forgets the
+record or unlinks the servers of a host in that state, whether the temporary
+tree still stands or was vacated. Without the claim, or when the restore cannot
+be rolled back, the row is left as it is and the root is reported as unfinished.
 
 **Linked servers are a per-server choice, not a cascade.** A server has its own
 storage class and its own world. Every temporary linked server is offered,
