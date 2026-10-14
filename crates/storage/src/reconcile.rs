@@ -386,7 +386,7 @@ fn reconcile_client(
     }
 
     // A temporary tree left beside the persistent root the row names was
-    // skipped by a write that could not claim the host.
+    // skipped because its removal failed or the host could not be claimed.
     let temporary = registry
         .paths()
         .instance_root(StorageClass::Temporary, record.id);
@@ -461,7 +461,7 @@ fn follow_moved_client(
     let mut record = canonical_client_at(moved, stale.id)?;
     moved.clone_into(&mut record.root);
     record.storage = StorageClass::Persistent;
-    registry.update_client(&mut record)?;
+    registry.commit_client_record(&mut record)?;
     if let (Some(stale_root), Some(claim)) = (stale_root, claim) {
         registry.discard_superseded_client_root(&stale_root, record.id, claim);
     }
@@ -560,7 +560,7 @@ fn reconcile_present_client(
     changed |= report_interrupted_state(&record.root, &mut record.attention, &entry, report);
     if changed {
         if adopted {
-            registry.update_client(&mut record)?;
+            registry.commit_client_record(&mut record)?;
         } else {
             // The files under this root are not canonical metadata, so only
             // the index records the new attention.
@@ -680,10 +680,7 @@ fn follow_moved_server(
     record.storage = StorageClass::Persistent;
     // Removes the superseded temporary tree once the row is repaired, while
     // the claim is held.
-    let _committed = match claim {
-        Some(claim) => registry.update_server_committed_claimed(&mut record, claim)?,
-        None => registry.update_server_committed(&mut record)?,
-    };
+    let _committed = registry.commit_server_record(&mut record, claim)?;
     tracing::info!(
         server_id = %record.id,
         root = %moved.display(),
@@ -786,7 +783,7 @@ fn reconcile_server_against_metadata(
     changed |= report_interrupted_state(&record.root, &mut record.attention, &entry, report);
     if changed {
         if adopted {
-            registry.update_server(&mut record)?;
+            registry.commit_server_record(&mut record, None)?;
         } else {
             // The files under this root are not canonical metadata, so only
             // the index records the new attention.
@@ -2150,9 +2147,13 @@ mod tests {
         let legacy = environment.base().join("data/legacy-temporary-client");
         std::fs::rename(&original, &legacy).expect("move legacy root");
         client.root.clone_from(&legacy);
+        let claim = registry
+            .claim_host(RecordRef::Client(client.id))
+            .expect("claim");
         registry
-            .update_client(&mut client)
+            .update_client_committed_claimed(&mut client, &claim)
             .expect("store legacy path");
+        drop(claim);
 
         let report = reconcile(&registry).expect("reconcile");
         assert_eq!(report.removed_stale_temporary.len(), 1);
@@ -3336,9 +3337,13 @@ mod tests {
         std::fs::rename(&client.root, &moved).expect("move");
         let mut current = client.clone();
         current.root.clone_from(&moved);
+        let claim = registry
+            .claim_host(RecordRef::Client(client.id))
+            .expect("claim");
         registry
-            .update_client(&mut current)
+            .update_client_committed_claimed(&mut current, &claim)
             .expect("record the move");
+        drop(claim);
 
         let mut report = ReconciliationReport::default();
         reconcile_listed_clients(&registry, &stale_listing, &mut report).expect("reconcile");
@@ -3365,9 +3370,13 @@ mod tests {
         std::fs::rename(&server.root, &moved).expect("move");
         let mut current = server.clone();
         current.root.clone_from(&moved);
+        let claim = registry
+            .claim_host(RecordRef::Server(server.id))
+            .expect("claim");
         registry
-            .update_server(&mut current)
+            .update_server_committed_claimed(&mut current, &claim)
             .expect("record the move");
+        drop(claim);
 
         let mut report = ReconciliationReport::default();
         reconcile_listed_servers(&registry, &stale_listing, &mut report).expect("reconcile");

@@ -592,7 +592,7 @@ impl App {
             superseded,
             client_warnings: warnings,
             server_warnings,
-        } = match self.synchronize_restored_host(target) {
+        } = match self.synchronize_restored_host(&claim, target) {
             Ok(synchronized) => synchronized,
             Err(error) => {
                 let rollback = transaction.rollback();
@@ -765,6 +765,7 @@ impl App {
     /// warnings on the committed metadata.
     fn synchronize_restored_host(
         &self,
+        claim: &ephervex_storage::HostClaim,
         target: RestoreTarget,
     ) -> Result<SynchronizedHost, SnapshotError> {
         match target {
@@ -791,7 +792,7 @@ impl App {
                 restored.storage = current.storage;
                 let warnings = self
                     .registry()
-                    .update_client_committed(&mut restored)
+                    .update_client_committed_claimed(&mut restored, claim)
                     .map_err(crate::CoreError::from)
                     .map_err(snapshot_core_error)?;
                 Ok(SynchronizedHost {
@@ -824,7 +825,7 @@ impl App {
                 restored.storage = current.storage;
                 let committed = self
                     .registry()
-                    .update_server_committed(&mut restored)
+                    .update_server_committed_claimed(&mut restored, claim)
                     .map_err(crate::CoreError::from)
                     .map_err(snapshot_core_error)?;
                 Ok(SynchronizedHost {

@@ -560,12 +560,17 @@ impl App {
         name: &str,
     ) -> CoreResult<ServerCommit<ServerRecord>> {
         let name = validated_entity_name(name)?;
+        // Claimed before the record is read, so a move cannot carry the server
+        // away between the read and the write.
+        let claim = self
+            .registry_for_services()
+            .claim_host(ephervex_storage::RecordRef::Server(server))?;
         let mut record = self.canonical_server_for_mutation(server)?;
         let previous = record.clone();
         record.name = name;
         let committed = self
             .registry_for_services()
-            .update_server_committed(&mut record)?;
+            .update_server_committed_claimed(&mut record, &claim)?;
         self.sync_linked_server_list(&committed.record, Some(&previous));
         Ok(committed)
     }

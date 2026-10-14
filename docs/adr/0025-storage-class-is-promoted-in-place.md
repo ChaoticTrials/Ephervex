@@ -110,10 +110,12 @@ it. A repeated promotion follows the files, and repairs the row without copying
 the stale temporary tree over the committed one.
 The removal happens under the host's claim, so a move cannot produce a host at
 the temporary root between the decision that it is superseded and the removal.
-A writer that holds no claim takes it before it decides, and decides again
-under it; when another change holds the host, or the writer holds the claim
-itself, the temporary tree is left in place and reconciliation removes it once
-the host is idle, so it costs temporary space for a while and nothing else.
+Every writer of a record holds the claim: one that does not already hold it
+takes it before it reads the record, and is refused while another change holds
+the host or when the host was moved after the record was read. The temporary
+tree is left in place only when its removal fails or when reconciliation could
+not claim the host, and reconciliation removes it once the host is idle, so it
+costs temporary space for a while and nothing else.
 Under the claim the tree goes only if the row names the finished persistent
 copy and the temporary metadata is older than that copy's, so a tree with an
 equal or newer stamp is kept as a possible live host. Every write stamps its

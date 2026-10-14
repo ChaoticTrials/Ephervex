@@ -4,8 +4,8 @@
 
 use ephervex_model::{InstanceId, LoaderSelection, SnapshotId, StorageClass};
 use ephervex_storage::{
-    ClientRecord, NewClient, Paths, RecordRef, Registry, RegistryError, RestorePart,
-    RestorePartState, RestoreTransaction, metadata, prepare_restore, reconcile,
+    ClientRecord, NewClient, NewServer, Paths, RecordRef, Registry, RegistryError, RestorePart,
+    RestorePartState, RestoreTransaction, ServerRecord, metadata, prepare_restore, reconcile,
 };
 use tempfile::TempDir;
 
@@ -214,4 +214,221 @@ fn a_staging_directory_of_an_unindexed_instance_is_still_reported() {
     let report = reconcile(&registry).expect("reconcile");
 
     assert_eq!(report.unfinished_instances.len(), 1);
+}
+
+fn temporary_server(registry: &Registry) -> ServerRecord {
+    registry
+        .create_server(NewServer::new("host", "1.20.1", LoaderSelection::vanilla()))
+        .expect("create server")
+}
+
+/// Moves a client to the persistent root under its claim, as a caller must.
+fn promote_client(registry: &Registry, client: &ClientRecord) -> ClientRecord {
+    let claim = registry
+        .claim_host(RecordRef::Client(client.id))
+        .expect("claim");
+    registry
+        .relocate_client(client.id, &claim, StorageClass::Persistent, &mut |_| {})
+        .expect("move")
+        .record
+}
+
+#[test]
+fn a_client_write_prepared_before_a_move_is_refused_instead_of_naming_the_vacated_root() {
+    let base = tempfile::tempdir().expect("temp dir");
+    let registry = Registry::open(isolated_paths(&base)).expect("open registry");
+    let client = client_with_state(&registry, b"original");
+    let mut stale = registry.current_client(client.id).expect("read");
+    let moved = promote_client(&registry, &client);
+    assert_ne!(moved.root, client.root);
+
+    stale.name = "renamed".to_owned();
+    let error = registry
+        .update_client_committed(&mut stale)
+        .expect_err("the host moved after the record was read");
+
+    assert!(matches!(error, RegistryError::HostBusy { .. }), "{error}");
+    let row = registry.indexed_client(client.id).expect("row");
+    assert_eq!(row.root, moved.root);
+    assert_eq!(row.storage, StorageClass::Persistent);
+    assert_eq!(row.name, moved.name);
+    assert!(moved.root.is_dir());
+    assert_eq!(
+        metadata::read_client_metadata(&moved.root)
+            .expect("metadata")
+            .name,
+        moved.name
+    );
+    assert!(!client.root.exists(), "the refused write recreated nothing");
+    assert_eq!(
+        registry.client(client.id).expect("reachable").root,
+        moved.root
+    );
+}
+
+#[test]
+fn a_client_change_made_after_a_move_lands_at_the_moved_root() {
+    let base = tempfile::tempdir().expect("temp dir");
+    let registry = Registry::open(isolated_paths(&base)).expect("open registry");
+    let client = client_with_state(&registry, b"original");
+    let moved = promote_client(&registry, &client);
+
+    registry
+        .modify_client(client.id, |record| record.name = "renamed".to_owned())
+        .expect("change");
+
+    let row = registry.indexed_client(client.id).expect("row");
+    assert_eq!(row.root, moved.root);
+    assert_eq!(row.name, "renamed");
+    assert_eq!(
+        metadata::read_client_metadata(&moved.root)
+            .expect("metadata")
+            .name,
+        "renamed"
+    );
+}
+
+#[test]
+fn a_move_cannot_start_between_a_client_changes_read_and_its_write() {
+    let base = tempfile::tempdir().expect("temp dir");
+    let registry = Registry::open(isolated_paths(&base)).expect("open registry");
+    let client = client_with_state(&registry, b"original");
+
+    registry
+        .modify_client(client.id, |record| {
+            assert!(
+                matches!(
+                    registry.claim_host(RecordRef::Client(client.id)),
+                    Err(RegistryError::HostBusy { .. })
+                ),
+                "the change holds the host between its read and its write"
+            );
+            record.name = "renamed".to_owned();
+        })
+        .expect("change");
+
+    assert_eq!(
+        registry.indexed_client(client.id).expect("row").name,
+        "renamed"
+    );
+}
+
+#[test]
+fn a_client_write_is_refused_while_another_operation_holds_the_host() {
+    let base = tempfile::tempdir().expect("temp dir");
+    let registry = Registry::open(isolated_paths(&base)).expect("open registry");
+    let client = client_with_state(&registry, b"original");
+    let claim = registry
+        .claim_host(RecordRef::Client(client.id))
+        .expect("claim");
+    let mut record = registry.current_client(client.id).expect("read");
+    record.name = "renamed".to_owned();
+
+    let refused = registry.update_client_committed(&mut record.clone());
+    let changed = registry.modify_client(client.id, |current| current.name = "other".to_owned());
+
+    assert!(matches!(refused, Err(RegistryError::HostBusy { .. })));
+    assert!(matches!(changed, Err(RegistryError::HostBusy { .. })));
+    registry
+        .update_client_committed_claimed(&mut record, &claim)
+        .expect("the holder of the claim writes");
+    assert_eq!(
+        registry.indexed_client(client.id).expect("row").name,
+        "renamed"
+    );
+}
+
+#[test]
+fn a_claimed_client_write_needs_the_claim_of_its_own_host() {
+    let base = tempfile::tempdir().expect("temp dir");
+    let registry = Registry::open(isolated_paths(&base)).expect("open registry");
+    let client = client_with_state(&registry, b"original");
+    let other = client_with_state(&registry, b"other");
+    let claim_of_other = registry
+        .claim_host(RecordRef::Client(other.id))
+        .expect("claim");
+    let mut record = registry.current_client(client.id).expect("read");
+
+    let error = registry
+        .update_client_committed_claimed(&mut record, &claim_of_other)
+        .expect_err("another host's claim does not cover this one");
+    let changed = registry.modify_client_committed_claimed(client.id, &claim_of_other, |_| {});
+
+    assert!(matches!(error, RegistryError::HostNotClaimed { .. }));
+    assert!(matches!(changed, Err(RegistryError::HostNotClaimed { .. })));
+}
+
+#[test]
+fn a_server_write_prepared_before_a_move_is_refused_instead_of_naming_the_vacated_root() {
+    let base = tempfile::tempdir().expect("temp dir");
+    let registry = Registry::open(isolated_paths(&base)).expect("open registry");
+    let server = temporary_server(&registry);
+    let mut stale = registry.current_server(server.id).expect("read");
+    let claim = registry
+        .claim_host(RecordRef::Server(server.id))
+        .expect("claim");
+    let moved = registry
+        .relocate_server(server.id, &claim, StorageClass::Persistent, &mut |_| {})
+        .expect("move")
+        .record;
+    drop(claim);
+    assert_ne!(moved.root, server.root);
+
+    stale.name = "renamed".to_owned();
+    let error = registry
+        .update_server_committed(&mut stale)
+        .expect_err("the host moved after the record was read");
+
+    assert!(matches!(error, RegistryError::HostBusy { .. }), "{error}");
+    let row = registry.indexed_server(server.id).expect("row");
+    assert_eq!(row.root, moved.root);
+    assert_eq!(row.storage, StorageClass::Persistent);
+    assert_eq!(row.name, moved.name);
+    assert!(moved.root.is_dir());
+    assert!(!server.root.exists(), "the refused write recreated nothing");
+    assert_eq!(
+        registry.server(server.id).expect("reachable").root,
+        moved.root
+    );
+}
+
+#[test]
+fn a_server_write_is_refused_while_another_operation_holds_the_host() {
+    let base = tempfile::tempdir().expect("temp dir");
+    let registry = Registry::open(isolated_paths(&base)).expect("open registry");
+    let server = temporary_server(&registry);
+    let claim = registry
+        .claim_host(RecordRef::Server(server.id))
+        .expect("claim");
+    let mut record = registry.current_server(server.id).expect("read");
+    record.name = "renamed".to_owned();
+
+    let refused = registry.update_server_committed(&mut record.clone());
+
+    assert!(matches!(refused, Err(RegistryError::HostBusy { .. })));
+    registry
+        .update_server_committed_claimed(&mut record, &claim)
+        .expect("the holder of the claim writes");
+    assert_eq!(
+        registry.indexed_server(server.id).expect("row").name,
+        "renamed"
+    );
+}
+
+#[test]
+fn a_claimed_server_write_needs_the_claim_of_its_own_host() {
+    let base = tempfile::tempdir().expect("temp dir");
+    let registry = Registry::open(isolated_paths(&base)).expect("open registry");
+    let server = temporary_server(&registry);
+    let other = temporary_server(&registry);
+    let claim_of_other = registry
+        .claim_host(RecordRef::Server(other.id))
+        .expect("claim");
+    let mut record = registry.current_server(server.id).expect("read");
+
+    let error = registry
+        .update_server_committed_claimed(&mut record, &claim_of_other)
+        .expect_err("another host's claim does not cover this one");
+
+    assert!(matches!(error, RegistryError::HostNotClaimed { .. }));
 }

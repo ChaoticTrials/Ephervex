@@ -358,7 +358,7 @@ impl Registry {
                 .committed_copy_superseding(&indexed)
                 .map(|_| indexed.root.clone());
             let mut current = current_client_of(record)?;
-            let warnings = self.update_client_committed(&mut current)?;
+            let warnings = self.update_client_committed_claimed(&mut current, claim)?;
             if let Some(stale) = superseded {
                 self.discard_superseded_client_root(&stale, id, claim);
             }
@@ -391,7 +391,7 @@ impl Registry {
                 );
                 current.root.clone_from(&destination);
                 current.storage = storage;
-                let warnings = self.update_client_committed(&mut current)?;
+                let warnings = self.update_client_committed_claimed(&mut current, claim)?;
                 Ok(ClientCommit {
                     record: current,
                     warnings,
@@ -470,7 +470,7 @@ impl Registry {
                 );
                 current.root.clone_from(&destination);
                 current.storage = storage;
-                self.update_server_committed(&mut current)
+                self.update_server_committed_claimed(&mut current, claim)
             },
         )?;
 
@@ -658,7 +658,64 @@ impl Registry {
     /// exists - a persistent instance whose directory vanished keeps its index
     /// row and its warning, and must not fail the update that records that
     /// warning.
+    ///
+    /// The write takes the host's claim and is refused with
+    /// [`RegistryError::HostBusy`] when another operation holds it, or when the
+    /// host was moved away from the root `record` was read at: a record written
+    /// back after a move would name the root the move removed. A caller that
+    /// holds the claim uses [`Self::update_client_committed_claimed`].
     pub fn update_client_committed(
+        &self,
+        record: &mut ClientRecord,
+    ) -> Result<Vec<ClientCommitWarning>, RegistryError> {
+        let _claim = self.claim_client_at_its_root(record)?;
+        self.commit_client_record(record)
+    }
+
+    /// [`Self::update_client_committed`] for a caller that holds the instance's
+    /// claim, which may also change the root the record names.
+    pub fn update_client_committed_claimed(
+        &self,
+        record: &mut ClientRecord,
+        claim: &HostClaim,
+    ) -> Result<Vec<ClientCommitWarning>, RegistryError> {
+        claim.require(RecordRef::Client(record.id), &record.root)?;
+        self.commit_client_record(record)
+    }
+
+    /// Claims the host of a record that was read before this write, and checks
+    /// under the claim that the files are still where the record names them.
+    /// `None` for an instance the index does not list, which the write then
+    /// refuses.
+    fn claim_client_at_its_root(
+        &self,
+        record: &ClientRecord,
+    ) -> Result<Option<HostClaim>, RegistryError> {
+        let host = RecordRef::Client(record.id);
+        if !self.is_indexed(host)? {
+            return Ok(None);
+        }
+        let claim = claim_host(&self.paths, host, &record.root)?;
+        match self.indexed_client(record.id) {
+            Ok(indexed) => {
+                // The root readers address: a row left at a temporary root by a
+                // move whose index write failed is read at the moved files.
+                let addressed = self.moved_files_root(&indexed).unwrap_or(indexed.root);
+                if addressed != record.root {
+                    return Err(RegistryError::HostBusy {
+                        path: record.root.clone(),
+                    });
+                }
+            }
+            Err(RegistryError::InstanceUnknown { .. }) => {}
+            Err(error) => return Err(error),
+        }
+        Ok(Some(claim))
+    }
+
+    /// Writes a client record, for a caller that already holds the instance's
+    /// claim or that reconciliation runs under its own probe of it.
+    pub(crate) fn commit_client_record(
         &self,
         record: &mut ClientRecord,
     ) -> Result<Vec<ClientCommitWarning>, RegistryError> {
@@ -733,29 +790,38 @@ impl Registry {
 
     /// [`Self::modify_client`] that also reports a published but unsynced
     /// metadata file as a warning on the committed change.
+    ///
+    /// The instance's claim is held from reading the record to writing it, so
+    /// a move cannot carry the host away in between. The claim is refused with
+    /// [`RegistryError::HostBusy`] while another operation holds it. A caller
+    /// that holds the claim uses [`Self::modify_client_committed_claimed`].
     pub fn modify_client_committed(
         &self,
         id: InstanceId,
         change: impl FnOnce(&mut ClientRecord),
     ) -> Result<ClientCommit<ClientRecord>, RegistryError> {
-        // A write that will supersede a temporary tree takes the claim first,
-        // so a move cannot produce a host at that root between the decision
-        // and the removal. The decision is taken again under the claim.
-        let claim = self
-            .committed_copy_superseding(&self.indexed_client(id)?)
-            .and_then(|_| self.idle_claim(RecordRef::Client(id)));
+        let claim = self.claim_host(RecordRef::Client(id))?;
+        self.modify_client_committed_claimed(id, &claim, change)
+    }
+
+    /// [`Self::modify_client_committed`] for a caller that holds the instance's
+    /// claim.
+    pub fn modify_client_committed_claimed(
+        &self,
+        id: InstanceId,
+        claim: &HostClaim,
+        change: impl FnOnce(&mut ClientRecord),
+    ) -> Result<ClientCommit<ClientRecord>, RegistryError> {
         let indexed = self.indexed_client(id)?;
+        claim.require(RecordRef::Client(id), &indexed.root)?;
         let superseded = self
             .committed_copy_superseding(&indexed)
             .map(|_| indexed.root);
         let mut record = self.current_client(id)?;
         change(&mut record);
-        let warnings = self.update_client_committed(&mut record)?;
+        let warnings = self.commit_client_record(&mut record)?;
         if let Some(stale) = superseded {
-            match &claim {
-                Some(claim) => self.discard_superseded_client_root(&stale, id, claim),
-                None => self.discard_superseded_client_root_if_unclaimed(&stale, id),
-            }
+            self.discard_superseded_client_root(&stale, id, claim);
         }
         Ok(ClientCommit { record, warnings })
     }
@@ -876,20 +942,6 @@ impl Registry {
         }
     }
 
-    /// [`Self::discard_superseded_client_root`] for a writer that holds no
-    /// claim. While another change or start holds the host the tree stays,
-    /// and reconciliation removes it once the host is idle.
-    fn discard_superseded_client_root_if_unclaimed(&self, stale: &Path, id: InstanceId) {
-        match self.probe_host(RecordRef::Client(id)) {
-            HostProbe::Idle(claim) => self.discard_superseded_client_root(stale, id, &claim),
-            HostProbe::Mutating | HostProbe::Unusable => tracing::debug!(
-                instance_id = %id,
-                root = %stale.display(),
-                "keeping the superseded temporary copy while the host is claimed"
-            ),
-        }
-    }
-
     /// Replaces the SQLite recovery copy of an indexed client with its
     /// canonical metadata, exactly as read.
     ///
@@ -967,19 +1019,19 @@ impl Registry {
         for server_id in self.linked_server_ids(id)? {
             // A server linked after the caller listed its servers is being
             // changed under no claim, and rewriting it could overwrite that.
-            if !claimed_servers
+            let Some(claim) = claimed_servers
                 .iter()
-                .any(|claim| claim.covers(RecordRef::Server(server_id)))
-            {
+                .find(|claim| claim.covers(RecordRef::Server(server_id)))
+            else {
                 return Err(RegistryError::HostNotClaimed {
                     path: self.server(server_id)?.root,
                 });
-            }
-            linked.push(self.current_server(server_id)?);
+            };
+            linked.push((self.current_server(server_id)?, *claim));
         }
-        for mut server in linked {
+        for (mut server, claim) in linked {
             server.linked_client_id = None;
-            let _committed = self.update_server_committed(&mut server)?;
+            let _committed = self.update_server_committed_claimed(&mut server, claim)?;
         }
 
         if files == FileDisposition::Remove {
@@ -1289,19 +1341,6 @@ impl Registry {
         }
     }
 
-    /// [`Self::discard_superseded_server_root`] for a writer that holds no
-    /// claim, by the rule of [`Self::discard_superseded_client_root_if_unclaimed`].
-    fn discard_superseded_server_root_if_unclaimed(&self, stale: &Path, id: ServerId) {
-        match self.probe_host(RecordRef::Server(id)) {
-            HostProbe::Idle(claim) => self.discard_superseded_server_root(stale, id, &claim),
-            HostProbe::Mutating | HostProbe::Unusable => tracing::debug!(
-                server_id = %id,
-                root = %stale.display(),
-                "keeping the superseded temporary copy while the host is claimed"
-            ),
-        }
-    }
-
     /// Lists every indexed server, newest first.
     pub fn list_servers(&self) -> Result<Vec<ServerRecord>, RegistryError> {
         let connection = self.index.connection();
@@ -1328,42 +1367,70 @@ impl Registry {
     ///
     /// A record written at the persistent root a committed move left, while the
     /// row still names the temporary tree that move superseded, repairs the row
-    /// and removes that tree. Every server write goes through here, so a change,
-    /// a repeated promotion and reconciliation all do.
+    /// and removes that tree, while the claim is held.
     ///
-    /// The superseded tree is removed only while no other change or start holds
-    /// the server, so a caller without the claim never discards a tree a move
-    /// has just produced. A caller that holds the claim uses
-    /// [`Self::update_server_committed_claimed`].
+    /// The write takes the host's claim and is refused with
+    /// [`RegistryError::HostBusy`] when another operation holds it, or when the
+    /// host was moved away from the root `record` was read at: a record written
+    /// back after a move would name the root the move removed. A caller that
+    /// holds the claim uses [`Self::update_server_committed_claimed`].
     pub fn update_server_committed(
         &self,
         record: &mut ServerRecord,
     ) -> Result<ServerCommit<ServerRecord>, RegistryError> {
-        // A write that will supersede a temporary tree takes the claim first,
-        // so a move cannot produce a host at that root between the decision
-        // and the removal. The decision is taken again under the claim.
-        let claim = self
-            .server_root_superseded_by(record)
-            .and_then(|_| self.idle_claim(RecordRef::Server(record.id)));
-        let (commit, superseded) = self.write_server_committed(record)?;
-        if let Some(stale) = superseded {
-            match &claim {
-                Some(claim) => self.discard_superseded_server_root(&stale, record.id, claim),
-                None => self.discard_superseded_server_root_if_unclaimed(&stale, record.id),
-            }
-        }
-        Ok(commit)
+        let claim = self.claim_server_at_its_root(record)?;
+        self.commit_server_record(record, claim.as_ref())
     }
 
     /// [`Self::update_server_committed`] for a caller that holds the server's
-    /// claim.
-    pub(crate) fn update_server_committed_claimed(
+    /// claim, which may also change the root the record names.
+    pub fn update_server_committed_claimed(
         &self,
         record: &mut ServerRecord,
         claim: &HostClaim,
     ) -> Result<ServerCommit<ServerRecord>, RegistryError> {
+        claim.require(RecordRef::Server(record.id), &record.root)?;
+        self.commit_server_record(record, Some(claim))
+    }
+
+    /// The server counterpart of [`Self::claim_client_at_its_root`].
+    fn claim_server_at_its_root(
+        &self,
+        record: &ServerRecord,
+    ) -> Result<Option<HostClaim>, RegistryError> {
+        let host = RecordRef::Server(record.id);
+        if !self.is_indexed(host)? {
+            return Ok(None);
+        }
+        let claim = claim_host(&self.paths, host, &record.root)?;
+        match self.indexed_server(record.id) {
+            Ok(indexed) => {
+                let addressed = self.moved_server_root(&indexed).unwrap_or(indexed.root);
+                if addressed != record.root {
+                    return Err(RegistryError::HostBusy {
+                        path: record.root.clone(),
+                    });
+                }
+            }
+            Err(RegistryError::ServerUnknown { .. }) => {}
+            Err(error) => return Err(error),
+        }
+        Ok(Some(claim))
+    }
+
+    /// Writes a server record and removes the temporary tree the write
+    /// superseded while the caller's claim is held. Without a claim the tree
+    /// stays and reconciliation removes it once the host is idle.
+    ///
+    /// For a caller that already holds the server's claim, and for
+    /// reconciliation, which runs under its own probe of it.
+    pub(crate) fn commit_server_record(
+        &self,
+        record: &mut ServerRecord,
+        claim: Option<&HostClaim>,
+    ) -> Result<ServerCommit<ServerRecord>, RegistryError> {
         let (commit, superseded) = self.write_server_committed(record)?;
-        if let Some(stale) = superseded {
+        if let (Some(stale), Some(claim)) = (superseded, claim) {
             self.discard_superseded_server_root(&stale, record.id, claim);
         }
         Ok(commit)
@@ -2190,14 +2257,6 @@ impl Registry {
             Err(GuardError::Unusable { path, source }) => {
                 Err(RegistryError::HostGuardUnusable { path, source })
             }
-        }
-    }
-
-    /// The host's claim, when nothing else holds it.
-    fn idle_claim(&self, host: RecordRef) -> Option<HostClaim> {
-        match self.probe_host(host) {
-            HostProbe::Idle(claim) => Some(claim),
-            HostProbe::Mutating | HostProbe::Unusable => None,
         }
     }
 
@@ -3223,18 +3282,23 @@ mod tests {
 
         let mut edited = false;
         crate::relocate::force_copy(true);
-        let promoted = move_client(&registry, client.id, &mut |_| {
-            if !edited {
-                edited = true;
-                registry
-                    .modify_client(client.id, |record| {
-                        record.name = "renamed meanwhile".to_owned();
-                        record.add_attention(AttentionReason::MissingRoot);
-                    })
-                    .expect("an edit while the files copy");
-            }
-        })
-        .expect("move");
+        let claim = registry
+            .claim_host(RecordRef::Client(client.id))
+            .expect("claim");
+        let promoted = registry
+            .relocate_client(client.id, &claim, StorageClass::Persistent, &mut |_| {
+                if !edited {
+                    edited = true;
+                    registry
+                        .modify_client_committed_claimed(client.id, &claim, |record| {
+                            record.name = "renamed meanwhile".to_owned();
+                            record.add_attention(AttentionReason::MissingRoot);
+                        })
+                        .expect("an edit while the files copy");
+                }
+            })
+            .expect("move")
+            .record;
         crate::relocate::force_copy(false);
 
         assert!(edited, "the edit ran while the copy was in progress");
@@ -3261,16 +3325,22 @@ mod tests {
 
         let mut edited = false;
         crate::relocate::force_copy(true);
-        let promoted = move_server(&registry, server.id, &mut |_| {
-            if !edited {
-                edited = true;
-                let mut record = registry.server(server.id).expect("server");
-                record.name = "renamed meanwhile".to_owned();
-                registry.update_server(&mut record).expect("edit");
-            }
-        })
-        .expect("move")
-        .record;
+        let claim = registry
+            .claim_host(RecordRef::Server(server.id))
+            .expect("claim");
+        let promoted = registry
+            .relocate_server(server.id, &claim, StorageClass::Persistent, &mut |_| {
+                if !edited {
+                    edited = true;
+                    let mut record = registry.server(server.id).expect("server");
+                    record.name = "renamed meanwhile".to_owned();
+                    registry
+                        .update_server_committed_claimed(&mut record, &claim)
+                        .expect("edit");
+                }
+            })
+            .expect("move")
+            .record;
         crate::relocate::force_copy(false);
 
         assert!(edited, "the edit ran while the copy was in progress");
@@ -3655,6 +3725,37 @@ mod tests {
             .relocate_client(client.id, &claim, StorageClass::Persistent, &mut |_| {})
             .expect("the published metadata is a committed move");
         (committed, destination)
+    }
+
+    #[test]
+    fn a_client_write_read_before_a_move_whose_index_write_failed_is_refused() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = created_client(&registry);
+        let mut stale = registry.current_client(client.id).expect("read");
+        assert_eq!(stale.root, client.root);
+        let (_, destination) = move_client_with_failing_index(&registry, &client);
+        restore_index_writes(&registry);
+        assert_eq!(
+            registry.indexed_client(client.id).expect("row").root,
+            client.root,
+            "the row still names the temporary root"
+        );
+
+        stale.name = "renamed".to_owned();
+        let error = registry
+            .update_client_committed(&mut stale)
+            .expect_err("the files moved after the record was read");
+
+        assert!(matches!(error, RegistryError::HostBusy { .. }), "{error}");
+        assert_eq!(
+            metadata::read_client_metadata(&destination)
+                .expect("metadata")
+                .name,
+            client.name
+        );
+        assert_eq!(registry.client(client.id).expect("read").root, destination);
+        assert!(!client.root.exists(), "the refused write recreated nothing");
     }
 
     #[test]
@@ -5486,7 +5587,8 @@ mod tests {
     }
 
     #[test]
-    fn a_client_change_leaves_the_superseded_temporary_copy_while_another_change_holds_the_host() {
+    fn a_client_change_is_refused_and_keeps_the_superseded_temporary_copy_while_another_change_holds_the_host()
+     {
         let environment = TestEnvironment::new();
         let registry = environment.registry();
         let (client, persistent) = superseded_client(&registry);
@@ -5494,15 +5596,15 @@ mod tests {
             .claim_host(RecordRef::Client(client.id))
             .expect("claim");
 
-        registry
-            .modify_client(client.id, |record| record.name = "after".to_owned())
-            .expect("change");
+        let refused = registry.modify_client(client.id, |record| record.name = "after".to_owned());
 
+        assert!(matches!(refused, Err(RegistryError::HostBusy { .. })));
         assert!(client.root.is_dir(), "a claimed move may be using it");
         assert!(persistent.is_dir());
         assert_eq!(
             registry.indexed_client(client.id).expect("row").root,
-            persistent
+            client.root,
+            "the refused change left the row alone"
         );
         drop(claim);
         crate::reconcile::reconcile(&registry).expect("reconcile");
@@ -5511,6 +5613,10 @@ mod tests {
             "reconciliation removes the leftover once the host is idle"
         );
         assert!(persistent.is_dir());
+        assert_eq!(
+            registry.indexed_client(client.id).expect("row").root,
+            persistent
+        );
     }
 
     #[test]
@@ -5575,7 +5681,8 @@ mod tests {
     }
 
     #[test]
-    fn a_server_change_leaves_the_superseded_temporary_copy_while_another_change_holds_the_host() {
+    fn a_server_change_is_refused_and_keeps_the_superseded_temporary_copy_while_another_change_holds_the_host()
+     {
         let environment = TestEnvironment::new();
         let registry = environment.registry();
         let server = created_server(&registry);
@@ -5585,15 +5692,17 @@ mod tests {
             .claim_host(RecordRef::Server(server.id))
             .expect("claim");
 
-        modify_server(&registry, server.id, |record| {
-            record.name = "after".to_owned();
-        });
+        let mut record = registry.current_server(server.id).expect("current");
+        record.name = "after".to_owned();
+        let refused = registry.update_server_committed(&mut record);
 
+        assert!(matches!(refused, Err(RegistryError::HostBusy { .. })));
         assert!(server.root.is_dir(), "a claimed move may be using it");
         assert!(persistent.is_dir());
         assert_eq!(
             registry.indexed_server(server.id).expect("row").root,
-            persistent
+            server.root,
+            "the refused change left the row alone"
         );
         drop(claim);
         crate::reconcile::reconcile(&registry).expect("reconcile");
@@ -5602,6 +5711,10 @@ mod tests {
             "reconciliation removes the leftover once the host is idle"
         );
         assert!(persistent.is_dir());
+        assert_eq!(
+            registry.indexed_server(server.id).expect("row").root,
+            persistent
+        );
     }
 
     #[test]

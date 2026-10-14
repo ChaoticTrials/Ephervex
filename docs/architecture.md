@@ -851,7 +851,11 @@ A client launch takes the claim only while it reads the instance record and
 takes the launch lock. A server start takes it before it checks the runtime and
 keeps it through start preparation until the supervisor owns the runtime lock.
 After that point the launch lock or runtime lock keeps changes out. An operation
-that finds the claim held is refused with a message to try again.
+that finds the claim held is refused with a message to try again. A write that
+only records a change to the host's record (a rename, an attention flag, the
+launch time, a setting) takes the claim briefly as well, and is refused when the
+host's files were moved after the record was read, so it never names a root a
+move has left.
 
 A launcher run can end while its game keeps running. The lock still holds the
 instance while the recorded game is alive and still has its recorded start

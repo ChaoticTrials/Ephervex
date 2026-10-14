@@ -356,7 +356,7 @@ impl App {
         options: &ServerCreateOptions,
         cancel: &CancellationToken,
     ) -> CoreResult<ServerCommit<ServerRecord>> {
-        let (_claim, mut record) = self.claim_stopped_server(id)?;
+        let (claim, mut record) = self.claim_stopped_server(id)?;
         if record.installation.is_installed() {
             return Ok(ServerCommit::clean(record));
         }
@@ -433,7 +433,7 @@ impl App {
         merge_network_file(&target.join(SERVER_PROPERTIES_FILE), &record.network)?;
         let committed = self
             .registry_for_services()
-            .update_server_committed(&mut record)?;
+            .update_server_committed_claimed(&mut record, &claim)?;
         cleanup.disarm();
         Ok(committed)
     }
@@ -679,12 +679,12 @@ impl App {
         network: ServerNetworkSettings,
         values: &[(String, String)],
     ) -> CoreResult<ServerCommit<ServerRecord>> {
-        let (_claim, mut record) = self.claim_stopped_server(id)?;
+        let (claim, mut record) = self.claim_stopped_server(id)?;
         network_properties(&network)?.validate()?;
         let backup = merge_properties_file(&server_properties_path(&record), &network, values)?;
         let previous = record.clone();
         record.network = network;
-        let committed = self.commit_or_restore_properties(&mut record, &backup)?;
+        let committed = self.commit_or_restore_properties(&claim, &mut record, &backup)?;
         self.sync_linked_server_list(&committed.record, Some(&previous));
         Ok(committed)
     }
@@ -696,13 +696,13 @@ impl App {
         id: ServerId,
         change: &ServerNetworkChange,
     ) -> CoreResult<ServerCommit<ServerRecord>> {
-        let (_claim, mut record) = self.claim_stopped_server(id)?;
+        let (claim, mut record) = self.claim_stopped_server(id)?;
         let network = change.applied_to(&record.network)?;
         network_properties(&network)?.validate()?;
         let backup = merge_network_file(&server_properties_path(&record), &network)?;
         let previous = record.clone();
         record.network = network;
-        let committed = self.commit_or_restore_properties(&mut record, &backup)?;
+        let committed = self.commit_or_restore_properties(&claim, &mut record, &backup)?;
         self.sync_linked_server_list(&committed.record, Some(&previous));
         Ok(committed)
     }
@@ -711,10 +711,14 @@ impl App {
     /// commit puts the file back so it keeps agreeing with the stored settings.
     fn commit_or_restore_properties(
         &self,
+        claim: &ephervex_storage::HostClaim,
         record: &mut ServerRecord,
         backup: &PropertiesBackup,
     ) -> CoreResult<ServerCommit<ServerRecord>> {
-        match self.registry_for_services().update_server_committed(record) {
+        match self
+            .registry_for_services()
+            .update_server_committed_claimed(record, claim)
+        {
             Ok(committed) => Ok(committed),
             Err(error) => {
                 if let Err(restore) = backup.restore() {
@@ -735,13 +739,13 @@ impl App {
         jvm_override: Option<JvmSettings>,
     ) -> CoreResult<ServerCommit<ServerRecord>> {
         let java_override = crate::app::normalized_java_override(java_override)?;
-        let (_claim, mut record) = self.claim_stopped_server(id)?;
+        let (claim, mut record) = self.claim_stopped_server(id)?;
         self.validate_jvm_override(jvm_override.as_ref())?;
         record.java_override = java_override;
         record.jvm_override = jvm_override;
         Ok(self
             .registry_for_services()
-            .update_server_committed(&mut record)?)
+            .update_server_committed_claimed(&mut record, &claim)?)
     }
 
     #[must_use]
@@ -927,7 +931,7 @@ impl App {
             if should_persist {
                 let _commit = self
                     .registry_for_services()
-                    .update_server_committed(&mut record)?;
+                    .update_server_committed_claimed(&mut record, &claim)?;
             }
         }
         materialize_operator_setup(&server_dir, &record.network, record.operator_setup.as_ref())?;
@@ -949,7 +953,7 @@ impl App {
         record.last_started_at = Some(Utc::now());
         let _commit = self
             .registry_for_services()
-            .update_server_committed(&mut record)?;
+            .update_server_committed_claimed(&mut record, &claim)?;
         Ok(PreparedServerStart {
             command,
             root: record.root,
@@ -1103,10 +1107,15 @@ impl App {
         id: ServerId,
         reason: AttentionReason,
     ) -> CoreResult<()> {
+        // Claimed before the record is read, so a move cannot carry the server
+        // away between the read and the write.
+        let claim = self
+            .registry_for_services()
+            .claim_host(ephervex_storage::RecordRef::Server(id))?;
         let mut record = self.canonical_server_for_mutation(id)?;
         record.add_attention(reason);
         self.registry_for_services()
-            .update_server_committed(&mut record)?;
+            .update_server_committed_claimed(&mut record, &claim)?;
         Ok(())
     }
 

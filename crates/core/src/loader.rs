@@ -260,7 +260,7 @@ impl App {
 
         // The installation can take long enough for a launch to begin. The
         // claim is kept to the end of the change, so none begins before it.
-        let _claim = self.claim_stopped_client(instance)?;
+        let claim = self.claim_stopped_client(instance)?;
 
         // Held from the last check to the recipe write, so a session cannot
         // start between them.
@@ -272,7 +272,7 @@ impl App {
         // changed at all.
         let ClientCommit { record, warnings } =
             self.registry()
-                .modify_client_committed(instance, |current| {
+                .modify_client_committed_claimed(instance, &claim, |current| {
                     current.loader = selection.clone();
                 })?;
         Self::align_recipe_loader(&record, &gate)?;

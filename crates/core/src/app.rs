@@ -825,13 +825,15 @@ impl App {
         jvm_override: Option<ephervex_model::JvmSettings>,
     ) -> CoreResult<ClientCommit<ClientRecord>> {
         let java_override = normalized_java_override(java_override)?;
-        let _claim = self.claim_stopped_client(id)?;
+        let claim = self.claim_stopped_client(id)?;
         self.client(id)?;
         self.validate_jvm_override(jvm_override.as_ref())?;
-        Ok(self.registry().modify_client_committed(id, |record| {
-            record.java_override = java_override;
-            record.jvm_override = jvm_override;
-        })?)
+        Ok(self
+            .registry()
+            .modify_client_committed_claimed(id, &claim, |record| {
+                record.java_override = java_override;
+                record.jvm_override = jvm_override;
+            })?)
     }
 
     /// Refuses an override that, layered over the current global settings,
