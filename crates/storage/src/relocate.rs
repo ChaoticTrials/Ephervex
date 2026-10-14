@@ -117,6 +117,10 @@ fn copy_through_stage(
 /// Renamed aside first, so a deletion that fails partway leaves nothing at
 /// `path` that could pass for the host.
 pub(crate) fn discard_tree(path: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if FAIL_DISCARD_OF.with_borrow(|refused| refused.as_deref() == Some(path)) {
+        return Err(std::io::Error::other("discarding is refused"));
+    }
     discard_stage(path)?;
     match std::fs::rename(path, stage_for(path)?) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -269,6 +273,16 @@ fn copy_file(from: &Path, to: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 thread_local! {
     static FORCE_COPY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FAIL_DISCARD_OF: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Makes this thread's removal of the tree at `path` fail, so a move whose old
+/// copy cannot be removed is reachable without depending on file permissions.
+/// `None` restores removal.
+#[cfg(test)]
+pub(crate) fn fail_discarding(path: Option<PathBuf>) {
+    FAIL_DISCARD_OF.set(path);
 }
 
 /// Makes this thread's moves copy even where a rename would work. Every test

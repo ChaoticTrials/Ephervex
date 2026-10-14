@@ -90,8 +90,16 @@ A client read before the next reconciliation, for example after the move's index
 write failed, follows the files in the same way: reading it, launching it,
 duplicating it, changing it, and deleting it with its files all address the
 persistent root, and a change repairs the row, instead of acting on a row that
-names a directory that no longer exists. Reconciliation and a repeated promotion
-read the row as indexed, so they still find the old storage class and repair it.
+names a directory that no longer exists. The same holds when a copy could not
+remove the temporary source and it still stands: the persistent tree is
+followed when its metadata names it persistent and was written after the
+temporary one's, so a stale persistent tree left by a demotion never displaces
+the instance the row names. Deleting the instance with its files removes both
+trees. Reconciliation reads the row as indexed and repairs it only when the
+temporary root is gone; while both trees stand it leaves the row alone and
+reports the persistent tree as a conflicting root. A repeated promotion follows
+the files, and repairs the row without copying the stale temporary tree over
+the committed one.
 
 **Linked servers are a per-server choice, not a cascade.** A server has its own
 storage class and its own world. Every temporary linked server is offered,
