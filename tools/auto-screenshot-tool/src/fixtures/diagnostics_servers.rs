@@ -1,14 +1,19 @@
 //! Diagnostics, failed-run notices, and server workspace surfaces.
 
 use ephervex_gui::ui::{
-    AppWindow, BundlePartRow, DiagnosticCheckRow, DiagnosticFindingRow, FixChangeRow, HostView,
-    InstanceRow, LogChunk, LogView, ServerRow, WorkspacePaneRow, WorkspaceSurfaceRow,
+    AppWindow, BundlePartRow, DiagnosticCheckRow, DiagnosticFindingRow, DiagnosticRow,
+    FixChangeRow, HostView, InstanceRow, LogChunk, LogView, ServerRow, WorkspacePaneRow,
+    WorkspaceSurfaceRow,
 };
 use ephervex_gui::workspace_layout::Surface;
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use slint::{Model, ModelRc, SharedString, VecModel};
 
-use super::{client_mod_results, client_mod_rows, rows, running_instance, running_server};
+use super::recorded::{self, Diagnostics};
+use super::{
+    client_mod_results, client_mod_rows, expand_tabs, log_level, rows, running_instance,
+    running_server, size_text,
+};
 
 fn strings(values: &[&str]) -> ModelRc<SharedString> {
     ModelRc::new(VecModel::from(
@@ -154,63 +159,40 @@ fn check(label: &str, value: String, state: &str, state_label: &str) -> Diagnost
     }
 }
 
+/// The files the verification found missing or damaged, as the findings list them.
+fn damaged_files(diagnostics: &Diagnostics) -> Vec<String> {
+    diagnostics
+        .files
+        .problems
+        .iter()
+        .map(|problem| format!("{} ({})", problem.path, problem.state))
+        .collect()
+}
+
 fn client_problems() -> Vec<DiagnosticFindingRow> {
-    vec![
-        with_fix(finding(
-            "p0",
-            true,
-            &lookup_args(
-                "gui-diagnosis-files-damaged",
-                [("count", Arg::from(2_usize))],
-            ),
-            &lookup_args(
-                "gui-diagnosis-files-restorable",
-                [("count", Arg::from(2_usize))],
-            ),
-            &[],
-            &[
-                "mods/jei-1.20.1-forge-15.20.0.130.jar (Missing)",
-                "mods/jade-1.20.1-forge-11.13.2.jar (Damaged)",
-            ],
-        )),
-        DiagnosticFindingRow {
-            install_label: lookup("gui-diagnosis-install-latest").into(),
-            install_provider: "modrinth".into(),
-            install_project: "villager-notice-board".into(),
-            ..with_route(
-                finding(
-                    "p1",
-                    true,
-                    &lookup_args(
-                        "gui-diagnosis-dependency-missing",
-                        [("name", Arg::from("Villager Notice Board"))],
-                    ),
-                    &lookup_args(
-                        "gui-diagnosis-required-by",
-                        [("name", Arg::from("Creeper Confetti"))],
-                    ),
-                    &[
-                        "Redstone Rabbit Holes",
-                        "Creeper Confetti",
-                        "Villager Notice Board",
-                    ],
-                    &[],
-                ),
-                "mods",
-                "gui-diagnosis-open-mods",
-            )
-        },
-    ]
+    let diagnostics = recorded::diagnostics();
+    let files = damaged_files(diagnostics);
+    let listed = files.iter().map(String::as_str).collect::<Vec<_>>();
+    let count = Arg::from(files.len());
+    vec![with_fix(finding(
+        "p0",
+        true,
+        &lookup_args("gui-diagnosis-files-damaged", [("count", count.clone())]),
+        &lookup_args("gui-diagnosis-files-restorable", [("count", count)]),
+        &[],
+        &listed,
+    ))]
 }
 
 fn client_customizations() -> Vec<DiagnosticFindingRow> {
+    let java = &recorded::diagnostics().java;
     vec![with_route(
         finding(
             "c0",
             false,
             &lookup_args(
                 "gui-diagnosis-java-custom",
-                [("version", Arg::from("17.0.12"))],
+                [("version", Arg::from(java.as_str()))],
             ),
             &lookup_args(
                 "gui-diagnosis-java-satisfies",
@@ -228,13 +210,16 @@ fn client_customizations() -> Vec<DiagnosticFindingRow> {
 }
 
 fn client_checks() -> Vec<DiagnosticCheckRow> {
+    let diagnostics = recorded::diagnostics();
+    let files = &diagnostics.files;
+    let mods = &diagnostics.mods;
     vec![
         check(
             &lookup("gui-diagnosis-check-java"),
             lookup_args(
                 "gui-diagnosis-check-java-pinned",
                 [
-                    ("version", Arg::from("17.0.12")),
+                    ("version", Arg::from(diagnostics.java.as_str())),
                     ("major", Arg::from("17")),
                 ],
             ),
@@ -246,14 +231,14 @@ fn client_checks() -> Vec<DiagnosticCheckRow> {
             lookup_args(
                 "gui-diagnosis-check-mods-value",
                 [
-                    ("enabled", Arg::from(53_usize)),
-                    ("disabled", Arg::from(1_usize)),
-                    ("answered", Arg::from(54_usize)),
-                    ("unanswered", Arg::from(0_usize)),
+                    ("enabled", Arg::from(mods.enabled)),
+                    ("disabled", Arg::from(mods.disabled)),
+                    ("answered", Arg::from(mods.answered)),
+                    ("unanswered", Arg::from(mods.unanswered)),
                 ],
             ),
-            "problem",
-            "gui-diagnosis-check-problem",
+            "ok",
+            "gui-diagnosis-check-ok",
         ),
         check(
             &lookup("gui-diagnosis-check-log"),
@@ -272,23 +257,14 @@ fn client_checks() -> Vec<DiagnosticCheckRow> {
             lookup_args(
                 "gui-diagnosis-check-files-value",
                 [
-                    ("count", Arg::from(54_usize)),
-                    ("intact", Arg::from(52_usize)),
-                    ("problems", Arg::from(2_usize)),
-                    ("unverifiable", Arg::from(0_usize)),
+                    ("count", Arg::from(files.total)),
+                    ("intact", Arg::from(files.intact)),
+                    ("problems", Arg::from(files.problems.len())),
+                    ("unverifiable", Arg::from(files.unverifiable)),
                 ],
             ),
             "problem",
             "gui-diagnosis-check-problem",
-        ),
-        check(
-            &lookup("gui-integrity-shared-title"),
-            lookup_args(
-                "gui-integrity-shared-sound",
-                [("count", Arg::from(212_usize))],
-            ),
-            "ok",
-            "gui-diagnosis-check-ok",
         ),
     ]
 }
@@ -327,26 +303,25 @@ pub(crate) fn client_diagnostics_result(ui: &AppWindow) {
 
 /// The same surface with the fix for damaged files open for review.
 pub(crate) fn client_diagnostics_fix_preview(ui: &AppWindow) {
+    let problems = &recorded::diagnostics().files.problems;
     let view = HostView {
         fix_state: "ready".into(),
         fix_finding: "p0".into(),
         fix_title: lookup_args(
             "gui-diagnosis-files-damaged",
-            [("count", Arg::from(2_usize))],
+            [("count", Arg::from(problems.len()))],
         )
         .into(),
-        fix_changes: rows(vec![
-            FixChangeRow {
-                action: lookup("gui-fix-restore").into(),
-                name: "mods/jei-1.20.1-forge-15.20.0.130.jar".into(),
-                detail: SharedString::default(),
-            },
-            FixChangeRow {
-                action: lookup("gui-fix-restore").into(),
-                name: "mods/jade-1.20.1-forge-11.13.2.jar".into(),
-                detail: SharedString::default(),
-            },
-        ]),
+        fix_changes: rows(
+            problems
+                .iter()
+                .map(|problem| FixChangeRow {
+                    action: lookup("gui-fix-restore").into(),
+                    name: problem.path.clone().into(),
+                    detail: SharedString::default(),
+                })
+                .collect(),
+        ),
         fix_notes: strings(&[&lookup("gui-fix-restore-note")]),
         ..diagnosed_client(ui)
     };
@@ -369,7 +344,7 @@ pub(crate) fn client_run_failure_notice(ui: &AppWindow) {
         mods: rows(client_mod_rows()),
         allow_pack_mod_changes: true,
         browser_provider: "modrinth".into(),
-        browser_submitted: "redstone".into(),
+        browser_submitted: recorded::data().mod_search.query.clone().into(),
         browser_ran: true,
         browser_results: rows(client_mod_results()),
         browser_next_offset: -1,
@@ -380,41 +355,44 @@ pub(crate) fn client_run_failure_notice(ui: &AppWindow) {
             [(
                 "cause",
                 Arg::from(lookup_args(
-                    "gui-diagnosis-dependency-missing",
-                    [("name", Arg::from("Villager Notice Board"))],
+                    "gui-diagnosis-files-damaged",
+                    [(
+                        "count",
+                        Arg::from(recorded::diagnostics().files.problems.len()),
+                    )],
                 )),
             )],
         )
         .into(),
-        run_crash_report: "crash-2026-10-07_21.14.32-client.txt".into(),
+        run_crash_report: recorded::diagnostics().client_crash.report.clone().into(),
         ..client_view(cavestone(ui))
     };
     open_client(ui, view, "Mods");
 }
 
-fn log_chunks(lines: &[(&str, &str)]) -> ModelRc<LogChunk> {
+fn log_chunks(text: &str) -> ModelRc<LogChunk> {
     rows(
-        lines
-            .iter()
-            .map(|(level, text)| LogChunk {
-                text: (*text).into(),
-                level: (*level).into(),
+        text.lines()
+            .map(|line| LogChunk {
+                text: line.into(),
+                level: log_level(line).into(),
             })
             .collect(),
     )
 }
 
-/// A live view that follows its log with every level shown.
-fn live_log(lines: &[(&str, &str)]) -> LogView {
+/// A live view that follows its recorded log with every level shown.
+fn live_log(text: &str) -> LogView {
+    let lines = text.lines().collect::<Vec<_>>();
     let columns = lines
         .iter()
-        .map(|(_, text)| text.chars().count())
+        .map(|text| text.chars().count())
         .max()
         .unwrap_or(0)
         .max(80);
     LogView {
         mode: "live".into(),
-        chunks: log_chunks(lines),
+        chunks: log_chunks(text),
         has_content: !lines.is_empty(),
         status: lookup_args(
             "gui-retained-log-records",
@@ -437,117 +415,14 @@ fn live_log(lines: &[(&str, &str)]) -> LogView {
     }
 }
 
-const TOTEM_CONSOLE: &[(&str, &str)] = &[
-    (
-        "info",
-        "[21:04:10] [main/INFO] [cpw.mods.modlauncher.Launcher/MODLAUNCHER]: ModLauncher running: args [--launchTarget, neoforgeserver]",
-    ),
-    (
-        "info",
-        "[21:04:10] [main/INFO] [cpw.mods.modlauncher.Launcher/MODLAUNCHER]: JVM identified as OpenJDK 64-Bit Server VM 21.0.8",
-    ),
-    (
-        "info",
-        "[21:04:11] [main/INFO] [net.neoforged.fml.loading.moddiscovery.ModDiscoverer/SCAN]: Found 7 mod jars in /demo/servers/totem-of-undying-qa/mods",
-    ),
-    (
-        "info",
-        "[21:04:12] [main/INFO] [net.neoforged.fml.loading.FMLLoader/LOADING]: Loading NeoForge 21.1.249 for Minecraft 1.21.1",
-    ),
-    (
-        "info",
-        "[21:04:14] [Server thread/INFO] [net.minecraft.server.dedicated.DedicatedServer/]: Starting minecraft server version 1.21.1",
-    ),
-    (
-        "info",
-        "[21:04:14] [Server thread/INFO] [net.minecraft.server.dedicated.DedicatedServer/]: Loading properties",
-    ),
-    (
-        "info",
-        "[21:04:14] [Server thread/INFO] [net.minecraft.server.dedicated.DedicatedServer/]: Default game type: SURVIVAL",
-    ),
-    (
-        "info",
-        "[21:04:14] [Server thread/INFO] [net.minecraft.server.dedicated.DedicatedServer/]: Starting Minecraft server on 127.0.0.1:25566",
-    ),
-    (
-        "warn",
-        "[21:04:15] [Server thread/WARN] [net.minecraft.server.dedicated.DedicatedServer/]: **** SERVER IS RUNNING IN OFFLINE/INSECURE MODE!",
-    ),
-    (
-        "info",
-        "[21:04:16] [Server thread/INFO] [net.minecraft.server.level.ServerLevel/]: Preparing level \"world\"",
-    ),
-    (
-        "info",
-        "[21:04:17] [Server thread/INFO] [totemqa/]: Totem of Undying QA harness ready, 3 scenarios loaded",
-    ),
-    (
-        "info",
-        "[21:04:18] [Server thread/INFO] [net.minecraft.server.dedicated.DedicatedServer/]: Done (4.2s)! For help, type \"help\"",
-    ),
-    (
-        "info",
-        "[21:06:41] [Server thread/INFO] [net.minecraft.server.players.PlayerList/]: MelanX[/127.0.0.1:51734] logged in with entity id 214 at (12.5, 64.0, -30.5)",
-    ),
-    (
-        "info",
-        "[21:06:41] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: MelanX joined the game",
-    ),
-    (
-        "info",
-        "[21:07:03] [Server thread/INFO] [net.minecraft.server.players.PlayerList/]: Steve[/127.0.0.1:51802] logged in with entity id 231 at (14.5, 64.0, -28.5)",
-    ),
-    (
-        "info",
-        "[21:07:03] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: Steve joined the game",
-    ),
-    (
-        "info",
-        "[21:07:19] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: <MelanX> testing the totem again",
-    ),
-    (
-        "info",
-        "[21:07:44] [Server thread/INFO] [totemqa/]: Scenario 1 passed: totem consumed on lethal damage",
-    ),
-    (
-        "warn",
-        "[21:08:02] [Server thread/WARN] [net.minecraft.server.MinecraftServer/]: Can't keep up! Is the server overloaded? Running 2312ms or 46 ticks behind",
-    ),
-    (
-        "info",
-        "[21:08:31] [Server thread/INFO] [totemqa/]: Scenario 2 passed: totem popped in the Nether",
-    ),
-    (
-        "info",
-        "[21:08:55] [Server thread/INFO] [totemqa/]: Scenario 3 passed: only one totem is consumed per death",
-    ),
-    (
-        "info",
-        "[21:09:12] [Server thread/INFO] [net.minecraft.server.network.ServerGamePacketListenerImpl/]: Steve lost connection: Disconnected",
-    ),
-    (
-        "info",
-        "[21:09:12] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: Steve left the game",
-    ),
-    (
-        "info",
-        "[21:09:40] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: <MelanX> that was the last scenario",
-    ),
-    (
-        "info",
-        "[21:10:05] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: There are 1 of a max of 20 players online: MelanX",
-    ),
-];
-
 /// The Console surface of a running server.
 pub(crate) fn server_console(ui: &AppWindow) {
-    let server = running_server(named_server(ui, "totem-of-undying-qa"));
+    let server = running_server(named_server(ui, "photon-server"));
     open_server(
         ui,
         server_view(server),
         "Console",
-        Some(live_log(TOTEM_CONSOLE)),
+        Some(live_log(recorded::PHOTON_SERVER_LOG)),
     );
 }
 
@@ -663,41 +538,37 @@ fn bundle_part(name: &str, kind: &str, size: &str, selected: bool) -> BundlePart
     }
 }
 
-/// The bundle panel opened on a client with a crash report, newest files chosen.
+/// The bundle panel opened on a client with a crash report. The parts are what
+/// the launcher offers for the instance; the large debug log stays unchecked.
 pub(crate) fn diagnostic_bundle_selection(ui: &AppWindow) {
-    let parts = vec![
-        bundle_part("latest.log", "gui-bundle-kind-game-log", "1.0 MiB", true),
-        bundle_part(
-            "crash-2026-10-08_09.41.17-client.txt",
-            "gui-bundle-kind-crash-report",
-            "48 KiB",
-            true,
-        ),
-        bundle_part("recipe.json", "gui-bundle-kind-recipe", "18 KiB", true),
-        bundle_part("client.json", "gui-bundle-kind-record", "2 KiB", true),
-        bundle_part(
-            "crash-2026-10-05_17.12.40-client.txt",
-            "gui-bundle-kind-crash-report",
-            "51 KiB",
-            false,
-        ),
-        bundle_part(
-            "ephervex.log",
-            "gui-bundle-kind-launcher-log",
-            "212 KiB",
-            false,
-        ),
-    ];
+    let offered = &recorded::diagnostics().bundle;
+    let selected = |part: &recorded::BundlePart| !part.name.ends_with("debug.log");
+    let parts = offered
+        .iter()
+        .map(|part| {
+            let kind = match part.kind.as_str() {
+                "game_log" => "gui-bundle-kind-game-log",
+                "crash_report" => "gui-bundle-kind-crash-report",
+                "recipe" => "gui-bundle-kind-recipe",
+                _ => "gui-bundle-kind-record",
+            };
+            let name = part.name.rsplit('/').next().unwrap_or(&part.name);
+            bundle_part(name, kind, &size_text(part.size_bytes), selected(part))
+        })
+        .collect::<Vec<_>>();
+    let chosen = offered.iter().filter(|part| selected(part));
+    let count = chosen.clone().count();
+    let total = chosen.map(|part| part.size_bytes).sum::<u64>();
     let view = HostView {
         bundle_selection: lookup_args(
             "gui-bundle-selection",
             [
-                ("count", Arg::from(4_usize)),
-                ("size", Arg::from("1.1 MiB")),
+                ("count", Arg::from(count)),
+                ("size", Arg::from(size_text(total))),
             ],
         )
         .into(),
-        bundle_selected_count: 4,
+        bundle_selected_count: i32::try_from(count).unwrap_or_default(),
         bundle_parts: rows(parts),
         ..client_view(cavestone(ui))
     };
@@ -706,166 +577,65 @@ pub(crate) fn diagnostic_bundle_selection(ui: &AppWindow) {
 
 /// The Overview of a server that failed to start, with its crash review.
 pub(crate) fn server_crash_notice(ui: &AppWindow) {
+    let crash = &recorded::diagnostics().server_crashes.fog;
     let view = HostView {
-        crash_report: "crash-2026-10-08_09.41.17-server.txt".into(),
-        crash_failure: "java.lang.NoClassDefFoundError: net/minecraft/client/gui/screens/Screen"
-            .into(),
-        crash_client_code_on_server: true,
-        crash_suggested: 1,
-        ..server_view(named_server(ui, "cow-clicker-test"))
+        crash_report: crash.report.clone().into(),
+        crash_failure: crash.failure.clone().into(),
+        crash_client_code_on_server: crash.client_code_on_server,
+        crash_suggested: i32::try_from(crash.suggested).unwrap_or_default(),
+        ..server_view(named_server(ui, "fog-server"))
     };
     open_server(ui, view, "Overview", None);
 }
 
-const CAVESTONE_CLIENT_LOG: &[(&str, &str)] = &[
-    (
-        "info",
-        "[21:12:03] [main/INFO] [FMLLoader/]: Forge mod loading, version 47.4.10, for MC 1.20.1",
-    ),
-    (
-        "info",
-        "[21:12:04] [main/INFO] [ModDiscoverer/SCAN]: Found 54 mod jars in /demo/instances/cavestone/mods",
-    ),
-    (
-        "info",
-        "[21:12:06] [main/INFO] [ModDiscoverer/SCAN]: Found 3 dependency jars",
-    ),
-    (
-        "info",
-        "[21:12:08] [main/INFO] [Minecraft/]: Setting user: MelanX",
-    ),
-    (
-        "info",
-        "[21:12:09] [Render thread/INFO] [Minecraft/]: Backend library: LWJGL version 3.3.1 build 7",
-    ),
-    (
-        "info",
-        "[21:12:11] [Render thread/INFO] [mixin/]: Initialized 38 mixin configs",
-    ),
-    (
-        "info",
-        "[21:12:14] [modloading-worker-0/INFO] [create/]: Create 0.5.1.j is starting up",
-    ),
-    (
-        "info",
-        "[21:12:15] [modloading-worker-1/INFO] [jei/]: Starting JEI...",
-    ),
-    (
-        "info",
-        "[21:12:17] [modloading-worker-2/INFO] [jade/]: Jade 11.13.2 is loading",
-    ),
-    (
-        "info",
-        "[21:12:19] [Render thread/INFO] [Minecraft/]: Reloading ResourceManager: vanilla, mod_resources",
-    ),
-    (
-        "warn",
-        "[21:12:21] [Worker-Main-3/WARN] [Minecraft/]: Missing sound for event: creeperconfetti:pop",
-    ),
-    (
-        "info",
-        "[21:12:24] [Render thread/INFO] [Minecraft/]: OpenAL initialized on device default",
-    ),
-    (
-        "info",
-        "[21:12:26] [Render thread/INFO] [Minecraft/]: Sound engine started",
-    ),
-    (
-        "info",
-        "[21:12:30] [Render thread/INFO] [Minecraft/]: Narrator library for x86-64 successfully loaded",
-    ),
-    (
-        "info",
-        "[21:12:33] [Render thread/INFO] [jei/]: Registering recipe catalysts",
-    ),
-    (
-        "info",
-        "[21:12:41] [Render thread/INFO] [Minecraft/]: Connecting to 127.0.0.1, 25565",
-    ),
-    (
-        "info",
-        "[21:12:42] [Render thread/INFO] [Minecraft/]: [CHAT] MelanX joined the game",
-    ),
-    (
-        "info",
-        "[21:13:05] [Render thread/INFO] [Minecraft/]: [CHAT] Steve joined the game",
-    ),
-    (
-        "info",
-        "[21:13:27] [Render thread/INFO] [Minecraft/]: [CHAT] <MelanX> chunks look correct here",
-    ),
-    (
-        "info",
-        "[21:13:52] [Render thread/INFO] [Minecraft/]: [CHAT] <Steve> the pearls land in the right chunk",
-    ),
-];
+/// The `Description:` line of a crash report, which the crash list shows as its summary.
+fn crash_description(report: &str) -> &str {
+    report
+        .lines()
+        .find_map(|line| line.strip_prefix("Description: "))
+        .unwrap_or_default()
+}
 
-const CAVESTONE_SERVER_CONSOLE: &[(&str, &str)] = &[
-    (
-        "info",
-        "[21:11:46] [main/INFO] [ModLauncher/MODLAUNCHER]: ModLauncher running: args [--launchTarget, forgeserver]",
-    ),
-    (
-        "info",
-        "[21:11:47] [main/INFO] [FMLLoader/]: Forge mod loading, version 47.4.10, for MC 1.20.1",
-    ),
-    (
-        "info",
-        "[21:11:49] [main/INFO] [ModDiscoverer/SCAN]: Found 32 mod jars in /demo/servers/cavestone-server/mods",
-    ),
-    (
-        "info",
-        "[21:11:53] [Server thread/INFO] [DedicatedServer/]: Starting minecraft server version 1.20.1",
-    ),
-    (
-        "info",
-        "[21:11:53] [Server thread/INFO] [DedicatedServer/]: Loading properties",
-    ),
-    (
-        "info",
-        "[21:11:54] [Server thread/INFO] [DedicatedServer/]: Default game type: SURVIVAL",
-    ),
-    (
-        "info",
-        "[21:11:54] [Server thread/INFO] [DedicatedServer/]: Starting Minecraft server on 127.0.0.1:25565",
-    ),
-    (
-        "warn",
-        "[21:11:55] [Server thread/WARN] [DedicatedServer/]: **** SERVER IS RUNNING IN OFFLINE/INSECURE MODE!",
-    ),
-    (
-        "info",
-        "[21:11:57] [Server thread/INFO] [ServerLevel/]: Preparing level \"world\"",
-    ),
-    (
-        "info",
-        "[21:11:59] [Server thread/INFO] [DedicatedServer/]: Done (3.8s)! For help, type \"help\"",
-    ),
-    (
-        "info",
-        "[21:12:42] [Server thread/INFO] [MinecraftServer/]: MelanX joined the game",
-    ),
-    (
-        "info",
-        "[21:13:05] [Server thread/INFO] [MinecraftServer/]: Steve joined the game",
-    ),
-    (
-        "warn",
-        "[21:13:19] [Server thread/WARN] [MinecraftServer/]: Can't keep up! Running 2012ms or 40 ticks behind",
-    ),
-    (
-        "info",
-        "[21:13:27] [Server thread/INFO] [MinecraftServer/]: <MelanX> chunks look correct here",
-    ),
-    (
-        "info",
-        "[21:13:52] [Server thread/INFO] [MinecraftServer/]: <Steve> the pearls land in the right chunk",
-    ),
-    (
-        "info",
-        "[21:14:20] [Server thread/INFO] [MinecraftServer/]: There are 2 of a max of 8 players online: MelanX, Steve",
-    ),
-];
+/// The Logs surface of a server that stopped while loading mods, with its
+/// crash report open.
+pub(crate) fn server_crash_reports(ui: &AppWindow) {
+    let crash = &recorded::diagnostics().server_crashes.utility_mods;
+    let server = named_server(ui, "utility-mods-server");
+    let summary = crash_description(recorded::UTILITY_SERVER_CRASH);
+    let file = DiagnosticRow {
+        scope_kind: "server".into(),
+        scope_id: server.id.clone(),
+        entity: server.name.clone(),
+        kind: "crash-report".into(),
+        name: crash.report.clone().into(),
+        path: format!(
+            "/demo/servers/{}/server/crash-reports/{}",
+            server.id, crash.report
+        )
+        .into(),
+        modified: "Today".into(),
+        size: size_text(recorded::UTILITY_SERVER_CRASH.len() as u64).into(),
+        summary: summary.into(),
+    };
+    let log = LogView {
+        mode: "crashes".into(),
+        file: crash.report.clone().into(),
+        files: rows(vec![file]),
+        report: expand_tabs(recorded::UTILITY_SERVER_CRASH).into(),
+        follow: true,
+        trace_enabled: true,
+        debug_enabled: true,
+        info_enabled: true,
+        warn_enabled: true,
+        error_enabled: true,
+        fatal_enabled: true,
+        other_enabled: true,
+        selection_start_row: -1,
+        selection_end_row: -1,
+        ..LogView::default()
+    };
+    open_server(ui, server_view(server), "Logs", Some(log));
+}
 
 /// Two panes: the client's live log beside its linked server's console.
 pub(crate) fn split_workspace(ui: &AppWindow) {
@@ -897,8 +667,8 @@ pub(crate) fn split_workspace(ui: &AppWindow) {
         ..server_view(server)
     };
     ui.set_log_views(rows(vec![
-        live_log(CAVESTONE_CLIENT_LOG),
-        live_log(CAVESTONE_SERVER_CONSOLE),
+        live_log(recorded::CLIENT_LOG),
+        live_log(recorded::CAVESTONE_SERVER_LOG),
     ]));
     ui.set_host_views(rows(vec![client_view, server_view]));
     ui.set_workspace_panes(rows(vec![
@@ -935,6 +705,13 @@ mod tests {
     use crate::capture::{CaptureOptions, Dimensions, ThemeName, generate};
     use crate::catalog::STATES;
 
+    #[test]
+    fn the_recorded_server_crash_carries_a_description() {
+        assert!(
+            !super::crash_description(crate::fixtures::recorded::UTILITY_SERVER_CRASH).is_empty()
+        );
+    }
+
     const NAMES: &[&str] = &[
         "client-diagnostics-result",
         "client-diagnostics-fix-preview",
@@ -943,6 +720,7 @@ mod tests {
         "server-console",
         "server-properties",
         "server-crash-notice",
+        "server-crash-reports",
         "split-workspace",
         "create-server-standalone",
         "create-server-linked",

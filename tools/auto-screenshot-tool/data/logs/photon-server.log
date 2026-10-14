@@ -1,0 +1,72 @@
+[14Oct2026 19:18:02.291] [main/INFO] [cpw.mods.modlauncher.Launcher/MODLAUNCHER]: ModLauncher running: args [--launchTarget, forgeserver, --fml.neoForgeVersion, 21.1.224, --fml.fmlVersion, 4.0.42, --fml.mcVersion, 1.21.1, --fml.neoFormVersion, 20240808.144430, nogui]
+[14Oct2026 19:18:02.293] [main/INFO] [cpw.mods.modlauncher.Launcher/MODLAUNCHER]: JVM identified as Ubuntu OpenJDK 64-Bit Server VM 21.0.12.1+1-1-24.04.4-Ubuntu
+[14Oct2026 19:18:02.294] [main/INFO] [cpw.mods.modlauncher.Launcher/MODLAUNCHER]: ModLauncher 11.0.5+main.901c6ea8 starting: java version 21.0.12.1 by Ubuntu; OS Linux arch amd64 version 6.8.0-147-generic
+[14Oct2026 19:18:02.394] [main/INFO] [me.decce.ixeris.neoforge.core.IxerisBootstrapper/]: Skipped Ixeris bootstrapping because: on dedicated server
+[14Oct2026 19:18:02.395] [main/INFO] [net.neoforged.fml.loading.ImmediateWindowHandler/]: ImmediateWindowProvider not loading because launch target is forgeserver
+[14Oct2026 19:18:02.421] [main/INFO] [mixin/]: SpongePowered MIXIN Subsystem Version=0.8.7 Source=union:/demo/servers/host/server/libraries/net/fabricmc/sponge-mixin/0.15.2+mixin.0.8.7/sponge-mixin-0.15.2+mixin.0.8.7.jar%2373!/ Service=ModLauncher Env=SERVER
+[14Oct2026 19:18:02.554] [main/INFO] [net.neoforged.fml.loading.moddiscovery.ModDiscoverer/SCAN]: Found mod file "server-1.21.1-20240808.144430-srg.jar" [locator: production server provider +net.neoforged:neoforge:21.1.224:server]
+[14Oct2026 19:18:02.566] [main/INFO] [net.neoforged.fml.loading.moddiscovery.ModDiscoverer/SCAN]: Found mod file "neoforge-21.1.224-universal.jar" [locator: PathBasedLocator[name=neoforge, paths=[libraries/net/neoforged/neoforge/21.1.224/neoforge-21.1.224-universal.jar]], reader: mod manifest]
+[14Oct2026 19:18:02.571] [main/INFO] [net.neoforged.fml.loading.moddiscovery.ModDiscoverer/SCAN]: Found mod file "BadOptimizations-2.4.1-1.21.1.jar" [locator: {mods folder locator at /demo/servers/host/server/mods}, reader: mod manifest]
+[14Oct2026 19:18:02.573] [main/INFO] [net.neoforged.fml.loading.moddiscovery.ModDiscoverer/SCAN]: Found mod file "c2me-neoforge-mc1.21.1-0.3.0+alpha.0.90.jar" [locator: {mods folder locator at /demo/servers/host/server/mods}, reader: mod manifest]
+[14Oct2026 19:18:02.575] [main/INFO] [net.neoforged.fml.loading.moddiscovery.ModDiscoverer/SCAN]: Found mod file "cloth-config-15.0.140-neoforge.jar" [locator: {mods folder locator at /demo/servers/host/server/mods}, reader: mod manifest]
+[14Oct2026 19:18:02.577] [main/INFO] [net.neoforged.fml.loading.moddiscovery.ModDiscoverer/SCAN]: Found mod file "entityculling-neoforge-1.10.1-mc1.21.1.jar" [locator: {mods folder locator at /demo/servers/host/server/mods}, reader: mod manifest]
+[14Oct2026 19:18:02.583] [main/INFO] [net.neoforged.fml.loading.moddiscovery.ModDiscoverer/SCAN]: Found mod file "ferritecore-7.0.3-neoforge.jar" [locator: {mods folder locator at /demo/servers/host/server/mods}, reader: mod manifest]
+[14Oct2026 19:18:02.585] [main/INFO] [net.neoforged.fml.loading.moddiscovery.ModDiscoverer/SCAN]: Found mod file "flerovium-neoforge-1.21.1-1.0.17-all.jar" [locator: {mods folder locator at /demo/servers/host/server/mods}, reader: mod manifest]
+[14Oct2026 19:18:02.587] [main/INFO] [net.neoforged.fml.loading.moddiscovery.ModDiscoverer/SCAN]: Found mod file "ImmediatelyFast-NeoForge-1.6.10+1.21.1.jar" [locator: {mods folder locator at /demo/servers/host/server/mods}, reader: mod manifest]
+[14Oct2026 19:18:02.588] [main/INFO] [net.neoforged.fml.loading.moddiscovery.ModDiscoverer/SCAN]: Found mod file "lithium-neoforge-0.15.3+mc1.21.1.jar" [locator: {mods folder locator at /demo/servers/host/server/mods}, reader: mod manifest]
+[14Oct2026 19:18:02.590] [main/INFO] [net.neoforged.fml.loading.moddiscovery.ModDiscoverer/SCAN]: Found mod file "modernfix-neoforge-5.27.2+mc1.21.1.jar" [locator: {mods folder locator at /demo/servers/host/server/mods}, reader: mod manifest]
+[14Oct2026 19:18:02.592] [main/INFO] [net.neoforged.fml.loading.moddiscovery.ModDiscoverer/SCAN]: Found mod file "moreculling-neoforge-1.21.1-1.0.7.jar" [locator: {mods folder locator at /demo/servers/host/server/mods}, reader: mod manifest]
+[14Oct2026 19:18:02.593] [main/INFO] [net.neoforged.fml.loading.moddiscovery.ModDiscoverer/SCAN]: Found mod file "noisium-neoforge-2.3.0+mc1.21-1.21.1.jar" [locator: {mods folder locator at /demo/servers/host/server/mods}, reader: mod manifest]
+[14Oct2026 19:18:02.594] [main/INFO] [net.neoforged.fml.loading.moddiscovery.ModDiscoverer/SCAN]: Found mod file "ScalableLux-0.1.0.1+neoforge.1cb1e91-all.jar" [locator: {mods folder locator at /demo/servers/host/server/mods}, reader: mod manifest]
+[14Oct2026 19:18:02.595] [main/INFO] [net.neoforged.fml.loading.moddiscovery.ModDiscoverer/SCAN]: Found mod file "sodium-neoforge-0.6.13+mc1.21.1.jar" [locator: {mods folder locator at /demo/servers/host/server/mods}, reader: mod manifest]
+[14Oct2026 19:18:02.848] [main/INFO] [net.neoforged.fml.loading.moddiscovery.ModDiscoverer/SCAN]: Found gamelibrary file "mixinsquared-neoforge-0.2.0.jar" [parent: moreculling-neoforge-1.21.1-1.0.7.jar, locator: jarinjar, reader: mod manifest]
+[14Oct2026 19:18:02.848] [main/INFO] [net.neoforged.fml.loading.moddiscovery.ModDiscoverer/SCAN]: Found library file "net.caffeinemc.sodium-neoforge-0.6.13+mc1.21.1-service.jar" [parent: sodium-neoforge-0.6.13+mc1.21.1.jar, locator: jarinjar, reader: mod manifest]
+[14Oct2026 19:18:02.848] [main/INFO] [net.neoforged.fml.loading.moddiscovery.ModDiscoverer/SCAN]: Found mod file "c2me-opts-worldgen-vanilla-mc1.21.1-0.3.0+alpha.0.90.jar" [parent: c2me-neoforge-mc1.21.1-0.3.0+alpha.0.90.jar, locator: jarinjar, reader: mod manifest]
+[14Oct2026 19:18:03.278] [main/INFO] [C2ME Modules Manager/]: Initializing com.ishland.c2me.client.uncapvd.mixin
+[14Oct2026 19:18:03.316] [main/INFO] [Lithium/]: Loaded configuration file for Lithium: 148 options available, 0 override(s) found
+[14Oct2026 19:18:03.333] [main/INFO] [C2ME Config System/]: Config noTickViewDistance.maxConcurrentChunkLoads changed from 2 to 2
+[14Oct2026 19:18:03.365] [main/INFO] [C2ME Modules Manager/]: Initializing com.ishland.c2me.opts.chunkio.mixin
+[14Oct2026 19:18:03.387] [main/WARN] [mixin/]: Reference map '${refmap_target}refmap.json' for ferritecore.modelsides.mixin.json could not be read. If this is a development environment you can ignore this message
+[14Oct2026 19:18:03.406] [main/INFO] [C2ME Config System/]: Config generalOptimizations.midTickChunkTasksInterval changed from 100000 to 100000
+[14Oct2026 19:18:06.641] [main/INFO] [net.minecraft.server.Bootstrap/]: Vanilla bootstrap took 2068 milliseconds
+[14Oct2026 19:18:06.921] [main/INFO] [com.mojang.authlib.yggdrasil.YggdrasilAuthenticationService/]: Environment: Environment[sessionHost=https://sessionserver.mojang.com, servicesHost=https://api.minecraftservices.com, name=PROD]
+[14Oct2026 19:18:07.898] [Server thread/INFO] [net.minecraft.server.network.ServerConnectionListener/]: Using epoll channel type
+[14Oct2026 19:18:07.914] [Server thread/WARN] [net.minecraft.server.dedicated.DedicatedServer/]: **** SERVER IS RUNNING IN OFFLINE/INSECURE MODE!
+[14Oct2026 19:18:07.914] [Server thread/WARN] [net.minecraft.server.dedicated.DedicatedServer/]: The server will make no attempt to authenticate usernames. Beware.
+[14Oct2026 19:18:07.914] [Server thread/WARN] [net.minecraft.server.dedicated.DedicatedServer/]: While this makes the game possible to play without internet access, it also opens up the ability for hackers to connect with any username they choose.
+[14Oct2026 19:18:07.914] [Server thread/WARN] [net.minecraft.server.dedicated.DedicatedServer/]: To change this, set "online-mode" to "true" in the server.properties file.
+[14Oct2026 19:18:07.935] [Server thread/INFO] [net.minecraft.server.dedicated.DedicatedServer/]: Preparing level "world"
+[14Oct2026 19:18:07.961] [Server thread/INFO] [CheckedThreadLocalRandom/]: Enforcing safe world random access
+[14Oct2026 19:18:08.175] [Server thread/INFO] [TheSpeedyObjectFactory/]: Using TheSpeedyObjectFactory with Unsafe
+[14Oct2026 19:18:08.336] [Server thread/INFO] [STDOUT/]: [ca.spottedleaf.starlight.common.thread.GlobalExecutors:<clinit>:20]: [ScalableLux] Lighting scaling is enabled in externally managed mode
+[14Oct2026 19:18:08.741] [c2me-worker-0/WARN] [mixin/]: Static binding violation: PRIVATE @Overwrite method getBuryContribution in c2me-opts-worldgen-vanilla.mixins.json:structure_weight_sampler.MixinStructureWeightSampler from mod c2me_opts_worldgen_vanilla cannot reduce visibiliy of PROTECTED target method, visibility will be upgraded.
+[14Oct2026 19:18:09.684] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: Preparing start region for dimension minecraft:overworld
+[14Oct2026 19:18:09.794] [c2me-worker-0/INFO] [net.minecraft.server.level.progress.LoggerChunkProgressListener/]: Preparing spawn area: 2%
+[14Oct2026 19:18:10.188] [c2me-worker-0/INFO] [net.minecraft.server.level.progress.LoggerChunkProgressListener/]: Preparing spawn area: 2%
+[14Oct2026 19:18:10.690] [c2me-worker-0/INFO] [net.minecraft.server.level.progress.LoggerChunkProgressListener/]: Preparing spawn area: 6%
+[14Oct2026 19:18:11.206] [c2me-worker-0/INFO] [net.minecraft.server.level.progress.LoggerChunkProgressListener/]: Preparing spawn area: 12%
+[14Oct2026 19:18:11.964] [c2me-worker-0/INFO] [net.minecraft.server.level.progress.LoggerChunkProgressListener/]: Preparing spawn area: 18%
+[14Oct2026 19:18:12.225] [c2me-worker-0/INFO] [net.minecraft.server.level.progress.LoggerChunkProgressListener/]: Preparing spawn area: 18%
+[14Oct2026 19:18:12.685] [c2me-worker-0/INFO] [net.minecraft.server.level.progress.LoggerChunkProgressListener/]: Preparing spawn area: 30%
+[14Oct2026 19:18:13.192] [c2me-worker-0/INFO] [net.minecraft.server.level.progress.LoggerChunkProgressListener/]: Preparing spawn area: 40%
+[14Oct2026 19:18:13.686] [c2me-worker-0/INFO] [net.minecraft.server.level.progress.LoggerChunkProgressListener/]: Preparing spawn area: 51%
+[14Oct2026 19:18:14.200] [c2me-worker-0/INFO] [net.minecraft.server.level.progress.LoggerChunkProgressListener/]: Preparing spawn area: 71%
+[14Oct2026 19:18:14.701] [c2me-worker-0/INFO] [net.minecraft.server.level.progress.LoggerChunkProgressListener/]: Preparing spawn area: 87%
+[14Oct2026 19:18:14.960] [Server thread/INFO] [net.minecraft.server.level.progress.LoggerChunkProgressListener/]: Time elapsed: 5275 ms
+[14Oct2026 19:18:14.960] [Server thread/INFO] [net.minecraft.server.dedicated.DedicatedServer/]: Done (7.039s)! For help, type "help"
+[14Oct2026 19:18:15.019] [Server thread/INFO] [net.neoforged.neoforge.server.permission.PermissionAPI/]: Successfully initialized permission handler neoforge:default_handler
+[14Oct2026 19:18:15.020] [Server thread/WARN] [ModernFix/]: Dedicated server took 13.431 seconds to load
+[14Oct2026 19:18:15.156] [Server thread/INFO] [STDOUT/]: [net.caffeinemc.mods.lithium.common.block.TrackedBlockStatePredicate:<clinit>:13]: Lithium Cached BlockState Flags are disabled!
+[14Oct2026 19:18:16.477] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: There are 0 of a max of 20 players online: 
+[14Oct2026 19:18:18.523] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: Stopping the server
+[14Oct2026 19:18:18.571] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: Stopping server
+[14Oct2026 19:18:18.572] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: Saving players
+[14Oct2026 19:18:18.573] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: Saving worlds
+[14Oct2026 19:18:18.594] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: ServerLevel[world]/minecraft:overworld: waiting for 841 chunks to unload
+[14Oct2026 19:18:18.798] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: Saving chunks for level 'ServerLevel[world]'/minecraft:overworld
+[14Oct2026 19:18:18.869] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: Saving chunks for level 'ServerLevel[world]'/minecraft:the_nether
+[14Oct2026 19:18:18.872] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: Saving chunks for level 'ServerLevel[world]'/minecraft:the_end
+[14Oct2026 19:18:18.877] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: ThreadedAnvilChunkStorage (world): All chunks are saved
+[14Oct2026 19:18:18.877] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: ThreadedAnvilChunkStorage (DIM-1): All chunks are saved
+[14Oct2026 19:18:18.877] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: ThreadedAnvilChunkStorage (DIM1): All chunks are saved
+[14Oct2026 19:18:18.877] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: ThreadedAnvilChunkStorage: All dimensions are saved

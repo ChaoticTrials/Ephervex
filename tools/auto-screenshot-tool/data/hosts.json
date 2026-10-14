@@ -1,0 +1,1153 @@
+{
+ "instances": [
+  {
+   "key": "cavestone",
+   "name": "CaveStone",
+   "minecraft": "1.20.1",
+   "loader_kind": "forge",
+   "loader": "Forge 47.4.10",
+   "source": "Modrinth",
+   "storage": "Persistent",
+   "mods": 64
+  },
+  {
+   "key": "vanilla-test",
+   "name": "Vanilla Test",
+   "minecraft": "1.21.1",
+   "loader_kind": "vanilla",
+   "loader": "Vanilla",
+   "source": "Manual",
+   "storage": "Persistent",
+   "mods": 0
+  },
+  {
+   "key": "photon",
+   "name": "Photon",
+   "minecraft": "1.21.1",
+   "loader_kind": "neoforge",
+   "loader": "NeoForge 21.1.224",
+   "source": "Modrinth",
+   "storage": "Persistent",
+   "mods": 14
+  },
+  {
+   "key": "cobblemon",
+   "name": "Cobblemon Official Modpack [NeoForge]",
+   "minecraft": "1.21.1",
+   "loader_kind": "neoforge",
+   "loader": "NeoForge 21.1.259",
+   "source": "Modrinth",
+   "storage": "Persistent",
+   "mods": 73
+  },
+  {
+   "key": "fog",
+   "name": "the horrors in the fog",
+   "minecraft": "1.20.1",
+   "loader_kind": "forge",
+   "loader": "Forge 47.2.17",
+   "source": "Modrinth",
+   "storage": "Persistent",
+   "mods": 53
+  },
+  {
+   "key": "super-tiny",
+   "name": "Super tiny",
+   "minecraft": "1.12.2",
+   "loader_kind": "forge",
+   "loader": "Forge 14.23.5.2860",
+   "source": "Modrinth",
+   "storage": "Persistent",
+   "mods": 1
+  },
+  {
+   "key": "utility-mods",
+   "name": "Utility Mods",
+   "minecraft": "1.21.1",
+   "loader_kind": "neoforge",
+   "loader": "NeoForge 21.1.224",
+   "source": "Manual",
+   "storage": "Persistent",
+   "mods": 11
+  },
+  {
+   "key": "skyblock-tools",
+   "name": "Skyblock Tools",
+   "minecraft": "1.20.1",
+   "loader_kind": "forge",
+   "loader": "Forge 47.4.10",
+   "source": "Manual",
+   "storage": "Persistent",
+   "mods": 5
+  }
+ ],
+ "servers": [
+  {
+   "key": "cavestone-server",
+   "name": "CaveStone Server",
+   "minecraft": "1.20.1",
+   "loader_kind": "forge",
+   "loader": "Forge 47.4.10",
+   "storage": "Persistent",
+   "port": 25565,
+   "state": "stopped",
+   "linked_client": "cavestone",
+   "failed": false
+  },
+  {
+   "key": "cavestone-staging",
+   "name": "CaveStone Staging",
+   "minecraft": "1.20.1",
+   "loader_kind": "forge",
+   "loader": "Forge 47.4.10",
+   "storage": "Temporary",
+   "port": 25570,
+   "state": "stopped",
+   "linked_client": "cavestone",
+   "failed": false
+  },
+  {
+   "key": "cobblemon-server",
+   "name": "Cobblemon Server",
+   "minecraft": "1.21.1",
+   "loader_kind": "neoforge",
+   "loader": "NeoForge 21.1.259",
+   "storage": "Persistent",
+   "port": 25569,
+   "state": "stopped",
+   "linked_client": "cobblemon",
+   "failed": false
+  },
+  {
+   "key": "fog-server",
+   "name": "Fog Server",
+   "minecraft": "1.20.1",
+   "loader_kind": "forge",
+   "loader": "Forge 47.2.17",
+   "storage": "Persistent",
+   "port": 25567,
+   "state": "stopped",
+   "linked_client": "fog",
+   "failed": true
+  },
+  {
+   "key": "photon-server",
+   "name": "Photon Server",
+   "minecraft": "1.21.1",
+   "loader_kind": "neoforge",
+   "loader": "NeoForge 21.1.224",
+   "storage": "Persistent",
+   "port": 25566,
+   "state": "stopped",
+   "linked_client": "photon",
+   "failed": false
+  },
+  {
+   "key": "utility-mods-server",
+   "name": "Utility Mods Server",
+   "minecraft": "1.21.1",
+   "loader_kind": "neoforge",
+   "loader": "NeoForge 21.1.224",
+   "storage": "Persistent",
+   "port": 25568,
+   "state": "stopped",
+   "linked_client": "utility-mods",
+   "failed": true
+  }
+ ],
+ "cavestone_mods": [
+  {
+   "project_id": "TFFWPTSD",
+   "title": "AIOT Botania",
+   "version": "1.20.1-4.0.8",
+   "file_name": "aiotbotania-1.20.1-4.0.8.jar",
+   "origin": "user",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge, neoforge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/TFFWPTSD/e6028ad41970b20d08d9eac75ce277c43d957a39_96.webp",
+    "sha256": "93f7ecd751ae7e3aa7f50ac5c1ee3ad513ad5dd052befe7725f1dd79e2e408ea"
+   }
+  },
+  {
+   "project_id": "EsAfCjCV",
+   "title": "AppleSkin",
+   "version": "2.5.1+mc1.20.1",
+   "file_name": "appleskin-forge-mc1.20.1-2.5.1.jar",
+   "origin": "pack",
+   "enabled": false,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/EsAfCjCV/icon.png",
+    "sha256": "e95c230cf1e850de619cf2bf09822490642ef57fc50211d86768437ab32d6538"
+   }
+  },
+  {
+   "project_id": "L9JLNLqk",
+   "title": "Automatic Tool Swap",
+   "version": "1.20.1-5.0.6",
+   "file_name": "ToolSwap-1.20.1-5.0.6.jar",
+   "origin": "user",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1, 1.20.2, 1.20.3, 1.20.4, 1.20.5, 1.20.6 | forge, neoforge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/L9JLNLqk/8645f29d7afbf4e19c82a45ca3163b6f49b3c9e1_96.webp",
+    "sha256": "83e662d2167bf3cfbb5cee1a1ee0d6ca496c8a6d57929cf25b45ba0297820441"
+   }
+  },
+  {
+   "project_id": "MBAkmtvl",
+   "title": "Balm",
+   "version": "7.3.38+forge-1.20.1",
+   "file_name": "balm-forge-1.20.1-7.3.38-all.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20, 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/MBAkmtvl/285b7bcfd6e525c043e640b08f3efc0cde90f7dd_96.webp",
+    "sha256": "1a41f9d4985d3b7fb8bb0f1c479246e6263a40fd4e5765a949ffad10c6f6f9d4"
+   }
+  },
+  {
+   "project_id": "Q2OqKxDG",
+   "title": "Better Advancements",
+   "version": "0.4.2.25",
+   "file_name": "BetterAdvancements-NeoForge-1.20.1-0.4.2.25.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/Q2OqKxDG/b1519a191e62135647f66394d526d179ab5b598d.png",
+    "sha256": "9583f18ef0a9b2e4c1b4da74d04b7ddfe9385922287b672fb506da155a540b6a"
+   }
+  },
+  {
+   "project_id": "uy4Cnpcm",
+   "title": "Bookshelf",
+   "version": "20.2.15",
+   "file_name": "Bookshelf-Forge-1.20.1-20.2.15.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/uy4Cnpcm/002e73d916fb63c9c85e212ac47fde4ef9c4a65f.png",
+    "sha256": "f2e36a799b7a7d6696c117727a2afe0cbd22c5548402719e0dc8a4c9b26c3c51"
+   }
+  },
+  {
+   "project_id": "pfjLUfGv",
+   "title": "Botania",
+   "version": "1.20.1-456-forge",
+   "file_name": "Botania-1.20.1-456-FORGE.jar",
+   "origin": "dependency",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/pfjLUfGv/e40d77bf0245907048fb71b5a64ec3de10099ef1_96.webp",
+    "sha256": "72cd67992d1266f42be1c6ed743e48af261cdbafbec0da238e8b84e621845a54"
+   }
+  },
+  {
+   "project_id": "",
+   "title": "BotanicalMachinery-1.20.1-3.0.10.jar",
+   "version": "",
+   "file_name": "BotanicalMachinery-1.20.1-3.0.10.jar",
+   "origin": "hand-placed",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "",
+   "icon": {
+    "url": "",
+    "sha256": ""
+   }
+  },
+  {
+   "project_id": "joEfVgkn",
+   "title": "Carry On",
+   "version": "2.1.2.7",
+   "file_name": "carryon-forge-1.20.1-2.1.2.7.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20, 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/joEfVgkn/d7750a532cd45c9020bf4d07f304191de6e98c19_96.webp",
+    "sha256": "ba549300995495c663b543655e540e16064839e3b26d2be3c5dc027618357dab"
+   }
+  },
+  {
+   "project_id": "Wnxd13zP",
+   "title": "Clumps",
+   "version": "12.0.0.4",
+   "file_name": "Clumps-forge-1.20.1-12.0.0.4.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/Wnxd13zP/6a965bb7974c3e759a53a1c89c35de4acd4cf86a_96.webp",
+    "sha256": "897a8d92cc637274222809f9ff5564c61a737c52501d976305e7eb68af34e394"
+   }
+  },
+  {
+   "project_id": "2gq0ALnz",
+   "title": "CodeChicken Lib",
+   "version": "4.4.0.516",
+   "file_name": "CodeChickenLib-1.20.1-4.4.0.516-universal.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge, neoforge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/2gq0ALnz/bd9432524341db1b71b3d0a64d92383ba90d2725_96.webp",
+    "sha256": "654a5d6e6bd68014748263d526a44162845964fda23741c15401c71dee927719"
+   }
+  },
+  {
+   "project_id": "xv94TkTM",
+   "title": "Controlling",
+   "version": "12.0.2",
+   "file_name": "Controlling-forge-1.20.1-12.0.2.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/xv94TkTM/bdb6feb3d04ca37da4ed5aa73fef062a39d8b3e5_96.webp",
+    "sha256": "27b51c9e050b67ed0b5bf6a1c6380e8eb106b2f615711d3f302ce41ca56d44a2"
+   }
+  },
+  {
+   "project_id": "vJnhuDde",
+   "title": "Cooking for Blockheads",
+   "version": "16.0.15+forge-1.20.1",
+   "file_name": "cookingforblockheads-forge-1.20.1-16.0.15.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20, 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/vJnhuDde/811d0c55230d84d9e182df1b0bd631ddebecc0ad_96.webp",
+    "sha256": "bd59645b744f19707dd2c3ac17d1d2af828888036c1d5946fe781e7044879d2f"
+   }
+  },
+  {
+   "project_id": "WrpuIfhw",
+   "title": "Corpse",
+   "version": "forge-1.20.1-1.0.23",
+   "file_name": "corpse-forge-1.20.1-1.0.23.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/WrpuIfhw/032925a79197e9e23be2c6a07d994b17e3363912.png",
+    "sha256": "a6e166b31ecaf94d9d697d03cc63b2e6b85e91b96483837617b38f6088bf08d3"
+   }
+  },
+  {
+   "project_id": "DMu0oBKf",
+   "title": "Crafting Tweaks",
+   "version": "18.2.8+forge-1.20.1",
+   "file_name": "craftingtweaks-forge-1.20.1-18.2.8.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20, 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/DMu0oBKf/32bc48587e2c1b0457698a9f4f9ecf3bbda6b42b_96.webp",
+    "sha256": "324f46ce77c9ac34dbe5cb1c652243c2a62117e4473dd1cd14281db37bbfab9b"
+   }
+  },
+  {
+   "project_id": "LNytGWDc",
+   "title": "Create",
+   "version": "1.20.1-0.5.1.j",
+   "file_name": "create-1.20.1-0.5.1.j.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge, neoforge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/LNytGWDc/61d716699bcf1ec42ed4926a9e1c7311be6087e2_96.webp",
+    "sha256": "7f896d09714143de40d14725358ce3bf6861459dfb5a7820b6db398733ec7306"
+   }
+  },
+  {
+   "project_id": "JmybsfWs",
+   "title": "Create: Dreams & Desires",
+   "version": "1.20.1-0.2c.PREBETA",
+   "file_name": "Create-Dreams-n-Desires-1.20.1-0.2c.PREBETA.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge, neoforge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/JmybsfWs/10e9ec54bd09e581dda15fc57eb754eca199ef10_96.webp",
+    "sha256": "2e67e61ab5e272e742010a3377d3ab885722bc7b46f0bd15b55a1221524b5523"
+   }
+  },
+  {
+   "project_id": "vvuO3ImH",
+   "title": "Curios API",
+   "version": "5.14.1+1.20.1",
+   "file_name": "curios-forge-5.14.1+1.20.1.jar",
+   "origin": "dependency",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20, 1.20.1 | forge, neoforge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/vvuO3ImH/2a7323ca80849de0bcb50299e18acdf8bf394682.png",
+    "sha256": "bfbf68cecb3a33282d88a623406777cb87d42e9dc54d189c50380a5e6e0ffc0f"
+   }
+  },
+  {
+   "project_id": "No1xZeN1",
+   "title": "Data Trader",
+   "version": "1.20.1-2.1.6",
+   "file_name": "DataTrader-1.20.1-2.1.6.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge, neoforge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/No1xZeN1/2184f64b3714f0439cc429e24fec616db3b498b7_96.webp",
+    "sha256": "2bf24a568f195deb4a8bb741ab73dc4189ff3f1895e0e5567bb468da17c8ac04"
+   }
+  },
+  {
+   "project_id": "kZvO1mDq",
+   "title": "Default World Type",
+   "version": "1.20.1-4.0.5",
+   "file_name": "DefaultWorldType-1.20.1-4.0.5.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge, neoforge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/kZvO1mDq/e0f0a629898daf2b079f91d32b4f978a7d642462_96.webp",
+    "sha256": "ac971c9cf20478d3bb1da15dba2d1a554817f1e2f89b9b91809ab573a151a6a0"
+   }
+  },
+  {
+   "project_id": "qc0LobOe",
+   "title": "Effect Tooltips",
+   "version": "9.0.3",
+   "file_name": "EffectTooltips-Forge-1.20.1-9.0.3.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/qc0LobOe/5ce7d75c0d8c31dd8aba0671354029914e34bfd2.png",
+    "sha256": "6ac2090a80c883001fc23089aa0c6c6999a337df497471edc291f3984af849ac"
+   }
+  },
+  {
+   "project_id": "UVtY3ZAC",
+   "title": "Enchantment Descriptions",
+   "version": "17.1.21",
+   "file_name": "EnchantmentDescriptions-Forge-1.20.1-17.1.21.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/UVtY3ZAC/1f857baf3d1f78e40343925176c084838c91a891_96.webp",
+    "sha256": "74688506e0bfa016558fd3f7dded6152141c379ce940f6b7de873672dfc135a8"
+   }
+  },
+  {
+   "project_id": "BbrHg80P",
+   "title": "Ender Storage",
+   "version": "2.11.0.188",
+   "file_name": "EnderStorage-1.20.1-2.11.0.188-universal.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge, neoforge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/BbrHg80P/3d82d5353fb8c44b46d33db5d4b93ca3b074485c_96.webp",
+    "sha256": "040597af91b3ccf1857a7e5ffe3615a6629810e0adf887183cdb5b87a18f96cc"
+   }
+  },
+  {
+   "project_id": "u86oU2cO",
+   "title": "Excavar",
+   "version": "1.20.1-3.1.5",
+   "file_name": "Excavar-1.20.1-3.1.5.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge, neoforge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/u86oU2cO/18f9d3332c7855c19ce804a2410930104d4ee088_96.webp",
+    "sha256": "22e2b491eb5f135f0c3c774b8e166b721fda09fdfa5e5e662932bc9885eff2b1"
+   }
+  },
+  {
+   "project_id": "Tlo2tahX",
+   "title": "Extra Disks",
+   "version": "1.20.1-3.0.1",
+   "file_name": "ExtraDisks-1.20.1-3.0.1.jar",
+   "origin": "user",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge, neoforge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/Tlo2tahX/c58745398bbf2adcab0413cb06d89b6dd1193b9c_96.webp",
+    "sha256": "f125fe2f958afdbef9bf782ba7eb3f6a73f423ef566293e523ccd79dd0affc2a"
+   }
+  },
+  {
+   "project_id": "R2OftAxM",
+   "title": "Farmer's Delight",
+   "version": "1.20.1-1.2.11",
+   "file_name": "FarmersDelight-1.20.1-1.2.11.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge, neoforge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/R2OftAxM/8e7aa38ab94d94bb0a2894a218b69beb49002b34.png",
+    "sha256": "3fde0c230f0538e952ca96be3de0483cca355c39d13652a79218f5f302e1dedb"
+   }
+  },
+  {
+   "project_id": "iZ10HXDj",
+   "title": "FPS Reducer",
+   "version": "1.20.1-2.5.1",
+   "file_name": "FpsReducer2-forge-1.20.1-2.5.1.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20, 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/iZ10HXDj/3d82fc3ce8a943d8065a4b5532f932dba144e128_96.webp",
+    "sha256": "d01b3f1ac110379ff1c775cee732b9257b766fe466377aa45b9e79a1679f5163"
+   }
+  },
+  {
+   "project_id": "",
+   "title": "inventorysorter-1.20.1-23.0.1.jar",
+   "version": "",
+   "file_name": "inventorysorter-1.20.1-23.0.1.jar",
+   "origin": "override",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "",
+   "icon": {
+    "url": "",
+    "sha256": ""
+   }
+  },
+  {
+   "project_id": "P3iIrPH3",
+   "title": "Iron Chests",
+   "version": "1.20.1-14.4.4",
+   "file_name": "ironchest-1.20.1-14.4.4.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/P3iIrPH3/a22018e95966927fdc4043f0759f0d786bfcade0_96.webp",
+    "sha256": "407d12ce60d927510e144be1325758a7cf5423ec787b414efa7924bae9c0ce63"
+   }
+  },
+  {
+   "project_id": "nvQzSEkH",
+   "title": "Jade 🔍",
+   "version": "11.13.2+forge",
+   "file_name": "Jade-1.20.1-Forge-11.13.2.jar",
+   "origin": "pack",
+   "enabled": false,
+   "deleted": true,
+   "compatibility": "Minecraft 1.20, 1.20.1 | forge, neoforge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/nvQzSEkH/b04217bc2b7dc524c4d12f81ff42cc1cefb9b0fc_96.webp",
+    "sha256": "892e43a16a756f2adfb6b3728d9f164975a40ecaf9acedf524efcec1c43e16d6"
+   }
+  },
+  {
+   "project_id": "u6dRKJwZ",
+   "title": "Just Enough Items (JEI)",
+   "version": "15.20.0.130",
+   "file_name": "jei-1.20.1-forge-15.20.0.130.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/u6dRKJwZ/4a3f18ac0d096c9f8e9176984c44be4e58f94c89_96.webp",
+    "sha256": "0166724467fb429677514fae524f7a699a7adbfc59019d8c88a7a0316239f0a6"
+   }
+  },
+  {
+   "project_id": "uEfK2CXF",
+   "title": "Just Enough Resources (JER)",
+   "version": "1.4.0.247",
+   "file_name": "JustEnoughResources-1.20.1-1.4.0.247.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/uEfK2CXF/ca8130fd80167a798d6bfa489dd87fbb871dce94_96.webp",
+    "sha256": "046615107ed7881e91d264bf44a3fe9f60e511a17f3a3cc589aad70b5e4660c3"
+   }
+  },
+  {
+   "project_id": "7uh75ruZ",
+   "title": "KleeSlabs",
+   "version": "15.0.11+forge-1.20.1",
+   "file_name": "kleeslabs-forge-1.20.1-15.0.11.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20, 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/7uh75ruZ/9d54dccb63b8fcb7fa0782ba42bfa771a7778d1f_96.webp",
+    "sha256": "4c2f2fe5e4c1cac60d754fe254ac2c3bef1d66f0df9b83fcc76dd19817520e7f"
+   }
+  },
+  {
+   "project_id": "qEH6GYul",
+   "title": "LibX",
+   "version": "1.20.1-5.0.14",
+   "file_name": "LibX-1.20.1-5.0.14.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/qEH6GYul/icon.png",
+    "sha256": "dbeab8935c88b6a150f40604f09bbc1d7ba4bce2fc3d91fae0dbc0f19ee77c81"
+   }
+  },
+  {
+   "project_id": "yjvKidNM",
+   "title": "Lighty",
+   "version": "2.1.3+1.20.1",
+   "file_name": "lighty-forge-2.1.3+1.20.1.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/yjvKidNM/aee2a3e0b3c10c82f76597edfef48d31966b2459.png",
+    "sha256": "b40b43c89a565a807ef6e327a8b1770f2e2390d975f95cc02903ec04a413c5d6"
+   }
+  },
+  {
+   "project_id": "EltpO5cN",
+   "title": "Lootr",
+   "version": "0.7.35.94",
+   "file_name": "lootr-forge-1.20-0.7.35.94.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20, 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/EltpO5cN/3dc915eb1bbcd65654c17eb3870de4aba055d0c6_96.webp",
+    "sha256": "0f883bf028937264fde6b650fb2d7fe523da0384eced1d1788ee81ffb617a5b0"
+   }
+  },
+  {
+   "project_id": "aC3cM3Vq",
+   "title": "Mouse Tweaks",
+   "version": "1.20.1-2.25.1-forge",
+   "file_name": "MouseTweaks-forge-mc1.20.1-2.25.1.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/aC3cM3Vq/6c0eaa4e60a9c87f4766f222ff63286f09da32c0_96.webp",
+    "sha256": "751338636d4c276fe2405e0d623cf5ef950514c620a8c0c8e6ceb7a0bd4ccea1"
+   }
+  },
+  {
+   "project_id": "fPetb5Kh",
+   "title": "Nature's Compass",
+   "version": "1.20.1-1.12.0-forge",
+   "file_name": "NaturesCompass-1.20.1-1.12.0-forge.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/fPetb5Kh/95e4110a4cf600843c4ba9d545cc1b60e2c00eaa.png",
+    "sha256": "75b16d9bd0cba554a1c15b567ef17414b62fdc5d4141609c750ad6426ce21310"
+   }
+  },
+  {
+   "project_id": "K8pn1qHf",
+   "title": "OAuth",
+   "version": "1.1.15",
+   "file_name": "oauth-1.1.15-1.20.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/K8pn1qHf/icon.png",
+    "sha256": "870ee1742c0023949fc7db88979e18be8476ce5e73801004a4e52948915d535d"
+   }
+  },
+  {
+   "project_id": "bb2EpKpx",
+   "title": "Odyssey Allies",
+   "version": "1.0.10",
+   "file_name": "argonauts-forge-1.20.1-1.0.10.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/bb2EpKpx/aaf10914d6af94cc9566346c02ff7bb80a5adb79_96.webp",
+    "sha256": "0a35c9f6b76d112434817405fce26509f729671f0990115337a1817d701708b7"
+   }
+  },
+  {
+   "project_id": "fEWKxVzh",
+   "title": "Odyssey Claims",
+   "version": "1.0.8",
+   "file_name": "cadmus-forge-1.20.1-1.0.8.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/fEWKxVzh/782cf1779f13724f2102acd9c331a4ac7d81b83f_96.webp",
+    "sha256": "e7eb831024ef6eaf493cd25442dc457541f4e0c80c6020b9207c309a7e71e889"
+   }
+  },
+  {
+   "project_id": "lo90fZoB",
+   "title": "Odyssey Quests",
+   "version": "1.1.13",
+   "file_name": "Heracles-forge-1.20.1-1.1.13.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/lo90fZoB/df9338027dc4a436c651ccc975f593b7c43e1fbb_96.webp",
+    "sha256": "7666208f56af2517537793e1b6697723f9ff80bcb1fb83d212d19e42e781b2d0"
+   }
+  },
+  {
+   "project_id": "KwWsINvD",
+   "title": "Open Loader",
+   "version": "19.0.5",
+   "file_name": "OpenLoader-Forge-1.20.1-19.0.5.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/KwWsINvD/2497b7a120430f277e9eb110a6fd33edd6eb8d3d.png",
+    "sha256": "fd08859a4746482d5be03e311e8c6d099d75c18d203e52953904c42b008105fa"
+   }
+  },
+  {
+   "project_id": "B7NPvScT",
+   "title": "Pack Essentials",
+   "version": "1.20.1-1.1.20",
+   "file_name": "PackEssentials-1.20.1-1.1.20.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/B7NPvScT/48e7dcb3b97bfa6d68a37048927e8450e0ab039b_96.webp",
+    "sha256": "2895ac62e6412392fd94e5bcc7002ccfa74ecd68287dde4188431612ad617fed"
+   }
+  },
+  {
+   "project_id": "",
+   "title": "PackMenu-1.20.1-6.1.1.jar",
+   "version": "",
+   "file_name": "PackMenu-1.20.1-6.1.1.jar",
+   "origin": "override",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "",
+   "icon": {
+    "url": "",
+    "sha256": ""
+   }
+  },
+  {
+   "project_id": "nU0bVIaL",
+   "title": "Patchouli",
+   "version": "1.20.1-85-forge",
+   "file_name": "Patchouli-1.20.1-85-FORGE.jar",
+   "origin": "dependency",
+   "enabled": false,
+   "deleted": true,
+   "compatibility": "Minecraft 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/nU0bVIaL/c271809dda89c9e7a39f19d91f7cf6fba3ede585_96.webp",
+    "sha256": "0dc82b97716750141c7003dbe8e862d210458a7e689a60c9eccefee55d883190"
+   }
+  },
+  {
+   "project_id": "",
+   "title": "Placebo-1.20.1-8.6.2.jar",
+   "version": "",
+   "file_name": "Placebo-1.20.1-8.6.2.jar",
+   "origin": "override",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "",
+   "icon": {
+    "url": "",
+    "sha256": ""
+   }
+  },
+  {
+   "project_id": "jSQXzmcf",
+   "title": "Rapid Leaf Decay",
+   "version": "1.20.1-2.0.2",
+   "file_name": "RapidLeafDecay-1.20.1-2.0.2.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/jSQXzmcf/28ed2eb0092505ae07c68c4064a514ec942a57ef.png",
+    "sha256": "718f9295940fb27ac003a549bfd297f4091eec1898b5a2bfff6c00c89f7c3476"
+   }
+  },
+  {
+   "project_id": "KDvYkUg3",
+   "title": "Refined Storage",
+   "version": "1.12.4",
+   "file_name": "refinedstorage-1.12.4.jar",
+   "origin": "dependency",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge, neoforge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/KDvYkUg3/be094d898dbfe003baaa6e86098145eec8dbec9b_96.webp",
+    "sha256": "9195ccd8090355af6dc150b18c11261d2b0356fbf641bf8c16638a1fb0c1f0f0"
+   }
+  },
+  {
+   "project_id": "G1hIVOrD",
+   "title": "Resourceful Lib",
+   "version": "2.1.29",
+   "file_name": "resourcefullib-forge-1.20.1-2.1.29.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/G1hIVOrD/52130f41d05162ce6d7d1832a47d3c238d102632_96.webp",
+    "sha256": "aad02bc0f17ee710d1ba3591003ace6145fa0faf5c5f774821d27288740607be"
+   }
+  },
+  {
+   "project_id": "fuuu3xnx",
+   "title": "Searchables",
+   "version": "1.0.3",
+   "file_name": "Searchables-forge-1.20.1-1.0.3.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/fuuu3xnx/206971d54b37b30a2e728b1c194f7f096963d05a_96.webp",
+    "sha256": "aee107093fd9379a1d3ecc8e750d80ab03d6bc68e272e58f62440caa2f63f783"
+   }
+  },
+  {
+   "project_id": "fzSKSXVK",
+   "title": "Simple Backups",
+   "version": "1.20.1-3.1.24",
+   "file_name": "SimpleBackups-1.20.1-3.1.24.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge, neoforge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/fzSKSXVK/d50c9ce03f47f141941339cf4d54f8cb6d81b6cf_96.webp",
+    "sha256": "28d74eb280a45de0e83a1cbd6700235dddf68f10e35d1114c5c4885d42436e6a"
+   }
+  },
+  {
+   "project_id": "QlvIRpDN",
+   "title": "Simplest Copper Gear (archived)",
+   "version": "1.0.5",
+   "file_name": "Simplest-Copper-Gear-1.0.5-Forge-1.20.1.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/QlvIRpDN/0585c61c00cbb9af482f71b9370705f677366b0e.png",
+    "sha256": "4d44676814d0beebd071059094db29e06fdb3edf80191bc1a51ac433726b42bb"
+   }
+  },
+  {
+   "project_id": "P4FVY4ll",
+   "title": "Simply Harvesting",
+   "version": "1.20.1-2.1.3",
+   "file_name": "SimplyHarvesting-1.20.1-2.1.3.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/P4FVY4ll/1e5af0552dfe6703574cbc1a1675dab8fc4410d5_96.webp",
+    "sha256": "4d80e1b91d99c6959967ab8ce4b90f2129e2033ea6e8d20d799a660502162b1d"
+   }
+  },
+  {
+   "project_id": "v7uAVl86",
+   "title": "Simply Tools",
+   "version": "1.20.1-2.0.8",
+   "file_name": "SimplyTools-1.20.1-2.0.8.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge, neoforge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/v7uAVl86/530aef72408696fa412ecc064f13d15524c28f57_96.webp",
+    "sha256": "fcc8ca3ffae5e2a8c46040e592a084d1c50508093a2d9f6ed122ad8d00e4e47c"
+   }
+  },
+  {
+   "project_id": "3Gdi7Qgq",
+   "title": "Sky GUIs",
+   "version": "1.20.1-3.0.16",
+   "file_name": "SkyGUIs-1.20.1-3.0.16.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge, neoforge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/3Gdi7Qgq/8e8cd5272905cad666577501f9044a5f866cfab7.png",
+    "sha256": "43bb88bc4b0ca29e6852a3b0f9342a73b54787bb7d9c49cb2010658f2acdc981"
+   }
+  },
+  {
+   "project_id": "por2AZc5",
+   "title": "Skyblock Builder",
+   "version": "1.20.1-5.1.32",
+   "file_name": "SkyblockBuilder-1.20.1-5.1.32.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/por2AZc5/89644ef50021efa23db52f574f514c0ebce7df07_96.webp",
+    "sha256": "d592a6533ca8feb8ddebf126aa347c908db06a4c2e8fae6e0e2fb7d658ebd4df"
+   }
+  },
+  {
+   "project_id": "u1aDdOsQ",
+   "title": "Spice of Life: Apple Pie Edition",
+   "version": "2.3.1",
+   "file_name": "solapplepie-1.20.1-2.3.0.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/u1aDdOsQ/6974ef9aa27c23ddfab557c6b59e15ac8aec51a5.png",
+    "sha256": "250f71bf5217ddf693d6f9e35eea12643f1db1235dbf00753ff778c82ae16793"
+   }
+  },
+  {
+   "project_id": "guitPqEi",
+   "title": "Storage Drawers",
+   "version": "1.20.1-12.14.3",
+   "file_name": "StorageDrawers-forge-1.20.1-12.14.3.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge, neoforge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/guitPqEi/58b4229c52876eff66c9f98a5d2a1e9b9f648501.png",
+    "sha256": "9a053ebee9fb62dddfb09ab8533650ad894c88a66391d71cf4d363865e535381"
+   }
+  },
+  {
+   "project_id": "XZNI4Cpy",
+   "title": "Tom's Simple Storage Mod",
+   "version": "1.20-1.7.1",
+   "file_name": "toms_storage-1.20-1.7.1.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20, 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/XZNI4Cpy/1949d7adbf962ac86912608edfb93fa5342bffd6_96.webp",
+    "sha256": "67d9d31e7f01839cbd204dff009824e7756955665ad2ac81f7a3577bf2c4710e"
+   }
+  },
+  {
+   "project_id": "",
+   "title": "TwerkItMeal-2.3.0.jar",
+   "version": "",
+   "file_name": "TwerkItMeal-2.3.0.jar",
+   "origin": "override",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "",
+   "icon": {
+    "url": "",
+    "sha256": ""
+   }
+  },
+  {
+   "project_id": "MMMWYsjm",
+   "title": "UtilitiX",
+   "version": "1.20.1-0.8.28",
+   "file_name": "UtilitiX-1.20.1-0.8.28.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge, neoforge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/MMMWYsjm/97a983d6b9e794edd669a86613aa014b0dff101a_96.webp",
+    "sha256": "16a4688327bbc4498ecd787c42913981b94ddb88570ac5309a3abc256eddc85a"
+   }
+  },
+  {
+   "project_id": "WN2YCymY",
+   "title": "Vanilla AIOTs",
+   "version": "1.20.1-3.0.9",
+   "file_name": "VanillaAIOTs-1.20.1-3.0.9.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/WN2YCymY/6000fb21e6d49636fe819299ab796ccdb89a3f51_96.webp",
+    "sha256": "c50f6c040033d81a059280e9782c02f0f983ce4d7f28ba8265945f119c35eb0c"
+   }
+  },
+  {
+   "project_id": "LOpKHB2A",
+   "title": "Waystones",
+   "version": "14.1.20+forge-1.20.1",
+   "file_name": "waystones-forge-1.20.1-14.1.20.jar",
+   "origin": "pack",
+   "enabled": true,
+   "deleted": false,
+   "compatibility": "Minecraft 1.20, 1.20.1 | forge",
+   "icon": {
+    "url": "https://cdn.modrinth.com/data/LOpKHB2A/d56c030a875582aff5bab477ddcfec317a1610f0_96.webp",
+    "sha256": "45ac21f5fd420c7b077e16252e892ab5a5ece635809b0ceb1a6cbd0fa932aea1"
+   }
+  }
+ ],
+ "mod_search": {
+  "query": "backup",
+  "results": [
+   {
+    "project_id": "fzSKSXVK",
+    "title": "Simple Backups",
+    "description": "A simple mod to create scheduled backups",
+    "author": "MelanX",
+    "installed": true,
+    "compatible": true,
+    "icon": {
+     "url": "https://cdn.modrinth.com/data/fzSKSXVK/d50c9ce03f47f141941339cf4d54f8cb6d81b6cf_96.webp",
+     "sha256": "28d74eb280a45de0e83a1cbd6700235dddf68f10e35d1114c5c4885d42436e6a"
+    }
+   },
+   {
+    "project_id": "Jrmoreqs",
+    "title": "Advanced Backups",
+    "description": "The backup mod to solve all your problems - actively maintained for almost any minecraft version!",
+    "author": "HeatherWhite",
+    "installed": false,
+    "compatible": true,
+    "icon": {
+     "url": "https://cdn.modrinth.com/data/Jrmoreqs/534340affc3732e8f7eae42951b827f5b6363d9d_96.webp",
+     "sha256": "d480fce3e214e2e1ce46e6c6231384bd3b65bfeb4c2ed4634d7bb18499eaedbf"
+    }
+   },
+   {
+    "project_id": "ZHKrK8Rp",
+    "title": "Fast Backups",
+    "description": "Fast, incremental world backups powered by Git. ",
+    "author": "pcal43",
+    "installed": false,
+    "compatible": true,
+    "icon": {
+     "url": "https://cdn.modrinth.com/data/ZHKrK8Rp/a7e5015060e1715be5bdfc19953749a657ed7b9c_96.webp",
+     "sha256": "96bbe5292d2aaaf7ebc7d06916f315f19032ea7f75ab39a077b0c0817500129a"
+    }
+   },
+   {
+    "project_id": "Ot5JFxuv",
+    "title": "Death Backup",
+    "description": "💾 Creates back-ups of player inventories before death, which can be loaded via commands.",
+    "author": "Serilum",
+    "installed": false,
+    "compatible": true,
+    "icon": {
+     "url": "https://cdn.modrinth.com/data/Ot5JFxuv/0cdc3bb5f8f3e371eb1176de72cb3f5d15c2395f_96.webp",
+     "sha256": "9662c850df2fd2fb7d20d44f1e03709c2e08eefd51ee601c369291c0b1d8bda5"
+    }
+   },
+   {
+    "project_id": "Iq6ne7Ra",
+    "title": "Config Backuper",
+    "description": "A simple mod for backing up all configurations at the start of Minecraft",
+    "author": "NaoCraftLab",
+    "installed": false,
+    "compatible": true,
+    "icon": {
+     "url": "https://cdn.modrinth.com/data/Iq6ne7Ra/1329e343bb2ee8e106d2cf947707abfeeed1b07d_96.webp",
+     "sha256": "f777788289ea315d4c4f12e5d6c2d0e402de9b81fbac18a5a1cf8d99c97378ce"
+    }
+   }
+  ]
+ },
+ "snapshots": [
+  {
+   "id": "4675608d-8509-46de-af47-af23e6589263",
+   "label": "Before snapshot restore",
+   "origin": "before_restore",
+   "copy_method": "copy",
+   "captured": "2026-10-14 19:52",
+   "size_bytes": 101287669,
+   "enabled": 61,
+   "disabled": 1
+  },
+  {
+   "id": "3d903a5d-62cc-4ef6-b5e4-edc8a922bba9",
+   "label": "Pre-Ender-Dragon",
+   "origin": "manual",
+   "copy_method": "copy",
+   "captured": "2026-10-14 19:52",
+   "size_bytes": 101287669,
+   "enabled": 61,
+   "disabled": 1
+  },
+  {
+   "id": "a8e2e757-6889-4eed-9c35-1cd0aadcf9de",
+   "label": "Before the Wither",
+   "origin": "manual",
+   "copy_method": "copy",
+   "captured": "2026-10-14 19:52",
+   "size_bytes": 101287669,
+   "enabled": 61,
+   "disabled": 1
+  }
+ ]
+}

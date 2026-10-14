@@ -466,7 +466,7 @@ pub(crate) fn disk_usage(ui: &AppWindow) {
         lookup_args("gui-disk-usage-incomplete", [("count", Arg::from(1_i64))]).into(),
     );
     ui.set_disk_usage_unreadable(strings(&[
-        "/demo/ephervex/instances/herobrine-sighting/.minecraft/saves/backup-2",
+        "/demo/ephervex/instances/cavestone/minecraft/saves/backup-2",
     ]));
 }
 

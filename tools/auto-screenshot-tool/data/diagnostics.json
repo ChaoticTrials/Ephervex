@@ -1,0 +1,88 @@
+{
+ "files": {
+  "total": 63,
+  "intact": 56,
+  "unverifiable": 4,
+  "problems": [
+   {
+    "path": "mods/Jade-1.20.1-Forge-11.13.2.jar",
+    "state": "Missing"
+   },
+   {
+    "path": "mods/SimpleBackups-1.20.1-3.1.24.jar",
+    "state": "Damaged"
+   },
+   {
+    "path": "mods/Patchouli-1.20.1-85-FORGE.jar",
+    "state": "Missing"
+   }
+  ]
+ },
+ "mods": {
+  "enabled": 61,
+  "disabled": 1,
+  "answered": 59,
+  "unanswered": 5
+ },
+ "java": "17.0.20.1",
+ "bundle": [
+  {
+   "name": "logs/latest.log",
+   "kind": "game_log",
+   "size_bytes": 522680
+  },
+  {
+   "name": "logs/debug.log",
+   "kind": "game_log",
+   "size_bytes": 2389032
+  },
+  {
+   "name": "crash-reports/crash-2026-10-14_19.25.21-client.txt",
+   "kind": "crash_report",
+   "size_bytes": 25228
+  },
+  {
+   "name": "instance/recipe.json",
+   "kind": "recipe",
+   "size_bytes": 39953
+  },
+  {
+   "name": "instance/instance.json",
+   "kind": "record",
+   "size_bytes": 574
+  }
+ ],
+ "client_crash": {
+  "report": "crash-2026-10-14_19.25.21-client.txt",
+  "size_bytes": 25228,
+  "summary": "Manually triggered debug crash"
+ },
+ "server_crashes": {
+  "fog-server": {
+   "report": "crash-2026-10-14_19.18.30-fml.txt",
+   "failure": "java.lang.RuntimeException: Attempted to load class net/minecraft/client/gui/screens/Screen for invalid dist DEDICATED_SERVER",
+   "client_code_on_server": false,
+   "suggested": 1,
+   "suspects": [
+    {
+     "name": "Oculus",
+     "confidence": "high",
+     "reason": "named"
+    }
+   ]
+  },
+  "utility-mods-server": {
+   "report": "crash-2026-10-14_19.18.41-fml.txt",
+   "failure": "<No associated exception found>",
+   "client_code_on_server": false,
+   "suggested": 0,
+   "suspects": [
+    {
+     "name": "jea",
+     "confidence": "high",
+     "reason": "named"
+    }
+   ]
+  }
+ }
+}

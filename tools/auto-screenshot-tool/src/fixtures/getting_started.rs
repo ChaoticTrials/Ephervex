@@ -133,7 +133,7 @@ pub(crate) fn create_instance_dialog(ui: &AppWindow) {
         "26.2", "1.21.1", "1.20.1", "1.19.4", "1.18.2", "1.16.5", "1.12.2",
     ])));
     ui.set_favorite_minecraft_versions(rows(strings(&["1.20.1", "1.21.1"])));
-    ui.set_create_name("Redstone Lag Repro".into());
+    ui.set_create_name("Simple Backups Repro".into());
     ui.set_create_name_suggestion("Minecraft 1.20.1 Forge".into());
     ui.set_create_minecraft("1.20.1".into());
     ui.set_create_minecraft_favorite(true);

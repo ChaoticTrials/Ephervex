@@ -1,5 +1,6 @@
 //! Documentation screenshots from the compiled Ephervex interface.
 
+mod artwork;
 mod capture;
 mod catalog;
 mod fixtures;
@@ -44,6 +45,12 @@ struct GenerateArgs {
     /// Derive 1080p full-window files from 1440p only for states marked layout-identical.
     #[arg(long)]
     derive_1080: bool,
+    /// Directory holding the project logos fetched for the recorded mod rows.
+    #[arg(long)]
+    artwork_cache: Option<PathBuf>,
+    /// Fetch no logos. Logos missing from the cache are left empty.
+    #[arg(long)]
+    offline: bool,
 }
 
 fn main() -> Result<()> {
@@ -93,6 +100,10 @@ fn run(args: GenerateArgs) -> Result<()> {
         .output
         .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("screenshots"));
 
+    let artwork_cache = args
+        .artwork_cache
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("artwork"));
+    artwork::prepare(&artwork_cache, args.offline)?;
     capture::initialize()?;
     if replace_default_output && output.exists() {
         std::fs::remove_dir_all(&output)

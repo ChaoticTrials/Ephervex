@@ -1,0 +1,142 @@
+{
+ "manage": {
+  "project": "waystones",
+  "title": "Waystones",
+  "path": "mods/waystones-forge-1.20.1-14.1.20.jar",
+  "installed_id": "sKoHLGbK",
+  "newest_id": "Y0IgdaoP",
+  "versions": [
+   {
+    "id": "Y0IgdaoP",
+    "name": "14.1.21+forge-1.20.1",
+    "number": "14.1.21+forge-1.20.1",
+    "channel": "release",
+    "published": "2026-09-08"
+   },
+   {
+    "id": "sKoHLGbK",
+    "name": "14.1.20+forge-1.20.1",
+    "number": "14.1.20+forge-1.20.1",
+    "channel": "release",
+    "published": "2026-02-26"
+   },
+   {
+    "id": "vRjmrMsl",
+    "name": "14.1.19+forge-1.20.1",
+    "number": "14.1.19+forge-1.20.1",
+    "channel": "release",
+    "published": "2026-02-18"
+   },
+   {
+    "id": "Z7sBfgIR",
+    "name": "14.1.18+forge-1.20.1",
+    "number": "14.1.18+forge-1.20.1",
+    "channel": "release",
+    "published": "2026-01-13"
+   },
+   {
+    "id": "WozH13dr",
+    "name": "14.1.17+forge-1.20.1",
+    "number": "14.1.17+forge-1.20.1",
+    "channel": "release",
+    "published": "2025-08-06"
+   }
+  ],
+  "requires": [
+   {
+    "name": "Balm",
+    "kind": "required",
+    "present": true
+   }
+  ],
+  "required_by": []
+ },
+ "update": {
+  "project": "extra-disks",
+  "title": "Extra Disks",
+  "path": "mods/ExtraDisks-1.20.1-3.0.1.jar",
+  "installed_id": "TGn6e0dU",
+  "newest_id": "bBzUlSat",
+  "versions": [
+   {
+    "id": "bBzUlSat",
+    "name": "ExtraDisks-1.20.1-3.0.3.jar",
+    "number": "1.20.1-3.0.3",
+    "channel": "beta",
+    "published": "2025-03-30"
+   },
+   {
+    "id": "gsPOqbxs",
+    "name": "ExtraDisks-1.20.1-3.0.2.jar",
+    "number": "1.20.1-3.0.2",
+    "channel": "beta",
+    "published": "2023-12-23"
+   },
+   {
+    "id": "TGn6e0dU",
+    "name": "ExtraDisks-1.20.1-3.0.1.jar",
+    "number": "1.20.1-3.0.1",
+    "channel": "beta",
+    "published": "2023-11-26"
+   },
+   {
+    "id": "Q0mfPN7r",
+    "name": "ExtraDisks-1.20.1-3.0.0.jar",
+    "number": "1.20.1-3.0.0",
+    "channel": "beta",
+    "published": "2023-07-06"
+   },
+   {
+    "id": "2UVMcW0J",
+    "name": "ExtraDisks-1.20.1-2.2.0.jar",
+    "number": "1.20.1-2.2.0",
+    "channel": "beta",
+    "published": "2023-07-04"
+   }
+  ],
+  "requires": [
+   {
+    "name": "Refined Storage",
+    "kind": "required",
+    "present": true
+   }
+  ],
+  "required_by": []
+ },
+ "impact": {
+  "name": "Balm",
+  "path": "mods/balm-forge-1.20.1-7.3.38-all.jar",
+  "breaks": [
+   {
+    "name": "Cooking for Blockheads",
+    "path": "mods/cookingforblockheads-forge-1.20.1-16.0.15.jar",
+    "distance": 1
+   },
+   {
+    "name": "Crafting Tweaks",
+    "path": "mods/craftingtweaks-forge-1.20.1-18.2.8.jar",
+    "distance": 1
+   },
+   {
+    "name": "KleeSlabs",
+    "path": "mods/kleeslabs-forge-1.20.1-15.0.11.jar",
+    "distance": 1
+   },
+   {
+    "name": "Waystones",
+    "path": "mods/waystones-forge-1.20.1-14.1.20.jar",
+    "distance": 1
+   }
+  ]
+ },
+ "plan": {
+  "project": "botanical-machinery",
+  "title": "Botanical Machinery",
+  "version_id": "nWd5gpH8",
+  "version": "1.20.1-3.0.10",
+  "dependencies": 4,
+  "existing": 4,
+  "optional": 2,
+  "warnings": 0
+ }
+}

@@ -68,11 +68,11 @@ pub(crate) fn instance_change_loader_dialog(ui: &AppWindow) {
 /// The approval asked for before a link downloads from a host not yet trusted.
 pub(crate) fn import_link_trust_prompt(ui: &AppWindow) {
     instances_page(ui);
-    ui.set_pack_link_url("https://packs.example.invalid/creeper-containment-lab-2.3.0.zip".into());
-    ui.set_pack_link_display(
-        "https://packs.example.invalid/creeper-containment-lab-2.3.0.zip".into(),
-    );
-    ui.set_pack_link_host("packs.example.invalid".into());
+    let link =
+        "https://cdn.modrinth.com/data/3HsvIkiC/versions/sH76UFa2/CaveStone-1.1.0-modrinth.mrpack";
+    ui.set_pack_link_url(link.into());
+    ui.set_pack_link_display(link.into());
+    ui.set_pack_link_host("cdn.modrinth.com".into());
     ui.set_pack_link_redirected(false);
     ui.set_pack_link_remember(false);
     ui.set_pack_link_downloading(false);

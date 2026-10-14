@@ -10,12 +10,20 @@ The script changes to the repository root and runs the Rust generator. It
 captures the compiled `AppWindow` with Slint's headless software renderer at a
 fixed scale of 1, with a fixed `en-US` locale and mocked time. It uses the
 same system font resolution as the launcher, including its monospace family.
-No display server is needed. The Rust tool never attaches the
-application controller, opens launcher storage, reads accounts or credentials,
-or contacts a service. Its instance, server, offline account, and mod rows are
-defined in `src/fixtures.rs` and contain only synthetic values. The CaveStone
-pack fields are transcribed from a supplied Modrinth archive; its provenance
-is recorded in `SOURCES.md`. Regeneration does not need that archive.
+No display server is needed. The Rust tool never attaches the application
+controller, opens launcher storage, or reads accounts or credentials. The rows
+it shows (instances, servers, the CaveStone mod list, search results, snapshots,
+logs, crash reports, and diagnosis results) come from the files in `data/`,
+which were recorded from real packs, mods, and servers run in an isolated
+launcher home. `SOURCES.md` lists what each file holds and how it was recorded.
+Progress bars, toasts, activity entries, which host is shown as running, and
+the other presentation-only state are set in `src/fixtures.rs`.
+
+The only network access is fetching project logos from `cdn.modrinth.com`
+into `artwork/`, which is gitignored. Each recorded row names its logo by
+address and by the SHA-256 of the bytes the catalog served, and a logo whose
+bytes differ is refused. Pass `--offline` to fetch nothing and leave logos that
+are not cached empty, or `--artwork-cache DIR` to keep them elsewhere.
 
 The default command writes both Ephervex Light and Dark captures at 1920x1080
 and 2560x1440. Full-window files are stored at

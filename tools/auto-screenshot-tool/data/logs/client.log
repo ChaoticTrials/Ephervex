@@ -1,0 +1,130 @@
+[14Oct2026 19:23:52.053] [main/INFO] [cpw.mods.modlauncher.Launcher/MODLAUNCHER]: ModLauncher running: args [--username, MelanX, --version, 1.20.1-forge-47.4.10, --gameDir, /demo/instances/host/minecraft, --assetsDir, /demo/cache/ephervex/assets, --assetIndex, 5, --uuid, 4914a687-c88d-3ba1-a48d-a1d99e69c1ee, --accessToken, ❄❄❄❄❄❄❄❄, --clientId, , --xuid, , --userType, legacy, --versionType, release, --launchTarget, forgeclient, --fml.forgeVersion, 47.4.10, --fml.mcVersion, 1.20.1, --fml.forgeGroup, net.minecraftforge, --fml.mcpVersion, 20230612.114412]
+[14Oct2026 19:23:52.061] [main/INFO] [cpw.mods.modlauncher.Launcher/MODLAUNCHER]: ModLauncher 10.0.9+10.0.9+main.dcd20f30 starting: java version 17.0.20.1 by Ubuntu; OS Linux arch amd64 version 6.8.0-147-generic
+[14Oct2026 19:23:52.232] [main/WARN] [net.minecraftforge.fml.loading.FMLConfig/CORE]: Configuration file /demo/instances/host/minecraft/config/fml.toml is not correct. Correcting
+[14Oct2026 19:23:52.233] [main/INFO] [net.minecraftforge.fml.loading.FMLConfig/CORE]: Incorrect key [earlyWindowSkipGLVersions] was corrected from null to []
+[14Oct2026 19:23:52.234] [main/INFO] [net.minecraftforge.fml.loading.FMLConfig/CORE]: Incorrect key [earlyWindowLogHelpMessage] was corrected from null to true
+[14Oct2026 19:23:52.234] [main/INFO] [net.minecraftforge.fml.loading.FMLConfig/CORE]: Incorrect key [earlyWindowSquir] was corrected from null to false
+[14Oct2026 19:23:52.235] [main/INFO] [net.minecraftforge.fml.loading.FMLConfig/CORE]: Incorrect key [earlyWindowShowCPU] was corrected from null to false
+[14Oct2026 19:23:53.080] [main/INFO] [net.minecraftforge.fml.loading.ImmediateWindowHandler/]: Loading ImmediateWindowProvider fmlearlywindow
+[14Oct2026 19:23:53.270] [main/INFO] [EARLYDISPLAY/]: Trying GL version 4.6
+[14Oct2026 19:23:53.270] [main/INFO] [EARLYDISPLAY/]: If this message is the only thing at the bottom of your log before a crash, you probably have a driver issue.
+[14Oct2026 19:23:53.699] [main/INFO] [EARLYDISPLAY/]: Requested GL version 4.6 got version 4.6
+[14Oct2026 19:23:53.885] [main/INFO] [mixin/]: SpongePowered MIXIN Subsystem Version=0.8.5 Source=union:/demo/cache/ephervex/libraries/org/spongepowered/mixin/0.8.5/mixin-0.8.5.jar%2388!/ Service=ModLauncher Env=CLIENT
+[14Oct2026 19:23:53.985] [pool-2-thread-1/INFO] [EARLYDISPLAY/]: GL info: NVIDIA GeForce RTX 4070 Ti/PCIe/SSE2 GL version 4.6.0 NVIDIA 595.99.02, NVIDIA Corporation
+[14Oct2026 19:23:54.341] [main/WARN] [net.minecraftforge.fml.loading.moddiscovery.ModFileParser/LOADING]: Mod file /demo/cache/ephervex/libraries/net/minecraftforge/fmlcore/1.20.1-47.4.10/fmlcore-1.20.1-47.4.10.jar is missing mods.toml file
+[14Oct2026 19:23:54.341] [main/WARN] [net.minecraftforge.fml.loading.moddiscovery.ModFileParser/LOADING]: Mod file /demo/cache/ephervex/libraries/net/minecraftforge/javafmllanguage/1.20.1-47.4.10/javafmllanguage-1.20.1-47.4.10.jar is missing mods.toml file
+[14Oct2026 19:23:54.342] [main/WARN] [net.minecraftforge.fml.loading.moddiscovery.ModFileParser/LOADING]: Mod file /demo/cache/ephervex/libraries/net/minecraftforge/lowcodelanguage/1.20.1-47.4.10/lowcodelanguage-1.20.1-47.4.10.jar is missing mods.toml file
+[14Oct2026 19:23:54.343] [main/WARN] [net.minecraftforge.fml.loading.moddiscovery.ModFileParser/LOADING]: Mod file /demo/cache/ephervex/libraries/net/minecraftforge/mclanguage/1.20.1-47.4.10/mclanguage-1.20.1-47.4.10.jar is missing mods.toml file
+[14Oct2026 19:23:54.595] [main/WARN] [net.minecraftforge.jarjar.selection.JarSelector/]: Attempted to select two dependency jars from JarJar which have the same identification: Mod File:  and Mod File: . Using Mod File: 
+[14Oct2026 19:23:54.599] [main/INFO] [net.minecraftforge.fml.loading.moddiscovery.JarInJarDependencyLocator/]: Found 9 dependencies adding them to mods collection
+[14Oct2026 19:23:56.938] [main/INFO] [mixin/]: Compatibility level set to JAVA_17
+[14Oct2026 19:23:57.037] [main/INFO] [cpw.mods.modlauncher.LaunchServiceHandler/MODLAUNCHER]: Launching target 'forgeclient' with arguments [--version, 1.20.1-forge-47.4.10, --gameDir, /demo/instances/host/minecraft, --assetsDir, /demo/cache/ephervex/assets, --uuid, 4914a687-c88d-3ba1-a48d-a1d99e69c1ee, --username, MelanX, --assetIndex, 5, --accessToken, ❄❄❄❄❄❄❄❄, --clientId, , --xuid, , --userType, legacy, --versionType, release]
+[14Oct2026 19:23:57.082] [main/WARN] [mixin/]: Reference map 'cookingforblockheads.refmap.json' for cookingforblockheads.mixins.json could not be read. If this is a development environment you can ignore this message
+[14Oct2026 19:23:57.238] [main/INFO] [fpsreducer/]: OptiFine was NOT detected.
+[14Oct2026 19:23:57.239] [main/INFO] [fpsreducer/]: OptiFabric was NOT detected.
+[14Oct2026 19:23:57.457] [main/INFO] [net.minecraftforge.coremod.CoreMod.placebo/COREMODLOG]: Patching IForgeItemStack#getEnchantmentLevel
+[14Oct2026 19:23:57.523] [main/INFO] [net.minecraftforge.coremod.CoreMod.placebo/COREMODLOG]: Patching IForgeItemStack#getEnchantmentLevel
+[14Oct2026 19:23:58.143] [main/INFO] [fpsreducer/]: bre2el.fpsreducer.mixin.RenderSystemMixin will be applied.
+[14Oct2026 19:23:58.144] [main/INFO] [fpsreducer/]: bre2el.fpsreducer.mixin.WindowMixin will NOT be applied because OptiFine was NOT detected.
+[14Oct2026 19:23:58.679] [main/INFO] [MixinExtras|Service/]: Initializing MixinExtras via com.llamalad7.mixinextras.service.MixinExtrasServiceImpl(version=0.2.1).
+[14Oct2026 19:24:01.676] [pool-4-thread-1/INFO] [net.minecraftforge.coremod.CoreMod.placebo/COREMODLOG]: Patching IForgeItemStack#getEnchantmentLevel
+[14Oct2026 19:24:01.677] [pool-4-thread-1/INFO] [net.minecraftforge.coremod.CoreMod.placebo/COREMODLOG]: Patching IForgeItemStack#getEnchantmentLevel
+[14Oct2026 19:24:06.669] [modloading-worker-0/INFO] [net.blay09.mods.balm.forge.config.ForgeBalmConfig/]: Registering config for cookingforblockheads:common (COMMON) with 11 properties.
+[14Oct2026 19:24:10.635] [modloading-worker-0/WARN] [net.minecraftforge.common.ForgeConfigSpec/CORE]: Configuration file /demo/instances/host/minecraft/config/farmersdelight-client.toml is not correct. Correcting
+[14Oct2026 19:24:11.343] [Placebo Patreon Trail Loader/INFO] [placebo/]: Loading patreon trails data...
+[14Oct2026 19:24:11.451] [Worker-Main-1/WARN] [net.minecraft.client.resources.model.ModelBakery/]: Exception loading blockstate definition: 'create_dd:blockstates/vanilla.json' missing model for variant: 'create_dd:vanilla#level=6'
+[14Oct2026 19:24:11.452] [Worker-Main-1/WARN] [net.minecraft.client.resources.model.ModelBakery/]: Exception loading blockstate definition: 'create_dd:blockstates/strawberry.json' missing model for variant: 'create_dd:strawberry#level=10'
+[14Oct2026 19:24:11.453] [Worker-Main-1/WARN] [net.minecraft.client.resources.model.ModelBakery/]: Exception loading blockstate definition: 'create_dd:blockstates/glowberry_milkshake.json' missing model for variant: 'create_dd:glowberry_milkshake#level=9'
+[14Oct2026 19:24:11.454] [Worker-Main-1/WARN] [net.minecraft.client.resources.model.ModelBakery/]: Exception loading blockstate definition: 'create_dd:blockstates/hot_chocolate.json' missing model for variant: 'create_dd:hot_chocolate#level=3'
+[14Oct2026 19:24:11.456] [Worker-Main-1/WARN] [net.minecraft.client.resources.model.ModelBakery/]: Exception loading blockstate definition: 'create_dd:blockstates/sap.json' missing model for variant: 'create_dd:sap#level=9'
+[14Oct2026 19:24:11.723] [Worker-Main-1/WARN] [net.minecraft.client.resources.model.ModelBakery/]: Unable to load model: 'create_dd:item/deforester/item' referenced from: create_dd:item/deforester_saw/gear: java.io.FileNotFoundException: create_dd:models/item/deforester/item.json
+[14Oct2026 19:24:13.216] [Forge Version Check/INFO] [net.minecraftforge.fml.VersionChecker/]: [enderstorage] Starting version check at https://version-check.covers1624.net/check/?mod=EnderStorage&mc=1.20.1
+[14Oct2026 19:24:28.851] [Render thread/ERROR] [net.minecraft.advancements.AdvancementList/]: Couldn't load advancement utilitix:recipes/misc/stone_wall: Task Advancement{parentId=minecraft:recipes/root, display=null, rewards=AdvancementRewards{experience=0, loot=[], recipes=[utilitix:stone_wall], function=net.minecraft.commands.CommandFunction$CacheableFunction@60866ff5}, criteria={criterion0=net.minecraft.advancements.Criterion@50cf60d, has_the_recipe=net.minecraft.advancements.Criterion@332f2b1b}, requirements=[[criterion0, has_the_recipe]], sends_telemetry_event=false}
+[14Oct2026 19:24:28.853] [Render thread/ERROR] [net.minecraft.advancements.AdvancementList/]: Couldn't load advancement utilitix:recipes/misc/mob_yoinker: Task Advancement{parentId=minecraft:recipes/root, display=null, rewards=AdvancementRewards{experience=0, loot=[], recipes=[utilitix:mob_yoinker], function=net.minecraft.commands.CommandFunction$CacheableFunction@60866ff5}, criteria={criterion0=net.minecraft.advancements.Criterion@4e0fc63f, has_the_recipe=net.minecraft.advancements.Criterion@706b2ff0, criterion2=net.minecraft.advancements.Criterion@4d84f8a6, criterion1=net.minecraft.advancements.Criterion@17618df2}, requirements=[[criterion0, criterion1, criterion2, has_the_recipe]], sends_telemetry_event=false}
+[14Oct2026 19:24:28.854] [Render thread/ERROR] [net.minecraft.advancements.AdvancementList/]: Couldn't load advancement simplytools:recipes/misc/gold_nugget_from_blasting: Task Advancement{parentId=minecraft:recipes/root, display=null, rewards=AdvancementRewards{experience=0, loot=[], recipes=[simplytools:gold_nugget_from_blasting], function=net.minecraft.commands.CommandFunction$CacheableFunction@60866ff5}, criteria={has_the_recipe=net.minecraft.advancements.Criterion@30315a1c, has_item0=net.minecraft.advancements.Criterion@2b065bdb, has_item1=net.minecraft.advancements.Criterion@21b48fb7}, requirements=[[has_item0, has_item1, has_the_recipe]], sends_telemetry_event=false}
+[14Oct2026 19:24:28.855] [Render thread/ERROR] [net.minecraft.advancements.AdvancementList/]: Couldn't load advancement utilitix:recipes/misc/linked_crystal_remove_nbt: Task Advancement{parentId=minecraft:recipes/root, display=null, rewards=AdvancementRewards{experience=0, loot=[], recipes=[utilitix:linked_crystal_remove_nbt], function=net.minecraft.commands.CommandFunction$CacheableFunction@60866ff5}, criteria={criterion0=net.minecraft.advancements.Criterion@78188cc6, has_the_recipe=net.minecraft.advancements.Criterion@4d2eebd1}, requirements=[[criterion0, has_the_recipe]], sends_telemetry_event=false}
+[14Oct2026 19:24:28.857] [Render thread/ERROR] [net.minecraft.advancements.AdvancementList/]: Couldn't load advancement packessentials:recipes/misc/slabs_to_block/diorite: Task Advancement{parentId=minecraft:recipes/root, display=null, rewards=AdvancementRewards{experience=0, loot=[], recipes=[packessentials:slabs_to_block/diorite], function=net.minecraft.commands.CommandFunction$CacheableFunction@60866ff5}, criteria={criterion0=net.minecraft.advancements.Criterion@277c87e5, has_the_recipe=net.minecraft.advancements.Criterion@2f2a8ce2, criterion1=net.minecraft.advancements.Criterion@732dd94b}, requirements=[[criterion0, criterion1, has_the_recipe]], sends_telemetry_event=false}
+[14Oct2026 19:24:28.858] [Render thread/ERROR] [net.minecraft.advancements.AdvancementList/]: Couldn't load advancement storagedrawers:recipes/storagedrawers/drawer_puller: Task Advancement{parentId=minecraft:recipes/root, display=null, rewards=AdvancementRewards{experience=0, loot=[], recipes=[storagedrawers:drawer_puller], function=net.minecraft.commands.CommandFunction$CacheableFunction@60866ff5}, criteria={has_the_recipe=net.minecraft.advancements.Criterion@3e4123ae, has_template=net.minecraft.advancements.Criterion@127b659c}, requirements=[[has_template, has_the_recipe]], sends_telemetry_event=false}
+[14Oct2026 19:24:28.859] [Render thread/ERROR] [net.minecraft.advancements.AdvancementList/]: Couldn't load advancement packessentials:recipes/misc/slabs_to_block/cut_sandstone: Task Advancement{parentId=minecraft:recipes/root, display=null, rewards=AdvancementRewards{experience=0, loot=[], recipes=[packessentials:slabs_to_block/cut_sandstone], function=net.minecraft.commands.CommandFunction$CacheableFunction@60866ff5}, criteria={criterion0=net.minecraft.advancements.Criterion@49e3675c, has_the_recipe=net.minecraft.advancements.Criterion@47962bfd, criterion1=net.minecraft.advancements.Criterion@3837d51a}, requirements=[[criterion0, criterion1, has_the_recipe]], sends_telemetry_event=false}
+[14Oct2026 19:24:33.906] [Server thread/WARN] [net.minecraftforge.common.ForgeConfigSpec/CORE]: Configuration file /demo/instances/host/minecraft/saves/New World/serverconfig/jei-server.toml is not correct. Correcting
+[14Oct2026 19:24:48.555] [Server thread/WARN] [solapplepie/]: Item is not food: largemeals:mushroom_pot_pie
+[14Oct2026 19:24:53.449] [Render thread/INFO] [mezz.jei.library.load.PluginCaller/]: Registering categories took 2.012 s
+[14Oct2026 19:24:53.449] [Render thread/INFO] [mezz.jei.library.load.PluginCaller/]: Registering vanilla category extensions...
+[14Oct2026 19:24:53.451] [Render thread/INFO] [mezz.jei.library.load.PluginCaller/]: Registering vanilla category extensions took 1.659 ms
+[14Oct2026 19:24:53.451] [Render thread/INFO] [mezz.jei.library.load.PluginCaller/]: Registering recipe catalysts...
+[14Oct2026 19:24:53.456] [Render thread/INFO] [mezz.jei.library.load.PluginCaller/]: Registering recipe catalysts took 4.003 ms
+[14Oct2026 19:24:53.456] [Render thread/INFO] [mezz.jei.core.util.LoggedTimer/]: Building recipe registry...
+[14Oct2026 19:24:53.467] [Render thread/INFO] [mezz.jei.core.util.LoggedTimer/]: Building recipe registry took 11.14 ms
+[14Oct2026 19:24:53.468] [Render thread/INFO] [mezz.jei.library.load.PluginCaller/]: Registering advanced plugins...
+[14Oct2026 19:24:53.471] [Render thread/INFO] [mezz.jei.library.load.PluginCaller/]: Registering advanced plugins took 2.831 ms
+[14Oct2026 19:24:53.471] [Render thread/INFO] [mezz.jei.library.load.PluginCaller/]: Registering recipes...
+[14Oct2026 19:24:53.816] [Render thread/INFO] [mezz.jei.library.load.PluginCallerTimerRunnable/]: Registering recipes: jei:minecraft took 344.1 milliseconds
+[14Oct2026 19:24:54.014] [Render thread/INFO] [mezz.jei.library.load.PluginCallerTimerRunnable/]: Registering recipes: minecraft:jeresources took 184.8 milliseconds
+[14Oct2026 19:24:54.230] [Render thread/INFO] [mezz.jei.library.load.PluginCallerTimerRunnable/]: Registering recipes: create:jei_plugin took 208.0 milliseconds
+[14Oct2026 19:24:54.231] [Render thread/INFO] [mezz.jei.library.load.PluginCaller/]: Registering recipes took 759.2 ms
+[14Oct2026 19:24:54.241] [Render thread/INFO] [mezz.jei.library.load.PluginCaller/]: Registering recipes transfer handlers...
+[14Oct2026 19:24:54.244] [Render thread/INFO] [mezz.jei.library.load.PluginCaller/]: Registering recipes transfer handlers took 2.680 ms
+[14Oct2026 19:24:54.244] [Render thread/INFO] [mezz.jei.core.util.LoggedTimer/]: Building runtime...
+[14Oct2026 19:24:54.245] [Render thread/INFO] [mezz.jei.library.load.PluginCaller/]: Registering gui handlers...
+[14Oct2026 19:24:54.265] [Render thread/INFO] [mezz.jei.library.load.PluginCaller/]: Registering gui handlers took 19.78 ms
+[14Oct2026 19:24:54.267] [Render thread/INFO] [mezz.jei.library.load.PluginCaller/]: Registering Runtime...
+[14Oct2026 19:24:54.268] [Render thread/INFO] [mezz.jei.gui.startup.JeiGuiStarter/]: Starting JEI GUI
+[14Oct2026 19:24:54.269] [Render thread/INFO] [mezz.jei.core.util.LoggedTimer/]: Building ingredient list...
+[14Oct2026 19:24:54.341] [Render thread/INFO] [mezz.jei.core.util.LoggedTimer/]: Building ingredient list took 72.20 ms
+[14Oct2026 19:24:54.341] [Render thread/INFO] [mezz.jei.core.util.LoggedTimer/]: Building ingredient filter...
+[14Oct2026 19:24:54.372] [Render thread/INFO] [mezz.jei.gui.ingredients.IngredientFilter/]: Adding 3108 ingredients
+[14Oct2026 19:24:54.717] [Render thread/INFO] [mezz.jei.gui.ingredients.IngredientFilter/]: Added 3108 ingredients
+[14Oct2026 19:24:54.718] [Render thread/INFO] [mezz.jei.core.util.LoggedTimer/]: Building ingredient filter took 376.7 ms
+[14Oct2026 19:24:54.758] [Render thread/INFO] [mezz.jei.library.load.PluginCallerTimerRunnable/]: Registering Runtime: jei:forge_gui took 490.1 milliseconds
+[14Oct2026 19:24:54.762] [Render thread/INFO] [mezz.jei.library.load.PluginCaller/]: Registering Runtime took 494.7 ms
+[14Oct2026 19:24:54.762] [Render thread/INFO] [mezz.jei.core.util.LoggedTimer/]: Building runtime took 517.6 ms
+[14Oct2026 19:24:54.762] [Render thread/INFO] [mezz.jei.library.load.PluginCaller/]: Sending Runtime...
+[14Oct2026 19:24:54.763] [Render thread/INFO] [mezz.jei.library.load.PluginCaller/]: Sending Runtime took 330.1 μs
+[14Oct2026 19:24:54.763] [Render thread/INFO] [mezz.jei.core.util.LoggedTimer/]: Starting JEI took 3.518 s
+[14Oct2026 19:24:54.891] [Render thread/WARN] [net.minecraft.client.multiplayer.ClientPacketListener/]: Unknown custom packet identifier: simplebackups:netchannel
+[14Oct2026 19:24:54.891] [Render thread/INFO] [Jade/]: Received config from the server: 
+[14Oct2026 19:24:55.991] [Server thread/INFO] [de.melanx.simplebackups.SimpleBackups/]: Backup done.
+[14Oct2026 19:24:56.000] [SimpleBackups/INFO] [de.melanx.simplebackups.SimpleBackups/]: Backup started...
+[14Oct2026 19:24:56.029] [Render thread/INFO] [net.minecraft.client.gui.components.ChatComponent/]: [System] [CHAT] Backup started...
+[14Oct2026 19:24:56.467] [SimpleBackups/INFO] [de.melanx.simplebackups.SimpleBackups/]: Backup completed in 0.470s (4,1 MB | 4,1 MB)
+[14Oct2026 19:24:56.470] [Render thread/INFO] [net.minecraft.client.gui.components.ChatComponent/]: [System] [CHAT] Backup completed in 0.470s (4,1 MB | 4,1 MB)
+[14Oct2026 19:25:06.582] [Server thread/INFO] [de.melanx.skyblockbuilder.SkyblockBuilder/]: Created team Tyrzonthar (94922b09-1219-4534-ba60-a9e7e529c6ad) at BlockPos{x=8192, y=64, z=0} with template {cavestone.templates.default}
+[14Oct2026 19:25:06.584] [Server thread/WARN] [net.minecraft.server.MinecraftServer/]: Can't keep up! Is the server overloaded? Running 2603ms or 52 ticks behind
+[14Oct2026 19:25:08.563] [Render thread/INFO] [net.minecraft.client.gui.components.ChatComponent/]: [System] [CHAT] [Debug]: Copied location to clipboard
+[14Oct2026 19:25:09.580] [Render thread/INFO] [net.minecraft.client.gui.components.ChatComponent/]: [System] [CHAT] [Debug]: F3 + C is held down. This will crash the game unless released.
+[14Oct2026 19:25:10.628] [Render thread/INFO] [net.minecraft.client.gui.components.ChatComponent/]: [System] [CHAT] [Debug]: Crashing in 8...
+[14Oct2026 19:25:11.680] [Render thread/INFO] [net.minecraft.client.gui.components.ChatComponent/]: [System] [CHAT] [Debug]: Crashing in 7...
+[14Oct2026 19:25:12.725] [Render thread/INFO] [net.minecraft.client.gui.components.ChatComponent/]: [System] [CHAT] [Debug]: Crashing in 6...
+[14Oct2026 19:25:13.731] [Render thread/INFO] [net.minecraft.client.gui.components.ChatComponent/]: [System] [CHAT] [Debug]: Crashing in 5...
+[14Oct2026 19:25:14.778] [Render thread/INFO] [net.minecraft.client.gui.components.ChatComponent/]: [System] [CHAT] [Debug]: Crashing in 4...
+[14Oct2026 19:25:15.828] [Render thread/INFO] [net.minecraft.client.gui.components.ChatComponent/]: [System] [CHAT] [Debug]: Crashing in 3...
+[14Oct2026 19:25:16.832] [Render thread/INFO] [net.minecraft.client.gui.components.ChatComponent/]: [System] [CHAT] [Debug]: Crashing in 2...
+[14Oct2026 19:25:17.879] [Render thread/INFO] [net.minecraft.client.gui.components.ChatComponent/]: [System] [CHAT] [Debug]: Crashing in 1...
+[14Oct2026 19:25:19.330] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: Stopping server
+[14Oct2026 19:25:19.331] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: Saving players
+[14Oct2026 19:25:19.332] [Server thread/INFO] [net.minecraft.server.network.ServerGamePacketListenerImpl/]: MelanX lost connection: Disconnected
+[14Oct2026 19:25:19.333] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: MelanX left the game
+[14Oct2026 19:25:19.333] [Server thread/WARN] [solapplepie/]: Invalid attribute specified in config: generic.speed
+[14Oct2026 19:25:19.334] [Server thread/INFO] [net.minecraft.server.network.ServerGamePacketListenerImpl/]: Stopping singleplayer server as player logged out
+[14Oct2026 19:25:19.334] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: Saving worlds
+[14Oct2026 19:25:19.970] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: Saving chunks for level 'ServerLevel[New World]'/minecraft:overworld
+[14Oct2026 19:25:20.202] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: Saving chunks for level 'ServerLevel[New World]'/minecraft:the_end
+[14Oct2026 19:25:20.203] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: Saving chunks for level 'ServerLevel[New World]'/create_dd:ponder
+[14Oct2026 19:25:20.203] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: Saving chunks for level 'ServerLevel[New World]'/minecraft:the_nether
+[14Oct2026 19:25:20.267] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: ThreadedAnvilChunkStorage (New World): All chunks are saved
+[14Oct2026 19:25:20.267] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: ThreadedAnvilChunkStorage (DIM1): All chunks are saved
+[14Oct2026 19:25:20.267] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: ThreadedAnvilChunkStorage (ponder): All chunks are saved
+[14Oct2026 19:25:20.267] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: ThreadedAnvilChunkStorage (DIM-1): All chunks are saved
+[14Oct2026 19:25:20.267] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: ThreadedAnvilChunkStorage: All dimensions are saved
+[14Oct2026 19:25:21.096] [Render thread/INFO] [mezz.jei.forge.startup.StartEventObserver/]: JEI StartEventObserver received class net.minecraftforge.client.event.ClientPlayerNetworkEvent$LoggingOut
+[14Oct2026 19:25:21.096] [Render thread/INFO] [mezz.jei.forge.startup.StartEventObserver/]: JEI StartEventObserver transitioning state from JEI_STARTED to DISABLED
+[14Oct2026 19:25:21.096] [Render thread/INFO] [mezz.jei.library.startup.JeiStarter/]: Stopping JEI
+[14Oct2026 19:25:21.096] [Render thread/INFO] [mezz.jei.library.load.PluginCaller/]: Sending Runtime Unavailable...
+[14Oct2026 19:25:21.097] [Render thread/INFO] [mezz.jei.forge.plugins.forge.ForgeGuiPlugin/]: Stopping JEI GUI
+[14Oct2026 19:25:21.098] [Render thread/INFO] [mezz.jei.library.load.PluginCaller/]: Sending Runtime Unavailable took 1.643 ms
+[14Oct2026 19:25:21.109] [Render thread/INFO] [de.melanx.skyblockbuilder.SkyblockBuilder/]: Loaded template "{cavestone.templates.default}" from "cavestone.snbt".
+[14Oct2026 19:25:21.120] [Render thread/INFO] [de.melanx.skyblockbuilder.SkyblockBuilder/]: Loaded template "{cavestone.templates.easy}" from "cavestone_with_campfire.snbt".
+[14Oct2026 19:25:21.127] [Render thread/INFO] [de.melanx.skyblockbuilder.SkyblockBuilder/]: Loaded template "{cavestone.templates.easiest}" from "cavestone_with_crops.snbt".
+[14Oct2026 19:25:21.375] [Render thread/ERROR] [net.minecraft.client.Minecraft/FATAL]: Reported exception thrown!
+[14Oct2026 19:25:21.389] [Render thread/FATAL] [net.minecraftforge.common.ForgeMod/]: Preparing crash report with UUID ba21e591-b153-4d4c-baee-8a969dd98b48
+[14Oct2026 19:25:21.393] [Render thread/FATAL] [net.minecraftforge.common.ForgeMod/]: Preparing crash report with UUID 8bff50b9-6414-49c7-96b6-e002da42c7cb

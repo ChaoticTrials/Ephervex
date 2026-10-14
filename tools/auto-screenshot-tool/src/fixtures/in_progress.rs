@@ -61,8 +61,8 @@ pub(crate) fn import_modpack_running(ui: &AppWindow) {
 
 pub(crate) fn activity_import_in_progress(ui: &AppWindow) {
     let failure = {
-        let message = lookup("error-pack-archive-download-failed");
-        match lookup_attribute("error-pack-archive-download-failed", "action") {
+        let message = lookup("error-pack-manifest-invalid");
+        match lookup_attribute("error-pack-manifest-invalid", "action") {
             Some(action) => format!("{message}\n{action}"),
             None => message,
         }
@@ -105,7 +105,7 @@ pub(crate) fn activity_import_in_progress(ui: &AppWindow) {
             ..activity(
                 "operation-15",
                 "operation-installing-mods",
-                "Nether Roof Highway",
+                "Utility Mods",
                 "gui-state-queued",
                 String::new(),
                 "14:32:11",
@@ -128,7 +128,7 @@ pub(crate) fn activity_import_in_progress(ui: &AppWindow) {
             ..activity(
                 "operation-12",
                 "operation-importing-pack",
-                "Herobrine Sighting #1337",
+                "Create+",
                 "gui-state-failed",
                 failure,
                 "14:21:03",
@@ -137,7 +137,7 @@ pub(crate) fn activity_import_in_progress(ui: &AppWindow) {
         activity(
             "operation-11",
             "operation-creating-snapshot",
-            "Creeper Containment Lab",
+            "CaveStone",
             "gui-state-canceled",
             String::new(),
             "14:17:52",
@@ -195,19 +195,19 @@ pub(crate) fn running_page(ui: &AppWindow) {
     ui.set_running(rows(vec![
         RunningRow {
             kind: "client".into(),
-            id: "nether-roof-highway".into(),
-            name: "Nether Roof Highway".into(),
+            id: "photon".into(),
+            name: "Photon".into(),
             pid: "48213".into(),
             uptime: uptime_minutes(12),
             usage: usage("214", "6.1 GiB"),
-            last_line: "[12:13:02] [Render thread/INFO]: Sound engine started".into(),
+            last_line: "[14Oct2026 19:24:54.763] [Render thread/INFO] [mezz.jei.core.util.LoggedTimer/]: Starting JEI took 3.518 s".into(),
             can_stop: true,
             ..RunningRow::default()
         },
         RunningRow {
             kind: "server".into(),
-            id: "totem-of-undying-qa".into(),
-            name: "Totem of Undying QA".into(),
+            id: "photon-server".into(),
+            name: "Photon Server".into(),
             pid: "48999".into(),
             uptime: lookup_args(
                 "gui-uptime-hours",
@@ -215,7 +215,7 @@ pub(crate) fn running_page(ui: &AppWindow) {
             )
             .into(),
             usage: usage("61", "2.4 GiB"),
-            last_line: "[12:04:51] [Server thread/INFO]: Done (7.318s)! For help, type \"help\""
+            last_line: "[14Oct2026 19:18:14.960] [Server thread/INFO] [net.minecraft.server.dedicated.DedicatedServer/]: Done (7.039s)! For help, type \"help\""
                 .into(),
             controllable: true,
             can_stop: true,

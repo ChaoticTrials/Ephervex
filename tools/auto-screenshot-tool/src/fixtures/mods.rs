@@ -8,6 +8,7 @@ use ephervex_gui::workspace_layout::Surface;
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use slint::{Model, SharedString};
 
+use super::recorded::{self, Manage, jar};
 use super::{FORGE_1_20, client_mod_results, client_mod_rows, rows};
 
 /// The workflow id the isolation session registers on its host.
@@ -18,6 +19,15 @@ fn strings(values: &[&str]) -> slint::ModelRc<SharedString> {
         values
             .iter()
             .map(|value| SharedString::from(*value))
+            .collect(),
+    )
+}
+
+fn jar_strings(titles: &[&str]) -> slint::ModelRc<SharedString> {
+    rows(
+        titles
+            .iter()
+            .map(|title| SharedString::from(jar(title)))
             .collect(),
     )
 }
@@ -47,7 +57,7 @@ fn cavestone_workspace(ui: &AppWindow, surface: Surface, edit: impl FnOnce(&mut 
         mods: rows(client_mod_rows()),
         allow_pack_mod_changes: true,
         browser_provider: "modrinth".into(),
-        browser_submitted: "villager".into(),
+        browser_submitted: recorded::data().mod_search.query.clone().into(),
         browser_ran: true,
         browser_results: rows(client_mod_results()),
         browser_next_offset: -1,
@@ -74,132 +84,60 @@ fn mods_surface(ui: &AppWindow) {
     cavestone_workspace(ui, Surface::Mods, |_| {});
 }
 
-fn version(
-    id: &str,
-    number: &str,
-    channel: &str,
-    published: &str,
-    installed: bool,
-    newest: bool,
-    restricted: bool,
-) -> ModVersionRow {
-    ModVersionRow {
-        version_id: id.into(),
-        name: format!("Create {number}").into(),
-        number: number.into(),
-        channel: channel.into(),
-        published: published.into(),
-        installed,
-        newest,
-        restricted,
-    }
+fn version_rows(manage: &Manage) -> Vec<ModVersionRow> {
+    manage
+        .versions
+        .iter()
+        .map(|release| ModVersionRow {
+            version_id: release.id.clone().into(),
+            name: release.name.clone().into(),
+            number: release.number.clone().into(),
+            channel: release.channel.clone().into(),
+            published: release.published.clone().into(),
+            installed: release.id == manage.installed_id,
+            newest: release.id == manage.newest_id,
+            restricted: false,
+        })
+        .collect()
 }
 
-fn relation(name: &str, detail: &str, kind: &str, state: &str, attention: bool) -> RelationRow {
-    RelationRow {
-        name: name.into(),
-        detail: detail.into(),
-        kind: lookup(kind).into(),
-        state: if state.is_empty() {
-            SharedString::default()
-        } else {
-            lookup(state).into()
-        },
-        attention,
-    }
+fn relation_rows(relations: &[recorded::Relation]) -> Vec<RelationRow> {
+    relations
+        .iter()
+        .map(|relation| RelationRow {
+            name: relation.name.clone().into(),
+            detail: SharedString::default(),
+            kind: lookup(if relation.kind == "required" {
+                "gui-mod-relation-required"
+            } else {
+                "gui-mod-relation-optional"
+            })
+            .into(),
+            state: if relation.present {
+                SharedString::default()
+            } else {
+                lookup("gui-mod-relation-absent").into()
+            },
+            attention: !relation.present,
+        })
+        .collect()
 }
 
-fn impact(name: &str, distance: i32) -> ImpactRow {
+fn impact(name: &str, path: &str, distance: i32) -> ImpactRow {
     ImpactRow {
         name: name.into(),
-        logical_path: format!("mods/{name}").into(),
+        logical_path: path.into(),
         distance,
     }
 }
 
-/// Manage Mod for a pack-owned mod with a newer release available.
-pub(crate) fn mod_manager(ui: &AppWindow) {
-    cavestone_workspace(ui, Surface::Mods, |view| {
-        let mut mods = client_mod_rows();
-        mods[0].version = "6.0.4".into();
-        mods[0].file_name = "create-1.20.1-6.0.4.jar".into();
-        mods[0].logical_path = "mods/create-1.20.1-6.0.4.jar".into();
-        view.mods = rows(mods);
-    });
+/// Fills the Manage Mod dialog for a mod with a newer release available.
+fn manage_dialog(ui: &AppWindow, manage: &Manage, pack_owned: bool) {
     ui.set_mod_action_host("cavestone".into());
-    ui.set_mod_action_path("mods/create-1.20.1-6.0.4.jar".into());
-    ui.set_mod_action_name("Create".into());
-    ui.set_mod_action_project_url("https://example.invalid/mod/create".into());
-    ui.set_mod_action_installed("create-6-0-4".into());
-    ui.set_mod_action_notice(SharedString::default());
-    ui.set_mod_action_loading(false);
-    ui.set_mod_action_pending(false);
-    ui.set_mod_action_can_change(true);
-    ui.set_mod_action_can_update(false);
-    ui.set_mod_action_can_remove(true);
-    ui.set_mod_action_up_to_date(true);
-    ui.set_mod_action_is_pack_owned(true);
-    ui.set_mod_action_pack_original_version("create-0-5-1-j".into());
-    ui.set_mod_action_selected("create-0-5-1-j".into());
-    ui.set_mod_versions(rows(vec![
-        version(
-            "create-6-0-4",
-            "6.0.4",
-            "release",
-            "2026-08-19",
-            true,
-            true,
-            false,
-        ),
-        version(
-            "create-6-0-3",
-            "6.0.3",
-            "release",
-            "2026-07-02",
-            false,
-            false,
-            true,
-        ),
-        version(
-            "create-0-5-1-j",
-            "0.5.1.j",
-            "release",
-            "2024-04-10",
-            false,
-            false,
-            false,
-        ),
-        version(
-            "create-0-5-1-i",
-            "0.5.1.i",
-            "beta",
-            "2024-02-27",
-            false,
-            false,
-            false,
-        ),
-        version(
-            "create-0-5-1-h",
-            "0.5.1.h",
-            "release",
-            "2024-01-15",
-            false,
-            false,
-            false,
-        ),
-    ]));
-    mod_manager_relations(ui);
-    ui.set_modal("mod-manage".into());
-}
-
-/// Manage Mod for an added mod whose catalog has a newer release, offering Update.
-pub(crate) fn mod_update_available(ui: &AppWindow) {
-    cavestone_workspace(ui, Surface::Mods, |_| {});
-    ui.set_mod_action_host("cavestone".into());
-    ui.set_mod_action_path("mods/redstone-rabbit-holes-1.20.1-1.4.0.jar".into());
-    ui.set_mod_action_name("Redstone Rabbit Holes".into());
-    ui.set_mod_action_project_url("https://example.invalid/mod/redstone-rabbit-holes".into());
-    ui.set_mod_action_installed("rrh-1-4-0".into());
+    ui.set_mod_action_path(manage.path.clone().into());
+    ui.set_mod_action_name(manage.title.clone().into());
+    ui.set_mod_action_project_url(format!("https://modrinth.com/mod/{}", manage.project).into());
+    ui.set_mod_action_installed(manage.installed_id.clone().into());
     ui.set_mod_action_notice(SharedString::default());
     ui.set_mod_action_loading(false);
     ui.set_mod_action_pending(false);
@@ -207,98 +145,63 @@ pub(crate) fn mod_update_available(ui: &AppWindow) {
     ui.set_mod_action_can_update(true);
     ui.set_mod_action_can_remove(true);
     ui.set_mod_action_up_to_date(false);
-    ui.set_mod_action_is_pack_owned(false);
-    ui.set_mod_action_pack_original_version(SharedString::default());
-    ui.set_mod_action_selected("rrh-1-5-0".into());
-    let release =
-        |id: &str, number: &str, published: &str, installed: bool, newest: bool| ModVersionRow {
-            name: format!("Redstone Rabbit Holes {number}").into(),
-            ..version(id, number, "release", published, installed, newest, false)
-        };
-    ui.set_mod_versions(rows(vec![
-        release("rrh-1-5-0", "1.5.0", "2026-09-14", false, true),
-        release("rrh-1-4-1", "1.4.1", "2026-08-02", false, false),
-        release("rrh-1-4-0", "1.4.0", "2026-06-21", true, false),
-        release("rrh-1-3-2", "1.3.2", "2026-04-09", false, false),
-    ]));
-    ui.set_mod_action_requires(rows(vec![relation(
-        "Ender Pearl Pager",
-        "ender-pearl-pager",
-        "gui-mod-relation-required",
-        "",
-        false,
-    )]));
-    ui.set_mod_action_required_by(rows(Vec::new()));
+    ui.set_mod_action_is_pack_owned(pack_owned);
+    ui.set_mod_action_pack_original_version(if pack_owned {
+        manage.installed_id.clone().into()
+    } else {
+        SharedString::default()
+    });
+    ui.set_mod_action_selected(manage.newest_id.clone().into());
+    ui.set_mod_versions(rows(version_rows(manage)));
+    ui.set_mod_action_requires(rows(relation_rows(&manage.requires)));
+    ui.set_mod_action_required_by(rows(relation_rows(&manage.required_by)));
     ui.set_mod_action_requires_note(SharedString::default());
     ui.set_mod_action_relations_refreshable(false);
     ui.set_modal("mod-manage".into());
+}
+
+/// Manage Mod for a pack-owned mod with a newer release available.
+pub(crate) fn mod_manager(ui: &AppWindow) {
+    cavestone_workspace(ui, Surface::Mods, |_| {});
+    manage_dialog(ui, &recorded::dialogs().manage, true);
+}
+
+/// Manage Mod for an added mod whose catalog has a newer release, offering Update.
+pub(crate) fn mod_update_available(ui: &AppWindow) {
+    cavestone_workspace(ui, Surface::Mods, |_| {});
+    manage_dialog(ui, &recorded::dialogs().update, false);
 }
 
 /// A pack mod whose jar was deleted outside Ephervex, offering Restore.
 pub(crate) fn mod_missing_file(ui: &AppWindow) {
     cavestone_workspace(ui, Surface::Mods, |view| {
         let mods = client_mod_rows();
-        let missing = mods
+        let shown = mods
             .iter()
-            .filter(|row| matches!(row.title.as_str(), "Create" | "Pocket Piglin" | "Jade"))
+            .filter(|row| row.deleted || matches!(row.title.as_str(), "Balm" | "Create"))
             .cloned()
             .collect::<Vec<_>>();
-        view.mods = rows(missing);
+        view.mods = rows(shown);
     });
-}
-
-fn mod_manager_relations(ui: &AppWindow) {
-    ui.set_mod_action_requires(rows(vec![
-        relation(
-            "Ender Pearl Pager",
-            "ender-pearl-pager",
-            "gui-mod-relation-required",
-            "",
-            false,
-        ),
-        relation(
-            "Cow Clicker",
-            "cow-clicker",
-            "gui-mod-relation-optional",
-            "gui-mod-relation-absent",
-            true,
-        ),
-    ]));
-    ui.set_mod_action_required_by(rows(vec![
-        relation(
-            "Redstone Rabbit Holes",
-            "redstone-rabbit-holes",
-            "gui-mod-relation-required",
-            "",
-            false,
-        ),
-        relation(
-            "Creeper Confetti",
-            "creeper-confetti",
-            "gui-mod-relation-optional",
-            "",
-            false,
-        ),
-    ]));
-    ui.set_mod_action_requires_note(SharedString::default());
-    ui.set_mod_action_relations_refreshable(false);
 }
 
 /// The confirmation shown before turning off a mod other mods need.
 pub(crate) fn mod_impact(ui: &AppWindow) {
     mods_surface(ui);
+    let recorded = &recorded::dialogs().impact;
     ui.set_mod_impact_kind("client".into());
     ui.set_mod_impact_host("cavestone".into());
-    ui.set_mod_impact_path("mods/ender-pearl-pager-forge-2.1.7.jar".into());
-    ui.set_mod_impact_name("Ender Pearl Pager".into());
+    ui.set_mod_impact_path(recorded.path.clone().into());
+    ui.set_mod_impact_name(recorded.name.clone().into());
     ui.set_mod_impact_deleting(false);
     ui.set_mod_impact_enabling(false);
-    ui.set_mod_impact_breaks(rows(vec![
-        impact("Create", 1),
-        impact("Redstone Rabbit Holes", 1),
-        impact("Villager Notice Board", 1),
-        impact("Silent Minecart Rails", 2),
-    ]));
+    ui.set_mod_impact_breaks(rows(
+        recorded
+            .breaks
+            .iter()
+            .map(|broken| impact(&broken.name, &broken.path, broken.distance))
+            .collect(),
+    ));
     ui.set_mod_impact_degrades(rows(Vec::new()));
     ui.set_mod_impact_unknown(rows(Vec::new()));
     ui.set_mod_impact_unidentifiable(rows(Vec::new()));
@@ -336,25 +239,29 @@ fn linked_target(
 /// The install confirmation with the linked servers that can receive the mod.
 pub(crate) fn mod_install_plan(ui: &AppWindow) {
     mods_surface(ui);
+    let plan = &recorded::dialogs().plan;
+    let installs = 1 + plan.dependencies.saturating_sub(plan.existing);
+    let count = |value: usize| i32::try_from(value).unwrap_or_default();
     ui.set_mod_plan_instance("cavestone".into());
     ui.set_mod_plan_provider("modrinth".into());
-    ui.set_mod_plan_project("villager-notice-board".into());
-    ui.set_mod_plan_version_id("villager-notice-board-1-3-0".into());
-    ui.set_mod_plan_title("Villager Notice Board".into());
-    ui.set_mod_plan_version("1.3.0".into());
-    ui.set_mod_plan_install_count(3);
-    ui.set_mod_plan_dependency_count(2);
-    ui.set_mod_plan_existing_count(1);
-    ui.set_mod_plan_optional_count(2);
-    ui.set_mod_plan_warning_count(1);
+    ui.set_mod_plan_project(plan.project.clone().into());
+    ui.set_mod_plan_version_id(plan.version_id.clone().into());
+    ui.set_mod_plan_title(plan.title.clone().into());
+    ui.set_mod_plan_version(plan.version.clone().into());
+    ui.set_mod_plan_install_count(count(installs));
+    ui.set_mod_plan_dependency_count(count(plan.dependencies));
+    ui.set_mod_plan_existing_count(count(plan.existing));
+    ui.set_mod_plan_optional_count(count(plan.optional));
+    ui.set_mod_plan_warning_count(count(plan.warnings));
     ui.set_mod_action_pending(false);
     ui.set_linked_support(lookup("gui-linked-support-required").into());
+    let will_install = || lookup_args("gui-linked-installs", [("count", Arg::from(installs))]);
     ui.set_linked_targets(rows(vec![
         linked_target(
             "cavestone-server",
             "CaveStone Server",
             "linked-target-will-install",
-            lookup_args("gui-linked-installs", [("count", Arg::from(3_usize))]),
+            will_install(),
             "ok",
             true,
             false,
@@ -363,94 +270,73 @@ pub(crate) fn mod_install_plan(ui: &AppWindow) {
             "cavestone-staging",
             "CaveStone Staging",
             "linked-target-will-install",
-            lookup_args("gui-linked-installs", [("count", Arg::from(3_usize))]),
+            will_install(),
             "ok",
             true,
             false,
-        ),
-        linked_target(
-            "cavestone-archive",
-            "CaveStone Archive",
-            "gui-linked-unavailable",
-            lookup("linked-target-server-not-installed"),
-            "warn",
-            false,
-            true,
         ),
     ]));
     ui.set_modal_error(SharedString::default());
     ui.set_modal("mod-plan".into());
 }
 
-fn candidate(name: &str, file: &str, pinned: bool) -> IsolationCandidateRow {
+fn candidate(title: &str, pinned: bool) -> IsolationCandidateRow {
+    let file = jar(title);
     IsolationCandidateRow {
         path: format!("mods/{file}").into(),
         display_path: file.into(),
-        name: name.into(),
+        name: title.into(),
         selected: pinned,
     }
 }
 
+/// The mods an isolation session reduces, by title. The list is a slice of
+/// the recorded CaveStone mods, in the launcher's order.
+const ISOLATION_POOL: [&str; 12] = [
+    "AIOT Botania",
+    "Balm",
+    "Botania",
+    "Cooking for Blockheads",
+    "Crafting Tweaks",
+    "Curios API",
+    "Extra Disks",
+    "Just Enough Items (JEI)",
+    "KleeSlabs",
+    "Patchouli",
+    "Refined Storage",
+    "Waystones",
+];
+
 /// The isolation setup with candidates, warnings, and Start enabled.
 pub(crate) fn mod_isolation_setup(ui: &AppWindow) {
-    let candidates = vec![
-        candidate("Create", "create-1.20.1-0.5.1.j.jar", true),
-        candidate(
-            "Creeper Confetti",
-            "creeper-confetti-1.20.1-forge-0.3.2.jar",
-            false,
-        ),
-        candidate(
-            "Ender Pearl Pager",
-            "ender-pearl-pager-forge-2.1.7.jar",
-            true,
-        ),
-        candidate("Jade", "Jade-1.20.1-Forge-11.13.2.jar", false),
-        candidate("JEI", "jei-1.20.1-forge-15.20.0.130.jar", true),
-        candidate("Lantern Lattice", "lantern-lattice-1.20.1-2.0.3.jar", false),
-        candidate("Nether Fridge", "nether-fridge-custom.jar", false),
-        candidate(
-            "Pocket Piglin",
-            "pocket-piglin-1.20.1-forge-1.2.0.jar",
-            false,
-        ),
-        candidate(
-            "Redstone Rabbit Holes",
-            "redstone-rabbit-holes-1.20.1-1.4.0.jar",
-            false,
-        ),
-        candidate(
-            "Silent Minecart Rails",
-            "silent-minecart-rails-1.20.1-0.8.2.jar",
-            false,
-        ),
-        candidate(
-            "Spawn Chunk Surveyor",
-            "spawn-chunk-surveyor-forge-1.1.5.jar",
-            false,
-        ),
-        candidate(
-            "Villager Notice Board",
-            "villager-notice-board-1.20.1-1.3.0.jar",
-            false,
-        ),
-    ];
+    let pinned = ["Balm", "Curios API", "Just Enough Items (JEI)"];
+    let candidates = ISOLATION_POOL
+        .iter()
+        .map(|title| candidate(title, pinned.contains(title)))
+        .collect::<Vec<_>>();
     let summary = lookup_args(
         "gui-isolation-setup-summary",
         [("count", Arg::from(candidates.len()))],
     );
+    let hand_placed = recorded::data()
+        .cavestone_mods
+        .iter()
+        .filter(|row| row.origin == "hand-placed")
+        .map(|row| SharedString::from(row.file_name.as_str()))
+        .collect::<Vec<_>>();
+    let overrides = recorded::data()
+        .cavestone_mods
+        .iter()
+        .filter(|row| row.origin == "override")
+        .take(2)
+        .map(|row| SharedString::from(row.file_name.as_str()))
+        .collect::<Vec<_>>();
     cavestone_workspace(ui, Surface::Isolation, |view| {
         view.isolation_phase = "setup".into();
         view.isolation_summary = summary.into();
         view.isolation_candidates = rows(candidates);
-        view.isolation_unrecorded = strings(&[
-            "lantern-lattice-1.20.1-2.0.3.jar",
-            "villager-notice-board-1.20.1-1.3.0.jar",
-        ]);
-        view.isolation_unidentifiable = strings(&[
-            "nether-fridge-custom.jar",
-            "spawn-chunk-surveyor-forge-1.1.5.jar",
-        ]);
+        view.isolation_unrecorded = rows(hand_placed);
+        view.isolation_unidentifiable = rows(overrides);
         view.isolation_linked_servers = strings(&[
             "CaveStone Server (cavestone-server)",
             "CaveStone Staging (cavestone-staging)",
@@ -496,21 +382,21 @@ pub(crate) fn mod_isolation_round(ui: &AppWindow) {
         view.isolation_round = round;
         view.isolation_granularity = 4;
         view.isolation_summary = summary.clone().into();
-        view.isolation_enabled = strings(&[
-            "create-1.20.1-0.5.1.j.jar",
-            "creeper-confetti-1.20.1-forge-0.3.2.jar",
-            "ender-pearl-pager-forge-2.1.7.jar",
-            "Jade-1.20.1-Forge-11.13.2.jar",
-            "jei-1.20.1-forge-15.20.0.130.jar",
-            "lantern-lattice-1.20.1-2.0.3.jar",
-            "redstone-rabbit-holes-1.20.1-1.4.0.jar",
+        view.isolation_enabled = jar_strings(&[
+            "AIOT Botania",
+            "Balm",
+            "Botania",
+            "Cooking for Blockheads",
+            "Curios API",
+            "Just Enough Items (JEI)",
+            "Patchouli",
         ]);
-        view.isolation_disabled = strings(&[
-            "nether-fridge-custom.jar",
-            "pocket-piglin-1.20.1-forge-1.2.0.jar",
-            "silent-minecart-rails-1.20.1-0.8.2.jar",
-            "spawn-chunk-surveyor-forge-1.1.5.jar",
-            "villager-notice-board-1.20.1-1.3.0.jar",
+        view.isolation_disabled = jar_strings(&[
+            "Crafting Tweaks",
+            "Extra Disks",
+            "KleeSlabs",
+            "Refined Storage",
+            "Waystones",
         ]);
         view.isolation_history = rows(
             [
@@ -544,12 +430,9 @@ pub(crate) fn mod_isolation_result(ui: &AppWindow) {
         view.isolation_round = 5;
         view.isolation_confidence = "one_minimal".into();
         view.isolation_summary = summary.clone().into();
-        view.isolation_remaining_candidates = strings(&["creeper-confetti-1.20.1-forge-0.3.2.jar"]);
-        view.isolation_pinned = strings(&[
-            "create-1.20.1-0.5.1.j.jar",
-            "jei-1.20.1-forge-15.20.0.130.jar",
-        ]);
-        view.isolation_required_dependencies = strings(&["ender-pearl-pager-forge-2.1.7.jar"]);
+        view.isolation_remaining_candidates = jar_strings(&["Waystones"]);
+        view.isolation_pinned = jar_strings(&["Balm", "Just Enough Items (JEI)"]);
+        view.isolation_required_dependencies = jar_strings(&["Curios API"]);
         view.isolation_history = rows(
             [
                 history_entry(5, "gui-isolation-issue-present", "subset", 1),
@@ -577,8 +460,11 @@ pub(crate) fn mod_isolation_recovery(ui: &AppWindow) {
     mod_isolation_round(ui);
     let mut view = ui.get_host_views().row_data(0).unwrap_or_default();
     view.isolation_recovery = "failed".into();
-    view.isolation_recovery_detail =
-        "The jar mods/jei-1.20.1-forge-15.20.0.130.jar is missing from the mods folder.".into();
+    view.isolation_recovery_detail = format!(
+        "The jar mods/{} is missing from the mods folder.",
+        jar("Just Enough Items (JEI)")
+    )
+    .into();
     view.workflow_summary = lookup("gui-isolation-recovery-summary").into();
     view.workflow_actions = rows(vec![workflow_action(
         "details",

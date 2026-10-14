@@ -27,7 +27,7 @@ pub(crate) fn toasts_success_and_error(ui: &AppWindow) {
             1,
             lookup_args(
                 "gui-created-entity",
-                [("value", Arg::from("Spawn Chunks Workshop"))],
+                [("value", Arg::from("Skyblock Tools"))],
             ),
             false,
             1,

@@ -16,9 +16,15 @@ anyhow.workspace = true
 clap.workspace = true
 ephervex-gui = { path = "../../crates/gui" }
 ephervex-i18n.workspace = true
+hex.workspace = true
 i-slint-backend-testing.workspace = true
 image.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 slint.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -23,6 +23,6 @@
 /license-tools/
 __pycache__/
 
-# todo remove before merge into main
 tools/auto-screenshot-tool/screenshots
+tools/auto-screenshot-tool/artwork
 /web/static/img/ephervex/

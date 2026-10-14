@@ -179,7 +179,7 @@ const DIAGNOSTIC_RESULT_REGIONS: &[Region] = &[
     },
     Region {
         name: "missing-files",
-        accessible_label: Some("Problem: 2 recorded files are missing or damaged"),
+        accessible_label: Some("Problem: 3 recorded files are missing or damaged"),
         padding: (4.0, 4.0),
         bounds: None,
     },
@@ -569,6 +569,13 @@ pub(crate) const STATES: &[State] = &[
         interaction: None,
     },
     State {
+        name: "server-crash-reports",
+        show: fixtures::diagnostics_servers::server_crash_reports,
+        regions: DIAGNOSTICS_SERVERS_REGIONS,
+        same_layout_at_both_sizes: false,
+        interaction: None,
+    },
+    State {
         name: "split-workspace",
         show: fixtures::diagnostics_servers::split_workspace,
         regions: DIAGNOSTICS_SERVERS_REGIONS,
@@ -708,6 +715,21 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::*;
+
+    #[test]
+    fn the_diagnosis_region_names_the_recorded_problem_count() {
+        let count = crate::fixtures::recorded::diagnostics()
+            .files
+            .problems
+            .len();
+        let expected = format!("Problem: {count} recorded files are missing or damaged");
+        assert!(STATES.iter().any(|state| {
+            state
+                .regions
+                .iter()
+                .any(|region| region.accessible_label == Some(expected.as_str()))
+        }));
+    }
 
     #[test]
     fn every_state_renders_a_full_window() {

@@ -55,19 +55,17 @@ synthetic and recorded as such in `SOURCES.md`.
       server with the linked-servers setting on.
 - [x] Accounts (4): two offline, one Microsoft with a stored credential, one
       "Sign-in required".
-- [x] Mods (8-10): mixed origin (pack, added, dependency, hand-placed), mixed
-      provider, one disabled, one deleted, one crash suspect, one with an
-      unknown version.
+- [x] Mods: mixed origin (pack, override, added, dependency, hand-placed), one
+      disabled, one deleted, one with an unknown version, each with its logo.
 - [x] Catalog browser results (4): one installed, one queued.
 - [x] Java runtimes: 8, 17, 21 and 25, one of them managed.
 - [x] Activity: running, queued, completed, failed and canceled rows.
 - [x] Running page: one client, one server.
-- [x] Easter eggs (names and text only): "Creeper Containment Lab", "Herobrine
-      Sighting #1337" (needs attention), "Redstone Clock Debugging", "Spawn
-      Chunks Server", "Totem of Undying QA", accounts `Steve`, `Alex`,
-      `Herobrine`, `Enderman_QA`, snapshot "Before the Wither", crash text
-      "Creeper Confetti tried to explode confetti twice". Mod names must not
-      imitate real projects.
+- [x] Instances, servers, mods, search results, snapshots, logs, crash reports
+      and diagnosis results are recorded from real packs and servers, listed in
+      `tools/auto-screenshot-tool/SOURCES.md`. Only the accounts other than
+      `MelanX`, the CurseForge import states and the import review's optional
+      files are made up.
 - [x] Update the account test in `fixtures.rs` for the new rows.
 
 ## 4. New screenshot states (`catalog.rs`)
