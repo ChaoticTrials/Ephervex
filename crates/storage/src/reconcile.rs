@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 
 use ephervex_model::{AttentionReason, InstanceId, ServerId, StorageClass};
 
-use crate::metadata;
+use crate::metadata::{self, MetadataError};
 use crate::records::{ClientRecord, FileDisposition, ServerRecord};
 use crate::registry::{
     HostProbe, Registry, RegistryError, canonical_client_at, canonical_server_at,
@@ -255,24 +255,62 @@ fn reconcile_listed_clients(
     Ok(())
 }
 
-/// Forgets a stale temporary client. A linked server whose canonical metadata
-/// is unreadable or names another server keeps the client and is reported as
-/// unhealthy, so one damaged server does not stop the rest of the pass.
+/// Forgets a stale temporary client, returning whether it was forgotten.
+///
+/// Unlinking rewrites each linked server's canonical metadata, so every linked
+/// server is claimed first and stays claimed until the client is gone. The
+/// client is kept, and the pass carries on, when:
+///
+/// - a linked server is being changed or started elsewhere: not reported, the
+///   next pass finds it idle;
+/// - a linked server's claim cannot be tried, or its canonical metadata cannot
+///   be read, cannot be published, or names another server: reported as
+///   unhealthy.
 fn forget_stale_client(
     registry: &Registry,
     id: InstanceId,
     entry: &ReconciledRecord,
     report: &mut ReconciliationReport,
 ) -> Result<bool, RegistryError> {
-    match registry.delete_client(id, FileDisposition::Keep) {
+    let linked = registry.linked_server_ids(id)?;
+    let mut claims = Vec::with_capacity(linked.len());
+    for &server_id in &linked {
+        match registry.probe_host(RecordRef::Server(server_id)) {
+            HostProbe::Idle(claim) => claims.push(claim),
+            HostProbe::Mutating => {
+                tracing::info!(
+                    instance_id = %id,
+                    server_id = %server_id,
+                    "a linked server is being changed or started; keeping the stale temporary instance for now"
+                );
+                return Ok(false);
+            }
+            HostProbe::Unusable => {
+                tracing::warn!(
+                    instance_id = %id,
+                    server_id = %server_id,
+                    "a linked server's claim could not be tried; keeping the stale temporary instance"
+                );
+                report.persistence_unhealthy.push(entry.clone());
+                return Ok(false);
+            }
+        }
+    }
+
+    let outcome = registry.delete_client(id, FileDisposition::Keep);
+    drop(claims);
+    match outcome {
         Ok(()) => Ok(true),
         Err(
-            RegistryError::ServerUnknown { .. }
+            error @ (RegistryError::ServerUnknown { .. }
             | RegistryError::ServerMetadataForeign { .. }
-            | RegistryError::Metadata(_),
+            | RegistryError::Metadata(_)),
         ) => {
             tracing::warn!(
                 instance_id = %id,
+                server_id = failing_server(registry, &linked, &error).map(tracing::field::display),
+                %error,
+                cause = std::error::Error::source(&error).map(tracing::field::display),
                 "a linked server's canonical metadata is unhealthy; keeping the stale temporary instance"
             );
             report.persistence_unhealthy.push(entry.clone());
@@ -280,6 +318,31 @@ fn forget_stale_client(
         }
         Err(error) => Err(error),
     }
+}
+
+/// The linked server a metadata failure concerns, from the id or the path the
+/// error carries. `None` when the error does not point at one of them.
+fn failing_server(
+    registry: &Registry,
+    linked: &[ServerId],
+    error: &RegistryError,
+) -> Option<ServerId> {
+    let path = match error {
+        RegistryError::ServerUnknown { id } => return Some(*id),
+        RegistryError::ServerMetadataForeign { path }
+        | RegistryError::Metadata(
+            MetadataError::Unwritable { path, .. }
+            | MetadataError::Unreadable { path, .. }
+            | MetadataError::Invalid { path, .. }
+            | MetadataError::UnsupportedVersion { path, .. },
+        ) => path,
+        _ => return None,
+    };
+    linked.iter().copied().find(|&server_id| {
+        registry
+            .server(server_id)
+            .is_ok_and(|server| path.starts_with(&server.root))
+    })
 }
 
 fn reconcile_client(
@@ -1765,6 +1828,136 @@ mod tests {
             std::fs::read(metadata::server_metadata_path(&other.root)).expect("metadata"),
             other_before,
             "the other server's metadata is untouched"
+        );
+    }
+
+    #[test]
+    fn a_stale_temporary_client_is_kept_while_a_linked_server_is_being_changed() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let stale = registry
+            .create_published_client(NewClient::new(
+                "stale",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("stale client");
+        let linked = registry
+            .create_server(NewServer::linked("linked", stale.id))
+            .expect("linked server");
+        let before = std::fs::read(metadata::server_metadata_path(&linked.root)).expect("metadata");
+        std::fs::remove_dir_all(&stale.root).expect("clear stale");
+
+        let claim = registry
+            .claim_host(RecordRef::Server(linked.id))
+            .expect("another change claims the server");
+        let report = reconcile(&registry).expect("the pass completes");
+
+        assert!(registry.client(stale.id).is_ok(), "the client is kept");
+        assert!(report.removed_stale_temporary.is_empty());
+        assert!(
+            report.persistence_unhealthy.is_empty(),
+            "a busy server is retried, not reported"
+        );
+        assert_eq!(
+            std::fs::read(metadata::server_metadata_path(&linked.root)).expect("metadata"),
+            before,
+            "the server's metadata is untouched"
+        );
+        assert_eq!(
+            registry.server(linked.id).expect("server").linked_client_id,
+            Some(stale.id)
+        );
+
+        drop(claim);
+        let report = reconcile(&registry).expect("the next pass completes");
+
+        assert_eq!(report.removed_stale_temporary.len(), 1);
+        assert!(
+            registry.client(stale.id).is_err(),
+            "the client is forgotten"
+        );
+        assert_eq!(
+            registry.server(linked.id).expect("server").linked_client_id,
+            None
+        );
+    }
+
+    #[test]
+    fn a_stale_temporary_client_releases_its_linked_server_claims_once_forgotten() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let stale = registry
+            .create_published_client(NewClient::new(
+                "stale",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("stale client");
+        let linked = registry
+            .create_server(NewServer::linked("linked", stale.id))
+            .expect("linked server");
+        std::fs::remove_dir_all(&stale.root).expect("clear stale");
+
+        reconcile(&registry).expect("the pass completes");
+
+        assert!(
+            registry.claim_host(RecordRef::Server(linked.id)).is_ok(),
+            "reconciliation does not keep the server claimed"
+        );
+    }
+
+    #[test]
+    fn the_server_a_linked_server_failure_concerns_is_named_from_the_error() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let stale = registry
+            .create_published_client(NewClient::new(
+                "stale",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("stale client");
+        let first = registry
+            .create_server(NewServer::linked("first", stale.id))
+            .expect("first server");
+        let second = registry
+            .create_server(NewServer::linked("second", stale.id))
+            .expect("second server");
+        let linked = [first.id, second.id];
+        let unreadable = |root: &Path| {
+            RegistryError::Metadata(MetadataError::Unreadable {
+                path: metadata::server_metadata_path(root),
+                source: std::io::Error::other("denied"),
+            })
+        };
+
+        assert_eq!(
+            failing_server(&registry, &linked, &unreadable(&second.root)),
+            Some(second.id)
+        );
+        assert_eq!(
+            failing_server(
+                &registry,
+                &linked,
+                &RegistryError::ServerMetadataForeign {
+                    path: first.root.clone()
+                }
+            ),
+            Some(first.id)
+        );
+        assert_eq!(
+            failing_server(
+                &registry,
+                &linked,
+                &RegistryError::ServerUnknown { id: second.id }
+            ),
+            Some(second.id)
+        );
+        assert_eq!(
+            failing_server(&registry, &linked, &unreadable(&stale.root)),
+            None,
+            "a path outside every linked server names none of them"
         );
     }
 
