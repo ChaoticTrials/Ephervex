@@ -104,10 +104,12 @@ the same repair instead of reporting the committed copy as a conflict. A
 persistent tree that is not the newer, persistent copy is left alone and
 reported as a conflicting root. Every repair of such a row, whether by a
 change, a repeated promotion, or reconciliation, then removes the superseded
-temporary tree, and a failure to remove it is logged. For a server that holds
-for every write of its record, because each goes through the one that commits
-it. A repeated promotion follows the files, and repairs the row without copying
-the stale temporary tree over the committed one.
+temporary tree, and a failure to remove it is logged. A server follows the same
+rule: every write of a server record goes through the one operation that
+commits it, so each repairs a row that names a superseded temporary root and
+removes that tree, as a client write does. A repeated promotion follows the
+files, and repairs the row without copying the stale temporary tree over the
+committed one.
 The removal happens under the host's claim, so a move cannot produce a host at
 the temporary root between the decision that it is superseded and the removal.
 Every writer of a record holds the claim: one that does not already hold it
