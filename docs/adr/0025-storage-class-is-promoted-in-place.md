@@ -109,6 +109,12 @@ reports the persistent tree as a conflicting root, and the temporary tree is
 removed only when the server is deleted with its files. A repeated promotion
 follows the files, and repairs the row without copying the stale temporary tree
 over the committed one.
+A snapshot restore of such a client or server reads the record it addresses
+before it publishes, because the incomplete marker it then sets keeps the
+persistent tree from being followed. It records the restored metadata at that
+root and repairs the row to it, and never writes to the superseded temporary
+tree. For a client, it reads the superseded temporary tree before it publishes
+too, and removes it once the restore is final.
 
 **Linked servers are a per-server choice, not a cascade.** A server has its own
 storage class and its own world. Every temporary linked server is offered,

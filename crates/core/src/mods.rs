@@ -814,6 +814,30 @@ pub(crate) struct HostLayout {
     pub(crate) recipe: Option<PackRecipe>,
 }
 
+impl HostLayout {
+    /// The layout of a host whose root the caller already resolved, so a
+    /// workflow that must act on one root throughout does not read the record
+    /// a second time.
+    pub(crate) fn at(host: InstalledHost, root: PathBuf) -> CoreResult<Self> {
+        let game_dir = match host {
+            InstalledHost::Instance(_) => ephervex_storage::metadata::client_game_dir(&root),
+            InstalledHost::Server(_) => ephervex_storage::metadata::server_game_dir(&root),
+        };
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(&root));
+        // Not an error: a host created by hand has no pack to record.
+        let recipe = if store.has_recipe() {
+            Some(store.read_recipe()?)
+        } else {
+            None
+        };
+        Ok(HostLayout {
+            root,
+            game_dir,
+            recipe,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedModSnapshot {
     pub host: InstalledHost,
@@ -1371,22 +1395,7 @@ impl App {
             InstalledHost::Instance(id) => self.client(id)?.root,
             InstalledHost::Server(id) => self.server(id)?.root,
         };
-        let game_dir = match host {
-            InstalledHost::Instance(_) => ephervex_storage::metadata::client_game_dir(&root),
-            InstalledHost::Server(_) => ephervex_storage::metadata::server_game_dir(&root),
-        };
-        let store = SourceStore::new(ephervex_storage::metadata::source_dir(&root));
-        // Not an error: a host created by hand has no pack to record.
-        let recipe = if store.has_recipe() {
-            Some(store.read_recipe()?)
-        } else {
-            None
-        };
-        Ok(HostLayout {
-            root,
-            game_dir,
-            recipe,
-        })
+        HostLayout::at(host, root)
     }
 
     /// Turns one recorded mod on or off without removing it.

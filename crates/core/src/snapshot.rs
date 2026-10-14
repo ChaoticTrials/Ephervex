@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use ephervex_model::{LoaderSelection, SnapshotId};
 use ephervex_storage::{
-    ClientCommitWarning, CloneMethod, ServerCommitWarning, ServerRecord, clone_file,
+    ClientCommitWarning, ClientRecord, CloneMethod, ServerCommitWarning, ServerRecord, clone_file,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio_util::sync::CancellationToken;
@@ -109,10 +109,47 @@ pub struct SnapshotRestore {
     pub server_warnings: Vec<ServerCommitWarning>,
 }
 
+/// The record a restore addresses, read once before the restore publishes.
+///
+/// Publishing marks the host's root incomplete, and a record that follows
+/// files a move left at another root is not followed to an incomplete root
+/// (ADR 0025). Reading the record again afterwards would name the superseded
+/// root the restore never wrote to.
+enum RestoreTarget {
+    Client {
+        record: ClientRecord,
+        /// The temporary tree the record's persistent root supersedes, which
+        /// is removed once the restore is final.
+        superseded: Option<PathBuf>,
+    },
+    Server(ServerRecord),
+}
+
+impl RestoreTarget {
+    fn read(app: &App, host: InstalledHost) -> CoreResult<Self> {
+        Ok(match host {
+            InstalledHost::Instance(id) => Self::Client {
+                record: app.client(id)?,
+                superseded: app.registry().superseded_client_root(id)?,
+            },
+            InstalledHost::Server(id) => Self::Server(app.server(id)?),
+        })
+    }
+
+    fn root(&self) -> &Path {
+        match self {
+            Self::Client { record, .. } => &record.root,
+            Self::Server(record) => &record.root,
+        }
+    }
+}
+
 /// What recording a restored host's metadata replaced and reported.
 struct SynchronizedHost {
     /// For a server, the record it replaced.
     previous_server: Option<ServerRecord>,
+    /// For a client, the temporary tree the restored root supersedes.
+    superseded: Option<PathBuf>,
     client_warnings: Vec<ClientCommitWarning>,
     server_warnings: Vec<ServerCommitWarning>,
 }
@@ -491,7 +528,9 @@ impl App {
             crate::host_recipe_gate::hold_blocking_for_change(self.registry(), host, cancel)
                 .map_err(snapshot_core_error)?;
         self.refuse_restore_during_isolation(host, owner)?;
-        let layout = self.host_layout(host).map_err(snapshot_core_error)?;
+        let target = RestoreTarget::read(self, host).map_err(snapshot_core_error)?;
+        let layout = crate::mods::HostLayout::at(host, target.root().to_path_buf())
+            .map_err(snapshot_core_error)?;
         let snapshot = self.snapshot_directory(host, id)?;
         let restored = read_manifest(&snapshot)?;
         let expected = format!("{}:{}", host.kind(), host.id());
@@ -542,9 +581,10 @@ impl App {
 
         let SynchronizedHost {
             previous_server,
+            superseded,
             client_warnings: warnings,
             server_warnings,
-        } = match self.synchronize_restored_host(host, &layout.root) {
+        } = match self.synchronize_restored_host(target) {
             Ok(synchronized) => synchronized,
             Err(error) => {
                 let rollback = transaction.rollback();
@@ -568,22 +608,37 @@ impl App {
                 path: transaction.directory().to_path_buf(),
                 source,
             })?;
-        // The restore can no longer be rolled back, so the client's server
-        // list is brought in line with the records only once it is final.
-        match host {
-            InstalledHost::Instance(id) => self.sync_linked_server_lists_of_client(id),
-            InstalledHost::Server(id) => {
-                if let Ok(restored_server) = self.server(id) {
-                    self.sync_linked_server_list(&restored_server, previous_server.as_ref());
-                }
-            }
-        }
+        self.settle_restored_host(host, previous_server.as_ref(), superseded.as_deref());
         Ok(SnapshotRestore {
             restored,
             safety_snapshot,
             warnings,
             server_warnings,
         })
+    }
+
+    /// Brings what depends on the restored host in line once the restore can
+    /// no longer be rolled back: the client's server list follows the
+    /// records, and a temporary tree the restored root superseded is removed.
+    fn settle_restored_host(
+        &self,
+        host: InstalledHost,
+        previous_server: Option<&ServerRecord>,
+        superseded: Option<&Path>,
+    ) {
+        match host {
+            InstalledHost::Instance(id) => {
+                self.sync_linked_server_lists_of_client(id);
+                if let Some(stale) = superseded {
+                    self.registry().discard_superseded_client_root(stale, id);
+                }
+            }
+            InstalledHost::Server(id) => {
+                if let Ok(restored_server) = self.server(id) {
+                    self.sync_linked_server_list(&restored_server, previous_server);
+                }
+            }
+        }
     }
 
     fn capture_snapshot(
@@ -684,27 +739,27 @@ impl App {
         }
     }
 
-    /// Records the restored host's metadata. For a server, returns the record
-    /// it replaced, which tells the linked client's server list what the
-    /// entry showed before. Also returns the warnings on the committed
-    /// metadata.
+    /// Records the restored host's metadata at the root the restore wrote to,
+    /// which also repairs an index row that still names a superseded root. For
+    /// a server, returns the record it replaced, which tells the linked
+    /// client's server list what the entry showed before. Also returns the
+    /// warnings on the committed metadata.
     fn synchronize_restored_host(
         &self,
-        host: InstalledHost,
-        root: &Path,
+        target: RestoreTarget,
     ) -> Result<SynchronizedHost, SnapshotError> {
-        match host {
-            InstalledHost::Instance(id) => {
-                let current = self.client(id).map_err(snapshot_core_error)?;
-                let path = ephervex_storage::metadata::client_metadata_path(root);
-                let mut restored =
-                    ephervex_storage::metadata::read_client_metadata(root).map_err(|error| {
-                        SnapshotError::Unreadable {
-                            path: path.clone(),
-                            source: std::io::Error::other(error),
-                        }
+        match target {
+            RestoreTarget::Client {
+                record: current,
+                superseded,
+            } => {
+                let path = ephervex_storage::metadata::client_metadata_path(&current.root);
+                let mut restored = ephervex_storage::metadata::read_client_metadata(&current.root)
+                    .map_err(|error| SnapshotError::Unreadable {
+                        path: path.clone(),
+                        source: std::io::Error::other(error),
                     })?;
-                if restored.id != id {
+                if restored.id != current.id {
                     return Err(SnapshotError::Unreadable {
                         path,
                         source: std::io::Error::new(
@@ -722,21 +777,19 @@ impl App {
                     .map_err(snapshot_core_error)?;
                 Ok(SynchronizedHost {
                     previous_server: None,
+                    superseded,
                     client_warnings: warnings,
                     server_warnings: Vec::new(),
                 })
             }
-            InstalledHost::Server(id) => {
-                let current = self.server(id).map_err(snapshot_core_error)?;
-                let path = ephervex_storage::metadata::server_metadata_path(root);
-                let mut restored =
-                    ephervex_storage::metadata::read_server_metadata(root).map_err(|error| {
-                        SnapshotError::Unreadable {
-                            path: path.clone(),
-                            source: std::io::Error::other(error),
-                        }
+            RestoreTarget::Server(current) => {
+                let path = ephervex_storage::metadata::server_metadata_path(&current.root);
+                let mut restored = ephervex_storage::metadata::read_server_metadata(&current.root)
+                    .map_err(|error| SnapshotError::Unreadable {
+                        path: path.clone(),
+                        source: std::io::Error::other(error),
                     })?;
-                if restored.id != id {
+                if restored.id != current.id {
                     return Err(SnapshotError::Unreadable {
                         path,
                         source: std::io::Error::new(
@@ -754,6 +807,7 @@ impl App {
                     .map_err(snapshot_core_error)?;
                 Ok(SynchronizedHost {
                     previous_server: Some(current),
+                    superseded: None,
                     client_warnings: Vec::new(),
                     server_warnings: committed.warnings,
                 })
@@ -1313,6 +1367,223 @@ mod tests {
             )
             .expect("read safety state"),
             b"changed"
+        );
+    }
+
+    fn copy_tree(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).expect("create directory");
+        for entry in std::fs::read_dir(from).expect("read directory") {
+            let entry = entry.expect("entry");
+            let target = to.join(entry.file_name());
+            if entry.file_type().expect("file type").is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), target).expect("copy file");
+            }
+        }
+    }
+
+    /// The state a copy-mode promotion leaves when its index write and its
+    /// source removal both fail: the row still names the temporary root, the
+    /// stale temporary tree stands, and a newer copy marked persistent stands
+    /// at the persistent root.
+    fn commit_persistent_copy_beside_the_temporary_tree(
+        app: &App,
+        client: &ephervex_storage::ClientRecord,
+    ) -> PathBuf {
+        let persistent = app
+            .paths()
+            .instance_root(ephervex_model::StorageClass::Persistent, client.id);
+        std::fs::create_dir_all(persistent.parent().expect("instances directory"))
+            .expect("create instances directory");
+        copy_tree(&client.root, &persistent);
+        let mut promoted =
+            ephervex_storage::metadata::read_client_metadata(&persistent).expect("copied metadata");
+        promoted.root.clone_from(&persistent);
+        promoted.storage = ephervex_model::StorageClass::Persistent;
+        promoted.updated_at = client.updated_at + chrono::Duration::seconds(1);
+        ephervex_storage::metadata::write_client_metadata(&persistent, &promoted)
+            .expect("promoted metadata");
+        assert_eq!(app.client(client.id).expect("followed").root, persistent);
+        assert_eq!(
+            app.registry().indexed_client(client.id).expect("row").root,
+            client.root
+        );
+        persistent
+    }
+
+    fn restore_with_defaults(app: &App, client: InstalledHost, snapshot: SnapshotId) {
+        app.restore_snapshot(
+            client,
+            snapshot,
+            SnapshotRestoreOptions::default(),
+            &CancellationToken::new(),
+        )
+        .expect("restore snapshot");
+    }
+
+    #[test]
+    fn restoring_a_client_whose_row_names_a_superseded_temporary_copy_repairs_the_row_and_removes_the_copy()
+     {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let app = App::open_at(Paths::rooted_at(temporary.path())).expect("open app");
+        let client = app
+            .create_client_for_test(NewClient::new(
+                "restore client",
+                "1.21.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create client");
+        let host = InstalledHost::Instance(client.id);
+        let game = ephervex_storage::metadata::client_game_dir(&client.root);
+        std::fs::write(game.join("state.txt"), b"captured").expect("write captured state");
+        let captured = app
+            .create_snapshot(
+                host,
+                "known good",
+                SnapshotOrigin::Manual,
+                &CancellationToken::new(),
+            )
+            .expect("create snapshot");
+        let persistent = commit_persistent_copy_beside_the_temporary_tree(&app, &client);
+        let persistent_game = ephervex_storage::metadata::client_game_dir(&persistent);
+        std::fs::write(persistent_game.join("state.txt"), b"changed").expect("change state");
+        restore_with_defaults(&app, host, captured.id);
+
+        let row = app.registry().indexed_client(client.id).expect("row");
+        assert_eq!(row.root, persistent);
+        assert_eq!(row.storage, ephervex_model::StorageClass::Persistent);
+        assert_eq!(app.client(client.id).expect("client").root, persistent);
+        assert_eq!(
+            app.current_client(client.id).expect("current").root,
+            persistent
+        );
+        assert_eq!(
+            std::fs::read(persistent_game.join("state.txt")).expect("restored state"),
+            b"captured"
+        );
+        assert_eq!(
+            ephervex_storage::metadata::read_client_metadata(&persistent)
+                .expect("restored metadata")
+                .root,
+            persistent
+        );
+        assert!(
+            !client.root.exists(),
+            "the superseded temporary tree is removed once the restore is final"
+        );
+    }
+
+    #[test]
+    fn restoring_a_client_whose_row_names_a_vacated_temporary_root_repairs_the_row() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let app = App::open_at(Paths::rooted_at(temporary.path())).expect("open app");
+        let client = app
+            .create_client_for_test(NewClient::new(
+                "restore client",
+                "1.21.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create client");
+        let host = InstalledHost::Instance(client.id);
+        let game = ephervex_storage::metadata::client_game_dir(&client.root);
+        std::fs::write(game.join("state.txt"), b"captured").expect("write captured state");
+        let captured = app
+            .create_snapshot(
+                host,
+                "known good",
+                SnapshotOrigin::Manual,
+                &CancellationToken::new(),
+            )
+            .expect("create snapshot");
+        let persistent = commit_persistent_copy_beside_the_temporary_tree(&app, &client);
+        std::fs::remove_dir_all(&client.root).expect("vacate the temporary root");
+
+        restore_with_defaults(&app, host, captured.id);
+
+        let row = app.registry().indexed_client(client.id).expect("row");
+        assert_eq!(row.root, persistent);
+        assert_eq!(row.storage, ephervex_model::StorageClass::Persistent);
+        assert_eq!(app.client(client.id).expect("client").root, persistent);
+        assert!(
+            !client.root.exists(),
+            "the vacated temporary root is not recreated"
+        );
+    }
+
+    #[test]
+    fn restoring_a_server_whose_row_names_a_superseded_temporary_copy_records_the_persistent_root()
+    {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let app = App::open_at(Paths::rooted_at(temporary.path())).expect("open app");
+        let server = app
+            .registry_for_services()
+            .create_server(NewServer::new(
+                "Repro Server",
+                "1.21.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create server");
+        let host = InstalledHost::Server(server.id);
+        let game = ephervex_storage::metadata::server_game_dir(&server.root);
+        std::fs::write(game.join("state.txt"), b"captured").expect("write captured state");
+        let captured = app
+            .create_snapshot(
+                host,
+                "known good",
+                SnapshotOrigin::Manual,
+                &CancellationToken::new(),
+            )
+            .expect("create snapshot");
+        let persistent = app
+            .paths()
+            .server_root(ephervex_model::StorageClass::Persistent, server.id);
+        std::fs::create_dir_all(persistent.parent().expect("servers directory"))
+            .expect("create servers directory");
+        copy_tree(&server.root, &persistent);
+        let mut promoted =
+            ephervex_storage::metadata::read_server_metadata(&persistent).expect("copied metadata");
+        promoted.root.clone_from(&persistent);
+        promoted.storage = ephervex_model::StorageClass::Persistent;
+        promoted.updated_at = server.updated_at + chrono::Duration::seconds(1);
+        ephervex_storage::metadata::write_server_metadata(&persistent, &promoted)
+            .expect("promoted metadata");
+        let persistent_game = ephervex_storage::metadata::server_game_dir(&persistent);
+        std::fs::write(persistent_game.join("state.txt"), b"changed").expect("change state");
+        assert_eq!(app.server(server.id).expect("followed").root, persistent);
+        let stale_metadata = std::fs::read(ephervex_storage::metadata::server_metadata_path(
+            &server.root,
+        ))
+        .expect("stale metadata");
+
+        let restore = app
+            .restore_snapshot(
+                host,
+                captured.id,
+                SnapshotRestoreOptions::default(),
+                &CancellationToken::new(),
+            )
+            .expect("restore snapshot");
+
+        assert!(restore.server_warnings.is_empty());
+        let row = app
+            .registry_for_services()
+            .indexed_server(server.id)
+            .expect("row");
+        assert_eq!(row.root, persistent);
+        assert_eq!(row.storage, ephervex_model::StorageClass::Persistent);
+        assert_eq!(app.server(server.id).expect("server").root, persistent);
+        assert_eq!(
+            std::fs::read(persistent_game.join("state.txt")).expect("restored state"),
+            b"captured"
+        );
+        assert_eq!(
+            std::fs::read(ephervex_storage::metadata::server_metadata_path(
+                &server.root
+            ))
+            .expect("stale metadata after the restore"),
+            stale_metadata,
+            "the superseded temporary tree is never written to"
         );
     }
 

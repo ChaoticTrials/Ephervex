@@ -824,10 +824,24 @@ impl Registry {
         .flatten()
     }
 
+    /// The temporary tree a committed persistent copy supersedes for a client
+    /// whose row still names it, when that tree still stands.
+    ///
+    /// A workflow that marks the persistent root incomplete reads this first,
+    /// because the copy is no longer recognized while the marker stands, and
+    /// passes the result to [`Self::discard_superseded_client_root`] once the
+    /// root is finished again.
+    pub fn superseded_client_root(&self, id: InstanceId) -> Result<Option<PathBuf>, RegistryError> {
+        let indexed = self.indexed_client(id)?;
+        Ok(self
+            .committed_copy_superseding(&indexed)
+            .map(|_| indexed.root))
+    }
+
     /// Removes the temporary tree a committed persistent copy superseded, once
     /// the copy is still verifiably the finished instance. A failure costs
     /// temporary space only, so it is logged.
-    pub(crate) fn discard_superseded_client_root(&self, stale: &Path, id: InstanceId) {
+    pub fn discard_superseded_client_root(&self, stale: &Path, id: InstanceId) {
         let persistent = self.paths.instance_root(StorageClass::Persistent, id);
         if stale != self.paths.instance_root(StorageClass::Temporary, id)
             || !crate::reconcile::is_finished_client_root(&persistent, id)
