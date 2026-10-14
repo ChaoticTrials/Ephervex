@@ -354,10 +354,16 @@ impl Registry {
                 return Ok(ClientCommit::clean(record));
             }
             // The move was committed and only the row never learned of it.
+            let superseded = self
+                .committed_copy_superseding(&indexed)
+                .map(|_| indexed.root.clone());
             let mut current = canonical_client_at(&record.root, id)?;
             current.root = record.root;
             current.storage = storage;
             let warnings = self.update_client_committed(&mut current)?;
+            if let Some(stale) = superseded {
+                self.discard_superseded_client_root(&stale, id);
+            }
             return Ok(ClientCommit {
                 record: current,
                 warnings,
@@ -717,9 +723,16 @@ impl Registry {
         id: InstanceId,
         change: impl FnOnce(&mut ClientRecord),
     ) -> Result<ClientCommit<ClientRecord>, RegistryError> {
+        let indexed = self.indexed_client(id)?;
+        let superseded = self
+            .committed_copy_superseding(&indexed)
+            .map(|_| indexed.root);
         let mut record = self.current_client(id)?;
         change(&mut record);
         let warnings = self.update_client_committed(&mut record)?;
+        if let Some(stale) = superseded {
+            self.discard_superseded_client_root(&stale, id);
+        }
         Ok(ClientCommit { record, warnings })
     }
 
@@ -766,8 +779,22 @@ impl Registry {
     /// copy committed after it, so a stale persistent tree left by an earlier
     /// demotion never displaces the instance the row names.
     fn following_moved_files(&self, indexed: ClientRecord) -> ClientRecord {
+        match self.moved_files_root(&indexed) {
+            Some(moved) => ClientRecord {
+                root: moved,
+                storage: StorageClass::Persistent,
+                ..indexed
+            },
+            None => indexed,
+        }
+    }
+
+    /// The persistent root a move left the finished files at, when `indexed`
+    /// still names a temporary root that was vacated or that a committed copy
+    /// supersedes.
+    pub(crate) fn moved_files_root(&self, indexed: &ClientRecord) -> Option<PathBuf> {
         if !indexed.storage.vanishing_is_expected() {
-            return indexed;
+            return None;
         }
         let moved = self
             .paths
@@ -776,12 +803,43 @@ impl Registry {
             || !crate::reconcile::is_finished_client_root(&moved, indexed.id)
             || (indexed.root.is_dir() && !is_committed_copy_of(&moved, &indexed.root, indexed.id))
         {
-            return indexed;
+            return None;
         }
-        ClientRecord {
-            root: moved,
-            storage: StorageClass::Persistent,
-            ..indexed
+        Some(moved)
+    }
+
+    /// The persistent root of a committed copy that supersedes the temporary
+    /// tree `indexed` names, when that tree still stands.
+    ///
+    /// Only the launcher's own temporary root for the instance qualifies, so a
+    /// row naming any other directory never leads to a deletion.
+    pub(crate) fn committed_copy_superseding(&self, indexed: &ClientRecord) -> Option<PathBuf> {
+        (indexed.root.is_dir()
+            && indexed.root
+                == self
+                    .paths
+                    .instance_root(StorageClass::Temporary, indexed.id))
+        .then(|| self.moved_files_root(indexed))
+        .flatten()
+    }
+
+    /// Removes the temporary tree a committed persistent copy superseded, once
+    /// the copy is still verifiably the finished instance. A failure costs
+    /// temporary space only, so it is logged.
+    pub(crate) fn discard_superseded_client_root(&self, stale: &Path, id: InstanceId) {
+        let persistent = self.paths.instance_root(StorageClass::Persistent, id);
+        if stale != self.paths.instance_root(StorageClass::Temporary, id)
+            || !crate::reconcile::is_finished_client_root(&persistent, id)
+        {
+            return;
+        }
+        if let Err(error) = crate::relocate::discard_tree(stale) {
+            tracing::warn!(
+                instance_id = %id,
+                root = %stale.display(),
+                %error,
+                "could not remove the temporary copy a committed move superseded"
+            );
         }
     }
 
@@ -3419,16 +3477,73 @@ mod tests {
                 .name,
             "after"
         );
-        assert_eq!(
-            metadata::read_client_metadata(&client.root)
-                .expect("temporary metadata")
-                .name,
-            "before",
-            "the stale copy is not edited"
+        assert!(
+            !client.root.exists(),
+            "the stale temporary copy is removed once the row names the committed one"
         );
         let row = registry.indexed_client(client.id).expect("row");
         assert_eq!(row.root, destination);
         assert_eq!(row.name, "after");
+    }
+
+    #[test]
+    fn a_change_that_cannot_remove_the_superseded_temporary_copy_still_repairs_the_row() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = created_client(&registry);
+        let destination = move_client_leaving_row_and_source(&registry, &client);
+        restore_index_writes(&registry);
+
+        crate::relocate::fail_discarding(Some(client.root.clone()));
+        let changed = registry
+            .modify_client(client.id, |record| record.name = "after".to_owned())
+            .expect("a copy that cannot be removed does not fail the change");
+        crate::relocate::fail_discarding(None);
+
+        assert_eq!(changed.root, destination);
+        assert!(client.root.is_dir(), "the copy that could not be removed");
+        let row = registry.indexed_client(client.id).expect("row");
+        assert_eq!(row.root, destination);
+        assert_eq!(row.name, "after");
+        assert_eq!(registry.client(client.id).expect("read").root, destination);
+    }
+
+    #[test]
+    fn a_change_never_removes_a_temporary_copy_the_persistent_tree_does_not_supersede() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = created_client(&registry);
+        let persistent = registry
+            .paths()
+            .instance_root(StorageClass::Persistent, client.id);
+
+        crate::relocate::force_copy(true);
+        move_client(&registry, client.id, &mut |_| {}).expect("promote");
+        crate::relocate::fail_discarding(Some(persistent.clone()));
+        let claim = registry
+            .claim_host(RecordRef::Client(client.id))
+            .expect("claim");
+        let demoted = registry
+            .relocate_client(client.id, &claim, StorageClass::Temporary, &mut |_| {})
+            .expect("demote");
+        crate::relocate::fail_discarding(None);
+        crate::relocate::force_copy(false);
+        drop(claim);
+
+        let changed = registry
+            .modify_client(client.id, |record| record.name = "after".to_owned())
+            .expect("change");
+
+        assert_eq!(changed.root, demoted.record.root);
+        assert!(demoted.record.root.is_dir());
+        assert!(
+            persistent.is_dir(),
+            "the older persistent tree is left alone"
+        );
+        assert_eq!(
+            registry.indexed_client(client.id).expect("row").root,
+            demoted.record.root
+        );
     }
 
     #[test]
@@ -3456,9 +3571,13 @@ mod tests {
         let registry = environment.registry();
         let client = created_client(&registry);
         let destination = move_client_leaving_row_and_source(&registry, &client);
+        // The copy still cannot be removed, so only the retry can.
+        crate::relocate::fail_discarding(Some(client.root.clone()));
         registry
             .modify_client(client.id, |record| record.name = "after".to_owned())
             .expect("committed change");
+        crate::relocate::fail_discarding(None);
+        assert!(client.root.is_dir());
         restore_index_writes(&registry);
 
         let claim = registry
@@ -3471,6 +3590,7 @@ mod tests {
         assert!(retried.warnings.is_empty());
         assert_eq!(retried.record.root, destination);
         assert_eq!(retried.record.name, "after");
+        assert!(!client.root.exists(), "the superseded temporary copy");
         let row = registry.indexed_client(client.id).expect("row");
         assert_eq!(row.root, destination);
         assert_eq!(row.storage, StorageClass::Persistent);

@@ -95,11 +95,15 @@ remove the temporary source and it still stands: the persistent tree is
 followed when its metadata names it persistent and was written after the
 temporary one's, so a stale persistent tree left by a demotion never displaces
 the instance the row names. Deleting the instance with its files removes both
-trees. Reconciliation reads the row as indexed and repairs it only when the
-temporary root is gone; while both trees stand it leaves the row alone and
-reports the persistent tree as a conflicting root. A repeated promotion follows
-the files, and repairs the row without copying the stale temporary tree over
-the committed one.
+trees. Reconciliation reads the row as indexed and repairs it to the persistent
+root when the temporary root is gone and when a committed persistent copy
+supersedes the temporary tree that still stands; it never stamps the stale
+tree. A persistent tree that is not the newer, persistent copy is left alone and
+reported as a conflicting root. Every repair of such a row, whether by a change,
+a repeated promotion, or reconciliation, then removes the superseded temporary
+tree, and a failure to remove it is logged. A repeated promotion follows the
+files, and repairs the row without copying the stale temporary tree over the
+committed one.
 
 **Linked servers are a per-server choice, not a cascade.** A server has its own
 storage class and its own world. Every temporary linked server is offered,

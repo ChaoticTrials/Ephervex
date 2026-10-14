@@ -366,6 +366,12 @@ fn reconcile_client(
         return Ok(());
     }
 
+    // A committed copy supersedes a temporary tree that a move could not
+    // remove. Reconciling the stale tree would stamp it newer than the copy.
+    if let Some(moved) = registry.committed_copy_superseding(&record) {
+        return follow_moved_client(registry, &record, &moved, idle, report);
+    }
+
     if record.root.is_dir() {
         return reconcile_present_client(registry, record, idle, report);
     }
@@ -379,19 +385,7 @@ fn reconcile_client(
             .paths()
             .instance_root(StorageClass::Persistent, record.id);
         if is_finished_client_root(&moved, record.id) {
-            // The index row can be older than the files; the moved metadata
-            // is the host's current state.
-            record = canonical_client_at(&moved, record.id)?;
-            record.root.clone_from(&moved);
-            record.storage = StorageClass::Persistent;
-            registry.update_client(&mut record)?;
-            tracing::info!(
-                instance_id = %record.id,
-                root = %moved.display(),
-                "an instance's files were found at the persistent root; the record followed them"
-            );
-            report.relocated.push(client_entry(&record));
-            return reconcile_present_client(registry, record, idle, report);
+            return follow_moved_client(registry, &record, &moved, idle, report);
         }
 
         // Expected: the OS owns this directory's lifecycle (ADR 0006).
@@ -421,6 +415,35 @@ fn reconcile_client(
         report.missing_persistent.push(entry);
     }
     Ok(())
+}
+
+/// Repairs the row of a client whose files a move left at the persistent root,
+/// then reconciles them there. A temporary tree that still stands was
+/// superseded by the committed copy and is removed once the row names it.
+fn follow_moved_client(
+    registry: &Registry,
+    stale: &ClientRecord,
+    moved: &Path,
+    idle: bool,
+    report: &mut ReconciliationReport,
+) -> Result<(), RegistryError> {
+    let stale_root = stale.root.is_dir().then(|| stale.root.clone());
+    // The index row can be older than the files; the moved metadata is the
+    // host's current state.
+    let mut record = canonical_client_at(moved, stale.id)?;
+    moved.clone_into(&mut record.root);
+    record.storage = StorageClass::Persistent;
+    registry.update_client(&mut record)?;
+    if let Some(stale_root) = stale_root {
+        registry.discard_superseded_client_root(&stale_root, record.id);
+    }
+    tracing::info!(
+        instance_id = %record.id,
+        root = %moved.display(),
+        "an instance's files were found at the persistent root; the record followed them"
+    );
+    report.relocated.push(client_entry(&record));
+    reconcile_present_client(registry, record, idle, report)
 }
 
 /// Reconciles a client whose files are standing at `record.root`.
@@ -795,17 +818,25 @@ fn reindex_orphaned_clients(
         if let Some(entry) = indexed.iter().find(|entry| entry.id == id) {
             // A copy cannot be told apart from an indexed original that is
             // still in place. A held claim is a move mid-flight, not a copy.
-            if entry.root != directory
-                && entry.root.is_dir()
-                && !matches!(
-                    registry.probe_host(RecordRef::Client(id)),
-                    HostProbe::Mutating
-                )
-            {
-                report.client_conflicts.push(ClientRootConflict {
-                    id,
-                    roots: vec![entry.root.clone(), directory],
-                });
+            if entry.root != directory && entry.root.is_dir() {
+                let probe = registry.probe_host(RecordRef::Client(id));
+                if matches!(probe, HostProbe::Mutating) {
+                    continue;
+                }
+                if registry.committed_copy_superseding(entry) == Some(directory.clone()) {
+                    follow_moved_client(
+                        registry,
+                        entry,
+                        &directory,
+                        matches!(probe, HostProbe::Idle(_)),
+                        report,
+                    )?;
+                } else {
+                    report.client_conflicts.push(ClientRootConflict {
+                        id,
+                        roots: vec![entry.root.clone(), directory],
+                    });
+                }
             }
             continue;
         }
@@ -2964,6 +2995,181 @@ mod tests {
                 .attention
                 .contains(&AttentionReason::InterruptedMutation)
         );
+    }
+
+    /// A copy-mode promotion that is committed but leaves both the index row
+    /// and the temporary source behind: the index write and the source removal
+    /// fail. Index writes stay refused until the caller restores them.
+    fn promote_leaving_row_and_temporary_copy(
+        registry: &Registry,
+        client: &ClientRecord,
+    ) -> PathBuf {
+        crate::relocate::force_copy(true);
+        crate::relocate::fail_discarding(Some(client.root.clone()));
+        fail_index_writes(registry, true);
+        let claim = registry
+            .claim_host(RecordRef::Client(client.id))
+            .expect("claim");
+        registry
+            .relocate_client(client.id, &claim, StorageClass::Persistent, &mut |_| {})
+            .expect("the published metadata is a committed move");
+        drop(claim);
+        crate::relocate::fail_discarding(None);
+        crate::relocate::force_copy(false);
+        assert!(client.root.is_dir(), "the source could not be removed");
+        registry
+            .paths()
+            .instance_root(StorageClass::Persistent, client.id)
+    }
+
+    #[test]
+    fn a_committed_copy_beside_the_temporary_tree_the_row_names_is_followed_not_stamped() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new(
+                "before",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        let server = registry
+            .create_server(NewServer::linked("server", client.id))
+            .expect("create server");
+        let persistent = promote_leaving_row_and_temporary_copy(&registry, &client);
+        // The stale tree keeps standing, and reconciling it would flag this
+        // and rewrite its metadata newer than the committed copy.
+        crate::relocate::fail_discarding(Some(client.root.clone()));
+        let interrupted = metadata::staging_dir(&client.root);
+        std::fs::create_dir_all(&interrupted).expect("interrupted state");
+        std::fs::write(interrupted.join("part"), b"x").expect("interrupted state");
+        let stale = metadata::read_client_metadata(&client.root).expect("stale metadata");
+        // An edit made on the committed copy after the move.
+        registry
+            .modify_client(client.id, |record| record.name = "after".to_owned())
+            .expect("edit");
+        fail_index_writes(&registry, false);
+
+        let report = reconcile(&registry).expect("reconcile");
+        crate::relocate::fail_discarding(None);
+
+        assert!(report.client_conflicts.is_empty());
+        assert_eq!(report.relocated.len(), 1);
+        assert!(report.interrupted_hosts.is_empty());
+        let row = registry.indexed_client(client.id).expect("row");
+        assert_eq!(row.root, persistent);
+        assert_eq!(row.storage, StorageClass::Persistent);
+        assert_eq!(row.name, "after");
+        assert!(row.attention.is_empty());
+        let read = registry.client(client.id).expect("read");
+        assert_eq!(read.root, persistent);
+        assert_eq!(read.name, "after");
+        assert_eq!(
+            metadata::read_client_metadata(&client.root)
+                .expect("the stale copy is still there")
+                .updated_at,
+            stale.updated_at,
+            "the stale copy is never stamped"
+        );
+        assert_eq!(
+            registry.linked_server_ids(client.id).expect("links"),
+            vec![server.id]
+        );
+    }
+
+    #[test]
+    fn reconciling_a_committed_copy_removes_the_superseded_temporary_tree() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new(
+                "before",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        let persistent = promote_leaving_row_and_temporary_copy(&registry, &client);
+        fail_index_writes(&registry, false);
+
+        reconcile(&registry).expect("reconcile");
+
+        assert!(
+            !client.root.exists(),
+            "nothing names the temporary tree now"
+        );
+        assert!(persistent.is_dir());
+        let second = reconcile(&registry).expect("reconcile again");
+        assert!(second.is_empty());
+    }
+
+    #[test]
+    fn the_orphan_scan_repairs_the_row_of_a_committed_copy_instead_of_reporting_a_conflict() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new(
+                "before",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        let persistent = promote_leaving_row_and_temporary_copy(&registry, &client);
+        fail_index_writes(&registry, false);
+
+        let mut report = ReconciliationReport::default();
+        reindex_orphaned_clients(&registry, &mut report).expect("scan");
+
+        assert!(report.client_conflicts.is_empty());
+        assert_eq!(report.relocated.len(), 1);
+        assert_eq!(
+            registry.indexed_client(client.id).expect("row").root,
+            persistent
+        );
+        assert!(!client.root.exists());
+    }
+
+    #[test]
+    fn a_persistent_tree_older_than_the_temporary_copy_the_row_names_is_still_a_conflict() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new(
+                "before",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        let persistent = registry
+            .paths()
+            .instance_root(StorageClass::Persistent, client.id);
+
+        // Promote, then demote with the persistent tree stuck in place.
+        crate::relocate::force_copy(true);
+        let claim = registry
+            .claim_host(RecordRef::Client(client.id))
+            .expect("claim");
+        registry
+            .relocate_client(client.id, &claim, StorageClass::Persistent, &mut |_| {})
+            .expect("promote");
+        crate::relocate::fail_discarding(Some(persistent.clone()));
+        let demoted = registry
+            .relocate_client(client.id, &claim, StorageClass::Temporary, &mut |_| {})
+            .expect("demote");
+        drop(claim);
+        crate::relocate::fail_discarding(None);
+        crate::relocate::force_copy(false);
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.client_conflicts.len(), 1);
+        assert!(demoted.record.root.is_dir(), "the instance is untouched");
+        assert!(
+            persistent.is_dir(),
+            "the older tree is reported, not removed"
+        );
+        let row = registry.indexed_client(client.id).expect("row");
+        assert_eq!(row.root, demoted.record.root);
+        assert_eq!(row.storage, StorageClass::Temporary);
     }
 
     /// A move that finishes between the listing and the claim has already
