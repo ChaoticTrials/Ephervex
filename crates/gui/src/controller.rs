@@ -7605,11 +7605,11 @@ fn apply_event(
             show_settings_saving(ui, &drafts);
             drop(drafts);
             // The launcher-wide Java settings decide every host's Java that
-            // pins none of its own, so each shown host reads it again.
+            // pins none of its own and whether the launcher preference pins a
+            // listed runtime. The list is read again, and with it each shown
+            // host.
             if succeeded && save == SettingsSave::JavaSettings {
-                for host in workspace.state.borrow().shown() {
-                    java_runtime::load(&workspace.commands, host, true);
-                }
+                send(&workspace.commands, Command::LoadJavaRuntimes);
             }
         }
         Event::MinecraftPreferencesSaveFinished { .. }
@@ -7816,7 +7816,14 @@ fn apply_event(
                 workspace.reveal_surface(ui, host, Surface::Isolation);
             }
         }
-        Event::JavaRuntimes(rows) => ui.set_java_runtimes(model(java_rows(rows))),
+        Event::JavaRuntimes(rows) => {
+            ui.set_java_runtimes(model(java_rows(rows)));
+            // A runtime that came or went can change what a host resolves to
+            // or whether its pin still runs, so each shown host reads it again.
+            for host in workspace.state.borrow().shown() {
+                java_runtime::load(&workspace.commands, host, true);
+            }
+        }
         Event::Activity(activity) => {
             apply_isolation_stage(ui, &workspace.isolation.borrow(), &activity);
             diagnosis_flow::apply_activity(
@@ -10079,8 +10086,18 @@ fn java_rows(rows: Vec<JavaData>) -> Vec<JavaRow> {
             path: row.path.into(),
             version: row.version.into(),
             vendor: row.vendor.into(),
+            title: row.title.into(),
             origin: row.origin.into(),
             compatible: row.compatible.into(),
+            pinned_by: match row.pinned_by.as_deref() {
+                Some("") => SharedString::default(),
+                Some(hosts) => {
+                    lookup_args("gui-java-pinned-by", [("hosts", Arg::from(hosts))]).into()
+                }
+                None => lookup("gui-java-pins-unknown").into(),
+            },
+            pins_known: row.pinned_by.is_some(),
+            pinning: row.pinned_by.unwrap_or_default().into(),
         })
         .collect()
 }
@@ -12345,6 +12362,37 @@ mod tests {
 
     fn test_workspace(ui: &AppWindow) -> Workspace {
         test_workspace_sending(ui).0
+    }
+
+    /// The launcher preference can pin a listed runtime, so a saved Java
+    /// setting reads the list, and its pins, again.
+    #[test]
+    fn a_saved_java_setting_reads_the_runtime_list_again() {
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        apply_event(
+            &ui,
+            Event::SettingsSaveFinished {
+                save: SettingsSave::JavaSettings,
+                succeeded: true,
+            },
+            &Rc::default(),
+            &Rc::default(),
+            &Rc::default(),
+            &Rc::default(),
+            &Rc::default(),
+            &Rc::default(),
+            &Rc::default(),
+            &Rc::default(),
+            &workspace,
+            &workspace.commands,
+        );
+
+        assert!(
+            commands
+                .try_iter()
+                .any(|command| matches!(command, Command::LoadJavaRuntimes))
+        );
     }
 
     /// A workspace whose commands can be read back.

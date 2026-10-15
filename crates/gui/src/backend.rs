@@ -1510,8 +1510,13 @@ pub struct JavaData {
     pub path: String,
     pub version: String,
     pub vendor: String,
+    /// Version, vendor and architecture as one line.
+    pub title: String,
     pub origin: String,
     pub compatible: String,
+    /// The hosts and launcher setting that name this runtime, empty when
+    /// none does, or `None` when they could not be read.
+    pub pinned_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5733,20 +5738,16 @@ fn run_worker(
                 let events = events.clone();
                 java_lane.submit(Box::new(move || {
                     let known = inventory.lock().ok().and_then(|slot| slot.clone());
-                    if let Some(known) = known {
-                        send_java_inventory(Ok(known), &inventory, &events);
-                        return;
-                    }
                     run_detached(
                         paths,
                         events,
                         |_| {},
                         move |app, events, runtime| {
-                            send_java_inventory(
-                                runtime.block_on(app.java_runtimes()),
-                                &inventory,
-                                &events,
-                            );
+                            let scanned = match known {
+                                Some(known) => Ok(known),
+                                None => runtime.block_on(app.java_runtimes()),
+                            };
+                            send_java_inventory(&app, scanned, &inventory, &events);
                         },
                     );
                 }));
@@ -5759,6 +5760,7 @@ fn run_worker(
                     events.clone(),
                     move |app, events, runtime| {
                         send_java_inventory(
+                            &app,
                             runtime.block_on(app.refresh_java_runtimes()),
                             &inventory,
                             &events,
@@ -5783,6 +5785,7 @@ fn run_worker(
                                 // directory that is gone, so it is read again
                                 // rather than left.
                                 send_java_inventory(
+                                    &app,
                                     runtime.block_on(app.refresh_java_runtimes()),
                                     &inventory,
                                     &events,
@@ -5952,7 +5955,10 @@ fn warm_language_catalog(paths: Paths, minecraft: &str) {
 }
 
 /// One row per runtime an inventory holds, in the order it reports them.
-fn describe_runtimes(inventory: &ephervex_core::RuntimeInventory) -> Vec<JavaData> {
+fn describe_runtimes(
+    inventory: &ephervex_core::RuntimeInventory,
+    pins: Option<&ephervex_core::JavaPinIndex>,
+) -> Vec<JavaData> {
     inventory
         .runtimes
         .iter()
@@ -5960,6 +5966,12 @@ fn describe_runtimes(inventory: &ephervex_core::RuntimeInventory) -> Vec<JavaDat
             path: java.executable.display().to_string(),
             version: java.version_string.clone(),
             vendor: java.vendor.clone(),
+            title: crate::java_view::reported_runtime_line(
+                &java.version_string,
+                &java.vendor,
+                &java.arch,
+            ),
+            pinned_by: pins.map(|pins| crate::java_view::pinning_settings(&pins.pins_for(java))),
             origin: java
                 .origins
                 .first()
@@ -10540,23 +10552,31 @@ fn spawn_dialog(gate: &DialogGate, open: impl FnOnce() + Send + 'static) {
 /// `App` with an empty inventory of its own.
 type JavaInventorySlot = Arc<Mutex<Option<Arc<ephervex_core::RuntimeInventory>>>>;
 
-/// Remembers a Java inventory and sends it to the page, or reports why there
-/// is none.
+/// Remembers a Java inventory and sends it to the page with what pins each
+/// runtime, or reports why there is none.
 fn send_java_inventory(
+    app: &App,
     inventory: CoreResult<Arc<ephervex_core::RuntimeInventory>>,
     slot: &JavaInventorySlot,
     events: &Sender<Event>,
 ) {
-    match inventory {
-        Ok(inventory) => {
-            let rows = describe_runtimes(&inventory);
-            if let Ok(mut known) = slot.lock() {
-                *known = Some(inventory);
-            }
-            let _ = events.send(Event::JavaRuntimes(rows));
-        }
-        Err(error) => send_error(events, &error),
+    let inventory = match inventory {
+        Ok(inventory) => inventory,
+        Err(error) => return send_error(events, &error),
+    };
+    if let Ok(mut known) = slot.lock() {
+        *known = Some(Arc::clone(&inventory));
     }
+    // A host record that cannot be read leaves the pins unknown, which the
+    // rows and the removal confirmation say, rather than hiding the list.
+    let pins = app
+        .java_pin_index()
+        .inspect_err(|error| send_error(events, error))
+        .ok();
+    let _ = events.send(Event::JavaRuntimes(describe_runtimes(
+        &inventory,
+        pins.as_ref(),
+    )));
 }
 
 /// Hands an `App` the inventory the session already knows, so a short-lived
@@ -14315,6 +14335,8 @@ mod tests {
 
     #[test]
     fn a_java_inventory_is_remembered_for_the_page_that_asks_again() {
+        let root = tempfile::tempdir().expect("root");
+        let app = App::open_at(Paths::rooted_at(root.path())).expect("app");
         let slot: JavaInventorySlot = Arc::new(Mutex::new(None));
         let (events, received) = mpsc::channel();
         let inventory = Arc::new(ephervex_core::RuntimeInventory {
@@ -14325,13 +14347,127 @@ mod tests {
             scanned_at: Utc::now(),
         });
 
-        send_java_inventory(Ok(inventory), &slot, &events);
+        send_java_inventory(&app, Ok(inventory), &slot, &events);
 
         assert!(matches!(
             received.try_recv().expect("an event"),
             Event::JavaRuntimes(rows) if rows.is_empty()
         ));
         assert!(slot.lock().expect("slot").is_some());
+    }
+
+    #[test]
+    fn a_runtime_row_names_its_architecture_and_every_setting_that_pins_it() {
+        without_desktop_keyring();
+        let root = tempfile::tempdir().expect("root");
+        let mut app = App::open_at(Paths::rooted_at(root.path())).expect("app");
+        let pinned = PathBuf::from("/opt/jdk-17/bin/java");
+        let client = ephervex_core::test_support::create_client_offline(
+            &app,
+            NewClient::new("Survival", "1.20.1", LoaderSelection::vanilla()),
+        )
+        .expect("a client");
+        app.set_client_java_override(client.id, Some(ephervex_model::JavaOverride::new(&pinned)))
+            .expect("pinned");
+        let mut settings = app.java_settings();
+        settings.preferred_path = Some(pinned.clone());
+        app.set_java_settings(&settings)
+            .expect("launcher preference");
+        let runtime = |executable: &str| ephervex_core::JavaRuntime {
+            executable: PathBuf::from(executable),
+            home: None,
+            version: ephervex_core::JavaVersion::parse("17.0.12").expect("a version"),
+            version_string: "17.0.12".to_owned(),
+            runtime_version: "17.0.12+7".to_owned(),
+            vendor: "Eclipse Adoptium".to_owned(),
+            arch: "amd64".to_owned(),
+            origins: vec![ephervex_core::JavaOrigin {
+                kind: ephervex_core::JavaSourceKind::Managed,
+                path: PathBuf::from(executable),
+            }],
+        };
+        let inventory = Arc::new(ephervex_core::RuntimeInventory {
+            runtimes: vec![
+                runtime("/opt/jdk-17/bin/java"),
+                runtime("/opt/jdk-21/bin/java"),
+            ],
+            failures: Vec::new(),
+            probed: 2,
+            candidates: 2,
+            scanned_at: Utc::now(),
+        });
+        let (events, received) = mpsc::channel();
+
+        send_java_inventory(&app, Ok(inventory), &Arc::new(Mutex::new(None)), &events);
+
+        let rows = match received.try_recv().expect("an event") {
+            Event::JavaRuntimes(rows) => rows,
+            _ => Vec::new(),
+        };
+        assert_eq!(rows.len(), 2, "the runtimes are listed");
+        assert_eq!(rows[0].title, "Java 17.0.12, Eclipse Adoptium, amd64");
+        assert_eq!(
+            rows[0].pinned_by.as_deref(),
+            Some("instance Survival, the launcher preference")
+        );
+        assert_eq!(rows[1].pinned_by.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn a_host_record_that_cannot_be_read_still_lists_the_runtimes_with_unknown_pins() {
+        without_desktop_keyring();
+        let root = tempfile::tempdir().expect("root");
+        let app = App::open_at(Paths::rooted_at(root.path())).expect("app");
+        ephervex_core::test_support::create_client_offline(
+            &app,
+            NewClient::new("Damaged", "1.20.1", LoaderSelection::vanilla()),
+        )
+        .expect("a client");
+        let metadata = find_file(root.path(), "instance.json").expect("the client's metadata");
+        std::fs::write(metadata, "{").expect("damaged metadata");
+        let inventory = Arc::new(ephervex_core::RuntimeInventory {
+            runtimes: vec![ephervex_core::JavaRuntime {
+                executable: PathBuf::from("/opt/jdk-17/bin/java"),
+                home: None,
+                version: ephervex_core::JavaVersion::parse("17.0.12").expect("a version"),
+                version_string: "17.0.12".to_owned(),
+                runtime_version: "17.0.12+7".to_owned(),
+                vendor: "Eclipse Adoptium".to_owned(),
+                arch: "amd64".to_owned(),
+                origins: Vec::new(),
+            }],
+            failures: Vec::new(),
+            probed: 1,
+            candidates: 1,
+            scanned_at: Utc::now(),
+        });
+        let (events, received) = mpsc::channel();
+
+        send_java_inventory(&app, Ok(inventory), &Arc::new(Mutex::new(None)), &events);
+
+        let rows: Vec<JavaData> = received
+            .try_iter()
+            .find_map(|event| match event {
+                Event::JavaRuntimes(rows) => Some(rows),
+                _ => None,
+            })
+            .expect("the runtimes are listed");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pinned_by, None);
+    }
+
+    fn find_file(directory: &Path, name: &str) -> Option<PathBuf> {
+        for entry in std::fs::read_dir(directory).ok()?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(found) = find_file(&path, name) {
+                    return Some(found);
+                }
+            } else if path.file_name().is_some_and(|file| file == name) {
+                return Some(path);
+            }
+        }
+        None
     }
 
     /// The worker answers the requests that touch a catalog, a cache or a

@@ -3,9 +3,9 @@
 //! runtime section, the picker, the change preview and failure messages.
 
 use ephervex_core::{
-    AutomaticJava, ExpectedRuntime, FindingClass, FindingKind, HostJavaStatus, JavaCheck,
-    JavaChoice, JavaChoices, JavaMismatch, JavaRefusal, JavaRuntimeFailure, JavaRuntimeSummary,
-    JavaSelectionMode, JavaUnavailable, ResolvedJava,
+    AutomaticJava, ExpectedRuntime, FindingClass, FindingKind, HostJavaStatus, InstalledHost,
+    JavaCheck, JavaChoice, JavaChoices, JavaMismatch, JavaRefusal, JavaRuntimeFailure,
+    JavaRuntimePins, JavaRuntimeSummary, JavaSelectionMode, JavaUnavailable, ResolvedJava,
 };
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use ephervex_model::LoaderKind;
@@ -25,6 +25,12 @@ pub const fn loader_display_name(kind: LoaderKind) -> &'static str {
 /// architecture is said not to have, rather than shown as a blank.
 #[must_use]
 pub fn runtime_line(runtime: &JavaRuntimeSummary) -> String {
+    reported_runtime_line(&runtime.version, &runtime.vendor, &runtime.arch)
+}
+
+/// [`runtime_line`] from the three facts a runtime reported.
+#[must_use]
+pub fn reported_runtime_line(version: &str, vendor: &str, arch: &str) -> String {
     let reported = |value: &str, missing: &str| {
         if value.trim().is_empty() {
             lookup(missing)
@@ -35,17 +41,35 @@ pub fn runtime_line(runtime: &JavaRuntimeSummary) -> String {
     lookup_args(
         "gui-java-runtime-line",
         [
-            ("version", Arg::from(runtime.version.as_str())),
+            ("version", Arg::from(version)),
             (
                 "vendor",
-                Arg::from(reported(&runtime.vendor, "gui-java-vendor-unknown")),
+                Arg::from(reported(vendor, "gui-java-vendor-unknown")),
             ),
-            (
-                "arch",
-                Arg::from(reported(&runtime.arch, "gui-java-arch-unknown")),
-            ),
+            ("arch", Arg::from(reported(arch, "gui-java-arch-unknown"))),
         ],
     )
+}
+
+/// Every setting that names a runtime, as one list: "instance Survival,
+/// server Lobby, the launcher preference". Empty when nothing names it.
+#[must_use]
+pub fn pinning_settings(pins: &JavaRuntimePins) -> String {
+    let mut named: Vec<String> = pins
+        .hosts
+        .iter()
+        .map(|pin| {
+            let key = match pin.host {
+                InstalledHost::Instance(_) => "gui-java-pinned-instance",
+                InstalledHost::Server(_) => "gui-java-pinned-server",
+            };
+            lookup_args(key, [("name", Arg::from(pin.name.as_str()))])
+        })
+        .collect();
+    if pins.launcher {
+        named.push(lookup("gui-java-pinned-launcher"));
+    }
+    named.join(", ")
 }
 
 /// How a host's runtime was chosen, and whether Ephervex manages it.
@@ -894,5 +918,27 @@ mod tests {
              older. It ran on Java 17.0.12, Eclipse Adoptium, amd64. This host expects Java 21. \
              Choose another runtime in this host's runtime settings."
         );
+    }
+
+    #[test]
+    fn the_settings_that_pin_a_runtime_are_named_hosts_first_then_the_launcher() {
+        let pins = JavaRuntimePins {
+            hosts: vec![
+                ephervex_core::PinningHost {
+                    host: InstalledHost::Instance(ephervex_model::InstanceId::new()),
+                    name: "Survival".to_owned(),
+                },
+                ephervex_core::PinningHost {
+                    host: InstalledHost::Server(ephervex_model::ServerId::new()),
+                    name: "Lobby".to_owned(),
+                },
+            ],
+            launcher: true,
+        };
+        assert_eq!(
+            pinning_settings(&pins),
+            "instance Survival, server Lobby, the launcher preference"
+        );
+        assert_eq!(pinning_settings(&JavaRuntimePins::default()), "");
     }
 }
