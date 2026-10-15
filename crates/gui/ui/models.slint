@@ -565,6 +565,18 @@ export struct PendingEntityRow {
     indeterminate: bool,
 }
 
+// One entry of a host's Java picker. `key` is "default" for the entry that
+// clears the host's own pin, otherwise the runtime's executable path.
+export struct JavaChoiceRow {
+    key: string,
+    title: string,
+    detail: string,
+    compatible: bool,
+    current: bool,
+    // Why the host refuses it, empty when it accepts it.
+    reason: string,
+}
+
 // One host the workspace shows, as every pane showing it reads it. Built
 // once per host rather than per pane, so two panes on one host cannot
 // disagree about it.
@@ -599,7 +611,6 @@ export struct HostView {
     snapshots-have-plain-copies: bool,
     // A client's runtime settings as stored. Empty where it follows the
     // global setting.
-    runtime-java: string,
     runtime-memory-min: string,
     runtime-memory-max: string,
     runtime-jvm-args: string,
@@ -607,6 +618,28 @@ export struct HostView {
     runtime-global: string,
     // Why the newest save of the client's runtime settings was refused.
     runtime-error: string,
+    // The host's Java: what it runs, what it expects, and how the two fit.
+    // `java-tone` is "healthy", "customized", "problem", or "unchecked", and
+    // empty until the status was read.
+    java-tone: string,
+    java-tone-label: string,
+    java-runtime: string,
+    java-path: string,
+    java-origin: string,
+    java-expected: string,
+    java-problem: string,
+    // The header's one-line summary.
+    java-summary: string,
+    // Why the status could not be read.
+    java-error: string,
+    // The install action's label, empty when none is offered.
+    java-install: string,
+    java-installing: bool,
+    java-choices: [JavaChoiceRow],
+    // The path the user named, once checked: one row, or none.
+    java-custom: [JavaChoiceRow],
+    java-custom-error: string,
+    java-custom-checking: bool,
     allow-pack-mod-changes: bool,
     // Bumped each time the stored settings are read, so an open form
     // starts over from them.

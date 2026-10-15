@@ -644,7 +644,13 @@ export component AppWindow inherits Window {
     callback delete-client(string, bool, bool);
     callback delete-server(string, bool);
     callback repair-server(string);
-    callback save-instance-runtime(string, string, string, string, string);
+    callback save-instance-runtime(string, string, string, string);
+    // A host's Java: read it, choose a runtime for review, check a path the
+    // user typed, or install the runtime the host expects.
+    callback load-host-java(string, string);
+    callback choose-host-java(string, string, string);
+    callback check-host-java-path(string, string, string);
+    callback install-host-java(string, string);
     callback clear-instance-runtime(string);
     callback set-allow-pack-mod-version-changes(string, bool);
     callback load-instance-workspace(string);
@@ -1302,7 +1308,14 @@ export component AppWindow inherits Window {
                                 if host.available && host.kind == "client" && pane.surface == "Settings" : ClientRuntimeForm {
                                     host: host;
                                     error: host.runtime-error;
-                                    save(id, java, min, max, args) => { root.save-instance-runtime(id, java, min, max, args); }
+                                    busy: root.host-busy-kind == host.kind && root.host-busy-id == host.id;
+                                    save(id, min, max, args) => { root.save-instance-runtime(id, min, max, args); }
+                                    load-java => { root.load-host-java(host.kind, host.id); }
+                                    choose-java(key) => { root.choose-host-java(host.kind, host.id, key); }
+                                    check-java-path(path) => { root.check-host-java-path(host.kind, host.id, path); }
+                                    install-java => { root.install-host-java(host.kind, host.id); }
+                                    cancel-fix => { root.cancel-fix(host.kind, host.id); }
+                                    apply-fix => { root.apply-fix(host.kind, host.id); }
                                     clear(id) => { root.clear-instance-runtime(id); }
                                     allow-pack-mod-changes(id, allow) => { root.set-allow-pack-mod-version-changes(id, allow); }
                                     open-global-defaults => { root.close-workspace(); root.page = 4; root.settings-tab = "Minecraft"; }
@@ -1449,6 +1462,13 @@ export component AppWindow inherits Window {
                                     eula-status: root.eula-status;
                                     save(id, motd, players, difficulty, gamemode, flight, pvp, allowlist, online, access, address, port, unset) => { root.save-server-properties(id, motd, players, difficulty, gamemode, flight, pvp, allowlist, online, access, address, port, unset); }
                                     review-eula => { root.modal = "eula"; }
+                                    busy: root.host-busy-kind == host.kind && root.host-busy-id == host.id;
+                                    load-java => { root.load-host-java(host.kind, host.id); }
+                                    choose-java(key) => { root.choose-host-java(host.kind, host.id, key); }
+                                    check-java-path(path) => { root.check-host-java-path(host.kind, host.id, path); }
+                                    install-java => { root.install-host-java(host.kind, host.id); }
+                                    cancel-fix => { root.cancel-fix(host.kind, host.id); }
+                                    apply-fix => { root.apply-fix(host.kind, host.id); }
                                 }
                             }
                         }

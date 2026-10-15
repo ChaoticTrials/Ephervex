@@ -2,7 +2,7 @@
 
 import { ScrollView } from "std-widgets.slint";
 import { ChoiceBox } from "../components/selection.slint";
-import { AppButton, LabeledToggle, TextField } from "../components/controls.slint";
+import { AppButton, BusySpinner, LabeledToggle, Pill, TextField } from "../components/controls.slint";
 import {
     ActionRow,
     BodyText,
@@ -12,8 +12,160 @@ import {
     SectionTitle
 } from "../components/text.slint";
 import { GuiI18n, PropertyRules, ServerHints } from "../globals.slint";
-import { HostView } from "../models.slint";
+import { HostView, JavaChoiceRow } from "../models.slint";
 import { Theme } from "../theme.slint";
+import { FixPanel } from "diagnostics.slint";
+
+// One runtime a host could use, with whether it is the one in use and, when
+// the host refuses it, why.
+component JavaChoiceItem inherits Rectangle {
+    in property <JavaChoiceRow> choice;
+    in property <bool> enabled;
+    // Why choosing waits while `enabled` is false.
+    in property <string> hint;
+    callback chosen();
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: root.choice.current ? Theme.accent : Theme.border;
+    background: root.choice.current ? Theme.selection-card : Theme.surface;
+    height: row.preferred-height;
+    accessible-role: AccessibleRole.groupbox;
+    accessible-label: root.choice.title;
+    row := HorizontalLayout {
+        padding: 10px;
+        spacing: 10px;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 2px;
+            BodyText { text: root.choice.title; color: root.choice.compatible ? Theme.text : Theme.text-muted; wrap: word-wrap; }
+            if root.choice.detail != "" : BodyText { text: root.choice.detail; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
+            if root.choice.reason != "" : BodyText { text: root.choice.reason; color: Theme.warning; font-size: Theme.caption-size; wrap: word-wrap; }
+        }
+        VerticalLayout {
+            alignment: center;
+            if root.choice.current : Pill { text: GuiI18n.text("gui-java-choice-current"); tone-color: Theme.accent; }
+            if !root.choice.current : AppButton {
+                text: GuiI18n.text("gui-java-choice-use");
+                accessible-name: GuiI18n.value("gui-java-choice-use-named", root.choice.title);
+                enabled: root.enabled && root.choice.compatible;
+                hint: !root.choice.compatible ? root.choice.reason : root.hint;
+                clicked => { root.chosen(); }
+            }
+        }
+    }
+}
+
+// One labeled line of the status card.
+component JavaFact inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> value;
+    spacing: 10px;
+    FieldLabel { text: root.label; width: 110px; vertical-alignment: top; }
+    BodyText { text: root.value; color: Theme.text-secondary; wrap: word-wrap; horizontal-stretch: 1; }
+}
+
+// A host's Java: what it runs, what its Minecraft and loader expect, and the
+// runtimes it can switch to. Choosing one opens the same review a Diagnostics
+// fix does, and nothing changes until it is applied there.
+export component JavaRuntimeSection inherits VerticalLayout {
+    in property <HostView> host;
+    // Whether a change can be chosen now, and why it waits otherwise.
+    in property <bool> can-change: true;
+    in property <string> change-hint;
+    callback load();
+    callback choose(string);
+    callback check-path(string);
+    callback install();
+    callback cancel-fix();
+    callback apply-fix();
+    property <string> host-id: root.host.id;
+    property <color> tone: root.host.java-tone == "healthy" ? Theme.success : root.host.java-tone == "customized" ? Theme.accent-secondary : root.host.java-tone == "problem" ? Theme.warning : Theme.text-secondary;
+    changed host-id => { root.load(); }
+    init => { root.load(); }
+    spacing: 10px;
+    SectionTitle { title: GuiI18n.text("gui-java-section"); detail: GuiI18n.text("gui-java-section-detail"); }
+    if root.host.java-error != "" : BodyText { text: root.host.java-error; color: Theme.danger; wrap: word-wrap; }
+    if root.host.java-tone == "" && root.host.java-error == "" : HorizontalLayout {
+        spacing: 8px;
+        VerticalLayout { alignment: center; BusySpinner { width: 16px; height: 16px; } }
+        BodyText { text: GuiI18n.text("gui-java-loading"); horizontal-stretch: 1; }
+    }
+    if root.host.java-tone != "" : Rectangle {
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: root.tone.with-alpha(0.55);
+        background: Theme.surface;
+        height: card.preferred-height;
+        accessible-role: AccessibleRole.groupbox;
+        accessible-label: GuiI18n.text("gui-java-section");
+        card := VerticalLayout {
+            padding: 12px;
+            spacing: 6px;
+            HorizontalLayout {
+                spacing: 10px;
+                Pill { text: root.host.java-tone-label; tone-color: root.tone; }
+                BodyText { text: root.host.java-runtime; color: Theme.text; wrap: word-wrap; horizontal-stretch: 1; }
+            }
+            if root.host.java-path != "" : JavaFact { label: GuiI18n.text("gui-java-fact-path"); value: root.host.java-path; }
+            if root.host.java-origin != "" : JavaFact { label: GuiI18n.text("gui-java-fact-chosen"); value: root.host.java-origin; }
+            JavaFact { label: GuiI18n.text("gui-java-fact-expected"); value: root.host.java-expected; }
+            if root.host.java-problem != "" : BodyText { text: root.host.java-problem; color: Theme.warning; wrap: word-wrap; }
+            if root.host.java-install != "" : HorizontalLayout {
+                spacing: 8px;
+                AppButton {
+                    text: root.host.java-install;
+                    enabled: !root.host.java-installing;
+                    hint: GuiI18n.text("gui-java-installing");
+                    clicked => { root.install(); }
+                }
+                if root.host.java-installing : VerticalLayout { alignment: center; BusySpinner { width: 16px; height: 16px; } }
+                BodyText { text: GuiI18n.text("gui-java-install-detail"); color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; vertical-alignment: center; horizontal-stretch: 1; }
+            }
+        }
+    }
+    if root.host.fix-state != "" : FixPanel {
+        host: root.host;
+        can-apply: root.can-change;
+        blocked-reason: root.change-hint;
+        cancel => { root.cancel-fix(); }
+        apply => { root.apply-fix(); }
+    }
+    Heading { text: GuiI18n.text("gui-java-choices"); font-size: Theme.row-heading-size; }
+    BodyText { text: GuiI18n.text("gui-java-choices-detail"); color: Theme.text-muted; wrap: word-wrap; }
+    for choice in root.host.java-choices : JavaChoiceItem {
+        choice: choice;
+        enabled: root.can-change && root.host.fix-state != "applying";
+        hint: root.host.fix-state == "applying" ? GuiI18n.text("gui-hint-fix-applying") : root.change-hint;
+        chosen => { root.choose(choice.key); }
+    }
+    FieldLabel { text: GuiI18n.text("gui-java-custom-path"); }
+    HorizontalLayout {
+        spacing: 8px;
+        path-field := TextField {
+            placeholder: GuiI18n.text("gui-java-custom-path-placeholder");
+            accessible-name: GuiI18n.text("gui-java-custom-path");
+            accepted => { root.check-path(path-field.text); }
+        }
+        AppButton {
+            text: GuiI18n.text("gui-java-custom-check");
+            enabled: !root.host.java-custom-checking && path-field.text != "";
+            hint: root.host.java-custom-checking ? GuiI18n.text("gui-java-custom-checking") : GuiI18n.text("gui-java-custom-path-empty");
+            clicked => { root.check-path(path-field.text); }
+        }
+    }
+    if root.host.java-custom-checking : HorizontalLayout {
+        spacing: 8px;
+        VerticalLayout { alignment: center; BusySpinner { width: 16px; height: 16px; } }
+        BodyText { text: GuiI18n.text("gui-java-custom-checking"); horizontal-stretch: 1; }
+    }
+    if root.host.java-custom-error != "" : BodyText { text: root.host.java-custom-error; color: Theme.danger; wrap: word-wrap; }
+    for choice in root.host.java-custom : JavaChoiceItem {
+        choice: choice;
+        enabled: root.can-change && root.host.fix-state != "applying";
+        hint: root.host.fix-state == "applying" ? GuiI18n.text("gui-hint-fix-applying") : root.change-hint;
+        chosen => { root.choose(choice.key); }
+    }
+}
 
 // A client's own runtime settings, edited here and saved together. The
 // fields start from what is stored and start over whenever it is read again
@@ -21,8 +173,15 @@ import { Theme } from "../theme.slint";
 export component ClientRuntimeForm inherits ScrollView {
     in property <HostView> host;
     in property <string> error;
-    // (host, java, minimum memory, maximum memory, arguments)
-    callback save(string, string, string, string, string);
+    // (host, minimum memory, maximum memory, arguments)
+    callback save(string, string, string, string);
+    callback load-java();
+    callback choose-java(string);
+    callback check-java-path(string);
+    callback install-java();
+    callback cancel-fix();
+    callback apply-fix();
+    in property <bool> busy;
     callback clear(string);
     callback allow-pack-mod-changes(string, bool);
     callback open-global-defaults();
@@ -32,7 +191,6 @@ export component ClientRuntimeForm inherits ScrollView {
     changed host-id => { root.reset(); }
     init => { root.reset(); }
     function reset() {
-        java-field.text = root.host.runtime-java;
         min-field.text = root.host.runtime-memory-min;
         max-field.text = root.host.runtime-memory-max;
         args-field.text = root.host.runtime-jvm-args;
@@ -41,8 +199,6 @@ export component ClientRuntimeForm inherits ScrollView {
     VerticalLayout { alignment: start; width: min(parent.width, 720px); spacing: 12px;
         SectionTitle { title: GuiI18n.text("gui-instance-runtime"); detail: GuiI18n.text("gui-instance-runtime-detail"); }
         BodyText { text: root.host.runtime-global; color: Theme.text-muted; wrap: word-wrap; }
-        Text { text: GuiI18n.text("gui-java-preferred"); color: Theme.text-secondary; font-size: Theme.label-size; }
-        java-field := TextField { placeholder: GuiI18n.text("gui-instance-runtime-inherited"); accessible-name: GuiI18n.text("gui-java-preferred"); }
         HorizontalLayout { spacing: 12px;
             VerticalLayout { spacing: 4px; FieldLabel { text: GuiI18n.text("gui-java-memory-min"); } min-field := TextField { placeholder: GuiI18n.text("gui-instance-runtime-inherited"); accessible-name: GuiI18n.text("gui-java-memory-min"); input-type: InputType.number; width: 190px; } }
             VerticalLayout { spacing: 4px; FieldLabel { text: GuiI18n.text("gui-java-memory-max"); } max-field := TextField { placeholder: GuiI18n.text("gui-instance-runtime-inherited"); accessible-name: GuiI18n.text("gui-java-memory-max"); input-type: InputType.number; width: 190px; } }
@@ -54,12 +210,24 @@ export component ClientRuntimeForm inherits ScrollView {
         HorizontalLayout { spacing: 8px;
             if root.host.runtime-pinned : AppButton { text: GuiI18n.text("gui-instance-runtime-clear"); clicked => { root.clear(root.host.id); } }
             Rectangle { horizontal-stretch: 1; }
-            AppButton { text: GuiI18n.text("gui-instance-runtime-save"); tone: "primary"; clicked => { root.save(root.host.id, java-field.text, min-field.text, max-field.text, args-field.text); } }
+            AppButton { text: GuiI18n.text("gui-instance-runtime-save"); tone: "primary"; clicked => { root.save(root.host.id, min-field.text, max-field.text, args-field.text); } }
         }
         Divider { }
         SectionTitle { title: GuiI18n.text("gui-allow-pack-mod-changes"); detail: GuiI18n.text("gui-allow-pack-mod-changes-detail"); }
         // Its position is what the instance records, read back after the change.
         LabeledToggle { width: min(parent.width, 520px); label: GuiI18n.text("gui-allow-pack-mod-changes-toggle"); checked: root.host.allow-pack-mod-changes; sets-its-own-position: false; toggled(value) => { root.allow-pack-mod-changes(root.host.id, value); } }
+        Divider { }
+        JavaRuntimeSection {
+            host: root.host;
+            can-change: !root.busy;
+            change-hint: GuiI18n.text("gui-hint-busy");
+            load => { root.load-java(); }
+            choose(key) => { root.choose-java(key); }
+            check-path(path) => { root.check-java-path(path); }
+            install => { root.install-java(); }
+            cancel-fix => { root.cancel-fix(); }
+            apply-fix => { root.apply-fix(); }
+        }
         Divider { }
         SectionTitle { title: GuiI18n.text("gui-instance-settings-unavailable"); detail: GuiI18n.text("gui-instance-settings-unavailable-detail"); }
         HorizontalLayout { AppButton { text: GuiI18n.text("gui-open-global-defaults"); clicked => { root.open-global-defaults(); } } Rectangle { horizontal-stretch: 1; } }
@@ -77,6 +245,13 @@ export component ServerPropertiesForm inherits ScrollView {
     // allowlist, online mode, access, address, port, unset keys)
     callback save(string, string, string, string, string, bool, bool, bool, bool, string, string, string, string);
     callback review-eula();
+    callback load-java();
+    callback choose-java(string);
+    callback check-java-path(string);
+    callback install-java();
+    callback cancel-fix();
+    callback apply-fix();
+    in property <bool> busy;
     property <string> access;
     property <string> difficulty;
     property <string> gamemode;
@@ -123,5 +298,17 @@ export component ServerPropertiesForm inherits ScrollView {
         if PropertyRules.is-unset(root.unset, "allow-flight") || PropertyRules.is-unset(root.unset, "pvp") || PropertyRules.is-unset(root.unset, "white-list") : BodyText { text: GuiI18n.text("gui-property-toggles-unset-detail"); wrap: word-wrap; }
         Rectangle { height: 84px; border-radius: 8px; border-width: 1px; border-color: root.eula-accepted ? Theme.success : Theme.warning; background: Theme.surface; HorizontalLayout { padding: 14px; VerticalLayout { Heading { text: GuiI18n.text("gui-server-eula"); font-size: Theme.row-heading-size; } BodyText { text: root.eula-status; wrap: word-wrap; } } AppButton { text: root.eula-accepted ? GuiI18n.text("gui-eula-review") : GuiI18n.text("gui-eula-review-accept"); clicked => { root.review-eula(); } } } }
         ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-changes"); tone: "primary"; enabled: ServerHints.can-save(root.host.server.state-kind); hint: ServerHints.save(root.host.server.state-kind); clicked => { root.save(root.host.id, motd-field.text, players-field.text, root.difficulty, root.gamemode, root.allow-flight, root.pvp, root.allowlist, root.online-mode, root.access, address-field.text, port-field.text, root.unset); } } }
+        Divider { }
+        JavaRuntimeSection {
+            host: root.host;
+            can-change: !root.busy;
+            change-hint: GuiI18n.text("gui-hint-busy");
+            load => { root.load-java(); }
+            choose(key) => { root.choose-java(key); }
+            check-path(path) => { root.check-java-path(path); }
+            install => { root.install-java(); }
+            cancel-fix => { root.cancel-fix(); }
+            apply-fix => { root.apply-fix(); }
+        }
     }
 }

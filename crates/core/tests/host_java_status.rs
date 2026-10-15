@@ -1284,3 +1284,26 @@ async fn a_server_s_status_reads_the_pin_its_index_row_has_not_caught_up_with() 
         Some(java)
     );
 }
+
+#[tokio::test]
+async fn saving_only_jvm_settings_keeps_the_java_pin_another_change_made() {
+    let fixture = Fixture::vanilla().await;
+    let pinned = fixture.java("kept-jdk", "21.0.8");
+    let InstalledHost::Instance(id) = fixture.client else {
+        unreachable!()
+    };
+    fixture.pin(fixture.client, &pinned);
+    let jvm = JvmSettings {
+        max_memory_mib: Some(2048),
+        ..JvmSettings::default()
+    };
+
+    fixture
+        .app
+        .set_client_jvm_settings(id, Some(jvm.clone()))
+        .unwrap();
+
+    let record = fixture.app.current_client(id).unwrap();
+    assert_eq!(record.java_override, Some(JavaOverride::new(&pinned)));
+    assert_eq!(record.jvm_override, Some(jvm));
+}

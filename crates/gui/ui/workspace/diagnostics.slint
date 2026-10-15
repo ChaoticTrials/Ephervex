@@ -203,7 +203,9 @@ component CheckList inherits Rectangle {
 
 // The change a fix would make, shown before anything changes. This is the
 // confirmation: Apply does it, and nothing asks again.
-component FixPanel inherits Rectangle {
+// The review of one previewed change, shared by every surface that proposes
+// one, so a change is always read and applied the same way.
+export component FixPanel inherits Rectangle {
     in property <HostView> host;
     in property <bool> can-apply;
     // Why nothing can be applied while `can-apply` is false.

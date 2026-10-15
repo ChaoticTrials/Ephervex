@@ -952,6 +952,41 @@ fn register_work(ui: &AppWindow, commands: &Sender<Command>, workspace: &Workspa
     });
 }
 
+/// Opens the review of a change another surface proposes for a host, through
+/// the same preview and apply as a finding's fix (ADR 0043).
+pub(super) fn review_change(
+    workspace: &Workspace,
+    commands: &Sender<Command>,
+    host: InstalledHost,
+    title: String,
+    fix: DiagnosticFix,
+) {
+    let mut state = workspace.diagnosis.borrow_mut();
+    if state.working_on(host) == Some(Work::Apply) {
+        return;
+    }
+    // The surface proposing the change may be the first to show this host
+    // anything of Diagnostics.
+    if !workspace.state.borrow().shown().contains(&host) {
+        return;
+    }
+    state.open(host);
+    state.last_preview = state.last_preview.wrapping_add(1);
+    let request = state.last_preview;
+    let Some(surface) = state.host_mut(host) else {
+        return;
+    };
+    surface.review = Some(Review {
+        title,
+        fix: fix.clone(),
+        request,
+        panel: Panel::Loading,
+    });
+    surface.outcome = None;
+    render(workspace, &state, host);
+    send(commands, Command::PreviewFix { host, request, fix });
+}
+
 fn register_review(ui: &AppWindow, commands: &Sender<Command>, workspace: &Workspace) {
     let sender = commands.clone();
     let views = workspace.clone();

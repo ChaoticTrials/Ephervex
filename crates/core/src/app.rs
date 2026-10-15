@@ -900,6 +900,25 @@ impl App {
             })?)
     }
 
+    /// Replaces an instance's own JVM settings and leaves its Java pin as it
+    /// is, read and written under the same claim, so a Java change made
+    /// meanwhile from elsewhere is never written back over.
+    #[instrument(skip(self))]
+    pub fn set_client_jvm_settings(
+        &self,
+        id: InstanceId,
+        jvm_override: Option<ephervex_model::JvmSettings>,
+    ) -> CoreResult<ClientCommit<ClientRecord>> {
+        let claim = self.claim_stopped_client(id)?;
+        self.client(id)?;
+        self.validate_jvm_override(jvm_override.as_ref())?;
+        Ok(self
+            .registry()
+            .modify_client_committed_claimed(id, &claim, |record| {
+                record.jvm_override = jvm_override;
+            })?)
+    }
+
     /// Refuses an override that, layered over the current global settings,
     /// leaves no valid heap range. Planning checks again because the global
     /// settings can change after the override is saved.
@@ -1441,18 +1460,33 @@ impl App {
         }
     }
 
+    /// The inventory this `App` holds, without scanning for one.
+    #[must_use]
+    pub fn known_java_runtimes(&self) -> Option<Arc<RuntimeInventory>> {
+        self.cached_java()
+    }
+
+    /// Takes an inventory another `App` of this process already scanned, so a
+    /// short-lived one answers from it instead of scanning again.
+    ///
+    /// A frontend that opens an `App` per operation keeps the inventory for
+    /// its session and hands it over here. A Refresh still rescans.
+    pub fn adopt_java_inventory(&self, inventory: Arc<RuntimeInventory>) {
+        if let Ok(mut cache) = self.java.write() {
+            *cache = Some(inventory);
+        }
+    }
+
     /// Replaces the cached inventory, as if a scan had found exactly these.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn use_java_inventory_for_test(&self, runtimes: Vec<JavaRuntime>) {
-        if let Ok(mut cache) = self.java.write() {
-            *cache = Some(Arc::new(RuntimeInventory {
-                probed: runtimes.len(),
-                candidates: runtimes.len(),
-                runtimes,
-                failures: Vec::new(),
-                scanned_at: chrono::Utc::now(),
-            }));
-        }
+        self.adopt_java_inventory(Arc::new(RuntimeInventory {
+            probed: runtimes.len(),
+            candidates: runtimes.len(),
+            runtimes,
+            failures: Vec::new(),
+            scanned_at: chrono::Utc::now(),
+        }));
     }
 
     /// Identifies a pinned executable as a runtime, found through the pin and

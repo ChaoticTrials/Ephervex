@@ -46,6 +46,7 @@ use ephervex_model::{
 };
 
 use crate::diagnosis_view::{self, DiagnosisView, OutcomeView, PreviewView};
+use crate::java_view::{JavaChoiceView, JavaStatusView};
 use crate::presentation::{
     ActivityPresentation, ImportErrorKind, ImportFailure, ImportPresentation, InstancePresentation,
     ModImpactPresentation, ModRequirementPresentation, PairPresentation,
@@ -73,6 +74,19 @@ pub enum ServerPackTarget {
 #[derive(Debug)]
 pub enum Command {
     Refresh,
+    /// Reads which Java a host would run and whether it fits, and, when the
+    /// runtime section asks, every runtime it could switch to.
+    LoadHostJava {
+        host: InstalledHost,
+        choices: bool,
+    },
+    /// Probes an executable the user named and gives a host's verdict on it.
+    CheckHostJavaPath {
+        host: InstalledHost,
+        path: PathBuf,
+    },
+    /// Installs the managed Java a host expects.
+    InstallHostJava(InstalledHost),
     LoadMinecraftReleases,
     WarmLanguageCatalog(String),
     LoadLoaderVersions {
@@ -86,12 +100,12 @@ pub enum Command {
     /// Records the Minecraft releases to offer first, in the order given.
     SetFavoriteMinecraftVersions(Vec<String>),
     CancelOperation(String),
-    /// Replace one instance's own Java and JVM settings. `None` on `java` and
-    /// a blank memory field restore the global setting. `jvm_args` and the
-    /// memory fields are the typed text.
+    /// Replace one instance's own JVM settings. A blank memory field restores
+    /// the global setting. `jvm_args` and the memory fields are the typed text.
+    /// The instance's Java pin is never touched here: choosing a runtime is a
+    /// previewed change of its own.
     SaveInstanceRuntime {
         instance: InstanceId,
-        java: Option<PathBuf>,
         min_memory_mib: String,
         max_memory_mib: String,
         jvm_args: String,
@@ -1225,18 +1239,25 @@ pub struct LinkedResultData {
     pub rows: Vec<LinkedTargetData>,
 }
 
-/// The Managed Mods list plus whatever has to be said about how complete it is.
+/// A host's Java as the window shows it.
+#[derive(Debug, Clone)]
+pub struct HostJavaData {
+    pub host: InstalledHost,
+    /// The status, or why it could not be read.
+    pub status: Result<JavaStatusView, String>,
+    /// The picker's entries, when they were asked for and could be read.
+    pub choices: Option<Vec<JavaChoiceView>>,
+}
+
 /// One instance's own runtime settings, and what it would otherwise inherit.
 #[derive(Debug, Clone)]
 pub struct InstanceRuntimeData {
     pub instance: String,
-    /// Empty where the instance follows the global setting.
-    pub java: String,
     pub min_memory: String,
     pub max_memory: String,
     pub jvm_args: String,
-    /// Whether anything is pinned, which is what makes "follow global" an
-    /// action worth offering.
+    /// Whether a JVM setting is pinned, which is what makes "follow global"
+    /// an action worth offering. The Java pin is the runtime section's.
     pub pinned: bool,
     /// An already-localized sentence naming what the global settings are, so
     /// an empty field reads as a choice rather than as missing information.
@@ -1572,6 +1593,21 @@ pub enum Event {
     },
     Snapshot(Box<Snapshot>),
     InstanceRuntime(InstanceRuntimeData),
+    /// A host's Java, as [`Command::LoadHostJava`] read it.
+    HostJava(Box<HostJavaData>),
+    /// The verdict on a path [`Command::CheckHostJavaPath`] probed.
+    HostJavaPathChecked {
+        host: InstalledHost,
+        result: Result<JavaChoiceView, String>,
+    },
+    /// A runtime was installed for a host. `pin` is the previewable change
+    /// that would make the host use it, when it would not on its own.
+    HostJavaInstalled {
+        host: InstalledHost,
+        pin: Option<PathBuf>,
+    },
+    /// An install for a host ended, whichever way.
+    HostJavaInstallSettled(InstalledHost),
     /// How a creation shown as a pending card is getting on.
     CreationProgress {
         request_id: String,
@@ -2880,7 +2916,6 @@ fn run_worker(
             }
             Command::SaveInstanceRuntime {
                 instance,
-                java,
                 min_memory_mib,
                 max_memory_mib,
                 jvm_args,
@@ -2924,11 +2959,8 @@ fn run_worker(
                     max_memory_mib,
                     jvm_args,
                 };
-                let result = app.set_client_runtime_settings(
-                    instance,
-                    java.map(ephervex_model::JavaOverride::new),
-                    (!jvm.pins_nothing()).then_some(jvm),
-                );
+                let result =
+                    app.set_client_jvm_settings(instance, (!jvm.pins_nothing()).then_some(jvm));
                 match result {
                     Ok(committed) => {
                         let _ = events.send(Event::Toast {
@@ -5627,6 +5659,67 @@ fn run_worker(
                         send_snapshot(&mut app, &events);
                     }
                 }
+            }
+            Command::LoadHostJava { host, choices } => {
+                let inventory = Arc::clone(&java_inventory);
+                spawn_in_lane(
+                    &java_lane,
+                    app.paths().clone(),
+                    events.clone(),
+                    move |app, events, runtime| {
+                        let data = load_host_java(&app, &runtime, &inventory, host, choices);
+                        let _ = events.send(Event::HostJava(Box::new(data)));
+                    },
+                );
+            }
+            Command::CheckHostJavaPath { host, path } => {
+                let inventory = Arc::clone(&java_inventory);
+                spawn_in_lane(
+                    &java_lane,
+                    app.paths().clone(),
+                    events.clone(),
+                    move |app, events, runtime| {
+                        adopt_known_inventory(&app, &inventory);
+                        let result = runtime
+                            .block_on(app.evaluate_java_path(host, &path))
+                            .map(|choice| crate::java_view::choice_view(&choice))
+                            .map_err(|error| localized_error(&error));
+                        let _ = events.send(Event::HostJavaPathChecked { host, result });
+                    },
+                );
+            }
+            Command::InstallHostJava(host) => {
+                let inventory = Arc::clone(&java_inventory);
+                let reports = events.clone();
+                spawn_async_operation(
+                    app.paths().clone(),
+                    &events,
+                    Arc::clone(&cancellations),
+                    AsyncOperationRequest {
+                        title: "operation-installing-java",
+                        entity: host.id(),
+                        allow_cancel: true,
+                        dialogs: ModalScope::NONE,
+                        finished: Some(Event::HostJavaInstallSettled(host)),
+                    },
+                    move |app, reporter, cancel| async move {
+                        adopt_known_inventory(&app, &inventory);
+                        let installed = app.install_java_for_host(host, &reporter, &cancel).await?;
+                        remember_installed_runtime(&inventory, &installed.installation.runtime);
+                        let pin = match installed.follow_up {
+                            Some(DiagnosticFix::PinJava(path)) => Some(path),
+                            _ => None,
+                        };
+                        let _ = reports.send(Event::HostJavaInstalled { host, pin });
+                        Ok(OperationReport::Toast(lookup_args(
+                            "gui-java-installed",
+                            [(
+                                "version",
+                                Arg::from(installed.installation.runtime.version_string.as_str()),
+                            )],
+                        )))
+                    },
+                );
             }
             // Opening the page asks for the inventory, which is cached after
             // the first scan; the page's own button is what forces a rescan.
@@ -9559,17 +9652,12 @@ fn instance_runtime_data(app: &App, instance: InstanceId) -> CoreResult<Instance
     let number = |value: Option<u32>| value.map(|mib| mib.to_string()).unwrap_or_default();
     Ok(InstanceRuntimeData {
         instance: instance.to_string(),
-        java: record
-            .java_override
-            .as_ref()
-            .map(|java| java.path.display().to_string())
-            .unwrap_or_default(),
         min_memory: number(jvm.and_then(|jvm| jvm.min_memory_mib)),
         max_memory: number(jvm.and_then(|jvm| jvm.max_memory_mib)),
         jvm_args: jvm
             .map(|jvm| crate::jvm_arguments::render(&jvm.jvm_args))
             .unwrap_or_default(),
-        pinned: record.java_override.is_some() || jvm.is_some(),
+        pinned: jvm.is_some(),
         global: localized_values(
             "gui-instance-runtime-global",
             &format!("{} - {} MiB", global.min_memory_mib, global.max_memory_mib),
@@ -10378,6 +10466,68 @@ fn send_java_inventory(
             let _ = events.send(Event::JavaRuntimes(rows));
         }
         Err(error) => send_error(events, &error),
+    }
+}
+
+/// Hands an `App` the inventory the session already knows, so a short-lived
+/// one does not scan the machine again.
+fn adopt_known_inventory(app: &App, slot: &JavaInventorySlot) {
+    if let Some(known) = slot.lock().ok().and_then(|known| known.clone()) {
+        app.adopt_java_inventory(known);
+    }
+}
+
+/// Adds a runtime installed while the session's inventory may have been
+/// rescanned meanwhile, so the newer scan is kept and only gains the runtime.
+fn remember_installed_runtime(slot: &JavaInventorySlot, runtime: &ephervex_core::JavaRuntime) {
+    if let Ok(mut known) = slot.lock()
+        && let Some(inventory) = known.as_ref()
+    {
+        let mut updated = ephervex_core::RuntimeInventory::clone(inventory);
+        updated.remember(runtime.clone());
+        *known = Some(Arc::new(updated));
+    }
+}
+
+/// Keeps whatever inventory an `App` ended up holding for the session.
+fn remember_inventory(app: &App, slot: &JavaInventorySlot) {
+    if let (Some(inventory), Ok(mut known)) = (app.known_java_runtimes(), slot.lock()) {
+        *known = Some(inventory);
+    }
+}
+
+/// Reads a host's Java status, and its picker's entries when asked.
+fn load_host_java(
+    app: &App,
+    runtime: &tokio::runtime::Runtime,
+    inventory: &JavaInventorySlot,
+    host: InstalledHost,
+    choices: bool,
+) -> HostJavaData {
+    adopt_known_inventory(app, inventory);
+    let status = runtime
+        .block_on(app.host_java_status(host))
+        .map(|status| {
+            let unchecked = || match &status.check {
+                ephervex_core::JavaCheck::Failed(error) => localized_error(error),
+                _ => String::new(),
+            };
+            crate::java_view::status_view(&status, &unchecked)
+        })
+        .map_err(|error| localized_error(&error));
+    let choices = if choices {
+        runtime
+            .block_on(app.java_choices(host))
+            .ok()
+            .map(|choices| crate::java_view::choice_views(&choices))
+    } else {
+        None
+    };
+    remember_inventory(app, inventory);
+    HostJavaData {
+        host,
+        status,
+        choices,
     }
 }
 
@@ -12197,7 +12347,6 @@ mod tests {
 
         let runtime = instance_runtime_data(&app, client.id).expect("runtime data");
 
-        assert_eq!(runtime.java, "/opt/jdk-21/bin/java");
         assert_eq!(runtime.min_memory, "2048");
         assert_eq!(runtime.max_memory, "4096");
         assert_eq!(runtime.jvm_args, "");

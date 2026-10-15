@@ -125,6 +125,9 @@ fn the_pack_mod_opt_in_survives_leaving_its_tab() {
         record.borrow_mut().push((instance.to_string(), allow));
     });
 
+    // Tall enough that the opt-in, below the Java runtime section, lies
+    // inside the pane.
+    ui.window().set_size(PhysicalSize::new(1480, 2400));
     client_workspace(&ui);
     support::set_surface(&ui, 1, "Settings");
     settle(&ui);
