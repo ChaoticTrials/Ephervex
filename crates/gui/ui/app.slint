@@ -2,8 +2,8 @@
 // invokes, the navigation shell, its pages, and its modals.
 
 import { AboutSlint, ListView, Palette, ScrollView } from "std-widgets.slint";
-import { ChoiceBox, IndexComboBox, ValueComboBox } from "components/selection.slint";
-import { LoaderGlyph, ModArtwork } from "components/artwork.slint";
+import { ChoiceBox, IndexComboBox, LabeledChoice, ValueComboBox } from "components/selection.slint";
+import { HostIcon, LoaderGlyph, ModArtwork } from "components/artwork.slint";
 import {
     AppButton,
     BusySpinner,
@@ -50,6 +50,7 @@ import {
     ActivityRow,
     BlockedFileRow,
     DiskUsageRow,
+    GroupRow,
     HostView,
     ImpactRow,
     ImportDuplicateRow,
@@ -83,7 +84,7 @@ import { ImpactList, LinkedTargetsPanel, ModCard, RelationList } from "workspace
 import { SnapshotPanel } from "workspace/snapshots.slint";
 
 export { GuiI18n } from "globals.slint";
-export { NameRules, PropertyRules } from "globals.slint";
+export { HostIcons, NameRules, PropertyRules } from "globals.slint";
 export { BuiltInPalettes, ThemePalette } from "palettes.slint";
 export { Theme } from "theme.slint";
 export { WindowSizePreview } from "settings/minecraft-defaults.slint";
@@ -313,6 +314,42 @@ export component AppWindow inherits Window {
     in-out property <int> selected-global-server-index: -1;
     in-out property <string> instance-filter: "all";
     in-out property <string> instance-query;
+    // The instance list's other filters, as positions in the option lists
+    // the controller writes. Position 0 of each is "any".
+    in-out property <bool> instance-favorites-only: false;
+    in-out property <bool> instance-filters-open: false;
+    in-out property <[string]> instance-minecraft-options;
+    in-out property <int> instance-minecraft-index: 0;
+    in-out property <[string]> instance-loader-options;
+    in-out property <int> instance-loader-index: 0;
+    in-out property <[string]> instance-run-options;
+    in-out property <int> instance-run-index: 0;
+    in-out property <[string]> instance-linking-options;
+    in-out property <int> instance-linking-index: 0;
+    in-out property <[string]> instance-group-options;
+    in-out property <int> instance-group-index: 0;
+    in-out property <[string]> instance-sort-options;
+    in-out property <int> instance-sort-index: 0;
+    // Every group, and "no group" followed by their names for a group choice.
+    in-out property <[GroupRow]> instance-groups;
+    in-out property <[string]> instance-group-names;
+    // How many instances exist, and how many conditions narrow the list.
+    in-out property <int> instance-total: 0;
+    in-out property <int> instance-filters-active: 0;
+    in-out property <string> pane-host-query;
+    // How many of the filter panel's own choices are set.
+    private property <int> panel-filters: (root.instance-minecraft-index > 0 ? 1 : 0) + (root.instance-loader-index > 0 ? 1 : 0) + (root.instance-run-index > 0 ? 1 : 0) + (root.instance-linking-index > 0 ? 1 : 0) + (root.instance-group-index > 0 ? 1 : 0);
+    function clear-instance-filters() {
+        root.instance-filter = "all";
+        root.instance-query = "";
+        root.instance-favorites-only = false;
+        root.instance-minecraft-index = 0;
+        root.instance-loader-index = 0;
+        root.instance-run-index = 0;
+        root.instance-linking-index = 0;
+        root.instance-group-index = 0;
+        root.instance-view-changed();
+    }
     in-out property <string> server-query;
     // How many results one Search or one Load More aims to put on screen.
     // Not a provider page size: a provider is asked in pages of at most
@@ -580,6 +617,14 @@ export component AppWindow inherits Window {
     in-out property <int> operator-permission-level: 4;
 
     callback refresh();
+    callback instance-view-changed();
+    callback choose-instance-sort(int);
+    callback pane-host-query-changed();
+    callback set-favorite(string, string, bool);
+    callback set-client-group(string, string);
+    callback delete-group(string);
+    callback pick-host-icon(string, string);
+    callback clear-host-icon(string, string);
     callback request-version-catalog();
     callback warm-language-catalog(string);
     callback request-loader-catalog(string, string, string);
@@ -978,27 +1023,60 @@ export component AppWindow inherits Window {
                             padding: 24px; spacing: 18px;
                             HorizontalLayout {
                                 PageIntro { title: GuiI18n.text("gui-instances"); subtitle: GuiI18n.text("gui-instances-detail"); }
-                                BodyText { text: GuiI18n.count("gui-client-instances-count", root.instances.length); color: Theme.text-muted; }
+                                BodyText { text: root.instance-filters-active > 0 ? GuiI18n.values("gui-instances-shown-of-total", "" + root.instances.length, "" + root.instance-total) : GuiI18n.count("gui-client-instances-count", root.instances.length); color: Theme.text-muted; }
                             }
+                            // The layout's own padding is its inset, so the
+                            // card is exactly as tall as what it holds.
                             Rectangle {
-                                height: Theme.control-height + 20px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
-                                HorizontalLayout {
-                                    cross-axis-alignment: center;
-                                    padding-left: 10px; padding-right: 10px; spacing: 8px;
-                                    AppButton { text: GuiI18n.text("gui-all"); tone: root.instance-filter == "all" ? "primary" : "secondary"; min-width: 70px; clicked => { root.instance-filter = "all"; root.refresh(); } }
-                                    AppButton { text: GuiI18n.text("gui-temporary"); tone: root.instance-filter == "temporary" ? "primary" : "secondary"; clicked => { root.instance-filter = "temporary"; root.refresh(); } }
-                                    AppButton { text: GuiI18n.text("gui-persistent"); tone: root.instance-filter == "persistent" ? "primary" : "secondary"; clicked => { root.instance-filter = "persistent"; root.refresh(); } }
-                                    Rectangle { horizontal-stretch: 1; }
-                                    TextField { text <=> root.instance-query; placeholder: GuiI18n.text("gui-filter-instances"); input-type: InputType.search; width: 290px; accepted => { root.refresh(); } }
+                                height: filter-bar.preferred-height; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
+                                filter-bar := VerticalLayout {
+                                    padding: 10px; spacing: 12px;
+                                    HorizontalLayout {
+                                        cross-axis-alignment: center; spacing: 8px;
+                                        AppButton { text: GuiI18n.text("gui-all"); tone: root.instance-filter == "all" ? "primary" : "secondary"; min-width: 70px; clicked => { root.instance-filter = "all"; root.instance-view-changed(); } }
+                                        AppButton { text: GuiI18n.text("gui-temporary"); tone: root.instance-filter == "temporary" ? "primary" : "secondary"; clicked => { root.instance-filter = "temporary"; root.instance-view-changed(); } }
+                                        AppButton { text: GuiI18n.text("gui-persistent"); tone: root.instance-filter == "persistent" ? "primary" : "secondary"; clicked => { root.instance-filter = "persistent"; root.instance-view-changed(); } }
+                                        // Favorites narrows whichever of the three is
+                                        // chosen, so it stands apart from them.
+                                        Rectangle { width: 1px; height: Theme.control-height - 12px; background: Theme.border; }
+                                        AppButton { text: GuiI18n.text("gui-favorites"); accessible-name: GuiI18n.text("gui-favorites-only"); tone: root.instance-favorites-only ? "primary" : "secondary"; clicked => { root.instance-favorites-only = !root.instance-favorites-only; root.instance-view-changed(); } }
+                                        Rectangle { horizontal-stretch: 1; }
+                                        if root.instance-filters-active > 0 : AppButton { text: GuiI18n.text("gui-clear-filters"); clicked => { root.clear-instance-filters(); } }
+                                        AppButton { text: GuiI18n.text("gui-groups"); clicked => { root.modal-error = ""; root.modal = "groups"; } }
+                                        AppButton { text: root.panel-filters > 0 ? GuiI18n.value("gui-more-filters-active", "" + root.panel-filters) : GuiI18n.text("gui-more-filters"); tone: root.instance-filters-open || root.panel-filters > 0 ? "primary" : "secondary"; clicked => { root.instance-filters-open = !root.instance-filters-open; } }
+                                        TextField { text <=> root.instance-query; placeholder: GuiI18n.text("gui-filter-instances"); input-type: InputType.search; width: 240px; edited(text) => { root.instance-view-changed(); } accepted => { root.instance-view-changed(); } }
+                                    }
+                                    // Two rows of three equal columns, each named
+                                    // above its choice, so what narrows the list and
+                                    // what orders it read as separate settings.
+                                    if root.instance-filters-open : GridLayout {
+                                        spacing-horizontal: 12px; spacing-vertical: 12px;
+                                        Row {
+                                            LabeledChoice { caption: GuiI18n.text("gui-minecraft-version"); label: GuiI18n.text("gui-filter-minecraft-version"); model: root.instance-minecraft-options; index: root.instance-minecraft-index; selected(index) => { root.instance-minecraft-index = index; root.instance-view-changed(); } }
+                                            LabeledChoice { caption: GuiI18n.text("gui-loader"); label: GuiI18n.text("gui-filter-loader"); model: root.instance-loader-options; index: root.instance-loader-index; selected(index) => { root.instance-loader-index = index; root.instance-view-changed(); } }
+                                            LabeledChoice { caption: GuiI18n.text("gui-running-state"); label: GuiI18n.text("gui-filter-run-state"); model: root.instance-run-options; index: root.instance-run-index; selected(index) => { root.instance-run-index = index; root.instance-view-changed(); } }
+                                        }
+                                        Row {
+                                            LabeledChoice { caption: GuiI18n.text("gui-linked-servers"); label: GuiI18n.text("gui-filter-linking"); model: root.instance-linking-options; index: root.instance-linking-index; selected(index) => { root.instance-linking-index = index; root.instance-view-changed(); } }
+                                            LabeledChoice { caption: GuiI18n.text("gui-group"); label: GuiI18n.text("gui-filter-group"); model: root.instance-group-options; index: root.instance-group-index; selected(index) => { root.instance-group-index = index; root.instance-view-changed(); } }
+                                            LabeledChoice { caption: GuiI18n.text("gui-sort-caption"); label: GuiI18n.text("gui-sort-by"); model: root.instance-sort-options; index: root.instance-sort-index; selected(index) => { root.instance-sort-index = index; root.choose-instance-sort(index); } }
+                                        }
+                                    }
                                 }
                             }
                             if root.loading && root.startup-error == "" : VerticalLayout { alignment: center; BusySpinner { width: 38px; height: 38px; } BodyText { text: GuiI18n.text("gui-loading-instances"); horizontal-alignment: center; } }
-                            if !root.loading && root.startup-error == "" && root.instances.length == 0 && root.pending-instances.length == 0 : EmptyState {
+                            if !root.loading && root.startup-error == "" && root.instance-total == 0 && root.instances.length == 0 && root.pending-instances.length == 0 : EmptyState {
                                 title: GuiI18n.text("gui-no-client-instances");
                                 message: GuiI18n.text("gui-no-client-instances-detail");
                                 primary-text: GuiI18n.text("gui-modal-new-instance"); secondary-text: GuiI18n.text("gui-import-modpack");
                                 primary => { root.open-create-instance-modal(); }
                                 secondary => { root.open-import-modal(); }
+                            }
+                            if !root.loading && root.startup-error == "" && root.instance-total > 0 && root.instances.length == 0 && root.pending-instances.length == 0 : EmptyState {
+                                title: GuiI18n.text("gui-no-matching-instances");
+                                message: GuiI18n.text("gui-no-matching-instances-detail");
+                                primary-text: GuiI18n.text("gui-clear-filters");
+                                primary => { root.clear-instance-filters(); }
                             }
                             if !root.loading && (root.instances.length > 0 || root.pending-instances.length > 0) : instance-scroll := ScrollView {
                                 viewport-width: self.width;
@@ -1017,9 +1095,14 @@ export component AppWindow inherits Window {
                                     spacing: Theme.card-gap;
                                     for pending in root.pending-instances : PendingCard { item: pending; }
                                     for item[index] in root.instances : VerticalLayout {
-                                    visible: root.instance-filter == "all" || item.storage-kind == root.instance-filter;
                                     InstanceCard {
                                         item: item;
+                                        groups: root.instance-groups;
+                                        toggle-favorite(id, favorite) => { root.set-favorite("client", id, favorite); }
+                                        set-group(id, group) => { root.set-client-group(id, group); }
+                                        new-group(id) => { root.pending-action-kind = "new-group"; root.pending-action-id = id; root.pending-rename-text = ""; root.modal-error = ""; root.modal = "rename"; }
+                                        pick-icon(id) => { root.pick-host-icon("client", id); }
+                                        clear-icon(id) => { root.clear-host-icon("client", id); }
                                         selected: item.id == root.selected-instance-id;
                                         choose(id) => { root.selected-instance-id = id; root.select-instance(id); }
                                         launch(id) => { root.launch-client(id); }
@@ -1041,6 +1124,13 @@ export component AppWindow inherits Window {
                         width: 360px;
                         has-selection: root.selected-instance-index >= 0;
                         item: root.selected-instance-index >= 0 ? root.instances[root.selected-instance-index] : {};
+                        groups: root.instance-groups;
+                        group-names: root.instance-group-names;
+                        toggle-favorite(id, favorite) => { root.set-favorite("client", id, favorite); }
+                        set-group(id, group) => { root.set-client-group(id, group); }
+                        manage-groups => { root.modal-error = ""; root.modal = "groups"; }
+                        pick-icon(id) => { root.pick-host-icon("client", id); }
+                        clear-icon(id) => { root.clear-host-icon("client", id); }
                         accounts: root.accounts;
                         launch(id) => { root.launch-client(id); }
                         launch-as(id, account, alongside) => { root.launch-client-as(id, account, alongside); }
@@ -1066,7 +1156,7 @@ export component AppWindow inherits Window {
                                 TextField { text <=> root.server-query; placeholder: GuiI18n.text("gui-filter-servers"); input-type: InputType.search; width: 290px; accepted => { root.refresh(); } }
                             }
                             if root.global-servers.length == 0 && root.pending-servers.length == 0 : EmptyState { icon: @image-url("../../../assets/icons/nav-servers.svg"); title: GuiI18n.text("gui-no-servers"); message: GuiI18n.text("gui-no-standalone-servers-detail"); primary-text: GuiI18n.text("gui-modal-new-server"); primary => { root.create-server-client-id = ""; root.create-server-name = ""; root.recompute-create-server-name(); root.modal-error = ""; root.request-version-catalog(); root.warm-language-catalog(root.create-server-minecraft); root.create-server-pack = ""; root.create-server-pack-name = ""; root.modal = "create-server"; } }
-                            if root.global-servers.length > 0 || root.pending-servers.length > 0 : ScrollView { viewport-width: self.width; VerticalLayout { spacing: 12px; for pending in root.pending-servers : PendingCard { item: pending; } for item[index] in root.global-servers : ServerCard { item: item; selected: item.id == root.selected-global-server-id; choose(id) => { root.selected-global-server-id = id; root.selected-global-server-index = index; root.select-server(id); } primary(id) => { if item.can-start { root.server-start(id); } else { root.server-stop(id); } } open-workspace(id) => { root.selected-global-server-id = id; root.selected-global-server-index = index; root.select-server(id); root.open-workspace("server", id, "Overview"); } open-folder(id) => { root.open-server-folder(id); } restart(id) => { root.server-restart(id); } kill(id, name) => { root.pending-action-id = id; root.pending-action-name = name; root.modal = "kill"; } rename(id, name) => { root.pending-action-kind = "server"; root.pending-action-id = id; root.pending-rename-text = name; root.modal-error = ""; root.modal = "rename"; } delete(id, name) => { root.pending-action-id = id; root.pending-action-name = name; root.pending-snapshot-deletion-note = item.snapshot-deletion-note; root.modal-error = ""; root.modal = "delete-server"; } } } }
+                            if root.global-servers.length > 0 || root.pending-servers.length > 0 : ScrollView { viewport-width: self.width; VerticalLayout { spacing: 12px; for pending in root.pending-servers : PendingCard { item: pending; } for item[index] in root.global-servers : ServerCard { item: item; toggle-favorite(id, favorite) => { root.set-favorite("server", id, favorite); } pick-icon(id) => { root.pick-host-icon("server", id); } clear-icon(id) => { root.clear-host-icon("server", id); } selected: item.id == root.selected-global-server-id; choose(id) => { root.selected-global-server-id = id; root.selected-global-server-index = index; root.select-server(id); } primary(id) => { if item.can-start { root.server-start(id); } else { root.server-stop(id); } } open-workspace(id) => { root.selected-global-server-id = id; root.selected-global-server-index = index; root.select-server(id); root.open-workspace("server", id, "Overview"); } open-folder(id) => { root.open-server-folder(id); } restart(id) => { root.server-restart(id); } kill(id, name) => { root.pending-action-id = id; root.pending-action-name = name; root.modal = "kill"; } rename(id, name) => { root.pending-action-kind = "server"; root.pending-action-id = id; root.pending-rename-text = name; root.modal-error = ""; root.modal = "rename"; } delete(id, name) => { root.pending-action-id = id; root.pending-action-name = name; root.pending-snapshot-deletion-note = item.snapshot-deletion-note; root.modal-error = ""; root.modal = "delete-server"; } } } }
                         }
                     }
                     if root.show-inspector && root.selected-global-server-index >= 0 : Rectangle { width: 360px; background: Theme.surface; border-width: 1px; border-color: Theme.border;
@@ -1074,7 +1164,7 @@ export component AppWindow inherits Window {
                         if root.selected-global-server-index >= 0 : VerticalLayout { alignment: start; padding: 22px; spacing: 12px;
                             HorizontalLayout {
                                 spacing: 12px;
-                                LoaderGlyph { kind: root.global-servers[root.selected-global-server-index].loader-kind; server: true; }
+                                HostIcon { slot: root.global-servers[root.selected-global-server-index].icon-slot; kind: root.global-servers[root.selected-global-server-index].loader-kind; server: true; }
                                 VerticalLayout { spacing: 4px;
                                     Heading { text: root.global-servers[root.selected-global-server-index].name; }
                                     Pill { text: root.global-servers[root.selected-global-server-index].state; tone-color: root.global-servers[root.selected-global-server-index].state-kind == "running" ? Theme.success : Theme.text-secondary; }
@@ -1154,7 +1244,7 @@ export component AppWindow inherits Window {
                                 java-tone-label: host.java-tone-label;
                                 java-origin: host.java-origin;
                                 open-java => { root.show-pane-surface(pane.id, self.is-client ? "Settings" : "Properties"); }
-                                choose-host => { root.pane-host-picker-pane = pane.id; root.pane-host-picker-kind = host.kind; root.pane-host-picker-id = host.id; root.modal = "pane-host"; }
+                                choose-host => { root.pane-host-picker-pane = pane.id; root.pane-host-picker-kind = host.kind; root.pane-host-picker-id = host.id; root.pane-host-query = ""; root.pane-host-query-changed(); root.modal = "pane-host"; }
                                 split-beside => { root.split-pane-beside(pane.id); }
                                 split-below => { root.split-pane-below(pane.id); }
                                 close-pane => { root.close-pane(pane.id); }
@@ -1225,7 +1315,7 @@ export component AppWindow inherits Window {
                                         Heading { text: GuiI18n.text("gui-reproduction-environment"); overflow: elide; }
                                         BodyText { text: GuiI18n.text("gui-reproduction-environment-detail"); wrap: word-wrap; }
                                         Rectangle { border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
-                                            HorizontalLayout { padding: 18px; spacing: 18px; LoaderGlyph { kind: host.client.loader-kind; } VerticalLayout { horizontal-stretch: 1; Heading { text: host.client.name; overflow: elide; } BodyText { text: GuiI18n.values("gui-target-summary", host.client.minecraft, host.client.loader); overflow: elide; } BodyText { text: host.client.storage + " | " + host.client.source; overflow: elide; } BodyText { text: host.client.path; color: Theme.text-muted; overflow: elide; } if host.client.paired-server-id != "" : BodyText { text: GuiI18n.value("gui-paired-with-host", host.client.paired-server-name); color: Theme.accent; overflow: elide; } } if host.client.paired-server-id != "" && !host.pair-shown : VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-pair-show-beside"); enabled: host.pair-room; hint: host.pair-room ? "" : GuiI18n.text("gui-pair-no-room"); clicked => { root.show-linked-pair(pane.id, "server", host.client.paired-server-id); } } } }
+                                            HorizontalLayout { padding: 18px; spacing: 18px; HostIcon { slot: host.client.icon-slot; kind: host.client.loader-kind; } VerticalLayout { horizontal-stretch: 1; Heading { text: host.client.name; overflow: elide; } BodyText { text: GuiI18n.values("gui-target-summary", host.client.minecraft, host.client.loader); overflow: elide; } BodyText { text: host.client.storage + " | " + host.client.source; overflow: elide; } BodyText { text: host.client.path; color: Theme.text-muted; overflow: elide; } if host.client.paired-server-id != "" : BodyText { text: GuiI18n.value("gui-paired-with-host", host.client.paired-server-name); color: Theme.accent; overflow: elide; } } if host.client.paired-server-id != "" && !host.pair-shown : VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-pair-show-beside"); enabled: host.pair-room; hint: host.pair-room ? "" : GuiI18n.text("gui-pair-no-room"); clicked => { root.show-linked-pair(pane.id, "server", host.client.paired-server-id); } } } }
                                         }
                                         if !client-overview.narrow : HorizontalLayout { spacing: 10px;
                                             if host.client.loader-kind != "vanilla" : BodyText { text: GuiI18n.value("gui-loader-change-summary", host.client.loader); color: Theme.text-secondary; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
@@ -2074,15 +2164,15 @@ export component AppWindow inherits Window {
         TouchArea { clicked => { } }
         Rectangle {
             width: root.modal == "license" || root.modal == "third-party" ? min(820px, parent.width - 80px) : root.modal == "mod-plan" || root.modal == "mod-apply" || root.modal == "mod-remove" || root.modal == "mod-result" || root.modal == "mod-manage" || root.modal == "mod-acquire" ? min(720px, parent.width - 80px) : min(620px, parent.width - 80px);
-            height: root.modal == "license" || root.modal == "third-party" ? min(720px, parent.height - 80px) : root.modal == "import" || root.modal == "pane-host" ? min(620px, parent.height - 80px) : root.modal == "mod-plan" ? min(500px * Theme.text-scale + root.linked-targets.length * 68px + 14px + root.mod-plan-extra, parent.height - 80px) : root.modal == "mod-manage" ? min(620px, parent.height - 80px) : root.modal == "mod-acquire" ? min(260px * Theme.text-scale + root.mod-acquisition-items.length * 64px, parent.height - 80px) : root.modal == "mod-apply" ? min(370px * Theme.text-scale + root.linked-targets.length * 68px + 14px, parent.height - 80px) : root.modal == "mod-result" ? min(300px * Theme.text-scale + root.linked-results.length * 68px + 14px, parent.height - 80px) : root.modal == "loader-change" ? 400px : root.modal == "mod-remove" ? min((root.linked-targets.length > 0 ? 424px : 300px) * Theme.text-scale + root.mod-removal-dependencies.length * 24px + root.linked-targets.length * 68px, parent.height - 80px) : root.modal == "eula" ? 440px : root.modal == "kill" ? 300px : root.modal == "delete-instance" || root.modal == "delete-server" ? 330px : root.modal == "rename" ? 300px : root.modal == "snapshot-create" || root.modal == "snapshot-restore" || root.modal == "snapshot-rename" || root.modal == "snapshot-delete" ? 330px : root.modal == "mod-impact" ? min(300px * Theme.text-scale + (root.mod-impact-breaks.length + root.mod-impact-degrades.length + root.mod-impact-unknown.length + root.mod-impact-unidentifiable.length + root.mod-requires-disabled.length + root.mod-requires-absent.length + root.mod-requires-incompatible.length) * 24px, parent.height - 80px) : root.modal == "delete-mod" ? 320px : root.modal == "remove-java-runtime" ? (root.pending-java-pinning == "" && root.pending-java-pins-known ? 320px : 320px + 66px * Theme.text-scale) : root.modal == "mod-clash" ? 380px : root.modal == "absent-mods" ? min(250px + root.absent-mods.length * 22px, parent.height - 80px) : root.modal == "make-persistent" ? min(290px + root.promote-servers.length * 28px, parent.height - 80px) : root.modal == "open-pack-link" ? 300px : root.modal == "theme-problems" ? min(260px * Theme.text-scale + root.theme-problems.length * 44px, parent.height - 80px) : root.modal == "create-server" ? min((root.create-server-client-id == "" ? 640px : 535px) + (root.create-server-client-id == "" && root.create-server-loader != "Vanilla" ? 44px : 0px), parent.height - 80px) : 570px;
+            height: root.modal == "license" || root.modal == "third-party" ? min(720px, parent.height - 80px) : root.modal == "import" || root.modal == "pane-host" ? min(620px, parent.height - 80px) : root.modal == "mod-plan" ? min(500px * Theme.text-scale + root.linked-targets.length * 68px + 14px + root.mod-plan-extra, parent.height - 80px) : root.modal == "mod-manage" ? min(620px, parent.height - 80px) : root.modal == "mod-acquire" ? min(260px * Theme.text-scale + root.mod-acquisition-items.length * 64px, parent.height - 80px) : root.modal == "mod-apply" ? min(370px * Theme.text-scale + root.linked-targets.length * 68px + 14px, parent.height - 80px) : root.modal == "mod-result" ? min(300px * Theme.text-scale + root.linked-results.length * 68px + 14px, parent.height - 80px) : root.modal == "loader-change" ? 400px : root.modal == "mod-remove" ? min((root.linked-targets.length > 0 ? 424px : 300px) * Theme.text-scale + root.mod-removal-dependencies.length * 24px + root.linked-targets.length * 68px, parent.height - 80px) : root.modal == "eula" ? 440px : root.modal == "kill" ? 300px : root.modal == "delete-instance" || root.modal == "delete-server" ? 330px : root.modal == "groups" ? min(420px, parent.height - 80px) : root.modal == "rename" ? min(modal-body.preferred-height, parent.height - 80px) : root.modal == "snapshot-create" || root.modal == "snapshot-restore" || root.modal == "snapshot-rename" || root.modal == "snapshot-delete" ? 330px : root.modal == "mod-impact" ? min(300px * Theme.text-scale + (root.mod-impact-breaks.length + root.mod-impact-degrades.length + root.mod-impact-unknown.length + root.mod-impact-unidentifiable.length + root.mod-requires-disabled.length + root.mod-requires-absent.length + root.mod-requires-incompatible.length) * 24px, parent.height - 80px) : root.modal == "delete-mod" ? 320px : root.modal == "remove-java-runtime" ? (root.pending-java-pinning == "" && root.pending-java-pins-known ? 320px : 320px + 66px * Theme.text-scale) : root.modal == "mod-clash" ? 380px : root.modal == "absent-mods" ? min(250px + root.absent-mods.length * 22px, parent.height - 80px) : root.modal == "make-persistent" ? min(290px + root.promote-servers.length * 28px, parent.height - 80px) : root.modal == "open-pack-link" ? 300px : root.modal == "theme-problems" ? min(260px * Theme.text-scale + root.theme-problems.length * 44px, parent.height - 80px) : root.modal == "create-server" ? min((root.create-server-client-id == "" ? 640px : 535px) + (root.create-server-client-id == "" && root.create-server-loader != "Vanilla" ? 44px : 0px), parent.height - 80px) : 570px;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             border-radius: 8px;
             border-width: 1px;
             border-color: Theme.border;
             background: Theme.elevated;
-            VerticalLayout { padding: 22px; spacing: 13px;
-                HorizontalLayout { cross-axis-alignment: center; Heading { text: root.modal == "pane-host" ? GuiI18n.text("gui-modal-pane-host") : root.modal == "create-instance" ? GuiI18n.text("gui-modal-new-instance") : root.modal == "import" ? GuiI18n.text("gui-modal-import") : root.modal == "create-server" ? GuiI18n.text("gui-modal-new-server") : root.modal == "mod-plan" ? GuiI18n.text("gui-modal-install-mod") : root.modal == "mod-manage" ? GuiI18n.text("gui-modal-manage-mod") : root.modal == "mod-acquire" ? GuiI18n.text("gui-modal-mod-acquire") : root.modal == "loader-change" ? GuiI18n.text("gui-modal-change-loader") : root.modal == "mod-remove" ? GuiI18n.text("gui-modal-remove-mod") : root.modal == "mod-apply" ? GuiI18n.text("gui-modal-apply-mod") : root.modal == "mod-result" ? GuiI18n.text("gui-modal-mod-result") : root.modal == "eula" ? GuiI18n.text("gui-server-eula") : root.modal == "kill" ? GuiI18n.text("gui-modal-force-kill") : root.modal == "delete-instance" ? GuiI18n.text("gui-delete-instance") : root.modal == "delete-server" ? GuiI18n.text("gui-delete-server") : root.modal == "rename" ? GuiI18n.text("gui-modal-rename") : root.modal == "snapshot-create" ? GuiI18n.text("gui-snapshot-create") : root.modal == "snapshot-restore" ? GuiI18n.text("gui-snapshot-restore") : root.modal == "snapshot-rename" ? GuiI18n.text("gui-snapshot-rename") : root.modal == "snapshot-delete" ? GuiI18n.text("gui-snapshot-delete") : root.modal == "mod-impact" ? GuiI18n.value(root.mod-impact-enabling ? "gui-mod-impact-enable-title" : "gui-mod-impact-disable-title", root.mod-impact-name) : root.modal == "delete-mod" ? GuiI18n.text("gui-modal-delete-mod") : root.modal == "remove-java-runtime" ? GuiI18n.text("gui-java-remove-runtime-title") : root.modal == "mod-clash" ? GuiI18n.text("gui-modal-mod-clash") : root.modal == "absent-mods" ? GuiI18n.text("gui-modal-absent-mods") : root.modal == "make-persistent" ? GuiI18n.text("gui-make-persistent") : root.modal == "open-pack-link" ? GuiI18n.text("gui-open-pack-link") : root.modal == "theme-problems" ? GuiI18n.text("gui-modal-theme-problems") : root.modal == "license" ? GuiI18n.text("gui-modal-apache-license") : root.third-party-open >= 0 ? root.third-party-packages[root.third-party-open].name + " " + root.third-party-packages[root.third-party-open].version + " | " + root.third-party-packages[root.third-party-open].license : GuiI18n.text("gui-third-party-licenses"); font-size: Theme.brand-size; } Rectangle { horizontal-stretch: 1; } IconButton { icon: @image-url("../../../assets/icons/close.svg"); accessible-name: GuiI18n.text("gui-close"); clicked => { if root.modal == "import" { root.close-import-modal(); } else { if root.modal == "mod-plan" { root.abandon-browser-install(); } if root.modal == "mod-acquire" { root.cancel-mod-acquisition(root.mod-acquisition-id); } if root.modal == "open-pack-link" { root.cancel-pack-link(); } root.modal = ""; root.modal-error = ""; } } } }
+            modal-body := VerticalLayout { padding: 22px; spacing: 13px;
+                HorizontalLayout { cross-axis-alignment: center; Heading { text: root.modal == "pane-host" ? GuiI18n.text("gui-modal-pane-host") : root.modal == "create-instance" ? GuiI18n.text("gui-modal-new-instance") : root.modal == "import" ? GuiI18n.text("gui-modal-import") : root.modal == "create-server" ? GuiI18n.text("gui-modal-new-server") : root.modal == "mod-plan" ? GuiI18n.text("gui-modal-install-mod") : root.modal == "mod-manage" ? GuiI18n.text("gui-modal-manage-mod") : root.modal == "mod-acquire" ? GuiI18n.text("gui-modal-mod-acquire") : root.modal == "loader-change" ? GuiI18n.text("gui-modal-change-loader") : root.modal == "mod-remove" ? GuiI18n.text("gui-modal-remove-mod") : root.modal == "mod-apply" ? GuiI18n.text("gui-modal-apply-mod") : root.modal == "mod-result" ? GuiI18n.text("gui-modal-mod-result") : root.modal == "eula" ? GuiI18n.text("gui-server-eula") : root.modal == "kill" ? GuiI18n.text("gui-modal-force-kill") : root.modal == "delete-instance" ? GuiI18n.text("gui-delete-instance") : root.modal == "delete-server" ? GuiI18n.text("gui-delete-server") : root.modal == "groups" ? GuiI18n.text("gui-modal-groups") : root.modal == "rename" ? (root.pending-action-kind == "new-group" ? GuiI18n.text("gui-modal-new-group") : GuiI18n.text("gui-modal-rename")) : root.modal == "snapshot-create" ? GuiI18n.text("gui-snapshot-create") : root.modal == "snapshot-restore" ? GuiI18n.text("gui-snapshot-restore") : root.modal == "snapshot-rename" ? GuiI18n.text("gui-snapshot-rename") : root.modal == "snapshot-delete" ? GuiI18n.text("gui-snapshot-delete") : root.modal == "mod-impact" ? GuiI18n.value(root.mod-impact-enabling ? "gui-mod-impact-enable-title" : "gui-mod-impact-disable-title", root.mod-impact-name) : root.modal == "delete-mod" ? GuiI18n.text("gui-modal-delete-mod") : root.modal == "remove-java-runtime" ? GuiI18n.text("gui-java-remove-runtime-title") : root.modal == "mod-clash" ? GuiI18n.text("gui-modal-mod-clash") : root.modal == "absent-mods" ? GuiI18n.text("gui-modal-absent-mods") : root.modal == "make-persistent" ? GuiI18n.text("gui-make-persistent") : root.modal == "open-pack-link" ? GuiI18n.text("gui-open-pack-link") : root.modal == "theme-problems" ? GuiI18n.text("gui-modal-theme-problems") : root.modal == "license" ? GuiI18n.text("gui-modal-apache-license") : root.third-party-open >= 0 ? root.third-party-packages[root.third-party-open].name + " " + root.third-party-packages[root.third-party-open].version + " | " + root.third-party-packages[root.third-party-open].license : GuiI18n.text("gui-third-party-licenses"); font-size: Theme.brand-size; } Rectangle { horizontal-stretch: 1; } IconButton { icon: @image-url("../../../assets/icons/close.svg"); accessible-name: GuiI18n.text("gui-close"); clicked => { if root.modal == "import" { root.close-import-modal(); } else { if root.modal == "mod-plan" { root.abandon-browser-install(); } if root.modal == "mod-acquire" { root.cancel-mod-acquisition(root.mod-acquisition-id); } if root.modal == "open-pack-link" { root.cancel-pack-link(); } root.modal = ""; root.modal-error = ""; } } } }
                 Divider { }
                 if root.modal == "create-instance" : VerticalLayout { spacing: 11px; BodyText { text: GuiI18n.text("gui-create-instance-detail"); wrap: word-wrap; } Text { text: GuiI18n.text("gui-name"); color: Theme.text-secondary; font-size: Theme.label-size; } TextField { text <=> root.create-name; placeholder: root.create-name-suggestion; accessible-name: GuiI18n.text("gui-name"); } Text { text: GuiI18n.text("gui-minecraft-release"); color: Theme.text-secondary; font-size: Theme.label-size; } HorizontalLayout { spacing: 8px; ValueComboBox { horizontal-stretch: 1; label: GuiI18n.text("gui-minecraft-release"); model: root.minecraft-releases; value: root.create-minecraft; selected(value) => { root.create-minecraft = value; root.create-loader-version = ""; root.create-loader-versions = []; root.minecraft-selection-changed("client", value); if root.create-loader != "Vanilla" { root.request-loader-catalog("client", root.create-loader, value); } root.recompute-create-name(); } } FavoriteToggle { version: root.create-minecraft; favorite: root.create-minecraft-favorite; enabled: root.create-minecraft != ""; hint: GuiI18n.text("gui-hint-choose-minecraft-release"); toggled => { root.toggle-favorite-version(root.create-minecraft); } } } Text { text: GuiI18n.text("gui-loader"); color: Theme.text-secondary; font-size: Theme.label-size; } ValueComboBox { label: GuiI18n.text("gui-loader"); model: root.create-loaders; value: root.create-loader; selected(value) => { root.create-loader = value; root.create-loader-version = ""; root.create-loader-versions = []; if value != "Vanilla" { root.request-loader-catalog("client", value, root.create-minecraft); } root.recompute-create-name(); } } if root.create-loader != "Vanilla" : ValueComboBox { label: GuiI18n.text("gui-loader-version-placeholder"); model: root.create-loader-versions; value: root.create-loader-version; selected(value) => { root.create-loader-version = value; } changed value => { root.recompute-create-name(); } } HorizontalLayout { BodyText { text: GuiI18n.text("gui-store-persistently"); } Toggle { checked <=> root.create-persistent; } BodyText { text: root.create-persistent ? GuiI18n.text("gui-persistent-root") : GuiI18n.text("gui-temporary-root"); color: Theme.text-muted; } } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-create-instance"); tone: "primary"; enabled: root.minecraft-releases.length > 0 && (root.create-name != "" || root.create-name-suggestion != "") && root.create-minecraft != "" && (root.create-loader == "Vanilla" || root.create-loader-version != ""); hint: root.minecraft-releases.length == 0 ? GuiI18n.text("gui-hint-minecraft-list-unavailable") : root.create-minecraft == "" ? GuiI18n.text("gui-hint-choose-minecraft-release") : root.create-name == "" && root.create-name-suggestion == "" ? GuiI18n.text("gui-hint-enter-name") : GuiI18n.text("gui-hint-choose-loader-version"); clicked => { root.submit-create-instance(root.create-name != "" ? root.create-name : root.create-name-suggestion, root.create-minecraft, root.create-loader, root.create-loader-version, root.create-persistent); } } } }
                 if root.modal == "import" : ScrollView {
@@ -2503,7 +2593,28 @@ export component AppWindow inherits Window {
                 }
                 if root.modal == "eula" : VerticalLayout { spacing: 12px; BodyText { text: GuiI18n.text("gui-eula-detail"); wrap: word-wrap; } AppButton { text: GuiI18n.text("gui-open-minecraft-eula"); clicked => { root.open-eula-reference(); } } Rectangle { height: 70px; border-radius: 6px; border-width: 1px; border-color: root.eula-accepted ? Theme.success : Theme.warning; background: Theme.surface; BodyText { x: 12px; width: parent.width - 24px; text: root.eula-status; wrap: word-wrap; } } if !root.eula-accepted : BodyText { text: GuiI18n.text("gui-eula-confirm"); color: Theme.text; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } if root.eula-accepted : AppButton { text: GuiI18n.text("gui-revoke-consent"); tone: "danger"; clicked => { root.revoke-eula(); } } if !root.eula-accepted : AppButton { text: GuiI18n.text("gui-accept-eula"); tone: "primary"; clicked => { root.accept-eula(); } } } }
                 if root.modal == "kill" : VerticalLayout { spacing: 14px; BodyText { text: GuiI18n.value("gui-force-kill-detail", root.pending-action-name != "" ? root.pending-action-name : GuiI18n.text("gui-this-server")); color: Theme.warning; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-force-kill-action"); tone: "danger"; clicked => { root.server-kill(root.pending-action-id); root.modal = ""; } } } }
-                if root.modal == "rename" : VerticalLayout { spacing: 14px; BodyText { text: GuiI18n.text("gui-rename-detail"); wrap: word-wrap; } Text { text: GuiI18n.text("gui-name"); color: Theme.text-secondary; font-size: Theme.label-size; } TextField { text <=> root.pending-rename-text; accessible-name: GuiI18n.text("gui-name"); accepted => { root.rename-entity(root.pending-action-kind, root.pending-action-id, root.pending-rename-text); } } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; root.modal-error = ""; } } AppButton { text: GuiI18n.text("gui-rename"); tone: "primary"; enabled: root.pending-rename-text != ""; hint: GuiI18n.text("gui-hint-enter-name"); clicked => { root.rename-entity(root.pending-action-kind, root.pending-action-id, root.pending-rename-text); } } } }
+                if root.modal == "groups" : VerticalLayout { spacing: 12px;
+                    BodyText { text: GuiI18n.text("gui-groups-detail"); wrap: word-wrap; }
+                    if root.instance-groups.length == 0 : BodyText { text: GuiI18n.text("gui-groups-none"); color: Theme.text-muted; wrap: word-wrap; }
+                    ScrollView {
+                        viewport-width: self.visible-width;
+                        VerticalLayout {
+                            alignment: start; spacing: 8px;
+                            for group in root.instance-groups : Rectangle {
+                                height: 56px; border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
+                                HorizontalLayout {
+                                    padding: 8px; padding-left: 12px; spacing: 8px;
+                                    VerticalLayout { alignment: center; Rectangle { width: 10px; height: 10px; border-radius: 5px; background: Theme.group-tone(group.tone); } }
+                                    VerticalLayout { horizontal-stretch: 1; alignment: center; Text { text: group.name; color: Theme.text; font-size: Theme.body-size; font-weight: 600; overflow: elide; } BodyText { text: GuiI18n.count("gui-group-members-count", group.members); color: Theme.text-muted; } }
+                                    VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-rename"); clicked => { root.pending-action-kind = "group"; root.pending-action-id = group.id; root.pending-rename-text = group.name; root.modal-error = ""; root.modal = "rename"; } } }
+                                    VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-delete-group"); tone: "danger"; clicked => { root.delete-group(group.id); } } }
+                                }
+                            }
+                        }
+                    }
+                    ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-new-group"); clicked => { root.pending-action-kind = "new-group"; root.pending-action-id = ""; root.pending-rename-text = ""; root.modal-error = ""; root.modal = "rename"; } } AppButton { text: GuiI18n.text("gui-close"); tone: "primary"; clicked => { root.modal = ""; } } }
+                }
+                if root.modal == "rename" : VerticalLayout { spacing: 14px; BodyText { text: root.pending-action-kind == "new-group" ? GuiI18n.text("gui-new-group-detail") : GuiI18n.text("gui-rename-detail"); wrap: word-wrap; } VerticalLayout { spacing: 6px; Text { text: GuiI18n.text("gui-name"); color: Theme.text-secondary; font-size: Theme.label-size; } TextField { text <=> root.pending-rename-text; accessible-name: GuiI18n.text("gui-name"); accepted => { root.rename-entity(root.pending-action-kind, root.pending-action-id, root.pending-rename-text); } } } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; root.modal-error = ""; } } AppButton { text: root.pending-action-kind == "new-group" ? GuiI18n.text("gui-create-group") : GuiI18n.text("gui-rename"); tone: "primary"; enabled: root.pending-rename-text != ""; hint: GuiI18n.text("gui-hint-enter-name"); clicked => { root.rename-entity(root.pending-action-kind, root.pending-action-id, root.pending-rename-text); } } } }
                 // Four groups, each hidden when empty, because each says
                 // something different: these stop working, these lose a
                 // feature, Ephervex has not asked about these, and
@@ -2569,6 +2680,7 @@ export component AppWindow inherits Window {
                 if root.modal == "remove-java-runtime" : VerticalLayout { spacing: 14px; BodyText { text: GuiI18n.value("gui-java-remove-runtime-detail", root.pending-action-name); color: Theme.warning; wrap: word-wrap; } BodyText { text: root.pending-action-id; color: Theme.text-muted; wrap: word-wrap; } if root.pending-java-pinning != "" : BodyText { text: GuiI18n.value("gui-java-remove-runtime-pinned", root.pending-java-pinning); color: Theme.warning; wrap: word-wrap; } if !root.pending-java-pins-known : BodyText { text: GuiI18n.text("gui-java-remove-runtime-pins-unknown"); color: Theme.warning; wrap: word-wrap; } BodyText { text: GuiI18n.text("gui-java-remove-runtime-note"); wrap: word-wrap; } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; root.modal-error = ""; } } AppButton { text: GuiI18n.text("gui-remove"); tone: "danger"; clicked => { root.remove-java-runtime(root.pending-action-id); root.modal = ""; root.modal-error = ""; } } } }
                 if root.modal == "mod-clash" && root.mod-clash-index < root.mod-clashes.length : VerticalLayout { spacing: 14px; BodyText { text: GuiI18n.value("gui-mod-clash-detail", root.mod-clashes[root.mod-clash-index].file-name); wrap: word-wrap; } if root.mod-clashes[root.mod-clash-index].existing-is-disabled : BodyText { text: GuiI18n.text("gui-mod-clash-disabled"); color: Theme.warning; wrap: word-wrap; } if root.mod-clashes[root.mod-clash-index].existing-is-recorded : BodyText { text: GuiI18n.text("gui-mod-clash-recorded"); color: Theme.warning; wrap: word-wrap; } if root.mod-clashes.length > 1 : BodyText { text: GuiI18n.values("gui-mod-clash-progress", root.mod-clash-index + 1, root.mod-clashes.length); color: Theme.text-muted; font-size: Theme.caption-size; } ActionRow { AppButton { text: GuiI18n.text("gui-skip-all"); clicked => { root.resolve-mod-clash("skip-all"); } } AppButton { text: GuiI18n.text("gui-overwrite-all"); clicked => { root.resolve-mod-clash("overwrite-all"); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-skip"); clicked => { root.resolve-mod-clash("skip"); } } AppButton { text: GuiI18n.text("gui-overwrite"); tone: "primary"; clicked => { root.resolve-mod-clash("overwrite"); } } } }
                 if root.modal == "pane-host" : VerticalLayout { spacing: 12px;
+                    TextField { text <=> root.pane-host-query; placeholder: GuiI18n.text("gui-filter-hosts"); input-type: InputType.search; edited(text) => { root.pane-host-query-changed(); } }
                     ScrollView {
                         viewport-width: self.visible-width;
                         VerticalLayout {

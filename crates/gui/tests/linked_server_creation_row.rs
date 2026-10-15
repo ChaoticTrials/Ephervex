@@ -122,6 +122,12 @@ fn instance(id: &str, name: &str) -> InstanceRow {
         paired_server_name: SharedString::default(),
         pair_start_together: false,
         pair_starting: false,
+        favorite: false,
+        group_id: slint::SharedString::default(),
+        group_name: slint::SharedString::default(),
+        group_index: 0,
+        group_tone: 0,
+        icon_slot: -1,
     }
 }
 

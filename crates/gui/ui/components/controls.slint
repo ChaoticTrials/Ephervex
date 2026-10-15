@@ -172,7 +172,11 @@ export component AppButton inherits Rectangle {
 // shapes read as two controls.
 export component FavoriteToggle inherits Rectangle {
     in property <bool> favorite;
+    // What the star is for. A Minecraft release when `version` is set, and
+    // otherwise the host named by `host-name`.
     in property <string> version;
+    in property <string> host-name;
+    in property <length> size: Theme.control-height;
     in property <bool> enabled: true;
     // Why the star cannot be pressed, shown on hover while it is disabled.
     in property <string> hint;
@@ -180,21 +184,21 @@ export component FavoriteToggle inherits Rectangle {
     // The star has no caption, so hover says what pressing it does, or why
     // it cannot be pressed.
     private property <string> hover-note: !root.enabled && root.hint != "" ? root.hint : root.accessible-label;
-    width: Theme.control-height;
-    height: Theme.control-height;
+    width: root.size;
+    height: root.size;
     border-radius: 6px;
     border-width: 1px;
     border-color: !root.enabled ? Theme.border : root.favorite ? Theme.warning.with-alpha(0.7) : area.has-hover ? Theme.accent : Theme.border;
     background: area.has-hover && root.enabled ? Theme.elevated : transparent;
     accessible-role: button;
-    accessible-label: root.favorite ? GuiI18n.value("gui-unfavorite-version", root.version) : GuiI18n.value("gui-favorite-version", root.version);
+    accessible-label: root.host-name != "" ? (root.favorite ? GuiI18n.value("gui-unfavorite-host", root.host-name) : GuiI18n.value("gui-favorite-host", root.host-name)) : root.favorite ? GuiI18n.value("gui-unfavorite-version", root.version) : GuiI18n.value("gui-favorite-version", root.version);
     accessible-enabled: root.enabled;
     accessible-checkable: true;
     accessible-checked: root.favorite;
     accessible-description: !root.enabled ? root.hint : "";
     accessible-action-default => { if root.enabled { root.toggled(); } }
     Image {
-        x: 8px; y: 8px; width: parent.width - 16px; height: parent.height - 16px;
+        x: root.size * 2 / 9; y: root.size * 2 / 9; width: parent.width - root.size * 4 / 9; height: parent.height - root.size * 4 / 9;
         source: root.favorite ? @image-url("../../../../assets/icons/favorite-filled.svg") : @image-url("../../../../assets/icons/favorite.svg");
         image-fit: contain;
         colorize: !root.enabled ? Theme.text-muted : root.favorite ? Theme.warning : Theme.text-secondary;

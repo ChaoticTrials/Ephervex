@@ -96,6 +96,23 @@ export global Theme {
     // rest of this palette works in.
     out property <color> forge: palette.forge;
     out property <color> neoforge: palette.neoforge;
+    // The colors instance groups are told apart by. A group keeps the slot it
+    // was given, so these are read through `group-tone`.
+    out property <color> group-tone-1: palette.group-tone-1;
+    out property <color> group-tone-2: palette.group-tone-2;
+    out property <color> group-tone-3: palette.group-tone-3;
+    out property <color> group-tone-4: palette.group-tone-4;
+    out property <color> group-tone-5: palette.group-tone-5;
+    out property <color> group-tone-6: palette.group-tone-6;
+    // The color of group slot `slot`, counted from zero.
+    public pure function group-tone(slot: int) -> color {
+        if slot == 1 { return root.group-tone-2; }
+        if slot == 2 { return root.group-tone-3; }
+        if slot == 3 { return root.group-tone-4; }
+        if slot == 4 { return root.group-tone-5; }
+        if slot == 5 { return root.group-tone-6; }
+        return root.group-tone-1;
+    }
     // What is drawn over the window rather than in it: a popover's shadow
     // and the wash that puts a modal in front of everything else.
     out property <color> shadow: palette.shadow;

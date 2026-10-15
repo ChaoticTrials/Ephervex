@@ -49,6 +49,7 @@ use crate::window_aspect;
 use crate::workspace_layout::{PaneId, Revealed, Surface, WorkspaceLayout};
 
 mod diagnosis_flow;
+mod instance_list;
 mod java_runtime;
 mod log_views;
 mod mod_views;
@@ -56,6 +57,7 @@ mod server_tools;
 mod workspace;
 
 use diagnosis_flow::DiagnosisFlowState;
+use instance_list::{InstanceListState, Listed, attach_icon_pool, host_icon_slot};
 use log_views::LogViews;
 use mod_views::ModViews;
 use server_tools::{LinkedClaim, LinkedRefusal, ServerAction, ServerTools};
@@ -2457,6 +2459,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
     let diagnosis_flow = Rc::new(RefCell::new(DiagnosisFlowState::default()));
     let lifecycle = Rc::new(RefCell::new(HostLifecycle::default()));
     let disk_usage = Rc::new(RefCell::new(DiskUsageState::default()));
+    let instance_list = Rc::new(RefCell::new(InstanceListState::default()));
     let workspace = Workspace {
         state: Rc::new(RefCell::new(WorkspaceState::default())),
         lifecycle: Rc::clone(&lifecycle),
@@ -2481,6 +2484,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         &local_mods,
         &lifecycle,
         &disk_usage,
+        &instance_list,
         &workspace,
         keys,
     );
@@ -2495,6 +2499,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
     let poll_local_mods = Rc::clone(&local_mods);
     let poll_lifecycle = Rc::clone(&lifecycle);
     let poll_disk_usage = Rc::clone(&disk_usage);
+    let poll_instance_list = Rc::clone(&instance_list);
     let poll_workspace = workspace.clone();
     let poll_commands = backend.commands.clone();
     let poll_timer = Timer::default();
@@ -2541,6 +2546,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
                     &poll_local_mods,
                     &poll_lifecycle,
                     &poll_disk_usage,
+                    &poll_instance_list,
                     &poll_workspace,
                     &poll_commands,
                 ),
@@ -2842,9 +2848,11 @@ fn register_callbacks(
     local_mods: &Rc<RefCell<LocalModDrop>>,
     lifecycle: &Rc<RefCell<HostLifecycle>>,
     disk_usage: &Rc<RefCell<DiskUsageState>>,
+    instance_list: &Rc<RefCell<InstanceListState>>,
     workspace: &Workspace,
     keys: &BindingCapture,
 ) {
+    register_instance_list(ui, commands, instance_list, lifecycle);
     register_catalog_actions(ui, commands);
     register_client_actions(ui, commands, creations);
     register_mod_actions(ui, commands, workspace);
@@ -3483,6 +3491,87 @@ fn next_launch_handle() -> String {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     )
+}
+
+/// The Instances page's list controls, and the favorite, group and icon
+/// actions on hosts.
+fn register_instance_list(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    list: &Rc<RefCell<InstanceListState>>,
+    lifecycle: &Rc<RefCell<HostLifecycle>>,
+) {
+    attach_icon_pool(ui);
+    let weak = ui.as_weak();
+    let shown = Rc::clone(list);
+    let stamped = Rc::clone(lifecycle);
+    ui.on_instance_view_changed(move || {
+        if let Some(ui) = weak.upgrade() {
+            shown.borrow().render(&ui);
+            stamp_host_lifecycle(&ui, &stamped.borrow());
+        }
+    });
+
+    let weak = ui.as_weak();
+    let ordered = Rc::clone(list);
+    let stamped = Rc::clone(lifecycle);
+    let sender = commands.clone();
+    ui.on_choose_instance_sort(move |index| {
+        let Some(sort) = usize::try_from(index)
+            .ok()
+            .and_then(|index| ephervex_core::InstanceSort::ALL.get(index).copied())
+        else {
+            return;
+        };
+        if let Some(ui) = weak.upgrade() {
+            ordered.borrow_mut().set_sort(&ui, sort);
+            stamp_host_lifecycle(&ui, &stamped.borrow());
+        }
+        send(&sender, Command::SetInstanceSort(sort));
+    });
+
+    let sender = commands.clone();
+    ui.on_set_favorite(move |kind, id, favorite| {
+        if let Some(host) = backend::parse_mod_host(&kind, &id) {
+            send(&sender, Command::SetFavorite { host, favorite });
+        }
+    });
+
+    let sender = commands.clone();
+    ui.on_set_client_group(move |id, group| {
+        let Some(client) = backend::parse_instance_id(&id) else {
+            return;
+        };
+        let group = if group.is_empty() {
+            None
+        } else if let Ok(group) = group.parse() {
+            Some(group)
+        } else {
+            return;
+        };
+        send(&sender, Command::SetClientGroup { client, group });
+    });
+
+    let sender = commands.clone();
+    ui.on_delete_group(move |id| {
+        if let Ok(group) = id.parse() {
+            send(&sender, Command::DeleteGroup(group));
+        }
+    });
+
+    let sender = commands.clone();
+    ui.on_pick_host_icon(move |kind, id| {
+        if let Some(host) = backend::parse_mod_host(&kind, &id) {
+            send(&sender, Command::PickHostIcon(host));
+        }
+    });
+
+    let sender = commands.clone();
+    ui.on_clear_host_icon(move |kind, id| {
+        if let Some(host) = backend::parse_mod_host(&kind, &id) {
+            send(&sender, Command::ClearHostIcon(host));
+        }
+    });
 }
 
 fn register_client_actions(
@@ -4734,6 +4823,18 @@ fn register_local_mod_actions(
                     send(&sender, Command::RenameServer { id, name });
                 }
             }
+            "group" => {
+                if let Ok(group) = id.parse() {
+                    send(&sender, Command::RenameGroup { group, name });
+                }
+            }
+            "new-group" => send(
+                &sender,
+                Command::CreateGroup {
+                    name,
+                    assign_to: backend::parse_instance_id(&id),
+                },
+            ),
             _ => {}
         }
     });
@@ -5094,6 +5195,14 @@ fn load_host(ui: &AppWindow, host: InstalledHost) {
 /// Opening, leaving, and moving around the host workspace.
 fn register_workspace(ui: &AppWindow, workspace: &Workspace) {
     workspace.state.borrow().attach(ui);
+
+    let weak = ui.as_weak();
+    let searched = workspace.clone();
+    ui.on_pane_host_query_changed(move || {
+        if let Some(ui) = weak.upgrade() {
+            searched.refresh(&ui);
+        }
+    });
 
     let weak = ui.as_weak();
     let open = workspace.clone();
@@ -7061,9 +7170,16 @@ fn apply_snapshot_event(
     creations: &Rc<RefCell<CreationTracker>>,
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
     settings_drafts: &Rc<RefCell<SettingsDrafts>>,
+    instance_list: &Rc<RefCell<InstanceListState>>,
     commands: &Sender<Command>,
 ) -> (Vec<InstanceRow>, Vec<ServerRow>) {
-    let rows = apply_snapshot(ui, snapshot, minecraft, &mut settings_drafts.borrow_mut());
+    let rows = apply_snapshot(
+        ui,
+        snapshot,
+        minecraft,
+        &mut settings_drafts.borrow_mut(),
+        &mut instance_list.borrow_mut(),
+    );
     apply_pending_creations(ui, &creations.borrow());
     request_minecraft_preview(ui, minecraft, commands);
     request_minecraft_languages(ui, minecraft, commands, false);
@@ -7567,6 +7683,7 @@ fn apply_event(
     local_mods: &Rc<RefCell<LocalModDrop>>,
     lifecycle: &Rc<RefCell<HostLifecycle>>,
     disk_usage: &Rc<RefCell<DiskUsageState>>,
+    instance_list: &Rc<RefCell<InstanceListState>>,
     workspace: &Workspace,
     commands: &Sender<Command>,
 ) {
@@ -7601,6 +7718,7 @@ fn apply_event(
                 creations,
                 minecraft,
                 settings_drafts,
+                instance_list,
                 commands,
             );
             lifecycle.borrow_mut().servers.observe(&servers);
@@ -7710,6 +7828,10 @@ fn apply_event(
                 running
                     .into_iter()
                     .map(|process| RunningRow {
+                        icon_slot: workspace
+                            .state
+                            .borrow()
+                            .icon_slot(&process.kind, &process.id),
                         kind: process.kind.into(),
                         id: process.id.into(),
                         launch: process.launch.into(),
@@ -8087,6 +8209,9 @@ fn apply_event(
         Event::StorageRootPicked(path) => {
             ui.set_persistent_root(path.display().to_string().into());
         }
+        Event::HostIconPicked { host, path } => {
+            send(commands, Command::SetHostIcon { host, path });
+        }
         Event::ServerPackPicked { target, path } => {
             set_server_pack(ui, target, Some(&path));
         }
@@ -8179,6 +8304,12 @@ fn reveal_instance(ui: &AppWindow, instance: &str) {
     ui.set_selected_instance_id(instance.into());
     ui.set_instance_filter("all".into());
     ui.set_instance_query(SharedString::default());
+    ui.set_instance_favorites_only(false);
+    ui.set_instance_minecraft_index(0);
+    ui.set_instance_loader_index(0);
+    ui.set_instance_run_index(0);
+    ui.set_instance_linking_index(0);
+    ui.set_instance_group_index(0);
     ui.invoke_select_instance(instance.into());
     // Where the card sits is not known until the list holding it has arrived,
     // so the scroll waits for the snapshot rather than happening here.
@@ -9008,10 +9139,15 @@ fn apply_snapshot(
     snapshot: Snapshot,
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
     drafts: &mut SettingsDrafts,
+    list: &mut InstanceListState,
 ) -> (Vec<InstanceRow>, Vec<ServerRow>) {
     let Snapshot {
         instances,
         servers,
+        groups,
+        organization_set_aside,
+        instance_sort,
+        version_order,
         accounts,
         minecraft_preferences,
         settings,
@@ -9023,7 +9159,22 @@ fn apply_snapshot(
     apply_favorite_versions(ui, settings.favorite_minecraft_versions.clone());
     ui.set_make_default_account_operator(settings.make_default_account_operator);
     ui.set_operator_permission_level(i32::from(settings.operator_permission_level));
-    let clients = apply_instance_snapshot(ui, instances);
+    if let Some(notice) = organization_set_aside {
+        ui.invoke_present_toast(
+            lookup_args(
+                if notice.restored {
+                    "gui-organization-restored"
+                } else {
+                    "gui-organization-set-aside"
+                },
+                [("value", Arg::from(notice.set_aside.display().to_string()))],
+            )
+            .into(),
+            true,
+        );
+    }
+    let clients =
+        apply_instance_snapshot(ui, instances, groups, instance_sort, version_order, list);
     let servers = apply_server_snapshot(ui, servers);
     ui.set_accounts(model(account_rows(accounts)));
     // A refresh happens for reasons unrelated to this screen, so the model
@@ -9077,101 +9228,101 @@ fn apply_snapshot(
 fn apply_instance_snapshot(
     ui: &AppWindow,
     instances: Vec<crate::presentation::InstancePresentation>,
+    groups: Vec<ephervex_core::InstanceGroup>,
+    sort: ephervex_core::InstanceSort,
+    order: ephervex_core::VersionOrder,
+    list: &mut InstanceListState,
 ) -> Vec<InstanceRow> {
-    let previous_instance = ui.get_selected_instance_id();
-    let mut instance_rows = instances
+    let listed = instances
         .into_iter()
-        .map(|item| InstanceRow {
-            snapshot_deletion_note: item.snapshot_deletion_note.into(),
-            id: item.id.into(),
-            name: item.name.into(),
-            minecraft: item.minecraft.into(),
-            loader: item.loader.into(),
-            loader_kind: item.loader_kind.into(),
-            storage: item.storage.into(),
-            storage_kind: item.storage_kind.into(),
-            source: item.source.into(),
-            path: item.path.into(),
-            updated: lookup("gui-available").into(),
-            linked_servers: to_i32(item.linked_servers),
-            stoppable_linked_servers: to_i32(item.stoppable_linked_servers),
-            unstoppable_linked_servers: to_i32(item.unstoppable_linked_servers),
-            mods: to_i32(item.managed_mods),
-            needs_attention: item.needs_attention,
-            state: item.state.into(),
-            state_kind: item.state_kind.into(),
-            can_launch: item.can_launch,
-            can_kill: item.can_kill,
-            connect_server_id: item
-                .launch_and_connect
-                .first()
-                .map_or_else(SharedString::default, |connect| {
-                    connect.server_id.clone().into()
-                }),
-            connect_server_name: item
-                .launch_and_connect
-                .first()
-                .map_or_else(SharedString::default, |connect| {
-                    connect.server_name.clone().into()
-                }),
-            can_connect: item
-                .launch_and_connect
-                .first()
-                .is_some_and(|connect| connect.enabled),
-            connect_reason: item
-                .launch_and_connect
-                .first()
-                .map_or_else(SharedString::default, |connect| {
-                    connect.reason.clone().into()
-                }),
-            // Filled in from the creation tracker, which a snapshot knows
-            // nothing about.
-            creating_server_detail: SharedString::default(),
-            creating_server_progress: 0.0,
-            creating_server_indeterminate: false,
-            restart_stage: SharedString::default(),
-            can_restart: false,
-            paired_server_id: item
-                .pair
-                .as_ref()
-                .map_or_else(SharedString::default, |pair| pair.id.clone().into()),
-            paired_server_name: item
-                .pair
-                .as_ref()
-                .map_or_else(SharedString::default, |pair| pair.name.clone().into()),
-            pair_start_together: item.pair.as_ref().is_some_and(|pair| pair.start_together),
-            // Stamped from the lifecycle, which a snapshot knows nothing about.
-            pair_starting: false,
+        .map(|item| {
+            let group = item.facts.group.as_ref();
+            let group_index = group
+                .and_then(|group| groups.iter().position(|candidate| candidate.id == group.id))
+                .map_or(-1, to_i32);
+            let row = InstanceRow {
+                snapshot_deletion_note: item.snapshot_deletion_note.into(),
+                id: item.id.into(),
+                name: item.name.into(),
+                minecraft: item.minecraft.into(),
+                loader: item.loader.into(),
+                loader_kind: item.loader_kind.into(),
+                storage: item.storage.into(),
+                storage_kind: item.storage_kind.into(),
+                source: item.source.into(),
+                path: item.path.into(),
+                updated: lookup("gui-available").into(),
+                linked_servers: to_i32(item.linked_servers),
+                stoppable_linked_servers: to_i32(item.stoppable_linked_servers),
+                unstoppable_linked_servers: to_i32(item.unstoppable_linked_servers),
+                mods: to_i32(item.managed_mods),
+                needs_attention: item.needs_attention,
+                state: item.state.into(),
+                state_kind: item.state_kind.into(),
+                can_launch: item.can_launch,
+                can_kill: item.can_kill,
+                connect_server_id: item
+                    .launch_and_connect
+                    .first()
+                    .map_or_else(SharedString::default, |connect| {
+                        connect.server_id.clone().into()
+                    }),
+                connect_server_name: item
+                    .launch_and_connect
+                    .first()
+                    .map_or_else(SharedString::default, |connect| {
+                        connect.server_name.clone().into()
+                    }),
+                can_connect: item
+                    .launch_and_connect
+                    .first()
+                    .is_some_and(|connect| connect.enabled),
+                connect_reason: item
+                    .launch_and_connect
+                    .first()
+                    .map_or_else(SharedString::default, |connect| {
+                        connect.reason.clone().into()
+                    }),
+                // Filled in from the creation tracker, which a snapshot knows
+                // nothing about.
+                creating_server_detail: SharedString::default(),
+                creating_server_progress: 0.0,
+                creating_server_indeterminate: false,
+                restart_stage: SharedString::default(),
+                can_restart: false,
+                paired_server_id: item
+                    .pair
+                    .as_ref()
+                    .map_or_else(SharedString::default, |pair| pair.id.clone().into()),
+                paired_server_name: item
+                    .pair
+                    .as_ref()
+                    .map_or_else(SharedString::default, |pair| pair.name.clone().into()),
+                pair_start_together: item.pair.as_ref().is_some_and(|pair| pair.start_together),
+                // Stamped from the lifecycle, which a snapshot knows nothing about.
+                pair_starting: false,
+                favorite: item.facts.favorite,
+                group_id: group
+                    .map_or_else(SharedString::default, |group| group.id.to_string().into()),
+                group_name: group
+                    .map_or_else(SharedString::default, |group| group.name.as_str().into()),
+                group_index,
+                group_tone: group.map_or(0, |group| i32::from(group.tone)),
+                icon_slot: host_icon_slot(item.icon.as_deref()),
+            };
+            Listed {
+                row,
+                facts: item.facts,
+            }
         })
         .collect::<Vec<_>>();
-    let all_rows = instance_rows.clone();
-    let storage_filter = ui.get_instance_filter();
-    let query = ui.get_instance_query().to_ascii_lowercase();
-    instance_rows.retain(|row| {
-        (storage_filter == "all" || row.storage_kind == storage_filter)
-            && row_matches(
-                &query,
-                [&row.name, &row.minecraft, &row.loader, &row.source],
-            )
-    });
-    let instance_index = selected_index(&instance_rows, &previous_instance, |row| &row.id);
-    if let Some(index) = instance_index {
-        ui.set_selected_instance_id(instance_rows[index].id.clone());
-        ui.set_selected_instance_index(to_i32(index));
-    } else {
-        ui.set_selected_instance_id(SharedString::default());
-        ui.set_selected_instance_index(-1);
-    }
-    ui.set_instances(reconciled(&ui.get_instances(), instance_rows));
-    // A snapshot rebuilds the rows, so whatever was stamped on them about a
-    // server being built has to be stamped again.
-    attach_creating_servers(ui);
+    let all_rows = list.replace(ui, listed, groups, sort, order);
     // The list a pending reveal was waiting for. Cleared whether or not the
     // card turned up, so a request cannot outlive the list it was made against.
     let pending = ui.get_pending_reveal_instance();
     if !pending.is_empty() {
         ui.set_pending_reveal_instance(SharedString::default());
-        if instance_index.is_some() && ui.get_selected_instance_id() == pending {
+        if ui.get_selected_instance_index() >= 0 && ui.get_selected_instance_id() == pending {
             ui.set_reveal_selected_instance(ui.get_reveal_selected_instance().saturating_add(1));
         }
     }
@@ -9203,6 +9354,8 @@ fn apply_server_snapshot(
             ],
         )
     });
+    // Favorites first, and otherwise the list's own order.
+    global_rows.sort_by_key(|row| !row.favorite);
     let global_index = global_selection_index(&global_rows, &previous_global_server);
     if let Some(index) = global_index {
         ui.set_selected_global_server_id(global_rows[index].id.clone());
@@ -9272,6 +9425,8 @@ fn server_row(item: crate::presentation::ServerPresentation) -> ServerRow {
             .map_or_else(SharedString::default, |pair| pair.name.clone().into()),
         pair_start_together: item.pair.as_ref().is_some_and(|pair| pair.start_together),
         pair_starting: false,
+        favorite: item.favorite,
+        icon_slot: host_icon_slot(item.icon.as_deref()),
     }
 }
 
@@ -10127,20 +10282,6 @@ fn java_rows(rows: Vec<JavaData>) -> Vec<JavaRow> {
             pinning: row.pinned_by.unwrap_or_default().into(),
         })
         .collect()
-}
-
-fn selected_index<T>(
-    rows: &[T],
-    previous: &SharedString,
-    id: impl Fn(&T) -> &SharedString,
-) -> Option<usize> {
-    if previous.is_empty() {
-        (!rows.is_empty()).then_some(0)
-    } else {
-        rows.iter()
-            .position(|row| id(row) == previous)
-            .or_else(|| (!rows.is_empty()).then_some(0))
-    }
 }
 
 fn row_matches<'a>(query: &str, values: impl IntoIterator<Item = &'a SharedString>) -> bool {
@@ -12427,6 +12568,7 @@ mod tests {
                 save: SettingsSave::JavaSettings,
                 succeeded: true,
             },
+            &Rc::default(),
             &Rc::default(),
             &Rc::default(),
             &Rc::default(),

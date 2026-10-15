@@ -26,6 +26,8 @@ export component ChoiceBox inherits Rectangle {
     in property <[string]> model;
     in property <bool> enabled: true;
     in-out property <int> current-index: 0;
+    // Shown muted while no entry is chosen.
+    in property <string> placeholder;
     out property <string> current-value: root.current-index >= 0 && root.current-index < root.model.length
         ? root.model[root.current-index]
         : "";
@@ -76,8 +78,8 @@ export component ChoiceBox inherits Rectangle {
         x: 11px;
         width: parent.width - 36px;
         height: parent.height;
-        text: root.current-value;
-        color: root.enabled ? Theme.text : Theme.text-muted;
+        text: root.current-value != "" ? root.current-value : root.placeholder;
+        color: root.enabled && root.current-value != "" ? Theme.text : Theme.text-muted;
         font-size: Theme.body-size;
         overflow: elide;
         vertical-alignment: center;
@@ -229,6 +231,7 @@ export component IndexComboBox inherits Rectangle {
     in property <bool> enabled: true;
     // What a screen reader announces for the dropdown.
     in property <string> label;
+    in property <string> placeholder;
     callback selected(index: int, value: string);
     min-width: box.min-width;
     min-height: box.min-height;
@@ -252,6 +255,7 @@ export component IndexComboBox inherits Rectangle {
         height: parent.height;
         model: root.model;
         enabled: root.enabled;
+        placeholder: root.placeholder;
         accessible-label: root.label;
         selected(value) => { root.selected(self.current-index, value); }
     }
@@ -316,5 +320,34 @@ export component ValueComboBox inherits Rectangle {
         init => { self.claim(); }
         changed holds-value => { self.claim(); }
         changed slot => { self.claim(); }
+    }
+}
+
+// An `IndexComboBox` named by a caption above it, for a panel of several side
+// by side. Each asks for the same width, so a row of them splits into equal
+// columns whatever their entries say. Children sit beside the dropdown.
+export component LabeledChoice inherits Rectangle {
+    in property <string> caption;
+    // What a screen reader announces for the dropdown.
+    in property <string> label;
+    in property <[string]> model;
+    in property <int> index;
+    callback selected(index: int);
+    horizontal-stretch: 1;
+    preferred-width: 1px;
+    VerticalLayout {
+        spacing: 6px;
+        Text { text: root.caption; color: Theme.text-secondary; font-size: Theme.label-size; }
+        HorizontalLayout {
+            spacing: 8px;
+            IndexComboBox {
+                horizontal-stretch: 1;
+                label: root.label;
+                model: root.model;
+                index: root.index;
+                selected(index, value) => { root.selected(index); }
+            }
+            @children
+        }
     }
 }

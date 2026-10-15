@@ -104,6 +104,8 @@ export component TooltipCard inherits Rectangle {
 export component ElidedHeading inherits Rectangle {
     in property <string> text;
     in property <length> font-size: Theme.heading-size;
+    // The width the whole text needs, for a row that wants the title to hug it.
+    out property <length> text-width: title.preferred-width;
     callback clicked();
     callback double-clicked();
     horizontal-stretch: 1;

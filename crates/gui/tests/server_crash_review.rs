@@ -250,5 +250,7 @@ fn server() -> ServerRow {
         paired_client_name: SharedString::default(),
         pair_start_together: false,
         pair_starting: false,
+        favorite: false,
+        icon_slot: -1,
     }
 }

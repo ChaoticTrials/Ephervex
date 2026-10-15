@@ -1,9 +1,9 @@
 // A host workspace's chrome: pane header, surface tabs, workflow banner, and the pane host picker.
 
-import { LoaderGlyph } from "../components/artwork.slint";
+import { HostIcon, LoaderGlyph } from "../components/artwork.slint";
 import { AppButton, BusySpinner, IconButton, LaunchAsButton, Pill, PillButton } from "../components/controls.slint";
 import { BodyText, Divider, Heading } from "../components/text.slint";
-import { GuiI18n } from "../globals.slint";
+import { GuiI18n, HostIcons } from "../globals.slint";
 import {
     AccountRow,
     WorkflowActionRow,
@@ -384,10 +384,14 @@ export component HostPickerCard inherits Rectangle {
         padding: 12px; spacing: 8px;
         HorizontalLayout {
             spacing: 12px;
-            LoaderGlyph { kind: root.item.loader-kind; server: root.item.kind == "server"; }
+            HostIcon { slot: root.item.icon-slot; kind: root.item.loader-kind; server: root.item.kind == "server"; }
             VerticalLayout {
                 alignment: center; spacing: 4px; horizontal-stretch: 1;
-                Heading { text: root.item.name; font-size: Theme.row-heading-size; overflow: elide; }
+                HorizontalLayout {
+                    spacing: 6px;
+                    if root.item.favorite : VerticalLayout { alignment: center; Image { width: 16px; height: 16px; source: @image-url("../../../../assets/icons/favorite-filled.svg"); image-fit: contain; colorize: Theme.warning; accessible-role: AccessibleRole.none; } }
+                    Heading { text: root.item.name; font-size: Theme.row-heading-size; overflow: elide; }
+                }
                 BodyText { text: root.item.summary; overflow: elide; }
             }
             VerticalLayout { alignment: center; Pill { text: root.item.state; tone-color: root.item.state-kind == "running" ? Theme.success : root.item.state-kind == "starting" ? Theme.warning : Theme.text-secondary; } }
@@ -405,6 +409,7 @@ export component HostPickerCard inherits Rectangle {
             linked-area := TouchArea { clicked => { root.picked("server", server.id); } }
             HorizontalLayout {
                 padding-left: 10px; padding-right: 10px; spacing: 8px;
+                if server.icon-slot >= 0 : VerticalLayout { alignment: center; Image { width: 22px; height: 22px; source: HostIcons.images[server.icon-slot]; image-fit: contain; } }
                 Text { text: GuiI18n.text("gui-server"); color: Theme.text-muted; font-size: Theme.caption-size; vertical-alignment: center; }
                 Text { text: server.name; color: Theme.text; font-size: Theme.body-size; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
                 VerticalLayout { alignment: center; Pill { text: server.state; tone-color: server.state-kind == "running" ? Theme.success : server.state-kind == "starting" ? Theme.warning : Theme.text-secondary; } }

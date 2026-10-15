@@ -7,6 +7,13 @@ export global GuiI18n {
     pure callback values(string, string, string) -> string;
 }
 
+// The images hosts show as icons. A row names one by its position here
+// (`icon-slot`), because an image inside a row would never compare equal to
+// itself and every refresh would rewrite every row.
+export global HostIcons {
+    in-out property <[image]> images;
+}
+
 // Whether a server property value is acceptable, answered by the same
 // checks saving applies. Empty when it is; otherwise what is wrong.
 export global PropertyRules {
