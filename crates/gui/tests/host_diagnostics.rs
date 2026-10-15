@@ -267,7 +267,7 @@ fn each_missing_mod_offers_its_own_install_on_a_client() {
     let record = Rc::clone(&installs);
     // The browser's install never hears it: that one skips the confirmation.
     ui.on_install_from_browser(|_, _, _, _| panic!("a Diagnostics install went the browser's way"));
-    ui.on_install_from_diagnostics(move |instance, provider, project| {
+    ui.on_install_from_diagnostics(move |_kind, instance, provider, project| {
         record.borrow_mut().push((
             instance.to_string(),
             provider.to_string(),
@@ -308,6 +308,49 @@ fn each_missing_mod_offers_its_own_install_on_a_client() {
             "host".to_owned(),
             "modrinth".to_owned(),
             "MBAkmtvl".to_owned()
+        )]
+    );
+}
+
+/// A server has a catalog install too, and the same confirmation stands before
+/// it. Which kind of host asked is what the install reports.
+#[test]
+fn each_missing_mod_offers_its_own_install_on_a_server() {
+    let ui = window();
+    let installs: Rc<RefCell<Vec<(String, String, String)>>> = Rc::default();
+    let record = Rc::clone(&installs);
+    ui.on_install_from_browser(|_, _, _, _| panic!("a Diagnostics install went the browser's way"));
+    ui.on_install_from_diagnostics(move |kind, id, _provider, project| {
+        record
+            .borrow_mut()
+            .push((kind.to_string(), id.to_string(), project.to_string()));
+    });
+    diagnosed_surface(&ui, true, false);
+    let mut row = finding("p0", true, "LibX is not installed", "", "mods");
+    row.install_label = lookup("gui-diagnosis-install-latest").into();
+    row.install_provider = "modrinth".into();
+    row.install_project = "qEH6GYul".into();
+    support::update_host(&ui, 0, |view| view.diagnosis_problems = rows(vec![row]));
+    settle(&ui);
+
+    ElementHandle::find_by_accessible_label(
+        &ui,
+        &format!(
+            "{}: LibX is not installed",
+            lookup("gui-diagnosis-install-latest")
+        ),
+    )
+    .next()
+    .expect("a missing mod on a server offers its install")
+    .mock_single_click(PointerEventButton::Left);
+    settle(&ui);
+
+    assert_eq!(
+        installs.borrow().as_slice(),
+        [(
+            "server".to_owned(),
+            "server".to_owned(),
+            "qEH6GYul".to_owned()
         )]
     );
 }

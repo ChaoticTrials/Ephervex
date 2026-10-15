@@ -254,7 +254,8 @@ client-only mods marked "Client only" with Install disabled and the reason
 stated. Installing opens a confirmation when a mod, or one it needs, has an
 unstated server side or is a client-only required dependency, and otherwise
 installs at once; a running server's confirmation says the change applies at its
-next start.
+next start. Diagnostics offers the same install, through the same confirmation,
+for a proven-missing dependency a server does not record.
 
 ### Split workspace
 

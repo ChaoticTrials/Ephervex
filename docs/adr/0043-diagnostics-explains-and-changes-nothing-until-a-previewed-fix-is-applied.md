@@ -64,9 +64,10 @@ dialog. Each change is reported on its own, so a partial result says what did
 and did not change, and the host is diagnosed again afterwards. Where the
 change is ambiguous, such as which version of a missing mod to install,
 Diagnostics explains the problem and routes to the surface that owns it
-instead. A missing mod whose catalog project is known is offered to a client
-as an install of the newest compatible release through the install
-confirmation, which names the exact release before anything changes.
+instead. A missing mod whose catalog project is known and that the host does
+not record is offered, on a client or a server, as an install of the newest
+compatible release through the install confirmation, which names the exact
+release before anything changes.
 
 **One diagnosis or fix at a time.** Results and previews are keyed by host and
 shared by every pane on it (ADR 0039). A fix claims the host like any other

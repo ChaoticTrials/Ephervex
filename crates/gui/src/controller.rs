@@ -3927,14 +3927,14 @@ fn register_browser_install(ui: &AppWindow, commands: &Sender<Command>, workspac
     let sender = commands.clone();
     let install_workspace = workspace.clone();
     let install_queue = Rc::clone(&workspace.browser);
-    ui.on_install_from_diagnostics(move |instance, provider, project| {
-        if backend::parse_instance_id(&instance).is_none()
+    ui.on_install_from_diagnostics(move |kind, instance, provider, project| {
+        if backend::parse_mod_host(&kind, &instance).is_none()
             || ModProvider::parse(&provider).is_none()
         {
             return;
         }
         let request = BrowserInstall {
-            server: false,
+            server: kind == "server",
             instance: instance.to_string(),
             provider: provider.to_string(),
             project: project.to_string(),
@@ -15457,6 +15457,7 @@ mod tests {
             let instance = ephervex_model::InstanceId::new().to_string();
             if from_diagnostics {
                 ui.invoke_install_from_diagnostics(
+                    "client".into(),
                     instance.as_str().into(),
                     "modrinth".into(),
                     "utilitix".into(),
@@ -15638,6 +15639,62 @@ mod tests {
         );
     }
 
+    /// Diagnostics names a mod, not a release, so on a server too the resolved
+    /// plan is shown before anything installs, even when nothing in it needs a
+    /// decision.
+    #[test]
+    fn a_diagnostics_install_on_a_server_is_planned_and_confirmed_before_it_installs() {
+        let server = ephervex_model::ServerId::new().to_string();
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        register_browser_install(&ui, &workspace.commands, &workspace);
+        register_mod_mutations(&ui, &workspace.commands, &workspace);
+
+        ui.invoke_install_from_diagnostics(
+            "server".into(),
+            server.as_str().into(),
+            "modrinth".into(),
+            "utilitix".into(),
+        );
+        let planned: Vec<Command> = commands.try_iter().collect();
+        assert!(
+            matches!(planned.as_slice(), [Command::PlanServerMod { .. }]),
+            "{planned:?}"
+        );
+
+        apply_mod_install_plan(
+            &ui,
+            server_plan(&server, "utilitix", &[]),
+            &workspace,
+            &workspace.commands,
+        );
+        assert_eq!(ui.get_modal(), "mod-plan");
+        assert_eq!(ui.get_mod_plan_kind(), "server");
+        assert!(
+            commands.try_iter().next().is_none(),
+            "nothing before confirming"
+        );
+
+        ui.invoke_install_server_mod(
+            ui.get_mod_plan_instance(),
+            ui.get_mod_plan_provider(),
+            ui.get_mod_plan_project(),
+            ui.get_mod_plan_version_id(),
+            ui.get_mod_plan_unstated_ids(),
+        );
+        let sent: Vec<Command> = commands.try_iter().collect();
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [Command::InstallServerMod {
+                    confirmed: true,
+                    ..
+                }]
+            ),
+            "{sent:?}"
+        );
+    }
+
     #[test]
     fn a_queued_diagnostics_install_is_still_confirmed_when_its_turn_comes() {
         let request = |project: &str| BrowserInstall {
@@ -15785,6 +15842,7 @@ mod tests {
         let queued = ephervex_model::InstanceId::new().to_string();
         for project in ["first", "second"] {
             ui.invoke_install_from_diagnostics(
+                "client".into(),
                 queued.as_str().into(),
                 "modrinth".into(),
                 project.into(),
@@ -15821,6 +15879,7 @@ mod tests {
         let request = ask_from_manager(&ui, &workspace, &commands, &closed, PlanKind::Apply);
         ui.set_modal(SharedString::default());
         ui.invoke_install_from_diagnostics(
+            "client".into(),
             queued.as_str().into(),
             "modrinth".into(),
             "first".into(),
