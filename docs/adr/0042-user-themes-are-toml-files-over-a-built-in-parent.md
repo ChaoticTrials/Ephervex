@@ -1,6 +1,7 @@
 # ADR 0042 - User themes are TOML files over a built-in parent
 
-**Status:** Accepted
+**Status:** Accepted (its one-file and only-colors decisions amended by
+[ADR 0047](0047-a-theme-folder-carries-branding-confined-to-its-own-branding-folder.md))
 
 ## Context
 

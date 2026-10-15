@@ -2,6 +2,7 @@
 
 pub mod backend;
 pub mod binding_capture;
+mod branding;
 pub mod controller;
 pub mod diagnosis_view;
 pub mod file_drop;

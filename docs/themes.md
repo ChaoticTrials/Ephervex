@@ -1,9 +1,10 @@
 # Themes
 
-Ephervex ships a Dark and a Light theme. You can add your own as TOML files,
-and they appear in Settings > General > Interface theme next to the built-in
-ones. A theme changes colors only. Text size is its own setting, and fonts and
-layout cannot be changed by a theme.
+Ephervex ships a Dark and a Light theme. You can add your own as TOML files or
+theme folders, and they appear in Settings > General > Interface theme next to
+the built-in ones. A theme changes colors, and a theme folder can also replace
+the logo and the window icon. Text size is its own setting, and fonts and layout
+cannot be changed by a theme.
 
 ## Where theme files go
 
@@ -14,10 +15,27 @@ layout cannot be changed by a theme.
 Or `$XDG_CONFIG_HOME/ephervex/themes/` when `XDG_CONFIG_HOME` is set. The folder
 does not exist until you create it. The settings page shows the exact path.
 
-The file name is the theme's identity. Use lowercase letters, digits, `-` and
-`_` (for example `modrinth.toml` or `my-dark_2.toml`); other file names are
-skipped. Renaming a file makes it a different theme, so a choice recorded for
-the old name falls back to the default until you choose it again.
+A theme that brings its own images is a folder instead of a file:
+
+```text
+~/.config/ephervex/themes/
+└── example-theme/
+    ├── theme.toml
+    └── branding/
+        ├── logo.png
+        └── icon.png
+```
+
+`theme.toml` has the same format as a standalone file. A folder without a
+`theme.toml` is not a theme and is ignored.
+
+The file name, or the folder name for a theme folder, is the theme's identity.
+Use lowercase letters, digits, `-` and `_` (for example `modrinth.toml` or
+`my-dark_2`); other names are skipped. Renaming a file or folder makes it a
+different theme, so a choice recorded for the old name falls back to the
+default until you choose it again. If a file and a usable folder have the same
+name, the folder is used and the file is reported. A folder that cannot be used
+does not hide the file.
 
 Themes are read when Ephervex starts and whenever the settings are refreshed,
 for example with the Refresh button in the top bar.
@@ -28,6 +46,10 @@ for example with the Refresh button in the top bar.
 format_version = 1
 name = "My Theme"
 parent = "dark"
+
+[branding]
+logo = "logo.png"
+icon = "icon.png"
 
 [colors]
 accent = "#1bd96a"
@@ -40,6 +62,7 @@ background = "#16181c"
 | `name` | No, defaults to the file name | What the theme list shows. At most 64 characters are kept. |
 | `parent` | No, defaults to `"dark"` | The built-in theme to start from: `"dark"` or `"light"`. |
 | `[colors]` | No | The colors to change, by token name. |
+| `[branding]` | No | Images that replace the logo and window icon. Theme folders only. |
 
 Every color you leave out is the parent's, with one exception: a theme that
 sets `accent`, `background` or `text` and leaves out `toggle-knob`, `field` or
@@ -107,6 +130,63 @@ Light, and the selection tints read clearly against the surface under them. A
 disabled button has no fill, only a border and a muted caption, so it reads as
 inactive rather than as a secondary button.
 
+## Branding
+
+A theme folder can name two images under `[branding]`:
+
+| Key | Replaces |
+|---|---|
+| `logo` | The logo in the top bar and on the About page |
+| `icon` | The window icon, where the desktop takes it from the window |
+
+Both are optional, and each one falls back to the Ephervex logo on its own:
+a theme that sets only `logo` keeps the default window icon. A built-in theme's
+branding is compiled into the application and never read from disk; Dark and
+Light use the Ephervex logo.
+
+Each value is a file name inside the theme's own `branding/` folder, such as
+`"logo.png"` or `"icons/app.webp"`. Do not write `branding/` in front of it.
+
+- Supported images are PNG (`.png`), JPEG (`.jpg`, `.jpeg`) and WebP
+  (`.webp`). The file's contents must be the format its extension names.
+- An image may be at most 4 MiB and at most 1024 by 1024 pixels, and decoding
+  it may not need more memory than an image of that size.
+- Images keep their aspect ratio. A logo is fitted inside its space, and an
+  icon that is not square is centered on a transparent square.
+- A value that is empty, absolute (`/...`), contains `..` or `.` as a
+  component, a backslash or a colon (so no drive letters, URLs or other URI
+  schemes), a doubled `/`, a control character, more than 255 bytes, or more
+  than three nested folders is ignored and reported.
+- Symbolic links are never followed below the themes folder. The theme
+  folder, its `branding/` folder, any folder in between, and the image itself
+  must all be real folders and files. Each step is opened inside the one
+  before it, so a link swapped in while Ephervex reads the theme is refused
+  rather than followed. The themes folder itself may be a link.
+- An image is only ever read from its own theme's `branding/` folder, never
+  from another theme, from elsewhere on disk, or from the network.
+
+An image that is missing, unreadable, malformed, too large, or refused for any
+of the reasons above is listed under Show problems with its path, and the
+default is shown in its place.
+
+Only the chosen theme's images are read, when the settings are read or the
+theme is changed. Changing the theme changes the logo straight away.
+
+### Window and taskbar icons
+
+The window icon changes with the theme while Ephervex runs where the desktop
+takes the icon from the window:
+
+- On X11 the window's icon is replaced, and taskbars that show the window's
+  own icon follow it. Docks and taskbars that match the window to Ephervex's
+  desktop entry instead, as GNOME Shell does, keep showing the installed
+  `ephervex` icon.
+- On Wayland the compositor shows the icon from Ephervex's desktop entry, and
+  an application cannot change it while it runs, so the window icon stays the
+  installed one. The logo inside the window still follows the theme.
+- Ephervex is built for Linux only, so there is no macOS Dock or Windows
+  taskbar icon to change.
+
 ## What a theme does not reach
 
 Dropdowns, sliders and spinners are drawn from the colors above. Scroll bars,
@@ -117,14 +197,23 @@ looking out of place.
 
 ## When a file has a problem
 
-Problems are listed under the theme setting, one line per file:
+The theme setting says how many problems were found, and Show problems lists
+them, one line per file:
 
 - A file is skipped when it is not valid TOML, uses a newer `format_version`,
   names a `parent` that is not a built-in theme, gives a key the wrong type, or
   writes a color any other way than `#rrggbb` or `#rrggbbaa`.
 - A color token or key Ephervex does not know is ignored and reported, and the
   rest of the theme is used. Check the spelling when you see one.
-- At most 100 theme files of at most 64 KiB each are read.
+- A theme folder that is a symbolic link, or whose `theme.toml` is one, is
+  skipped.
+- A `[branding]` value of the wrong type skips the file. A branding value that
+  names an unsafe or unsupported file, or a branding key Ephervex does not know,
+  is ignored and reported, and the rest of the theme is used. `[branding]` in a
+  standalone `.toml` file is ignored and reported, because only a theme folder
+  has a `branding/` folder.
+- At most 100 themes, files and folders together, are read, and a theme file
+  may be at most 64 KiB.
 
 If the theme you chose can no longer be read, Ephervex paints in the Dark
 theme and keeps your choice, so fixing the file brings the theme back.

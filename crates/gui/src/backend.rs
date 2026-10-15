@@ -889,6 +889,8 @@ pub struct SettingsData {
     pub theme: ephervex_core::ApplicationTheme,
     /// The themes the user added, read from [`Self::themes_folder`].
     pub user_themes: crate::theme_files::UserThemes,
+    /// The chosen theme's decoded logo and window icon.
+    pub branding: crate::theme_files::BrandingImages,
     pub themes_folder: String,
     pub show_linked_servers: bool,
     /// Whether a mod change acts on the mods its relations name.
@@ -6117,6 +6119,12 @@ fn application_settings(app: &App) -> Result<SettingsData, CoreError> {
         .paths()
         .config_dir()
         .join(crate::theme_files::THEMES_FOLDER);
+    let mut user_themes = crate::theme_files::read_user_themes(&themes_folder);
+    let branding = crate::theme_files::read_selected_branding(
+        &themes_folder,
+        &mut user_themes,
+        &display.theme,
+    );
     let storage = app.persistent_storage_settings();
     let java = app.java_settings();
     let server = app.server_application_settings();
@@ -6151,7 +6159,8 @@ fn application_settings(app: &App) -> Result<SettingsData, CoreError> {
         text_scale_percent: display.text_scale.percent(),
         technical_text_size_pixels: display.technical_text_size.pixels(),
         theme: display.theme,
-        user_themes: crate::theme_files::read_user_themes(&themes_folder),
+        user_themes,
+        branding,
         themes_folder: themes_folder.display().to_string(),
         show_linked_servers: display.show_linked_servers,
         follow_mod_dependencies: app.follow_mod_dependencies(),

@@ -79,6 +79,7 @@ pub mod termination;
 mod test_fixtures;
 #[cfg(feature = "test-support")]
 pub mod test_support;
+pub mod theme_package;
 pub mod url_handler;
 pub mod verify;
 

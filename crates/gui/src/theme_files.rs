@@ -1,14 +1,22 @@
-//! Themes a user adds as TOML files in the themes folder.
+//! Themes a user adds to the themes folder, as TOML files or theme folders.
 //!
 //! A theme names a built-in parent and overrides some of its colors; every
-//! color it leaves out is the parent's. The format is documented in
-//! `docs/themes.md` (ADR 0042). Files are the user's own, but they are still
-//! read defensively: bounded in number and size, parsed strictly, and a file
-//! that cannot be used is reported and skipped without affecting the others.
+//! color it leaves out is the parent's. A theme folder may also replace the
+//! logo and window icon with images in its own `branding/` folder. The format
+//! is documented in `docs/themes.md` (ADR 0042, ADR 0047). Files are the user's
+//! own, but they are still read defensively: bounded in number and size, parsed
+//! strictly, and a file that cannot be used is reported and skipped without
+//! affecting the others.
 
+use std::collections::HashSet;
 use std::io::Read as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use ephervex_core::theme_package::{
+    self, BRANDING_FOLDER, BrandingFormat, BrandingImage, BrandingReference,
+    BrandingReferenceError, BrandingRole, MAX_BRANDING_DIMENSION, MAX_BRANDING_FILE_BYTES,
+    MAX_REFERENCE_BYTES, MAX_REFERENCE_DEPTH, THEME_MANIFEST, ThemePackageError,
+};
 use ephervex_core::{ApplicationColorScheme, ApplicationTheme};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use slint::Color;
@@ -20,7 +28,7 @@ pub const THEMES_FOLDER: &str = "themes";
 
 /// The theme format this build reads.
 const FORMAT_VERSION: i64 = 1;
-/// Files read at most, in file-name order.
+/// Theme files and folders read at most, in name order.
 const MAX_THEME_FILES: usize = 100;
 /// A theme is a few dozen short lines; anything much larger is not one.
 const MAX_THEME_FILE_BYTES: u64 = 64 * 1024;
@@ -37,6 +45,23 @@ pub struct UserTheme {
     pub parent: ApplicationColorScheme,
     /// The colors the file sets, by palette token.
     pub colors: Vec<(&'static str, Color)>,
+    /// Always empty for a standalone file, which has no `branding/` folder.
+    pub branding: ThemeBranding,
+}
+
+/// The images a theme folder names under `[branding]`. An absent one is the
+/// default.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ThemeBranding {
+    pub logo: Option<BrandingReference>,
+    pub icon: Option<BrandingReference>,
+}
+
+/// The chosen theme's decoded branding. An absent image is the default.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BrandingImages {
+    pub logo: Option<BrandingImage>,
+    pub icon: Option<BrandingImage>,
 }
 
 impl UserTheme {
@@ -62,7 +87,10 @@ enum Problem {
     FileName,
     Unreadable,
     TooLarge,
-    Syntax { line: usize, message: String },
+    Syntax {
+        line: usize,
+        message: String,
+    },
     NewerFormat(i64),
     InvalidField(&'static str),
     UnknownParent(String),
@@ -71,6 +99,15 @@ enum Problem {
     // tokens still loads here.
     UnknownColor(String),
     UnknownKey(String),
+    PackageLink,
+    /// A file whose id a theme folder also has; the folder is used.
+    Shadowed,
+    BrandingWithoutFolder,
+    UnknownBrandingKey(String),
+    BrandingReference {
+        reference: String,
+        reason: BrandingReferenceError,
+    },
 }
 
 impl Problem {
@@ -97,7 +134,109 @@ impl Problem {
             Self::InvalidColor(key) => text("gui-theme-problem-invalid-color", key),
             Self::UnknownColor(key) => text("gui-theme-problem-unknown-color", key),
             Self::UnknownKey(key) => text("gui-theme-problem-unknown-key", key),
+            Self::PackageLink => lookup("gui-theme-problem-package-link"),
+            Self::Shadowed => lookup("gui-theme-problem-shadowed"),
+            Self::BrandingWithoutFolder => lookup("gui-theme-problem-branding-without-folder"),
+            Self::UnknownBrandingKey(key) => text("gui-theme-problem-unknown-branding", key),
+            Self::BrandingReference { reference, reason } => {
+                let limit = |id: &str, limit: usize| {
+                    lookup_args(
+                        id,
+                        [
+                            ("value", Arg::from(reference.clone())),
+                            (
+                                "count",
+                                Arg::Count(i64::try_from(limit).unwrap_or(i64::MAX)),
+                            ),
+                        ],
+                    )
+                };
+                match reason {
+                    BrandingReferenceError::Empty => lookup("gui-theme-problem-branding-empty"),
+                    BrandingReferenceError::TooLong => {
+                        limit("gui-theme-problem-branding-too-long", MAX_REFERENCE_BYTES)
+                    }
+                    BrandingReferenceError::TooDeep => limit(
+                        "gui-theme-problem-branding-too-deep",
+                        MAX_REFERENCE_DEPTH - 1,
+                    ),
+                    BrandingReferenceError::EmptyComponent => {
+                        text("gui-theme-problem-branding-empty-component", reference)
+                    }
+                    BrandingReferenceError::ControlCharacter => {
+                        text("gui-theme-problem-branding-control", reference)
+                    }
+                    BrandingReferenceError::UnsupportedFormat => {
+                        text("gui-theme-problem-branding-format", reference)
+                    }
+                    BrandingReferenceError::Backslash
+                    | BrandingReferenceError::Scheme
+                    | BrandingReferenceError::Absolute
+                    | BrandingReferenceError::Traversal => {
+                        text("gui-theme-problem-branding-outside", reference)
+                    }
+                }
+            }
         }
+    }
+}
+
+/// Why one branding image of the chosen theme is not shown.
+fn branding_message(error: &ThemePackageError) -> String {
+    let count = |value: u64| Arg::Count(i64::try_from(value).unwrap_or(i64::MAX));
+    match error {
+        ThemePackageError::Missing => lookup("gui-theme-branding-missing"),
+        ThemePackageError::SymbolicLink => lookup("gui-theme-branding-link"),
+        ThemePackageError::NotAFile => lookup("gui-theme-branding-not-file"),
+        ThemePackageError::TooLarge { .. } => lookup_args(
+            "gui-theme-branding-too-large",
+            [("count", count(MAX_BRANDING_FILE_BYTES / (1024 * 1024)))],
+        ),
+        ThemePackageError::TooManyPixels { .. } => lookup_args(
+            "gui-theme-branding-too-many-pixels",
+            [("count", count(u64::from(MAX_BRANDING_DIMENSION)))],
+        ),
+        ThemePackageError::FormatMismatch => lookup("gui-theme-branding-format-mismatch"),
+        ThemePackageError::DecodeLimit => lookup("gui-theme-branding-decode-limit"),
+        ThemePackageError::Malformed(_) => lookup("gui-theme-branding-malformed"),
+        ThemePackageError::InvalidPackageName | ThemePackageError::Unreadable(_) => {
+            lookup("gui-theme-branding-unreadable")
+        }
+    }
+}
+
+/// One theme's result: the theme, if usable, and what was wrong with it.
+type ThemeRead = (Option<UserTheme>, Vec<Problem>);
+
+/// Something in the themes folder that holds a theme.
+#[derive(Debug)]
+enum Candidate {
+    File(PathBuf),
+    Package(String),
+    /// A link where a theme folder would be, which is never followed.
+    LinkedPackage(String),
+}
+
+/// What `entry` holds, if it looks like a theme. Only decides what to try:
+/// a theme folder is read through `theme_package`, which enforces the rules.
+fn candidate(entry: &std::fs::DirEntry) -> Option<(String, Candidate)> {
+    let name = entry.file_name().to_string_lossy().into_owned();
+    let path = entry.path();
+    if path
+        .extension()
+        .is_some_and(|extension| extension == "toml")
+        && path.is_file()
+    {
+        return Some((name, Candidate::File(path)));
+    }
+    let kind = entry.file_type().ok()?;
+    let manifest = path.join(THEME_MANIFEST);
+    if kind.is_dir() && manifest.symlink_metadata().is_ok() {
+        Some((name.clone(), Candidate::Package(name)))
+    } else if kind.is_symlink() && manifest.exists() {
+        Some((name.clone(), Candidate::LinkedPackage(name)))
+    } else {
+        None
     }
 }
 
@@ -116,14 +255,9 @@ pub fn read_user_themes(folder: &Path) -> UserThemes {
     };
     let mut files: Vec<_> = entries
         .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|extension| extension == "toml")
-        })
-        .filter(|path| path.is_file())
+        .filter_map(|entry| candidate(&entry))
         .collect();
-    files.sort();
+    files.sort_by(|a, b| a.0.cmp(&b.0));
     if files.len() > MAX_THEME_FILES {
         found.problems.push(lookup_args(
             "gui-theme-problem-too-many",
@@ -141,13 +275,42 @@ pub fn read_user_themes(folder: &Path) -> UserThemes {
         files.truncate(MAX_THEME_FILES);
     }
 
-    for path in files {
-        let file = path
-            .file_name()
-            .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
-        let (theme, problems) = read_theme_file(&path);
+    // Folders are read first, because only a usable one shadows the file it
+    // shares a name with.
+    let mut read: Vec<(String, ThemeRead)> = files
+        .iter()
+        .map(|(name, candidate)| match candidate {
+            Candidate::File(_) => (name.clone(), (None, Vec::new())),
+            Candidate::Package(id) => (
+                format!("{id}/{THEME_MANIFEST}"),
+                read_theme_package(folder, id),
+            ),
+            Candidate::LinkedPackage(id) => (
+                format!("{id}/{THEME_MANIFEST}"),
+                (None, vec![Problem::PackageLink]),
+            ),
+        })
+        .collect();
+    let usable: HashSet<String> = read
+        .iter()
+        .filter_map(|(_, (theme, _))| theme.as_ref().map(|theme| theme.id.clone()))
+        .collect();
+    for ((_, candidate), (_, result)) in files.iter().zip(&mut read) {
+        if let Candidate::File(path) = candidate {
+            let shadowed = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(|stem| usable.contains(stem));
+            *result = if shadowed {
+                (None, vec![Problem::Shadowed])
+            } else {
+                read_theme_file(path)
+            };
+        }
+    }
+    for (file, (theme, problems)) in read {
         for problem in problems {
-            tracing::warn!(path = %path.display(), ?problem, "theme file problem");
+            tracing::warn!(%file, ?problem, "theme file problem");
             found.problems.push(lookup_args(
                 "gui-theme-problem",
                 [
@@ -182,9 +345,112 @@ fn read_theme_file(path: &Path) -> (Option<UserTheme>, Vec<Problem>) {
     });
     match read {
         Ok(length) if length as u64 > MAX_THEME_FILE_BYTES => (None, vec![Problem::TooLarge]),
-        Ok(_) => parse_theme(id, &text),
+        Ok(_) => {
+            let (mut theme, mut problems) = parse_theme(id, &text);
+            let is_branding = |problem: &Problem| {
+                matches!(
+                    problem,
+                    Problem::BrandingReference { .. } | Problem::UnknownBrandingKey(_)
+                )
+            };
+            if let Some(theme) = &mut theme
+                && (theme.branding != ThemeBranding::default() || problems.iter().any(is_branding))
+            {
+                theme.branding = ThemeBranding::default();
+                problems.retain(|problem| !is_branding(problem));
+                problems.push(Problem::BrandingWithoutFolder);
+            }
+            (theme, problems)
+        }
         Err(_) => (None, vec![Problem::Unreadable]),
     }
+}
+
+/// Reads `<folder>/<id>/theme.toml`, never through a link.
+fn read_theme_package(folder: &Path, id: &str) -> (Option<UserTheme>, Vec<Problem>) {
+    if ApplicationTheme::user(id).is_none() {
+        return (None, vec![Problem::FileName]);
+    }
+    match theme_package::read_theme_manifest(folder, id, MAX_THEME_FILE_BYTES) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(text) => parse_theme(id, &text),
+            Err(_) => (None, vec![Problem::Unreadable]),
+        },
+        Err(ThemePackageError::TooLarge { .. }) => (None, vec![Problem::TooLarge]),
+        Err(ThemePackageError::SymbolicLink) => (None, vec![Problem::PackageLink]),
+        Err(_) => (None, vec![Problem::Unreadable]),
+    }
+}
+
+/// Branding compiled into the application for a built-in theme: the theme,
+/// what the image replaces, its bytes and their format. Nothing here is read
+/// from disk. Dark and Light show the default logo, so they have no entries.
+type EmbeddedBranding = (
+    ApplicationColorScheme,
+    BrandingRole,
+    &'static [u8],
+    BrandingFormat,
+);
+
+const BUILT_IN_BRANDING: &[EmbeddedBranding] = &[];
+
+/// Decodes `scheme`'s entries in `table`. One that does not decode is a
+/// defect in the build, logged and left at the default.
+fn embedded_branding(table: &[EmbeddedBranding], scheme: ApplicationColorScheme) -> BrandingImages {
+    let mut images = BrandingImages::default();
+    for (_, role, bytes, format) in table.iter().filter(|entry| entry.0 == scheme) {
+        match theme_package::decode_branding_image(bytes, *format, *role) {
+            Ok(image) => match role {
+                BrandingRole::Logo => images.logo = Some(image),
+                BrandingRole::Icon => images.icon = Some(image),
+            },
+            Err(error) => tracing::error!(?scheme, ?role, %error, "built-in branding unusable"),
+        }
+    }
+    images
+}
+
+/// Decodes the branding of the theme `selected` names: a built-in theme's
+/// compiled-in images, or a theme folder's own. Each image that cannot be used is reported in
+/// `themes.problems` and left at the default.
+#[must_use]
+pub fn read_selected_branding(
+    folder: &Path,
+    themes: &mut UserThemes,
+    selected: &ApplicationTheme,
+) -> BrandingImages {
+    let id = match selected {
+        ApplicationTheme::BuiltIn(scheme) => return embedded_branding(BUILT_IN_BRANDING, *scheme),
+        ApplicationTheme::User(id) => id,
+    };
+    let Some(theme) = themes.themes.iter().find(|theme| theme.id == *id) else {
+        return BrandingImages::default();
+    };
+    let mut problems = Vec::new();
+    let mut read = |reference: Option<&BrandingReference>, role| {
+        let reference = reference?;
+        match theme_package::read_branding_image(folder, &theme.id, reference, role) {
+            Ok(image) => Some(image),
+            Err(error) => {
+                let file = format!("{}/{BRANDING_FOLDER}/{}", theme.id, reference.as_str());
+                tracing::warn!(%file, %error, "theme branding unusable");
+                problems.push(lookup_args(
+                    "gui-theme-problem",
+                    [
+                        ("file", Arg::from(file)),
+                        ("value", Arg::from(branding_message(&error))),
+                    ],
+                ));
+                None
+            }
+        }
+    };
+    let images = BrandingImages {
+        logo: read(theme.branding.logo.as_ref(), BrandingRole::Logo),
+        icon: read(theme.branding.icon.as_ref(), BrandingRole::Icon),
+    };
+    themes.problems.extend(problems);
+    images
 }
 
 /// Parses one theme file's text. Returns the theme, if it is usable, and
@@ -205,7 +471,7 @@ fn parse_theme(id: &str, text: &str) -> (Option<UserTheme>, Vec<Problem>) {
     for key in document.keys() {
         if !matches!(
             key.as_str(),
-            "format_version" | "name" | "parent" | "colors"
+            "format_version" | "name" | "parent" | "colors" | "branding"
         ) {
             notes.push(Problem::UnknownKey(key.clone()));
         }
@@ -266,13 +532,54 @@ fn parse_theme(id: &str, text: &str) -> (Option<UserTheme>, Vec<Problem>) {
         Some(_) => return (None, vec![Problem::InvalidField("colors")]),
     }
 
+    let branding = match parse_branding(document.get("branding"), &mut notes) {
+        Ok(branding) => branding,
+        Err(problem) => return (None, vec![problem]),
+    };
+
     let theme = UserTheme {
         id: id.to_owned(),
         name,
         parent,
         colors,
+        branding,
     };
     (Some(theme), notes)
+}
+
+/// The `[branding]` table. A wrong type refuses the file; a reference that is
+/// unsafe or unsupported is reported in `notes` and left at the default.
+fn parse_branding(
+    table: Option<&toml::Value>,
+    notes: &mut Vec<Problem>,
+) -> Result<ThemeBranding, Problem> {
+    let mut branding = ThemeBranding::default();
+    let table = match table {
+        None => return Ok(branding),
+        Some(toml::Value::Table(table)) => table,
+        Some(_) => return Err(Problem::InvalidField("branding")),
+    };
+    for (key, value) in table {
+        let (slot, field) = match key.as_str() {
+            "logo" => (&mut branding.logo, "branding.logo"),
+            "icon" => (&mut branding.icon, "branding.icon"),
+            _ => {
+                notes.push(Problem::UnknownBrandingKey(key.clone()));
+                continue;
+            }
+        };
+        let Some(text) = value.as_str() else {
+            return Err(Problem::InvalidField(field));
+        };
+        match BrandingReference::parse(text) {
+            Ok(reference) => *slot = Some(reference),
+            Err(reason) => notes.push(Problem::BrandingReference {
+                reference: text.chars().filter(|c| !c.is_control()).collect(),
+                reason,
+            }),
+        }
+    }
+    Ok(branding)
 }
 
 /// `#rrggbb` or `#rrggbbaa`, and nothing looser.
@@ -293,7 +600,7 @@ fn parse_color(value: &str) -> Option<Color> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::expect_used, clippy::unwrap_used)]
+    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
     use super::*;
 
@@ -498,5 +805,424 @@ mod tests {
         let found = read_user_themes(folder.path());
         assert_eq!(found.themes.len(), MAX_THEME_FILES);
         assert_eq!(found.problems.len(), 1);
+    }
+
+    fn package(folder: &Path, id: &str, manifest: &str) -> PathBuf {
+        let branding = folder.join(id).join(BRANDING_FOLDER);
+        std::fs::create_dir_all(&branding).expect("package");
+        std::fs::write(folder.join(id).join(THEME_MANIFEST), manifest).expect("manifest");
+        branding
+    }
+
+    fn png(rgba: [u8; 4]) -> Vec<u8> {
+        ephervex_core::test_support::solid_png(4, 2, rgba)
+    }
+
+    #[test]
+    fn a_theme_folder_names_its_branding_relative_to_its_branding_folder() {
+        let (theme, problems) = parse_theme(
+            "pumpkin",
+            "name = \"Pumpkin\"\n[branding]\nlogo = \"logo.png\"\nicon = \"icons/app.webp\"\n",
+        );
+        assert!(problems.is_empty(), "{problems:?}");
+        let branding = theme.expect("usable").branding;
+        assert_eq!(branding.logo.expect("logo").as_str(), "logo.png");
+        assert_eq!(branding.icon.expect("icon").as_str(), "icons/app.webp");
+    }
+
+    #[test]
+    fn an_unusable_branding_reference_is_reported_and_the_theme_still_loads() {
+        for (text, expected) in [
+            (
+                "../other/branding/logo.png",
+                Problem::BrandingReference {
+                    reference: "../other/branding/logo.png".to_owned(),
+                    reason: BrandingReferenceError::Traversal,
+                },
+            ),
+            (
+                "/etc/logo.png",
+                Problem::BrandingReference {
+                    reference: "/etc/logo.png".to_owned(),
+                    reason: BrandingReferenceError::Absolute,
+                },
+            ),
+            (
+                "https://example.com/logo.png",
+                Problem::BrandingReference {
+                    reference: "https://example.com/logo.png".to_owned(),
+                    reason: BrandingReferenceError::Scheme,
+                },
+            ),
+            (
+                "logo.svg",
+                Problem::BrandingReference {
+                    reference: "logo.svg".to_owned(),
+                    reason: BrandingReferenceError::UnsupportedFormat,
+                },
+            ),
+        ] {
+            let (theme, problems) = parse_theme(
+                "t",
+                &format!("[branding]\nlogo = \"{text}\"\nicon = \"ok.png\""),
+            );
+            let theme = theme.expect("usable");
+            assert_eq!(theme.branding.logo, None, "{text}");
+            assert!(theme.branding.icon.is_some(), "{text}");
+            assert_eq!(problems, [expected], "{text}");
+        }
+        let (theme, problems) = parse_theme("t", "[branding]\nbanner = \"b.png\"");
+        assert_eq!(theme.expect("usable").branding, ThemeBranding::default());
+        assert_eq!(problems, [Problem::UnknownBrandingKey("banner".to_owned())]);
+    }
+
+    #[test]
+    fn branding_of_the_wrong_type_skips_the_theme() {
+        for (text, expected) in [
+            ("branding = \"logo.png\"", "branding"),
+            ("[branding]\nlogo = 1", "branding.logo"),
+            ("[branding]\nicon = [\"a.png\"]", "branding.icon"),
+        ] {
+            let (theme, problems) = parse_theme("t", text);
+            assert!(theme.is_none(), "{text}");
+            assert_eq!(problems, [Problem::InvalidField(expected)], "{text}");
+        }
+    }
+
+    #[test]
+    fn a_standalone_file_keeps_its_colors_and_ignores_branding() {
+        let folder = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            folder.path().join("plain.toml"),
+            "[colors]\naccent = \"#112233\"\n[branding]\nlogo = \"logo.png\"\n",
+        )
+        .expect("write");
+        std::fs::write(
+            folder.path().join("unsafe.toml"),
+            "[branding]\nlogo = \"../logo.png\"\n",
+        )
+        .expect("write");
+        let found = read_user_themes(folder.path());
+        let [plain, unsafe_theme] = found.themes.as_slice() else {
+            panic!("two themes: {found:?}");
+        };
+        assert_eq!(plain.colors.len(), 1);
+        assert_eq!(plain.branding, ThemeBranding::default());
+        assert_eq!(unsafe_theme.branding, ThemeBranding::default());
+        let without_folder = lookup("gui-theme-problem-branding-without-folder");
+        for file in ["plain.toml", "unsafe.toml"] {
+            let expected = lookup_args(
+                "gui-theme-problem",
+                [
+                    ("file", Arg::from(file)),
+                    ("value", Arg::from(without_folder.clone())),
+                ],
+            );
+            assert!(
+                found.problems.contains(&expected),
+                "{file}: {:?}",
+                found.problems
+            );
+        }
+        assert_eq!(found.problems.len(), 2, "{:?}", found.problems);
+    }
+
+    #[test]
+    fn theme_folders_are_read_beside_theme_files() {
+        let folder = tempfile::tempdir().expect("temp dir");
+        package(
+            folder.path(),
+            "pumpkin",
+            "name = \"Pumpkin\"\nparent = \"light\"\n[branding]\nlogo = \"logo.png\"",
+        );
+        std::fs::write(folder.path().join("modrinth.toml"), "name = \"Modrinth\"").expect("write");
+        // A folder holding no theme is not one, and says nothing.
+        std::fs::create_dir(folder.path().join("backup")).expect("dir");
+
+        let found = read_user_themes(folder.path());
+        assert!(found.problems.is_empty(), "{:?}", found.problems);
+        let ids: Vec<&str> = found.themes.iter().map(|theme| theme.id.as_str()).collect();
+        assert_eq!(ids, ["modrinth", "pumpkin"]);
+        let pumpkin = &found.themes[1];
+        assert_eq!(pumpkin.parent, ApplicationColorScheme::Light);
+        assert_eq!(
+            pumpkin
+                .branding
+                .logo
+                .as_ref()
+                .map(BrandingReference::as_str),
+            Some("logo.png")
+        );
+    }
+
+    #[test]
+    fn a_theme_folder_is_never_read_through_a_link() {
+        let outside = tempfile::tempdir().expect("outside");
+        package(outside.path(), "real", "name = \"Outside\"");
+        let folder = tempfile::tempdir().expect("temp dir");
+        std::os::unix::fs::symlink(outside.path().join("real"), folder.path().join("linked"))
+            .expect("link");
+        let branding = package(folder.path(), "manifest-link", "");
+        std::fs::remove_file(folder.path().join("manifest-link").join(THEME_MANIFEST))
+            .expect("remove");
+        std::os::unix::fs::symlink(
+            outside.path().join("real").join(THEME_MANIFEST),
+            branding.parent().expect("package").join(THEME_MANIFEST),
+        )
+        .expect("link");
+
+        let found = read_user_themes(folder.path());
+        assert!(found.themes.is_empty(), "{:?}", found.themes);
+        assert_eq!(found.problems.len(), 2, "{:?}", found.problems);
+        let link = lookup("gui-theme-problem-package-link");
+        for file in ["linked/theme.toml", "manifest-link/theme.toml"] {
+            assert!(
+                found.problems.contains(&lookup_args(
+                    "gui-theme-problem",
+                    [
+                        ("file", Arg::from(file)),
+                        ("value", Arg::from(link.clone()))
+                    ]
+                )),
+                "{file}: {:?}",
+                found.problems
+            );
+        }
+    }
+
+    #[test]
+    fn a_theme_folder_wins_over_a_file_of_the_same_name_and_bad_names_are_reported() {
+        let folder = tempfile::tempdir().expect("temp dir");
+        package(folder.path(), "mine", "name = \"Folder\"");
+        std::fs::write(folder.path().join("mine.toml"), "name = \"File\"").expect("write");
+        package(folder.path(), "Bad Name", "");
+        // A refused link leaves the file of its name in use.
+        let outside = tempfile::tempdir().expect("outside");
+        package(outside.path(), "real", "");
+        std::os::unix::fs::symlink(outside.path().join("real"), folder.path().join("other"))
+            .expect("link");
+        std::fs::write(folder.path().join("other.toml"), "name = \"Other\"").expect("write");
+        // So does a folder that cannot be used.
+        package(folder.path(), "broken", "colors = 1");
+        std::fs::write(folder.path().join("broken.toml"), "name = \"Broken file\"").expect("write");
+
+        let found = read_user_themes(folder.path());
+        let names: Vec<&str> = found
+            .themes
+            .iter()
+            .map(|theme| theme.name.as_str())
+            .collect();
+        assert_eq!(names, ["Broken file", "Folder", "Other"]);
+        assert_eq!(found.problems.len(), 4, "{:?}", found.problems);
+        assert!(
+            found
+                .problems
+                .iter()
+                .any(|problem| problem.starts_with("broken/theme.toml: "))
+        );
+        assert!(
+            found
+                .problems
+                .iter()
+                .any(|problem| problem.starts_with("other/theme.toml: "))
+        );
+        assert!(
+            found
+                .problems
+                .iter()
+                .any(|problem| problem.starts_with("mine.toml: "))
+        );
+        assert!(
+            found
+                .problems
+                .iter()
+                .any(|problem| problem.starts_with("Bad Name/theme.toml: "))
+        );
+    }
+
+    #[test]
+    fn the_chosen_theme_folder_shows_its_logo_and_icon() {
+        let folder = tempfile::tempdir().expect("temp dir");
+        let branding = package(
+            folder.path(),
+            "pumpkin",
+            "[branding]\nlogo = \"logo.png\"\nicon = \"icon.png\"",
+        );
+        std::fs::write(branding.join("logo.png"), png([200, 100, 0, 255])).expect("write");
+        std::fs::write(branding.join("icon.png"), png([0, 0, 0, 255])).expect("write");
+        let mut found = read_user_themes(folder.path());
+
+        let images = read_selected_branding(
+            folder.path(),
+            &mut found,
+            &ApplicationTheme::User("pumpkin".to_owned()),
+        );
+        assert!(found.problems.is_empty(), "{:?}", found.problems);
+        let logo = images.logo.expect("logo");
+        assert_eq!(
+            (logo.width(), logo.height()),
+            (4, 2),
+            "the logo keeps its shape"
+        );
+        assert_eq!(&logo.rgba()[..4], &[200, 100, 0, 255]);
+        let icon = images.icon.expect("icon");
+        assert_eq!(
+            (icon.width(), icon.height()),
+            (4, 4),
+            "the icon is made square"
+        );
+    }
+
+    #[test]
+    fn a_branding_image_that_cannot_be_used_is_reported_and_the_default_kept() {
+        let outside = tempfile::tempdir().expect("outside");
+        std::fs::write(outside.path().join("secret.png"), png([1, 1, 1, 255])).expect("write");
+        let folder = tempfile::tempdir().expect("temp dir");
+        let branding = package(
+            folder.path(),
+            "broken",
+            "[branding]\nlogo = \"absent.png\"\nicon = \"linked.png\"",
+        );
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.png"),
+            branding.join("linked.png"),
+        )
+        .expect("link");
+        let mut found = read_user_themes(folder.path());
+
+        let images = read_selected_branding(
+            folder.path(),
+            &mut found,
+            &ApplicationTheme::User("broken".to_owned()),
+        );
+        assert_eq!(images, BrandingImages::default());
+        let reported = |file: &str, message: &str| {
+            lookup_args(
+                "gui-theme-problem",
+                [
+                    ("file", Arg::from(file)),
+                    ("value", Arg::from(lookup(message))),
+                ],
+            )
+        };
+        assert_eq!(
+            found.problems,
+            [
+                reported("broken/branding/absent.png", "gui-theme-branding-missing"),
+                reported("broken/branding/linked.png", "gui-theme-branding-link"),
+            ]
+        );
+
+        std::fs::remove_file(branding.join("linked.png")).expect("remove");
+        std::fs::write(branding.join("absent.png"), "not a png").expect("write");
+        let mut found = read_user_themes(folder.path());
+        let images = read_selected_branding(
+            folder.path(),
+            &mut found,
+            &ApplicationTheme::User("broken".to_owned()),
+        );
+        assert_eq!(images, BrandingImages::default());
+        assert_eq!(
+            found.problems[0],
+            reported(
+                "broken/branding/absent.png",
+                "gui-theme-branding-format-mismatch"
+            )
+        );
+    }
+
+    #[test]
+    fn a_built_in_theme_shows_its_compiled_in_branding_and_falls_back_per_image() {
+        let logo: &'static [u8] = include_bytes!("../../../assets/logo.png");
+        let table: [EmbeddedBranding; 2] = [
+            (
+                ApplicationColorScheme::Light,
+                BrandingRole::Logo,
+                logo,
+                BrandingFormat::Png,
+            ),
+            (
+                ApplicationColorScheme::Light,
+                BrandingRole::Icon,
+                b"not an image",
+                BrandingFormat::Png,
+            ),
+        ];
+        let light = embedded_branding(&table, ApplicationColorScheme::Light);
+        let shown = light.logo.expect("the compiled-in logo");
+        assert_eq!((shown.width(), shown.height()), (620, 620));
+        assert_eq!(light.icon, None, "an unusable image is the default");
+        assert_eq!(
+            embedded_branding(&table, ApplicationColorScheme::Dark),
+            BrandingImages::default()
+        );
+        for scheme in [ApplicationColorScheme::Dark, ApplicationColorScheme::Light] {
+            assert_eq!(
+                embedded_branding(BUILT_IN_BRANDING, scheme),
+                BrandingImages::default()
+            );
+        }
+    }
+
+    #[test]
+    fn each_refused_branding_reference_says_what_to_change() {
+        let message = |text: &str| {
+            let (_, problems) = parse_theme("t", &format!("[branding]\nlogo = \"{text}\""));
+            let [problem] = problems.as_slice() else {
+                panic!("one problem for {text:?}: {problems:?}");
+            };
+            problem.message()
+        };
+        assert_eq!(message(""), lookup("gui-theme-problem-branding-empty"));
+        assert!(message("a/b/c/d/e.png").contains('3'));
+        assert!(message(&format!("{}.png", "a".repeat(300))).contains("255"));
+        assert_eq!(
+            message("icons//logo.png"),
+            lookup_args(
+                "gui-theme-problem-branding-empty-component",
+                [("value", Arg::from("icons//logo.png"))]
+            )
+        );
+        assert_eq!(
+            message("logo\\u0007.png"),
+            lookup_args(
+                "gui-theme-problem-branding-control",
+                [("value", Arg::from("logo.png"))]
+            )
+        );
+        let outside = lookup_args(
+            "gui-theme-problem-branding-outside",
+            [("value", Arg::from("../logo.png"))],
+        );
+        assert_eq!(message("../logo.png"), outside);
+        let distinct: HashSet<String> = [
+            "",
+            "a/b/c/d/e.png",
+            "icons//logo.png",
+            "../logo.png",
+            "logo.svg",
+        ]
+        .into_iter()
+        .map(message)
+        .collect();
+        assert_eq!(distinct.len(), 5);
+    }
+
+    #[test]
+    fn only_the_chosen_theme_folder_is_decoded() {
+        let folder = tempfile::tempdir().expect("temp dir");
+        let branding = package(folder.path(), "pumpkin", "[branding]\nlogo = \"logo.png\"");
+        std::fs::write(branding.join("logo.png"), png([200, 100, 0, 255])).expect("write");
+        let mut found = read_user_themes(folder.path());
+        for selected in [
+            ApplicationTheme::default(),
+            ApplicationTheme::User("absent".to_owned()),
+        ] {
+            assert_eq!(
+                read_selected_branding(folder.path(), &mut found, &selected),
+                BrandingImages::default()
+            );
+        }
+        assert!(found.problems.is_empty());
     }
 }

@@ -278,6 +278,7 @@ mod tests {
             name: id.to_uppercase(),
             parent,
             colors: colors.to_vec(),
+            branding: crate::theme_files::ThemeBranding::default(),
         }
     }
 
