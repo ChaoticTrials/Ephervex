@@ -2320,7 +2320,7 @@ gui-restore-mod = Restore
 gui-mod-restored = Put the mod back.
 gui-mod-loads = Load { $value }
 gui-server-mods = Server mods
-gui-server-mods-detail = Everything in this server's mods folder, including jars you added yourself. Drop JARs here to add them. Turn off a mod to keep it installed while the loader skips it, which is how a client-only mod stops crashing a server.
+gui-server-mods-detail = Every mod on this server: the ones its pack brought, the ones you installed, and any jar you added yourself. Drop JARs here to add them.
 gui-no-server-mods-detail = This server was not built from a pack, so nothing here is recorded as belonging to it.
 # Shown when the mod's exact release cannot be proven from what Ephervex
 # recorded. The file is installed; only its version is unknown.
@@ -2344,9 +2344,9 @@ gui-loader-changed = This instance now runs { $value }.
 gui-modal-manage-mod = Manage Mod
 gui-modal-remove-mod = Remove Mod
 gui-modal-mod-acquire = Download This Release Yourself
-gui-mod-compatible-versions = Releases that fit this instance
+gui-mod-compatible-versions = Releases that fit this Minecraft version and loader
 gui-mod-versions-loading = Loading releases...
-gui-mod-no-compatible-versions = No release of this mod fits this instance's exact Minecraft version and loader.
+gui-mod-no-compatible-versions = No release of this mod fits this exact Minecraft version and loader.
 gui-mod-installed-version = Installed
 gui-mod-newest-version = Newest
 gui-mod-browser-download = Browser download
@@ -2363,13 +2363,13 @@ gui-mod-reset-to-pack-version = Reset to Pack's Version
 gui-mod-project-page-opened = Opened the project's page in your browser.
 gui-mod-project-page-open-failed = Could not open a browser.
 gui-mod-version-changed = { $value } now runs the release you selected.
-gui-mod-already-current = { $value } is already the newest release that fits this instance.
+gui-mod-already-current = { $value } is already the newest release that fits this Minecraft version and loader.
 gui-mod-repaired = { $value } was put back at its recorded release.
 gui-mod-removed = { $count ->
     [one] Removed 1 mod.
    *[other] Removed { $count } mods.
 }
-gui-mod-remove-detail = { $value } will be deleted from this instance.
+gui-mod-remove-detail = { $value } will be deleted from its mods folder.
 gui-mod-remove-dependencies = { $count ->
     [one] 1 mod was installed only for it and will go too:
    *[other] { $count } mods were installed only for it and will go too:

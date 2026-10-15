@@ -91,6 +91,7 @@ pub(super) struct HostMods {
     rows: Vec<ModRow>,
     query: String,
     notice: String,
+    mods_are_the_users: bool,
     browser: Browser,
 }
 
@@ -132,12 +133,14 @@ impl ModViews {
         host: InstalledHost,
         rows: Vec<ModRow>,
         notice: String,
+        mods_are_the_users: bool,
     ) -> bool {
         let Some(mods) = self.hosts.get_mut(&host) else {
             return false;
         };
         mods.rows = rows;
         mods.notice = notice;
+        mods.mods_are_the_users = mods_are_the_users;
         mark_installed(mods);
         true
     }
@@ -379,6 +382,7 @@ fn write_view(view: &mut HostView, mods: &HostMods) {
     view.mods = reuse(&view.mods, matching_mods(&mods.rows, &mods.query));
     view.mods_query = mods.query.as_str().into();
     view.mods_notice = mods.notice.as_str().into();
+    view.mods_are_the_users = mods.mods_are_the_users;
     let browser = &mods.browser;
     view.browser_provider = browser.provider.as_str().into();
     view.browser_submitted = browser.submitted.as_str().into();

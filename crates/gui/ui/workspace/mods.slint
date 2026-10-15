@@ -2,10 +2,10 @@
 
 import { ScrollView } from "std-widgets.slint";
 import { ModArtwork } from "../components/artwork.slint";
-import { AppButton, IconButton, Pill, Toggle } from "../components/controls.slint";
-import { BodyText } from "../components/text.slint";
+import { AppButton, EmptyState, IconButton, Pill, TextField, Toggle } from "../components/controls.slint";
+import { BodyText, Heading } from "../components/text.slint";
 import { GuiI18n } from "../globals.slint";
-import { ImpactRow, LinkedTargetRow, ModRow, RelationRow } from "../models.slint";
+import { HostView, ImpactRow, LinkedTargetRow, ModRow, RelationRow } from "../models.slint";
 import { Theme } from "../theme.slint";
 
 // A boxed list of mods a dependency question named.
@@ -166,13 +166,6 @@ export component ModCard inherits Rectangle {
     in property <ModRow> item;
     // Whether this list lets a mod be turned off in place.
     in property <bool> togglable;
-    // Whether this list can take a launcher-installed mod out of its host.
-    //
-    // A client's list can: removal resolves what the mod's dependencies
-    // leave orphaned and retires the jar. A server's cannot, so there the
-    // bin appears only for a jar the user placed themselves, which is
-    // theirs to delete whatever is listing it.
-    in property <bool> removable;
     // Whether this host's mods are the user's, rather than a record of
     // what a pack shipped. When they are, the bin takes a mod out of the
     // instance for good; when they are not, it puts the jar aside so it
@@ -182,7 +175,7 @@ export component ModCard inherits Rectangle {
     // disk. A mod whose release is not the user's to end - a library
     // something else needs - keeps the reversible bin whatever the host
     // says.
-    property <bool> bin-removes: root.removable && root.item.can-remove && root.mods-are-the-users;
+    property <bool> bin-removes: root.item.can-remove && root.mods-are-the-users;
     callback manage(string);
     callback toggle(string, bool);
     callback delete-file(string, string);
@@ -251,17 +244,85 @@ export component ModCard inherits Rectangle {
             //
             // Declared after the card's own touch area so they take their
             // own clicks instead of opening the mod manager behind them.
-            if root.togglable || root.item.can-delete-file || (root.removable && root.item.can-remove) : HorizontalLayout {
+            if root.togglable || root.item.can-delete-file || root.item.can-remove : HorizontalLayout {
                 alignment: end;
                 spacing: 8px;
                 // Nothing to turn on or throw away while the jar is gone.
                 // The one thing left is putting it back.
                 if root.item.deleted : AppButton { text: GuiI18n.text("gui-restore-mod"); clicked => { root.restore-file(root.item.logical-path); } }
                 if !root.item.deleted && root.togglable : VerticalLayout { alignment: center; Toggle { checked: root.item.enabled; sets-its-own-position: false; accessible-name: GuiI18n.value("gui-mod-loads", root.item.title); toggled(on) => { root.toggle(root.item.logical-path, on); } } }
-                if !root.item.deleted && (root.item.can-delete-file || (root.removable && root.item.can-remove)) : IconButton {
+                if !root.item.deleted && (root.item.can-delete-file || root.item.can-remove) : IconButton {
                     icon: @image-url("../../../../assets/icons/trash.svg");
                     accessible-name: GuiI18n.value(root.item.can-delete-file && !root.bin-removes ? "gui-delete-mod" : "gui-remove-mod", root.item.title);
                     clicked => { root.delete-file(root.item.logical-path, root.item.title); }
+                }
+            }
+        }
+    }
+}
+
+// A host's mod list beside its catalog browser: one panel for a client and a
+// server, so the two cannot drift apart. Anything a host adds above the list
+// goes in as children.
+export component ManagedModsPanel inherits Rectangle {
+    in property <HostView> host;
+    // What this host's list holds, said under the title.
+    in property <string> detail;
+    // What an empty list says when no filter hides anything.
+    in property <string> empty-detail;
+    in property <bool> mods-are-the-users;
+    callback filter(string);
+    callback add-jars();
+    callback refresh();
+    callback manage(string);
+    callback toggle(string, bool);
+    callback restore-file(string);
+    // The row, its path, and its title, for the confirmation the bin opens.
+    callback delete-file(ModRow, string, string);
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.surface;
+    VerticalLayout {
+        padding: 16px;
+        spacing: 10px;
+        HorizontalLayout {
+            spacing: 8px;
+            cross-axis-alignment: center;
+            Heading { text: GuiI18n.text("gui-managed-mods"); horizontal-stretch: 1; }
+            TextField {
+                property <string> host-query: root.host.mods-query;
+                changed host-query => { self.text = self.host-query; }
+                init => { self.text = self.host-query; }
+                placeholder: GuiI18n.text("gui-filter-mods");
+                accessible-label: GuiI18n.text("gui-filter-mods");
+                input-type: InputType.search;
+                width: 200px;
+                edited(text) => { root.filter(text); }
+            }
+            AppButton { text: GuiI18n.text("gui-add-local-mods"); clicked => { root.add-jars(); } }
+            IconButton { icon: @image-url("../../../../assets/icons/refresh.svg"); accessible-name: GuiI18n.text("gui-refresh-mod-details"); clicked => { root.refresh(); } }
+        }
+        BodyText { text: root.detail; wrap: word-wrap; }
+        @children
+        if root.host.mods-notice != "" : BodyText { text: root.host.mods-notice; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
+        if root.host.mods.length == 0 : EmptyState {
+            icon: @image-url("../../../../assets/icons/semantic-mod.svg");
+            title: root.host.mods-query != "" ? GuiI18n.text("gui-no-mods-match-title") : GuiI18n.text("gui-no-managed-mods");
+            message: root.host.mods-query != "" ? GuiI18n.value("gui-no-mods-match", root.host.mods-query) : root.empty-detail;
+        }
+        if root.host.mods.length > 0 : ScrollView {
+            viewport-width: self.width;
+            VerticalLayout {
+                spacing: 8px;
+                for mod in root.host.mods : ModCard {
+                    item: mod;
+                    togglable: true;
+                    mods-are-the-users: root.mods-are-the-users;
+                    manage(path) => { root.manage(path); }
+                    toggle(path, on) => { root.toggle(path, on); }
+                    restore-file(path) => { root.restore-file(path); }
+                    delete-file(path, title) => { root.delete-file(mod, path, title); }
                 }
             }
         }

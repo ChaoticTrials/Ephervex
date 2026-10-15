@@ -782,6 +782,43 @@ fn the_browsers_description_starts_level_with_the_mod_lists() {
     );
 }
 
+/// A server's mod list is the panel a client's is: titled alike, its
+/// description under the toolbar at the panel's full width, level with the
+/// browser's.
+#[test]
+fn a_servers_mod_list_is_laid_out_like_a_clients() {
+    let ui = window();
+    mod_browser(&ui, Vec::new());
+    settle(&ui);
+    let client = shown_text(&ui, "gui-managed-mods-detail");
+    let (client_y, client_width) = (client.absolute_position().y, client.size().width);
+
+    server_browser(&ui, modded_server(), Vec::new());
+    shown_text(&ui, "gui-managed-mods");
+    let server = shown_text(&ui, "gui-server-mods-detail");
+    let filter = shown_text(&ui, "gui-filter-mods");
+    let browser = shown_text(&ui, "gui-server-catalog-compatibility");
+
+    let top = server.absolute_position().y;
+    assert!(
+        top >= filter.absolute_position().y + filter.size().height,
+        "the description sits under the toolbar"
+    );
+    assert!(
+        (top - client_y).abs() < 0.5,
+        "it starts at {top}, a client's at {client_y}"
+    );
+    assert!(
+        (server.size().width - client_width).abs() < 0.5,
+        "it is {} wide, a client's {client_width}",
+        server.size().width
+    );
+    assert!(
+        (top - browser.absolute_position().y).abs() < 0.5,
+        "it starts level with the browser's"
+    );
+}
+
 /// The one element showing this text.
 fn shown_text(ui: &AppWindow, id: &str) -> ElementHandle {
     ElementHandle::find_by_accessible_label(ui, &lookup(id))

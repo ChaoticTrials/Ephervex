@@ -3706,23 +3706,19 @@ fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>, workspace: &
     let sender = commands.clone();
     let handle = ui.as_weak();
     let lists = workspace.clone();
-    ui.on_open_mod_manager(move |id, path| {
+    ui.on_open_mod_manager(move |kind, id, path| {
         let Some(ui) = handle.upgrade() else { return };
-        let Some(instance) = backend::parse_instance_id(&id) else {
+        let Some(host) = backend::parse_mod_host(&kind, &id) else {
             return;
         };
         lists.plan_requests.manager_opened();
         // The modal opens on the state the list already has, then fills in.
         // Waiting for the catalog before showing anything would make an offline
-        // instance feel broken.
+        // host feel broken.
         ui.set_mod_action_host(id);
+        ui.set_mod_action_host_kind(kind);
         ui.set_mod_action_path(path.clone());
-        ui.set_mod_action_name(
-            lists
-                .mods
-                .borrow()
-                .title(InstalledHost::Instance(instance), &path),
-        );
+        ui.set_mod_action_name(lists.mods.borrow().title(host, &path));
         ui.set_mod_action_notice(SharedString::default());
         ui.set_mod_action_selected(SharedString::default());
         ui.set_mod_action_project_url(SharedString::default());
@@ -3744,14 +3740,14 @@ fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>, workspace: &
         send(
             &sender,
             Command::LoadModRelations {
-                host: InstalledHost::Instance(instance),
+                host,
                 path: mod_path_key::decode(path.as_str()),
             },
         );
         send(
             &sender,
             Command::LoadModVersions {
-                instance,
+                host,
                 path: mod_path_key::decode(path.as_str()),
             },
         );
@@ -3760,11 +3756,16 @@ fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>, workspace: &
         send(
             &sender,
             Command::ResolveDeclaredRelations {
-                host: InstalledHost::Instance(instance),
+                host,
                 path: mod_path_key::decode(path.as_str()),
             },
         );
     });
+}
+
+/// The host the open mod dialog acts on.
+fn mod_action_host(ui: &AppWindow, id: &str) -> Option<InstalledHost> {
+    backend::parse_mod_host(&ui.get_mod_action_host_kind(), id)
 }
 
 /// Searching a catalog, paging further into the results, and switching which
@@ -4142,13 +4143,13 @@ fn register_mod_mutations(ui: &AppWindow, commands: &Sender<Command>, workspace:
 
     let sender = commands.clone();
     let handle = ui.as_weak();
-    ui.on_change_mod_version(move |instance, path, version| {
+    ui.on_change_mod_version(move |id, path, version| {
         let Some(ui) = handle.upgrade() else { return };
-        if let Some(instance) = backend::parse_instance_id(&instance) {
+        if let Some(host) = mod_action_host(&ui, &id) {
             send(
                 &sender,
                 Command::ChangeModVersion {
-                    instance,
+                    host,
                     path: mod_path_key::decode(path.as_str()),
                     version: version.to_string(),
                     servers: chosen_linked_servers(&ui),
@@ -4167,15 +4168,15 @@ fn register_mod_mutations(ui: &AppWindow, commands: &Sender<Command>, workspace:
     let sender = commands.clone();
     let handle = ui.as_weak();
     let plans = Rc::clone(&workspace.plan_requests);
-    ui.on_plan_mod_apply(move |instance, path, version| {
+    ui.on_plan_mod_apply(move |id, path, version| {
         let Some(ui) = handle.upgrade() else { return };
-        if let Some(instance) = backend::parse_instance_id(&instance) {
+        if let Some(host) = mod_action_host(&ui, &id) {
             let request = plans.ask(PlanKind::Apply, ui.get_modal().as_str());
             send(
                 &sender,
                 Command::PlanModApply {
                     request,
-                    instance,
+                    host,
                     path: mod_path_key::decode(path.as_str()),
                     version: version.to_string(),
                 },
@@ -4186,16 +4187,17 @@ fn register_mod_mutations(ui: &AppWindow, commands: &Sender<Command>, workspace:
     let sender = commands.clone();
     let handle = ui.as_weak();
     let plans = Rc::clone(&workspace.plan_requests);
-    ui.on_plan_mod_removal(move |id, path| {
+    ui.on_plan_mod_removal(move |kind, id, path| {
         let Some(ui) = handle.upgrade() else { return };
         ui.set_mod_action_host(id.clone());
-        if let Some(instance) = backend::parse_instance_id(&id) {
+        ui.set_mod_action_host_kind(kind.clone());
+        if let Some(host) = backend::parse_mod_host(&kind, &id) {
             let request = plans.ask(PlanKind::Removal, ui.get_modal().as_str());
             send(
                 &sender,
                 Command::PlanModRemoval {
                     request,
-                    instance,
+                    host,
                     path: mod_path_key::decode(path.as_str()),
                 },
             );
@@ -4204,13 +4206,13 @@ fn register_mod_mutations(ui: &AppWindow, commands: &Sender<Command>, workspace:
 
     let sender = commands.clone();
     let handle = ui.as_weak();
-    ui.on_remove_mod(move |instance, path| {
+    ui.on_remove_mod(move |id, path| {
         let Some(ui) = handle.upgrade() else { return };
-        if let Some(instance) = backend::parse_instance_id(&instance) {
+        if let Some(host) = mod_action_host(&ui, &id) {
             send(
                 &sender,
                 Command::RemoveMod {
-                    instance,
+                    host,
                     path: mod_path_key::decode(path.as_str()),
                     servers: chosen_linked_servers(&ui),
                 },
@@ -7808,6 +7810,7 @@ fn apply_event(
                     host,
                     managed_mod_rows(data.mods),
                     data.notice,
+                    data.mods_are_the_users,
                 )
             {
                 mod_views::publish(workspace, &workspace.mods.borrow(), host);
@@ -9898,6 +9901,7 @@ fn plan_disposition(direct: bool, plan: &backend::ModPlanData) -> PlanDispositio
 /// Puts a plan in the confirmation dialog, addressed to the host it installs on.
 fn show_install_confirmation(ui: &AppWindow, plan: backend::ModPlanData) {
     ui.set_mod_action_host(plan.instance.as_str().into());
+    ui.set_mod_action_host_kind(if plan.server { "server" } else { "client" }.into());
     ui.set_mod_action_path(SharedString::default());
     ui.set_mod_plan_kind(if plan.server { "server" } else { "client" }.into());
     ui.set_mod_plan_unstated(model(
@@ -10085,6 +10089,7 @@ fn apply_mod_removal_plan(
     };
     // An install confirmation may have taken the addressing since the ask.
     ui.set_mod_action_host(data.instance.as_str().into());
+    ui.set_mod_action_host_kind(data.host_kind.as_str().into());
     ui.set_mod_action_path(data.logical_path.as_str().into());
     ui.set_mod_remove_returns_to_manager(matches!(awaited.asked_from, PlanAskedFrom::Manager(_)));
     ui.set_mod_action_name(data.name.into());
@@ -12385,15 +12390,17 @@ mod tests {
                 mod_row("Iris", "iris.jar", "")
             ],
             String::new(),
+            false,
         ));
         assert!(mods.apply_list(
             server,
             vec![mod_row("Lithium", "lithium.jar", "")],
-            String::new()
+            String::new(),
+            false,
         ));
         assert!(mods.filter(client, "iris"));
         assert!(
-            !mods.apply_list(client_host(), Vec::new(), String::new()),
+            !mods.apply_list(client_host(), Vec::new(), String::new(), false),
             "a list for a host no pane shows lands nowhere"
         );
         drop(mods);
@@ -16065,6 +16072,7 @@ mod tests {
         ui: &AppWindow,
         workspace: &Workspace,
         server: InstalledHost,
+        suggested: usize,
         mods: Vec<backend::ManagedModData>,
     ) {
         deliver_event(
@@ -16076,7 +16084,7 @@ mod tests {
                 report: String::new(),
                 failure: String::new(),
                 client_code_on_server: false,
-                suggested: 0,
+                suggested,
             }),
         );
         deliver_event(
@@ -16086,6 +16094,7 @@ mod tests {
                 host: server.id(),
                 host_kind: "server".to_owned(),
                 mods,
+                mods_are_the_users: false,
                 notice: String::new(),
             }),
         );
@@ -16096,12 +16105,12 @@ mod tests {
     #[test]
     fn a_deleted_jar_shows_its_restore_row_as_soon_as_the_list_arrives() {
         let (ui, workspace, _commands, server) = server_mods_window();
-        deliver_listing(&ui, &workspace, server, vec![server_mod("repro", false)]);
+        deliver_listing(&ui, &workspace, server, 0, vec![server_mod("repro", false)]);
         render();
         let restore = lookup("gui-restore-mod");
         assert!(!on_screen(&ui, &restore));
 
-        deliver_listing(&ui, &workspace, server, vec![server_mod("repro", true)]);
+        deliver_listing(&ui, &workspace, server, 0, vec![server_mod("repro", true)]);
         render();
 
         assert!(
@@ -16115,6 +16124,21 @@ mod tests {
             ),
             "and no longer offers to turn it off"
         );
+    }
+
+    /// A notice that really changes the host, here a crash's suggested count
+    /// dropping as its suspect is put aside, does not hold back the list that
+    /// follows it.
+    #[test]
+    fn a_list_change_shows_after_a_crash_notice_that_changed() {
+        let (ui, workspace, _commands, server) = server_mods_window();
+        deliver_listing(&ui, &workspace, server, 1, vec![server_mod("repro", false)]);
+        render();
+
+        deliver_listing(&ui, &workspace, server, 0, vec![server_mod("repro", true)]);
+        render();
+
+        assert!(on_screen(&ui, &lookup("gui-restore-mod")));
     }
 
     /// The result of a finished install says so, rather than staying queued.
@@ -16176,7 +16200,7 @@ mod tests {
         render();
         assert!(on_screen(&ui, &lookup("gui-mod-result-queued")));
 
-        deliver_listing(&ui, &workspace, server, vec![server_mod("repro", false)]);
+        deliver_listing(&ui, &workspace, server, 0, vec![server_mod("repro", false)]);
         deliver_event(
             &ui,
             &workspace,
@@ -16559,10 +16583,12 @@ mod tests {
         kind: PlanKind,
     ) -> u64 {
         register_mod_actions(ui, &workspace.commands, workspace);
-        ui.invoke_open_mod_manager(instance.into(), "mods/m.jar".into());
+        ui.invoke_open_mod_manager("client".into(), instance.into(), "mods/m.jar".into());
         commands.try_iter().for_each(drop);
         match kind {
-            PlanKind::Removal => ui.invoke_plan_mod_removal(instance.into(), "mods/m.jar".into()),
+            PlanKind::Removal => {
+                ui.invoke_plan_mod_removal("client".into(), instance.into(), "mods/m.jar".into());
+            }
             PlanKind::Apply => {
                 ui.invoke_plan_mod_apply(
                     instance.into(),
@@ -16572,6 +16598,43 @@ mod tests {
             }
         }
         requested_plan(commands)
+    }
+
+    /// A server's mod manager reads, changes, and removes the server's own
+    /// mod, never a client's.
+    #[test]
+    fn a_servers_mod_manager_addresses_every_request_to_the_server() {
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        register_mod_actions(&ui, &workspace.commands, &workspace);
+        let server = ephervex_model::ServerId::new();
+        let host = InstalledHost::Server(server);
+        let id = SharedString::from(server.to_string());
+
+        ui.invoke_open_mod_manager("server".into(), id.clone(), "mods/m.jar".into());
+        let opened: Vec<Command> = commands.try_iter().collect();
+        assert!(
+            opened.iter().any(
+                |command| matches!(command, Command::LoadModVersions { host: asked, .. } if *asked == host)
+            ),
+            "{opened:?}"
+        );
+
+        ui.invoke_plan_mod_apply(id.clone(), "mods/m.jar".into(), "v2".into());
+        ui.invoke_change_mod_version(id.clone(), "mods/m.jar".into(), "v2".into());
+        ui.invoke_plan_mod_removal("server".into(), id.clone(), "mods/m.jar".into());
+        ui.invoke_remove_mod(id, "mods/m.jar".into());
+        let hosts: Vec<InstalledHost> = commands
+            .try_iter()
+            .filter_map(|command| match command {
+                Command::PlanModApply { host, .. }
+                | Command::ChangeModVersion { host, .. }
+                | Command::PlanModRemoval { host, .. }
+                | Command::RemoveMod { host, .. } => Some(host),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(hosts, [host; 4]);
     }
 
     /// The number the next plan command carries.
@@ -16621,7 +16684,7 @@ mod tests {
         let (workspace, commands) = test_workspace_sending(&ui);
         let host = ephervex_model::InstanceId::new().to_string();
         let first = ask_from_manager(&ui, &workspace, &commands, &host, PlanKind::Removal);
-        ui.invoke_plan_mod_removal(host.as_str().into(), "mods/m.jar".into());
+        ui.invoke_plan_mod_removal("client".into(), host.as_str().into(), "mods/m.jar".into());
         let second = requested_plan(&commands);
 
         apply_mod_removal_plan(&ui, removal_plan(first, &host), &workspace);
@@ -16668,7 +16731,7 @@ mod tests {
         let request = ask_from_manager(&ui, &workspace, &commands, &host, PlanKind::Apply);
 
         ui.set_modal(SharedString::default());
-        ui.invoke_open_mod_manager(host.as_str().into(), "mods/m.jar".into());
+        ui.invoke_open_mod_manager("client".into(), host.as_str().into(), "mods/m.jar".into());
         apply_linked_confirmation(
             &ui,
             request,
@@ -16703,7 +16766,7 @@ mod tests {
         let (workspace, commands) = test_workspace_sending(&ui);
         register_mod_mutations(&ui, &workspace.commands, &workspace);
         let host = ephervex_model::InstanceId::new().to_string();
-        ui.invoke_plan_mod_removal(host.as_str().into(), "mods/m.jar".into());
+        ui.invoke_plan_mod_removal("client".into(), host.as_str().into(), "mods/m.jar".into());
         let request = requested_plan(&commands);
         open_install_confirmation(&ui, &workspace);
 
@@ -16726,7 +16789,7 @@ mod tests {
         let host = ephervex_model::InstanceId::new().to_string();
         let other = ephervex_model::InstanceId::new().to_string();
         ui.set_mod_action_path("mods/m.jar".into());
-        ui.invoke_plan_mod_removal(host.as_str().into(), "mods/m.jar".into());
+        ui.invoke_plan_mod_removal("client".into(), host.as_str().into(), "mods/m.jar".into());
         let request = requested_plan(&commands);
         // An install confirmation addressed its own instance, then closed.
         ui.set_mod_action_host(other.as_str().into());
@@ -17723,7 +17786,7 @@ mod tests {
         let (workspace, commands) = test_workspace_sending(&ui);
         register_mod_mutations(&ui, &workspace.commands, &workspace);
         let host = ephervex_model::InstanceId::new().to_string();
-        ui.invoke_plan_mod_removal(host.as_str().into(), "mods/m.jar".into());
+        ui.invoke_plan_mod_removal("client".into(), host.as_str().into(), "mods/m.jar".into());
         let card = requested_plan(&commands);
         let apply = ask_from_manager(&ui, &workspace, &commands, &host, PlanKind::Apply);
         apply_mod_acquisition(&ui, acquisition_prompt(1, &host), &workspace);

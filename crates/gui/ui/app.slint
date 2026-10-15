@@ -80,7 +80,7 @@ import { ClientRuntimeForm, ServerPropertiesForm } from "workspace/host-settings
 import { HostPickerCard, HostWorkspace, WorkspaceTab } from "workspace/host-workspace.slint";
 import { IsolationSurface } from "workspace/isolation.slint";
 import { CrashNotice, DiagnosticFileList, LiveLogViewer } from "workspace/logs.slint";
-import { ImpactList, LinkedTargetsPanel, ModCard, RelationList } from "workspace/mods.slint";
+import { ImpactList, LinkedTargetsPanel, ManagedModsPanel, RelationList } from "workspace/mods.slint";
 import { SnapshotPanel } from "workspace/snapshots.slint";
 
 export { GuiI18n } from "globals.slint";
@@ -230,18 +230,21 @@ export component AppWindow inherits Window {
     in-out property <int> loader-change-unverifiable: 0;
     callback open-loader-change(string);
     callback change-loader-version(string, string);
-    // (instance, the mod's path)
-    callback open-mod-manager(string, string);
-    // The instance the open mod dialog acts on, set by whichever pane opened it.
+    // (host kind, host id, the mod's path)
+    callback open-mod-manager(string, string, string);
+    // The host the open mod dialog acts on, set by whichever pane opened it.
     in-out property <string> mod-action-host;
+    // `"client"` or `"server"`, for `mod-action-host`.
+    in-out property <string> mod-action-host-kind: "client";
     // (host kind, host id, the mod's path, whether the loader loads it)
     callback set-mod-enabled(string, string, string, bool);
     callback restore-mod-file(string, string, string);
     callback change-mod-version(string, string, string);
-    callback plan-mod-removal(string, string);
+    // (host kind, host id, the mod's path)
+    callback plan-mod-removal(string, string, string);
     // Works out what a change or an update would do here and on every
     // linked server. An empty version means "the newest release that fits
-    // this client", which is a different request from an exact choice.
+    // this host", which is a different request from an exact choice.
     callback plan-mod-apply(string, string, string);
     callback remove-mod(string, string);
     callback open-mod-project-page(string);
@@ -1363,12 +1366,19 @@ export component AppWindow inherits Window {
                                 }
                                 if host.available && host.kind == "client" && pane.surface == "Mods" : HorizontalLayout {
                                     spacing: 16px;
-                                    Rectangle { width: 46%; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
-                                        VerticalLayout { padding: 16px; spacing: 10px; HorizontalLayout { spacing: 8px; cross-axis-alignment: center; Heading { text: GuiI18n.text("gui-managed-mods"); horizontal-stretch: 1; } TextField { property <string> host-query: host.mods-query; changed host-query => { self.text = self.host-query; } init => { self.text = self.host-query; } placeholder: GuiI18n.text("gui-filter-mods"); accessible-label: GuiI18n.text("gui-filter-mods"); input-type: InputType.search; width: 200px; edited(text) => { root.filter-mods("client", host.id, text); } } AppButton { text: GuiI18n.text("gui-add-local-mods"); clicked => { root.pick-local-mods("client", host.id); } } IconButton { icon: @image-url("../../../assets/icons/refresh.svg"); accessible-name: GuiI18n.text("gui-refresh-mod-details"); clicked => { root.refresh-mods("client", host.id); } } } BodyText { text: GuiI18n.text("gui-managed-mods-detail"); wrap: word-wrap; }
-                                            if host.mods-notice != "" : BodyText { text: host.mods-notice; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
-                                            if host.mods.length == 0 : EmptyState { icon: @image-url("../../../assets/icons/semantic-mod.svg"); title: host.mods-query != "" ? GuiI18n.text("gui-no-mods-match-title") : GuiI18n.text("gui-no-managed-mods"); message: host.mods-query != "" ? GuiI18n.value("gui-no-mods-match", host.mods-query) : GuiI18n.text("gui-no-managed-mods-detail"); }
-                                            ScrollView { viewport-width: self.width; VerticalLayout { spacing: 8px; for mod in host.mods : ModCard { item: mod; removable: true; togglable: true; mods-are-the-users: host.allow-pack-mod-changes; restore-file(path) => { root.restore-mod-file("client", host.id, path); } toggle(path, on) => { root.set-mod-enabled("client", host.id, path, on); } manage(path) => { root.open-mod-manager(host.id, path); } delete-file(path, title) => { root.pending-action-kind = "client"; root.pending-action-id = host.id; root.pending-action-name = title; root.mod-action-path = path; root.mod-action-name = title; root.mod-action-is-hand-placed = mod.origin-kind == "hand-placed"; root.modal-error = ""; root.mod-remove-returns-to-manager = false; if mod.can-delete-file && !(host.allow-pack-mod-changes && mod.can-remove) { root.modal = "delete-mod"; } else { root.plan-mod-removal(host.id, path); } } } } }
-                                        }
+                                    ManagedModsPanel {
+                                        width: 46%;
+                                        host: host;
+                                        detail: GuiI18n.text("gui-managed-mods-detail");
+                                        empty-detail: GuiI18n.text("gui-no-managed-mods-detail");
+                                        mods-are-the-users: host.allow-pack-mod-changes;
+                                        filter(text) => { root.filter-mods("client", host.id, text); }
+                                        add-jars => { root.pick-local-mods("client", host.id); }
+                                        refresh => { root.refresh-mods("client", host.id); }
+                                        manage(path) => { root.open-mod-manager("client", host.id, path); }
+                                        toggle(path, on) => { root.set-mod-enabled("client", host.id, path, on); }
+                                        restore-file(path) => { root.restore-mod-file("client", host.id, path); }
+                                        delete-file(mod, path, title) => { root.pending-action-kind = "client"; root.pending-action-id = host.id; root.pending-action-name = title; root.mod-action-path = path; root.mod-action-name = title; root.mod-action-is-hand-placed = mod.origin-kind == "hand-placed"; root.modal-error = ""; root.mod-remove-returns-to-manager = false; if mod.can-delete-file && !(host.allow-pack-mod-changes && mod.can-remove) { root.modal = "delete-mod"; } else { root.plan-mod-removal("client", host.id, path); } }
                                     }
                                     ModBrowser {
                                         horizontal-stretch: 1;
@@ -1538,15 +1548,23 @@ export component AppWindow inherits Window {
                                 }
                                 if host.available && host.kind == "server" && pane.surface == "Mods" : HorizontalLayout {
                                     spacing: 16px;
-                                    VerticalLayout { spacing: 10px; horizontal-stretch: 1;
-                                    HorizontalLayout { spacing: 8px; SectionTitle { title: GuiI18n.text("gui-server-mods"); detail: GuiI18n.text("gui-server-mods-detail"); horizontal-stretch: 1; } VerticalLayout { alignment: center; TextField { property <string> host-query: host.mods-query; changed host-query => { self.text = self.host-query; } init => { self.text = self.host-query; } placeholder: GuiI18n.text("gui-filter-mods"); accessible-label: GuiI18n.text("gui-filter-mods"); input-type: InputType.search; width: 200px; edited(text) => { root.filter-mods("server", host.id, text); } } } VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-add-local-mods"); clicked => { root.pick-local-mods("server", host.id); } } } VerticalLayout { alignment: center; IconButton { icon: @image-url("../../../assets/icons/refresh.svg"); accessible-name: GuiI18n.text("gui-refresh-mod-details"); clicked => { root.refresh-mods("server", host.id); } } } }
-                                    if host.crash-report != "" : CrashNotice { report: host.crash-report; failure: host.crash-failure; client-code-on-server: host.crash-client-code-on-server; suggested: host.crash-suggested; beside-the-mods: true; disable-suggested => { root.disable-suggested-mods(host.id); } }
-                                    if host.mods-notice != "" : BodyText { text: host.mods-notice; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
-                                    if host.mods.length == 0 : EmptyState { icon: @image-url("../../../assets/icons/semantic-mod.svg"); title: host.mods-query != "" ? GuiI18n.text("gui-no-mods-match-title") : GuiI18n.text("gui-no-managed-mods"); message: host.mods-query != "" ? GuiI18n.value("gui-no-mods-match", host.mods-query) : GuiI18n.text("gui-no-server-mods-detail"); }
-                                    if host.mods.length > 0 : ScrollView { viewport-width: self.width; VerticalLayout { spacing: 8px; for mod in host.mods : ModCard { item: mod; togglable: true; restore-file(path) => { root.restore-mod-file("server", host.id, path); } toggle(path, on) => { root.set-mod-enabled("server", host.id, path, on); } delete-file(path, title) => { root.pending-action-kind = "server"; root.pending-action-id = host.id; root.pending-action-name = title; root.mod-action-path = path; root.mod-action-name = title; root.mod-action-is-hand-placed = mod.origin-kind == "hand-placed"; root.modal-error = ""; root.modal = "delete-mod"; } } } }
+                                    ManagedModsPanel {
+                                        width: host.server.installed && host.server.loader-kind != "vanilla" ? 46% : 100%;
+                                        host: host;
+                                        detail: GuiI18n.text("gui-server-mods-detail");
+                                        empty-detail: GuiI18n.text("gui-no-server-mods-detail");
+                                        mods-are-the-users: host.mods-are-the-users;
+                                        filter(text) => { root.filter-mods("server", host.id, text); }
+                                        add-jars => { root.pick-local-mods("server", host.id); }
+                                        refresh => { root.refresh-mods("server", host.id); }
+                                        manage(path) => { root.open-mod-manager("server", host.id, path); }
+                                        toggle(path, on) => { root.set-mod-enabled("server", host.id, path, on); }
+                                        restore-file(path) => { root.restore-mod-file("server", host.id, path); }
+                                        delete-file(mod, path, title) => { root.pending-action-kind = "server"; root.pending-action-id = host.id; root.pending-action-name = title; root.mod-action-path = path; root.mod-action-name = title; root.mod-action-is-hand-placed = mod.origin-kind == "hand-placed"; root.modal-error = ""; root.mod-remove-returns-to-manager = false; if mod.can-delete-file && !(host.mods-are-the-users && mod.can-remove) { root.modal = "delete-mod"; } else { root.plan-mod-removal("server", host.id, path); } }
+                                        if host.crash-report != "" : CrashNotice { report: host.crash-report; failure: host.crash-failure; client-code-on-server: host.crash-client-code-on-server; suggested: host.crash-suggested; beside-the-mods: true; disable-suggested => { root.disable-suggested-mods(host.id); } }
                                     }
                                     if host.server.installed && host.server.loader-kind != "vanilla" : ModBrowser {
-                                        width: 46%;
+                                        horizontal-stretch: 1;
                                         host: host;
                                         page-sizes: root.mod-page-sizes;
                                         page-size-label: root.mod-page-size-label;
@@ -2500,14 +2518,17 @@ export component AppWindow inherits Window {
                             RelationList { rows: root.mod-action-required-by; note: GuiI18n.text("gui-mod-required-by-nothing"); }
                         }
                     }
-                    if root.mod-action-relations-refreshable : HorizontalLayout { AppButton { text: GuiI18n.text("gui-mod-impact-refresh"); clicked => { root.refresh-mod-dependencies("client", root.mod-action-host, root.mod-action-path); } } Rectangle { horizontal-stretch: 1; } }
+                    if root.mod-action-relations-refreshable : HorizontalLayout { AppButton { text: GuiI18n.text("gui-mod-impact-refresh"); clicked => { root.refresh-mod-dependencies(root.mod-action-host-kind, root.mod-action-host, root.mod-action-path); } } Rectangle { horizontal-stretch: 1; } }
                     if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; }
+                    // With no release list to take the dialog's height, the rest
+                    // stays together at the top instead of spreading out.
+                    if root.mod-versions.length == 0 : Rectangle { vertical-stretch: 1; }
                     // Leaving on the left, acting on the right, and the one
                     // that takes the selected release last. Everything bunched
                     // at one end left the dialog looking like it had run out
                     // of room, which is what it used to do.
                     HorizontalLayout { spacing: 8px;
-                        if root.mod-action-can-remove : AppButton { text: GuiI18n.text("gui-remove"); tone: "danger"; enabled: !root.mod-action-pending; hint: GuiI18n.text("gui-hint-mod-action-pending"); clicked => { root.mod-action-pending = true; root.modal-error = ""; root.mod-remove-returns-to-manager = true; root.plan-mod-removal(root.mod-action-host, root.mod-action-path); } }
+                        if root.mod-action-can-remove : AppButton { text: GuiI18n.text("gui-remove"); tone: "danger"; enabled: !root.mod-action-pending; hint: GuiI18n.text("gui-hint-mod-action-pending"); clicked => { root.mod-action-pending = true; root.modal-error = ""; root.mod-remove-returns-to-manager = true; root.plan-mod-removal(root.mod-action-host-kind, root.mod-action-host, root.mod-action-path); } }
                         AppButton { min-width: 124px; text: GuiI18n.text("gui-close"); clicked => { root.modal = ""; root.modal-error = ""; } }
                         Rectangle { horizontal-stretch: 1; }
                         if root.mod-action-is-pack-owned && root.mod-action-pack-original-version != "" : AppButton { text: GuiI18n.text("gui-mod-reset-to-pack-version"); enabled: !root.mod-action-pending; hint: GuiI18n.text("gui-hint-mod-action-pending"); clicked => { root.mod-action-pending = true; root.modal-error = ""; root.plan-mod-apply(root.mod-action-host, root.mod-action-path, root.mod-action-pack-original-version); } }

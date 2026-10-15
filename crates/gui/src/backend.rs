@@ -27,12 +27,13 @@ use ephervex_core::{
     LinkedModRequest, LinkedStart, LinkedTargetPlan, LinkedTargetResult, LinkedTargetState,
     LocalModOffer, LocalModPlan, LocalModReport, LoginOptions, ManagedModEntry, ManagedModSnapshot,
     MetadataAvailability, ModInstallPlan, ModInstallRequest, ModMutability, ModMutation,
-    ModMutationPlan, ModPresence, ModSearchHit, ModSearchQuery, MutationRestriction, NewClient,
-    NewServer, OperationReporter, OptionalSelection, PackAnalysis, Paths, PlannedOutcome,
-    ProcessMonitor, ProgressSink, ProviderFileIdentity, RoundAnswer, SearchOptions, ServerCommit,
-    ServerContentSource, ServerCreateOptions, ServerEvent, ServerEvents, ServerFolder,
-    ServerNetworkSettings, ServerObserver, ServerRecord, SideRequirement, SideSupport,
-    SnapshotOrigin, SnapshotRestoreOptions, SuspectReason, WatchTarget,
+    ModMutationPlan, ModPresence, ModSearchHit, ModSearchQuery, ModVersionChoice,
+    MutationRestriction, NewClient, NewServer, OperationReporter, OptionalSelection, PackAnalysis,
+    Paths, PlannedOutcome, ProcessMonitor, ProgressSink, ProviderFileIdentity, RoundAnswer,
+    SearchOptions, ServerCommit, ServerContentSource, ServerCreateOptions, ServerEvent,
+    ServerEvents, ServerFolder, ServerNetworkSettings, ServerObserver, ServerRecord,
+    SideRequirement, SideSupport, SnapshotOrigin, SnapshotRestoreOptions, SuspectReason,
+    WatchTarget,
 };
 use ephervex_core::{
     ConfiguredPreferences, LanguageAvailability, LanguageEntry, MinecraftPreferencePreview,
@@ -406,21 +407,22 @@ pub enum Command {
     /// Shows the folder an exported bundle was written to.
     OpenBundleFolder(PathBuf),
     LoadModVersions {
-        instance: InstanceId,
+        host: InstalledHost,
         path: PathBuf,
     },
     /// Works out what changing or updating one mod would do here and on every
     /// linked server, before anything is written. An empty `version` means the
-    /// newest release that fits this client. `request` names the ask, and the
-    /// plan that answers it carries the same number back.
+    /// newest release that fits this host. `request` names the ask, and the
+    /// plan that answers it carries the same number back. A server has no
+    /// linked servers to ask about, so its change is made at once.
     PlanModApply {
         request: u64,
-        instance: InstanceId,
+        host: InstalledHost,
         path: PathBuf,
         version: String,
     },
     ChangeModVersion {
-        instance: InstanceId,
+        host: InstalledHost,
         path: PathBuf,
         version: String,
         servers: Vec<ServerId>,
@@ -436,11 +438,11 @@ pub enum Command {
     /// ask, and the plan that answers it carries the same number back.
     PlanModRemoval {
         request: u64,
-        instance: InstanceId,
+        host: InstalledHost,
         path: PathBuf,
     },
     RemoveMod {
-        instance: InstanceId,
+        host: InstalledHost,
         path: PathBuf,
         servers: Vec<ServerId>,
     },
@@ -1215,6 +1217,8 @@ pub struct ModRelationsData {
 pub struct ModRemovalPlanData {
     /// The ask this plan answers.
     pub request: u64,
+    /// `"client"` or `"server"`.
+    pub host_kind: String,
     pub instance: String,
     pub logical_path: String,
     pub name: String,
@@ -1320,6 +1324,9 @@ pub struct ManagedModsData {
     /// mistaken for one about the instance it is linked to.
     pub host_kind: String,
     pub mods: Vec<ManagedModData>,
+    /// Whether the host's mods are the user's rather than a pack's record, so
+    /// its bin takes a mod out rather than putting the jar aside.
+    pub mods_are_the_users: bool,
     /// A localized note when provider metadata could not be fetched, empty
     /// otherwise. Never a reason to withhold the list.
     pub notice: String,
@@ -3699,16 +3706,30 @@ fn run_worker(
                     }
                 });
             }
-            Command::LoadModVersions { instance, path } => {
+            Command::LoadModVersions { host, path } => {
                 let paths = app.paths().clone();
                 spawn_detached(paths, events.clone(), move |app, events, runtime| {
-                    let data = runtime.block_on(mod_versions(&app, instance, &path));
+                    let data = runtime.block_on(mod_versions(&app, host, &path));
                     let _ = events.send(Event::ModVersions(data));
                 });
             }
             Command::PlanModApply {
+                host: InstalledHost::Server(server),
+                path,
+                version,
+                ..
+            } => apply_server_mod_change(
+                app.paths().clone(),
+                &events,
+                &acquisition_waits,
+                &changing,
+                server,
+                ServerModChange::Version { path, version },
+                ModalScope::MOD_MANAGE,
+            ),
+            Command::PlanModApply {
                 request: ask,
-                instance,
+                host: InstalledHost::Instance(instance),
                 path,
                 version,
             } => {
@@ -3766,7 +3787,21 @@ fn run_worker(
                 });
             }
             Command::ChangeModVersion {
-                instance,
+                host: InstalledHost::Server(server),
+                path,
+                version,
+                ..
+            } => apply_server_mod_change(
+                app.paths().clone(),
+                &events,
+                &acquisition_waits,
+                &changing,
+                server,
+                ServerModChange::Version { path, version },
+                ModalScope::NONE,
+            ),
+            Command::ChangeModVersion {
+                host: InstalledHost::Instance(instance),
                 path,
                 version,
                 servers,
@@ -3788,7 +3823,34 @@ fn run_worker(
             Command::CancelModAcquisition { id } => acquisition_waits.cancel(id),
             Command::PlanModRemoval {
                 request,
-                instance,
+                host: InstalledHost::Server(server),
+                path,
+            } => {
+                let paths = app.paths().clone();
+                spawn_detached(
+                    paths,
+                    events.clone(),
+                    move |app, events, runtime| match runtime.block_on(app.plan_mod_removal(
+                        server,
+                        &path,
+                        &OperationReporter::silent("planning-mod-removal"),
+                        &CancellationToken::new(),
+                    )) {
+                        Ok(plan) => {
+                            let _ = events.send(Event::ModRemovalPlan(ModRemovalPlanData {
+                                request,
+                                ..removal_data(&plan, LinkedSectionData::default())
+                            }));
+                        }
+                        Err(error) => {
+                            send_scoped_modal_error(&events, ModalScope::MOD_MANAGE, &error);
+                        }
+                    },
+                );
+            }
+            Command::PlanModRemoval {
+                request,
+                host: InstalledHost::Instance(instance),
                 path,
             } => {
                 let paths = app.paths().clone();
@@ -3813,7 +3875,20 @@ fn run_worker(
                 });
             }
             Command::RemoveMod {
-                instance,
+                host: InstalledHost::Server(server),
+                path,
+                ..
+            } => apply_server_mod_change(
+                app.paths().clone(),
+                &events,
+                &acquisition_waits,
+                &changing,
+                server,
+                ServerModChange::Remove { path },
+                ModalScope::NONE,
+            ),
+            Command::RemoveMod {
+                host: InstalledHost::Instance(instance),
                 path,
                 servers,
             } => {
@@ -10189,6 +10264,150 @@ fn restore_after_acquisition(
     });
 }
 
+/// One change to a server's own mods.
+enum ServerModChange {
+    /// An empty `version` means the newest release that fits the server.
+    Version {
+        path: PathBuf,
+        version: String,
+    },
+    Remove {
+        path: PathBuf,
+    },
+}
+
+impl ServerModChange {
+    const fn operation(&self) -> &'static str {
+        match self {
+            Self::Version { .. } => "changing-mod-version",
+            Self::Remove { .. } => "removing-mod",
+        }
+    }
+
+    async fn run(
+        &self,
+        app: &App,
+        server: ServerId,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> CoreResult<ModMutation> {
+        match self {
+            Self::Version { path, version } => {
+                let choice = if version.is_empty() {
+                    ModVersionChoice::NewestCompatible
+                } else {
+                    ModVersionChoice::Exact(version.clone())
+                };
+                app.change_managed_mod_version(server, path, &choice, reporter, cancel)
+                    .await
+            }
+            Self::Remove { path } => app.remove_managed_mod(server, path, reporter, cancel).await,
+        }
+    }
+}
+
+/// Says which client-only mods a server change installed anyway, and for whom.
+fn client_only_dependencies(plan: &ModMutationPlan) -> Vec<String> {
+    let name = |project: &str| {
+        plan.installs
+            .iter()
+            .find(|file| file.project_id.as_deref() == Some(project))
+            .map_or_else(|| project.to_owned(), |file| file.name.clone())
+    };
+    plan.warnings
+        .iter()
+        .filter_map(|warning| match warning {
+            PlanWarning::ServerSideUnsupported {
+                project_id,
+                required_by,
+            } => Some(lookup_args(
+                warning.message_id(),
+                [
+                    ("project", Arg::from(name(project_id))),
+                    (
+                        "required_by",
+                        Arg::from(
+                            required_by
+                                .iter()
+                                .map(|id| name(id))
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                        ),
+                    ),
+                ],
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Changes one of a server's own mods. A server has no linked servers to carry
+/// the change to, so there is nothing to offer first.
+fn apply_server_mod_change(
+    paths: Paths,
+    events: &Sender<Event>,
+    waits: &AcquisitionWaits,
+    changing: &ChangingHosts,
+    server: ServerId,
+    change: ServerModChange,
+    dialogs: ModalScope,
+) {
+    let host = InstalledHost::Server(server);
+    let Some(in_flight) = claim_hosts_for_change(
+        changing,
+        &[host],
+        "gui-mod-change-busy",
+        ModalScope::MOD_MANAGE,
+        events,
+    ) else {
+        return;
+    };
+    let waits = waits.clone();
+    spawn_detached(paths, events.clone(), move |app, events, runtime| {
+        let _in_flight = in_flight;
+        let reporter = OperationReporter::silent(change.operation());
+        runtime.block_on(async {
+            let cancel = CancellationToken::new();
+            let mut result = change.run(&app, server, &reporter, &cancel).await;
+            match await_manual_acquisition(&app, &events, &waits, &host.id(), &result, &cancel)
+                .await
+            {
+                Acquisition::Acquired => {
+                    result = change
+                        .run(&app, server, &reporter, &CancellationToken::new())
+                        .await;
+                }
+                Acquisition::NotNeeded => {}
+                Acquisition::Abandoned => return,
+            }
+            match result {
+                Ok(mutation) => {
+                    let _ = events.send(Event::CloseModal(dialogs));
+                    let mut message = mutation_message(&mutation);
+                    for warning in client_only_dependencies(&mutation.plan) {
+                        message = format!("{message} {warning}");
+                    }
+                    if server_is_running(&app, server) {
+                        message = format!("{message} {}", lookup("gui-server-mod-plan-restart"));
+                    }
+                    let _ = events.send(Event::Toast {
+                        message,
+                        error: false,
+                    });
+                    let review = app.crash_review(host).ok().flatten();
+                    let _ = events.send(Event::ManagedMods(managed_mods_data(
+                        &mutation.snapshot,
+                        review.as_ref(),
+                    )));
+                    send_isolation_basis(&app, host, &events);
+                    refresh_enriched_host_mods(app.paths().clone(), &events, host);
+                }
+                Err(error) => send_scoped_modal_error(&events, dialogs, &error),
+            }
+        });
+    });
+}
+
 /// Carries out one mod operation, offering the user-assisted acquisition path
 /// when a release's provider does not permit this launcher to download it.
 ///
@@ -11458,11 +11677,11 @@ fn send_mod_relations(
     }
 }
 
-async fn mod_versions(app: &App, instance: InstanceId, path: &Path) -> ModVersionsData {
+async fn mod_versions(app: &App, host: InstalledHost, path: &Path) -> ModVersionsData {
     let reporter = OperationReporter::silent("listing-mod-versions");
     let cancel = CancellationToken::new();
     match app
-        .managed_mod_versions(instance, path, &reporter, &cancel)
+        .managed_mod_versions(host, path, &reporter, &cancel)
         .await
     {
         Ok(choices) => {
@@ -11488,7 +11707,7 @@ async fn mod_versions(app: &App, instance: InstanceId, path: &Path) -> ModVersio
                 })
                 .collect();
             ModVersionsData {
-                instance: instance.to_string(),
+                instance: host.id(),
                 logical_path: crate::mod_path_key::encode(path),
                 title: choices.project.title.clone(),
                 installed_version: installed,
@@ -11506,7 +11725,7 @@ async fn mod_versions(app: &App, instance: InstanceId, path: &Path) -> ModVersio
         Err(error) => {
             tracing::warn!(%error, "mod versions could not be listed");
             ModVersionsData {
-                instance: instance.to_string(),
+                instance: host.id(),
                 logical_path: crate::mod_path_key::encode(path),
                 notice: localized_error(&error),
                 ..ModVersionsData::default()
@@ -11535,8 +11754,15 @@ fn removal_plan_data(linked: &LinkedModPlan) -> ModRemovalPlanData {
     let Some(plan) = mutation_plan_of(linked) else {
         return ModRemovalPlanData::default();
     };
+    removal_data(plan, linked_section(linked))
+}
+
+/// What removing one mod would take with it, and which linked servers could
+/// follow.
+fn removal_data(plan: &ModMutationPlan, linked: LinkedSectionData) -> ModRemovalPlanData {
     ModRemovalPlanData {
         request: 0,
+        host_kind: plan.host.kind().to_owned(),
         instance: plan.host.id(),
         logical_path: crate::mod_path_key::encode(&plan.target),
         name: plan.name.clone(),
@@ -11545,7 +11771,7 @@ fn removal_plan_data(linked: &LinkedModPlan) -> ModRemovalPlanData {
             .map(|file| file.name.clone())
             .collect(),
         dependencies_unprovable: plan.orphans_unprovable,
-        linked: linked_section(linked),
+        linked,
     }
 }
 
@@ -12048,6 +12274,7 @@ fn managed_mods_data(
             })
             .map(|entry| managed_mod_data(entry, snapshot.mods_are_the_users, review))
             .collect(),
+        mods_are_the_users: snapshot.mods_are_the_users,
         notice: match snapshot.metadata {
             MetadataAvailability::Unavailable => lookup("gui-mod-metadata-offline"),
             MetadataAvailability::Local | MetadataAvailability::Provider => String::new(),
