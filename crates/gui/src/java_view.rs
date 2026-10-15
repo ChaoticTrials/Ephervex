@@ -4,8 +4,8 @@
 
 use ephervex_core::{
     AutomaticJava, ExpectedRuntime, FindingClass, FindingKind, HostJavaStatus, JavaCheck,
-    JavaChoice, JavaChoices, JavaMismatch, JavaRuntimeSummary, JavaSelectionMode, JavaUnavailable,
-    ResolvedJava,
+    JavaChoice, JavaChoices, JavaMismatch, JavaRefusal, JavaRuntimeFailure, JavaRuntimeSummary,
+    JavaSelectionMode, JavaUnavailable, ResolvedJava,
 };
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use ephervex_model::LoaderKind;
@@ -417,6 +417,86 @@ pub fn choice_view(choice: &JavaChoice) -> JavaChoiceView {
     }
 }
 
+/// How a refused runtime was chosen.
+fn refused_origin_text(chosen: ephervex_core::RefusedJavaChoice, managed: bool) -> String {
+    match chosen {
+        ephervex_core::RefusedJavaChoice::Selected(mode) => origin_text(mode, managed),
+        ephervex_core::RefusedJavaChoice::GivenForRun => lookup("gui-java-origin-given"),
+    }
+}
+
+/// What a launch or start that refused its Java tried, what the host
+/// expected, and how the two differ, to follow the refusal's own message.
+#[must_use]
+pub fn refusal_text(refusal: &JavaRefusal) -> String {
+    let mut sentences = vec![match &refusal.attempted {
+        Some(runtime) => lookup_args(
+            "gui-java-refused-tried",
+            [
+                ("runtime", Arg::from(runtime_line(runtime))),
+                (
+                    "origin",
+                    Arg::from(refused_origin_text(refusal.chosen, runtime.managed)),
+                ),
+            ],
+        ),
+        None if refusal.chosen
+            == ephervex_core::RefusedJavaChoice::Selected(JavaSelectionMode::Automatic) =>
+        {
+            lookup("gui-java-refused-nothing")
+        }
+        None => lookup_args(
+            "gui-java-refused-unusable",
+            [(
+                "origin",
+                Arg::from(refused_origin_text(refusal.chosen, false)),
+            )],
+        ),
+    }];
+    sentences.push(lookup_args(
+        "gui-java-refused-expected",
+        [("expected", Arg::from(expected_text(&refusal.expected)))],
+    ));
+    if let Some(mismatch) = &refusal.mismatch {
+        sentences.push(mismatch_text(mismatch));
+    }
+    sentences.push(lookup("gui-java-refused-next"));
+    sentences.join(" ")
+}
+
+/// Why a game or server exited because its runtime could not load its code.
+#[must_use]
+pub fn runtime_failure_text(failure: &JavaRuntimeFailure) -> String {
+    let needed = Arg::from(failure.mismatch.class_major.to_string());
+    let class = Arg::from(failure.mismatch.class.as_str());
+    let mut sentences = vec![match failure.mismatch.runtime_major {
+        Some(supported) => lookup_args(
+            "gui-java-class-version",
+            [
+                ("class", class),
+                ("needed", needed),
+                ("supported", Arg::from(supported.to_string())),
+            ],
+        ),
+        None => lookup_args(
+            "gui-java-class-version-legacy",
+            [("class", class), ("needed", needed)],
+        ),
+    }];
+    if let Some(runtime) = &failure.attempted {
+        sentences.push(lookup_args(
+            "gui-java-class-version-runtime",
+            [("runtime", Arg::from(runtime_line(runtime)))],
+        ));
+    }
+    sentences.push(lookup_args(
+        "gui-java-refused-expected",
+        [("expected", Arg::from(expected_text(&failure.expected)))],
+    ));
+    sentences.push(lookup("gui-java-refused-next"));
+    sentences.join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -772,5 +852,47 @@ mod tests {
         assert_eq!(view.runtime, "Java 17.0.12, Eclipse Adoptium, amd64");
         assert_eq!(view.problem, "This runtime is Java 17.");
         assert_eq!(view.install, "Install Java 21");
+    }
+
+    #[test]
+    fn a_refused_runtime_says_what_was_tried_what_was_expected_and_why() {
+        let error = ephervex_core::test_support::java_refusal_error(
+            ephervex_core::JavaError::AutoDetectDisabled { required_major: 21 },
+            JavaSelectionMode::PinnedByHost,
+            Some(summary("17.0.12", "/opt/jdk-17/bin/java")),
+            java_21(),
+            Some(JavaMismatch::Major {
+                required: 21,
+                found: 17,
+            }),
+        );
+        assert_eq!(
+            error.java_refusal().map(refusal_text).as_deref(),
+            Some(
+                "It tried Java 17.0.12, Eclipse Adoptium, amd64 (pinned by this host). This host \
+             expects Java 21. This runtime is Java 17. Choose another runtime in this host's \
+             runtime settings."
+            )
+        );
+    }
+
+    #[test]
+    fn a_class_compiled_for_newer_java_names_both_versions_and_the_runtime_it_ran_on() {
+        let failure = ephervex_core::JavaRuntimeFailure {
+            mismatch: ephervex_core::ClassVersionMismatch {
+                class: "net/minecraft/client/main/Main".to_owned(),
+                class_major: 21,
+                runtime_major: Some(17),
+            },
+            attempted: Some(summary("17.0.12", "/opt/jdk-17/bin/java")),
+            expected: java_21(),
+        };
+
+        assert_eq!(
+            runtime_failure_text(&failure),
+            "net/minecraft/client/main/Main needs Java 21, and the runtime only runs Java 17 or \
+             older. It ran on Java 17.0.12, Eclipse Adoptium, amd64. This host expects Java 21. \
+             Choose another runtime in this host's runtime settings."
+        );
     }
 }

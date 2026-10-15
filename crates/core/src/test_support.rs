@@ -56,3 +56,21 @@ pub fn commit_client_without_index(
 pub fn use_java_inventory(app: &App, runtimes: Vec<JavaRuntime>) {
     app.use_java_inventory_for_test(runtimes);
 }
+
+/// A launch or start refusal of its Java, as a frontend receives one, so a
+/// frontend test can render it without planning a launch.
+pub fn java_refusal_error(
+    error: ephervex_java::JavaError,
+    mode: crate::JavaSelectionMode,
+    attempted: Option<crate::JavaRuntimeSummary>,
+    expected: crate::ExpectedRuntime,
+    mismatch: Option<crate::JavaMismatch>,
+) -> crate::CoreError {
+    crate::CoreError::JavaRefused(Box::new(crate::JavaRefusal {
+        error,
+        chosen: crate::RefusedJavaChoice::Selected(mode),
+        attempted,
+        expected,
+        mismatch,
+    }))
+}

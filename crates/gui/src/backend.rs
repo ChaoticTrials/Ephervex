@@ -6371,8 +6371,18 @@ async fn explain_failed_run(
 fn server_failure(result: &CoreResult<ephervex_core::ServerExit>) -> Option<String> {
     match result {
         Ok(exit) => server_exit_failure(exit),
-        Err(error) if !error.is_cancellation() => Some(localized_error(error)),
+        Err(error) if !error.is_cancellation() => Some(run_error_text(error)),
         Err(_) => None,
+    }
+}
+
+/// A run's error in the user's words, followed, when it refused its Java, by
+/// the runtime it tried and what the host expected.
+fn run_error_text(error: &CoreError) -> String {
+    let message = localized_error(error);
+    match error.java_refusal() {
+        Some(refusal) => format!("{message} {}", crate::java_view::refusal_text(refusal)),
+        None => message,
     }
 }
 
@@ -6402,9 +6412,18 @@ fn launch_failure(
         return None;
     }
     match result {
-        Ok(outcome) => game_exit_failure(outcome.exit),
+        Ok(outcome) => launch_exit_failure(outcome),
         Err(error) => launch_error_failure(error),
     }
+}
+
+/// Why a game that ran exited as a failure: its runtime could not load its
+/// code, or it simply exited with an error.
+fn launch_exit_failure(outcome: &ephervex_core::LaunchOutcome) -> Option<String> {
+    outcome.java_failure.as_deref().map_or_else(
+        || game_exit_failure(outcome.exit),
+        |failure| Some(crate::java_view::runtime_failure_text(failure)),
+    )
 }
 
 fn game_exit_failure(exit: Option<ephervex_core::GameExit>) -> Option<String> {
@@ -6416,7 +6435,7 @@ fn launch_error_failure(error: &CoreError) -> Option<String> {
     if error.is_cancellation() || error.requires_interactive_login() {
         None
     } else {
-        Some(localized_error(error))
+        Some(run_error_text(error))
     }
 }
 
@@ -6432,7 +6451,7 @@ fn connect_client_failure(
         return None;
     }
     match result {
-        Ok(outcome) => game_exit_failure(outcome.launch.exit),
+        Ok(outcome) => launch_exit_failure(&outcome.launch),
         Err(error) if server_ready => launch_error_failure(error),
         Err(_) => None,
     }
@@ -8595,10 +8614,21 @@ fn spawn_server(
                     send_snapshot(&mut app, &events);
                     send_server_workspace(&app, server, &events);
                 }
+                // A server that stopped because its runtime could not load
+                // its code says so, rather than only that it stopped.
+                let java_failure = match &result {
+                    Ok(exit) if server_exit_failure(exit).is_some() => app
+                        .server_java_failure(server, exit, None)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|failure| crate::java_view::runtime_failure_text(&failure)),
+                    _ => None,
+                };
                 let _ = events.send(Event::ServerTool {
                     server,
                     event: ServerToolEvent::Finished {
-                        failure: server_failure(&result),
+                        failure: java_failure.or_else(|| server_failure(&result)),
                     },
                 });
             });
@@ -8874,7 +8904,7 @@ impl ConnectedServerRow {
         {
             *end = Some(ServerStartEnd {
                 canceled: error.is_cancellation(),
-                detail: localized_error(error),
+                detail: run_error_text(error),
             });
         }
     }
@@ -8965,6 +8995,51 @@ fn forward_connect_server_event(
     server: ServerId,
     event: ServerEvent,
 ) {
+    forward_connect_server_event_explained(events, paths, row, server, event, None);
+}
+
+/// Why a server a Launch & Connect run started stopped, when its runtime could
+/// not load its code. Read only for a failed exit.
+///
+/// The lookup opens an `App`, which a task shared between threads cannot hold,
+/// so it runs on a blocking thread of its own.
+async fn connect_server_java_failure(
+    paths: &Paths,
+    server: ServerId,
+    event: &ServerEvent,
+) -> Option<String> {
+    let ServerEvent::Finished { exit: Some(exit) } = event else {
+        return None;
+    };
+    server_exit_failure(exit)?;
+    let (paths, exit) = (paths.clone(), *exit);
+    tokio::task::spawn_blocking(move || {
+        let app = App::open_at(paths).ok()?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .ok()?;
+        runtime
+            .block_on(app.server_java_failure(server, &exit, None))
+            .ok()
+            .flatten()
+            .map(|failure| crate::java_view::runtime_failure_text(&failure))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// [`forward_connect_server_event`] with the explanation of a runtime that
+/// could not load the server's code, which replaces the plain failure.
+fn forward_connect_server_event_explained(
+    events: &Sender<Event>,
+    paths: &Paths,
+    row: &ConnectedServerRow,
+    server: ServerId,
+    event: ServerEvent,
+    java_failure: Option<String>,
+) {
     match event {
         ServerEvent::Finished { exit } => {
             refresh_snapshot(paths, events);
@@ -8977,10 +9052,12 @@ fn forward_connect_server_event(
                 }
                 None => {}
             }
-            let failure = exit.map_or_else(
-                || Some(lookup("gui-run-server-exited-with-error")),
-                |exit| server_exit_failure(&exit),
-            );
+            let failure = java_failure.or_else(|| {
+                exit.map_or_else(
+                    || Some(lookup("gui-run-server-exited-with-error")),
+                    |exit| server_exit_failure(&exit),
+                )
+            });
             let _ = events.send(Event::ServerTool {
                 server,
                 event: ServerToolEvent::Finished { failure },
@@ -9109,6 +9186,9 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
                     ObservedServerEvents::new(server_events, supervised, server);
                 let server_forward = tokio::spawn(async move {
                     while let Some(event) = server_events.recv().await {
+                        // The end of the run waits until its failure is
+                        // explained; it is the last event a run sends.
+                        let mut finished = Vec::new();
                         if let ServerEvent::Output(line) = event {
                             forward_output_batch(
                                 line,
@@ -9122,22 +9202,32 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
                                     );
                                 },
                                 |other| {
-                                    forward_connect_server_event(
-                                        &server_event_sender,
-                                        &server_paths,
-                                        &forwarded_row,
-                                        server,
-                                        other,
-                                    );
+                                    if matches!(other, ServerEvent::Finished { .. }) {
+                                        finished.push(other);
+                                    } else {
+                                        forward_connect_server_event(
+                                            &server_event_sender,
+                                            &server_paths,
+                                            &forwarded_row,
+                                            server,
+                                            other,
+                                        );
+                                    }
                                 },
                             );
                         } else {
-                            forward_connect_server_event(
+                            finished.push(event);
+                        }
+                        for event in finished {
+                            let java_failure =
+                                connect_server_java_failure(&server_paths, server, &event).await;
+                            forward_connect_server_event_explained(
                                 &server_event_sender,
                                 &server_paths,
                                 &forwarded_row,
                                 server,
                                 event,
+                                java_failure,
                             );
                         }
                     }
@@ -9229,7 +9319,7 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
                         &entity,
                         &server_name,
                     ),
-                    Err(error) => send_error(&events, &error),
+                    Err(error) => send_run_error(&events, &error),
                 }
                 if let Ok(mut settled) = settled.lock() {
                     settled.take();
@@ -9291,7 +9381,7 @@ fn send_pair_start_failure(
             [
                 ("client", Arg::from(client)),
                 ("server", Arg::from(server)),
-                ("error", Arg::from(localized_error(error))),
+                ("error", Arg::from(run_error_text(error))),
             ],
         ),
         error: true,
@@ -11914,6 +12004,16 @@ fn default_mod_catalog_events(stored: &Result<(), CoreError>) -> Vec<Event> {
     }
 }
 
+/// A run's failure as a toast, naming the runtime it refused when it refused
+/// its Java.
+fn send_run_error(events: &Sender<Event>, error: &CoreError) {
+    tracing::warn!(message_id = error.message_id(), detail = %ErrorChain(error), "run failed");
+    let _ = events.send(Event::Toast {
+        message: run_error_text(error),
+        error: true,
+    });
+}
+
 fn send_error(events: &Sender<Event>, error: &CoreError) {
     let _ = events.send(error_toast(error));
 }
@@ -12351,6 +12451,42 @@ mod tests {
         assert_eq!(runtime.max_memory, "4096");
         assert_eq!(runtime.jvm_args, "");
         assert!(runtime.pinned);
+    }
+
+    #[test]
+    fn a_run_that_refused_its_java_adds_what_it_tried_to_the_error() {
+        let required = ephervex_core::RequiredJava {
+            major: 21,
+            basis: ephervex_core::RequirementBasis::FallbackTable,
+        };
+        let error = ephervex_core::test_support::java_refusal_error(
+            ephervex_core::JavaError::AutoDetectDisabled { required_major: 21 },
+            ephervex_core::JavaSelectionMode::Automatic,
+            None,
+            ephervex_core::ExpectedRuntime {
+                java: ephervex_core::ExpectedJava::new(&required, &[]),
+                loader: ephervex_model::LoaderKind::Vanilla,
+            },
+            None,
+        );
+
+        let text = run_error_text(&error);
+
+        assert!(text.starts_with(&localized_error(&error)), "{text}");
+        assert!(
+            text.contains("No runtime could be chosen automatically.")
+                && text.contains("This host expects Java 21."),
+            "{text}"
+        );
+        assert_eq!(
+            run_error_text(&CoreError::from(
+                ephervex_core::JavaError::AutoDetectDisabled { required_major: 21 }
+            )),
+            localized_error(&CoreError::from(
+                ephervex_core::JavaError::AutoDetectDisabled { required_major: 21 }
+            )),
+            "an error without the context reads as before"
+        );
     }
 
     fn logical(paths: &[&str]) -> Vec<PathBuf> {
