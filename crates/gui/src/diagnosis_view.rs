@@ -3,8 +3,9 @@
 
 use ephervex_core::{
     CoreError, DiagnosticFix, Finding, FindingClass, FindingKind, FixOutcome, FixPreview,
-    HostDiagnosis, Integrity, IntegrityCheck, JavaCheck, JavaLayer, JavaMismatch, JavaUnavailable,
-    LoaderReportedRequirement, ProposedChange, RepairRefusal, UnmetDependency, UnmetRequirement,
+    HostDiagnosis, Integrity, IntegrityCheck, JavaCheck, JavaLayer, JavaMismatch,
+    JavaSelectionMode, JavaUnavailable, LoaderReportedRequirement, ProposedChange, RepairRefusal,
+    UnmetDependency, UnmetRequirement,
 };
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use ephervex_model::ModProvider;
@@ -141,6 +142,15 @@ pub fn diagnosis_view(
 
 fn count(message: &str, count: usize) -> String {
     lookup_args(message, [("count", Arg::from(count))])
+}
+
+/// How a runtime the given layer pinned, or none did, was chosen.
+const fn selection_mode(layer: Option<JavaLayer>) -> JavaSelectionMode {
+    match layer {
+        None => JavaSelectionMode::Automatic,
+        Some(JavaLayer::Host) => JavaSelectionMode::PinnedByHost,
+        Some(JavaLayer::Launcher) => JavaSelectionMode::PinnedByLauncher,
+    }
 }
 
 fn layer_route(layer: JavaLayer) -> FindingRoute {
@@ -381,6 +391,7 @@ fn java_card(kind: &FindingKind, mc: &str) -> Card {
                 [("version", Arg::from(runtime.version.as_str()))],
             ),
             vec![
+                crate::java_view::runtime_line(runtime),
                 runtime.path.display().to_string(),
                 lookup_args(
                     "gui-diagnosis-java-satisfies",
@@ -663,13 +674,19 @@ fn java_check(java: &JavaCheck, localized: &dyn Fn(&CoreError) -> String) -> Che
             layer,
         } => (
             lookup_args(
-                match (layer, runtime.managed) {
-                    (Some(_), _) => "gui-diagnosis-check-java-pinned",
-                    (None, true) => "gui-diagnosis-check-java-managed",
-                    (None, false) => "gui-diagnosis-check-java-automatic",
-                },
+                "gui-diagnosis-check-java-runtime",
                 [
-                    ("version", Arg::from(runtime.version.as_str())),
+                    (
+                        "runtime",
+                        Arg::from(crate::java_view::runtime_line(runtime)),
+                    ),
+                    (
+                        "origin",
+                        Arg::from(crate::java_view::origin_text(
+                            selection_mode(*layer),
+                            runtime.managed,
+                        )),
+                    ),
                     ("major", Arg::from(required_major.to_string())),
                 ],
             ),
@@ -681,6 +698,19 @@ fn java_check(java: &JavaCheck, localized: &dyn Fn(&CoreError) -> String) -> Che
                 [("major", Arg::from(required_major.to_string()))],
             ),
             "ok",
+        ),
+        JavaCheck::Refused {
+            attempted: Some(runtime),
+            ..
+        } => (
+            lookup_args(
+                "gui-diagnosis-check-java-refused-runtime",
+                [(
+                    "runtime",
+                    Arg::from(crate::java_view::runtime_line(runtime)),
+                )],
+            ),
+            "problem",
         ),
         JavaCheck::Refused { .. } => (lookup("gui-diagnosis-check-java-refused"), "problem"),
         JavaCheck::Failed(error) => (
@@ -1108,6 +1138,54 @@ mod tests {
         assert_eq!(view.class, FindingClass::Customized);
         assert_eq!(view.fix_label, lookup("gui-diagnosis-use-recommended-java"));
         assert!(view.detail.contains("/usr/lib/jvm/temurin-21/bin/java"));
+        assert!(view.detail.contains("Java 21.0.8, Eclipse Adoptium, amd64"));
+    }
+
+    fn summary(version: &str) -> JavaRuntimeSummary {
+        JavaRuntimeSummary {
+            version: version.to_owned(),
+            major: version
+                .split('.')
+                .next()
+                .and_then(|major| major.parse().ok())
+                .unwrap_or_default(),
+            path: PathBuf::from("/opt/jdk/bin/java"),
+            managed: false,
+            vendor: "Eclipse Adoptium".to_owned(),
+            arch: "amd64".to_owned(),
+            source: ephervex_core::JavaSourceKind::UserSupplied,
+        }
+    }
+
+    #[test]
+    fn the_java_check_names_the_runtime_its_vendor_architecture_and_how_it_was_chosen() {
+        let check = java_check(
+            &JavaCheck::Selected {
+                required_major: 21,
+                runtime: summary("21.0.8"),
+                layer: Some(JavaLayer::Launcher),
+            },
+            &|_| String::new(),
+        );
+        assert_eq!(
+            check.value,
+            "Java 21.0.8, Eclipse Adoptium, amd64 (pinned by the launcher preference). \
+             Requires Java 21."
+        );
+        assert_eq!(check.state, "customized");
+
+        let refused = java_check(
+            &JavaCheck::Refused {
+                required_major: Some(21),
+                attempted: Some(summary("17.0.12")),
+            },
+            &|_| String::new(),
+        );
+        assert_eq!(
+            refused.value,
+            "No usable runtime. Refused Java 17.0.12, Eclipse Adoptium, amd64."
+        );
+        assert_eq!(refused.state, "problem");
     }
 
     #[test]
