@@ -235,6 +235,7 @@ impl ModrinthApi {
                         minecraft_version: &target.minecraft_version,
                         loader,
                     }),
+                    excluding_client_only: query.excludes_client_only(),
                 },
                 &url,
                 reporter,
@@ -389,6 +390,10 @@ impl ModrinthApi {
     }
 }
 
+/// The facet that drops projects declaring they do not run on a server, in
+/// Modrinth's `{type}{operation}{value}` facet syntax.
+const SERVER_UNSUPPORTED_EXCLUSION: &str = "server_side!=unsupported";
+
 /// The facets one search sends.
 ///
 /// The compatibility facets are dropped when the caller wants incompatible
@@ -399,6 +404,9 @@ fn facets(target: &InstanceTarget, query: &ModSearchQuery, loader: &str) -> Stri
     if !query.include_incompatible {
         groups.push(format!("[\"categories:{loader}\"]"));
         groups.push(format!("[\"versions:{}\"]", target.minecraft_version));
+    }
+    if query.excludes_client_only() {
+        groups.push(format!("[\"{SERVER_UNSUPPORTED_EXCLUSION}\"]"));
     }
     format!("[{}]", groups.join(","))
 }

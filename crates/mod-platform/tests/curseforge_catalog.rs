@@ -15,8 +15,9 @@ use std::sync::Arc;
 
 use ephervex_download::{DomainAllowlist, HttpConfig, OperationReporter};
 use ephervex_mod_platform::{
-    Compatibility, ConfiguredApiKey, CurseForgeApi, CurseForgeProvider, IncompatibilityReason,
-    InstanceTarget, ModPlatformError, ModProviderApi, ModSearchQuery, ReleaseChannel, SideSupport,
+    Compatibility, ConfiguredApiKey, CurseForgeApi, CurseForgeProvider, HostSide,
+    IncompatibilityReason, InstanceTarget, ModPlatformError, ModProviderApi, ModSearchQuery,
+    ReleaseChannel, SideSupport,
 };
 use ephervex_model::{LoaderKind, ModProvider, ModRelationKind, SecretString};
 use tokio_util::sync::CancellationToken;
@@ -1519,4 +1520,133 @@ async fn a_file_listing_longer_than_the_provider_will_page_through_is_reported_i
         requests, 200,
         "the crawl stays inside the documented window"
     );
+}
+
+// -- searching for a server ----------------------------------------------
+
+/// Four projects whose files declare their sides in each of the ways CurseForge
+/// allows: both sides, the client only, nothing, and a project that looks
+/// like it runs on both while its newest fitting file names the client only.
+async fn side_catalog(server: &MockServer) {
+    serve_categories(server).await;
+    let project = |id: u32, name: &str, declared: &str| {
+        format!(
+            r#"{{"id":{id},"gameId":432,"name":"{name}","slug":"{name}","summary":"A test mod",
+                "classId":{MODS_CLASS},"authors":[{{"id":1,"name":"mezz"}}],
+                "latestFiles":[{{"gameVersions":[{declared}]}}]}}"#
+        )
+    };
+    let body = format!(
+        r#"{{"data":[{both},{client},{silent},{release}],
+            "pagination":{{"index":0,"pageSize":10,"resultCount":4,"totalCount":90}}}}"#,
+        both = project(6001, "both", r#""1.20.1","NeoForge","Client","Server""#),
+        client = project(6002, "client-only", r#""1.20.1","NeoForge","Client""#),
+        silent = project(6003, "silent", r#""1.20.1","NeoForge""#),
+        release = project(
+            6004,
+            "release-client",
+            r#""1.20.1","NeoForge","Client","Server""#
+        ),
+    );
+    Mock::given(method("GET"))
+        .and(path("/v1/mods/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+        .mount(server)
+        .await;
+    for (project, tags) in [
+        (6001_u32, r#""1.20.1","NeoForge","Client","Server""#),
+        (6002, r#""1.20.1","NeoForge","Client""#),
+        (6003, r#""1.20.1","NeoForge""#),
+        (6004, r#""1.20.1","NeoForge","Client""#),
+    ] {
+        let file = file_document(server, 8_000_000 + project, project, "File", 1)
+            .replace(r#""1.20.1","Forge","NeoForge","Client","Server""#, tags);
+        let files = format!(
+            r#"{{"data":[{file}],"pagination":{{"index":0,"pageSize":50,"resultCount":1,"totalCount":1}}}}"#
+        );
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/mods/{project}/files")))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(files, "application/json"))
+            .mount(server)
+            .await;
+    }
+}
+
+async fn server_search(
+    server: &MockServer,
+    query: ModSearchQuery,
+) -> ephervex_mod_platform::ModSearchResults {
+    provider_against(server, Some(FAKE_KEY))
+        .search(
+            &target(LoaderKind::NeoForge),
+            &query,
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("a search")
+}
+
+#[tokio::test]
+async fn a_server_search_hides_a_file_that_names_only_the_client_and_keeps_an_unstated_one() {
+    let server = MockServer::start().await;
+    side_catalog(&server).await;
+
+    let results = server_search(&server, ModSearchQuery::new("").for_side(HostSide::Server)).await;
+
+    let titles: Vec<&str> = results
+        .hits
+        .iter()
+        .map(|hit| hit.project.title.as_str())
+        .collect();
+    assert_eq!(titles, ["both", "silent"]);
+    assert_eq!(results.hits[1].effective_sides().1, SideSupport::Unknown);
+    assert!(
+        !sent_search(&server).await.contains("server"),
+        "CurseForge has no environment filter to send"
+    );
+}
+
+#[tokio::test]
+async fn a_server_search_page_continues_from_the_raw_page_when_the_filter_shortens_it() {
+    let server = MockServer::start().await;
+    side_catalog(&server).await;
+
+    let results = server_search(&server, ModSearchQuery::new("").for_side(HostSide::Server)).await;
+
+    assert_eq!(results.hits.len(), 2);
+    assert_eq!(results.next_offset, Some(4));
+}
+
+#[tokio::test]
+async fn showing_incompatible_results_for_a_server_keeps_client_only_files_marked_as_such() {
+    let server = MockServer::start().await;
+    side_catalog(&server).await;
+
+    let results = server_search(
+        &server,
+        ModSearchQuery::new("")
+            .for_side(HostSide::Server)
+            .including_incompatible(true),
+    )
+    .await;
+
+    let client_only: Vec<&str> = results
+        .hits
+        .iter()
+        .filter(|hit| hit.is_client_only())
+        .map(|hit| hit.project.title.as_str())
+        .collect();
+    assert_eq!(client_only, ["client-only", "release-client"]);
+    assert_eq!(results.hits.len(), 4);
+}
+
+#[tokio::test]
+async fn a_client_search_does_not_filter_by_declared_side() {
+    let server = MockServer::start().await;
+    side_catalog(&server).await;
+
+    let results = server_search(&server, ModSearchQuery::new("")).await;
+
+    assert_eq!(results.hits.len(), 4);
 }

@@ -295,11 +295,17 @@ impl ModProviderApi for CurseForgeProvider {
             if !query.include_incompatible && !compatibility.is_compatible() {
                 continue;
             }
-            hits.push(ModSearchHit {
+            let hit = ModSearchHit {
                 project,
                 best_version: best,
                 compatibility,
-            });
+            };
+            // CurseForge has no environment filter, so a server's page can come
+            // back short; the next offset still follows the raw page.
+            if query.excludes_client_only() && hit.is_client_only() {
+                continue;
+            }
+            hits.push(hit);
         }
 
         Ok(ModSearchResults {

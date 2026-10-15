@@ -971,6 +971,16 @@ query rather than filtering locally, because a filter would remove the rows that
 need annotating. Per-search version lookups are bounded, and the page size is
 clamped.
 
+A search for a server also leaves out mods declared client-only. Modrinth is
+asked to exclude projects declaring no server support, and both catalogs then
+drop any hit whose newest fitting release is declared unsupported on a server,
+by the release's own declaration where it has one. CurseForge has no environment
+filter, so a page can come back short; the next offset follows the page the
+provider returned, not the hits that survived. A hit whose server support is
+undeclared stays and is reported as undeclared, never as confirmed. Showing
+incompatible results widens the query instead: client-only mods are returned and
+marked, and are not installable on a server.
+
 Exact selections are preserved. A pinned version that does not fit is refused
 rather than moved to a neighboring release, two mods pinning one project to
 different versions is a conflict rather than an arbitration, and a required
