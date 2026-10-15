@@ -252,6 +252,7 @@ impl App {
             origin: ModOrigin::PackDeclared,
             identity: Some(blocked.identity.clone()),
             original_identity: None,
+            installed_despite_unsupported: None,
             // The provider refused to serve this file's bytes, not to describe
             // it. Whatever its document declared is recorded here; `None`
             // survives only where nothing ever described the file at all.
@@ -1074,6 +1075,7 @@ fn recipe_entry(
             file_id: Some(release.file.to_string()),
         }),
         original_identity: None,
+        installed_despite_unsupported: None,
         relations: Some(crate::mods::recipe_relations(&release.dependencies)),
     })
 }
@@ -4155,6 +4157,7 @@ mod tests {
                 file_id: Some(REQUIRED_FILE.to_string()),
             }),
             original_identity: None,
+            installed_despite_unsupported: None,
             relations: Some(Vec::new()),
         });
         let staging = dir.path().join("linked-server");
@@ -4206,6 +4209,7 @@ mod tests {
                 file_id: None,
             }),
             original_identity: None,
+            installed_despite_unsupported: None,
             relations: None,
         }
     }

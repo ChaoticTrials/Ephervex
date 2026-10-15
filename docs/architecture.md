@@ -1092,6 +1092,12 @@ them, because a mod nothing has asked about is unknown rather than independent,
 and a warning that treats it as independent is confidently wrong rather than
 merely incomplete.
 
+A side declared `unsupported` normally means the file is not installed there. A
+file that is installed on such a side anyway keeps the declaration and also
+records the side it was placed on, so that host's mod list, verification, repair,
+and dependency graph count it as installed while the catalog's statement stays
+visible. Nothing else reads an unsupported side as installed.
+
 Installing a mod through a catalog records them, because the resolver already
 has the release's declared dependencies in hand and used to drop them; the same
 entry, and the same relations, is what a linked server's own recipe receives.

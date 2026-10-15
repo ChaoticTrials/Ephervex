@@ -533,6 +533,9 @@ pub(crate) fn recording_side(
     if requirement.needs_decision() {
         recorded.selected = request.selected;
     }
+    if request.installed_despite_unsupported == Some(side) {
+        recorded.installed_despite_unsupported = Some(side);
+    }
     Some(recorded)
 }
 

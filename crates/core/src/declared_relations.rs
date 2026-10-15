@@ -421,6 +421,7 @@ mod tests {
                 file_id: Some(DECLARING_FILE.to_owned()),
             }),
             original_identity: None,
+            installed_despite_unsupported: None,
             relations: Some(
                 [FIRST_DECLARED, SECOND_DECLARED]
                     .into_iter()

@@ -613,6 +613,11 @@ pub struct PackFileRecipe {
     /// confidently wrong rather than merely incomplete.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relations: Option<Vec<RecipeRelation>>,
+    /// The side this file is installed on although its catalog declares that
+    /// side `unsupported`, so the declaration is kept and the file still counts
+    /// as installed there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_despite_unsupported: Option<PackSide>,
 }
 
 impl PackFileRecipe {
@@ -678,11 +683,19 @@ impl PackFileRecipe {
     pub fn is_installed_on(&self, side: PackSide, selection: &OptionalSelection) -> bool {
         match self.requirement(side) {
             SideRequirement::Required => true,
-            SideRequirement::Unsupported => false,
+            SideRequirement::Unsupported => self.installed_despite_unsupported == Some(side),
             SideRequirement::Optional | SideRequirement::Unknown => {
                 selection.includes(&self.logical_path, self.selected)
             }
         }
+    }
+
+    /// Whether the catalog declares this side unsupported and nothing places the
+    /// file there anyway.
+    #[must_use]
+    pub fn is_excluded_from(&self, side: PackSide) -> bool {
+        self.requirement(side) == SideRequirement::Unsupported
+            && self.installed_despite_unsupported != Some(side)
     }
 
     /// Whether this entry describes a jar in the game's `mods/` directory.
@@ -1111,7 +1124,11 @@ impl PackRecipe {
                         files.push(file);
                     }
                 }
-                SideRequirement::Unsupported => {}
+                SideRequirement::Unsupported => {
+                    if !file.is_excluded_from(PackSide::Server) {
+                        files.push(file);
+                    }
+                }
                 SideRequirement::Unknown if unknown.includes(&file.logical_path) => {
                     files.push(file);
                 }
@@ -1350,6 +1367,7 @@ impl PackRecipe {
                 origin: ModOrigin::PackOverride,
                 identity: None,
                 original_identity: None,
+                installed_despite_unsupported: None,
                 relations: None,
             }
         };
@@ -2190,6 +2208,7 @@ mod tests {
             origin: ModOrigin::PackDeclared,
             identity: None,
             original_identity: None,
+            installed_despite_unsupported: None,
             relations: None,
         }
     }
@@ -2415,6 +2434,69 @@ mod tests {
         assert_eq!(SideRequirement::Unknown.as_str(), "unknown");
     }
 
+    #[test]
+    fn an_unsupported_side_counts_as_installed_only_where_the_file_was_placed_anyway() {
+        let none = OptionalSelection::none();
+        let mut entry = managed("PROJ", "V1", "mod.jar");
+        entry.server = SideRequirement::Unsupported;
+
+        assert!(!entry.is_installed_on(PackSide::Server, &none));
+        assert!(entry.is_excluded_from(PackSide::Server));
+
+        entry.installed_despite_unsupported = Some(PackSide::Server);
+
+        assert!(entry.is_installed_on(PackSide::Server, &none));
+        assert!(!entry.is_excluded_from(PackSide::Server));
+        assert_eq!(
+            entry.server,
+            SideRequirement::Unsupported,
+            "the catalog's declaration is kept"
+        );
+        entry.client = SideRequirement::Unsupported;
+        assert!(
+            !entry.is_installed_on(PackSide::Client, &none),
+            "the placement names one side only"
+        );
+    }
+
+    #[test]
+    fn the_placement_despite_an_unsupported_side_is_written_only_when_present_and_fails_closed_when_unknown()
+     {
+        let mut entry = managed("PROJ", "V1", "mod.jar");
+        let plain = serde_json::to_value(&entry).expect("serialize");
+        assert!(plain.get("installed_despite_unsupported").is_none());
+        let read: PackFileRecipe = serde_json::from_value(plain.clone()).expect("read");
+        assert_eq!(read.installed_despite_unsupported, None);
+
+        entry.installed_despite_unsupported = Some(PackSide::Server);
+        let placed = serde_json::to_value(&entry).expect("serialize");
+        assert_eq!(placed["installed_despite_unsupported"], "server");
+        let read: PackFileRecipe = serde_json::from_value(placed).expect("read");
+        assert_eq!(read.installed_despite_unsupported, Some(PackSide::Server));
+
+        let mut unknown = plain;
+        unknown["installed_despite_unsupported"] = "somewhere".into();
+        assert!(serde_json::from_value::<PackFileRecipe>(unknown).is_err());
+    }
+
+    #[test]
+    fn a_server_reconstruction_plan_keeps_a_file_placed_on_a_side_its_catalog_excludes() {
+        let mut recipe = recipe();
+        let mut placed = managed("PROJ", "V1", "placed.jar");
+        placed.server = SideRequirement::Unsupported;
+        placed.installed_despite_unsupported = Some(PackSide::Server);
+        let mut excluded = managed("OTHER", "V1", "excluded.jar");
+        excluded.server = SideRequirement::Unsupported;
+        recipe.files = vec![placed, excluded];
+
+        let plan = recipe
+            .server_preview_plan(&OptionalSelection::none(), &UnknownServerFiles::default())
+            .expect("plan");
+
+        let names: Vec<_> = plan.files.iter().map(|file| file.file_name()).collect();
+        assert_eq!(names, ["placed.jar"]);
+    }
+
     // -- managed mods ------------------------------------------------------
 
     /// A mod as the browser installs one: on the client because the user asked,
@@ -2444,6 +2526,7 @@ mod tests {
                 file_id: None,
             }),
             original_identity: None,
+            installed_despite_unsupported: None,
             relations: None,
         }
     }

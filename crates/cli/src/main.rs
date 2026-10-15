@@ -47,11 +47,10 @@ use ephervex_core::{
     RequirementBasis, RoundAnswer, RuntimeClassification, RuntimeInventory, SearchOptions,
     SecretString, ServerCommitWarning, ServerContentSource, ServerCreateOptions, ServerEvent,
     ServerExit, ServerFolder, ServerNetworkChange, ServerObserver, ServerPersistenceHealth,
-    ServerRecord, ServerWarning, Session, SharedArtifactReport, SideRequirement, SkipReason,
-    SnapshotOrigin, SnapshotRecord, SnapshotRestoreOptions, StartedServerLifetime,
-    SuspectConfidence, SuspectReason, TerminationRequests, TextAnchor, TextView,
-    UnknownServerFiles, UnverifiedOptional, VerificationReport, VersionMetadata, VersionRecord,
-    format_binary_bytes,
+    ServerRecord, ServerWarning, Session, SharedArtifactReport, SkipReason, SnapshotOrigin,
+    SnapshotRecord, SnapshotRestoreOptions, StartedServerLifetime, SuspectConfidence,
+    SuspectReason, TerminationRequests, TextAnchor, TextView, UnknownServerFiles,
+    UnverifiedOptional, VerificationReport, VersionMetadata, VersionRecord, format_binary_bytes,
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{
@@ -7499,7 +7498,7 @@ fn print_recipe(
         outln!("file:      {}", terminal_safe(&file.display_name()));
     }
     for file in &recipe.files {
-        if file.requirement(side) == SideRequirement::Unsupported {
+        if file.is_excluded_from(side) {
             outln!("excluded:  {}", terminal_safe(&file.display_name()));
         }
     }

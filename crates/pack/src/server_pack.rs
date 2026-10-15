@@ -309,6 +309,7 @@ pub fn server_pack_recipe(
                 origin: ModOrigin::PackDeclared,
                 identity: entry.identity.clone(),
                 original_identity: None,
+                installed_despite_unsupported: None,
                 relations: entry.relations.clone(),
             })
             .collect(),

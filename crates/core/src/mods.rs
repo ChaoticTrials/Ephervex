@@ -330,6 +330,7 @@ fn record_identified(root: &Path, side: PackSide, adopted: &[IdentifiedJar]) {
             origin: ModOrigin::HandPlaced,
             identity: Some(identity),
             original_identity: None,
+            installed_despite_unsupported: None,
             relations: Some(relations.clone()),
         };
         // The same jar may already be recorded from the host's other side
@@ -2247,6 +2248,7 @@ pub(crate) fn recipe_entry_for(
             file_id: exact_file_id(provider, &planned.version.id),
         }),
         original_identity: None,
+        installed_despite_unsupported: None,
         relations: Some(recipe_relations(&planned.version.dependencies)),
     })
 }
@@ -2924,6 +2926,7 @@ mod tests {
             origin: ModOrigin::PackDeclared,
             identity: None,
             original_identity: None,
+            installed_despite_unsupported: None,
             relations: None,
         }
     }
