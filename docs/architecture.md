@@ -990,7 +990,9 @@ a dependency, whose server support the catalog never stated, and records it as a
 explicit choice. A required dependency declared client-only is installed anyway,
 with a warning naming it and the mod that needs it, and is recorded as installed
 on the server beside the declaration it keeps. A root declared client-only is
-refused. A running server receives the change for its next start.
+refused. A running server receives the change for its next start. The command
+line names either host with `--instance` or `--server`, and
+`--accept-unknown-server-support` is its form of the confirmation.
 
 Exact selections are preserved. A pinned version that does not fit is refused
 rather than moved to a neighboring release, two mods pinning one project to

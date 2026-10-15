@@ -1738,6 +1738,12 @@ mod-incompatible-loader = Does not support { $required }.
 
 mod-warning-client-side-unsupported = { $project } says it does not run on the client.
 .action = It was installed because you asked for it by name. Remove it if this instance is not meant to have it.
+mod-search-server-support-unstated = Server support is not stated by the catalog.
+mod-search-client-only = Client only. It cannot be installed on a server.
+mod-plan-server-support-unstated = { $name } does not state whether it runs on a server.
+mod-install-server-support-unconfirmed = The catalog does not state whether { $mods } runs on a server.
+.action = Add --accept-unknown-server-support to install it anyway.
+
 mod-warning-server-side-unsupported = { $project } says it does not run on a server, but { $required_by } needs it.
 .action = It was installed because the mod that needs it cannot load without it.
 mod-warning-uncheckable-conflict = { $declared_by } says it conflicts with the file { $file_name }, which Ephervex cannot check automatically.
