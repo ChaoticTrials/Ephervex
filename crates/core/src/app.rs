@@ -288,6 +288,10 @@ pub struct App {
     /// into a test build.
     #[cfg(test)]
     pub(crate) test_keyring: crate::account::TestKeyring,
+    /// The Adoptium API root a test build installs managed runtimes from
+    /// instead of Adoptium's own. Compiled only into a test build.
+    #[cfg(test)]
+    pub(crate) adoptium_base: Option<String>,
 }
 
 /// Makes a Java override absolute and refuses one with no text form, before
@@ -350,6 +354,8 @@ impl App {
             auth_endpoints: None,
             #[cfg(test)]
             test_keyring: crate::account::TestKeyring::default(),
+            #[cfg(test)]
+            adoptium_base: None,
         })
     }
 
@@ -378,6 +384,8 @@ impl App {
             auth_endpoints: None,
             #[cfg(test)]
             test_keyring: crate::account::TestKeyring::default(),
+            #[cfg(test)]
+            adoptium_base: None,
         })
     }
 
@@ -1132,13 +1140,27 @@ impl App {
     /// The first call scans; later calls return what it found. Scanning forks a
     /// JVM per distinct runtime, so a frontend may call this as often as it
     /// likes - which is the point of caching it here rather than asking every
-    /// caller to remember.
+    /// caller to remember. A managed runtime installed or removed since the
+    /// scan, by another `App` or process, is caught up by probing the managed
+    /// store alone.
     #[instrument(skip(self))]
     pub async fn java_runtimes(&self) -> CoreResult<Arc<RuntimeInventory>> {
-        if let Some(inventory) = self.cached_java() {
+        let Some(inventory) = self.cached_java() else {
+            return self.refresh_java_runtimes().await;
+        };
+        let store = self.paths().java_dir();
+        if inventory.matches_managed_store(&store) {
             return Ok(inventory);
         }
-        self.refresh_java_runtimes().await
+        let managed = JavaDiscovery::isolated()
+            .with_managed_root(&store)
+            .discover()
+            .await;
+        let updated = Arc::new(inventory.with_managed_from(&store, managed));
+        if let Ok(mut cache) = self.java.write() {
+            *cache = Some(Arc::clone(&updated));
+        }
+        Ok(updated)
     }
 
     /// Rescans for Java runtimes, discarding what was cached.
@@ -1410,7 +1432,7 @@ impl App {
     }
 
     /// Replaces the cached inventory, as if a scan had found exactly these.
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn use_java_inventory_for_test(&self, runtimes: Vec<JavaRuntime>) {
         if let Ok(mut cache) = self.java.write() {
             *cache = Some(Arc::new(RuntimeInventory {
@@ -1483,15 +1505,15 @@ impl App {
     /// Downloads and installs a managed runtime of one major.
     ///
     /// Installs under the user's own data directory; nothing here needs or asks
-    /// for elevated privileges. The inventory cache is invalidated afterwards
-    /// so the new runtime is visible without an explicit Refresh.
+    /// for elevated privileges. The new runtime joins the cached inventory, so
+    /// it is visible without an explicit Refresh.
     #[instrument(skip(self))]
     pub async fn install_java(&self, major: u32) -> CoreResult<ManagedInstallation> {
         self.install_java_with_maximum_update(major, None, None, &CancellationToken::new())
             .await
     }
 
-    async fn install_java_with_maximum_update(
+    pub(crate) async fn install_java_with_maximum_update(
         &self,
         major: u32,
         maximum_update: Option<u32>,
@@ -1529,6 +1551,12 @@ impl App {
             self.paths().java_dir(),
         )?;
 
+        #[cfg(test)]
+        let provider = match &self.adoptium_base {
+            Some(base) => provider.with_api_base(base)?,
+            None => provider,
+        };
+
         let reporter = reporter
             .cloned()
             .unwrap_or_else(|| OperationReporter::silent("managed-java"));
@@ -1540,10 +1568,21 @@ impl App {
             }
             None => provider.install(major, &reporter, cancel).await?,
         };
-        if let Ok(mut cache) = self.java.write() {
-            *cache = None;
-        }
+        self.remember_installed_java(&installed.runtime);
         Ok(installed)
+    }
+
+    /// Adds a runtime Ephervex just installed to the cached inventory, so it
+    /// is visible at once without scanning every other runtime again.
+    fn remember_installed_java(&self, runtime: &JavaRuntime) {
+        let Ok(mut cache) = self.java.write() else {
+            return;
+        };
+        if let Some(inventory) = cache.as_ref() {
+            let mut updated = RuntimeInventory::clone(inventory);
+            updated.remember(runtime.clone());
+            *cache = Some(Arc::new(updated));
+        }
     }
 
     /// Removes a runtime Ephervex installed, and reports the directory that

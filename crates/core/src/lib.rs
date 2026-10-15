@@ -46,6 +46,7 @@ pub mod import;
 pub mod instance;
 pub mod isolation;
 pub mod java_choices;
+pub mod java_install;
 pub mod java_status;
 pub mod launch;
 pub mod licenses;
@@ -140,6 +141,7 @@ pub use java_choices::{
     AutomaticJava, JavaChoice, JavaChoices, JavaPinIndex, JavaRuntimePins, LauncherJavaChoice,
     PinningHost,
 };
+pub use java_install::HostJavaInstall;
 pub use java_status::{
     ExpectedRuntime, HostJavaStatus, JavaInstallOffer, JavaSelectionMode, JavaSelectionState,
     JavaStatusTone, ResolvedJava,

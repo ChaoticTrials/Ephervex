@@ -259,6 +259,38 @@ async fn automatic_selection_of_a_managed_runtime_is_healthy_and_marked_managed(
     }
 }
 
+/// A launch, start or another process can install a managed runtime after
+/// the inventory was scanned; the status and the picker follow the store.
+#[tokio::test]
+async fn a_managed_runtime_installed_after_the_scan_is_what_the_host_now_runs() {
+    let mut fixture = Fixture::vanilla().await;
+    ephervex_core::test_support::use_java_inventory(&fixture.app, Vec::new());
+    fixture.detect(true, true);
+    for host in fixture.hosts() {
+        assert!(matches!(
+            fixture.status(host).await.check,
+            JavaCheck::DownloadsAtLaunch { required_major: 21 }
+        ));
+    }
+
+    let installed = fixture.managed_java("21.0.8");
+
+    for host in fixture.hosts() {
+        let status = fixture.status(host).await;
+        let runtime = status.runtime().expect("the installed runtime");
+        assert_eq!(runtime.path, installed, "{host:?}");
+        assert!(runtime.managed);
+        assert_eq!(status.tone(), JavaStatusTone::Healthy);
+        let choices = fixture.app.java_choices(host).await.unwrap();
+        assert!(
+            choices
+                .runtimes
+                .iter()
+                .any(|choice| choice.runtime.path == installed && choice.is_compatible())
+        );
+    }
+}
+
 #[tokio::test]
 async fn nothing_installed_with_downloads_on_is_healthy_and_offers_an_install() {
     let mut fixture = Fixture::vanilla().await;
