@@ -1,7 +1,7 @@
 // A host workspace's chrome: pane header, surface tabs, workflow banner, and the pane host picker.
 
 import { LoaderGlyph } from "../components/artwork.slint";
-import { AppButton, BusySpinner, IconButton, LaunchAsButton, Pill } from "../components/controls.slint";
+import { AppButton, BusySpinner, IconButton, LaunchAsButton, Pill, PillButton } from "../components/controls.slint";
 import { BodyText, Divider, Heading } from "../components/text.slint";
 import { GuiI18n } from "../globals.slint";
 import {
@@ -11,6 +11,22 @@ import {
     WorkspaceSurfaceRow
 } from "../models.slint";
 import { Theme } from "../theme.slint";
+
+// A host's Java at a glance: the runtime it would run with, in a tone that
+// says how that fits what its Minecraft and loader expect. On hover it says
+// how the runtime was chosen and the status in words. Pressing it opens the
+// host's runtime settings.
+component JavaRuntimePill inherits PillButton {
+    in property <string> summary;
+    in property <string> origin;
+    // "healthy", "customized", "problem", or "unchecked".
+    in property <string> tone;
+    in property <string> tone-label;
+    text: root.summary;
+    tone-color: root.tone == "healthy" ? Theme.success : root.tone == "customized" ? Theme.accent-secondary : root.tone == "problem" ? Theme.warning : Theme.text-secondary;
+    note: root.origin == "" ? GuiI18n.value("gui-java-pill-status", root.tone-label) : GuiI18n.values("gui-java-pill-note", root.origin, root.tone-label);
+    accessible-name: GuiI18n.values("gui-java-pill", root.summary, self.note);
+}
 
 export component WorkspaceTab inherits Rectangle {
     in property <string> text;
@@ -223,6 +239,12 @@ export component HostWorkspace inherits Rectangle {
     in property <bool> paired;
     in property <string> pair-label;
     in property <string> pair-state-kind;
+    // The host's Java, once its status was read; empty until then.
+    in property <string> java-summary;
+    in property <string> java-tone;
+    in property <string> java-tone-label;
+    in property <string> java-origin;
+    callback open-java();
     property <color> pair-tone: root.pair-state-kind == "starting" || root.pair-state-kind == "restarting" ? Theme.warning : root.pair-state-kind == "running" ? Theme.success : Theme.accent;
     callback choose-host();
     callback split-beside();
@@ -252,6 +274,7 @@ export component HostWorkspace inherits Rectangle {
                 }
                 VerticalLayout { alignment: center; Pill { text: root.restart-stage != "" ? GuiI18n.text("gui-state-restarting") : root.status; tone-color: root.restart-stage != "" || root.status-kind == "starting" ? Theme.warning : root.status-kind == "running" ? Theme.success : Theme.text-secondary; } }
                 if root.paired && root.width >= 520px : VerticalLayout { alignment: center; Pill { text: root.pair-label; tone-color: root.pair-tone; } }
+                if root.java-summary != "" && root.width >= 640px : VerticalLayout { alignment: center; JavaRuntimePill { summary: root.java-summary; origin: root.java-origin; tone: root.java-tone; tone-label: root.java-tone-label; clicked => { root.open-java(); } } }
                 if root.kill-visible : AppButton { text: GuiI18n.text("gui-kill"); accessible-name: GuiI18n.values("gui-pane-action", GuiI18n.text("gui-kill"), root.pane-label); tone: "danger"; enabled: root.kill-enabled; hint: root.kill-hint; clicked => { root.kill(); } }
                 if root.restart-visible : AppButton { text: GuiI18n.text("gui-restart"); accessible-name: GuiI18n.values("gui-pane-action", GuiI18n.text("gui-restart"), root.pane-label); enabled: root.restart-enabled && !root.occupied; hint: root.restart-reason; clicked => { root.restart(); } }
                 AppButton { text: root.primary-label; accessible-name: GuiI18n.values("gui-pane-action", root.primary-label, root.pane-label); tone: root.primary-tone; enabled: root.primary-enabled && !root.primary-waits; hint: root.primary-reason; clicked => { root.primary(); } }
@@ -274,6 +297,7 @@ export component HostWorkspace inherits Rectangle {
             Heading { text: root.title; font-size: Theme.workspace-title-size; overflow: elide; }
             VerticalLayout { alignment: center; Pill { text: root.restart-stage != "" ? GuiI18n.text("gui-state-restarting") : root.status; tone-color: root.restart-stage != "" || root.status-kind == "starting" ? Theme.warning : root.status-kind == "running" ? Theme.success : Theme.text-secondary; } }
             if root.paired : VerticalLayout { alignment: center; Pill { text: root.pair-label; tone-color: root.pair-tone; } }
+            if root.java-summary != "" : VerticalLayout { alignment: center; JavaRuntimePill { summary: root.java-summary; origin: root.java-origin; tone: root.java-tone; tone-label: root.java-tone-label; clicked => { root.open-java(); } } }
             Rectangle { horizontal-stretch: 1; }
             if root.can-split-beside : IconButton { icon: @image-url("../../../../assets/icons/split-beside.svg"); accessible-name: GuiI18n.text("gui-workspace-split"); clicked => { root.split-beside(); } }
             AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-folder(); } }

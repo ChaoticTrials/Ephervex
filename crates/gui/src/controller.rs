@@ -11252,6 +11252,56 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_java_read_leaves_nothing_of_the_earlier_one_on_screen() {
+        let ui = test_window();
+        let (workspace, _commands) = test_workspace_sending(&ui);
+        let host = client_host();
+        workspace.open(&ui, host, Surface::Settings);
+        let status = crate::java_view::JavaStatusView {
+            tone: "healthy".to_owned(),
+            tone_label: "Healthy".to_owned(),
+            runtime: "Java 21.0.8, Eclipse Adoptium, amd64".to_owned(),
+            summary: "Java 21.0.8 (Eclipse Adoptium)".to_owned(),
+            origin: "chosen automatically".to_owned(),
+            expected: "Java 21".to_owned(),
+            ..crate::java_view::JavaStatusView::default()
+        };
+        java_runtime::apply_host_java(
+            &workspace,
+            &backend::HostJavaData {
+                host,
+                status: Ok(status),
+                choices: None,
+            },
+        );
+        assert_eq!(
+            first_view(&ui).java_summary,
+            "Java 21.0.8 (Eclipse Adoptium)"
+        );
+
+        java_runtime::apply_host_java(
+            &workspace,
+            &backend::HostJavaData {
+                host,
+                status: Err("The Java check could not run".to_owned()),
+                choices: None,
+            },
+        );
+
+        let view = first_view(&ui);
+        assert_eq!(view.java_error, "The Java check could not run");
+        for field in [
+            view.java_summary,
+            view.java_tone,
+            view.java_tone_label,
+            view.java_runtime,
+            view.java_origin,
+        ] {
+            assert_eq!(field, "", "a stale claim stayed on screen");
+        }
+    }
+
+    #[test]
     fn a_fix_is_applied_only_from_its_preview_and_only_once() {
         let (ui, workspace, commands, host) = shown_result(mixed());
         ui.invoke_review_fix("client".into(), host.id().into(), "p0".into());

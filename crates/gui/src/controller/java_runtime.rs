@@ -48,8 +48,17 @@ pub(super) fn apply_host_java(workspace: &Workspace, data: &HostJavaData) {
                 view.java_install = status.install.as_str().into();
                 view.java_error = SharedString::default();
             }
+            // Nothing the last good read said stands once a newer one failed.
             Err(error) => {
                 view.java_tone = SharedString::default();
+                view.java_tone_label = SharedString::default();
+                view.java_runtime = SharedString::default();
+                view.java_path = SharedString::default();
+                view.java_origin = SharedString::default();
+                view.java_expected = SharedString::default();
+                view.java_problem = SharedString::default();
+                view.java_summary = SharedString::default();
+                view.java_install = SharedString::default();
                 view.java_error = error.as_str().into();
             }
         }

@@ -1141,6 +1141,11 @@ export component AppWindow inherits Window {
                                 pair-label: self.pair-display == "" ? GuiI18n.text("gui-paired") : GuiI18n.value(self.is-client ? "gui-paired-server-state" : "gui-paired-client-state", self.pair-display);
                                 pair-state-kind: host.pair-restart-stage != "" ? "restarting" : host.pair-state-kind;
                                 pair-starting: self.is-client ? host.client.pair-starting : host.server.pair-starting;
+                                java-summary: host.java-summary;
+                                java-tone: host.java-tone;
+                                java-tone-label: host.java-tone-label;
+                                java-origin: host.java-origin;
+                                open-java => { root.show-pane-surface(pane.id, self.is-client ? "Settings" : "Properties"); }
                                 choose-host => { root.pane-host-picker-pane = pane.id; root.pane-host-picker-kind = host.kind; root.pane-host-picker-id = host.id; root.modal = "pane-host"; }
                                 split-beside => { root.split-pane-beside(pane.id); }
                                 split-below => { root.split-pane-below(pane.id); }
