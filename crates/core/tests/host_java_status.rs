@@ -6,15 +6,16 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use ephervex_core::{
-    App, DiagnosisRequest, FindingClass, FindingKind, HostJavaStatus, InstalledHost, JavaCheck,
-    JavaLayer, JavaMismatch, JavaSelectionMode, JavaStatusTone, Paths,
+    App, DiagnosisRequest, DiagnosticFix, FindingClass, FindingKind, FixOutcome, HostJavaStatus,
+    InstalledHost, JavaCheck, JavaLayer, JavaMismatch, JavaSelectionMode, JavaStatusTone, Paths,
+    ProposedChange, ResolvedJava,
 };
 use ephervex_download::{
     CacheLayout, ContentStore, FileExtension, MetadataCache, MetadataKey, OperationReporter,
 };
 use ephervex_java::{JavaOrigin, JavaRuntime, JavaSourceKind, JavaVersion};
 use ephervex_minecraft::{VERSION_MANIFEST_CACHE_KEY, VERSION_MANIFEST_URL, VersionManifest};
-use ephervex_model::{JavaOverride, LoaderKind, LoaderSelection};
+use ephervex_model::{JavaOverride, JvmSettings, LoaderKind, LoaderSelection};
 use ephervex_storage::{NewClient, NewServer, Registry};
 use tokio_util::sync::CancellationToken;
 
@@ -991,4 +992,237 @@ async fn a_launcher_preference_that_is_not_a_runtime_is_never_compatible() {
         JavaStatusTone::Problem,
         "the status calls the same preference a problem"
     );
+}
+
+#[tokio::test]
+async fn changing_only_the_java_pin_keeps_the_jvm_settings_each_host_holds() {
+    let fixture = Fixture::vanilla().await;
+    let before = fixture.java("before-jdk", "21.0.3");
+    let after = fixture.java("after-jdk", "21.0.8");
+    let jvm = JvmSettings {
+        jvm_args: vec!["-Dkept=1".to_owned()],
+        ..JvmSettings::default()
+    };
+
+    for host in fixture.hosts() {
+        pin_with_jvm(&fixture, host, &before, jvm.clone());
+        match host {
+            InstalledHost::Instance(id) => {
+                fixture
+                    .app
+                    .set_client_java_override(id, Some(JavaOverride::new(&after)))
+                    .unwrap();
+            }
+            InstalledHost::Server(id) => {
+                fixture
+                    .app
+                    .set_server_java_override(id, Some(JavaOverride::new(&after)))
+                    .unwrap();
+            }
+        }
+        assert_eq!(
+            runtime_settings(&fixture, host),
+            (Some(after.clone()), Some(jvm.clone())),
+            "{host:?}"
+        );
+    }
+}
+
+fn runtime_settings(
+    fixture: &Fixture,
+    host: InstalledHost,
+) -> (Option<PathBuf>, Option<JvmSettings>) {
+    match host {
+        InstalledHost::Instance(id) => {
+            let record = fixture.app.current_client(id).unwrap();
+            (
+                record.java_override.map(|java| java.path),
+                record.jvm_override,
+            )
+        }
+        InstalledHost::Server(id) => {
+            let record = fixture.app.server(id).unwrap();
+            (
+                record.java_override.map(|java| java.path),
+                record.jvm_override,
+            )
+        }
+    }
+}
+
+fn pin_with_jvm(fixture: &Fixture, host: InstalledHost, path: &Path, jvm: JvmSettings) {
+    let java = Some(JavaOverride::new(path));
+    match host {
+        InstalledHost::Instance(id) => {
+            fixture
+                .app
+                .set_client_runtime_settings(id, java, Some(jvm))
+                .unwrap();
+        }
+        InstalledHost::Server(id) => {
+            fixture
+                .app
+                .set_server_runtime_settings(id, java, Some(jvm))
+                .unwrap();
+        }
+    }
+}
+
+async fn apply(fixture: &Fixture, host: InstalledHost, fix: &DiagnosticFix) -> FixOutcome {
+    fixture
+        .app
+        .apply_fix(
+            host,
+            fix,
+            &OperationReporter::silent("fixing"),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn pinning_a_runtime_previews_both_sides_and_changes_only_the_java_path_once_applied() {
+    let fixture = Fixture::vanilla().await;
+    let old = fixture.java("before-17", "17.0.12");
+    let new = fixture.java("after-21", "21.0.8");
+    let jvm = JvmSettings {
+        max_memory_mib: Some(3072),
+        jvm_args: vec!["-Dkept=1".to_owned()],
+        ..JvmSettings::default()
+    };
+
+    for host in fixture.hosts() {
+        pin_with_jvm(&fixture, host, &old, jvm.clone());
+        let fix = DiagnosticFix::PinJava(new.clone());
+
+        let preview = fixture.app.preview_fix(host, &fix).await.unwrap();
+        assert!(preview.blocked.is_none());
+        let [ProposedChange::UseJava(change)] = preview.changes.as_slice() else {
+            panic!("{:?}", preview.changes);
+        };
+        assert_eq!(change.expected.major(), 21);
+        assert_eq!(change.current.mode, JavaSelectionMode::PinnedByHost);
+        assert!(matches!(
+            &change.current.resolved,
+            ResolvedJava::Runtime { runtime, rejection: Some(JavaMismatch::Major { found: 17, .. }) }
+                if runtime.path == old
+        ));
+        assert_eq!(change.proposed.mode, JavaSelectionMode::PinnedByHost);
+        assert!(matches!(
+            &change.proposed.resolved,
+            ResolvedJava::Runtime { runtime, rejection: None }
+                if runtime.path == new && runtime.vendor == "Eclipse Adoptium"
+        ));
+        assert_eq!(
+            runtime_settings(&fixture, host),
+            (Some(old.clone()), Some(jvm.clone())),
+            "a preview changes nothing"
+        );
+
+        let outcome = apply(&fixture, host, &fix).await;
+        assert!(outcome.is_complete(), "{host:?}: {outcome:?}");
+        assert_eq!(
+            runtime_settings(&fixture, host),
+            (Some(new.clone()), Some(jvm.clone())),
+            "only the Java path changes"
+        );
+        assert!(
+            fixture
+                .app
+                .preview_fix(host, &fix)
+                .await
+                .unwrap()
+                .is_empty(),
+            "pinning the runtime already pinned changes nothing"
+        );
+    }
+}
+
+#[tokio::test]
+async fn switching_to_automatic_previews_what_automatic_selection_resolves_to() {
+    let mut fixture = Fixture::vanilla().await;
+    let installed = fixture.java("installed-21", "21.0.8");
+    ephervex_core::test_support::use_java_inventory(
+        &fixture.app,
+        vec![scanned(
+            &installed,
+            "21.0.8",
+            "Ubuntu",
+            JavaSourceKind::System,
+        )],
+    );
+    fixture.detect(true, false);
+    let pinned = fixture.java("pinned-21", "21.0.3");
+    let jvm = JvmSettings {
+        min_memory_mib: Some(1024),
+        ..JvmSettings::default()
+    };
+
+    for host in fixture.hosts() {
+        pin_with_jvm(&fixture, host, &pinned, jvm.clone());
+        let status = fixture.status(host).await;
+        assert_eq!(status.tone(), JavaStatusTone::Customized);
+        assert_eq!(status.fix(), Some(&DiagnosticFix::UseAutomaticJava));
+
+        let preview = fixture
+            .app
+            .preview_fix(host, &DiagnosticFix::UseAutomaticJava)
+            .await
+            .unwrap();
+        let [ProposedChange::UseJava(change)] = preview.changes.as_slice() else {
+            panic!("{:?}", preview.changes);
+        };
+        assert_eq!(change.proposed.mode, JavaSelectionMode::Automatic);
+        assert!(matches!(
+            &change.proposed.resolved,
+            ResolvedJava::Runtime { runtime, rejection: None } if runtime.path == installed
+        ));
+
+        assert!(
+            apply(&fixture, host, &DiagnosticFix::UseAutomaticJava)
+                .await
+                .is_complete()
+        );
+        assert_eq!(runtime_settings(&fixture, host), (None, Some(jvm.clone())));
+        assert_eq!(fixture.status(host).await.tone(), JavaStatusTone::Healthy);
+    }
+}
+
+#[tokio::test]
+async fn a_java_change_waits_for_a_running_server_to_stop() {
+    use rustix::fs::{FlockOperation, flock};
+
+    let fixture = Fixture::vanilla().await;
+    let before = fixture.java("server-before", "21.0.3");
+    let after = fixture.java("server-after", "21.0.8");
+    fixture.pin(fixture.server, &before);
+    let InstalledHost::Server(id) = fixture.server else {
+        unreachable!()
+    };
+    let lock_path = fixture
+        .app
+        .server(id)
+        .unwrap()
+        .root
+        .join(".launcher")
+        .join(ephervex_server::RUNTIME_LOCK_FILE);
+    std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+    let lock = std::fs::File::create(&lock_path).unwrap();
+    flock(&lock, FlockOperation::LockExclusive).unwrap();
+
+    let fix = DiagnosticFix::PinJava(after);
+    let preview = fixture.app.preview_fix(fixture.server, &fix).await.unwrap();
+    assert!(preview.blocked.is_some(), "{preview:?}");
+    let refused = fixture
+        .app
+        .apply_fix(
+            fixture.server,
+            &fix,
+            &OperationReporter::silent("fixing"),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(refused.is_err());
+    assert_eq!(runtime_settings(&fixture, fixture.server).0, Some(before));
 }

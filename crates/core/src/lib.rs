@@ -106,9 +106,9 @@ pub use dependencies::{
 };
 pub use diagnosis::{
     DiagnosisRequest, DiagnosticFix, Finding, FindingClass, FindingKind, FixOutcome, FixPreview,
-    HostDiagnosis, IntegrityCheck, JavaCheck, JavaLayer, JavaMismatch, JavaRuntimeSummary,
-    JavaUnavailable, LoaderReportedRequirement, LoaderRequest, ModCounts, ProposedChange,
-    RecommendedJava,
+    HostDiagnosis, IntegrityCheck, JavaChange, JavaCheck, JavaLayer, JavaMismatch,
+    JavaRuntimeSummary, JavaUnavailable, LoaderReportedRequirement, LoaderRequest, ModCounts,
+    ProposedChange,
 };
 pub use diagnostics::{
     ClientLogTail, DEFAULT_DIAGNOSTIC_BYTES, DiagnosticCatalog, DiagnosticRequest, DiagnosticScope,
@@ -141,7 +141,8 @@ pub use java_choices::{
     PinningHost,
 };
 pub use java_status::{
-    ExpectedRuntime, HostJavaStatus, JavaInstallOffer, JavaSelectionMode, JavaStatusTone,
+    ExpectedRuntime, HostJavaStatus, JavaInstallOffer, JavaSelectionMode, JavaSelectionState,
+    JavaStatusTone, ResolvedJava,
 };
 pub use launch::{LaunchOptions, LaunchOutcome};
 pub use licenses::{
@@ -272,7 +273,7 @@ pub use ephervex_java::{
     EffectiveJvmSettings, ExpectedJava, GlobalJavaSettings, JavaError, JavaOrigin, JavaPathChoice,
     JavaRuntime, JavaSourceKind, JavaVersion, JvmField, ManagedInstallation, ManagedRelease,
     PinSource, ProbeFailure, RejectedRuntime, RejectionReason, RequiredJava, RequirementBasis,
-    RuleRejection, RuntimeInventory,
+    RuleRejection, RuntimeInventory, VersionBound,
 };
 pub use ephervex_loaders::{InstalledServer, LoaderBuild, LoaderVersionListing, ServerLaunch};
 pub use ephervex_minecraft::{

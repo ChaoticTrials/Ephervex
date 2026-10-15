@@ -729,6 +729,23 @@ impl App {
         }
     }
 
+    /// Replaces a server's own Java pin and leaves its JVM settings as they
+    /// are, both read from the record its claim holds, so a JVM change made
+    /// meanwhile from elsewhere is never written back over. `None` follows the
+    /// global setting again. A relative path is stored as an absolute one.
+    pub fn set_server_java_override(
+        &self,
+        id: ServerId,
+        java_override: Option<JavaOverride>,
+    ) -> CoreResult<ServerCommit<ServerRecord>> {
+        let java_override = crate::app::normalized_java_override(java_override)?;
+        let (claim, mut record) = self.claim_stopped_server(id)?;
+        record.java_override = java_override;
+        Ok(self
+            .registry_for_services()
+            .update_server_committed_claimed(&mut record, &claim)?)
+    }
+
     /// Replaces the server-specific Java and JVM overrides as one canonical
     /// metadata mutation. `None` restores the corresponding global setting.
     /// A relative Java path is stored as an absolute one.

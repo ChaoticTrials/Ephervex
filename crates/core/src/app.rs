@@ -831,6 +831,26 @@ impl App {
         }
     }
 
+    /// Replaces an instance's own Java pin and leaves its JVM settings as they
+    /// are, read and written under the same claim, so a JVM change made
+    /// meanwhile from elsewhere is never written back over. `None` follows the
+    /// global setting again. A relative path is stored as an absolute one.
+    #[instrument(skip(self))]
+    pub fn set_client_java_override(
+        &self,
+        id: InstanceId,
+        java_override: Option<ephervex_model::JavaOverride>,
+    ) -> CoreResult<ClientCommit<ClientRecord>> {
+        let java_override = normalized_java_override(java_override)?;
+        let claim = self.claim_stopped_client(id)?;
+        self.client(id)?;
+        Ok(self
+            .registry()
+            .modify_client_committed_claimed(id, &claim, |record| {
+                record.java_override = java_override;
+            })?)
+    }
+
     /// Replaces one instance's Java and JVM overrides as one metadata mutation.
     ///
     /// A relative Java path is stored as an absolute one.

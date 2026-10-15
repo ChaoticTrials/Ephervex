@@ -4,8 +4,7 @@
 use ephervex_core::{
     CoreError, DiagnosticFix, Finding, FindingClass, FindingKind, FixOutcome, FixPreview,
     HostDiagnosis, Integrity, IntegrityCheck, JavaCheck, JavaLayer, JavaMismatch, JavaUnavailable,
-    LoaderReportedRequirement, ProposedChange, RecommendedJava, RepairRefusal, UnmetDependency,
-    UnmetRequirement,
+    LoaderReportedRequirement, ProposedChange, RepairRefusal, UnmetDependency, UnmetRequirement,
 };
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use ephervex_model::ModProvider;
@@ -93,7 +92,7 @@ pub struct DiagnosisView {
 /// One row of a fix preview.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangeView {
-    /// What happens: "Enable", "Restore", "Current", "Recommended".
+    /// What happens: "Enable", "Restore", "Current", "After".
     pub action: String,
     pub name: String,
     pub detail: String,
@@ -159,36 +158,7 @@ fn pinned_by(layer: JavaLayer) -> String {
 }
 
 fn mismatch_text(mismatch: &JavaMismatch) -> String {
-    match mismatch {
-        JavaMismatch::Major { required, found } => lookup_args(
-            "gui-diagnosis-java-major",
-            [
-                ("required", Arg::from(required.to_string())),
-                ("found", Arg::from(found.to_string())),
-            ],
-        ),
-        JavaMismatch::TooOld { minimum, found } => lookup_args(
-            "gui-diagnosis-java-too-old",
-            [
-                ("minimum", Arg::from(minimum.as_str())),
-                ("found", Arg::from(found.as_str())),
-            ],
-        ),
-        JavaMismatch::TooNew { maximum, found } => lookup_args(
-            "gui-diagnosis-java-too-new",
-            [
-                ("maximum", Arg::from(maximum.as_str())),
-                ("found", Arg::from(found.as_str())),
-            ],
-        ),
-        JavaMismatch::Architecture { expected, found } => lookup_args(
-            "gui-diagnosis-java-architecture",
-            [
-                ("expected", Arg::from(expected.as_str())),
-                ("found", Arg::from(found.as_str())),
-            ],
-        ),
-    }
+    crate::java_view::mismatch_text(mismatch)
 }
 
 /// The versions the loader said the asking mods accept: one range when one
@@ -833,57 +803,31 @@ pub fn preview_view(preview: &FixPreview) -> PreviewView {
                 name: logical_path.display().to_string(),
                 detail: String::new(),
             }),
-            ProposedChange::UseJava {
-                current_path,
-                current_version,
-                recommended,
-                required_major,
-            } => {
-                changes.push(ChangeView {
-                    action: lookup("gui-fix-current"),
-                    name: current_version.as_ref().map_or_else(
-                        || lookup("gui-fix-java-unknown-version"),
-                        |version| {
-                            lookup_args(
-                                "gui-fix-java-version",
-                                [("version", Arg::from(version.as_str()))],
-                            )
-                        },
-                    ),
-                    detail: current_path.display().to_string(),
-                });
-                changes.push(match recommended {
-                    RecommendedJava::Installed(runtime) => ChangeView {
-                        action: lookup("gui-fix-recommended"),
-                        name: lookup_args(
-                            if runtime.managed {
-                                "gui-fix-java-managed"
-                            } else {
-                                "gui-fix-java-version"
-                            },
-                            [("version", Arg::from(runtime.version.as_str()))],
-                        ),
-                        detail: runtime.path.display().to_string(),
-                    },
-                    RecommendedJava::ManagedDownload { major } => ChangeView {
-                        action: lookup("gui-fix-recommended"),
-                        name: lookup_args(
-                            "gui-fix-java-download",
-                            [("major", Arg::from(major.to_string()))],
-                        ),
-                        detail: String::new(),
-                    },
-                });
+            ProposedChange::UseJava(change) => {
+                for (action, side) in [
+                    ("gui-fix-current", &change.current),
+                    ("gui-fix-proposed", &change.proposed),
+                ] {
+                    let (name, detail) = crate::java_view::resolved_text(side.mode, &side.resolved);
+                    changes.push(ChangeView {
+                        action: lookup(action),
+                        name,
+                        detail,
+                    });
+                }
                 notes.push(lookup_args(
-                    "gui-fix-java-requires",
-                    [("major", Arg::from(required_major.to_string()))],
+                    "gui-fix-java-expected",
+                    [(
+                        "expected",
+                        Arg::from(crate::java_view::expected_text(&change.expected)),
+                    )],
                 ));
             }
         }
     }
     notes.push(lookup(match preview.fix {
         DiagnosticFix::EnableMods(_) => "gui-fix-enable-note",
-        DiagnosticFix::UseAutomaticJava => "gui-fix-java-note",
+        DiagnosticFix::UseAutomaticJava | DiagnosticFix::PinJava(_) => "gui-fix-java-note",
         DiagnosticFix::RestoreFiles(_) => "gui-fix-restore-note",
     }));
     if preview.is_empty() {
@@ -945,7 +889,10 @@ pub fn outcome_view(
         DiagnosticFix::UseAutomaticJava if outcome.failed.is_empty() => {
             lookup("gui-fix-java-applied")
         }
-        DiagnosticFix::UseAutomaticJava => lookup("gui-fix-java-not-applied"),
+        DiagnosticFix::PinJava(_) if outcome.failed.is_empty() => lookup("gui-fix-java-pinned"),
+        DiagnosticFix::UseAutomaticJava | DiagnosticFix::PinJava(_) => {
+            lookup("gui-fix-java-not-applied")
+        }
         DiagnosticFix::RestoreFiles(_) => {
             let repair = outcome.repair.clone().unwrap_or_default();
             let mut message = count(
@@ -989,7 +936,7 @@ mod tests {
     use std::path::PathBuf;
 
     use ephervex_core::{
-        ImpactedMod, JavaRuntimeSummary, ModPresence, RepairReport, UnmetRequirement,
+        ImpactedMod, JavaRuntimeSummary, ModPresence, RepairReport, ResolvedJava, UnmetRequirement,
     };
     use ephervex_model::ModOrigin;
 
@@ -1356,6 +1303,68 @@ mod tests {
                 "gui-diagnosis-check-failed",
                 [("error", Arg::from("offline"))]
             )
+        );
+    }
+
+    #[test]
+    fn a_java_change_shows_both_runtimes_with_how_each_is_chosen_and_the_expectation() {
+        let runtime = |version: &str, path: &str| ephervex_core::JavaRuntimeSummary {
+            version: version.to_owned(),
+            path: PathBuf::from(path),
+            managed: false,
+            vendor: "Eclipse Adoptium".to_owned(),
+            arch: "amd64".to_owned(),
+            source: ephervex_core::JavaSourceKind::UserSupplied,
+        };
+        let required = ephervex_core::RequiredJava {
+            major: 21,
+            basis: ephervex_core::RequirementBasis::FallbackTable,
+        };
+        let change = ephervex_core::JavaChange {
+            current: ephervex_core::JavaSelectionState {
+                mode: ephervex_core::JavaSelectionMode::PinnedByHost,
+                resolved: ResolvedJava::Runtime {
+                    runtime: runtime("17.0.12", "/opt/jdk-17/bin/java"),
+                    rejection: Some(JavaMismatch::Major {
+                        required: 21,
+                        found: 17,
+                    }),
+                },
+            },
+            proposed: ephervex_core::JavaSelectionState {
+                mode: ephervex_core::JavaSelectionMode::PinnedByHost,
+                resolved: ResolvedJava::Runtime {
+                    runtime: runtime("21.0.8", "/opt/jdk-21/bin/java"),
+                    rejection: None,
+                },
+            },
+            expected: ephervex_core::ExpectedRuntime {
+                java: ephervex_core::ExpectedJava::new(&required, &[]),
+                loader: ephervex_model::LoaderKind::Vanilla,
+            },
+        };
+        let view = preview_view(&FixPreview {
+            fix: DiagnosticFix::PinJava(PathBuf::from("/opt/jdk-21/bin/java")),
+            changes: vec![ProposedChange::UseJava(Box::new(change))],
+            blocked: None,
+        });
+
+        assert_eq!(view.changes.len(), 2, "{:?}", view.changes);
+        let (current, after) = (&view.changes[0], &view.changes[1]);
+        assert_eq!(current.action, lookup("gui-fix-current"));
+        assert_eq!(
+            current.name,
+            "Java 17.0.12, Eclipse Adoptium, amd64 (pinned by this host)"
+        );
+        assert_eq!(
+            current.detail,
+            "/opt/jdk-17/bin/java. This runtime is Java 17."
+        );
+        assert_eq!(after.action, lookup("gui-fix-proposed"));
+        assert_eq!(after.detail, "/opt/jdk-21/bin/java");
+        assert!(
+            view.notes
+                .contains(&"This host expects Java 21.".to_owned())
         );
     }
 }

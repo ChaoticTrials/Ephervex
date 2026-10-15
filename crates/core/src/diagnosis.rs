@@ -26,12 +26,15 @@ use ephervex_storage::{ClientCommitWarning, DiagnosticKind, ServerCommitWarning}
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
 
-use crate::app::{App, JavaPlan, JavaPlanRequest, JavaTarget, PinProbe};
+use crate::app::{App, JavaPlan, JavaPlanRequest, JavaRefusal, JavaTarget, PinProbe};
 use crate::crash_analysis::{LoaderReportedDependency, loader_dependency_failures};
 use crate::dependencies::{DeclaredConflict, UnmetDependency, UnmetRequirement};
 use crate::diagnostics::{DiagnosticRequest, DiagnosticScope};
 use crate::error::{CoreError, CoreResult};
-use crate::java_status::{ExpectedRuntime, HostJavaStatus, JavaInstallOffer, JavaSelectionMode};
+use crate::java_status::{
+    ExpectedRuntime, HostJavaStatus, JavaInstallOffer, JavaSelectionMode, JavaSelectionState,
+    ResolvedJava,
+};
 use crate::mods::{InstalledHost, ModPresence};
 use crate::verify::{
     Integrity, RepairRefusal, RepairReport, SharedArtifactReport, VerificationReport,
@@ -155,16 +158,6 @@ impl JavaRuntimeSummary {
             source: runtime.primary_source(),
         }
     }
-}
-
-/// What automatic selection would run this host with, once nothing on the
-/// host pins a runtime.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RecommendedJava {
-    /// An installed runtime selection would choose.
-    Installed(JavaRuntimeSummary),
-    /// Nothing installed qualifies; Ephervex downloads this major at launch.
-    ManagedDownload { major: u32 },
 }
 
 /// One thing a diagnosis found.
@@ -357,8 +350,11 @@ impl LoaderReportedRequirement {
 pub enum DiagnosticFix {
     /// Turn these mods on, dependencies first.
     EnableMods(Vec<PathBuf>),
-    /// Remove this host's Java override so automatic selection applies.
+    /// Remove this host's Java override so automatic selection applies, or the
+    /// launcher preference when one is set.
     UseAutomaticJava,
+    /// Pin this host to this exact runtime executable.
+    PinJava(PathBuf),
     /// Fetch these recorded files again from their recorded sources.
     RestoreFiles(Vec<PathBuf>),
 }
@@ -510,16 +506,20 @@ pub enum ProposedChange {
         name: String,
         logical_path: PathBuf,
     },
-    UseJava {
-        /// The pinned runtime, as far as it could be read.
-        current_path: PathBuf,
-        current_version: Option<String>,
-        recommended: RecommendedJava,
-        required_major: u32,
-    },
+    /// The host's Java selection changes.
+    UseJava(Box<JavaChange>),
     Restore {
         logical_path: PathBuf,
     },
+}
+
+/// A host's Java selection before and after a change, next to what the host
+/// expects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JavaChange {
+    pub current: JavaSelectionState,
+    pub proposed: JavaSelectionState,
+    pub expected: ExpectedRuntime,
 }
 
 /// What applying a fix would do, shown before anything changes.
@@ -734,26 +734,23 @@ impl App {
             }
             DiagnosticFix::UseAutomaticJava => {
                 let facts = self.host_facts(host)?;
-                let Some(current_path) = facts.java_override.clone() else {
-                    return Ok(FixPreview {
-                        fix: fix.clone(),
-                        changes: Vec::new(),
-                        blocked: None,
-                    });
-                };
-                let (required_major, recommended) =
-                    self.recommended_java(host, &facts, PinProbe::Fresh).await?;
-                let current_version = self
-                    .test_java_runtime(&current_path)
-                    .await
-                    .ok()
-                    .map(|runtime| runtime.version_string);
-                vec![ProposedChange::UseJava {
-                    current_path,
-                    current_version,
-                    recommended,
-                    required_major,
-                }]
+                if facts.java_override.is_none() {
+                    Vec::new()
+                } else {
+                    vec![self.java_change(host, &facts, None).await?]
+                }
+            }
+            DiagnosticFix::PinJava(path) => {
+                let facts = self.host_facts(host)?;
+                let unchanged = facts
+                    .java_override
+                    .as_deref()
+                    .is_some_and(|current| current == path.as_path() || same_file(current, path));
+                if unchanged {
+                    Vec::new()
+                } else {
+                    vec![self.java_change(host, &facts, Some(path.clone())).await?]
+                }
             }
             DiagnosticFix::RestoreFiles(paths) => paths
                 .iter()
@@ -815,21 +812,19 @@ impl App {
             }
             DiagnosticFix::UseAutomaticJava => {
                 let facts = self.host_facts(host)?;
-                let result = match host {
-                    InstalledHost::Instance(id) => self
-                        .set_client_runtime_settings(id, None, facts.jvm_override)
-                        .map(|committed| outcome.client_warnings = committed.warnings),
-                    InstalledHost::Server(id) => self
-                        .set_server_runtime_settings(id, None, facts.jvm_override)
-                        .map(|committed| outcome.server_warnings = committed.warnings),
-                };
                 let name = facts
                     .java_override
+                    .as_ref()
                     .map_or_else(String::new, |path| path.display().to_string());
-                match result {
-                    Ok(()) => outcome.applied.push(name),
-                    Err(error) => outcome.failed.push((name, error)),
-                }
+                self.set_host_java(host, None, name, &mut outcome);
+            }
+            DiagnosticFix::PinJava(path) => {
+                self.set_host_java(
+                    host,
+                    Some(ephervex_model::JavaOverride::new(path)),
+                    path.display().to_string(),
+                    &mut outcome,
+                );
             }
             DiagnosticFix::RestoreFiles(paths) => {
                 let report = self
@@ -961,9 +956,9 @@ impl App {
         // somewhere that works.
         let use_automatic = (pinned_layer == Some(JavaLayer::Host)
             && self
-                .recommended_java(host, facts, PinProbe::ReuseInventory)
+                .java_state(host, facts, None, PinProbe::ReuseInventory)
                 .await
-                .is_ok())
+                .is_ok_and(|state| state.resolved.is_usable()))
         .then_some(DiagnosticFix::UseAutomaticJava);
         let (check, findings) = match planned {
             Ok(plan) => selected_java(&plan, use_automatic),
@@ -1040,46 +1035,116 @@ impl App {
         }
     }
 
-    /// What automatic selection would choose once this host pins nothing.
-    async fn recommended_java(
+    /// Stores a host's Java override, leaving its JVM settings as its claimed
+    /// record holds them, and records the result under `name`.
+    fn set_host_java(
+        &self,
+        host: InstalledHost,
+        java_override: Option<ephervex_model::JavaOverride>,
+        name: String,
+        outcome: &mut FixOutcome,
+    ) {
+        let result = match host {
+            InstalledHost::Instance(id) => self
+                .set_client_java_override(id, java_override)
+                .map(|committed| outcome.client_warnings = committed.warnings),
+            InstalledHost::Server(id) => self
+                .set_server_java_override(id, java_override)
+                .map(|committed| outcome.server_warnings = committed.warnings),
+        };
+        match result {
+            Ok(()) => outcome.applied.push(name),
+            Err(error) => outcome.failed.push((name, error)),
+        }
+    }
+
+    /// The change from a host's current Java selection to `java_override`,
+    /// each side probed as a launch would probe it.
+    async fn java_change(
         &self,
         host: InstalledHost,
         facts: &HostFacts,
+        java_override: Option<PathBuf>,
+    ) -> CoreResult<ProposedChange> {
+        let rules = self.host_java_rules(facts).await?;
+        Ok(ProposedChange::UseJava(Box::new(JavaChange {
+            current: self
+                .java_state(host, facts, facts.java_override.clone(), PinProbe::Fresh)
+                .await?,
+            proposed: self
+                .java_state(host, facts, java_override, PinProbe::Fresh)
+                .await?,
+            expected: rules.expected(facts.loader.kind),
+        })))
+    }
+
+    /// What a host would run with if its own override were `java_override`,
+    /// everything else as stored.
+    pub(crate) async fn java_state(
+        &self,
+        host: InstalledHost,
+        facts: &HostFacts,
+        java_override: Option<PathBuf>,
         probe: PinProbe,
-    ) -> CoreResult<(u32, RecommendedJava)> {
+    ) -> CoreResult<JavaSelectionState> {
+        let settings = self.java_settings();
+        let mode = JavaSelectionMode::of_layer(if java_override.is_some() {
+            Some(JavaLayer::Host)
+        } else if settings.preferred_path.is_some() {
+            Some(JavaLayer::Launcher)
+        } else {
+            None
+        });
         let required = self.required_java(&facts.minecraft_version).await?;
-        let major = required.major;
         let planned = self
             .resolve_java(
                 &facts.minecraft_version,
                 required,
                 &facts.loader,
-                None,
+                java_override.map(ephervex_model::JavaOverride::new),
                 facts.jvm_override.clone(),
                 &JavaPlanRequest {
                     target: java_target(host),
-                    explicit_path: None,
-                    install_if_missing: false,
                     ..JavaPlanRequest::default()
                 },
                 probe,
             )
-            .await
-            .map_err(|refusal| refusal.error);
-        match planned {
-            // A launcher-wide pin that works is what removing this host's own
-            // override leads to, and it is a real recommendation.
-            Ok(plan) => Ok((
-                major,
-                RecommendedJava::Installed(JavaRuntimeSummary::of(&plan)),
-            )),
-            Err(CoreError::Java(JavaError::NoCompatibleRuntime { .. }))
-                if self.java_settings().auto_download =>
-            {
-                Ok((major, RecommendedJava::ManagedDownload { major }))
+            .await;
+        let resolved = match planned {
+            Ok(plan) => ResolvedJava::Runtime {
+                runtime: JavaRuntimeSummary::of(&plan),
+                rejection: None,
+            },
+            Err(refusal) => {
+                let JavaRefusal { error, attempted } = *refusal;
+                match (error, attempted) {
+                    (
+                        CoreError::Java(JavaError::PinnedRuntimeIncompatible { rejection, .. }),
+                        Some(runtime),
+                    ) => ResolvedJava::Runtime {
+                        runtime: JavaRuntimeSummary::of_runtime(&runtime),
+                        rejection: Some(JavaMismatch::of(&rejection.reason)),
+                    },
+                    (CoreError::Java(JavaError::RuntimeUnusable { path, .. }), _) => {
+                        ResolvedJava::Unusable { path }
+                    }
+                    (CoreError::Java(JavaError::AutoDetectDisabled { .. }), _) => {
+                        ResolvedJava::Unavailable(JavaUnavailable::DetectionDisabled)
+                    }
+                    (CoreError::Java(JavaError::NoCompatibleRuntime { required_major, .. }), _) => {
+                        if settings.auto_download {
+                            ResolvedJava::DownloadsAtLaunch {
+                                major: required_major,
+                            }
+                        } else {
+                            ResolvedJava::Unavailable(JavaUnavailable::NothingCompatible)
+                        }
+                    }
+                    (error, _) => return Err(error),
+                }
             }
-            Err(error) => Err(error),
-        }
+        };
+        Ok(JavaSelectionState { mode, resolved })
     }
 
     /// Unmet relations as findings, in their own order.
@@ -1364,6 +1429,14 @@ fn jvm_findings(app: &App, host_override: Option<&ephervex_model::JvmSettings>) 
         });
     }
     findings
+}
+
+/// Whether two paths name the same file once links are resolved.
+fn same_file(left: &Path, right: &Path) -> bool {
+    matches!(
+        (std::fs::canonicalize(left), std::fs::canonicalize(right)),
+        (Ok(left), Ok(right)) if left == right
+    )
 }
 
 const fn java_target(host: InstalledHost) -> JavaTarget {

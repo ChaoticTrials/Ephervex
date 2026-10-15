@@ -18,7 +18,8 @@ use tracing::instrument;
 
 use crate::app::App;
 use crate::diagnosis::{
-    DiagnosticFix, Finding, FindingClass, JavaCheck, JavaLayer, JavaRuntimeSummary,
+    DiagnosticFix, Finding, FindingClass, JavaCheck, JavaLayer, JavaMismatch, JavaRuntimeSummary,
+    JavaUnavailable,
 };
 use crate::error::CoreResult;
 use crate::mods::InstalledHost;
@@ -82,6 +83,44 @@ impl ExpectedRuntime {
             None
         }
     }
+}
+
+/// What one Java selection for a host resolves to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedJava {
+    /// This runtime, and why the host refuses it when it does.
+    Runtime {
+        runtime: JavaRuntimeSummary,
+        rejection: Option<JavaMismatch>,
+    },
+    /// A pinned path that is not a runtime that can be run.
+    Unusable { path: PathBuf },
+    /// Nothing installed qualifies; Ephervex downloads this major at launch.
+    DownloadsAtLaunch { major: u32 },
+    /// No runtime would be chosen.
+    Unavailable(JavaUnavailable),
+}
+
+impl ResolvedJava {
+    /// Whether a host with this selection would launch on a fitting runtime.
+    #[must_use]
+    pub const fn is_usable(&self) -> bool {
+        matches!(
+            self,
+            Self::Runtime {
+                rejection: None,
+                ..
+            } | Self::DownloadsAtLaunch { .. }
+        )
+    }
+}
+
+/// A host's Java selection and what it resolves to, one side of a previewed
+/// change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JavaSelectionState {
+    pub mode: JavaSelectionMode,
+    pub resolved: ResolvedJava,
 }
 
 /// The state a host's Java is in, in Diagnostics' terms.
