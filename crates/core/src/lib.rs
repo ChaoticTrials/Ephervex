@@ -45,6 +45,7 @@ mod host_recipe_gate;
 pub mod import;
 pub mod instance;
 pub mod isolation;
+pub mod java_status;
 pub mod launch;
 pub mod licenses;
 pub mod linked_mods;
@@ -133,6 +134,9 @@ pub use isolation::{
     IsolationReconciliation, IsolationReport, IsolationRequest, IsolationResultCandidate,
     IsolationRound, IsolationRoundKind, IsolationRoundRecord, IsolationSession, IsolationStep,
     RoundAnswer, RoundContradiction,
+};
+pub use java_status::{
+    ExpectedRuntime, HostJavaStatus, JavaInstallOffer, JavaSelectionMode, JavaStatusTone,
 };
 pub use launch::{LaunchOptions, LaunchOutcome};
 pub use licenses::{
@@ -260,10 +264,10 @@ pub use ephervex_download::{
 /// `ephervex-download` to its manifest to show a progress bar.
 pub use ephervex_download::{Freshness, OperationReporter, ProgressSink};
 pub use ephervex_java::{
-    EffectiveJvmSettings, GlobalJavaSettings, JavaError, JavaOrigin, JavaPathChoice, JavaRuntime,
-    JavaSourceKind, JavaVersion, JvmField, ManagedInstallation, ManagedRelease, PinSource,
-    ProbeFailure, RejectedRuntime, RejectionReason, RequiredJava, RequirementBasis, RuleRejection,
-    RuntimeInventory,
+    EffectiveJvmSettings, ExpectedJava, GlobalJavaSettings, JavaError, JavaOrigin, JavaPathChoice,
+    JavaRuntime, JavaSourceKind, JavaVersion, JvmField, ManagedInstallation, ManagedRelease,
+    PinSource, ProbeFailure, RejectedRuntime, RejectionReason, RequiredJava, RequirementBasis,
+    RuleRejection, RuntimeInventory,
 };
 pub use ephervex_loaders::{InstalledServer, LoaderBuild, LoaderVersionListing, ServerLaunch};
 pub use ephervex_minecraft::{

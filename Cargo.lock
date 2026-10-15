@@ -1702,6 +1702,7 @@ version = "0.11.0"
 dependencies = [
  "chrono",
  "ephervex-auth",
+ "ephervex-core",
  "ephervex-download",
  "ephervex-i18n",
  "ephervex-java",

@@ -62,6 +62,9 @@ sysinfo.workspace = true
 fastnbt.workspace = true
 
 [dev-dependencies]
+# The integration tests seed the Java inventory through the test-support hooks,
+# so no test probes a runtime installed on the machine running it.
+ephervex-core = { path = ".", features = ["test-support"] }
 tempfile.workspace = true
 # The import tests build `.mrpack` archives to import; nothing in this crate
 # reads an archive itself.

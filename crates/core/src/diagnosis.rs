@@ -16,18 +16,22 @@
 use std::path::{Path, PathBuf};
 
 use ephervex_download::OperationReporter;
-use ephervex_java::{JavaError, JavaPathChoice, JavaSourceKind, PinSource, RejectionReason};
+use ephervex_java::{
+    ExpectedJava, JavaError, JavaPathChoice, JavaRuntime, JavaSourceKind, PinSource,
+    RejectionReason,
+};
 use ephervex_model::LoaderSelection;
 use ephervex_storage::diagnostics::{MAX_VIEW_BYTES, TextAnchor};
 use ephervex_storage::{ClientCommitWarning, DiagnosticKind, ServerCommitWarning};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
 
-use crate::app::{App, JavaPlan, JavaPlanRequest, JavaTarget};
+use crate::app::{App, JavaPlan, JavaPlanRequest, JavaTarget, PinProbe};
 use crate::crash_analysis::{LoaderReportedDependency, loader_dependency_failures};
 use crate::dependencies::{DeclaredConflict, UnmetDependency, UnmetRequirement};
 use crate::diagnostics::{DiagnosticRequest, DiagnosticScope};
 use crate::error::{CoreError, CoreResult};
+use crate::java_status::{ExpectedRuntime, HostJavaStatus, JavaInstallOffer, JavaSelectionMode};
 use crate::mods::{InstalledHost, ModPresence};
 use crate::verify::{
     Integrity, RepairRefusal, RepairReport, SharedArtifactReport, VerificationReport,
@@ -128,18 +132,27 @@ pub struct JavaRuntimeSummary {
     pub path: PathBuf,
     /// Ephervex downloaded and manages it.
     pub managed: bool,
+    /// The `java.vendor` the runtime reported, exact.
+    pub vendor: String,
+    /// The `os.arch` the runtime reported, exact.
+    pub arch: String,
+    /// The most authoritative source the runtime was found through.
+    pub source: JavaSourceKind,
 }
 
 impl JavaRuntimeSummary {
     fn of(plan: &JavaPlan) -> Self {
+        Self::of_runtime(&plan.runtime)
+    }
+
+    pub(crate) fn of_runtime(runtime: &JavaRuntime) -> Self {
         Self {
-            version: plan.runtime.version_string.clone(),
-            path: plan.runtime.executable.clone(),
-            managed: plan
-                .runtime
-                .origins
-                .iter()
-                .any(|origin| origin.kind == JavaSourceKind::Managed),
+            version: runtime.version_string.clone(),
+            path: runtime.executable.clone(),
+            managed: runtime.is_managed(),
+            vendor: runtime.vendor.clone(),
+            arch: runtime.arch.clone(),
+            source: runtime.primary_source(),
         }
     }
 }
@@ -385,7 +398,11 @@ pub enum JavaCheck {
     /// Nothing is installed yet; Ephervex downloads this major at launch.
     DownloadsAtLaunch { required_major: u32 },
     /// No runtime would be chosen. The findings say why.
-    Refused { required_major: Option<u32> },
+    Refused {
+        required_major: Option<u32>,
+        /// The pinned runtime that was refused, when it could be identified.
+        attempted: Option<JavaRuntimeSummary>,
+    },
     /// The check itself could not run.
     Failed(Box<CoreError>),
 }
@@ -397,7 +414,7 @@ impl JavaCheck {
             Self::Selected { required_major, .. } | Self::DownloadsAtLaunch { required_major } => {
                 Some(*required_major)
             }
-            Self::Refused { required_major } => *required_major,
+            Self::Refused { required_major, .. } => *required_major,
             Self::Failed(_) => None,
         }
     }
@@ -559,7 +576,7 @@ impl FixOutcome {
 }
 
 /// The pieces of a host record a diagnosis reads.
-struct HostFacts {
+pub(crate) struct HostFacts {
     minecraft_version: String,
     loader: LoaderSelection,
     java_override: Option<PathBuf>,
@@ -581,7 +598,8 @@ impl App {
     ) -> CoreResult<HostDiagnosis> {
         let facts = self.host_facts(host)?;
         reporter.set_stage(Some("operation-stage-checking-java".to_owned()));
-        let (java, java_findings) = self.check_java(host, &facts).await;
+        let status = self.assess_java(host, &facts).await?;
+        let (java, java_findings) = (status.check, status.findings);
         let (java_problems, mut java_customizations): (Vec<Finding>, Vec<Finding>) = java_findings
             .into_iter()
             .partition(|finding| finding.class() == FindingClass::Problem);
@@ -723,7 +741,8 @@ impl App {
                         blocked: None,
                     });
                 };
-                let (required_major, recommended) = self.recommended_java(host, &facts).await?;
+                let (required_major, recommended) =
+                    self.recommended_java(host, &facts, PinProbe::Fresh).await?;
                 let current_version = self
                     .test_java_runtime(&current_path)
                     .await
@@ -838,7 +857,7 @@ impl App {
         Ok(outcome)
     }
 
-    fn host_facts(&self, host: InstalledHost) -> CoreResult<HostFacts> {
+    pub(crate) fn host_facts(&self, host: InstalledHost) -> CoreResult<HostFacts> {
         Ok(match host {
             InstalledHost::Instance(id) => {
                 let record = self.current_client(id)?;
@@ -873,84 +892,151 @@ impl App {
         })
     }
 
-    async fn check_java(
+    /// The one Java classification behind both [`App::diagnose_host`] and
+    /// [`App::host_java_status`].
+    pub(crate) async fn assess_java(
         &self,
         host: InstalledHost,
         facts: &HostFacts,
-    ) -> (JavaCheck, Vec<Finding>) {
+    ) -> CoreResult<HostJavaStatus> {
+        let settings = self.java_settings();
         let pinned_layer = if facts.java_override.is_some() {
             Some(JavaLayer::Host)
-        } else if self.java_settings().preferred_path.is_some() {
+        } else if settings.preferred_path.is_some() {
             Some(JavaLayer::Launcher)
         } else {
             None
         };
-        let plan = self
-            .plan_java(
+        let mode = JavaSelectionMode::of_layer(pinned_layer);
+        let pinned_path = facts
+            .java_override
+            .clone()
+            .or_else(|| settings.preferred_path.clone());
+        let unchecked = |required: &ephervex_java::RequiredJava, error: CoreError| HostJavaStatus {
+            host,
+            expected: ExpectedRuntime {
+                java: ExpectedJava::new(required, &[]),
+                loader: facts.loader.kind,
+            },
+            mode,
+            pinned_path: pinned_path.clone(),
+            check: JavaCheck::Failed(Box::new(error)),
+            findings: Vec::new(),
+            install: None,
+        };
+        let required = match self.required_java(&facts.minecraft_version).await {
+            Ok(required) => required,
+            Err(error) => {
+                let table = self.required_java_or_table(&facts.minecraft_version).await;
+                return Ok(unchecked(&table, error));
+            }
+        };
+        let rules =
+            match self.loader_java_rules(&facts.minecraft_version, &facts.loader, required.major) {
+                Ok(rules) => rules,
+                Err(error) => return Ok(unchecked(&required, error)),
+            };
+        let expected = ExpectedRuntime {
+            java: ExpectedJava::new(&required, &rules),
+            loader: facts.loader.kind,
+        };
+        let planned = self
+            .resolve_java(
                 &facts.minecraft_version,
+                required.clone(),
+                &facts.loader,
+                facts
+                    .java_override
+                    .clone()
+                    .map(ephervex_model::JavaOverride::new),
+                facts.jvm_override.clone(),
                 &JavaPlanRequest {
                     target: java_target(host),
-                    explicit_path: None,
-                    install_if_missing: false,
                     ..JavaPlanRequest::default()
                 },
+                PinProbe::ReuseInventory,
             )
             .await;
         // Removing this host's own pin is only offered when doing so leads
         // somewhere that works.
         let use_automatic = (pinned_layer == Some(JavaLayer::Host)
-            && self.recommended_java(host, facts).await.is_ok())
+            && self
+                .recommended_java(host, facts, PinProbe::ReuseInventory)
+                .await
+                .is_ok())
         .then_some(DiagnosticFix::UseAutomaticJava);
-        let plan = match plan {
-            Ok(plan) => plan,
-            Err(error) => {
-                let required_major = self.required_major(&facts.minecraft_version).await;
-                return java_refusal(
-                    error,
-                    pinned_layer,
-                    required_major,
-                    use_automatic,
-                    self.java_settings().auto_download,
-                );
+        let (check, findings) = match planned {
+            Ok(plan) => selected_java(&plan, use_automatic),
+            Err(refusal) => java_refusal(
+                refusal.error,
+                refusal.attempted.as_ref(),
+                pinned_layer,
+                required.major,
+                use_automatic,
+                settings.auto_download,
+            ),
+        };
+        let install = match &check {
+            JavaCheck::DownloadsAtLaunch { .. } | JavaCheck::Refused { .. }
+                if !self
+                    .installed_java_satisfies(&required, &rules, &settings)
+                    .await =>
+            {
+                Some(JavaInstallOffer {
+                    major: expected.major(),
+                    maximum_update: expected.java.maximum_update(),
+                })
             }
+            _ => None,
         };
-        let runtime = JavaRuntimeSummary::of(&plan);
-        let required_major = plan.required.major;
-        let layer = match plan.choice {
-            JavaPathChoice::Pinned { source, .. } => Some(JavaLayer::of(source)),
-            JavaPathChoice::Automatic => None,
-        };
-        let findings = layer
-            .map(|layer| Finding {
-                kind: FindingKind::JavaCustomized {
-                    layer,
-                    runtime: runtime.clone(),
-                    required_major,
-                },
-                fix: use_automatic,
-            })
-            .into_iter()
-            .collect();
-        (
-            JavaCheck::Selected {
-                required_major,
-                runtime,
-                layer,
-            },
+        Ok(HostJavaStatus {
+            host,
+            expected,
+            mode,
+            pinned_path,
+            check,
             findings,
-        )
+            install,
+        })
     }
 
-    /// The Java major a release needs, falling back to the table offline.
-    async fn required_major(&self, minecraft_version: &str) -> u32 {
+    /// Whether a runtime already on this machine satisfies the requirement.
+    ///
+    /// Reads the cached inventory, and scans for one only where automatic
+    /// detection allows it. Nothing known counts as nothing installed.
+    async fn installed_java_satisfies(
+        &self,
+        required: &ephervex_java::RequiredJava,
+        rules: &[ephervex_java::VersionBound],
+        settings: &ephervex_java::GlobalJavaSettings,
+    ) -> bool {
+        let inventory = if settings.auto_detect {
+            self.java_runtimes().await.ok()
+        } else {
+            self.cached_java()
+        };
+        let rules: Vec<&dyn ephervex_java::JavaCompatibilityRule> = rules
+            .iter()
+            .map(|rule| rule as &dyn ephervex_java::JavaCompatibilityRule)
+            .collect();
+        inventory.is_some_and(|inventory| {
+            inventory.runtimes.iter().any(|runtime| {
+                ephervex_java::evaluate_runtime(runtime, required, &rules).is_accepted()
+            })
+        })
+    }
+
+    /// The Java a release needs, falling back to the table when the metadata
+    /// cannot be read.
+    pub(crate) async fn required_java_or_table(
+        &self,
+        minecraft_version: &str,
+    ) -> ephervex_java::RequiredJava {
         match self.required_java(minecraft_version).await {
-            Ok(required) => required.major,
-            Err(_) => {
-                ephervex_java::RequiredJava::from_table(
-                    &ephervex_minecraft::MinecraftVersionId::parse(minecraft_version),
-                )
-                .major
-            }
+            Ok(required) => required,
+            Err(_) => ephervex_java::RequiredJava::from_table(
+                &ephervex_minecraft::MinecraftVersionId::parse(minecraft_version),
+            ),
         }
     }
 
@@ -959,11 +1045,12 @@ impl App {
         &self,
         host: InstalledHost,
         facts: &HostFacts,
+        probe: PinProbe,
     ) -> CoreResult<(u32, RecommendedJava)> {
         let required = self.required_java(&facts.minecraft_version).await?;
         let major = required.major;
         let planned = self
-            .plan_java_for_selection(
+            .resolve_java(
                 &facts.minecraft_version,
                 required,
                 &facts.loader,
@@ -975,8 +1062,10 @@ impl App {
                     install_if_missing: false,
                     ..JavaPlanRequest::default()
                 },
+                probe,
             )
-            .await;
+            .await
+            .map_err(|refusal| refusal.error);
         match planned {
             // A launcher-wide pin that works is what removing this host's own
             // override leads to, and it is a real recommendation.
@@ -1092,9 +1181,42 @@ impl App {
     }
 }
 
+/// What a Java plan that chose a runtime says about the host.
+fn selected_java(
+    plan: &JavaPlan,
+    use_automatic: Option<DiagnosticFix>,
+) -> (JavaCheck, Vec<Finding>) {
+    let runtime = JavaRuntimeSummary::of(plan);
+    let required_major = plan.required.major;
+    let layer = match plan.choice {
+        JavaPathChoice::Pinned { source, .. } => Some(JavaLayer::of(source)),
+        JavaPathChoice::Automatic => None,
+    };
+    let findings = layer
+        .map(|layer| Finding {
+            kind: FindingKind::JavaCustomized {
+                layer,
+                runtime: runtime.clone(),
+                required_major,
+            },
+            fix: use_automatic,
+        })
+        .into_iter()
+        .collect();
+    (
+        JavaCheck::Selected {
+            required_major,
+            runtime,
+            layer,
+        },
+        findings,
+    )
+}
+
 /// What a Java plan that failed says about the host.
 fn java_refusal(
     error: CoreError,
+    attempted: Option<&JavaRuntime>,
     pinned_layer: Option<JavaLayer>,
     required_major: u32,
     use_automatic: Option<DiagnosticFix>,
@@ -1104,6 +1226,7 @@ fn java_refusal(
         (
             JavaCheck::Refused {
                 required_major: Some(required_major),
+                attempted: attempted.map(JavaRuntimeSummary::of_runtime),
             },
             vec![Finding { kind, fix }],
         )
@@ -1360,7 +1483,7 @@ fn write_java(
             let _ = writeln!(
                 *out,
                 "Java selected: {} [{source}] {}",
-                runtime.version,
+                runtime_line(runtime),
                 path(&runtime.path)
             );
         }
@@ -1371,11 +1494,22 @@ fn write_java(
                 "Java selected: managed Java {required_major}, downloaded at launch"
             );
         }
-        JavaCheck::Refused { required_major } => {
+        JavaCheck::Refused {
+            required_major,
+            attempted,
+        } => {
             if let Some(major) = required_major {
                 let _ = writeln!(*out, "Java required: {major}");
             }
             out.push_str("Java selected: none usable\n");
+            if let Some(runtime) = attempted {
+                let _ = writeln!(
+                    *out,
+                    "Java refused: {} {}",
+                    runtime_line(runtime),
+                    path(&runtime.path)
+                );
+            }
         }
         JavaCheck::Failed(error) => {
             let _ = writeln!(
@@ -1385,6 +1519,11 @@ fn write_java(
             );
         }
     }
+}
+
+/// A runtime's version, vendor and architecture, as the report prints them.
+fn runtime_line(runtime: &JavaRuntimeSummary) -> String {
+    format!("{} ({}, {})", runtime.version, runtime.vendor, runtime.arch)
 }
 
 fn write_integrity(out: &mut String, integrity: Option<&IntegrityCheck>, home: Option<&Path>) {

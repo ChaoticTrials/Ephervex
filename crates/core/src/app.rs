@@ -43,7 +43,7 @@ use ephervex_storage::{
 use tokio_util::sync::CancellationToken;
 use tracing::{instrument, warn};
 
-use crate::error::CoreResult;
+use crate::error::{CoreError, CoreResult};
 
 /// What a caller wants a Java plan for, beyond the Minecraft version.
 ///
@@ -94,6 +94,32 @@ pub struct JavaPlan {
     pub jvm: EffectiveJvmSettings,
     /// Whether the runtime was downloaded during this call.
     pub installed_now: bool,
+}
+
+/// How a plan identifies a pinned runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PinProbe {
+    /// Run the executable, as a launch must.
+    Fresh,
+    /// Answer from the cached inventory when it knows the executable.
+    ReuseInventory,
+}
+
+/// A plan that found no runtime, with the pinned runtime it refused when that
+/// one could be identified.
+#[derive(Debug)]
+pub(crate) struct JavaRefusal {
+    pub(crate) error: CoreError,
+    pub(crate) attempted: Option<JavaRuntime>,
+}
+
+impl From<CoreError> for Box<JavaRefusal> {
+    fn from(error: CoreError) -> Self {
+        Self::new(JavaRefusal {
+            error,
+            attempted: None,
+        })
+    }
 }
 
 /// Ephervex interface display preferences exposed to frontends.
@@ -1220,11 +1246,50 @@ impl App {
         jvm_override: Option<ephervex_model::JvmSettings>,
         request: &JavaPlanRequest,
     ) -> CoreResult<JavaPlan> {
-        let loader_rules = self.loaders()?.provider(loader.kind).java_rules(
+        self.resolve_java(
+            minecraft_version,
+            required,
+            loader,
+            java_override,
+            jvm_override,
+            request,
+            PinProbe::Fresh,
+        )
+        .await
+        .map_err(|refusal| refusal.error)
+    }
+
+    /// The loader's own bounds on the runtime, the rules every plan, status
+    /// and runtime listing evaluates.
+    pub(crate) fn loader_java_rules(
+        &self,
+        minecraft_version: &str,
+        loader: &ephervex_model::LoaderSelection,
+        required_major: u32,
+    ) -> CoreResult<Vec<ephervex_java::VersionBound>> {
+        Ok(self.loaders()?.provider(loader.kind).java_rules(
             minecraft_version,
             loader.version.as_deref(),
-            required.major,
-        );
+            required_major,
+        ))
+    }
+
+    /// Plans a runtime like [`Self::plan_java_for_selection`], and on a refusal
+    /// keeps the pinned runtime that was refused when it could be identified.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn resolve_java(
+        &self,
+        minecraft_version: &str,
+        required: RequiredJava,
+        loader: &ephervex_model::LoaderSelection,
+        java_override: Option<ephervex_model::JavaOverride>,
+        jvm_override: Option<ephervex_model::JvmSettings>,
+        request: &JavaPlanRequest,
+        probe: PinProbe,
+    ) -> Result<JavaPlan, Box<JavaRefusal>> {
+        let loader_rules = self
+            .loader_java_rules(minecraft_version, loader, required.major)
+            .map_err(Box::<JavaRefusal>::from)?;
         let rules: Vec<&dyn JavaCompatibilityRule> = loader_rules
             .iter()
             .map(|rule| rule as &dyn JavaCompatibilityRule)
@@ -1239,12 +1304,20 @@ impl App {
             global: settings.preferred_path.clone(),
         };
         let jvm = EffectiveJvmSettings::resolve(&settings, jvm_override.as_ref());
-        jvm.validate_memory_range()?;
+        jvm.validate_memory_range().map_err(CoreError::from)?;
 
         let choice = preference.resolve();
         if let JavaPathChoice::Pinned { path, source } = &choice {
-            let runtime = probe_runtime(path, pin_source_kind(*source)).await?;
-            ephervex_java::check_pinned(&runtime, &required, &rules, *source)?;
+            let runtime = self
+                .identify_pinned_java(path, *source, probe)
+                .await
+                .map_err(CoreError::from)?;
+            if let Err(error) = ephervex_java::check_pinned(&runtime, &required, &rules, *source) {
+                return Err(Box::new(JavaRefusal {
+                    error: error.into(),
+                    attempted: Some(runtime),
+                }));
+            }
             return Ok(JavaPlan {
                 minecraft_version: minecraft_version.to_owned(),
                 required,
@@ -1259,9 +1332,9 @@ impl App {
         if !settings.auto_detect {
             // Auto-detection off with nothing pinned leaves nothing to choose
             // from. Scanning anyway would ignore a setting the user set.
-            return Err(JavaError::AutoDetectDisabled {
+            return Err(CoreError::from(JavaError::AutoDetectDisabled {
                 required_major: required.major,
-            }
+            })
             .into());
         }
 
@@ -1278,12 +1351,12 @@ impl App {
             }),
             Err(error) => {
                 if !request.install_if_missing {
-                    return Err(error.into());
+                    return Err(CoreError::from(error).into());
                 }
                 if !settings.auto_download {
-                    return Err(JavaError::ManagedDownloadDisabled {
+                    return Err(CoreError::from(JavaError::ManagedDownloadDisabled {
                         required_major: required.major,
-                    }
+                    })
                     .into());
                 }
                 let installed = self
@@ -1301,7 +1374,8 @@ impl App {
                     candidates: 1,
                     scanned_at: chrono::Utc::now(),
                 };
-                let checked = ephervex_java::select(&inventory, &required, &rules)?;
+                let checked = ephervex_java::select(&inventory, &required, &rules)
+                    .map_err(CoreError::from)?;
                 Ok(JavaPlan {
                     minecraft_version: minecraft_version.to_owned(),
                     required,
@@ -1313,6 +1387,77 @@ impl App {
                 })
             }
         }
+    }
+
+    /// Replaces the cached inventory, as if a scan had found exactly these.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn use_java_inventory_for_test(&self, runtimes: Vec<JavaRuntime>) {
+        if let Ok(mut cache) = self.java.write() {
+            *cache = Some(Arc::new(RuntimeInventory {
+                probed: runtimes.len(),
+                candidates: runtimes.len(),
+                runtimes,
+                failures: Vec::new(),
+                scanned_at: chrono::Utc::now(),
+            }));
+        }
+    }
+
+    /// Identifies a pinned executable as a runtime, found through the pin and
+    /// marked managed when it lives under Ephervex's managed Java directory.
+    ///
+    /// [`PinProbe::ReuseInventory`] takes the probed facts from the cached
+    /// inventory when it already holds the same canonical executable, so a
+    /// status refresh does not fork a JVM each time. A launch always probes,
+    /// because what it runs must be what was checked. Either way the runtime is
+    /// reported as found through the pin, so its origin does not depend on
+    /// whether a scan happened to run first.
+    async fn identify_pinned_java(
+        &self,
+        path: &Path,
+        source: PinSource,
+        probe: PinProbe,
+    ) -> Result<JavaRuntime, JavaError> {
+        let canonical = tokio::fs::canonicalize(path).await.ok();
+        let known = (probe == PinProbe::ReuseInventory)
+            .then(|| self.cached_java())
+            .flatten()
+            .zip(canonical.as_ref())
+            .and_then(|(inventory, canonical)| {
+                inventory
+                    .runtimes
+                    .iter()
+                    .find(|runtime| &runtime.executable == canonical)
+                    .cloned()
+            });
+        let mut runtime = match known {
+            Some(mut known) => {
+                known.origins = vec![JavaOrigin {
+                    kind: pin_source_kind(source),
+                    path: path.to_path_buf(),
+                }];
+                known
+            }
+            None => probe_runtime(path, pin_source_kind(source)).await?,
+        };
+        if self.is_managed_java(&runtime.executable).await {
+            runtime.origins.push(JavaOrigin {
+                kind: JavaSourceKind::Managed,
+                path: runtime.executable.clone(),
+            });
+            runtime.origins.sort();
+        }
+        Ok(runtime)
+    }
+
+    /// Whether an executable lives under the managed Java directory.
+    async fn is_managed_java(&self, executable: &Path) -> bool {
+        let Ok(root) = tokio::fs::canonicalize(self.paths().java_dir()).await else {
+            return false;
+        };
+        tokio::fs::canonicalize(executable)
+            .await
+            .is_ok_and(|executable| executable.starts_with(root))
     }
 
     /// Downloads and installs a managed runtime of one major.
@@ -1442,7 +1587,7 @@ impl App {
     /// A poisoned lock is treated as a cache miss rather than propagated: the
     /// worst outcome is one extra scan, and refusing to list runtimes because
     /// an unrelated thread panicked would be a poor trade.
-    fn cached_java(&self) -> Option<Arc<RuntimeInventory>> {
+    pub(crate) fn cached_java(&self) -> Option<Arc<RuntimeInventory>> {
         self.java.read().ok()?.clone()
     }
 
