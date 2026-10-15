@@ -755,6 +755,7 @@ impl CurseForgeOperation<'_> {
                 );
                 continue;
             };
+            let (client_side, server_side) = file_declared_sides(&matched.file.game_versions);
             for digest in supported_hashes(&matched.file.hashes) {
                 if !expected.contains(digest.digest()) {
                     continue;
@@ -767,6 +768,8 @@ impl CurseForgeOperation<'_> {
                         version_id: matched.file.id.to_string(),
                         file_id: Some(matched.file.id.to_string()),
                         dependencies: dependencies.clone(),
+                        client_side,
+                        server_side,
                     },
                 );
             }

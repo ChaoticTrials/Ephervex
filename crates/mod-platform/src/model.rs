@@ -176,6 +176,10 @@ pub struct RecognizedFile {
     /// What this exact release declares, read the same way the mod browser
     /// reads it. Empty when the catalog answered that it declares nothing.
     pub dependencies: Vec<ModDependency>,
+    /// The sides this exact release declares. `Unknown` means the catalog
+    /// stated nothing about the side for this file.
+    pub client_side: SideSupport,
+    pub server_side: SideSupport,
 }
 
 /// How stable a release claims to be.

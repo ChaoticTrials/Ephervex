@@ -48,6 +48,7 @@ use tracing::debug;
 use super::PROJECT_TYPE;
 use super::cache_key::{CompatibilityFilter, ModrinthRequest};
 use super::dto::{RawProject, RawSearch, RawVersion};
+use super::mapping::environment_sides;
 use crate::error::{ModPlatformError, ModPlatformResult};
 use crate::model::{InstanceTarget, MAX_SEARCH_LIMIT, ModSearchQuery, RecognizedFile};
 
@@ -184,6 +185,7 @@ impl ModrinthApi {
             // under any other key is about a file nobody asked about.
             .filter(|(digest, _)| asked.contains(digest.as_str()))
             .map(|(digest, version)| {
+                let (client_side, server_side) = environment_sides(version.environment.as_deref());
                 (
                     digest,
                     RecognizedFile {
@@ -192,6 +194,8 @@ impl ModrinthApi {
                         version_id: version.id,
                         file_id: None,
                         dependencies: version.dependencies.into_iter().map(Into::into).collect(),
+                        client_side,
+                        server_side,
                     },
                 )
             })

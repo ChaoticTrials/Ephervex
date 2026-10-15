@@ -15,7 +15,7 @@ use std::sync::Arc;
 use ephervex_download::{DomainAllowlist, HttpConfig};
 use ephervex_mod_platform::{
     ConfiguredApiKey, CurseForgeApi, CurseForgeCredentialSource, MINECRAFT_GAME_ID, ModDependency,
-    ModPlatformError,
+    ModPlatformError, SideSupport,
 };
 use ephervex_model::{
     CurseForgeFileId, CurseForgeProjectId, Hash, HashAlgorithm, ModProvider, ModRelationKind,
@@ -654,6 +654,54 @@ async fn a_fingerprint_match_carries_what_its_file_declares() {
     assert_eq!(
         recognized.get(&library).expect("recognized").dependencies,
         []
+    );
+}
+
+/// Which side a file runs on is the file's own claim, carried with the match.
+#[tokio::test]
+async fn a_fingerprint_match_carries_the_sides_its_file_declares() {
+    let client_only = "a".repeat(40);
+    let both = "b".repeat(40);
+    let silent = "c".repeat(40);
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/fingerprints"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+            r#"{{"data":{{"exactMatches":[{{"id":1,"file":{{"id":11,"modId":1,"isAvailable":true,"fileName":"client.jar","gameVersions":["1.20.1","NeoForge","Client"],"hashes":[{{"value":"{client_only}","algo":1}}],"dependencies":[]}}}},{{"id":2,"file":{{"id":22,"modId":2,"isAvailable":true,"fileName":"both.jar","gameVersions":["1.20.1","Client","Server"],"hashes":[{{"value":"{both}","algo":1}}],"dependencies":[]}}}},{{"id":3,"file":{{"id":33,"modId":3,"isAvailable":true,"fileName":"silent.jar","gameVersions":["1.20.1","NeoForge"],"hashes":[{{"value":"{silent}","algo":1}}],"dependencies":[]}}}}]}}}}"#
+        )))
+        .mount(&server)
+        .await;
+
+    let api = configured(&server);
+    let operation = api.begin_operation().expect("an operation begins");
+    let wanted: Vec<_> = [(1_u32, &client_only), (2, &both), (3, &silent)]
+        .into_iter()
+        .map(|(fingerprint, digest)| {
+            (
+                fingerprint,
+                Hash::new(HashAlgorithm::Sha1, digest).expect("sha1"),
+            )
+        })
+        .collect();
+
+    let recognized = operation
+        .fingerprints(&wanted, &CancellationToken::new())
+        .await
+        .expect("the lookup answers");
+
+    let sides = |digest: &str| {
+        let found = recognized.get(digest).expect("recognized");
+        (found.client_side, found.server_side)
+    };
+    assert_eq!(
+        sides(&client_only),
+        (SideSupport::Required, SideSupport::Unsupported)
+    );
+    assert_eq!(sides(&both), (SideSupport::Required, SideSupport::Required));
+    assert_eq!(
+        sides(&silent),
+        (SideSupport::Unknown, SideSupport::Unknown),
+        "a file naming neither side declares nothing"
     );
 }
 

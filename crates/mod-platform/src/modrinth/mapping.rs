@@ -168,7 +168,7 @@ pub(super) fn version(raw: RawVersion) -> ModPlatformResult<ModVersionInfo> {
 /// `unknown`, or unrecognized value declares nothing: both sides stay
 /// `Unknown` so the project's declaration applies, rather than being read as
 /// `Required`.
-fn environment_sides(environment: Option<&str>) -> (SideSupport, SideSupport) {
+pub(super) fn environment_sides(environment: Option<&str>) -> (SideSupport, SideSupport) {
     use SideSupport::{Optional, Required, Unknown, Unsupported};
     match environment.map(str::trim) {
         Some("client_and_server") => (Required, Required),

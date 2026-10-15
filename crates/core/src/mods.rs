@@ -233,6 +233,47 @@ struct IdentifiedJar {
     entry: ManagedModEntry,
     /// What the recognized release declares, in the recipe's own shape.
     relations: Vec<RecipeRelation>,
+    /// The client and server support the recognized release declares.
+    declared_sides: (SideSupport, SideSupport),
+}
+
+/// How a hand-placed jar's two sides are recorded.
+///
+/// The host the jar was found on holds it, so that side is recorded as required,
+/// the way a browser install records it, or as unsupported and placed anyway
+/// when the catalog says so. The other side keeps the release's own declaration,
+/// and stays undeclared where the release declared nothing. No optional choice
+/// is recorded: one choice covers both sides, and finding a jar on one host is
+/// no answer for the other.
+struct HandPlacedSides {
+    client: SideRequirement,
+    server: SideRequirement,
+    installed_despite_unsupported: Option<PackSide>,
+}
+
+impl HandPlacedSides {
+    fn found_on(host: PackSide, (client, server): (SideSupport, SideSupport)) -> Self {
+        let (here, there) = match host {
+            PackSide::Client => (client, server),
+            PackSide::Server => (server, client),
+        };
+        let (held, installed_despite_unsupported) = match here {
+            SideSupport::Unsupported => (SideRequirement::Unsupported, Some(host)),
+            SideSupport::Required | SideSupport::Optional | SideSupport::Unknown => {
+                (SideRequirement::Required, None)
+            }
+        };
+        let other = side_requirement(there);
+        let (client, server) = match host {
+            PackSide::Client => (held, other),
+            PackSide::Server => (other, held),
+        };
+        Self {
+            client,
+            server,
+            installed_despite_unsupported,
+        }
+    }
 }
 
 /// Records what a digest lookup identified in the host's own recipe.
@@ -284,13 +325,14 @@ fn record_identified(root: &Path, side: PackSide, adopted: &[IdentifiedJar]) {
             return;
         }
     };
-    let (client, server) = match side {
-        PackSide::Client => (SideRequirement::Required, SideRequirement::Unknown),
-        PackSide::Server => (SideRequirement::Unknown, SideRequirement::Required),
-    };
-
     let mut changed = false;
-    for IdentifiedJar { entry, relations } in adopted {
+    for IdentifiedJar {
+        entry,
+        relations,
+        declared_sides,
+    } in adopted
+    {
+        let sides = HandPlacedSides::found_on(side, *declared_sides);
         let (Some(provider), Some(project_id)) =
             (entry.identity.provider(), entry.identity.project_id())
         else {
@@ -324,13 +366,13 @@ fn record_identified(root: &Path, side: PackSide, adopted: &[IdentifiedJar]) {
             hashes: entry.hashes.clone(),
             downloads: Vec::new(),
             size: entry.size,
-            client,
-            server,
+            client: sides.client,
+            server: sides.server,
             selected: None,
             origin: ModOrigin::HandPlaced,
             identity: Some(identity),
             original_identity: None,
-            installed_despite_unsupported: None,
+            installed_despite_unsupported: sides.installed_despite_unsupported,
             relations: Some(relations.clone()),
         };
         // The same jar may already be recorded from the host's other side
@@ -393,7 +435,22 @@ fn align_recorded_hand_placed(
     if existing.requirement(side) == SideRequirement::Unknown && existing.selected.is_none() {
         existing.client = found.client;
         existing.server = found.server;
+        existing.installed_despite_unsupported = found.installed_despite_unsupported;
         changed = true;
+    } else if existing.selected.is_none() {
+        let other = match side {
+            PackSide::Client => PackSide::Server,
+            PackSide::Server => PackSide::Client,
+        };
+        if existing.requirement(other) == SideRequirement::Unknown
+            && found.requirement(other) != SideRequirement::Unknown
+        {
+            match other {
+                PackSide::Client => existing.client = found.client,
+                PackSide::Server => existing.server = found.server,
+            }
+            changed = true;
+        }
     }
     if existing.relations.is_none() && found.relations.is_some() {
         existing.relations.clone_from(&found.relations);
@@ -1798,6 +1855,7 @@ impl App {
             adopted.push(IdentifiedJar {
                 entry: entry.clone(),
                 relations: recipe_relations(&found.dependencies),
+                declared_sides: (found.client_side, found.server_side),
             });
         }
         // Held from the read inside to the write, so a change made to this
@@ -3423,9 +3481,18 @@ mod tests {
     }
 
     fn identified(entry: ManagedModEntry) -> IdentifiedJar {
+        identified_declaring(entry, SideSupport::Unknown, SideSupport::Unknown)
+    }
+
+    fn identified_declaring(
+        entry: ManagedModEntry,
+        client: SideSupport,
+        server: SideSupport,
+    ) -> IdentifiedJar {
         IdentifiedJar {
             entry,
             relations: Vec::new(),
+            declared_sides: (client, server),
         }
     }
 
@@ -3564,6 +3631,156 @@ mod tests {
         assert_eq!(hand.server, SideRequirement::Unknown);
     }
 
+    /// The release's own declaration for the side the jar was not found on is
+    /// recorded, so creating a server from a client's record neither asks about
+    /// nor installs a mod the catalog already answered for.
+    #[test]
+    fn a_jar_identified_on_a_client_records_the_servers_declared_side() {
+        for (declared, expected) in [
+            (SideSupport::Required, SideRequirement::Required),
+            (SideSupport::Optional, SideRequirement::Optional),
+            (SideSupport::Unsupported, SideRequirement::Unsupported),
+        ] {
+            let root = tempfile::tempdir().expect("temp dir");
+            let store = recipe_with_one_mod(root.path());
+
+            record_identified(
+                root.path(),
+                PackSide::Client,
+                &[identified_declaring(
+                    hand_placed_find("hand.jar"),
+                    SideSupport::Required,
+                    declared,
+                )],
+            );
+
+            let hand = &store.read_recipe().expect("recipe").files[1];
+            assert_eq!(hand.client, SideRequirement::Required);
+            assert_eq!(hand.server, expected, "{declared:?}");
+            assert_eq!(hand.selected, None);
+        }
+    }
+
+    /// A jar found in a server's `mods/` is on that server whatever its release
+    /// declares there, and what the release declared is kept beside that fact.
+    #[test]
+    fn a_jar_identified_on_a_server_stays_the_servers_whatever_its_release_declares() {
+        let none = ephervex_pack::OptionalSelection::none();
+        for (declared, expected, selected, placed) in [
+            (SideSupport::Required, SideRequirement::Required, None, None),
+            (SideSupport::Unknown, SideRequirement::Required, None, None),
+            (SideSupport::Optional, SideRequirement::Required, None, None),
+            (
+                SideSupport::Unsupported,
+                SideRequirement::Unsupported,
+                None,
+                Some(PackSide::Server),
+            ),
+        ] {
+            let root = tempfile::tempdir().expect("temp dir");
+            let store = recipe_with_one_mod(root.path());
+
+            record_identified(
+                root.path(),
+                PackSide::Server,
+                &[identified_declaring(
+                    hand_placed_find("hand.jar"),
+                    SideSupport::Required,
+                    declared,
+                )],
+            );
+
+            let recipe = store.read_recipe().expect("recipe");
+            let hand = &recipe.files[1];
+            assert_eq!(hand.server, expected, "{declared:?}");
+            assert_eq!(hand.selected, selected, "{declared:?}");
+            assert_eq!(hand.installed_despite_unsupported, placed, "{declared:?}");
+            assert!(
+                hand.is_installed_on(PackSide::Server, &none),
+                "{declared:?}"
+            );
+            assert_eq!(hand.client, SideRequirement::Required);
+        }
+    }
+
+    /// A jar whose release is optional on both sides, found on a client, is not
+    /// a decision about a server built from that client later: the server's
+    /// reconstruction leaves it out until somebody chooses it there.
+    #[test]
+    fn a_jar_found_on_a_client_answers_no_question_for_a_server() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let store = recipe_with_one_mod(root.path());
+
+        record_identified(
+            root.path(),
+            PackSide::Client,
+            &[identified_declaring(
+                hand_placed_find("hand.jar"),
+                SideSupport::Optional,
+                SideSupport::Optional,
+            )],
+        );
+
+        let recipe = store.read_recipe().expect("recipe");
+        let hand = &recipe.files[1];
+        assert_eq!(hand.client, SideRequirement::Required);
+        assert_eq!(hand.server, SideRequirement::Optional);
+        assert_eq!(hand.selected, None, "nobody was asked about the server");
+        let plan = recipe
+            .server_preview_plan(
+                &ephervex_pack::OptionalSelection::none(),
+                &ephervex_pack::UnknownServerFiles::default(),
+            )
+            .expect("plan");
+        assert!(
+            plan.files
+                .iter()
+                .all(|file| file.logical_path != Path::new("mods/hand.jar"))
+        );
+    }
+
+    /// A record an earlier identification left undeclared on the other side
+    /// takes the release's declaration, and an answer already given stays.
+    #[test]
+    fn a_later_identification_settles_only_the_side_the_record_left_undeclared() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let store = recipe_with_one_mod(root.path());
+        record_identified(
+            root.path(),
+            PackSide::Client,
+            &[identified(hand_placed_find("hand.jar"))],
+        );
+
+        record_identified(
+            root.path(),
+            PackSide::Client,
+            &[identified_declaring(
+                hand_placed_find("hand.jar"),
+                SideSupport::Required,
+                SideSupport::Unsupported,
+            )],
+        );
+
+        let settled = store.read_recipe().expect("recipe").files[1].clone();
+        assert_eq!(settled.client, SideRequirement::Required);
+        assert_eq!(settled.server, SideRequirement::Unsupported);
+
+        record_identified(
+            root.path(),
+            PackSide::Client,
+            &[identified_declaring(
+                hand_placed_find("hand.jar"),
+                SideSupport::Required,
+                SideSupport::Required,
+            )],
+        );
+        assert_eq!(
+            store.read_recipe().expect("recipe").files[1].server,
+            SideRequirement::Unsupported,
+            "a declaration already recorded is not replaced"
+        );
+    }
+
     /// A release pin whose project the catalog layer named is recorded as that
     /// project at that release, which is the shape the version-change guard and
     /// incompatibility matching read.
@@ -3617,10 +3834,12 @@ mod tests {
                 IdentifiedJar {
                     entry: hand_placed_find("hand.jar"),
                     relations: relations.clone(),
+                    declared_sides: (SideSupport::Unknown, SideSupport::Unknown),
                 },
                 IdentifiedJar {
                     entry: shipped_find,
                     relations: relations.clone(),
+                    declared_sides: (SideSupport::Unknown, SideSupport::Unknown),
                 },
             ],
         );

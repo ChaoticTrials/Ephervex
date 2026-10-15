@@ -469,7 +469,7 @@ mod tests {
     use std::sync::Arc;
 
     use ephervex_auth::MemoryStore;
-    use ephervex_mod_platform::ModDependency;
+    use ephervex_mod_platform::{ModDependency, SideSupport};
     use ephervex_model::{
         LoaderKind, LoaderSelection, ModRelationKind, SecretString, ServerRelativePath,
     };
@@ -684,6 +684,8 @@ mod tests {
                 version_id: "wrong".to_owned(),
                 file_id: None,
                 dependencies: Vec::new(),
+                client_side: SideSupport::Unknown,
+                server_side: SideSupport::Unknown,
             },
         )]);
 
@@ -711,6 +713,8 @@ mod tests {
                 version_id: "vvvv".to_owned(),
                 file_id: None,
                 dependencies: Vec::new(),
+                client_side: SideSupport::Unknown,
+                server_side: SideSupport::Unknown,
             },
         )]);
 

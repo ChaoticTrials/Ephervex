@@ -998,10 +998,14 @@ an explicit refresh rather than part of listing, because listing has to stay a
 directory read. Modrinth is asked first there, by the SHA-1 the launcher
 computes, and CurseForge second by fingerprint - the reverse of a server archive
 (ADR 0024), which is a CurseForge problem by construction. A jar a catalog
-recognizes is recorded in the recipe with its identity, `client` required and
-`server` undeclared, so creating a server asks about it in the same way it asks
-about a CurseForge pack's own files rather than assuming. A jar nothing
-recognizes stays listed and unrecorded.
+recognizes is recorded in the recipe with its identity and the sides the
+recognized release declares: the host it was found on holds the jar, so that
+side is recorded as taken, and the other side takes the release's declaration.
+Where the release declares nothing the other side stays undeclared, so creating
+a server asks about it in the same way it asks about a CurseForge pack's own
+files rather than assuming. A declaration is never invented, and one already
+recorded is never replaced. A jar nothing recognizes stays listed and
+unrecorded.
 
 An instance's mods are one list, and each entry carries its ownership and the
 completeness of its provider identity as separate typed facts (ADR 0019). An
