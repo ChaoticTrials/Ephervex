@@ -194,6 +194,38 @@ on a record a finishing move has just changed, and a host found at its
 persistent root after an interrupted promotion gets the same restore recovery,
 metadata check, and interrupted-state report as one that never moved.
 
+## Instance organization
+
+Favorites, groups and icons are presentation state (ADR 0048). They live in
+`organization.json` in the data directory, beside the `icons/` store, and not in
+`instance.json` or the index, so no snapshot restore, promotion, storage move or
+reconciliation can roll them back and no diagnostic bundle carries them. The
+file is versioned on its own, additive, written compactly and changed under a
+file lock. Each change first keeps the file as it was in
+`organization.old.json`. A file that cannot be used is moved aside, never
+overwritten, and that copy takes its place; the launcher starts with an empty
+organization only when the copy cannot be used either.
+
+Core owns the whole feature. Setting a favorite, a group or an icon only reads
+the registry to check the host exists. It takes no host claim and does not touch
+`updated_at`, so it works while a host is running, restoring or moving. Entries
+for hosts that no longer exist are dropped by the next change, but only when the
+index could be listed.
+
+An icon starts as an untrusted local PNG or JPEG file. It is size-limited before
+it is read, decoded within dimension and pixel bounds of its own, scaled
+to at most 256 pixels, re-encoded as PNG and stored under the hash of its bytes.
+The organization file keeps that hash. A host with no icon, or one whose file is
+missing or will not load, draws its loader symbol.
+
+Searching, filtering and ordering are pure functions over a small facts record
+per instance, in core. The desktop list, the split workspace's host picker and
+`ephervex instances list` all use them. The Instances page keeps its filters as
+positions in option lists it writes, and keeps its selection by id, so a re-sort
+or a filter that hides the selected instance never moves the selection to
+another one. The workspace and its picker are handed every host, whatever the
+page's filters hide.
+
 ## Mutation and interruption recovery
 
 State-changing operations use a publication boundary or leave durable evidence

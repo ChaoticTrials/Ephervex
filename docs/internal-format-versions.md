@@ -14,6 +14,7 @@ the three host-facing format versions at `1` until the 1.0.0 boundary.
 | Minecraft options dataset | `DATASET_FORMAT_VERSION` | 1 | A document with a newer format is rejected as a whole. |
 | Third-party license inventory | `LICENSE_INVENTORY_FORMAT_VERSION` | 1 | A document with a newer format is rejected as a whole. Generated from `Cargo.lock` and compiled in, so a mismatch is a broken build rather than stale user data. |
 | Mod isolation session | `ISOLATION_VERSION` | 1 | A newer document is rejected. Retained state changes remain additive before 1.0.0; finish or cancel removes the session. |
+| Instance organization | `ORGANIZATION_FORMAT_VERSION` | 1 | Additive fields default when absent. Unknown fields survive a load and save. A file from a newer build, or one that cannot be read, is moved aside and replaced by `organization.old.json`, the copy from before the last change, or by an empty organization when that copy cannot be used either (ADR 0048). |
 | SQLite index | ordered migrations | 1 | The pre-1.0 schema is one initial migration. Later migrations are append-only. The index remains a recovery copy, not host authority. |
 | Mod display cache | `CACHE_VERSION` | 1 | Cache state may be discarded and rebuilt. |
 | Minecraft analysis workspace | `ANALYSIS_SCHEMA_VERSION` | 1 | Generated analysis state may be discarded and rebuilt. |

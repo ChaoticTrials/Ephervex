@@ -94,6 +94,9 @@ Current functionality includes:
   technical report can be copied for bug reports;
 * local diagnostic bundles built from a checklist of the host's logs, crash
   reports, and recorded state, copied verbatim and never uploaded;
+* instance search, combinable filters, deterministic ordering, favorites,
+  groups and custom icons, kept apart from instance files and available in the
+  desktop interface and on the command line;
 * desktop management of instances, servers, accounts, Java runtimes, mods,
   Minecraft preferences, diagnostics, and application settings; and
 * shell completion generation for Bash, Zsh, Fish, Elvish, and PowerShell; and
