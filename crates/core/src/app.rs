@@ -108,14 +108,14 @@ pub(crate) enum PinProbe {
 /// A plan that found no runtime, with the pinned runtime it refused when that
 /// one could be identified.
 #[derive(Debug)]
-pub(crate) struct JavaRefusal {
+pub(crate) struct PlanRefusal {
     pub(crate) error: CoreError,
     pub(crate) attempted: Option<JavaRuntime>,
 }
 
-impl From<CoreError> for Box<JavaRefusal> {
+impl From<CoreError> for Box<PlanRefusal> {
     fn from(error: CoreError) -> Self {
-        Self::new(JavaRefusal {
+        Self::new(PlanRefusal {
             error,
             attempted: None,
         })
@@ -1328,10 +1328,10 @@ impl App {
         jvm_override: Option<ephervex_model::JvmSettings>,
         request: &JavaPlanRequest,
         probe: PinProbe,
-    ) -> Result<JavaPlan, Box<JavaRefusal>> {
+    ) -> Result<JavaPlan, Box<PlanRefusal>> {
         let loader_rules = self
             .loader_java_rules(minecraft_version, loader, required.major)
-            .map_err(Box::<JavaRefusal>::from)?;
+            .map_err(Box::<PlanRefusal>::from)?;
         let rules: Vec<&dyn JavaCompatibilityRule> = loader_rules
             .iter()
             .map(|rule| rule as &dyn JavaCompatibilityRule)
@@ -1355,7 +1355,7 @@ impl App {
                 .await
                 .map_err(CoreError::from)?;
             if let Err(error) = ephervex_java::check_pinned(&runtime, &required, &rules, *source) {
-                return Err(Box::new(JavaRefusal {
+                return Err(Box::new(PlanRefusal {
                     error: error.into(),
                     attempted: Some(runtime),
                 }));

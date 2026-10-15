@@ -237,6 +237,7 @@ mod tests {
     fn a_runtime_line_shows_version_vendor_and_architecture_exactly() {
         let runtime = JavaRuntimeSummary {
             version: "21.0.8".to_owned(),
+            major: 21,
             path: PathBuf::from("/opt/jdk/bin/java"),
             managed: false,
             vendor: "Eclipse Adoptium".to_owned(),
@@ -253,6 +254,7 @@ mod tests {
     fn a_runtime_that_reported_no_vendor_or_architecture_says_so() {
         let runtime = JavaRuntimeSummary {
             version: "1.6.0_45".to_owned(),
+            major: 6,
             path: PathBuf::from("/opt/jdk6/bin/java"),
             managed: false,
             vendor: String::new(),

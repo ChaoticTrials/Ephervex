@@ -1091,6 +1091,7 @@ mod tests {
                 layer: JavaLayer::Host,
                 runtime: JavaRuntimeSummary {
                     version: "21.0.8".to_owned(),
+                    major: 21,
                     path: PathBuf::from("/usr/lib/jvm/temurin-21/bin/java"),
                     managed: false,
                     vendor: "Eclipse Adoptium".to_owned(),
@@ -1310,6 +1311,11 @@ mod tests {
     fn a_java_change_shows_both_runtimes_with_how_each_is_chosen_and_the_expectation() {
         let runtime = |version: &str, path: &str| ephervex_core::JavaRuntimeSummary {
             version: version.to_owned(),
+            major: version
+                .split('.')
+                .next()
+                .and_then(|major| major.parse().ok())
+                .unwrap_or_default(),
             path: PathBuf::from(path),
             managed: false,
             vendor: "Eclipse Adoptium".to_owned(),

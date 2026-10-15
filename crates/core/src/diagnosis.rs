@@ -26,7 +26,7 @@ use ephervex_storage::{ClientCommitWarning, DiagnosticKind, ServerCommitWarning}
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
 
-use crate::app::{App, JavaPlan, JavaPlanRequest, JavaRefusal, JavaTarget, PinProbe};
+use crate::app::{App, JavaPlan, JavaPlanRequest, JavaTarget, PinProbe, PlanRefusal};
 use crate::crash_analysis::{LoaderReportedDependency, loader_dependency_failures};
 use crate::dependencies::{DeclaredConflict, UnmetDependency, UnmetRequirement};
 use crate::diagnostics::{DiagnosticRequest, DiagnosticScope};
@@ -132,6 +132,8 @@ pub enum JavaUnavailable {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JavaRuntimeSummary {
     pub version: String,
+    /// The feature release the version names.
+    pub major: u32,
     pub path: PathBuf,
     /// Ephervex downloaded and manages it.
     pub managed: bool,
@@ -151,6 +153,7 @@ impl JavaRuntimeSummary {
     pub(crate) fn of_runtime(runtime: &JavaRuntime) -> Self {
         Self {
             version: runtime.version_string.clone(),
+            major: runtime.version.major,
             path: runtime.executable.clone(),
             managed: runtime.is_managed(),
             vendor: runtime.vendor.clone(),
@@ -1116,7 +1119,7 @@ impl App {
                 rejection: None,
             },
             Err(refusal) => {
-                let JavaRefusal { error, attempted } = *refusal;
+                let PlanRefusal { error, attempted } = *refusal;
                 match (error, attempted) {
                     (
                         CoreError::Java(JavaError::PinnedRuntimeIncompatible { rejection, .. }),

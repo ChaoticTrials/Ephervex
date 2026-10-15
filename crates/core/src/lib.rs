@@ -46,6 +46,7 @@ pub mod import;
 pub mod instance;
 pub mod isolation;
 pub mod java_choices;
+pub mod java_failure;
 pub mod java_install;
 pub mod java_status;
 pub mod launch;
@@ -74,6 +75,8 @@ pub mod server_pack;
 pub mod single_instance;
 pub mod snapshot;
 pub mod termination;
+#[cfg(test)]
+mod test_fixtures;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 pub mod url_handler;
@@ -140,6 +143,9 @@ pub use isolation::{
 pub use java_choices::{
     AutomaticJava, JavaChoice, JavaChoices, JavaPinIndex, JavaRuntimePins, LauncherJavaChoice,
     PinningHost,
+};
+pub use java_failure::{
+    ClassVersionMismatch, JavaRefusal, JavaRuntimeFailure, class_version_mismatch,
 };
 pub use java_install::HostJavaInstall;
 pub use java_status::{

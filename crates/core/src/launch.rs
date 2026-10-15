@@ -49,7 +49,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument};
 
 use crate::app::{App, JavaPlan, JavaPlanRequest, JavaTarget};
+use crate::diagnosis::JavaRuntimeSummary;
 use crate::error::CoreResult;
+use crate::java_failure::JavaRuntimeFailure;
+use crate::mods::InstalledHost;
 
 /// What a caller is asking for when it launches an instance.
 #[derive(Debug, Clone, Default)]
@@ -113,6 +116,9 @@ pub struct LaunchOutcome {
     pub authenticated: bool,
     /// How the game finished, or `None` for a dry run.
     pub exit: Option<GameExit>,
+    /// Why the game could not run on its runtime, when it exited because the
+    /// JVM refused a class compiled for a newer Java.
+    pub java_failure: Option<Box<JavaRuntimeFailure>>,
 }
 
 impl LaunchOutcome {
@@ -273,8 +279,8 @@ impl App {
 
         let metadata = self.minecraft_version(&record.minecraft_version).await?;
         let java = self
-            .plan_java(
-                &record.minecraft_version,
+            .plan_java_for_host(
+                InstalledHost::Instance(instance),
                 &JavaPlanRequest {
                     target: JavaTarget::Client(instance),
                     explicit_path: options.java_path.clone(),
@@ -322,6 +328,7 @@ impl App {
             command: Box::new(command),
             installation: Box::new(installed.installation),
             exit: None,
+            java_failure: None,
         };
 
         if options.dry_run {
@@ -359,7 +366,18 @@ impl App {
             authenticated = outcome.authenticated,
             "launched minecraft"
         );
-        outcome.exit = Some(process.wait(observer, cancel).await?);
+        let (exit, early_output) = process.wait_with_early_output(observer, cancel).await?;
+        outcome.exit = Some(exit);
+        if !exit.is_success() {
+            outcome.java_failure = self
+                .java_runtime_failure(
+                    InstalledHost::Instance(instance),
+                    Some(JavaRuntimeSummary::of_runtime(&outcome.java.runtime)),
+                    early_output.iter().map(String::as_str),
+                )
+                .await
+                .map(Box::new);
+        }
         Ok(outcome)
     }
 

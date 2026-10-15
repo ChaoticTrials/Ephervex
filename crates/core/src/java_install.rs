@@ -65,10 +65,8 @@ impl App {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
-    use ephervex_download::{CacheLayout, ContentStore, FileExtension, MetadataCache, MetadataKey};
-    use ephervex_minecraft::{VERSION_MANIFEST_CACHE_KEY, VERSION_MANIFEST_URL, VersionManifest};
     use ephervex_model::{JavaOverride, LoaderKind, LoaderSelection};
     use ephervex_storage::{NewClient, NewServer, Paths};
     use sha2::{Digest, Sha256};
@@ -77,20 +75,13 @@ mod tests {
 
     use super::*;
     use crate::java_status::JavaStatusTone;
+    use crate::test_fixtures::{jvm_arch, seed_minecraft};
 
     const RELEASE: &str = "jdk8u312-b07";
     const ARCHIVE_ROUTE: &str = "/download/OpenJDK8U-jdk_linux_hotspot_8u312b07.tar.gz";
     /// The ceiling legacy Forge applies, as the version-range request spells
     /// it: Java 8 from 8.0.0 up to, not including, update 321.
     const CAPPED_ROUTE: &str = "/v3/assets/version/%5B8%2C8.0.321%29";
-
-    const fn jvm_arch() -> &'static str {
-        if cfg!(target_arch = "aarch64") {
-            "aarch64"
-        } else {
-            "amd64"
-        }
-    }
 
     /// A Temurin-shaped tarball whose `bin/java` reports 8u312.
     fn archive() -> Vec<u8> {
@@ -145,33 +136,6 @@ mod tests {
             .mount(&server)
             .await;
         server
-    }
-
-    /// Mojang's manifest and the release documents the fixtures cover, stored
-    /// as fresh so resolving a release reaches no network.
-    async fn seed_minecraft(cache: &Path) {
-        let layout = CacheLayout::new(cache);
-        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/minecraft");
-        let manifest_json =
-            std::fs::read_to_string(fixtures.join("version_manifest_v2.json")).unwrap();
-        let manifest = VersionManifest::parse(&manifest_json).unwrap();
-        MetadataCache::new(layout.clone())
-            .store(
-                &MetadataKey::new(VERSION_MANIFEST_CACHE_KEY).unwrap(),
-                &VERSION_MANIFEST_URL.parse().unwrap(),
-                serde_json::value::RawValue::from_string(manifest_json).unwrap(),
-            )
-            .await
-            .unwrap();
-        let json = FileExtension::new("json").unwrap();
-        for record in &manifest.versions {
-            let Ok(document) = std::fs::read(fixtures.join(format!("{}.json", record.id))) else {
-                continue;
-            };
-            let path = layout.content(ContentStore::Metadata, &record.sha1, Some(&json));
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, &document).unwrap();
-        }
     }
 
     struct Fixture {

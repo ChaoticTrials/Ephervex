@@ -104,6 +104,10 @@ pub struct CaptureSnapshot {
     pub pruned_while_reading: bool,
 }
 
+/// How many of a stopped server's last output lines are read for a runtime
+/// failure: the JVM's error and the stack trace that follows it.
+const SERVER_FAILURE_LINES: usize = 200;
+
 /// A fully validated server start whose process ownership can move onto the
 /// application's supervision task.
 pub(super) struct PreparedServerStart {
@@ -955,8 +959,8 @@ impl App {
         materialize_eula_file(&server_dir.join(EULA_FILE), &eula)?;
         emit_network_advisories(&record.network, observer)?;
         let java = self
-            .plan_java(
-                &record.minecraft_version,
+            .plan_java_for_host(
+                crate::InstalledHost::Server(id),
                 &JavaPlanRequest {
                     target: JavaTarget::Server(id),
                     explicit_path: explicit_java,
@@ -1064,6 +1068,49 @@ impl App {
             limit,
             CaptureScope::LatestRun,
         )
+    }
+
+    /// Why a server stopped, when its runtime could not load its code: the
+    /// JVM printed `java.lang.UnsupportedClassVersionError` in the latest run.
+    ///
+    /// `exit` is how that run ended and `explicit_java` the runtime it was
+    /// started with when one was given for that start alone. A run stopped on
+    /// request, or one that finished starting and exited cleanly, explains
+    /// nothing. Otherwise the end of the run's capture is read. The runtime is
+    /// named only when it agrees with what the JVM printed, so a setting that
+    /// changed since the run cannot be presented as the runtime that failed.
+    pub async fn server_java_failure(
+        &self,
+        id: ServerId,
+        exit: &ephervex_server::ServerExit,
+        explicit_java: Option<&Path>,
+    ) -> CoreResult<Option<crate::JavaRuntimeFailure>> {
+        let clean = exit.finished_starting && exit.code == Some(0);
+        if exit.stop_requested || clean {
+            return Ok(None);
+        }
+        let output = self.server_latest_run_output(id, SERVER_FAILURE_LINES)?;
+        // Most failed runs have nothing to do with Java, and finding the
+        // runtime costs a status check, so the output is read for the JVM's
+        // message first.
+        let lines = || output.lines.iter().map(|line| line.text.as_str());
+        if crate::java_failure::first_class_version_mismatch(lines()).is_none() {
+            return Ok(None);
+        }
+        let host = crate::InstalledHost::Server(id);
+        let attempted = match explicit_java {
+            Some(path) => self
+                .test_java_runtime(path)
+                .await
+                .ok()
+                .map(|runtime| crate::JavaRuntimeSummary::of_runtime(&runtime)),
+            None => self
+                .host_java_status(host)
+                .await
+                .ok()
+                .and_then(|status| status.runtime().cloned()),
+        };
+        Ok(self.java_runtime_failure(host, attempted, lines()).await)
     }
 
     /// Follows a server's capture from now on, whichever process supervises
@@ -3879,6 +3926,146 @@ mod tests {
             body.push(b'\n');
         }
         std::fs::write(directory.join(name), body).expect("write capture segment");
+    }
+
+    #[tokio::test]
+    async fn a_server_that_stopped_on_a_class_version_error_is_explained_from_its_capture() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        crate::test_fixtures::seed_minecraft(app.paths().cache_dir()).await;
+        let server = app
+            .registry_for_services()
+            .create_server(NewServer::new(
+                "class version",
+                "1.21.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("scaffold");
+        let failed = ephervex_server::ServerExit {
+            code: Some(1),
+            signal: None,
+            finished_starting: false,
+            stop_requested: false,
+        };
+        let capture = app.paths().server_capture_dir(server.id);
+        std::fs::create_dir_all(&capture).expect("capture directory");
+        write_capture_segment(
+            &capture,
+            "capture-20260813T120000.000Z-a.jsonl",
+            &["Starting net.minecraft.server.Main"],
+        );
+        assert_eq!(
+            app.server_java_failure(server.id, &failed, None)
+                .await
+                .expect("read"),
+            None,
+            "a run without the error explains nothing"
+        );
+
+        write_capture_segment(
+            &capture,
+            "capture-20260813T130000.000Z-b.jsonl",
+            &[
+                "Error: LinkageError occurred while loading main class net.minecraft.server.Main",
+                "\tjava.lang.UnsupportedClassVersionError: net/minecraft/server/Main has been \
+                 compiled by a more recent version of the Java Runtime (class file version \
+                 65.0), this version of the Java Runtime only recognizes class file versions \
+                 up to 61.0",
+            ],
+        );
+        let java_17 = crate::test_fixtures::fake_java(&directory.path().join("jdk-17"), "17.0.12");
+        let failure = app
+            .server_java_failure(server.id, &failed, Some(&java_17))
+            .await
+            .expect("read")
+            .expect("the latest run's failure");
+        assert_eq!(failure.mismatch.class_major, 21);
+        assert_eq!(failure.mismatch.runtime_major, Some(17));
+        assert_eq!(failure.expected.major(), 21);
+        assert_eq!(
+            failure.attempted.map(|runtime| runtime.path),
+            Some(java_17),
+            "the runtime the run was started with"
+        );
+
+        let java_21 = crate::test_fixtures::fake_java(&directory.path().join("jdk-21"), "21.0.8");
+        let failure = app
+            .server_java_failure(server.id, &failed, Some(&java_21))
+            .await
+            .expect("read")
+            .expect("the latest run's failure");
+        assert_eq!(
+            failure.attempted, None,
+            "a runtime that could not have printed the error is not named"
+        );
+
+        let stopped = ephervex_server::ServerExit {
+            stop_requested: true,
+            ..failed
+        };
+        assert_eq!(
+            app.server_java_failure(server.id, &stopped, None)
+                .await
+                .expect("read"),
+            None,
+            "a server stopped on request did not fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_server_failure_without_the_jvm_message_reads_no_runtime() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        crate::test_fixtures::seed_minecraft(app.paths().cache_dir()).await;
+        let server = app
+            .registry_for_services()
+            .create_server(NewServer::new(
+                "no java failure",
+                "1.21.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("scaffold");
+        // A pinned runtime that leaves a mark whenever it is run.
+        let probed = directory.path().join("probed");
+        let java = directory.path().join("marking-java");
+        std::fs::write(
+            &java,
+            format!("#!/bin/sh\ntouch '{}'\nexit 1\n", probed.display()),
+        )
+        .expect("write java");
+        std::fs::set_permissions(&java, std::fs::Permissions::from_mode(0o755))
+            .expect("make java executable");
+        app.set_server_runtime_settings(server.id, Some(JavaOverride::new(&java)), None)
+            .expect("pin");
+        let capture = app.paths().server_capture_dir(server.id);
+        std::fs::create_dir_all(&capture).expect("capture directory");
+        write_capture_segment(
+            &capture,
+            "capture-20260813T120000.000Z-a.jsonl",
+            &[
+                "Exception in server tick loop",
+                "java.lang.OutOfMemoryError: Java heap space",
+            ],
+        );
+        let failed = ephervex_server::ServerExit {
+            code: Some(1),
+            signal: None,
+            finished_starting: true,
+            stop_requested: false,
+        };
+
+        assert_eq!(
+            app.server_java_failure(server.id, &failed, None)
+                .await
+                .expect("read"),
+            None
+        );
+        assert!(
+            !probed.exists(),
+            "no runtime was run to explain a non-Java failure"
+        );
     }
 
     fn texts(snapshot: &CaptureSnapshot) -> Vec<&str> {
