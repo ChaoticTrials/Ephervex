@@ -65,6 +65,8 @@ pub mod promotion;
 pub mod running;
 pub mod server;
 mod server_capture;
+#[cfg(test)]
+mod server_catalog_install;
 pub mod server_pack;
 pub mod single_instance;
 pub mod snapshot;

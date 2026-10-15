@@ -1518,7 +1518,7 @@ fn display_name(project: &ModProject, fallback: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use std::io::Write as _;
@@ -1537,11 +1537,11 @@ mod tests {
 
     use super::*;
 
-    const MINECRAFT: &str = "1.20.1";
+    pub(crate) const MINECRAFT: &str = "1.20.1";
     /// A release a linked server may have been moved to independently.
-    const OTHER_MINECRAFT: &str = "1.20.2";
-    const LOADER: &str = "neoforge";
-    const LOADER_BUILD: &str = "47.1.106";
+    pub(crate) const OTHER_MINECRAFT: &str = "1.20.2";
+    pub(crate) const LOADER: &str = "neoforge";
+    pub(crate) const LOADER_BUILD: &str = "47.1.106";
 
     // -- the catalog every test runs against -------------------------------
 
@@ -1646,6 +1646,8 @@ mod tests {
             project_json("NEWLIB", "Moving Library", "required", "required"),
             project_json("PINNER", "Release Pinner", "required", "required"),
             project_json("RELDECLPROJ", "Release Declared", "required", "required"),
+            project_json("NEEDSUNK", "Needs Undeclared", "required", "required"),
+            project_json("SERVERONLY", "Server Only", "unsupported", "required"),
         ];
         let versions = vec![
             version_json(base, "ROOTV1", "ROOTPROJ", &[MINECRAFT], &["CLIENTLIB"], 0),
@@ -1667,6 +1669,15 @@ mod tests {
             ),
             version_json(base, "OPTV1", "OPTPROJ", &[MINECRAFT], &[], 0),
             version_json(base, "UNKV1", "UNKPROJ", &[MINECRAFT], &[], 0),
+            version_json(
+                base,
+                "NEEDSUNKV1",
+                "NEEDSUNK",
+                &[MINECRAFT],
+                &["UNKPROJ"],
+                0,
+            ),
+            version_json(base, "SERVERONLYV1", "SERVERONLY", &[MINECRAFT], &[], 0),
             version_json(
                 base,
                 "SECONDV1",
@@ -1802,19 +1813,19 @@ mod tests {
 
     // -- an application with a client and its linked servers ---------------
 
-    struct World {
+    pub(crate) struct World {
         _base: TempDir,
-        _catalog: MockServer,
+        pub(crate) catalog: MockServer,
         /// Publishes the release the catalog has been holding back.
         late: LateRelease,
-        app: App,
-        client: InstanceId,
+        pub(crate) app: App,
+        pub(crate) client: InstanceId,
     }
 
     impl World {
         /// A linked server, installed and stopped, holding a copy of the
         /// client's desired state exactly as reconstruction leaves it.
-        fn link_server(&self, name: &str, minecraft: &str) -> ServerId {
+        pub(crate) fn link_server(&self, name: &str, minecraft: &str) -> ServerId {
             let mut record = self
                 .app
                 .registry_for_services()
@@ -1846,11 +1857,11 @@ mod tests {
             record.id
         }
 
-        fn server_root(&self, server: ServerId) -> PathBuf {
+        pub(crate) fn server_root(&self, server: ServerId) -> PathBuf {
             self.app.server(server).expect("server").root
         }
 
-        fn server_recipe(&self, server: ServerId) -> PackRecipe {
+        pub(crate) fn server_recipe(&self, server: ServerId) -> PackRecipe {
             SourceStore::new(ephervex_storage::metadata::source_dir(
                 &self.server_root(server),
             ))
@@ -1858,13 +1869,13 @@ mod tests {
             .expect("server recipe")
         }
 
-        fn server_jars(&self, server: ServerId) -> Vec<String> {
+        pub(crate) fn server_jars(&self, server: ServerId) -> Vec<String> {
             jars_in(&ephervex_storage::metadata::server_game_dir(
                 &self.server_root(server),
             ))
         }
 
-        fn client_jars(&self) -> Vec<String> {
+        pub(crate) fn client_jars(&self) -> Vec<String> {
             let root = self.app.client(self.client).expect("client").root;
             jars_in(&ephervex_storage::metadata::client_game_dir(&root))
         }
@@ -1884,7 +1895,7 @@ mod tests {
         }
 
         /// Marks a server as running by leaving the evidence a supervisor would.
-        fn mark_running(&self, server: ServerId) {
+        pub(crate) fn mark_running(&self, server: ServerId) {
             let root = self.server_root(server);
             let evidence = ephervex_server::RuntimeEvidence::for_current_supervisor()
                 .expect("runtime evidence");
@@ -1894,7 +1905,7 @@ mod tests {
         }
     }
 
-    fn jars_in(game_dir: &Path) -> Vec<String> {
+    pub(crate) fn jars_in(game_dir: &Path) -> Vec<String> {
         let Ok(entries) = std::fs::read_dir(game_dir.join("mods")) else {
             return Vec::new();
         };
@@ -1928,7 +1939,7 @@ mod tests {
         writer.finish().expect("finish archive");
     }
 
-    async fn world() -> World {
+    pub(crate) async fn world() -> World {
         let (catalog, late) = catalog().await;
         let base = tempfile::tempdir().expect("temp dir");
 
@@ -1953,11 +1964,11 @@ mod tests {
             app,
             late,
             _base: base,
-            _catalog: catalog,
+            catalog,
         }
     }
 
-    fn silent() -> OperationReporter {
+    pub(crate) fn silent() -> OperationReporter {
         OperationReporter::silent("linked-mod-test")
     }
 

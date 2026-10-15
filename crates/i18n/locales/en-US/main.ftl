@@ -1738,6 +1738,8 @@ mod-incompatible-loader = Does not support { $required }.
 
 mod-warning-client-side-unsupported = { $project } says it does not run on the client.
 .action = It was installed because you asked for it by name. Remove it if this instance is not meant to have it.
+mod-warning-server-side-unsupported = { $project } says it does not run on a server, but { $required_by } needs it.
+.action = It was installed because the mod that needs it cannot load without it.
 mod-warning-uncheckable-conflict = { $declared_by } says it conflicts with the file { $file_name }, which Ephervex cannot check automatically.
 .action = Check your mods folder for that file.
 mod-warning-optional-not-offered = { $project } was selected as an optional dependency, but nothing in this graph offers it.
@@ -1797,6 +1799,11 @@ error-mod-file-distribution-restricted = That mod's author does not allow other 
 
 error-mod-acquisition-restricted = That mod's author does not allow other launchers to download this release.
 .action = Open { $file } on CurseForge and save it to a watched download folder. Ephervex verifies the copy and finishes the change for you.
+
+error-mod-client-only = { $project } is declared client-only, so it is not installed on a server.
+.action = Install it on a client instead.
+error-mod-server-support-unconfirmed = The catalog does not state whether { $mods } runs on a server.
+.action = Confirm that you want it on this server and try again.
 
 error-mod-file-identity-mismatch = { $provider } answered about a different file than the one requested.
 .action = Ephervex asked for { $requested } and was told about { $returned }, so nothing was installed.

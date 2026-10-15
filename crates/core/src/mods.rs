@@ -38,14 +38,15 @@ use ephervex_download::{
     hash_file,
 };
 use ephervex_mod_platform::{
-    AnnotatedVersion, InstallSelection, InstalledPolicy, InstalledProject, InstanceTarget,
-    ModDependency, ModInstallPlan, ModPlatformError, ModProject, ModProjectDetails, ModProviderApi,
-    ModSearchQuery, ModSearchResults, ModVersionInfo, ModrinthProvider, PlannedMod, RecognizedFile,
-    SideSupport, annotate, curseforge_fingerprint, newest_compatible,
+    AnnotatedVersion, HostSide, InstallSelection, InstalledPolicy, InstalledProject,
+    InstanceTarget, ModDependency, ModInstallPlan, ModPlatformError, ModProject, ModProjectDetails,
+    ModProviderApi, ModSearchQuery, ModSearchResults, ModVersionInfo, ModrinthProvider,
+    PlanWarning, PlannedMod, RecognizedFile, SideSupport, annotate, curseforge_fingerprint,
+    newest_compatible,
 };
 use ephervex_model::{
     AttentionReason, DefaultModCatalog, Hash, HashAlgorithm, ImportSourceKind, InstanceId,
-    ModOrigin, ModProvider, ServerId,
+    LoaderSelection, ModOrigin, ModProvider, ServerId,
 };
 use ephervex_pack::{
     ArtifactFetch, MODS_DIR, ManagedMod, ManagedModInstall, ManagedModInstallation, ModIdentity,
@@ -84,6 +85,10 @@ pub struct ModInstallRequest {
     /// Optional dependencies to take, by project id. Empty means none, which is
     /// the product default.
     pub optional: BTreeSet<String>,
+    /// Projects, by id, whose undeclared server support the caller has
+    /// confirmed. Read only when installing onto a server: a mod there whose
+    /// catalog never stated server support is refused unless it is named here.
+    pub confirmed_server_support: BTreeSet<String>,
 }
 
 impl ModInstallRequest {
@@ -94,7 +99,20 @@ impl ModInstallRequest {
             project: project.into(),
             version: None,
             optional: BTreeSet::new(),
+            confirmed_server_support: BTreeSet::new(),
         }
+    }
+
+    /// Confirms that these projects belong on a server although their catalog
+    /// never stated server support.
+    #[must_use]
+    pub fn confirming_server_support<I, S>(mut self, projects: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.confirmed_server_support = projects.into_iter().map(Into::into).collect();
+        self
     }
 
     /// The catalog the project reference belongs to.
@@ -1204,26 +1222,27 @@ impl App {
         self.mutate_config(|config| config.mods.set_default_catalog(catalog))
     }
 
-    /// Searches a provider for mods that fit one instance.
+    /// Searches a provider for mods that fit one host.
     ///
-    /// Compatibility is the instance's own exact Minecraft version and loader.
+    /// Compatibility is the host's own exact Minecraft version and loader.
     /// By default only mods that actually fit are returned; asking for the rest
     /// returns them annotated with why they do not, rather than offering them
-    /// as installable.
-    #[instrument(skip(self, query), fields(instance = %instance, provider = %catalog))]
+    /// as installable. A server's search also leaves out mods declared
+    /// client-only unless the rest is asked for.
+    #[instrument(skip(self, host, query), fields(provider = %catalog))]
     pub async fn search_mods(
         &self,
-        instance: InstanceId,
+        host: impl Into<InstalledHost>,
         catalog: ModProvider,
         query: &ModSearchQuery,
     ) -> CoreResult<ModSearchResults> {
-        let record = self.current_client(instance)?;
-        let target = target_for(&record);
+        let host = self.catalog_host(host.into())?;
+        let query = query.clone().for_side(host.search_side());
         let provider = self.mod_provider(catalog)?;
         Ok(provider
             .search(
-                &target,
-                query,
+                &host.target(),
+                &query,
                 &OperationReporter::silent("browsing-mods"),
                 &CancellationToken::new(),
             )
@@ -1253,21 +1272,20 @@ impl App {
         .await
     }
 
-    /// One project and its versions, annotated against the instance.
+    /// One project and its versions, annotated against the host.
     ///
     /// `include_incompatible` decides what the version list contains, not
     /// whether the incompatible ones are installable: an incompatible version
     /// carries its reasons and is never the default selection.
-    #[instrument(skip(self), fields(instance = %instance, provider = %catalog, project = reference))]
+    #[instrument(skip(self, host), fields(provider = %catalog, project = reference))]
     pub async fn mod_project(
         &self,
-        instance: InstanceId,
+        host: impl Into<InstalledHost>,
         catalog: ModProvider,
         reference: &str,
         include_incompatible: bool,
     ) -> CoreResult<ModProjectDetails> {
-        let record = self.current_client(instance)?;
-        let target = target_for(&record);
+        let target = self.catalog_host(host.into())?.target();
         let provider = self.mod_provider(catalog)?;
         let loader = ephervex_mod_platform::loader_name_for(provider, &target)?;
 
@@ -1297,16 +1315,19 @@ impl App {
     /// Every refusal an installation can hit - a conflicting pin, an
     /// incompatible relation, a required dependency that names no project, a
     /// project already installed at another version - happens here, before the
-    /// instance is touched.
-    #[instrument(skip(self, request), fields(instance = %instance, project = %request.project))]
+    /// host is touched. On a server, a mod declared client-only is refused too,
+    /// and a required dependency declared client-only is planned with a warning
+    /// because the mod that needs it cannot load without it.
+    #[instrument(skip(self, host, request), fields(project = %request.project))]
     pub async fn plan_mod_installation(
         &self,
-        instance: InstanceId,
+        host: impl Into<InstalledHost>,
         request: &ModInstallRequest,
     ) -> CoreResult<ModInstallPlan> {
-        let record = self.current_client(instance)?;
-        self.plan_for(
-            &record,
+        let host = self.catalog_host(host.into())?;
+        host.require_installed()?;
+        self.plan_for_host(
+            &host,
             request,
             InstalledPolicy::Preserve,
             &OperationReporter::silent("resolving-mods"),
@@ -1315,51 +1336,58 @@ impl App {
     }
 
     /// Installs a mod and everything it requires.
+    ///
+    /// Onto a server this reads and writes only that server's own recipe and
+    /// `mods/`; a linked client is never consulted. A running server receives
+    /// the change for its next start.
     #[instrument(
-        skip(self, request, reporter, cancel),
-        fields(instance = %instance, project = %request.project, operation = %reporter.id())
+        skip(self, host, request, reporter, cancel),
+        fields(project = %request.project, operation = %reporter.id())
     )]
     pub async fn install_mods(
         &self,
-        instance: InstanceId,
+        host: impl Into<InstalledHost>,
         request: &ModInstallRequest,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<InstalledMods> {
-        self.refuse_mod_change_during_isolation(InstalledHost::Instance(instance))?;
+        let host = host.into();
+        self.refuse_mod_change_during_isolation(host)?;
         self.with_artifact_cache(Box::pin(
-            self.install_mods_holding_the_cache(instance, request, reporter, cancel),
+            self.install_mods_holding_the_cache(host, request, reporter, cancel),
         ))
         .await
     }
 
     async fn install_mods_holding_the_cache(
         &self,
-        instance: InstanceId,
+        host: InstalledHost,
         request: &ModInstallRequest,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<InstalledMods> {
-        let record = self.current_client(instance)?;
+        let host = self.catalog_host(host)?;
+        host.require_installed()?;
         let plan = self
-            .plan_for(&record, request, InstalledPolicy::Preserve, reporter)
+            .plan_for_host(&host, request, InstalledPolicy::Preserve, reporter)
             .await?;
+        if host.side() == PackSide::Server {
+            require_confirmed_server_support(&plan, request)?;
+        }
 
         // From reading the recipe to the install writing it back, so the
         // background enrichment of this host cannot write in between.
-        let _gate = self
-            .hold_mod_change(InstalledHost::Instance(instance), cancel)
-            .await?;
+        let _gate = self.hold_mod_change(host.host, cancel).await?;
 
-        // An instance created by hand has no recipe until something needs one.
-        let store = SourceStore::new(ephervex_storage::metadata::source_dir(&record.root));
+        // A host created by hand has no recipe until something needs one.
+        let store = host.store();
         let mut recipe = if store.has_recipe() {
             store.read_recipe()?
         } else {
             PackRecipe::for_manual_instance(
-                record.name.clone(),
-                record.minecraft_version.clone(),
-                record.loader.clone(),
+                host.name.clone(),
+                host.minecraft_version.clone(),
+                host.loader.clone(),
             )
         };
 
@@ -1372,16 +1400,16 @@ impl App {
         let additions: Vec<PackFileRecipe> = plan
             .all_mods()
             .into_iter()
-            .map(|planned| recipe_entry(planned, plan.provider))
+            .map(|planned| recipe_entry_for(planned, plan.provider, host.side()))
             .collect::<Result<_, _>>()?;
 
         let manager = self.artifact_manager()?;
 
-        let game_dir = ephervex_storage::metadata::client_game_dir(&record.root);
+        let game_dir = host.game_dir();
         let installation = match ephervex_pack::install_managed(ManagedModInstall {
             recipe: &mut recipe,
             additions: &additions,
-            side: PackSide::Client,
+            side: host.side(),
             game_dir: &game_dir,
             store: &store,
             fetch: ArtifactFetch {
@@ -1401,22 +1429,26 @@ impl App {
             Ok(installation) => installation,
             Err(error) => {
                 if !error.recovery_issues().is_empty() {
-                    self.registry().modify_client(record.id, |current| {
-                        current.add_attention(AttentionReason::InterruptedMutation);
-                    })?;
+                    self.add_host_attention(host.host, AttentionReason::InterruptedMutation)?;
                 }
                 let destination = PathBuf::from(ephervex_pack::MODS_DIR).join(
                     ephervex_pack::safe_file_name(&plan.root.version.file.file_name)
                         .unwrap_or_else(|| PathBuf::from(&plan.root.version.id)),
                 );
                 return Err(self
-                    .as_manual_acquisition(CoreError::from(error), &destination, &plan, &game_dir)
+                    .as_manual_acquisition(
+                        CoreError::from(error),
+                        &destination,
+                        &plan,
+                        &game_dir,
+                        host.side(),
+                    )
                     .await);
             }
         };
 
         info!(
-            instance_id = %record.id,
+            host = %host.host.id(),
             installed = installation.installed.len(),
             repaired = installation.repaired.len(),
             recorded = installation.recorded.len(),
@@ -2056,7 +2088,7 @@ impl App {
         cached
     }
 
-    /// Resolves a plan against an instance's exact versions.
+    /// Resolves a plan against a client instance's exact versions.
     ///
     /// `policy` is what separates installing from mutating: an install refuses
     /// to move a mod that is already there, and a version change is a request
@@ -2068,16 +2100,71 @@ impl App {
         policy: InstalledPolicy,
         reporter: &OperationReporter,
     ) -> CoreResult<ModInstallPlan> {
-        let installed = self.installed_projects(record, request.provider)?;
-        self.resolve_against(
-            &target_for(record),
-            &installed,
-            request,
-            policy,
-            reporter,
-            &CancellationToken::new(),
-        )
-        .await
+        self.plan_for_host(&CatalogHost::client(record), request, policy, reporter)
+            .await
+    }
+
+    /// Resolves a plan against one host's exact versions and its own installed
+    /// set, which is read from that host's recipe and no other.
+    async fn plan_for_host(
+        &self,
+        host: &CatalogHost,
+        request: &ModInstallRequest,
+        policy: InstalledPolicy,
+        reporter: &OperationReporter,
+    ) -> CoreResult<ModInstallPlan> {
+        let store = host.store();
+        let recipe = if store.has_recipe() {
+            Some(store.read_recipe()?)
+        } else {
+            None
+        };
+        let installed = installed_projects_of(recipe.as_ref(), request.provider);
+        let mut plan = self
+            .resolve_against(
+                &host.target(),
+                &installed,
+                request,
+                policy,
+                reporter,
+                &CancellationToken::new(),
+            )
+            .await?;
+        if host.side() == PackSide::Server {
+            settle_plan_for_server(&mut plan)?;
+        }
+        Ok(plan)
+    }
+
+    /// The identity and layout of the host a catalog operation is for.
+    pub(crate) fn catalog_host(&self, host: InstalledHost) -> CoreResult<CatalogHost> {
+        Ok(match host {
+            InstalledHost::Instance(id) => CatalogHost::client(&self.current_client(id)?),
+            InstalledHost::Server(id) => {
+                let record = self.server(id)?;
+                CatalogHost {
+                    host,
+                    name: record.name,
+                    minecraft_version: record.minecraft_version,
+                    loader: record.loader,
+                    root: record.root,
+                    installed: record.installation.is_installed(),
+                }
+            }
+        })
+    }
+
+    /// Marks a host as needing attention after an interrupted change.
+    fn add_host_attention(&self, host: InstalledHost, reason: AttentionReason) -> CoreResult<()> {
+        match host {
+            InstalledHost::Instance(id) => {
+                self.registry().modify_client(id, |current| {
+                    current.add_attention(reason);
+                })?;
+                Ok(())
+            }
+            InstalledHost::Server(id) => self.add_server_attention(id, reason),
+        }
     }
 
     /// Resolves a request against an arbitrary exact target and desired state.
@@ -2121,18 +2208,6 @@ impl App {
             })
             .await?,
         )
-    }
-
-    /// What the instance already has, for the provider this browse is against.
-    fn installed_projects(
-        &self,
-        record: &ClientRecord,
-        provider: ModProvider,
-    ) -> CoreResult<Vec<InstalledProject>> {
-        Ok(installed_projects_of(
-            self.pack_recipe(record.id)?.as_ref(),
-            provider,
-        ))
     }
 
     /// One mod catalog, built on first use.
@@ -2226,12 +2301,134 @@ pub(crate) fn installed_projects_of(
         .collect()
 }
 
-/// The instance's exact Minecraft version and loader.
+/// The host a catalog operation is for: a client instance or a server.
 ///
-/// Cloned out of the record rather than borrowed so that nothing downstream can
-/// hold a reference into the record and be tempted to write through it.
-fn target_for(record: &ClientRecord) -> InstanceTarget {
-    InstanceTarget::new(record.minecraft_version.clone(), record.loader.kind)
+/// Holds copies of what the operation reads from the record, so nothing
+/// downstream can hold a reference into the record and be tempted to write
+/// through it. The Minecraft version and loader are inputs and never outputs.
+#[derive(Debug)]
+pub(crate) struct CatalogHost {
+    pub(crate) host: InstalledHost,
+    pub(crate) name: String,
+    pub(crate) minecraft_version: String,
+    pub(crate) loader: LoaderSelection,
+    pub(crate) root: PathBuf,
+    installed: bool,
+}
+
+impl CatalogHost {
+    pub(crate) fn client(record: &ClientRecord) -> Self {
+        Self {
+            host: InstalledHost::Instance(record.id),
+            name: record.name.clone(),
+            minecraft_version: record.minecraft_version.clone(),
+            loader: record.loader.clone(),
+            root: record.root.clone(),
+            installed: true,
+        }
+    }
+
+    pub(crate) const fn side(&self) -> PackSide {
+        self.host.side()
+    }
+
+    /// The exact Minecraft version and loader.
+    pub(crate) fn target(&self) -> InstanceTarget {
+        InstanceTarget::new(self.minecraft_version.clone(), self.loader.kind)
+    }
+
+    pub(crate) fn game_dir(&self) -> PathBuf {
+        match self.host {
+            InstalledHost::Instance(_) => ephervex_storage::metadata::client_game_dir(&self.root),
+            InstalledHost::Server(_) => ephervex_storage::metadata::server_game_dir(&self.root),
+        }
+    }
+
+    pub(crate) fn store(&self) -> SourceStore {
+        SourceStore::new(ephervex_storage::metadata::source_dir(&self.root))
+    }
+
+    /// The side search results are narrowed for.
+    fn search_side(&self) -> HostSide {
+        match self.host {
+            InstalledHost::Instance(_) => HostSide::Client,
+            InstalledHost::Server(_) => HostSide::Server,
+        }
+    }
+
+    /// A server without its base installation has no game directory to write.
+    fn require_installed(&self) -> CoreResult<()> {
+        if self.installed {
+            Ok(())
+        } else {
+            Err(CoreError::Server(
+                ephervex_server::ServerError::NotInstalled,
+            ))
+        }
+    }
+}
+
+/// Applies the server-specific rules to a resolved plan.
+///
+/// A mod declared client-only is never a server root. A required dependency
+/// declared client-only is kept, because the mod that needs it cannot load
+/// without it, and is reported so the caller can say so.
+fn settle_plan_for_server(plan: &mut ModInstallPlan) -> CoreResult<()> {
+    if plan.root.server_side() == SideSupport::Unsupported {
+        let title = &plan.root.project.title;
+        return Err(CoreError::ModClientOnly {
+            project: if title.is_empty() {
+                plan.root.project.id.clone()
+            } else {
+                title.clone()
+            },
+        });
+    }
+    // Said for a client the root does not run on, which a server is not.
+    plan.warnings
+        .retain(|warning| !matches!(warning, PlanWarning::ClientSideUnsupported { .. }));
+    let warnings: Vec<PlanWarning> = plan
+        .dependencies
+        .iter()
+        .filter(|planned| planned.server_side() == SideSupport::Unsupported)
+        .map(|planned| PlanWarning::ServerSideUnsupported {
+            project_id: planned.project.id.clone(),
+            required_by: planned.requested_by.clone(),
+        })
+        .collect();
+    plan.warnings.extend(warnings);
+    Ok(())
+}
+
+/// Refuses a server install that would put a mod on the server whose catalog
+/// never stated server support, unless the request named it.
+fn require_confirmed_server_support(
+    plan: &ModInstallPlan,
+    request: &ModInstallRequest,
+) -> CoreResult<()> {
+    let unconfirmed: Vec<String> = plan
+        .undeclared_server_support()
+        .into_iter()
+        .filter(|planned| {
+            !request
+                .confirmed_server_support
+                .contains(&planned.project.id)
+        })
+        .map(|planned| {
+            if planned.project.title.is_empty() {
+                planned.project.id.clone()
+            } else {
+                planned.project.title.clone()
+            }
+        })
+        .collect();
+    if unconfirmed.is_empty() {
+        Ok(())
+    } else {
+        Err(CoreError::ModServerSupportUnconfirmed {
+            projects: unconfirmed,
+        })
+    }
 }
 
 /// Turns one planned mod into the recipe entry that records it.
@@ -2306,7 +2503,11 @@ pub(crate) fn recipe_entry_for(
             file_id: exact_file_id(provider, &planned.version.id),
         }),
         original_identity: None,
-        installed_despite_unsupported: None,
+        // A server install of a required dependency its catalog declares
+        // client-only keeps that declaration and still counts as installed.
+        installed_despite_unsupported: (side == PackSide::Server
+            && server == SideRequirement::Unsupported)
+            .then_some(PackSide::Server),
         relations: Some(recipe_relations(&planned.version.dependencies)),
     })
 }

@@ -5416,6 +5416,16 @@ fn warning_text(warning: &PlanWarning) -> String {
             warning.message_id(),
             [("project", MessageArg::from(project_id.as_str()))],
         ),
+        PlanWarning::ServerSideUnsupported {
+            project_id,
+            required_by,
+        } => ephervex_i18n::lookup_args(
+            warning.message_id(),
+            [
+                ("project", MessageArg::from(project_id.as_str())),
+                ("required_by", MessageArg::from(required_by.join(", "))),
+            ],
+        ),
         PlanWarning::UncheckableConflict {
             declared_by,
             file_name,

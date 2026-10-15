@@ -981,6 +981,17 @@ undeclared stays and is reported as undeclared, never as confirmed. Showing
 incompatible results widens the query instead: client-only mods are returned and
 marked, and are not installable on a server.
 
+A server is an install target in its own right (ADR 0045). Its target is the
+server's own Minecraft version and loader, its installed set is its own recipe,
+and nothing about a linked client is read or written, so the flow works with no
+client at all and a linked client's files and records are left exactly as they
+were. Installing onto a server needs a confirmation naming every mod, the root or
+a dependency, whose server support the catalog never stated, and records it as an
+explicit choice. A required dependency declared client-only is installed anyway,
+with a warning naming it and the mod that needs it, and is recorded as installed
+on the server beside the declaration it keeps. A root declared client-only is
+refused. A running server receives the change for its next start.
+
 Exact selections are preserved. A pinned version that does not fit is refused
 rather than moved to a neighboring release, two mods pinning one project to
 different versions is a conflict rather than an arbitration, and a required
@@ -1585,8 +1596,8 @@ is a review question rather than something already released.
 
 The supported scope includes Linux, Minecraft release versions from 1.12.2
 onward, Vanilla, Forge, NeoForge, Modrinth and CurseForge pack import, Modrinth
-and CurseForge mod browsing with dependency resolution, and linked-server
-reconstruction from retained recipes, plus launching a linked client directly
+and CurseForge mod browsing with dependency resolution, direct mod installation
+onto a server, and linked-server reconstruction from retained recipes, plus launching a linked client directly
 into a local managed server. Logs, crash reports, and launcher diagnostics are
 inspectable through `ephervex-core`, the CLI, and the GUI. CurseForge pack
 import and CurseForge browsing need a user-supplied API key and cannot obtain a

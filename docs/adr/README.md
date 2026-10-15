@@ -50,3 +50,4 @@ so the reasoning trail survives.
 | [0042](0042-user-themes-are-toml-files-over-a-built-in-parent.md) | User themes are TOML files over a built-in parent | Accepted |
 | [0043](0043-diagnostics-explains-and-changes-nothing-until-a-previewed-fix-is-applied.md) | Diagnostics explains, and changes nothing until a previewed fix is applied | Accepted |
 | [0044](0044-rpm-packages-are-published-to-the-signed-package-repository.md) | RPM packages are published to the signed package repository | Accepted (amends ADR 0026) |
+| [0045](0045-a-server-installs-catalog-mods-into-its-own-recipe.md) | A server installs catalog mods into its own recipe | Accepted |

@@ -23,7 +23,8 @@ use ephervex_download::{ContentStore, FileExtension, file_matches_hashes};
 use ephervex_mod_platform::{CurseForgeProjectClass, ModInstallPlan, PlannedMod, file_browser_url};
 use ephervex_model::{CurseForgeFileId, Hash, ModProvider};
 use ephervex_pack::{
-    BlockedProviderFile, PackRecipe, ProviderFileIdentity, SideRequirement, safe_file_name,
+    BlockedProviderFile, PackRecipe, PackSide, ProviderFileIdentity, SideRequirement,
+    safe_file_name,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -101,6 +102,7 @@ impl App {
         &self,
         plan: &ModInstallPlan,
         game_dir: &Path,
+        side: PackSide,
     ) -> CoreResult<Vec<BlockedProviderFile>> {
         let mut blocked = Vec::new();
         for planned in plan.all_mods() {
@@ -119,7 +121,7 @@ impl App {
             if installed_copy_matches(game_dir, file_name, hashes).await {
                 continue;
             }
-            blocked.push(blocked_file(planned, plan.provider));
+            blocked.push(blocked_file(planned, plan.provider, side));
         }
         Ok(blocked)
     }
@@ -137,6 +139,7 @@ impl App {
         target: &Path,
         plan: &ModInstallPlan,
         game_dir: &Path,
+        side: PackSide,
     ) -> CoreError {
         if !matches!(
             error,
@@ -144,7 +147,7 @@ impl App {
         ) {
             return error;
         }
-        match self.unacquirable(plan, game_dir).await {
+        match self.unacquirable(plan, game_dir, side).await {
             Ok(blocked) if !blocked.is_empty() => CoreError::ModAcquisitionRestricted {
                 path: target.to_path_buf(),
                 blocked,
@@ -256,7 +259,11 @@ async fn installed_copy_matches(game_dir: &Path, file_name: &str, hashes: &[Hash
 ///
 /// The same shape a blocked pack-import file has, so both go through one
 /// presentation, one folder watcher, and one set of identity rules.
-fn blocked_file(planned: &PlannedMod, provider: ModProvider) -> BlockedProviderFile {
+fn blocked_file(
+    planned: &PlannedMod,
+    provider: ModProvider,
+    side: PackSide,
+) -> BlockedProviderFile {
     let version = &planned.version;
     let file_id = match provider {
         ModProvider::CurseForge => Some(version.id.clone()),
@@ -275,8 +282,12 @@ fn blocked_file(planned: &PlannedMod, provider: ModProvider) -> BlockedProviderF
         hashes: version.file.hashes.clone(),
         relations: Some(crate::mods::recipe_relations(&version.dependencies)),
         // The user asked for this mod on this client, which is a fact about
-        // the instance rather than a claim about the project.
-        client: SideRequirement::Required,
+        // the instance rather than a claim about the project. On a server the
+        // client side is only what the catalog declared.
+        client: match side {
+            PackSide::Client => SideRequirement::Required,
+            PackSide::Server => crate::mods::side_requirement(planned.client_side()),
+        },
         server: crate::mods::side_requirement(planned.server_side()),
     }
 }
