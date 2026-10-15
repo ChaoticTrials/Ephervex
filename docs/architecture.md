@@ -1067,7 +1067,9 @@ root is recorded in the server's own retained recipe as an explicit choice, so i
 stays distinguishable from what the pack declared, and ownership is read back
 from that record rather than from the directory. Each target's mutation is the
 same undoable transaction; several targets are not one transaction, and the
-result is per target.
+result is per target. A running server is a valid target: the change lands in
+its `mods/` directory and takes effect on the next start, and a mod operation
+never starts, stops, or restarts a server.
 
 ## What a mod requires
 
