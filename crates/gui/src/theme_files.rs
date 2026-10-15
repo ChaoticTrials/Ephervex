@@ -743,6 +743,28 @@ mod tests {
     }
 
     #[test]
+    fn the_documented_example_branding_is_valid_once_uncommented() {
+        let uncommented: String = EXAMPLE
+            .lines()
+            .map(|line| match line {
+                "# [branding]" | "# logo = \"logo.png\"" | "# icon = \"icon.png\"" => &line[2..],
+                line => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_ne!(
+            uncommented,
+            EXAMPLE.trim_end(),
+            "the section is in the example"
+        );
+        let (theme, problems) = parse_theme("modrinth", &uncommented);
+        assert!(problems.is_empty(), "{problems:?}");
+        let branding = theme.expect("usable").branding;
+        assert_eq!(branding.logo.expect("logo").as_str(), "logo.png");
+        assert_eq!(branding.icon.expect("icon").as_str(), "icon.png");
+    }
+
+    #[test]
     fn every_color_a_theme_can_set_is_documented() {
         let guide = include_str!("../../../docs/themes.md");
         for token in PALETTE_COLORS {

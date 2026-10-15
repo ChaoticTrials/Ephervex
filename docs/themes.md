@@ -74,7 +74,8 @@ Colors are written as `"#rrggbb"`, or `"#rrggbbaa"` with an alpha channel, in
 hexadecimal. Nothing looser is accepted.
 
 `docs/themes/modrinth.toml` is a complete example that sets every color. Copy it
-into the themes folder to try it, or use it as a list of what can be set.
+into the themes folder to try it, or use it as a list of what can be set. It
+also holds a commented-out `[branding]` section for use in a theme folder.
 
 ## Colors
 
