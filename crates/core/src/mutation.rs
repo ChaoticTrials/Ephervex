@@ -57,7 +57,7 @@ use ephervex_mod_platform::{
 use ephervex_model::{AttentionReason, InstanceId, ModOrigin, ModProvider, ModRelationKind};
 use ephervex_pack::{
     ArtifactFetch, ManagedMutation, ManagedProject, ModIdentity, PackError, PackFileRecipe,
-    PackRecipe, ProviderFileIdentity, RecordedMod, RelationTarget, SourceStore,
+    PackRecipe, PackSide, ProviderFileIdentity, RecordedMod, RelationTarget, SourceStore,
 };
 use ephervex_storage::ClientRecord;
 use tokio_util::sync::CancellationToken;
@@ -504,7 +504,7 @@ impl App {
         // The catalog the mod was installed from, never a default: another
         // catalog's ids resolve to something else or to nothing.
         let provider = self.mod_provider(provider_kind)?;
-        let instance_target = target_for(&record);
+        let instance_target = crate::mods::CatalogHost::client(&record).target();
         let loader = ephervex_mod_platform::loader_name_for(provider, &instance_target)?;
         let project = provider.project(project_id, reporter, cancel).await?;
         let versions: Vec<_> = provider
@@ -611,7 +611,7 @@ impl App {
         {
             return Err(match &resolved {
                 Some(resolved) => {
-                    self.as_manual_acquisition(error, target, resolved, &game_dir)
+                    self.as_manual_acquisition(error, target, resolved, &game_dir, PackSide::Client)
                         .await
                 }
                 None => error,
@@ -709,7 +709,7 @@ impl App {
         };
 
         Ok(MutationContext {
-            target: target_for(&record),
+            target: crate::mods::CatalogHost::client(&record).target(),
             record,
             entry,
             recipe,
@@ -1364,11 +1364,6 @@ fn display_name(entry: &ManagedModEntry, plan: &ModInstallPlan) -> String {
     } else {
         plan.root.project.title.clone()
     }
-}
-
-/// The instance's exact Minecraft version and loader.
-fn target_for(record: &ClientRecord) -> InstanceTarget {
-    InstanceTarget::new(record.minecraft_version.clone(), record.loader.kind)
 }
 
 #[cfg(test)]

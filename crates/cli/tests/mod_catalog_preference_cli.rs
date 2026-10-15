@@ -173,7 +173,7 @@ fn a_catalog_a_newer_ephervex_recorded_is_kept_and_never_searched_past() {
 
     // Offline and immediate: the refusal happens before any catalog is asked
     // anything, rather than the search quietly moving to another one.
-    let refused = sandbox.run(&["--json", "mod", "search", &instance, "jei"]);
+    let refused = sandbox.run(&["--json", "mod", "search", "--instance", &instance, "jei"]);
     assert!(!refused.status.success());
     let reported = String::from_utf8_lossy(&refused.stderr);
     assert!(
@@ -212,6 +212,7 @@ fn naming_a_catalog_on_the_command_line_never_consults_the_setting() {
         "--json",
         "mod",
         "search",
+        "--instance",
         missing,
         "jei",
         "--provider",
@@ -224,7 +225,7 @@ fn naming_a_catalog_on_the_command_line_never_consults_the_setting() {
         "an explicitly named catalog never consults the preference: {reported}"
     );
 
-    let unnamed = sandbox.run(&["--json", "mod", "search", missing, "jei"]);
+    let unnamed = sandbox.run(&["--json", "mod", "search", "--instance", missing, "jei"]);
     assert!(!unnamed.status.success());
     assert!(
         String::from_utf8_lossy(&unnamed.stderr).contains("a-later-catalog"),

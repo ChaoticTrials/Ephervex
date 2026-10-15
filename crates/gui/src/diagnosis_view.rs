@@ -3,9 +3,9 @@
 
 use ephervex_core::{
     CoreError, DiagnosticFix, Finding, FindingClass, FindingKind, FixOutcome, FixPreview,
-    HostDiagnosis, InstalledHost, Integrity, IntegrityCheck, JavaCheck, JavaLayer, JavaMismatch,
-    JavaUnavailable, LoaderReportedRequirement, ProposedChange, RecommendedJava, RepairRefusal,
-    UnmetDependency, UnmetRequirement,
+    HostDiagnosis, Integrity, IntegrityCheck, JavaCheck, JavaLayer, JavaMismatch, JavaUnavailable,
+    LoaderReportedRequirement, ProposedChange, RecommendedJava, RepairRefusal, UnmetDependency,
+    UnmetRequirement,
 };
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use ephervex_model::ModProvider;
@@ -126,7 +126,7 @@ pub fn diagnosis_view(
     let (problems, customized) = diagnosis
         .findings
         .iter()
-        .map(|finding| finding_view(finding, mc, diagnosis.host))
+        .map(|finding| finding_view(finding, mc))
         .partition(|view| view.class == FindingClass::Problem);
     DiagnosisView {
         healthy: diagnosis.is_healthy(),
@@ -277,7 +277,7 @@ impl Card {
 }
 
 #[must_use]
-pub fn finding_view(finding: &Finding, mc: &str, host: InstalledHost) -> FindingView {
+pub fn finding_view(finding: &Finding, mc: &str) -> FindingView {
     let mut card = match &finding.kind {
         FindingKind::JavaIncompatible { .. }
         | FindingKind::JavaUnusable { .. }
@@ -291,9 +291,10 @@ pub fn finding_view(finding: &Finding, mc: &str, host: InstalledHost) -> Finding
         _ => other_card(&finding.kind),
     };
     let missing = missing_dependency(&finding.kind);
-    // Only a client installs from a catalog. A mod its host records is
-    // restored at the recorded release instead, never replaced by a newer one.
-    let install = match (missing, &finding.fix, host) {
+    // A mod its host records is restored at the recorded release instead,
+    // never replaced by a newer one. Only a mod nothing records is installed
+    // from a catalog, on a client and on a server alike.
+    let install = match (missing, &finding.fix) {
         (
             Some(UnmetDependency::Missing {
                 project_id: Some(project),
@@ -303,7 +304,6 @@ pub fn finding_view(finding: &Finding, mc: &str, host: InstalledHost) -> Finding
                 ..
             }),
             None,
-            InstalledHost::Instance(_),
         ) => Some((*provider, project.clone())),
         _ => None,
     };
@@ -995,10 +995,6 @@ mod tests {
 
     use super::*;
 
-    fn client() -> InstalledHost {
-        InstalledHost::Instance(ephervex_model::InstanceId::new())
-    }
-
     fn impacted(name: &str) -> ImpactedMod {
         ImpactedMod {
             logical_path: PathBuf::from("mods").join(format!("{name}.jar")),
@@ -1028,7 +1024,7 @@ mod tests {
             fix: None,
         };
 
-        let view = finding_view(&finding, "1.21.1", client());
+        let view = finding_view(&finding, "1.21.1");
 
         assert_eq!(view.class, FindingClass::Problem);
         assert_eq!(view.chain, ["Create", "Flywheel", "Registrate"]);
@@ -1062,7 +1058,7 @@ mod tests {
             fix: None,
         };
 
-        let view = finding_view(&finding, "1.20.1", client());
+        let view = finding_view(&finding, "1.20.1");
 
         assert_eq!(
             view.title,
@@ -1107,45 +1103,36 @@ mod tests {
             Some(path),
             Some(DiagnosticFix::RestoreFiles(vec![PathBuf::from(path)])),
         );
-        for host in [
-            client(),
-            InstalledHost::Server(ephervex_model::ServerId::new()),
-        ] {
-            let view = finding_view(&finding, "1.20.1", host);
-            assert_eq!(
-                view.fix_label,
-                lookup_args("gui-diagnosis-restore-mod", [("name", Arg::from("LibX"))])
-            );
-            assert_eq!(view.install, None);
-            assert!(
-                view.detail
-                    .contains(&lookup("gui-diagnosis-dependency-restore-detail"))
-            );
-        }
+        let view = finding_view(&finding, "1.20.1");
+        assert_eq!(
+            view.fix_label,
+            lookup_args("gui-diagnosis-restore-mod", [("name", Arg::from("LibX"))])
+        );
+        assert_eq!(view.install, None);
+        assert!(
+            view.detail
+                .contains(&lookup("gui-diagnosis-dependency-restore-detail"))
+        );
     }
 
     #[test]
-    fn an_unrecorded_missing_mod_is_installed_where_a_catalog_install_exists() {
+    fn an_unrecorded_missing_mod_is_installed_from_a_catalog_on_either_host() {
         let finding = missing_libx(None, None);
 
-        let view = finding_view(&finding, "1.20.1", client());
+        let view = finding_view(&finding, "1.20.1");
         assert_eq!(
             view.install,
-            Some((ModProvider::Modrinth, "qEH6GYul".to_owned()))
+            Some((ModProvider::Modrinth, "qEH6GYul".to_owned())),
+            "the host does not decide it: a server has a catalog install too"
         );
         assert!(
             view.detail
                 .contains(&lookup("gui-diagnosis-dependency-install-detail"))
         );
 
-        let view = finding_view(
-            &finding,
-            "1.20.1",
-            InstalledHost::Server(ephervex_model::ServerId::new()),
-        );
-        assert_eq!(view.install, None, "a server has no catalog install");
         assert!(
-            view.detail
+            !view
+                .detail
                 .contains(&lookup("gui-diagnosis-dependency-missing-detail"))
         );
     }
@@ -1165,7 +1152,7 @@ mod tests {
             fix: Some(DiagnosticFix::UseAutomaticJava),
         };
 
-        let view = finding_view(&finding, "1.21.1", client());
+        let view = finding_view(&finding, "1.21.1");
 
         assert_eq!(view.class, FindingClass::Customized);
         assert_eq!(view.fix_label, lookup("gui-diagnosis-use-recommended-java"));

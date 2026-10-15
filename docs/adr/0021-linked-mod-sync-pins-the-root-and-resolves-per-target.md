@@ -100,10 +100,12 @@ target is planned again from scratch before it is written to, with the same exac
 pin. A target that no longer holds is skipped with its reason rather than failing
 partway through a write.
 
-**A running server is refused, not stopped.** Changing a live server's mods has
-no proven safe mechanism here, and starting, stopping, or restarting a server as
-a side effect of a mod operation is not something a mod operation may do. The
-target reports that the server must be stopped, and the user retries.
+**A running server receives the change for its next start.** A server reads its
+`mods/` directory when it starts, so writing into it while the server runs
+changes what the next start loads and nothing else. Refusing instead would only
+move the same work to after a stop. A mod operation never starts, stops, or
+restarts a server: the change lands in `mods/`, the running process is left
+alone, and the result says the change takes effect on the next start.
 
 ## Consequences
 

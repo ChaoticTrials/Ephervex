@@ -469,7 +469,7 @@ mod tests {
     use std::sync::Arc;
 
     use ephervex_auth::MemoryStore;
-    use ephervex_mod_platform::ModDependency;
+    use ephervex_mod_platform::{ModDependency, SideSupport};
     use ephervex_model::{
         LoaderKind, LoaderSelection, ModRelationKind, SecretString, ServerRelativePath,
     };
@@ -636,6 +636,7 @@ mod tests {
             origin: ephervex_pack::ModOrigin::PackDeclared,
             identity: Some(curseforge_identity("238222", "4712354")),
             original_identity: None,
+            installed_despite_unsupported: None,
             relations: None,
         });
         store.write_recipe(&recipe).expect("write");
@@ -683,6 +684,8 @@ mod tests {
                 version_id: "wrong".to_owned(),
                 file_id: None,
                 dependencies: Vec::new(),
+                client_side: SideSupport::Unknown,
+                server_side: SideSupport::Unknown,
             },
         )]);
 
@@ -710,6 +713,8 @@ mod tests {
                 version_id: "vvvv".to_owned(),
                 file_id: None,
                 dependencies: Vec::new(),
+                client_side: SideSupport::Unknown,
+                server_side: SideSupport::Unknown,
             },
         )]);
 
@@ -986,6 +991,7 @@ mod tests {
                 origin: ephervex_pack::ModOrigin::PackDeclared,
                 identity: Some(curseforge_identity("238222", name)),
                 original_identity: None,
+                installed_despite_unsupported: None,
                 relations,
             });
         }

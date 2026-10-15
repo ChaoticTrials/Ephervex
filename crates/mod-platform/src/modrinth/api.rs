@@ -48,6 +48,7 @@ use tracing::debug;
 use super::PROJECT_TYPE;
 use super::cache_key::{CompatibilityFilter, ModrinthRequest};
 use super::dto::{RawProject, RawSearch, RawVersion};
+use super::mapping::environment_sides;
 use crate::error::{ModPlatformError, ModPlatformResult};
 use crate::model::{InstanceTarget, MAX_SEARCH_LIMIT, ModSearchQuery, RecognizedFile};
 
@@ -184,6 +185,7 @@ impl ModrinthApi {
             // under any other key is about a file nobody asked about.
             .filter(|(digest, _)| asked.contains(digest.as_str()))
             .map(|(digest, version)| {
+                let (client_side, server_side) = environment_sides(version.environment.as_deref());
                 (
                     digest,
                     RecognizedFile {
@@ -192,6 +194,8 @@ impl ModrinthApi {
                         version_id: version.id,
                         file_id: None,
                         dependencies: version.dependencies.into_iter().map(Into::into).collect(),
+                        client_side,
+                        server_side,
                     },
                 )
             })
@@ -231,6 +235,7 @@ impl ModrinthApi {
                         minecraft_version: &target.minecraft_version,
                         loader,
                     }),
+                    excluding_client_only: query.excludes_client_only(),
                 },
                 &url,
                 reporter,
@@ -385,6 +390,10 @@ impl ModrinthApi {
     }
 }
 
+/// The facet that drops projects declaring they do not run on a server, in
+/// Modrinth's `{type}{operation}{value}` facet syntax.
+const SERVER_UNSUPPORTED_EXCLUSION: &str = "server_side!=unsupported";
+
 /// The facets one search sends.
 ///
 /// The compatibility facets are dropped when the caller wants incompatible
@@ -395,6 +404,9 @@ fn facets(target: &InstanceTarget, query: &ModSearchQuery, loader: &str) -> Stri
     if !query.include_incompatible {
         groups.push(format!("[\"categories:{loader}\"]"));
         groups.push(format!("[\"versions:{}\"]", target.minecraft_version));
+    }
+    if query.excludes_client_only() {
+        groups.push(format!("[\"{SERVER_UNSUPPORTED_EXCLUSION}\"]"));
     }
     format!("[{}]", groups.join(","))
 }

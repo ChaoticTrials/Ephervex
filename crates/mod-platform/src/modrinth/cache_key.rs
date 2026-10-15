@@ -72,6 +72,9 @@ pub(super) enum ModrinthRequest<'a> {
         /// key that pretended otherwise would split one answer across every
         /// instance that asked for it.
         filter: Option<CompatibilityFilter<'a>>,
+        /// Whether projects declaring no server support were asked to be left
+        /// out. That changes which projects the page holds.
+        excluding_client_only: bool,
     },
     /// Several projects in one request.
     Projects { ids: &'a [String] },
@@ -115,6 +118,7 @@ impl ModrinthRequest<'_> {
                 limit,
                 offset,
                 filter,
+                excluding_client_only,
             } => {
                 let mut key = header("search");
                 field(&mut key, "query", text);
@@ -123,6 +127,9 @@ impl ModrinthRequest<'_> {
                 if let Some(filter) = filter {
                     field(&mut key, "game_version", filter.minecraft_version);
                     field(&mut key, "loader", filter.loader);
+                }
+                if *excluding_client_only {
+                    field(&mut key, "server_side", "!=unsupported");
                 }
                 key
             }
@@ -195,6 +202,7 @@ mod tests {
             text,
             limit: 10,
             offset: 0,
+            excluding_client_only: false,
             filter: Some(CompatibilityFilter {
                 minecraft_version: "1.20.1",
                 loader: "neoforge",
@@ -254,6 +262,7 @@ mod tests {
                 text: "jei",
                 limit: 25,
                 offset: 0,
+                excluding_client_only: false,
                 filter: Some(CompatibilityFilter {
                     minecraft_version: "1.20.1",
                     loader: "neoforge",
@@ -263,6 +272,7 @@ mod tests {
                 text: "jei",
                 limit: 10,
                 offset: 10,
+                excluding_client_only: false,
                 filter: Some(CompatibilityFilter {
                     minecraft_version: "1.20.1",
                     loader: "neoforge",
@@ -272,6 +282,7 @@ mod tests {
                 text: "jei",
                 limit: 10,
                 offset: 0,
+                excluding_client_only: false,
                 filter: Some(CompatibilityFilter {
                     minecraft_version: "1.21.1",
                     loader: "neoforge",
@@ -281,6 +292,7 @@ mod tests {
                 text: "jei",
                 limit: 10,
                 offset: 0,
+                excluding_client_only: false,
                 filter: Some(CompatibilityFilter {
                     minecraft_version: "1.20.1",
                     loader: "forge",
@@ -290,6 +302,7 @@ mod tests {
                 text: "jei",
                 limit: 10,
                 offset: 0,
+                excluding_client_only: false,
                 filter: None,
             },
         ];
@@ -318,6 +331,7 @@ mod tests {
                 text: &text,
                 limit: 10,
                 offset: 0,
+                excluding_client_only: false,
                 filter: Some(CompatibilityFilter {
                     minecraft_version: &String::from("1.20.1"),
                     loader: &String::from("neoforge"),
@@ -360,12 +374,14 @@ mod tests {
             text: "jei",
             limit: 10,
             offset: 0,
+            excluding_client_only: false,
             filter: None,
         };
         let empty = ModrinthRequest::Search {
             text: "jei",
             limit: 10,
             offset: 0,
+            excluding_client_only: false,
             filter: Some(CompatibilityFilter {
                 minecraft_version: "",
                 loader: "",
@@ -385,12 +401,14 @@ mod tests {
             text: "\nloader=forge",
             limit: 10,
             offset: 0,
+            excluding_client_only: false,
             filter: None,
         };
         let genuine = ModrinthRequest::Search {
             text: "",
             limit: 10,
             offset: 0,
+            excluding_client_only: false,
             filter: None,
         };
         assert_ne!(
@@ -398,5 +416,24 @@ mod tests {
             genuine.cache_key().expect("addressable")
         );
         assert!(!forged.canonical_key().contains("\nloader=forge\n"));
+    }
+
+    #[test]
+    fn asking_to_leave_out_client_only_mods_is_a_different_page() {
+        let narrowed = ModrinthRequest::Search {
+            text: "jei",
+            limit: 10,
+            offset: 0,
+            excluding_client_only: true,
+            filter: Some(CompatibilityFilter {
+                minecraft_version: "1.20.1",
+                loader: "neoforge",
+            }),
+        };
+
+        assert_ne!(
+            narrowed.cache_key().expect("addressable"),
+            search("jei").cache_key().expect("addressable")
+        );
     }
 }

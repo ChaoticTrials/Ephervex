@@ -42,7 +42,7 @@ use crate::install::{ArtifactFetch, copy_into_instance, fetch_all};
 use crate::mutate::{MutationRecoveryAction, MutationRecoveryIssue};
 use crate::path::{DestinationLinks, contained_join, is_reserved, safe_relative_path};
 use crate::recipe::{
-    OptionalSelection, PackFileRecipe, PackRecipe, PackSide, ProviderFileIdentity,
+    OptionalSelection, PackFileRecipe, PackRecipe, PackSide, ProviderFileIdentity, SideRequirement,
 };
 use crate::store::SourceStore;
 
@@ -511,29 +511,50 @@ pub(crate) fn settle_recorded_paths(
 }
 
 /// The recorded entry as it must read once the request installs it on `side`,
-/// or nothing when the record already takes that side.
+/// or nothing when the record already says everything the request declares.
 ///
-/// Only that side's requirement and the optional choice move. The path, origin,
-/// identity, relations and the other side's requirement stay as recorded.
+/// The installing side's requirement and the optional choice move when the
+/// record does not take that side. The other side moves only from undeclared to
+/// the request's declaration, and never when a choice was already recorded. The
+/// path, origin, identity and relations stay as recorded.
 pub(crate) fn recording_side(
     current: &PackFileRecipe,
     request: &PackFileRecipe,
     side: PackSide,
 ) -> Option<PackFileRecipe> {
     let none = OptionalSelection::none();
-    if !request.is_installed_on(side, &none) || current.is_installed_on(side, &none) {
-        return None;
-    }
-    let requirement = request.requirement(side);
     let mut recorded = current.clone();
-    match side {
-        PackSide::Client => recorded.client = requirement,
-        PackSide::Server => recorded.server = requirement,
+    let mut changed = false;
+    if request.is_installed_on(side, &none) && !current.is_installed_on(side, &none) {
+        let requirement = request.requirement(side);
+        match side {
+            PackSide::Client => recorded.client = requirement,
+            PackSide::Server => recorded.server = requirement,
+        }
+        if requirement.needs_decision() {
+            recorded.selected = request.selected;
+        }
+        if request.installed_despite_unsupported == Some(side) {
+            recorded.installed_despite_unsupported = Some(side);
+        }
+        changed = true;
     }
-    if requirement.needs_decision() {
-        recorded.selected = request.selected;
+    let other = match side {
+        PackSide::Client => PackSide::Server,
+        PackSide::Server => PackSide::Client,
+    };
+    let declared = request.requirement(other);
+    if current.selected.is_none()
+        && current.requirement(other) == SideRequirement::Unknown
+        && declared != SideRequirement::Unknown
+    {
+        match other {
+            PackSide::Client => recorded.client = declared,
+            PackSide::Server => recorded.server = declared,
+        }
+        changed = true;
     }
-    Some(recorded)
+    changed.then_some(recorded)
 }
 
 /// What a recorded mod's jar is on disk.

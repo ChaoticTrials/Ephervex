@@ -1,0 +1,171 @@
+// The catalog browser beside a host's mod list: one panel for a client and a
+// server, so the two cannot drift apart.
+
+import { ScrollView } from "std-widgets.slint";
+import { ModArtwork } from "../components/artwork.slint";
+import { AppButton, EmptyState, FilterChip, InlineToggle, Pill, TextField } from "../components/controls.slint";
+import { ValueComboBox } from "../components/selection.slint";
+import { ActionRow, BodyText, Heading, TooltipCard } from "../components/text.slint";
+import { GuiI18n } from "../globals.slint";
+import { HostView } from "../models.slint";
+import { Theme } from "../theme.slint";
+
+// A small mark on a result that explains itself on hover and to assistive
+// technology, because a bare glyph says nothing to either.
+component SupportBadge inherits Rectangle {
+    in property <string> glyph;
+    in property <string> description;
+    width: 22px;
+    height: 22px;
+    horizontal-stretch: 0;
+    border-radius: 11px;
+    border-width: 1px;
+    border-color: Theme.warning.with-alpha(0.55);
+    background: Theme.warning.with-alpha(0.12);
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.description;
+    Text {
+        text: root.glyph;
+        color: Theme.warning;
+        font-size: Theme.caption-size;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    TouchArea {}
+    Tooltip {
+        TooltipCard { text: root.description; }
+    }
+}
+
+export component ModBrowser inherits Rectangle {
+    in property <HostView> host;
+    in property <[string]> page-sizes;
+    in property <string> page-size-label;
+    // Whether this browser is for a server, which adds the choice to also list
+    // the mods a server cannot take.
+    property <bool> for-server: root.host.kind == "server";
+    callback switch-catalog(string);
+    callback search(string, string);
+    callback load-more(string, string, int);
+    callback install(string);
+    callback set-include-incompatible(bool);
+    callback set-page-size(string);
+    callback open-provider-settings();
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.surface;
+    VerticalLayout {
+        padding: 16px;
+        spacing: 10px;
+        Heading { text: GuiI18n.text("gui-add-mods"); }
+        BodyText {
+            text: root.for-server ? GuiI18n.text("gui-server-catalog-compatibility") : GuiI18n.text("gui-catalog-compatibility");
+            wrap: word-wrap;
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            cross-axis-alignment: center;
+            Text { text: GuiI18n.text("gui-mod-catalog"); color: Theme.text-secondary; font-size: Theme.label-size; vertical-alignment: center; }
+            FilterChip { text: GuiI18n.text("gui-provider-modrinth"); accessible-name: GuiI18n.text("gui-provider-modrinth"); selected: root.host.browser-provider == "modrinth"; clicked => { root.switch-catalog("modrinth"); } }
+            FilterChip { text: GuiI18n.text("gui-provider-curseforge"); accessible-name: GuiI18n.text("gui-provider-curseforge"); selected: root.host.browser-provider == "curseforge"; clicked => { root.switch-catalog("curseforge"); } }
+            Rectangle { horizontal-stretch: 1; }
+            Text { text: GuiI18n.text("gui-mod-results-per-page"); color: Theme.text-secondary; font-size: Theme.label-size; vertical-alignment: center; }
+            ValueComboBox { width: 92px; label: GuiI18n.text("gui-mod-results-per-page"); model: root.page-sizes; value: root.page-size-label; selected(value) => { root.set-page-size(value); } }
+        }
+        if root.for-server : InlineToggle {
+            label: GuiI18n.text("gui-show-incompatible-mods");
+            checked: root.host.browser-include-incompatible;
+            toggled(on) => { root.set-include-incompatible(on); }
+        }
+        ActionRow {
+            search-field := TextField {
+                property <string> submitted: root.host.browser-submitted;
+                changed submitted => { self.text = self.submitted; }
+                placeholder: GuiI18n.text("gui-search-compatible-mods");
+                input-type: InputType.search;
+                horizontal-stretch: 1;
+                init => { self.text = self.submitted; }
+                accepted => { root.search(root.host.browser-provider, self.text); }
+            }
+            AppButton {
+                text: GuiI18n.text("gui-search");
+                tone: "primary";
+                enabled: !root.host.browser-loading;
+                hint: GuiI18n.text("gui-hint-search-running");
+                clicked => { root.search(root.host.browser-provider, search-field.text); }
+            }
+        }
+        if root.host.browser-notice != "" : Rectangle {
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: Theme.danger;
+            background: Theme.background;
+            VerticalLayout {
+                padding: 10px;
+                spacing: 6px;
+                BodyText { text: root.host.browser-notice; color: Theme.text-secondary; wrap: word-wrap; }
+                if root.host.browser-provider == "curseforge" : HorizontalLayout {
+                    AppButton { text: GuiI18n.text("gui-open-providers-settings"); clicked => { root.open-provider-settings(); } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+            }
+        }
+        if root.host.browser-loading : BodyText { text: GuiI18n.text("gui-mod-search-running"); color: Theme.text-muted; }
+        if !root.host.browser-loading && root.host.browser-ran && root.host.browser-notice == "" && root.host.browser-results.length == 0 && root.host.browser-next-offset < 0 : EmptyState {
+            icon: @image-url("../../../../assets/icons/semantic-mod.svg");
+            title: GuiI18n.text("gui-no-mod-results");
+            message: root.for-server ? GuiI18n.text("gui-no-server-mod-results-detail") : GuiI18n.text("gui-no-mod-results-detail");
+        }
+        ScrollView {
+            VerticalLayout {
+                spacing: 8px;
+                for mod in root.host.browser-results : Rectangle {
+                    height: 92px;
+                    clip: true;
+                    border-radius: 6px;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    background: Theme.background;
+                    HorizontalLayout {
+                        padding: 10px;
+                        spacing: 11px;
+                        VerticalLayout { alignment: center; ModArtwork { icon: mod.icon; origin-kind: "user"; } }
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Heading { text: mod.title; font-size: Theme.row-heading-size; overflow: elide; horizontal-stretch: 1; }
+                                if mod.server-support == "unknown" : SupportBadge { glyph: "?"; description: GuiI18n.text("gui-mod-server-support-unstated"); }
+                                if mod.server-support == "client-only" : Pill { text: GuiI18n.text("gui-mod-client-only"); tone-color: Theme.text-muted; content-height: 22px; }
+                            }
+                            BodyText { text: mod.description; wrap: word-wrap; overflow: elide; vertical-alignment: top; height: Theme.body-size * 2.7; }
+                            BodyText { text: GuiI18n.values("gui-mod-result-meta", mod.author, mod.note); color: Theme.text-muted; overflow: elide; }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            AppButton {
+                                width: 120px;
+                                text: mod.installed ? GuiI18n.text("gui-mod-result-installed") : mod.queued ? GuiI18n.text("gui-mod-result-queued") : GuiI18n.text("gui-install");
+                                tone: mod.installed || mod.queued ? "secondary" : "primary";
+                                enabled: !mod.installed && !mod.queued && mod.blocked-reason == "";
+                                hint: mod.installed ? GuiI18n.text("gui-hint-mod-already-installed") : mod.queued ? GuiI18n.text("gui-hint-mod-already-queued") : mod.blocked-reason;
+                                clicked => { root.install(mod.project-id); }
+                            }
+                        }
+                    }
+                }
+                if root.host.browser-next-offset >= 0 : HorizontalLayout {
+                    alignment: center;
+                    AppButton {
+                        text: GuiI18n.text("gui-load-more");
+                        enabled: !root.host.browser-loading;
+                        hint: GuiI18n.text("gui-hint-results-loading");
+                        clicked => { root.load-more(root.host.browser-search-provider, root.host.browser-submitted, root.host.browser-next-offset); }
+                    }
+                }
+            }
+        }
+    }
+}

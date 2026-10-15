@@ -246,6 +246,17 @@ not another host header or navigation structure. More than one host workspace
 can therefore be composed by a parent without teaching its surfaces about that
 parent.
 
+A server's Mods surface carries the same catalog browser as a client's, and it
+is absent for a Vanilla server and for one whose base installation is not
+complete. A result whose server side the catalog never stated is marked with a
+"?" and a hover and accessible label saying so. "Show incompatible mods" lists
+client-only mods marked "Client only" with Install disabled and the reason
+stated. Installing opens a confirmation when a mod, or one it needs, has an
+unstated server side or is a client-only required dependency, and otherwise
+installs at once; a running server's confirmation says the change applies at its
+next start. Diagnostics offers the same install, through the same confirmation,
+for a proven-missing dependency a server does not record.
+
 ### Split workspace
 
 The workspace can be split into two to four panes, each showing one host and
@@ -971,6 +982,29 @@ query rather than filtering locally, because a filter would remove the rows that
 need annotating. Per-search version lookups are bounded, and the page size is
 clamped.
 
+A search for a server also leaves out mods declared client-only. Modrinth is
+asked to exclude projects declaring no server support, and both catalogs then
+drop any hit whose newest fitting release is declared unsupported on a server,
+by the release's own declaration where it has one. CurseForge has no environment
+filter, so a page can come back short; the next offset follows the page the
+provider returned, not the hits that survived. A hit whose server support is
+undeclared stays and is reported as undeclared, never as confirmed. Showing
+incompatible results widens the query instead: client-only mods are returned and
+marked, and are not installable on a server.
+
+A server is an install target in its own right (ADR 0045). Its target is the
+server's own Minecraft version and loader, its installed set is its own recipe,
+and nothing about a linked client is read or written, so the flow works with no
+client at all and a linked client's files and records are left exactly as they
+were. Installing onto a server needs a confirmation naming every mod, the root or
+a dependency, whose server support the catalog never stated, and records it as an
+explicit choice. A required dependency declared client-only is installed anyway,
+with a warning naming it and the mod that needs it, and is recorded as installed
+on the server beside the declaration it keeps. A root declared client-only is
+refused. A running server receives the change for its next start. The command
+line names either host with `--instance` or `--server`, and
+`--accept-unknown-server-support` is its form of the confirmation.
+
 Exact selections are preserved. A pinned version that does not fit is refused
 rather than moved to a neighboring release, two mods pinning one project to
 different versions is a conflict rather than an arbitration, and a required
@@ -998,10 +1032,14 @@ an explicit refresh rather than part of listing, because listing has to stay a
 directory read. Modrinth is asked first there, by the SHA-1 the launcher
 computes, and CurseForge second by fingerprint - the reverse of a server archive
 (ADR 0024), which is a CurseForge problem by construction. A jar a catalog
-recognizes is recorded in the recipe with its identity, `client` required and
-`server` undeclared, so creating a server asks about it in the same way it asks
-about a CurseForge pack's own files rather than assuming. A jar nothing
-recognizes stays listed and unrecorded.
+recognizes is recorded in the recipe with its identity and the sides the
+recognized release declares: the host it was found on holds the jar, so that
+side is recorded as taken, and the other side takes the release's declaration.
+Where the release declares nothing the other side stays undeclared, so creating
+a server asks about it in the same way it asks about a CurseForge pack's own
+files rather than assuming. A declaration is never invented, and one already
+recorded is never replaced. A jar nothing recognizes stays listed and
+unrecorded.
 
 An instance's mods are one list, and each entry carries its ownership and the
 completeness of its provider identity as separate typed facts (ADR 0019). An
@@ -1067,7 +1105,9 @@ root is recorded in the server's own retained recipe as an explicit choice, so i
 stays distinguishable from what the pack declared, and ownership is read back
 from that record rather than from the directory. Each target's mutation is the
 same undoable transaction; several targets are not one transaction, and the
-result is per target.
+result is per target. A running server is a valid target: the change lands in
+its `mods/` directory and takes effect on the next start, and a mod operation
+never starts, stops, or restarts a server.
 
 ## What a mod requires
 
@@ -1089,6 +1129,12 @@ one answered that the file needs nothing. Anything built on this distinguishes
 them, because a mod nothing has asked about is unknown rather than independent,
 and a warning that treats it as independent is confidently wrong rather than
 merely incomplete.
+
+A side declared `unsupported` normally means the file is not installed there. A
+file that is installed on such a side anyway keeps the declaration and also
+records the side it was placed on, so that host's mod list, verification, repair,
+and dependency graph count it as installed while the catalog's statement stays
+visible. Nothing else reads an unsupported side as installed.
 
 Installing a mod through a catalog records them, because the resolver already
 has the release's declared dependencies in hand and used to drop them; the same
@@ -1563,8 +1609,8 @@ is a review question rather than something already released.
 
 The supported scope includes Linux, Minecraft release versions from 1.12.2
 onward, Vanilla, Forge, NeoForge, Modrinth and CurseForge pack import, Modrinth
-and CurseForge mod browsing with dependency resolution, and linked-server
-reconstruction from retained recipes, plus launching a linked client directly
+and CurseForge mod browsing with dependency resolution, direct mod installation
+onto a server, and linked-server reconstruction from retained recipes, plus launching a linked client directly
 into a local managed server. Logs, crash reports, and launcher diagnostics are
 inspectable through `ephervex-core`, the CLI, and the GUI. CurseForge pack
 import and CurseForge browsing need a user-supplied API key and cannot obtain a

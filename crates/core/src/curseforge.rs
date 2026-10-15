@@ -1172,6 +1172,146 @@ mod browsing {
             .collect()
     }
 
+    /// A server created on its own: installed, stopped, linked to nothing.
+    fn standalone_server(app: &App) -> ephervex_model::ServerId {
+        let mut record = app
+            .registry_for_services()
+            .prepare_server(ephervex_storage::NewServer::new(
+                "CurseForge server",
+                "1.20.1",
+                LoaderSelection::exact(LoaderKind::NeoForge, "47.1.106"),
+            ))
+            .expect("prepare");
+        record.installation = ephervex_model::ServerInstallation::Installed {
+            launch: ephervex_model::ServerLaunch::Jar {
+                path: ephervex_model::ServerRelativePath::new("server.jar").expect("launch path"),
+            },
+        };
+        let staging = record.root.with_extension("staging");
+        std::fs::create_dir_all(ephervex_storage::metadata::server_game_dir(&staging).join("mods"))
+            .expect("mods dir");
+        app.registry_for_services()
+            .publish_staged_server(&record, &staging)
+            .expect("publish");
+        record.id
+    }
+
+    fn server_jars(app: &App, server: ephervex_model::ServerId) -> Vec<String> {
+        let root = app.server(server).expect("server").root;
+        let mut names: Vec<String> =
+            std::fs::read_dir(ephervex_storage::metadata::server_game_dir(&root).join("mods"))
+                .expect("mods dir")
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect();
+        names.sort();
+        names
+    }
+
+    /// The catalog states no server side for these fixtures, so installing
+    /// them on a server is the caller's confirmed choice.
+    fn confirmed(request: ModInstallRequest) -> ModInstallRequest {
+        request.confirming_server_support([
+            ROOT_PROJECT.to_string(),
+            LIBRARY_PROJECT.to_string(),
+            RESTRICTED_PROJECT.to_string(),
+        ])
+    }
+
+    #[tokio::test]
+    async fn a_server_installs_a_curseforge_mod_and_its_dependency_with_no_linked_client() {
+        let server = catalog().await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_against(base.path(), &server);
+        let target = standalone_server(&app);
+
+        app.install_mods(
+            crate::mods::InstalledHost::Server(target),
+            &confirmed(request(ROOT_PROJECT).at_version(ROOT_NEWEST.to_string())),
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("an install onto the server");
+
+        assert_eq!(
+            server_jars(&app, target),
+            [
+                file_name(ROOT_PROJECT, ROOT_NEWEST),
+                file_name(LIBRARY_PROJECT, LIBRARY_FILE)
+            ]
+        );
+        let root = app.server(target).expect("server").root;
+        let recipe = ephervex_pack::SourceStore::new(ephervex_storage::metadata::source_dir(&root))
+            .read_recipe()
+            .expect("the server's own recipe");
+        for project in [ROOT_PROJECT, LIBRARY_PROJECT] {
+            let entry = recipe
+                .managed_project(ModProvider::CurseForge, &project.to_string())
+                .expect("recorded");
+            assert!(entry.is_installed_on(
+                ephervex_pack::PackSide::Server,
+                &ephervex_pack::OptionalSelection::none()
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_restricted_file_on_a_server_asks_for_a_manual_download_with_the_catalogs_sides() {
+        let server = catalog().await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_against(base.path(), &server);
+        let target = standalone_server(&app);
+
+        let error = app
+            .install_mods(
+                crate::mods::InstalledHost::Server(target),
+                &confirmed(request(RESTRICTED_PROJECT).at_version(RESTRICTED_NEWER.to_string())),
+                &reporter(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("the bytes are nowhere yet");
+
+        let crate::error::CoreError::ModAcquisitionRestricted { blocked, .. } = &error else {
+            panic!("a dead-end provider failure instead of the manual path: {error:?}");
+        };
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(
+            blocked[0].client,
+            ephervex_pack::SideRequirement::Unknown,
+            "a server install does not claim the client requires the mod"
+        );
+        assert_eq!(blocked[0].server, ephervex_pack::SideRequirement::Unknown);
+        assert!(blocked[0].browser_url.is_some());
+        assert!(artifact_requests(&server).await.is_empty());
+        assert!(server_jars(&app, target).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_cached_restricted_release_installs_on_a_server_without_a_browser() {
+        let server = catalog().await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_against(base.path(), &server);
+        let target = standalone_server(&app);
+        seed_cache(&app, RESTRICTED_PROJECT, RESTRICTED_NEWER);
+
+        app.install_mods(
+            crate::mods::InstalledHost::Server(target),
+            &confirmed(request(RESTRICTED_PROJECT).at_version(RESTRICTED_NEWER.to_string())),
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("a verified cached copy is used");
+
+        assert_eq!(
+            server_jars(&app, target),
+            [file_name(RESTRICTED_PROJECT, RESTRICTED_NEWER)]
+        );
+        assert!(artifact_requests(&server).await.is_empty());
+    }
+
     #[tokio::test]
     async fn a_restricted_project_manages_like_any_other_mod() {
         let server = catalog().await;

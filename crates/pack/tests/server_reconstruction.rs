@@ -42,6 +42,7 @@ fn file(
         origin: ModOrigin::PackDeclared,
         identity: None,
         original_identity: None,
+        installed_despite_unsupported: None,
         relations: None,
     }
 }

@@ -276,6 +276,13 @@ pub enum PlanWarning {
     /// and second-guessing a deliberate reproduction step is not this
     /// launcher's job.
     ClientSideUnsupported { project_id: String },
+    /// A required dependency declares that it does not run on a server, and a
+    /// server install still puts it there because the mod that needs it cannot
+    /// load without it.
+    ServerSideUnsupported {
+        project_id: String,
+        required_by: Vec<String>,
+    },
     /// An `incompatible` relation naming a bare file, which cannot be checked
     /// against the graph.
     UncheckableConflict {
@@ -292,6 +299,7 @@ impl PlanWarning {
     pub const fn message_id(&self) -> &'static str {
         match self {
             Self::ClientSideUnsupported { .. } => "mod-warning-client-side-unsupported",
+            Self::ServerSideUnsupported { .. } => "mod-warning-server-side-unsupported",
             Self::UncheckableConflict { .. } => "mod-warning-uncheckable-conflict",
             Self::OptionalNotOffered { .. } => "mod-warning-optional-not-offered",
         }
@@ -320,6 +328,17 @@ pub struct ModInstallPlan {
 }
 
 impl ModInstallPlan {
+    /// The planned mods, root first, whose release and project both leave the
+    /// server side undeclared. Installing one on a server is an explicit choice,
+    /// not something the catalog confirmed.
+    #[must_use]
+    pub fn undeclared_server_support(&self) -> Vec<&PlannedMod> {
+        self.all_mods()
+            .into_iter()
+            .filter(|planned| planned.server_side() == crate::model::SideSupport::Unknown)
+            .collect()
+    }
+
     /// The root plus its dependencies, in installation order.
     #[must_use]
     pub fn all_mods(&self) -> Vec<&PlannedMod> {

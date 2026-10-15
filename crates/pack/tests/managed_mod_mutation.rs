@@ -141,6 +141,7 @@ fn entry(
             file_id: None,
         }),
         original_identity: None,
+        installed_despite_unsupported: None,
         relations: None,
     }
 }

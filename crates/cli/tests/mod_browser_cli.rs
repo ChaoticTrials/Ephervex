@@ -319,10 +319,41 @@ fn a_catalog_can_be_chosen_and_an_unknown_one_is_refused() {
     let refused = sandbox.run(&[
         "mod",
         "search",
+        "--instance",
         "00000000-0000-4000-8000-000000000000",
         "jei",
         "--provider",
         "nowhere",
     ]);
     assert!(!refused.status.success());
+}
+
+#[test]
+fn catalog_commands_name_a_client_or_a_server_and_say_so_in_their_help() {
+    let sandbox = Sandbox::new();
+    for command in ["search", "show", "plan", "install"] {
+        let help = sandbox.run(&["mod", command, "--help"]);
+        assert!(help.status.success(), "{command}");
+        let text = String::from_utf8_lossy(&help.stdout);
+        assert!(text.contains("--instance"), "{command}: {text}");
+        assert!(text.contains("--server"), "{command}: {text}");
+    }
+    let install = sandbox.run(&["mod", "install", "--help"]);
+    let text = String::from_utf8_lossy(&install.stdout);
+    assert!(text.contains("--accept-unknown-server-support"), "{text}");
+    assert!(text.contains("client"), "{text}");
+
+    let top = sandbox.run(&["--help"]);
+    assert!(top.status.success());
+
+    let positional = sandbox.run(&[
+        "mod",
+        "search",
+        "00000000-0000-4000-8000-000000000000",
+        "jei",
+    ]);
+    assert!(
+        !positional.status.success(),
+        "the instance is named with --instance or --server"
+    );
 }

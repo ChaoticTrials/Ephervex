@@ -176,6 +176,10 @@ pub struct RecognizedFile {
     /// What this exact release declares, read the same way the mod browser
     /// reads it. Empty when the catalog answered that it declares nothing.
     pub dependencies: Vec<ModDependency>,
+    /// The sides this exact release declares. `Unknown` means the catalog
+    /// stated nothing about the side for this file.
+    pub client_side: SideSupport,
+    pub server_side: SideSupport,
 }
 
 /// How stable a release claims to be.
@@ -369,6 +373,16 @@ impl Compatibility {
     }
 }
 
+/// The side of the game a search installs onto.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum HostSide {
+    /// A client instance. Results are not narrowed by declared side support.
+    #[default]
+    Client,
+    /// A dedicated server. Mods declared client-only are left out.
+    Server,
+}
+
 /// What a caller is searching for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModSearchQuery {
@@ -378,6 +392,9 @@ pub struct ModSearchQuery {
     /// Whether to return projects that do not fit the instance, annotated with
     /// why. Off by default: the common case is "show me what I can install".
     pub include_incompatible: bool,
+    /// The side the results are for. Narrows results only while incompatible
+    /// results are not requested, like the version and loader filters.
+    pub side: HostSide,
 }
 
 /// The largest page this launcher asks a provider for.
@@ -399,7 +416,20 @@ impl ModSearchQuery {
             limit: DEFAULT_SEARCH_LIMIT,
             offset: 0,
             include_incompatible: false,
+            side: HostSide::Client,
         }
+    }
+
+    #[must_use]
+    pub const fn for_side(mut self, side: HostSide) -> Self {
+        self.side = side;
+        self
+    }
+
+    /// Whether results declared client-only are left out of this search.
+    #[must_use]
+    pub const fn excludes_client_only(&self) -> bool {
+        matches!(self.side, HostSide::Server) && !self.include_incompatible
     }
 
     /// Sets the page size, clamped to [`MAX_SEARCH_LIMIT`].
@@ -435,6 +465,24 @@ pub struct ModSearchHit {
     pub best_version: Option<ModVersionInfo>,
     /// Why the project does not fit, when nothing of it does.
     pub compatibility: Compatibility,
+}
+
+impl ModSearchHit {
+    /// The client and server support of the release an install would default
+    /// to, or of the project where no release fits.
+    #[must_use]
+    pub fn effective_sides(&self) -> (SideSupport, SideSupport) {
+        self.best_version.as_ref().map_or(
+            (self.project.client_side, self.project.server_side),
+            |version| version.effective_sides(&self.project),
+        )
+    }
+
+    /// Whether the hit declares that it does not run on a server.
+    #[must_use]
+    pub fn is_client_only(&self) -> bool {
+        self.effective_sides().1 == SideSupport::Unsupported
+    }
 }
 
 /// A page of search results.

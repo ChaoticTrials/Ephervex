@@ -47,7 +47,7 @@ use ephervex_core::{
     RequirementBasis, RoundAnswer, RuntimeClassification, RuntimeInventory, SearchOptions,
     SecretString, ServerCommitWarning, ServerContentSource, ServerCreateOptions, ServerEvent,
     ServerExit, ServerFolder, ServerNetworkChange, ServerObserver, ServerPersistenceHealth,
-    ServerRecord, ServerWarning, Session, SharedArtifactReport, SideRequirement, SkipReason,
+    ServerRecord, ServerWarning, Session, SharedArtifactReport, SideSupport, SkipReason,
     SnapshotOrigin, SnapshotRecord, SnapshotRestoreOptions, StartedServerLifetime,
     SuspectConfidence, SuspectReason, TerminationRequests, TextAnchor, TextView,
     UnknownServerFiles, UnverifiedOptional, VerificationReport, VersionMetadata, VersionRecord,
@@ -356,10 +356,14 @@ fn catalog_or_preference(app: &App, named: Option<CatalogArg>) -> anyhow::Result
 /// Minecraft version and mod loader.
 #[derive(Debug, Subcommand)]
 enum ModCommand {
-    /// Search a mod catalog for mods that fit an instance.
+    /// Search a mod catalog for mods that fit a client or a server.
+    ///
+    /// Results are judged against the exact Minecraft version and loader of
+    /// the instance or server you name. Searching for a server leaves out mods
+    /// that declare they do not run on one.
     Search {
-        /// The client instance the results are judged against.
-        instance: InstanceId,
+        #[command(flatten)]
+        host: HostArgs,
         /// What to search for.
         query: String,
         /// Which catalog to search. Defaults to your preferred catalog.
@@ -374,13 +378,15 @@ enum ModCommand {
         /// Also list mods that do not fit, with the reason each one does not.
         ///
         /// They are shown so you can see why the mod you were looking for is
-        /// not offered. They still cannot be installed.
+        /// not offered. They still cannot be installed. For a server this
+        /// includes mods that only run on a client.
         #[arg(long)]
         include_incompatible: bool,
     },
-    /// Show a mod and the versions available for an instance.
+    /// Show a mod and the versions available for a client or a server.
     Show {
-        instance: InstanceId,
+        #[command(flatten)]
+        host: HostArgs,
         /// The mod, by its project id or slug in the chosen catalog.
         project: String,
         /// Which catalog the mod is on. Defaults to your preferred catalog.
@@ -396,8 +402,8 @@ enum ModCommand {
     /// Reports the version that would be installed, every dependency that
     /// comes with it, and the optional ones you could add. Writes nothing.
     Plan {
-        /// The client instance the mod would be installed into.
-        instance: InstanceId,
+        #[command(flatten)]
+        host: HostArgs,
         /// The mod, by its project id or slug in the chosen catalog.
         project: String,
         #[command(flatten)]
@@ -405,16 +411,28 @@ enum ModCommand {
     },
     /// Install a mod and everything it requires.
     ///
-    /// The newest version that fits the instance is chosen unless you name
-    /// one. Required dependencies are installed with it; optional ones are not,
-    /// unless you ask for them.
+    /// The newest version that fits the instance or server is chosen unless
+    /// you name one. Required dependencies are installed with it; optional ones
+    /// are not, unless you ask for them.
+    ///
+    /// Installing onto a server touches that server only, and works with no
+    /// linked client. A mod that runs only on a client is refused, and a
+    /// required dependency that runs only on a client is installed with a
+    /// warning because the mod that needs it cannot load without it. A running
+    /// server picks the change up on its next start.
     Install {
-        /// The client instance to install into.
-        instance: InstanceId,
+        #[command(flatten)]
+        host: HostArgs,
         /// The mod, by its project id or slug in the chosen catalog.
         project: String,
         #[command(flatten)]
         selection: ModSelectionArgs,
+        /// Install onto a server even when the catalog does not say whether
+        /// the mod, or a mod it needs, runs on a server.
+        ///
+        /// Without it, such an install is refused and the mods are named.
+        #[arg(long)]
+        accept_unknown_server_support: bool,
     },
     /// Show or set which catalog mod commands use when none is named.
     ///
@@ -749,8 +767,8 @@ struct ModSelectionArgs {
     provider: Option<CatalogArg>,
     /// Install this exact version instead of the newest compatible one.
     ///
-    /// Preserved exactly. If it does not fit the instance, the install is
-    /// refused rather than moved to a nearby release.
+    /// Preserved exactly. If it does not fit the instance or server, the
+    /// install is refused rather than moved to a nearby release.
     #[arg(long)]
     version: Option<String>,
     /// Also install this optional dependency, by its project id.
@@ -4191,7 +4209,7 @@ fn list_servers(app: &App, json: bool) -> anyhow::Result<()> {
 async fn run_mod_command(app: &mut App, command: &ModCommand, json: bool) -> anyhow::Result<()> {
     match command {
         ModCommand::Search {
-            instance,
+            host,
             query,
             provider,
             limit,
@@ -4203,18 +4221,19 @@ async fn run_mod_command(app: &mut App, command: &ModCommand, json: bool) -> any
                 .from_offset(*offset)
                 .including_incompatible(*include_incompatible);
             let catalog = catalog_or_preference(app, *provider)?;
-            let results = app.search_mods(*instance, catalog, &query).await?;
-            print_mod_search(&results, json);
+            let host = host.host()?;
+            let results = app.search_mods(host, catalog, &query).await?;
+            print_mod_search(&results, host, json);
         }
         ModCommand::Show {
-            instance,
+            host,
             project,
             provider,
             include_incompatible,
         } => {
             return run_mod_show(
                 app,
-                *instance,
+                host.host()?,
                 project,
                 *provider,
                 *include_incompatible,
@@ -4223,15 +4242,16 @@ async fn run_mod_command(app: &mut App, command: &ModCommand, json: bool) -> any
             .await;
         }
         ModCommand::Plan {
-            instance,
+            host,
             project,
             selection,
-        } => return run_mod_plan(app, *instance, project, selection, json).await,
+        } => return run_mod_plan(app, host.host()?, project, selection, json).await,
         ModCommand::Install {
-            instance,
+            host,
             project,
             selection,
-        } => return run_mod_install(app, *instance, project, selection, json).await,
+            accept_unknown_server_support: accept,
+        } => return run_mod_install(app, host.host()?, project, selection, *accept, json).await,
         ModCommand::Catalog { catalog, clear } => {
             run_mod_catalog(app, *catalog, *clear, json)?;
         }
@@ -4894,41 +4914,86 @@ fn print_mod_states(applied: &[(PathBuf, ModPresence)], json: bool) {
 /// Works out what installing one mod would do, without doing it.
 async fn run_mod_plan(
     app: &App,
-    instance: InstanceId,
+    host: InstalledHost,
     project: &str,
     selection: &ModSelectionArgs,
     json: bool,
 ) -> anyhow::Result<()> {
     let catalog = catalog_or_preference(app, selection.provider)?;
     let plan = app
-        .plan_mod_installation(instance, &selection.request(project, catalog))
+        .plan_mod_installation(host, &selection.request(project, catalog))
         .await?;
-    print_mod_plan(&plan, json);
+    print_mod_plan(&plan, host, json);
     Ok(())
 }
 
-/// Installs one mod, and whatever it needs, into an instance.
+/// Installs one mod, and whatever it needs, into an instance or a server.
+///
+/// A server install needs the caller to have said that mods whose catalog never
+/// stated server support belong there. The plan is read first so those mods can
+/// be named, and so the refusal happens before anything is written.
 async fn run_mod_install(
     app: &App,
-    instance: InstanceId,
+    host: InstalledHost,
     project: &str,
     selection: &ModSelectionArgs,
+    accept_unknown_server_support: bool,
     json: bool,
 ) -> anyhow::Result<()> {
     let catalog = catalog_or_preference(app, selection.provider)?;
-    let request = selection.request(project, catalog);
+    let mut request = selection.request(project, catalog);
+    if matches!(host, InstalledHost::Server(_)) {
+        let plan = app.plan_mod_installation(host, &request).await?;
+        let unconfirmed = plan.undeclared_server_support();
+        if !unconfirmed.is_empty() {
+            if !accept_unknown_server_support {
+                anyhow::bail!(
+                    "{}\n{}",
+                    ephervex_i18n::lookup_args(
+                        "mod-install-server-support-unconfirmed",
+                        [("mods", MessageArg::from(mod_names(&unconfirmed).join(", ")))],
+                    ),
+                    ephervex_i18n::lookup_attribute(
+                        "mod-install-server-support-unconfirmed",
+                        "action"
+                    )
+                    .unwrap_or_default()
+                );
+            }
+            request = request.confirming_server_support(
+                unconfirmed
+                    .iter()
+                    .map(|planned| planned.project.id.clone())
+                    .collect::<Vec<_>>(),
+            );
+        }
+    }
     let reporter = OperationReporter::silent("installing-mods");
     let installed = app
-        .install_mods(instance, &request, &reporter, &CancellationToken::new())
+        .install_mods(host, &request, &reporter, &CancellationToken::new())
         .await?;
-    print_installed_mods(&installed, json);
+    print_installed_mods(&installed, host, json);
     Ok(())
+}
+
+/// The display names of planned mods, falling back to the project id.
+fn mod_names(planned: &[&PlannedMod]) -> Vec<String> {
+    planned
+        .iter()
+        .map(|planned| {
+            if planned.project.title.is_empty() {
+                planned.project.id.clone()
+            } else {
+                planned.project.title.clone()
+            }
+        })
+        .collect()
 }
 
 /// Shows one mod and the releases available for an instance.
 async fn run_mod_show(
     app: &App,
-    instance: InstanceId,
+    host: InstalledHost,
     project: &str,
     provider: Option<CatalogArg>,
     include_incompatible: bool,
@@ -4936,7 +5001,7 @@ async fn run_mod_show(
 ) -> anyhow::Result<()> {
     let catalog = catalog_or_preference(app, provider)?;
     let details = app
-        .mod_project(instance, catalog, project, include_incompatible)
+        .mod_project(host, catalog, project, include_incompatible)
         .await?;
     print_mod_project(&details, json);
     Ok(())
@@ -5292,7 +5357,7 @@ fn optional_unverified_text(candidate: &OptionalCandidate) -> Option<String> {
     })
 }
 
-fn print_mod_search(results: &ModSearchResults, json: bool) {
+fn print_mod_search(results: &ModSearchResults, host: InstalledHost, json: bool) {
     if json {
         print_json(&serde_json::json!({
             "provider": results.provider.as_str(),
@@ -5306,6 +5371,7 @@ fn print_mod_search(results: &ModSearchResults, json: bool) {
                 "author": hit.project.author,
                 "client_side": hit.project.client_side.to_string(),
                 "server_side": hit.project.server_side.to_string(),
+                "effective_server_side": hit.effective_sides().1.to_string(),
                 "best_version": hit.best_version.as_ref().map(|version| serde_json::json!({
                     "id": version.id,
                     "version_number": version.version_number,
@@ -5328,6 +5394,20 @@ fn print_mod_search(results: &ModSearchResults, json: bool) {
     for hit in &results.hits {
         outln!("{}  {}", hit.project.id, hit.project.title);
         outln!("  {}", hit.project.description);
+        if matches!(host, InstalledHost::Server(_)) {
+            match hit.effective_sides().1 {
+                SideSupport::Unknown => {
+                    outln!(
+                        "  {}",
+                        ephervex_i18n::lookup("mod-search-server-support-unstated")
+                    );
+                }
+                SideSupport::Unsupported => {
+                    outln!("  {}", ephervex_i18n::lookup("mod-search-client-only"));
+                }
+                SideSupport::Required | SideSupport::Optional => {}
+            }
+        }
         match &hit.best_version {
             Some(version) => outln!("  version: {} ({})", version.version_number, version.id),
             None => {
@@ -5417,6 +5497,16 @@ fn warning_text(warning: &PlanWarning) -> String {
             warning.message_id(),
             [("project", MessageArg::from(project_id.as_str()))],
         ),
+        PlanWarning::ServerSideUnsupported {
+            project_id,
+            required_by,
+        } => ephervex_i18n::lookup_args(
+            warning.message_id(),
+            [
+                ("project", MessageArg::from(project_id.as_str())),
+                ("required_by", MessageArg::from(required_by.join(", "))),
+            ],
+        ),
         PlanWarning::UncheckableConflict {
             declared_by,
             file_name,
@@ -5434,7 +5524,7 @@ fn warnings_json(warnings: &[PlanWarning]) -> Vec<String> {
     warnings.iter().map(warning_text).collect()
 }
 
-fn print_mod_plan(plan: &ModInstallPlan, json: bool) {
+fn print_mod_plan(plan: &ModInstallPlan, host: InstalledHost, json: bool) {
     if json {
         print_json(&serde_json::json!({
             "provider": plan.provider.as_str(),
@@ -5463,24 +5553,43 @@ fn print_mod_plan(plan: &ModInstallPlan, json: bool) {
                 "project_id": installed.project_id,
                 "version_id": installed.version_id,
             })).collect::<Vec<_>>(),
+            "unconfirmed_server_support": plan
+                .undeclared_server_support()
+                .iter()
+                .map(|planned| planned.project.id.clone())
+                .collect::<Vec<_>>(),
             "warnings": warnings_json(&plan.warnings),
         }));
         return;
     }
 
+    let server = matches!(host, InstalledHost::Server(_));
     outln!(
-        "{}  {}  ({})",
+        "{}  {}  ({}){}",
         plan.root.version.project_id,
         plan.root.project.title,
-        plan.root.version.version_number
+        plan.root.version.version_number,
+        server_side_suffix(&plan.root, server)
     );
     for planned in &plan.dependencies {
         outln!(
-            "  + {}  {}  ({})",
+            "  + {}  {}  ({}){}",
             planned.version.project_id,
             planned.project.title,
-            planned.version.version_number
+            planned.version.version_number,
+            server_side_suffix(planned, server)
         );
+    }
+    if server {
+        for name in mod_names(&plan.undeclared_server_support()) {
+            outln!(
+                "  ? {}",
+                ephervex_i18n::lookup_args(
+                    "mod-plan-server-support-unstated",
+                    [("name", MessageArg::from(name.as_str()))]
+                )
+            );
+        }
     }
     for candidate in &plan.optional {
         // Unchecked by default, and shown as such rather than hidden.
@@ -5502,6 +5611,15 @@ fn print_mod_plan(plan: &ModInstallPlan, json: bool) {
     }
     for warning in &plan.warnings {
         eprintln!("{}", warning_text(warning));
+    }
+}
+
+/// The server side a planned mod's catalog declared, for a server's output.
+fn server_side_suffix(planned: &PlannedMod, server: bool) -> String {
+    if server {
+        format!("  server: {}", planned.server_side())
+    } else {
+        String::new()
     }
 }
 
@@ -5562,7 +5680,7 @@ fn installed_mods_json(installed: &InstalledMods) -> serde_json::Value {
     })
 }
 
-fn print_installed_mods(installed: &InstalledMods, json: bool) {
+fn print_installed_mods(installed: &InstalledMods, host: InstalledHost, json: bool) {
     if json {
         print_json(&installed_mods_json(installed));
         return;
@@ -5570,6 +5688,19 @@ fn print_installed_mods(installed: &InstalledMods, json: bool) {
 
     for line in installation_lines(&installed.plan.root.project.title, &installed.installation) {
         outln!("{line}");
+    }
+    if matches!(host, InstalledHost::Server(_)) {
+        for planned in installed.plan.all_mods() {
+            outln!(
+                "  {}{}",
+                if planned.project.title.is_empty() {
+                    planned.project.id.as_str()
+                } else {
+                    planned.project.title.as_str()
+                },
+                server_side_suffix(planned, true)
+            );
+        }
     }
     for warning in &installed.plan.warnings {
         eprintln!("{}", warning_text(warning));
@@ -7499,7 +7630,7 @@ fn print_recipe(
         outln!("file:      {}", terminal_safe(&file.display_name()));
     }
     for file in &recipe.files {
-        if file.requirement(side) == SideRequirement::Unsupported {
+        if file.is_excluded_from(side) {
             outln!("excluded:  {}", terminal_safe(&file.display_name()));
         }
     }
@@ -9583,6 +9714,78 @@ mod tests {
             clap::error::ErrorKind::ArgumentConflict,
             "the conflict must be caught at the argument-parsing boundary, before any pack is read"
         );
+    }
+
+    const SERVER_ID: &str = "22222222-2222-4222-8222-222222222222";
+
+    #[test]
+    fn every_catalog_command_accepts_a_client_or_a_server_and_refuses_neither_or_both() {
+        for command in ["search", "show", "plan", "install"] {
+            let argument = if command == "search" {
+                "jei"
+            } else {
+                "jei-project"
+            };
+            for flag in [("--instance", INSTANCE_ID), ("--server", SERVER_ID)] {
+                Cli::try_parse_from(["ephervex", "mod", command, flag.0, flag.1, argument])
+                    .unwrap_or_else(|error| panic!("{command} {}: {error}", flag.0));
+            }
+            assert!(
+                Cli::try_parse_from(["ephervex", "mod", command, argument]).is_err(),
+                "{command} needs a host"
+            );
+            assert!(
+                Cli::try_parse_from([
+                    "ephervex",
+                    "mod",
+                    command,
+                    "--instance",
+                    INSTANCE_ID,
+                    "--server",
+                    SERVER_ID,
+                    argument,
+                ])
+                .is_err(),
+                "{command} takes one host"
+            );
+        }
+    }
+
+    #[test]
+    fn an_install_onto_a_server_reads_the_unknown_support_confirmation() {
+        let cli = Cli::try_parse_from([
+            "ephervex",
+            "mod",
+            "install",
+            "--server",
+            SERVER_ID,
+            "--accept-unknown-server-support",
+            "jei",
+        ])
+        .expect("valid install");
+        let Command::Mod {
+            command:
+                ModCommand::Install {
+                    host,
+                    accept_unknown_server_support,
+                    ..
+                },
+        } = cli.command
+        else {
+            panic!("expected mod install");
+        };
+        assert!(matches!(host.host(), Ok(InstalledHost::Server(_))));
+        assert!(accept_unknown_server_support);
+    }
+
+    #[test]
+    fn a_client_only_dependency_warning_names_the_dependency_and_the_mod_that_needs_it() {
+        let text = warning_text(&PlanWarning::ServerSideUnsupported {
+            project_id: "CLIENTLIB".to_owned(),
+            required_by: vec!["ROOTPROJ".to_owned(), "OTHERPROJ".to_owned()],
+        });
+        assert!(text.contains("CLIENTLIB"), "{text}");
+        assert!(text.contains("ROOTPROJ, OTHERPROJ"), "{text}");
     }
 
     #[test]

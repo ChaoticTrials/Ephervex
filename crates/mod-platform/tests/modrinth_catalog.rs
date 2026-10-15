@@ -15,7 +15,7 @@ use ephervex_download::{
     CacheLayout, DownloadManager, DownloaderConfig, HttpConfig, OperationReporter, RetryPolicy,
 };
 use ephervex_mod_platform::{
-    InstallSelection, InstanceTarget, ModDependency, ModPlatformError, ModProviderApi,
+    HostSide, InstallSelection, InstanceTarget, ModDependency, ModPlatformError, ModProviderApi,
     ModSearchQuery, ModrinthProvider, ResolveRequest, SideSupport, resolve,
 };
 use ephervex_model::{Hash, HashAlgorithm, LoaderKind, ModProvider, ModRelationKind};
@@ -861,6 +861,43 @@ async fn installed_files_are_recognized_by_digest_in_one_request() {
     );
 }
 
+/// The recognized release's own `environment` is carried with the answer, and a
+/// release declaring none stays undeclared rather than becoming a yes.
+#[tokio::test]
+async fn a_recognized_release_carries_the_sides_its_environment_declares() {
+    let catalog = Catalog::start().await;
+    let server_only = "a".repeat(40);
+    let silent = "b".repeat(40);
+    Mock::given(method("POST"))
+        .and(path("/v2/version_files"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+            r#"{{"{server_only}":{{"id":"v1","project_id":"P1","environment":"server_only","date_published":"2024-01-01T00:00:00Z","files":[]}},"{silent}":{{"id":"v2","project_id":"P2","date_published":"2024-01-01T00:00:00Z","files":[]}}}}"#
+        )))
+        .mount(&catalog.server)
+        .await;
+
+    let digests = vec![
+        Hash::new(HashAlgorithm::Sha1, &server_only).expect("sha1"),
+        Hash::new(HashAlgorithm::Sha1, &silent).expect("sha1"),
+    ];
+    let recognized = catalog
+        .provider
+        .recognize(&digests, &CancellationToken::new())
+        .await
+        .expect("the lookup answers");
+
+    let declared = &recognized[&server_only];
+    assert_eq!(
+        (declared.client_side, declared.server_side),
+        (SideSupport::Unsupported, SideSupport::Required)
+    );
+    let undeclared = &recognized[&silent];
+    assert_eq!(
+        (undeclared.client_side, undeclared.server_side),
+        (SideSupport::Unknown, SideSupport::Unknown)
+    );
+}
+
 /// What a recognition request asked for, read back from the loopback capture.
 async fn recognition_requests(catalog: &Catalog) -> Vec<(String, Vec<String>)> {
     catalog
@@ -1671,4 +1708,202 @@ async fn a_search_hit_is_offered_when_a_release_owned_by_another_project_cannot_
         .find(|hit| hit.project.id == "FITSPROJ")
         .expect("the project still has an installable release");
     assert_eq!(hit.best_version.as_ref().expect("a version").id, "FITSOLD1");
+}
+
+// -- searching for a server ----------------------------------------------
+
+fn side_hit(id: &str, client: &str, server: &str) -> String {
+    format!(
+        r#"{{"project_id":"{id}","slug":"{id}","title":"{id}","description":"","author":"a",
+            "client_side":"{client}","server_side":"{server}","project_type":"mod",
+            "categories":["neoforge"],"versions":["1.20.1"]}}"#
+    )
+}
+
+fn side_versions(id: &str, environment: Option<&str>) -> String {
+    let environment =
+        environment.map_or_else(String::new, |value| format!(r#""environment":"{value}","#));
+    format!(
+        r#"[{{"id":"{id}V1","project_id":"{id}","name":"v1","version_number":"1.0.0",
+            "version_type":"release","game_versions":["1.20.1"],"loaders":["neoforge"],
+            "date_published":"2026-01-01T00:00:00Z",{environment}
+            "files":[{{"hashes":{{"sha1":"da39a3ee5e6b4b0d3255bfef95601890afd80709"}},
+                       "url":"https://cdn.modrinth.com/data/{id}/versions/{id}V1/{id}.jar",
+                       "filename":"{id}.jar","primary":true,"size":1}}],
+            "dependencies":[]}}]"#
+    )
+}
+
+/// A page of four hits, each about one way a side can be declared.
+async fn side_catalog() -> Catalog {
+    let hits = [
+        side_hit("BOTHPROJ", "required", "required"),
+        side_hit("PROJECTCLIENT", "required", "unsupported"),
+        side_hit("RELEASECLIENT", "required", "required"),
+        side_hit("UNSTATED", "required", "unknown"),
+    ]
+    .join(",");
+    let page = format!(r#"{{"hits":[{hits}],"offset":0,"limit":10,"total_hits":40}}"#);
+    Catalog::start()
+        .await
+        .serving("/v2/search", page)
+        .await
+        .serving(
+            "/v2/project/BOTHPROJ/version",
+            side_versions("BOTHPROJ", None),
+        )
+        .await
+        .serving(
+            "/v2/project/PROJECTCLIENT/version",
+            side_versions("PROJECTCLIENT", None),
+        )
+        .await
+        .serving(
+            "/v2/project/RELEASECLIENT/version",
+            side_versions("RELEASECLIENT", Some("client_only")),
+        )
+        .await
+        .serving(
+            "/v2/project/UNSTATED/version",
+            side_versions("UNSTATED", None),
+        )
+        .await
+}
+
+async fn search_ids(catalog: &Catalog, query: &ModSearchQuery) -> Vec<String> {
+    catalog
+        .provider
+        .search(&target(), query, &reporter(), &CancellationToken::new())
+        .await
+        .expect("search")
+        .hits
+        .into_iter()
+        .map(|hit| hit.project.id)
+        .collect()
+}
+
+#[tokio::test]
+async fn a_server_search_asks_upstream_to_leave_out_projects_declaring_no_server_support() {
+    let catalog = side_catalog().await;
+
+    search_ids(
+        &catalog,
+        &ModSearchQuery::new("test").for_side(HostSide::Server),
+    )
+    .await;
+
+    let facets = catalog.sent_facets().await;
+    assert!(
+        facets.contains(r#"["server_side!=unsupported"]"#),
+        "{facets}"
+    );
+    assert!(facets.contains(r#"["versions:1.20.1"]"#));
+}
+
+#[tokio::test]
+async fn a_client_search_sends_no_side_facet() {
+    let catalog = side_catalog().await;
+
+    search_ids(&catalog, &ModSearchQuery::new("test")).await;
+
+    assert!(!catalog.sent_facets().await.contains("server_side"));
+}
+
+#[tokio::test]
+async fn a_server_search_hides_client_only_mods_declared_by_the_project_or_by_the_release() {
+    let catalog = side_catalog().await;
+
+    let ids = search_ids(
+        &catalog,
+        &ModSearchQuery::new("test").for_side(HostSide::Server),
+    )
+    .await;
+
+    assert_eq!(
+        ids,
+        ["BOTHPROJ", "UNSTATED"],
+        "the project's own client-only declaration and a client-only release are both hidden"
+    );
+}
+
+#[tokio::test]
+async fn a_server_search_keeps_a_mod_with_no_stated_server_side_and_says_so() {
+    let catalog = side_catalog().await;
+
+    let results = catalog
+        .provider
+        .search(
+            &target(),
+            &ModSearchQuery::new("test").for_side(HostSide::Server),
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("search");
+
+    let sides = |id: &str| {
+        results
+            .hits
+            .iter()
+            .find(|hit| hit.project.id == id)
+            .expect("a hit")
+            .effective_sides()
+            .1
+    };
+    assert_eq!(sides("UNSTATED"), SideSupport::Unknown);
+    assert_eq!(sides("BOTHPROJ"), SideSupport::Required);
+}
+
+#[tokio::test]
+async fn showing_incompatible_results_for_a_server_keeps_client_only_mods_and_sends_no_side_facet()
+{
+    let catalog = side_catalog().await;
+
+    let results = catalog
+        .provider
+        .search(
+            &target(),
+            &ModSearchQuery::new("test")
+                .for_side(HostSide::Server)
+                .including_incompatible(true),
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("search");
+
+    assert_eq!(catalog.sent_facets().await, r#"[["project_type:mod"]]"#);
+    let client_only: Vec<&str> = results
+        .hits
+        .iter()
+        .filter(|hit| hit.is_client_only())
+        .map(|hit| hit.project.id.as_str())
+        .collect();
+    assert_eq!(client_only, ["PROJECTCLIENT", "RELEASECLIENT"]);
+    assert_eq!(results.hits.len(), 4);
+}
+
+#[tokio::test]
+async fn a_server_search_continues_from_the_raw_page_not_from_what_survived_the_filter() {
+    let catalog = side_catalog().await;
+
+    let results = catalog
+        .provider
+        .search(
+            &target(),
+            &ModSearchQuery::new("test")
+                .for_side(HostSide::Server)
+                .limited(10),
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("search");
+
+    assert_eq!(results.hits.len(), 2);
+    assert_eq!(
+        results.next_offset,
+        Some(4),
+        "the provider returned four hits, so the next page starts after four"
+    );
 }

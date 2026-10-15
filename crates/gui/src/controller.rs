@@ -955,6 +955,8 @@ enum ImportPhase {
 /// completion both come back under.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BrowserInstall {
+    /// Whether `instance` names a server rather than a client.
+    server: bool,
     instance: String,
     provider: String,
     project: String,
@@ -3676,12 +3678,10 @@ fn register_mod_browser(ui: &AppWindow, commands: &Sender<Command>, workspace: &
     let sender = commands.clone();
     let handle = ui.as_weak();
     let browsers = workspace.clone();
-    ui.on_search_mods(move |instance, provider, query| {
-        let (Some(ui), Some(instance)) = (handle.upgrade(), backend::parse_instance_id(&instance))
-        else {
+    ui.on_search_mods(move |kind, id, provider, query| {
+        let (Some(ui), Some(host)) = (handle.upgrade(), backend::parse_mod_host(&kind, &id)) else {
             return;
         };
-        let host = InstalledHost::Instance(instance);
         let command = browsers.mods.borrow_mut().search(
             host,
             &provider,
@@ -3696,12 +3696,10 @@ fn register_mod_browser(ui: &AppWindow, commands: &Sender<Command>, workspace: &
     let sender = commands.clone();
     let handle = ui.as_weak();
     let browsers = workspace.clone();
-    ui.on_load_more_mods(move |instance, provider, query, offset| {
-        let (Some(ui), Some(instance)) = (handle.upgrade(), backend::parse_instance_id(&instance))
-        else {
+    ui.on_load_more_mods(move |kind, id, provider, query, offset| {
+        let (Some(ui), Some(host)) = (handle.upgrade(), backend::parse_mod_host(&kind, &id)) else {
             return;
         };
-        let host = InstalledHost::Instance(instance);
         let command = browsers.mods.borrow_mut().load_more(
             host,
             &provider,
@@ -3715,13 +3713,36 @@ fn register_mod_browser(ui: &AppWindow, commands: &Sender<Command>, workspace: &
     });
 
     let browsers = workspace.clone();
-    ui.on_switch_mod_catalog(move |instance, provider| {
-        if let Some(instance) = backend::parse_instance_id(&instance) {
-            let host = InstalledHost::Instance(instance);
-            if browsers.mods.borrow_mut().switch_catalog(host, &provider) {
-                mod_views::publish(&browsers, &browsers.mods.borrow(), host);
-            }
+    ui.on_switch_mod_catalog(move |kind, id, provider| {
+        if let Some(host) = backend::parse_mod_host(&kind, &id)
+            && browsers.mods.borrow_mut().switch_catalog(host, &provider)
+        {
+            mod_views::publish(&browsers, &browsers.mods.borrow(), host);
         }
+    });
+
+    let sender = commands.clone();
+    let handle = ui.as_weak();
+    let browsers = workspace.clone();
+    ui.on_set_mod_include_incompatible(move |kind, id, on| {
+        let (Some(ui), Some(host)) = (handle.upgrade(), backend::parse_mod_host(&kind, &id)) else {
+            return;
+        };
+        let asked_again = browsers
+            .mods
+            .borrow_mut()
+            .set_include_incompatible(host, on);
+        let command = if asked_again {
+            browsers.mods.borrow_mut().repeat_search(
+                host,
+                &browsers.browser.search_requests,
+                ui.get_mod_page_size(),
+            )
+        } else {
+            None
+        };
+        mod_views::publish(&browsers, &browsers.mods.borrow(), host);
+        mod_views::send_if(&sender, command);
     });
 
     let lists = workspace.clone();
@@ -3864,15 +3885,32 @@ fn apply_minecraft_selection(ui: &AppWindow, form: &str, minecraft: &str) {
 /// staleness bookkeeping.
 fn register_browser_install(ui: &AppWindow, commands: &Sender<Command>, workspace: &Workspace) {
     let sender = commands.clone();
+    ui.on_install_server_mod(
+        move |server, provider, project, version, confirmed_support| {
+            if let Some(command) = server_install_command(
+                &server,
+                &provider,
+                &project,
+                &version,
+                confirmed_support.iter().map(|id| id.to_string()).collect(),
+                true,
+            ) {
+                send(&sender, command);
+            }
+        },
+    );
+
+    let sender = commands.clone();
     let install_workspace = workspace.clone();
     let install_queue = Rc::clone(&workspace.browser);
-    ui.on_install_from_browser(move |instance, provider, project| {
-        if backend::parse_instance_id(&instance).is_none()
+    ui.on_install_from_browser(move |kind, instance, provider, project| {
+        if backend::parse_mod_host(&kind, &instance).is_none()
             || ModProvider::parse(&provider).is_none()
         {
             return;
         }
         let request = BrowserInstall {
+            server: kind == "server",
             instance: instance.to_string(),
             provider: provider.to_string(),
             project: project.to_string(),
@@ -3889,13 +3927,14 @@ fn register_browser_install(ui: &AppWindow, commands: &Sender<Command>, workspac
     let sender = commands.clone();
     let install_workspace = workspace.clone();
     let install_queue = Rc::clone(&workspace.browser);
-    ui.on_install_from_diagnostics(move |instance, provider, project| {
-        if backend::parse_instance_id(&instance).is_none()
+    ui.on_install_from_diagnostics(move |kind, instance, provider, project| {
+        if backend::parse_mod_host(&kind, &instance).is_none()
             || ModProvider::parse(&provider).is_none()
         {
             return;
         }
         let request = BrowserInstall {
+            server: kind == "server",
             instance: instance.to_string(),
             provider: provider.to_string(),
             project: project.to_string(),
@@ -3927,10 +3966,23 @@ fn register_browser_install(ui: &AppWindow, commands: &Sender<Command>, workspac
 /// The request is identified by the queue alone. Whatever dialog is open belongs
 /// to the user, so nothing here reads or writes its host or its selections.
 fn start_browser_install(commands: &Sender<Command>, request: &BrowserInstall) {
-    let (Some(instance), Some(catalog)) = (
-        backend::parse_instance_id(&request.instance),
-        ModProvider::parse(&request.provider),
-    ) else {
+    let Some(catalog) = ModProvider::parse(&request.provider) else {
+        return;
+    };
+    if request.server {
+        if let Some(server) = backend::parse_server_id(&request.instance) {
+            send(
+                commands,
+                Command::PlanServerMod {
+                    server,
+                    provider: catalog,
+                    project: request.project.clone(),
+                },
+            );
+        }
+        return;
+    }
+    let Some(instance) = backend::parse_instance_id(&request.instance) else {
         return;
     };
     send(
@@ -4103,6 +4155,26 @@ fn install_command(
         project: project.to_owned(),
         version: version.to_owned(),
         servers,
+        confirmed,
+    })
+}
+
+/// The install of one exact release onto a server. `confirmed_support` names
+/// the projects whose undeclared server support the user agreed to.
+fn server_install_command(
+    server: &str,
+    provider: &str,
+    project: &str,
+    version: &str,
+    confirmed_support: Vec<String>,
+    confirmed: bool,
+) -> Option<Command> {
+    Some(Command::InstallServerMod {
+        server: backend::parse_server_id(server)?,
+        provider: ModProvider::parse(provider)?,
+        project: project.to_owned(),
+        version: version.to_owned(),
+        confirmed_support,
         confirmed,
     })
 }
@@ -7643,11 +7715,13 @@ fn apply_event(
         Event::ModResults(results) => apply_mod_results(workspace, results, commands),
         Event::ModPlan(plan) => apply_mod_install_plan(ui, plan, workspace, commands),
         Event::ModInstallFinished {
+            server,
             instance,
             provider,
             project,
         } => {
             let finished = BrowserInstall {
+                server,
                 instance,
                 provider,
                 project,
@@ -7658,11 +7732,13 @@ fn apply_event(
         // The question will never be answered, so whatever asked it stops
         // waiting. The reason itself already arrived as an error.
         Event::ModPlanFailed {
+            server,
             instance,
             provider,
             requested,
         } => {
             let abandoned = BrowserInstall {
+                server,
                 instance,
                 provider,
                 project: requested,
@@ -9561,15 +9637,13 @@ fn apply_mod_results(
     results: backend::ModResultsData,
     commands: &Sender<Command>,
 ) {
-    let host = backend::parse_instance_id(&results.instance).map(InstalledHost::Instance);
+    let host = results.host;
     let next = workspace.mods.borrow_mut().apply_results(
         results,
         &workspace.browser.installs.borrow(),
         &workspace.browser.search_requests,
     );
-    if let Some(host) = host {
-        mod_views::publish(workspace, &workspace.mods.borrow(), host);
-    }
+    mod_views::publish(workspace, &workspace.mods.borrow(), host);
     mod_views::send_if(commands, next);
 }
 
@@ -9602,13 +9676,62 @@ enum PlanDisposition {
 /// should also receive the mod is a choice, and a choice needs the panel that
 /// offers it.
 fn plan_disposition(direct: bool, plan: &backend::ModPlanData) -> PlanDisposition {
-    if !direct || !plan.linked.targets.is_empty() {
+    // A server install also stops for what the catalog never stated or says
+    // does not run on a server, because those are the user's decisions.
+    if !direct
+        || !plan.linked.targets.is_empty()
+        || !plan.unstated.is_empty()
+        || !plan.client_only.is_empty()
+    {
         return PlanDisposition::Confirm;
     }
     if plan.install_count == 0 {
         return PlanDisposition::NothingToDo;
     }
     PlanDisposition::Install
+}
+
+/// Puts a plan in the confirmation dialog, addressed to the host it installs on.
+fn show_install_confirmation(ui: &AppWindow, plan: backend::ModPlanData) {
+    ui.set_mod_action_host(plan.instance.as_str().into());
+    ui.set_mod_action_path(SharedString::default());
+    ui.set_mod_plan_kind(if plan.server { "server" } else { "client" }.into());
+    ui.set_mod_plan_unstated(model(
+        plan.unstated
+            .iter()
+            .map(|(_, name)| SharedString::from(name.as_str()))
+            .collect(),
+    ));
+    ui.set_mod_plan_unstated_ids(model(
+        plan.unstated
+            .iter()
+            .map(|(id, _)| SharedString::from(id.as_str()))
+            .collect(),
+    ));
+    ui.set_mod_plan_client_only(model(
+        plan.client_only
+            .iter()
+            .map(|line| SharedString::from(line.as_str()))
+            .collect(),
+    ));
+    ui.set_mod_plan_restart_note(if plan.server && plan.running {
+        lookup("gui-server-mod-plan-restart").into()
+    } else {
+        SharedString::default()
+    });
+    ui.set_mod_plan_instance(plan.instance.into());
+    ui.set_mod_plan_provider(plan.provider.into());
+    ui.set_mod_plan_project(plan.project.into());
+    ui.set_mod_plan_title(plan.title.into());
+    ui.set_mod_plan_version(plan.version.into());
+    ui.set_mod_plan_version_id(plan.version_id.into());
+    ui.set_mod_plan_install_count(to_i32(plan.install_count));
+    ui.set_mod_plan_dependency_count(to_i32(plan.dependency_count));
+    ui.set_mod_plan_optional_count(to_i32(plan.optional_count));
+    ui.set_mod_plan_existing_count(to_i32(plan.already_installed_count));
+    ui.set_mod_plan_warning_count(to_i32(plan.warning_count));
+    apply_linked_section(ui, plan.linked);
+    ui.set_mod_action_pending(false);
 }
 
 fn apply_mod_install_plan(
@@ -9622,6 +9745,7 @@ fn apply_mod_install_plan(
     // request that was abandoned or already ended has no one to show it to.
     // What dialog is open, and for which instance, has no say in that.
     let awaited = BrowserInstall {
+        server: plan.server,
         instance: plan.instance.clone(),
         provider: plan.provider.clone(),
         project: plan.requested.clone(),
@@ -9647,14 +9771,26 @@ fn apply_mod_install_plan(
             // the next one may not start while this one is writing the recipe.
             // Nothing was offered, so no linked server was chosen, whatever
             // rows an open dialog holds.
-            let Some(command) = install_command(
-                &plan.instance,
-                &plan.provider,
-                &plan.project,
-                &plan.version_id,
-                Vec::new(),
-                false,
-            ) else {
+            let command = if plan.server {
+                server_install_command(
+                    &plan.instance,
+                    &plan.provider,
+                    &plan.project,
+                    &plan.version_id,
+                    Vec::new(),
+                    false,
+                )
+            } else {
+                install_command(
+                    &plan.instance,
+                    &plan.provider,
+                    &plan.project,
+                    &plan.version_id,
+                    Vec::new(),
+                    false,
+                )
+            };
+            let Some(command) = command else {
                 retire();
                 return;
             };
@@ -9690,21 +9826,7 @@ fn apply_mod_install_plan(
     // No dialog is open here, so the confirmation can take the dialog
     // addressing. Left as an earlier dialog set it, a late answer for that
     // closed dialog would replace this confirmation and strand the queue.
-    ui.set_mod_action_host(plan.instance.as_str().into());
-    ui.set_mod_action_path(SharedString::default());
-    ui.set_mod_plan_instance(plan.instance.into());
-    ui.set_mod_plan_provider(plan.provider.into());
-    ui.set_mod_plan_project(plan.project.into());
-    ui.set_mod_plan_title(plan.title.into());
-    ui.set_mod_plan_version(plan.version.into());
-    ui.set_mod_plan_version_id(plan.version_id.into());
-    ui.set_mod_plan_install_count(to_i32(plan.install_count));
-    ui.set_mod_plan_dependency_count(to_i32(plan.dependency_count));
-    ui.set_mod_plan_optional_count(to_i32(plan.optional_count));
-    ui.set_mod_plan_existing_count(to_i32(plan.already_installed_count));
-    ui.set_mod_plan_warning_count(to_i32(plan.warning_count));
-    apply_linked_section(ui, plan.linked);
-    ui.set_mod_action_pending(false);
+    show_install_confirmation(ui, plan);
     ui.set_modal("mod-plan".into());
     ui.set_modal_error(SharedString::default());
 }
@@ -9914,6 +10036,8 @@ fn mod_search_rows(rows: Vec<ModSearchData>) -> Vec<ModSearchRow> {
             // page arrives unmarked and is marked by the two passes below.
             installed: false,
             queued: false,
+            server_support: row.server_support.into(),
+            blocked_reason: row.blocked_reason.into(),
         })
         .collect()
 }
@@ -14681,7 +14805,7 @@ mod tests {
     #[test]
     fn modrinth_search_does_not_reuse_the_server_filter() {
         let source = ui_markup();
-        assert!(source.contains("root.search-mods(host.id, host.browser-provider, self.text)"));
+        assert!(source.contains("root.search(root.host.browser-provider, self.text)"));
         assert!(source.contains("text <=> root.server-query"));
         assert!(!source.contains("root.server-query)"));
     }
@@ -14996,6 +15120,7 @@ mod tests {
                     })
                     .collect(),
             },
+            ..backend::ModPlanData::default()
         }
     }
 
@@ -15332,12 +15457,14 @@ mod tests {
             let instance = ephervex_model::InstanceId::new().to_string();
             if from_diagnostics {
                 ui.invoke_install_from_diagnostics(
+                    "client".into(),
                     instance.as_str().into(),
                     "modrinth".into(),
                     "utilitix".into(),
                 );
             } else {
                 ui.invoke_install_from_browser(
+                    "client".into(),
                     instance.as_str().into(),
                     "modrinth".into(),
                     "utilitix".into(),
@@ -15381,9 +15508,197 @@ mod tests {
         }
     }
 
+    fn server_plan(server: &str, project: &str, unstated: &[(&str, &str)]) -> backend::ModPlanData {
+        backend::ModPlanData {
+            server: true,
+            instance: server.to_owned(),
+            provider: "modrinth".to_owned(),
+            requested: project.to_owned(),
+            project: project.to_owned(),
+            title: "UtilitiX".to_owned(),
+            version: "21.1.6".to_owned(),
+            version_id: "abcd1234".to_owned(),
+            install_count: 1,
+            unstated: unstated
+                .iter()
+                .map(|(id, name)| ((*id).to_owned(), (*name).to_owned()))
+                .collect(),
+            ..backend::ModPlanData::default()
+        }
+    }
+
+    #[test]
+    fn a_server_plan_with_undeclared_support_or_a_client_only_dependency_is_confirmed() {
+        assert_eq!(
+            plan_disposition(true, &server_plan("server", "utilitix", &[])),
+            PlanDisposition::Install
+        );
+        assert_eq!(
+            plan_disposition(true, &server_plan("server", "utilitix", &[("lib", "Lib")])),
+            PlanDisposition::Confirm
+        );
+        let mut client_only = server_plan("server", "utilitix", &[]);
+        client_only.client_only = vec!["Lib does not run on a server.".to_owned()];
+        assert_eq!(
+            plan_disposition(true, &client_only),
+            PlanDisposition::Confirm
+        );
+    }
+
+    /// A server's install is planned against the server and installed on it. No
+    /// command the client's flow uses is issued, and the confirmation sends
+    /// exactly the mods it named.
+    #[test]
+    fn a_server_install_issues_only_server_commands() {
+        let server = ephervex_model::ServerId::new().to_string();
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        register_browser_install(&ui, &workspace.commands, &workspace);
+        register_mod_mutations(&ui, &workspace.commands, &workspace);
+
+        ui.invoke_install_from_browser(
+            "server".into(),
+            server.as_str().into(),
+            "modrinth".into(),
+            "utilitix".into(),
+        );
+        let planned: Vec<Command> = commands.try_iter().collect();
+        assert!(
+            matches!(planned.as_slice(), [Command::PlanServerMod { project, .. }] if project == "utilitix"),
+            "{planned:?}"
+        );
+
+        // Nothing is left to decide: the plan installs.
+        apply_mod_install_plan(
+            &ui,
+            server_plan(&server, "utilitix", &[]),
+            &workspace,
+            &workspace.commands,
+        );
+        let installed: Vec<Command> = commands.try_iter().collect();
+        assert!(
+            matches!(
+                installed.as_slice(),
+                [Command::InstallServerMod {
+                    confirmed: false,
+                    confirmed_support,
+                    version,
+                    ..
+                }] if confirmed_support.is_empty() && version == "abcd1234"
+            ),
+            "{installed:?}"
+        );
+        assert_eq!(ui.get_modal(), "");
+    }
+
+    #[test]
+    fn a_server_confirmation_installs_the_mods_it_named() {
+        let server = ephervex_model::ServerId::new().to_string();
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        register_browser_install(&ui, &workspace.commands, &workspace);
+        register_mod_mutations(&ui, &workspace.commands, &workspace);
+        ui.invoke_install_from_browser(
+            "server".into(),
+            server.as_str().into(),
+            "modrinth".into(),
+            "utilitix".into(),
+        );
+        commands.try_iter().for_each(drop);
+
+        apply_mod_install_plan(
+            &ui,
+            server_plan(&server, "utilitix", &[("quiet-lib", "Quiet Library")]),
+            &workspace,
+            &workspace.commands,
+        );
+
+        assert_eq!(ui.get_modal(), "mod-plan");
+        assert_eq!(ui.get_mod_plan_kind(), "server");
+        assert_eq!(ui.get_mod_plan_unstated().row_count(), 1);
+        assert!(
+            commands.try_iter().next().is_none(),
+            "nothing installs before the confirmation"
+        );
+
+        ui.invoke_install_server_mod(
+            ui.get_mod_plan_instance(),
+            ui.get_mod_plan_provider(),
+            ui.get_mod_plan_project(),
+            ui.get_mod_plan_version_id(),
+            ui.get_mod_plan_unstated_ids(),
+        );
+        let sent: Vec<Command> = commands.try_iter().collect();
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [Command::InstallServerMod { confirmed: true, confirmed_support, .. }]
+                    if confirmed_support == &["quiet-lib".to_owned()]
+            ),
+            "{sent:?}"
+        );
+    }
+
+    /// Diagnostics names a mod, not a release, so on a server too the resolved
+    /// plan is shown before anything installs, even when nothing in it needs a
+    /// decision.
+    #[test]
+    fn a_diagnostics_install_on_a_server_is_planned_and_confirmed_before_it_installs() {
+        let server = ephervex_model::ServerId::new().to_string();
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        register_browser_install(&ui, &workspace.commands, &workspace);
+        register_mod_mutations(&ui, &workspace.commands, &workspace);
+
+        ui.invoke_install_from_diagnostics(
+            "server".into(),
+            server.as_str().into(),
+            "modrinth".into(),
+            "utilitix".into(),
+        );
+        let planned: Vec<Command> = commands.try_iter().collect();
+        assert!(
+            matches!(planned.as_slice(), [Command::PlanServerMod { .. }]),
+            "{planned:?}"
+        );
+
+        apply_mod_install_plan(
+            &ui,
+            server_plan(&server, "utilitix", &[]),
+            &workspace,
+            &workspace.commands,
+        );
+        assert_eq!(ui.get_modal(), "mod-plan");
+        assert_eq!(ui.get_mod_plan_kind(), "server");
+        assert!(
+            commands.try_iter().next().is_none(),
+            "nothing before confirming"
+        );
+
+        ui.invoke_install_server_mod(
+            ui.get_mod_plan_instance(),
+            ui.get_mod_plan_provider(),
+            ui.get_mod_plan_project(),
+            ui.get_mod_plan_version_id(),
+            ui.get_mod_plan_unstated_ids(),
+        );
+        let sent: Vec<Command> = commands.try_iter().collect();
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [Command::InstallServerMod {
+                    confirmed: true,
+                    ..
+                }]
+            ),
+            "{sent:?}"
+        );
+    }
+
     #[test]
     fn a_queued_diagnostics_install_is_still_confirmed_when_its_turn_comes() {
         let request = |project: &str| BrowserInstall {
+            server: false,
             instance: "repro-client".to_owned(),
             provider: "modrinth".to_owned(),
             project: project.to_owned(),
@@ -15436,6 +15751,7 @@ mod tests {
         let open = ephervex_model::InstanceId::new().to_string();
         for project in ["first", "second"] {
             ui.invoke_install_from_browser(
+                "client".into(),
                 queued.as_str().into(),
                 "modrinth".into(),
                 project.into(),
@@ -15455,6 +15771,7 @@ mod tests {
             .installs
             .borrow_mut()
             .finish(&BrowserInstall {
+                server: false,
                 instance: queued.clone(),
                 provider: "modrinth".to_owned(),
                 project: "first".to_owned(),
@@ -15482,7 +15799,12 @@ mod tests {
         let (workspace, commands) = test_workspace_sending(&ui);
         register_browser_install(&ui, &workspace.commands, &workspace);
         let queued = ephervex_model::InstanceId::new().to_string();
-        ui.invoke_install_from_browser(queued.as_str().into(), "modrinth".into(), "first".into());
+        ui.invoke_install_from_browser(
+            "client".into(),
+            queued.as_str().into(),
+            "modrinth".into(),
+            "first".into(),
+        );
         open_mod_dialog(&ui, &queued);
 
         apply_mod_install_plan(
@@ -15520,6 +15842,7 @@ mod tests {
         let queued = ephervex_model::InstanceId::new().to_string();
         for project in ["first", "second"] {
             ui.invoke_install_from_diagnostics(
+                "client".into(),
                 queued.as_str().into(),
                 "modrinth".into(),
                 project.into(),
@@ -15556,6 +15879,7 @@ mod tests {
         let request = ask_from_manager(&ui, &workspace, &commands, &closed, PlanKind::Apply);
         ui.set_modal(SharedString::default());
         ui.invoke_install_from_diagnostics(
+            "client".into(),
             queued.as_str().into(),
             "modrinth".into(),
             "first".into(),
@@ -15816,7 +16140,12 @@ mod tests {
         let (workspace, _commands) = test_workspace_sending(&ui);
         register_browser_install(&ui, &workspace.commands, &workspace);
         let queued = ephervex_model::InstanceId::new().to_string();
-        ui.invoke_install_from_browser(queued.as_str().into(), "modrinth".into(), "first".into());
+        ui.invoke_install_from_browser(
+            "client".into(),
+            queued.as_str().into(),
+            "modrinth".into(),
+            "first".into(),
+        );
         ui.set_modal("mod-plan".into());
         assert!(workspace.browser.installs.borrow().active.is_some());
         let other = ephervex_model::InstanceId::new().to_string();
@@ -15884,7 +16213,12 @@ mod tests {
     fn open_install_confirmation(ui: &AppWindow, workspace: &Workspace) {
         register_browser_install(ui, &workspace.commands, workspace);
         let queued = ephervex_model::InstanceId::new().to_string();
-        ui.invoke_install_from_browser(queued.as_str().into(), "modrinth".into(), "first".into());
+        ui.invoke_install_from_browser(
+            "client".into(),
+            queued.as_str().into(),
+            "modrinth".into(),
+            "first".into(),
+        );
         ui.set_modal("mod-plan".into());
         assert!(workspace.browser.installs.borrow().active.is_some());
     }
@@ -16842,6 +17176,7 @@ mod tests {
     #[test]
     fn the_install_queue_runs_one_request_at_a_time_in_the_order_they_were_pressed() {
         let request = |project: &str| BrowserInstall {
+            server: false,
             instance: "repro-client".to_owned(),
             provider: "modrinth".to_owned(),
             project: project.to_owned(),
@@ -16877,6 +17212,7 @@ mod tests {
     #[test]
     fn a_queue_reports_every_project_it_still_owes_an_install() {
         let request = |instance: &str, provider: &str, project: &str| BrowserInstall {
+            server: false,
             instance: instance.to_owned(),
             provider: provider.to_owned(),
             project: project.to_owned(),

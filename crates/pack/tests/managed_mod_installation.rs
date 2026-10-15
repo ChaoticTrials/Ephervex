@@ -117,6 +117,7 @@ fn addition(
             file_id: None,
         }),
         original_identity: None,
+        installed_despite_unsupported: None,
         relations: None,
     }
 }
@@ -1140,4 +1141,54 @@ async fn a_record_that_already_takes_the_client_is_left_as_recorded_by_a_repeat_
         .await
         .expect("repair");
     assert_eq!(recipe, before, "a plain repair does not touch the record");
+}
+
+#[tokio::test]
+async fn a_present_jar_recorded_with_an_undeclared_server_takes_the_release_declaration() {
+    for declared in [
+        SideRequirement::Required,
+        SideRequirement::Optional,
+        SideRequirement::Unsupported,
+    ] {
+        let server = MockServer::start().await;
+        let instance = Instance::new();
+        let (mut recipe, mut root) = installed_root(&server, &instance).await;
+        assert_eq!(recorded_root(&recipe).server, SideRequirement::Unknown);
+        root.server = declared;
+
+        let report = install(&instance, &mut recipe, &[root])
+            .await
+            .expect("install on the client");
+
+        assert_eq!(
+            report.recorded,
+            [Path::new("mods/root-1.0.jar")],
+            "{declared:?}"
+        );
+        let recorded = recorded_root(&recipe);
+        assert_eq!(recorded.server, declared);
+        assert_eq!(recorded.client, SideRequirement::Required);
+        assert_eq!(instance.store.read_recipe().expect("recipe"), recipe);
+    }
+}
+
+#[tokio::test]
+async fn a_record_that_answered_the_other_side_keeps_its_answer_when_the_release_declares_otherwise()
+ {
+    let server = MockServer::start().await;
+    let instance = Instance::new();
+    let (mut recipe, mut root) = installed_root(&server, &instance).await;
+    for file in &mut recipe.files {
+        file.server = SideRequirement::Optional;
+        file.selected = Some(false);
+    }
+    root.server = SideRequirement::Unsupported;
+    let before = recipe.clone();
+
+    let report = install(&instance, &mut recipe, &[root])
+        .await
+        .expect("install on the client");
+
+    assert!(report.recorded.is_empty());
+    assert_eq!(recipe, before);
 }

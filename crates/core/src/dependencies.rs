@@ -1081,9 +1081,7 @@ impl ModGraph {
             .recipe
             .iter()
             .flat_map(|recipe| &recipe.files)
-            .filter(|file| {
-                file.requirement(host.side()) == ephervex_pack::SideRequirement::Unsupported
-            })
+            .filter(|file| file.is_excluded_from(host.side()))
             .flat_map(|file| {
                 let project = file
                     .identity
@@ -1691,6 +1689,7 @@ mod tests {
                 file_id: None,
             }),
             original_identity: None,
+            installed_despite_unsupported: None,
             relations: None,
         }
     }

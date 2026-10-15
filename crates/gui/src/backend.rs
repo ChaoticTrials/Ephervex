@@ -20,24 +20,25 @@ use ephervex_core::{
     App, AuthEvent, AuthObserver, CancellationToken, ClientFolder, ClientModOutcome, ClientModPlan,
     ConnectionTarget, CoreError, CoreResult, CrashReview, CredentialOutcome, CredentialPresence,
     DeclaredProject, DiagnosisRequest, DiagnosticFix, DiagnosticKind, DiagnosticRequest,
-    DiagnosticScope, ErrorChain, EulaStatus, ImportRequest, InstalledHost, IsolationError,
-    IsolationPlan, IsolationReconciliation, IsolationReport, IsolationRequest, IsolationSession,
-    LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions, LaunchEvent,
-    LaunchFeatures, LaunchObserver, LaunchOptions, LinkedModOutcome, LinkedModPlan,
+    DiagnosticScope, ErrorChain, EulaStatus, ImportRequest, IncompatibilityReason, InstalledHost,
+    IsolationError, IsolationPlan, IsolationReconciliation, IsolationReport, IsolationRequest,
+    IsolationSession, LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions,
+    LaunchEvent, LaunchFeatures, LaunchObserver, LaunchOptions, LinkedModOutcome, LinkedModPlan,
     LinkedModRequest, LinkedStart, LinkedTargetPlan, LinkedTargetResult, LinkedTargetState,
     LocalModOffer, LocalModPlan, LocalModReport, LoginOptions, ManagedModEntry, ManagedModSnapshot,
-    MetadataAvailability, ModInstallPlan, ModMutability, ModMutation, ModMutationPlan, ModPresence,
-    ModSearchQuery, MutationRestriction, NewClient, NewServer, OperationReporter,
-    OptionalSelection, PackAnalysis, Paths, PlannedOutcome, ProcessMonitor, ProgressSink,
-    ProviderFileIdentity, RoundAnswer, SearchOptions, ServerCommit, ServerContentSource,
-    ServerCreateOptions, ServerEvent, ServerEvents, ServerFolder, ServerNetworkSettings,
-    ServerObserver, ServerRecord, SideRequirement, SnapshotOrigin, SnapshotRestoreOptions,
-    SuspectReason, WatchTarget,
+    MetadataAvailability, ModInstallPlan, ModInstallRequest, ModMutability, ModMutation,
+    ModMutationPlan, ModPresence, ModSearchHit, ModSearchQuery, MutationRestriction, NewClient,
+    NewServer, OperationReporter, OptionalSelection, PackAnalysis, Paths, PlannedOutcome,
+    ProcessMonitor, ProgressSink, ProviderFileIdentity, RoundAnswer, SearchOptions, ServerCommit,
+    ServerContentSource, ServerCreateOptions, ServerEvent, ServerEvents, ServerFolder,
+    ServerNetworkSettings, ServerObserver, ServerRecord, SideRequirement, SideSupport,
+    SnapshotOrigin, SnapshotRestoreOptions, SuspectReason, WatchTarget,
 };
 use ephervex_core::{
     ConfiguredPreferences, LanguageAvailability, LanguageEntry, MinecraftPreferencePreview,
     MinecraftPreferenceSnapshot, PreferenceEdit,
 };
+use ephervex_core::{PlanWarning, PlannedMod};
 use ephervex_i18n::{Arg, lookup, lookup_args, lookup_attribute, lookup_attribute_args};
 use ephervex_model::{
     AbsentModPolicy, InstanceId, LoaderKind, LoaderSelection, ModOrigin, ModProvider, Operation,
@@ -403,7 +404,7 @@ pub enum Command {
         version: String,
     },
     SearchMods {
-        instance: InstanceId,
+        host: InstalledHost,
         /// Which catalog to search. Explicit rather than an application-wide
         /// setting: the answer, and every id in it, belongs to one catalog.
         provider: ModProvider,
@@ -416,12 +417,31 @@ pub enum Command {
         /// rather than a display preference: deciding compatibility costs one
         /// version lookup per hit.
         limit: u8,
+        /// Whether to also list what the host cannot take, marked as such.
+        include_incompatible: bool,
         /// Opaque frontend bookkeeping, echoed back unchanged. Two requests
         /// can otherwise carry an identical instance, provider, query, and
         /// offset (a search resubmitted after switching catalog away and
         /// back), and this is what still tells their answers apart. Never
         /// read by a provider or recorded anywhere.
         request_id: u64,
+    },
+    PlanServerMod {
+        server: ServerId,
+        provider: ModProvider,
+        project: String,
+    },
+    InstallServerMod {
+        server: ServerId,
+        provider: ModProvider,
+        project: String,
+        /// The exact release the confirmation showed. Empty only when nothing
+        /// resolved one, in which case the newest that fits is installed.
+        version: String,
+        /// The projects whose undeclared server support the user confirmed.
+        confirmed_support: Vec<String>,
+        /// Whether a confirmation dialog asked for this install.
+        confirmed: bool,
     },
     PlanMod {
         instance: InstanceId,
@@ -1256,6 +1276,12 @@ pub struct ModSearchData {
     /// instance. The catalogs do not publish one comparable statistic between
     /// them, and inventing a number here would only look like one.
     pub note: String,
+    /// What the catalog states about the server side: empty when it says the
+    /// mod runs there, `unknown` when it says nothing, `client-only` when it
+    /// says the mod cannot. Only filled for a server's results.
+    pub server_support: String,
+    /// Why the result cannot be installed on this host, already localized.
+    pub blocked_reason: String,
 }
 
 /// One page of search results, and the request it answers.
@@ -1266,7 +1292,7 @@ pub struct ModSearchData {
 /// moved on from.
 #[derive(Debug, Clone)]
 pub struct ModResultsData {
-    pub instance: String,
+    pub host: InstalledHost,
     /// The catalog this page came from, echoed back for the same reason the
     /// query is: switching catalog asks a new question, and the old answer
     /// must not land on it.
@@ -1296,6 +1322,8 @@ pub struct ModResultsData {
 
 #[derive(Debug, Clone, Default)]
 pub struct ModPlanData {
+    /// Whether `instance` names a server rather than a client.
+    pub server: bool,
     pub instance: String,
     /// The catalog the review asked, echoed back beside the reference. Two
     /// catalogs can spell a project id the same way, so the reference alone
@@ -1321,6 +1349,15 @@ pub struct ModPlanData {
     pub already_installed_count: usize,
     pub warning_count: usize,
     pub linked: LinkedSectionData,
+    /// For a server: the mods whose catalog never stated server support, as
+    /// project id and name. Installing them needs the user's confirmation.
+    pub unstated: Vec<(String, String)>,
+    /// For a server: one sentence per required dependency the catalog says
+    /// does not run on a server, installed anyway because a mod needs it.
+    pub client_only: Vec<String>,
+    /// For a server: whether it is running, so the change waits for its next
+    /// start.
+    pub running: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1847,6 +1884,8 @@ pub enum Event {
     /// serially and needs to know when it may start the next one, which a
     /// success-only report cannot tell it.
     ModInstallFinished {
+        /// Whether `instance` names a server rather than a client.
+        server: bool,
         instance: String,
         provider: String,
         project: String,
@@ -1855,6 +1894,7 @@ pub enum Event {
     /// through [`Event::Error`]; this only names the question that will never
     /// be answered, so nothing waits on it forever.
     ModPlanFailed {
+        server: bool,
         instance: String,
         provider: String,
         requested: String,
@@ -4368,19 +4408,21 @@ fn run_worker(
                 }
             }
             Command::SearchMods {
-                instance,
+                host,
                 provider,
                 query,
                 offset,
                 limit,
+                include_incompatible,
                 request_id,
             } => {
                 let paths = app.paths().clone();
                 spawn_detached(paths, events.clone(), move |app, events, runtime| {
                     let request = ModSearchQuery::new(query.clone())
                         .from_offset(offset)
-                        .limited(limit);
-                    let result = runtime.block_on(app.search_mods(instance, provider, &request));
+                        .limited(limit)
+                        .including_incompatible(include_incompatible);
+                    let result = runtime.block_on(app.search_mods(host, provider, &request));
                     let answer = match result {
                         Ok(results) => {
                             let total = results.total_hits;
@@ -4393,23 +4435,10 @@ fn run_worker(
                             let rows = results
                                 .hits
                                 .into_iter()
-                                .map(|hit| ModSearchData {
-                                    icon: icons
-                                        .get(&hit.project.id)
-                                        .map(|path| path.display().to_string())
-                                        .unwrap_or_default(),
-                                    project_id: hit.project.id,
-                                    title: hit.project.title,
-                                    description: hit.project.description,
-                                    author: hit
-                                        .project
-                                        .author
-                                        .unwrap_or_else(|| lookup("gui-unknown-author")),
-                                    note: lookup("gui-compatible"),
-                                })
+                                .map(|hit| search_row(host, hit, &icons))
                                 .collect();
                             ModResultsData {
-                                instance: instance.to_string(),
+                                host,
                                 provider: provider.as_str().to_owned(),
                                 query,
                                 offset,
@@ -4429,7 +4458,7 @@ fn run_worker(
                                 "mod search failed"
                             );
                             ModResultsData {
-                                instance: instance.to_string(),
+                                host,
                                 provider: provider.as_str().to_owned(),
                                 query,
                                 offset,
@@ -4451,6 +4480,102 @@ fn run_worker(
             } => {
                 spawn_mod_plan(app.paths().clone(), &events, instance, provider, project);
             }
+            Command::PlanServerMod {
+                server,
+                provider,
+                project,
+            } => {
+                spawn_server_mod_plan(app.paths().clone(), &events, server, provider, project);
+            }
+            Command::InstallServerMod {
+                server,
+                provider,
+                project,
+                version,
+                confirmed_support,
+                confirmed,
+            } => {
+                let host = InstalledHost::Server(server);
+                let finished = Event::ModInstallFinished {
+                    server: true,
+                    instance: server.to_string(),
+                    provider: provider.as_str().to_owned(),
+                    project: project.clone(),
+                };
+                let Some(in_flight) = claim_hosts_for_change(
+                    &changing,
+                    &[host],
+                    "gui-mod-change-busy",
+                    ModalScope::NONE,
+                    &events,
+                ) else {
+                    let _ = events.send(finished);
+                    continue;
+                };
+                let paths = app.paths().clone();
+                let reports = events.clone();
+                let acquisition_events = events.clone();
+                let waits = acquisition_waits.clone();
+                let refreshed = Arc::clone(&refreshed_mods);
+                spawn_async_operation(
+                    paths,
+                    &events,
+                    Arc::clone(&cancellations),
+                    AsyncOperationRequest {
+                        title: "operation-installing-mods",
+                        entity: project.clone(),
+                        allow_cancel: true,
+                        dialogs: ModalScope::NONE,
+                        finished: Some(finished),
+                    },
+                    move |app, reporter, cancel| async move {
+                        let _in_flight = in_flight;
+                        let mut request = ModInstallRequest::new(project)
+                            .from_provider(provider)
+                            .confirming_server_support(confirmed_support);
+                        if !version.is_empty() {
+                            // Pinned to what the user agreed to, so a release
+                            // published since cannot take its place.
+                            request = request.at_version(version);
+                        }
+                        let mut result = app.install_mods(host, &request, &reporter, &cancel).await;
+                        match await_manual_acquisition(
+                            &app,
+                            &acquisition_events,
+                            &waits,
+                            &server.to_string(),
+                            &result,
+                            &cancel,
+                        )
+                        .await
+                        {
+                            Acquisition::Acquired => {
+                                result = app.install_mods(host, &request, &reporter, &cancel).await;
+                            }
+                            Acquisition::NotNeeded => {}
+                            Acquisition::Abandoned => return Ok(OperationReport::Reported),
+                        }
+                        let installed = result?;
+                        let mut message = installed_message(
+                            &installed.installation,
+                            installed.plan.all_mods().len(),
+                        );
+                        if server_is_running(&app, server) {
+                            message =
+                                format!("{message} {}", lookup("gui-server-mod-plan-restart"));
+                        }
+                        send_host_mods(&app, host, &reports, &refreshed, true);
+                        if confirmed {
+                            return Ok(OperationReport::Toast(message));
+                        }
+                        let _ = reports.send(Event::Toast {
+                            message,
+                            error: false,
+                        });
+                        Ok(OperationReport::Reported)
+                    },
+                );
+            }
             Command::InstallMod {
                 instance,
                 provider,
@@ -4470,6 +4595,7 @@ fn run_worker(
                     &events,
                 ) else {
                     let _ = events.send(Event::ModInstallFinished {
+                        server: false,
                         instance: instance.to_string(),
                         provider: provider.as_str().to_owned(),
                         project,
@@ -4490,6 +4616,7 @@ fn run_worker(
                         allow_cancel: true,
                         dialogs: ModalScope::NONE,
                         finished: Some(Event::ModInstallFinished {
+                            server: false,
                             instance: instance.to_string(),
                             provider: provider.as_str().to_owned(),
                             project: project.clone(),
@@ -9885,6 +10012,7 @@ fn spawn_mod_plan(
         let project = project.clone();
         move |events: &Sender<Event>| {
             let _ = events.send(Event::ModPlanFailed {
+                server: false,
                 instance: instance.to_string(),
                 provider: provider.as_str().to_owned(),
                 requested: project,
@@ -9913,6 +10041,7 @@ fn spawn_mod_plan(
                 Err(error) => {
                     send_error(&events, &error);
                     let _ = events.send(Event::ModPlanFailed {
+                        server: false,
                         instance: instance.to_string(),
                         provider: provider.as_str().to_owned(),
                         requested: project,
@@ -9921,6 +10050,204 @@ fn spawn_mod_plan(
             }
         },
     );
+}
+
+/// Plans an install onto a server on its own thread. Ends in an
+/// [`Event::ModPlan`] or an [`Event::ModPlanFailed`], like [`spawn_mod_plan`].
+fn spawn_server_mod_plan(
+    paths: Paths,
+    events: &Sender<Event>,
+    server: ServerId,
+    provider: ModProvider,
+    project: String,
+) {
+    let failed = {
+        let project = project.clone();
+        move |events: &Sender<Event>| {
+            let _ = events.send(Event::ModPlanFailed {
+                server: true,
+                instance: server.to_string(),
+                provider: provider.as_str().to_owned(),
+                requested: project,
+            });
+        }
+    };
+    spawn_detached_with_setup_failure(
+        paths,
+        events.clone(),
+        failed,
+        move |app, events, runtime| {
+            let request = ModInstallRequest::new(project.clone()).from_provider(provider);
+            let result = runtime
+                .block_on(app.plan_mod_installation(InstalledHost::Server(server), &request));
+            match result {
+                Ok(plan) => {
+                    let running = server_is_running(&app, server);
+                    let _ = events.send(Event::ModPlan(server_plan_data(
+                        server, &plan, &project, running,
+                    )));
+                }
+                Err(error) => {
+                    send_error(&events, &error);
+                    let _ = events.send(Event::ModPlanFailed {
+                        server: true,
+                        instance: server.to_string(),
+                        provider: provider.as_str().to_owned(),
+                        requested: project,
+                    });
+                }
+            }
+        },
+    );
+}
+
+/// Whether a server may be running, so a change to its mods waits for a start.
+fn server_is_running(app: &App, server: ServerId) -> bool {
+    app.server_status(server)
+        .is_ok_and(|status| status.runtime.may_be_running())
+}
+
+/// What installing a mod onto a server would involve.
+fn server_plan_data(
+    server: ServerId,
+    plan: &ModInstallPlan,
+    requested: &str,
+    running: bool,
+) -> ModPlanData {
+    let name = |planned: &PlannedMod| {
+        if planned.project.title.is_empty() {
+            planned.project.id.clone()
+        } else {
+            planned.project.title.clone()
+        }
+    };
+    ModPlanData {
+        server: true,
+        instance: server.to_string(),
+        provider: plan.provider.as_str().to_owned(),
+        requested: requested.to_owned(),
+        project: plan.root.project.id.clone(),
+        title: plan.root.project.title.clone(),
+        version: plan.root.version.version_number.clone(),
+        version_id: plan.root.version.id.clone(),
+        install_count: plan.to_install().len(),
+        dependency_count: plan.dependencies.len(),
+        optional_count: plan.optional.len(),
+        already_installed_count: plan.already_installed.len(),
+        warning_count: plan.warnings.len(),
+        linked: LinkedSectionData::default(),
+        unstated: plan
+            .undeclared_server_support()
+            .into_iter()
+            .map(|planned| (planned.project.id.clone(), name(planned)))
+            .collect(),
+        client_only: plan
+            .warnings
+            .iter()
+            .filter_map(|warning| match warning {
+                PlanWarning::ServerSideUnsupported {
+                    project_id,
+                    required_by,
+                } => Some(lookup_args(
+                    warning.message_id(),
+                    [
+                        (
+                            "project",
+                            Arg::from(
+                                plan.dependencies
+                                    .iter()
+                                    .find(|planned| &planned.project.id == project_id)
+                                    .map_or_else(|| project_id.clone(), name),
+                            ),
+                        ),
+                        (
+                            "required_by",
+                            Arg::from(
+                                required_by
+                                    .iter()
+                                    .map(|id| {
+                                        plan.all_mods()
+                                            .into_iter()
+                                            .find(|planned| &planned.project.id == id)
+                                            .map_or_else(|| id.clone(), name)
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(", "),
+                            ),
+                        ),
+                    ],
+                )),
+                _ => None,
+            })
+            .collect(),
+        running,
+    }
+}
+
+/// One search hit as a row, with what a server's results add: how the catalog
+/// states the server side, and why a result cannot be installed.
+fn search_row(
+    host: InstalledHost,
+    hit: ModSearchHit,
+    icons: &std::collections::BTreeMap<String, PathBuf>,
+) -> ModSearchData {
+    let (server_support, blocked_reason) = match host {
+        InstalledHost::Instance(_) => (String::new(), String::new()),
+        InstalledHost::Server(_) => server_result_notes(&hit),
+    };
+    ModSearchData {
+        icon: icons
+            .get(&hit.project.id)
+            .map(|path| path.display().to_string())
+            .unwrap_or_default(),
+        project_id: hit.project.id,
+        title: hit.project.title,
+        description: hit.project.description,
+        author: hit
+            .project
+            .author
+            .unwrap_or_else(|| lookup("gui-unknown-author")),
+        note: lookup(if hit.compatibility.is_compatible() {
+            "gui-compatible"
+        } else {
+            "gui-incompatible"
+        }),
+        server_support,
+        blocked_reason,
+    }
+}
+
+/// How a server's result stands: what the catalog states about the server side,
+/// and the reason it cannot be installed when it cannot.
+fn server_result_notes(hit: &ModSearchHit) -> (String, String) {
+    let support = match hit.effective_sides().1 {
+        SideSupport::Unsupported => "client-only",
+        SideSupport::Unknown => "unknown",
+        SideSupport::Required | SideSupport::Optional => "",
+    };
+    let blocked = if hit.is_client_only() {
+        lookup("gui-hint-mod-client-only")
+    } else {
+        hit.compatibility
+            .reasons()
+            .first()
+            .map(incompatibility_text)
+            .unwrap_or_default()
+    };
+    (support.to_owned(), blocked)
+}
+
+fn incompatibility_text(reason: &IncompatibilityReason) -> String {
+    match reason {
+        IncompatibilityReason::MinecraftVersion { required, .. } => lookup_args(
+            reason.message_id(),
+            [("required", Arg::from(required.as_str()))],
+        ),
+        IncompatibilityReason::Loader { required, .. } => lookup_args(
+            reason.message_id(),
+            [("required", Arg::from(required.to_string()))],
+        ),
+    }
 }
 
 fn spawn_detached(
@@ -10775,6 +11102,7 @@ fn install_plan_data(linked: &LinkedModPlan, requested: &str) -> ModPlanData {
         already_installed_count: plan.already_installed.len(),
         warning_count: plan.warnings.len(),
         linked: linked_section(linked),
+        ..ModPlanData::default()
     }
 }
 
@@ -14966,6 +15294,7 @@ mod tests {
                 .recv_timeout(Duration::from_secs(5))
                 .expect("completion");
             if let Event::ModPlanFailed {
+                server: false,
                 instance: failed,
                 provider,
                 requested,

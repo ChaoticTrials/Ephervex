@@ -273,11 +273,15 @@ impl ModProviderApi for ModrinthProvider {
                 // The facets promised more than they can deliver.
                 continue;
             }
-            hits.push(ModSearchHit {
+            let hit = ModSearchHit {
                 project,
                 best_version: best,
                 compatibility,
-            });
+            };
+            if query.excludes_client_only() && hit.is_client_only() {
+                continue;
+            }
+            hits.push(hit);
         }
 
         Ok(ModSearchResults {
