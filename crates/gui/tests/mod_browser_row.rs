@@ -725,6 +725,112 @@ fn a_client_only_result_is_marked_and_its_install_cannot_be_pressed() {
     );
 }
 
+/// A result's server-support badge sits over its Install button, in the
+/// row's trailing column, the way a managed mod's badges sit over its bin.
+#[test]
+fn a_results_server_support_badge_sits_above_its_install_button() {
+    let ui = window();
+    for (support, label) in [
+        ("client-only", lookup("gui-mod-client-only")),
+        ("unknown", lookup("gui-mod-server-support-unstated")),
+    ] {
+        server_browser(
+            &ui,
+            modded_server(),
+            vec![ModSearchRow {
+                server_support: support.into(),
+                ..result("utilitix", "UtilitiX")
+            }],
+        );
+
+        let badge = ElementHandle::find_by_accessible_label(&ui, &label)
+            .find(|element| element.size().width > 0.0)
+            .expect("the row carries the badge");
+        let buttons = install_buttons(&ui);
+        let button = buttons.first().expect("the row shows Install");
+
+        assert!(
+            button.absolute_position().y >= badge.absolute_position().y + badge.size().height,
+            "{support}: the badge is above the button"
+        );
+        let badge_right = badge.absolute_position().x + badge.size().width;
+        let button_right = button.absolute_position().x + button.size().width;
+        assert!(
+            (badge_right - button_right).abs() < 1.0,
+            "{support}: the badge ends where the button ends, at {badge_right} and {button_right}"
+        );
+    }
+}
+
+/// The browser's heading row is as tall as the mod list's toolbar, so the two
+/// panels' descriptions start on one line.
+#[test]
+fn the_browsers_description_starts_level_with_the_mod_lists() {
+    let ui = window();
+    mod_browser(&ui, Vec::new());
+    settle(&ui);
+
+    let list = shown_text(&ui, "gui-managed-mods-detail")
+        .absolute_position()
+        .y;
+    let browser = shown_text(&ui, "gui-catalog-compatibility")
+        .absolute_position()
+        .y;
+    assert!(
+        (list - browser).abs() < 0.5,
+        "the descriptions start at {list} and {browser}"
+    );
+}
+
+/// The one element showing this text.
+fn shown_text(ui: &AppWindow, id: &str) -> ElementHandle {
+    ElementHandle::find_by_accessible_label(ui, &lookup(id))
+        .find(|element| element.size().width > 0.0)
+        .expect(id)
+}
+
+/// The badge sits at the window's trailing edge when the browser does, so
+/// what it says on hover opens toward the row rather than off the window.
+#[test]
+fn a_support_badges_explanation_stays_inside_the_window() {
+    let ui = window();
+    server_browser(
+        &ui,
+        modded_server(),
+        vec![ModSearchRow {
+            server_support: "unknown".into(),
+            ..result("utilitix", "UtilitiX")
+        }],
+    );
+    let label = lookup("gui-mod-server-support-unstated");
+    let badge = ElementHandle::find_by_accessible_label(&ui, &label)
+        .find(|element| element.size().width > 0.0)
+        .expect("the row carries the badge");
+    let (at, size) = (badge.absolute_position(), badge.size());
+
+    ui.window()
+        .dispatch_event(slint::platform::WindowEvent::PointerMoved {
+            position: slint::LogicalPosition::new(
+                at.x + size.width / 2.0,
+                at.y + size.height / 2.0,
+            ),
+        });
+    settle(&ui);
+
+    let explanation = ElementHandle::find_by_accessible_label(&ui, &label)
+        .find(|element| {
+            element.size().width > 0.0
+                && element.absolute_position().x + element.size().width <= at.x
+        })
+        .expect("hovering the badge explains it beside the badge");
+    let window = ui.window().size().to_logical(ui.window().scale_factor());
+    assert!(explanation.absolute_position().x >= 0.0);
+    assert!(
+        explanation.absolute_position().x + explanation.size().width <= window.width,
+        "the explanation ends inside the window"
+    );
+}
+
 #[test]
 fn the_servers_browser_offers_the_incompatible_toggle_and_a_clients_does_not() {
     let ui = window();
