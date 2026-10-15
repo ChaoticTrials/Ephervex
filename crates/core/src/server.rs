@@ -750,6 +750,26 @@ impl App {
             .update_server_committed_claimed(&mut record, &claim)?)
     }
 
+    /// Lets the user change and remove the mods a pack declared for this
+    /// server, or stops letting them, as [`App::set_allow_pack_mod_version_changes`]
+    /// does for a client. Available while the server runs, for the same reason:
+    /// it decides what the mod list offers, and the files it unlocks are read
+    /// at the next start.
+    pub fn set_server_allow_pack_mod_version_changes(
+        &self,
+        id: ServerId,
+        allow: bool,
+    ) -> CoreResult<ServerCommit<ServerRecord>> {
+        let claim = self
+            .registry_for_services()
+            .claim_host(ephervex_storage::RecordRef::Server(id))?;
+        let mut record = self.canonical_server_for_mutation(id)?;
+        record.allow_pack_mod_version_changes = allow;
+        Ok(self
+            .registry_for_services()
+            .update_server_committed_claimed(&mut record, &claim)?)
+    }
+
     /// Replaces the server-specific Java and JVM overrides as one canonical
     /// metadata mutation. `None` restores the corresponding global setting.
     /// A relative Java path is stored as an absolute one.

@@ -61,6 +61,22 @@ was installed on the server anyway, so every reader that asks whether a file is
 installed on the server agrees. Linked synchronization keeps dropping such
 dependencies.
 
+**What a server installed, it can change and remove.** Changing a mod's
+version, updating it, and removing it take the same host as installing, and
+resolve against the server's own target and recipe. A server made here rather
+than reconstructed from a pack has no declaration to preserve, so its mods are
+the user's in the sense of ADR 0032: removing one takes it out of the recipe,
+with the dependencies nothing else needs, instead of putting the jar aside to be
+restored. A server built from a pack keeps its declaration until the user turns
+on the same setting ADR 0032 gives a client,
+`ServerRecord::allow_pack_mod_version_changes`, from the server's Settings tab;
+from then on its mods are the user's in the same sense. The setting lives in the
+server's metadata only, because the launcher index takes no further migration
+before 1.0.0 (ADR 0033), so reading or reconciling the index never overrides it.
+A version change that would add a mod whose server support the catalog never
+stated is refused rather than confirmed in passing: installing that mod from the
+catalog is where the confirmation is asked.
+
 **Downloads are unchanged.** Artifacts come from the shared verified cache, with
 the same hash verification, destination safety, and rollback as a client
 install. A release its author does not allow to be downloaded stays an

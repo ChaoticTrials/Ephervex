@@ -11537,7 +11537,7 @@ fn removal_plan_data(linked: &LinkedModPlan) -> ModRemovalPlanData {
     };
     ModRemovalPlanData {
         request: 0,
-        instance: plan.instance.to_string(),
+        instance: plan.host.id(),
         logical_path: crate::mod_path_key::encode(&plan.target),
         name: plan.name.clone(),
         dependencies: plan

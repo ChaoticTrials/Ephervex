@@ -742,6 +742,9 @@ fn reconcile_server_against_metadata(
             } else {
                 let recorded_root_differs = canonical.root != record.root;
                 canonical.root.clone_from(&record.root);
+                // Held in the metadata alone, so the row never disagrees about
+                // it and never carries it back over the metadata.
+                record.allow_pack_mod_version_changes = canonical.allow_pack_mod_version_changes;
                 if server_index_is_newer(&record, &canonical) {
                     adopted = true;
                 } else {
@@ -3538,6 +3541,44 @@ mod tests {
                     .with_storage(StorageClass::Persistent),
             )
             .expect("create")
+    }
+
+    /// A server's pack-mod setting lives in its metadata alone. Reconciling
+    /// neither reports it as an index repair nor writes it back as off, also
+    /// when the index row is the newer one.
+    #[test]
+    fn a_servers_metadata_only_setting_survives_reconciliation() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let mut server = persistent_server(&registry, "from a pack");
+        server.allow_pack_mod_version_changes = true;
+        registry
+            .update_server_committed(&mut server)
+            .expect("allow the pack's mods to change");
+        let allowed = || {
+            metadata::read_server_metadata(&server.root)
+                .expect("metadata")
+                .allow_pack_mod_version_changes
+        };
+
+        for _ in 0..2 {
+            let report = reconcile(&registry).expect("reconcile");
+            assert!(
+                report.index_repaired.is_empty(),
+                "{:?}",
+                report.index_repaired
+            );
+        }
+        assert!(allowed());
+
+        // A row newer than the metadata, as a write made while the root was
+        // missing leaves behind.
+        let mut row = registry.indexed_server(server.id).expect("row");
+        row.updated_at = server.updated_at + chrono::Duration::seconds(5);
+        row.add_attention(AttentionReason::MissingRoot);
+        registry.synchronize_server_index(&row).expect("newer row");
+        reconcile(&registry).expect("reconcile");
+        assert!(allowed());
     }
 
     #[test]

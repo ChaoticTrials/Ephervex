@@ -1930,6 +1930,7 @@ error-mod-acquisition-restricted = That mod's author does not allow other launch
 error-mod-client-only = { $project } is declared client-only, so it is not installed on a server.
 .action = Install it on a client instead.
 error-mod-server-support-unconfirmed = The catalog does not state whether { $mods } runs on a server.
+error-mod-change-server-support-unconfirmed = The catalog does not state whether { $mods } runs on a server. Install it on this server from the catalog first, which asks you to confirm it.
 .action = Confirm that you want it on this server and try again.
 
 error-mod-file-identity-mismatch = { $provider } answered about a different file than the one requested.

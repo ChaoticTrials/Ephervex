@@ -1648,6 +1648,7 @@ pub(crate) mod tests {
             project_json("RELDECLPROJ", "Release Declared", "required", "required"),
             project_json("NEEDSUNK", "Needs Undeclared", "required", "required"),
             project_json("SERVERONLY", "Server Only", "unsupported", "required"),
+            project_json("LATERUNK", "Later Undeclared", "required", "required"),
         ];
         let versions = vec![
             version_json(base, "ROOTV1", "ROOTPROJ", &[MINECRAFT], &["CLIENTLIB"], 0),
@@ -1678,6 +1679,15 @@ pub(crate) mod tests {
                 0,
             ),
             version_json(base, "SERVERONLYV1", "SERVERONLY", &[MINECRAFT], &[], 0),
+            version_json(base, "LATERUNKV1", "LATERUNK", &[MINECRAFT], &[], 0),
+            version_json(
+                base,
+                "LATERUNKV2",
+                "LATERUNK",
+                &[MINECRAFT],
+                &["UNKPROJ"],
+                10,
+            ),
             version_json(
                 base,
                 "SECONDV1",

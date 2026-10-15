@@ -1079,7 +1079,12 @@ with a warning naming it and the mod that needs it, and is recorded as installed
 on the server beside the declaration it keeps. A root declared client-only is
 refused. A running server receives the change for its next start. The command
 line names either host with `--instance` or `--server`, and
-`--accept-unknown-server-support` is its form of the confirmation.
+`--accept-unknown-server-support` is its form of the confirmation. A server's
+mods are changed, updated, and removed through the same mutation as a client's,
+resolved against the server. A server made here rather than from a pack treats
+its mods as the user's, and one from a pack does once its independent mod
+changes are allowed, so removing one takes it out of the recipe. That setting is
+kept in the server's metadata only (ADR 0045).
 
 Exact selections are preserved. A pinned version that does not fit is refused
 rather than moved to a neighboring release, two mods pinning one project to
