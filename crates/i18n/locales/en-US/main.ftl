@@ -34,6 +34,7 @@ storage-class-persistent-description = Lives under the configured instance direc
 ## Instance and server listings
 
 instances-list-empty = No instances yet.
+instances-list-none-match = No instances match.
 servers-list-empty = No servers yet.
 
 instances-list-count = { $count ->
@@ -45,6 +46,25 @@ servers-list-count = { $count ->
         [one] { $count } server
        *[other] { $count } servers
     }
+
+instances-list-favorite-marker = [favorite]
+
+# $group is the user's own group name.
+instances-list-group-marker = [group: { $group }]
+
+groups-list-empty = No groups yet. Create one with `ephervex groups create`.
+
+groups-list-members = { $count ->
+        [one] { $count } instance
+       *[other] { $count } instances
+    }
+
+# $name is the user's own group name.
+# $path is where the unreadable file was kept.
+organization-set-aside = The favorites, groups and icons file could not be read, so they start empty. The unreadable file was kept as { $path }.
+organization-restored = The favorites, groups and icons file could not be read, so its copy from before the last change was restored. The unreadable file was kept as { $path }.
+
+group-deleted = Deleted the group { $name }. Its instances are now ungrouped.
 
 # $name is user-authored and $version is a Minecraft version string; neither is
 # translated.
