@@ -87,6 +87,12 @@ typed_id!(
     SnapshotId
 );
 
+typed_id!(
+    /// Identifies a user-defined instance group, so renaming the group never
+    /// touches the instances assigned to it.
+    GroupId
+);
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

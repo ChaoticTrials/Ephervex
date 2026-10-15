@@ -195,6 +195,17 @@ error-config-unsupported-schema = This configuration was written by a newer vers
 error-config-secret-rejected = Refusing to save a credential into the configuration file.
 .action = The key { $key } looks like a secret. Secrets are stored in the system keyring instead, and configuration only records that one exists.
 
+## Organization errors
+
+error-organization-unreadable = The favorites, groups and icons file could not be read.
+.action = Check that { $path } exists and is readable. Favorites, groups and icons are not applied until it is.
+
+error-organization-unwritable = Favorites, groups and icons could not be saved.
+.action = Check that { $path } is writable and that the filesystem is not full.
+
+error-organization-busy = Another Ephervex window or command is saving favorites, groups or icons right now.
+.action = Try again in a moment. If it keeps happening, check which process holds { $path }.
+
 ## Artifact cache errors
 
 # The cache holds re-downloadable copies, so every one of these leaves the cache

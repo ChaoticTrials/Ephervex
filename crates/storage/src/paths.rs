@@ -312,10 +312,24 @@ impl Paths {
         self.data.join("shared")
     }
 
-    /// Instance icons (`$XDG_DATA_HOME/ephervex/icons/`).
+    /// Imported host icons (`$XDG_DATA_HOME/ephervex/icons/`), one
+    /// content-addressed PNG each.
     #[must_use]
     pub fn icons_dir(&self) -> PathBuf {
         self.data.join("icons")
+    }
+
+    /// The stored PNG for one imported icon.
+    #[must_use]
+    pub fn icon_file(&self, icon: &crate::organization::IconId) -> PathBuf {
+        self.icons_dir().join(icon.file_name())
+    }
+
+    /// `$XDG_DATA_HOME/ephervex/organization.json`: favorites, groups and
+    /// icons, kept apart from host metadata (ADR 0048).
+    #[must_use]
+    pub fn organization_file(&self) -> PathBuf {
+        self.data.join(crate::organization::ORGANIZATION_FILE_NAME)
     }
 
     /// In-progress and completed downloads.
