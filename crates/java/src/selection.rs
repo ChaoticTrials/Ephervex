@@ -31,6 +31,7 @@
 //! after the global value changes. [`EffectiveJvmSettings`] records which
 //! fields came from where, so the difference is visible rather than inferred.
 
+use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
@@ -297,6 +298,57 @@ fn major_rule(required: &RequiredJava) -> crate::rules::VersionBound {
     crate::rules::VersionBound::new("minecraft-java-major").major(required.major)
 }
 
+/// Whether one runtime satisfies the requirement, the host architecture and
+/// every loader rule.
+///
+/// The single evaluation behind [`select`], [`check_pinned`] and any frontend
+/// that lists runtimes with a verdict next to each, so a runtime shown as
+/// compatible is exactly one launch would accept. The first rule to refuse
+/// supplies the rejection: the required major, then the architecture, then the
+/// loader's own rules in the order given.
+#[must_use]
+pub fn evaluate_runtime(
+    runtime: &JavaRuntime,
+    required: &RequiredJava,
+    rules: &[&dyn JavaCompatibilityRule],
+) -> RuleVerdict {
+    evaluate_for_host(runtime, required, rules, &HostArchitecture::current())
+}
+
+fn evaluate_for_host(
+    runtime: &JavaRuntime,
+    required: &RequiredJava,
+    rules: &[&dyn JavaCompatibilityRule],
+    host: &HostArchitecture,
+) -> RuleVerdict {
+    let base = major_rule(required);
+    for rule in [&base as &dyn JavaCompatibilityRule, host]
+        .into_iter()
+        .chain(rules.iter().copied())
+    {
+        if let RuleVerdict::Reject(rejection) = rule.evaluate(runtime) {
+            return RuleVerdict::Reject(rejection);
+        }
+    }
+    RuleVerdict::Accept
+}
+
+/// The order automatic selection prefers runtimes in: newest first, a managed
+/// runtime ahead of a system one at equal version, then by path so the order
+/// is total.
+///
+/// [`Ordering::Less`] means `left` is preferred. Shared with every listing that
+/// presents compatible runtimes, so the first entry shown is the one selection
+/// would pick.
+#[must_use]
+pub fn compare_preference(left: &JavaRuntime, right: &JavaRuntime) -> Ordering {
+    right
+        .version
+        .cmp(&left.version)
+        .then_with(|| right.is_managed().cmp(&left.is_managed()))
+        .then_with(|| left.executable.cmp(&right.executable))
+}
+
 /// Picks the best runtime satisfying the requirement, the host architecture and
 /// every rule.
 ///
@@ -320,34 +372,21 @@ fn select_for_host(
     rules: &[&dyn JavaCompatibilityRule],
     host: &HostArchitecture,
 ) -> Result<Selection, JavaError> {
-    let base = major_rule(required);
     let mut accepted: Vec<&JavaRuntime> = Vec::new();
     let mut rejected: Vec<RejectedRuntime> = Vec::new();
 
-    'candidate: for runtime in &inventory.runtimes {
-        for rule in [&base as &dyn JavaCompatibilityRule, host]
-            .into_iter()
-            .chain(rules.iter().copied())
-        {
-            if let RuleVerdict::Reject(rejection) = rule.evaluate(runtime) {
-                rejected.push(RejectedRuntime {
-                    executable: runtime.executable.clone(),
-                    version: runtime.version,
-                    rejection,
-                });
-                continue 'candidate;
-            }
+    for runtime in &inventory.runtimes {
+        match evaluate_for_host(runtime, required, rules, host) {
+            RuleVerdict::Accept => accepted.push(runtime),
+            RuleVerdict::Reject(rejection) => rejected.push(RejectedRuntime {
+                executable: runtime.executable.clone(),
+                version: runtime.version,
+                rejection,
+            }),
         }
-        accepted.push(runtime);
     }
 
-    accepted.sort_by(|left, right| {
-        right
-            .version
-            .cmp(&left.version)
-            .then_with(|| right.is_managed().cmp(&left.is_managed()))
-            .then_with(|| left.executable.cmp(&right.executable))
-    });
+    accepted.sort_by(|left, right| compare_preference(left, right));
 
     match accepted.first() {
         Some(runtime) => {
@@ -401,20 +440,14 @@ fn check_pinned_for_host(
     source: PinSource,
     host: &HostArchitecture,
 ) -> Result<(), JavaError> {
-    let base = major_rule(required);
-    for rule in [&base as &dyn JavaCompatibilityRule, host]
-        .into_iter()
-        .chain(rules.iter().copied())
-    {
-        if let RuleVerdict::Reject(rejection) = rule.evaluate(runtime) {
-            return Err(JavaError::PinnedRuntimeIncompatible {
-                path: runtime.executable.clone(),
-                pinned_by: source,
-                rejection: Box::new(rejection),
-            });
-        }
+    match evaluate_for_host(runtime, required, rules, host) {
+        RuleVerdict::Accept => Ok(()),
+        RuleVerdict::Reject(rejection) => Err(JavaError::PinnedRuntimeIncompatible {
+            path: runtime.executable.clone(),
+            pinned_by: source,
+            rejection: Box::new(rejection),
+        }),
     }
-    Ok(())
 }
 
 /// A short, untranslated description of a rejection, for logs.
@@ -1017,5 +1050,63 @@ mod tests {
             "the checkbox is off even though no value was changed yet"
         );
         assert!(effective.overridden.is_empty());
+    }
+
+    // -- shared evaluation and ordering ---------------------------------
+
+    #[test]
+    fn the_shared_evaluation_agrees_with_selection_and_the_pinned_check() {
+        let legacy_forge = VersionBound::new("forge-legacy-java8")
+            .major(8)
+            .at_most(JavaVersion::new(8, 0, LEGACY_FORGE_MAX_JAVA_8_UPDATE));
+        let rules: [&dyn JavaCompatibilityRule; 1] = [&legacy_forge];
+        let inventory = representative_inventory();
+        for major in [8, 17, 21, 25] {
+            let required = required(major);
+            let selection = select(&inventory, &required, &rules);
+            for candidate in &inventory.runtimes {
+                let verdict = evaluate_runtime(candidate, &required, &rules);
+                let pinned =
+                    check_pinned(candidate, &required, &rules, PinSource::InstanceOverride);
+                assert_eq!(verdict.is_accepted(), pinned.is_ok(), "{major} pinned");
+                let selectable = selection
+                    .as_ref()
+                    .is_ok_and(|selected| selected.runtime.executable == candidate.executable);
+                if selectable {
+                    assert!(verdict.is_accepted(), "{major} selected");
+                }
+                if let RuleVerdict::Reject(rejection) = &verdict
+                    && let Ok(selected) = &selection
+                {
+                    assert!(
+                        selected.rejected.iter().any(|entry| {
+                            entry.executable == candidate.executable
+                                && entry.rejection == *rejection
+                        }),
+                        "{major} rejection"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn preference_order_puts_the_runtime_selection_would_pick_first() {
+        let mut inventory = representative_inventory();
+        inventory.runtimes.push(runtime(
+            "/home/dev/.local/share/ephervex/java/21/eclipse-jdk-21.0.11+9/bin/java",
+            JavaVersion::new(21, 0, 11),
+            JavaSourceKind::Managed,
+        ));
+        let required = required(21);
+        let mut compatible: Vec<&JavaRuntime> = inventory
+            .runtimes
+            .iter()
+            .filter(|candidate| evaluate_runtime(candidate, &required, &[]).is_accepted())
+            .collect();
+        compatible.sort_by(|left, right| compare_preference(left, right));
+        let selected = select(&inventory, &required, &[]).expect("java 21");
+        assert_eq!(compatible[0].executable, selected.runtime.executable);
+        assert!(compatible[0].is_managed());
     }
 }

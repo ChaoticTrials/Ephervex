@@ -167,6 +167,12 @@ impl VersionBound {
     pub const fn maximum(&self) -> Option<JavaVersion> {
         self.maximum
     }
+
+    /// The inclusive lower bound, when this rule declares one.
+    #[must_use]
+    pub const fn minimum(&self) -> Option<JavaVersion> {
+        self.minimum
+    }
 }
 
 /// The release a runtime is on, without its vendor build.

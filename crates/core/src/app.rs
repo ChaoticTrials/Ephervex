@@ -1229,12 +1229,8 @@ impl App {
             .iter()
             .map(|rule| rule as &dyn JavaCompatibilityRule)
             .collect();
-        let maximum_update = loader_rules
-            .iter()
-            .filter_map(ephervex_java::VersionBound::maximum)
-            .filter(|maximum| maximum.major == required.major)
-            .map(|maximum| maximum.update)
-            .min();
+        let maximum_update =
+            ephervex_java::ExpectedJava::new(&required, &loader_rules).maximum_update();
 
         let settings = self.java_settings();
         let preference = JavaPreference {
