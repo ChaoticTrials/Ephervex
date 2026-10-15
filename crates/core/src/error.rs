@@ -405,6 +405,21 @@ pub enum CoreError {
     #[error("that name cannot be used: {reason}")]
     EntityNameInvalid { reason: NameRefusal },
 
+    /// A group already has this name. Names compare without regard to case.
+    #[error("a group named `{name}` already exists")]
+    GroupNameTaken { name: String },
+
+    /// No group has this name or id.
+    #[error("there is no group `{group}`")]
+    GroupNotFound { group: String },
+
+    /// A picked icon file cannot be used.
+    #[error("the icon {} cannot be used: {reason}", path.display())]
+    IconRefused {
+        path: PathBuf,
+        reason: crate::organization::IconRefusal,
+    },
+
     /// A repair that would rewrite mods something else is using right now.
     #[error("this host cannot be repaired while {reason}")]
     RepairRefused { reason: RepairRefusal },
@@ -589,6 +604,9 @@ impl CoreError {
             }
             Self::ModFileNotAdded { .. } => "error-mod-file-not-added",
             Self::EntityNameInvalid { reason } => reason.message_id(),
+            Self::GroupNameTaken { .. } => "error-group-name-taken",
+            Self::GroupNotFound { .. } => "error-group-not-found",
+            Self::IconRefused { reason, .. } => reason.message_id(),
             Self::RepairRefused { reason } => reason.message_id(),
             Self::ChangeRefused { reason } => match reason {
                 RepairRefusal::HostRunning => "error-change-host-running",
@@ -652,6 +670,9 @@ impl CoreError {
             )],
             Self::Preference(error) => vec![("syntax", Arg::from(error.syntax.to_owned()))],
             Self::PreferenceValue(error) => vec![("preference", Arg::from(error.id.to_string()))],
+            Self::GroupNameTaken { name } => vec![("name", Arg::from(name.clone()))],
+            Self::GroupNotFound { group } => vec![("group", Arg::from(group.clone()))],
+            Self::IconRefused { reason, .. } => reason.message_args(),
             Self::EntityNameInvalid {
                 reason: NameRefusal::TooLong,
             } => vec![(
@@ -863,6 +884,9 @@ impl CoreError {
             | Self::ModFileNotDeleted { .. }
             | Self::ModFileNotAdded { .. }
             | Self::EntityNameInvalid { .. }
+            | Self::GroupNameTaken { .. }
+            | Self::GroupNotFound { .. }
+            | Self::IconRefused { .. }
             | Self::LoaderFamilyFixed { .. }
             | Self::LoaderChangeBlockedByMods { .. }
             | Self::ModCatalogPreferenceUnrecognized { .. }
@@ -933,6 +957,7 @@ impl CoreError {
             | Self::ModDependencyNotMovable { path, .. }
             | Self::DiagnosticBundleNotWritten { path, .. }
             | Self::DiagnosticBundleOverwritesSource { path }
+            | Self::IconRefused { path, .. }
             | Self::Auth(
                 ephervex_auth::AuthError::CredentialChangeBusy { path }
                 | ephervex_auth::AuthError::CredentialChangeUnavailable { path },
@@ -964,6 +989,8 @@ impl CoreError {
             | Self::UrlHandlerUnavailable { .. }
             | Self::SingleInstanceUnavailable { .. }
             | Self::EntityNameInvalid { .. }
+            | Self::GroupNameTaken { .. }
+            | Self::GroupNotFound { .. }
             | Self::RepairRefused { .. }
             | Self::ChangeRefused { .. }
             | Self::ArtworkUnusable { .. } => None,
@@ -1008,6 +1035,7 @@ fn storage_failing_path(error: &StorageError) -> Option<PathBuf> {
         // Always about a file or a directory: naming it is most of what makes
         // a diagnostics failure actionable.
         StorageError::Diagnostics(inner) => Some(inner.failing_path()),
+        StorageError::Organization(inner) => organization_failing_path(inner),
     }
 }
 
@@ -1082,6 +1110,17 @@ fn index_failing_path(error: &ephervex_storage::IndexError) -> Option<PathBuf> {
     }
 }
 
+fn organization_failing_path(error: &ephervex_storage::OrganizationError) -> Option<PathBuf> {
+    use ephervex_storage::OrganizationError;
+    match error {
+        OrganizationError::Unreadable { path, .. }
+        | OrganizationError::Unwritable { path, .. }
+        | OrganizationError::Busy { path } => Some(path.clone()),
+        OrganizationError::Path(inner) => path_failing_path(inner),
+        OrganizationError::Serialization(_) => None,
+    }
+}
+
 fn path_failing_path(error: &ephervex_storage::PathError) -> Option<PathBuf> {
     use ephervex_storage::PathError;
     match error {
@@ -1101,6 +1140,12 @@ impl From<ephervex_storage::RegistryError> for CoreError {
 impl From<ephervex_storage::ConfigError> for CoreError {
     fn from(error: ephervex_storage::ConfigError) -> Self {
         Self::from(StorageError::Config(error))
+    }
+}
+
+impl From<ephervex_storage::OrganizationError> for CoreError {
+    fn from(error: ephervex_storage::OrganizationError) -> Self {
+        Self::from(StorageError::Organization(error))
     }
 }
 

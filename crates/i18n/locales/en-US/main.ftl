@@ -206,6 +206,32 @@ error-organization-unwritable = Favorites, groups and icons could not be saved.
 error-organization-busy = Another Ephervex window or command is saving favorites, groups or icons right now.
 .action = Try again in a moment. If it keeps happening, check which process holds { $path }.
 
+## Group and icon errors
+
+error-group-name-taken = A group named { $name } already exists.
+.action = Group names are compared without regard to case. Choose a different name.
+
+error-group-not-found = That group does not exist.
+.action = List the groups to see their names. It may have been deleted already.
+
+error-icon-unreadable = The icon file could not be read.
+.action = Check that the file exists and that you can read it.
+
+error-icon-not-a-file = The icon path is not a file.
+.action = Pick a PNG or JPEG image file.
+
+error-icon-too-large = The icon file is too large.
+.action = Pick an image smaller than { $limit_mib } MiB.
+
+error-icon-unsupported-format = Only PNG and JPEG images can be used as icons.
+.action = Convert the image to PNG or JPEG and pick it again.
+
+error-icon-not-an-image = The icon file is not a readable image.
+.action = Pick a PNG or JPEG image that opens in an image viewer.
+
+error-icon-too-many-pixels = The icon image is too large.
+.action = Pick a smaller image. An icon picture can be at most { $limit } pixels on a side and { $megapixels } megapixels in total.
+
 ## Artifact cache errors
 
 # The cache holds re-downloadable copies, so every one of these leaves the cache

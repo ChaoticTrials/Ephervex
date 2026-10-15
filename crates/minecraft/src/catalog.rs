@@ -106,6 +106,22 @@ impl ReleaseListing {
     }
 }
 
+async fn read_cached_manifest(cache: &MetadataCache, key: &MetadataKey) -> Option<VersionManifest> {
+    let document = cache.peek(key).await?;
+    VersionManifest::parse(document.json()).ok()
+}
+
+/// The version manifest as cached under `layout`, without reaching for the
+/// network.
+///
+/// `None` when nothing is cached or the cached copy cannot be read, so a caller
+/// that only wants release order never becomes an operation that needs a
+/// connection.
+pub async fn cached_version_manifest(layout: &CacheLayout) -> Option<VersionManifest> {
+    let key = MetadataKey::new(VERSION_MANIFEST_CACHE_KEY).ok()?;
+    read_cached_manifest(&MetadataCache::new(layout.clone()), &key).await
+}
+
 /// Reads Mojang's version metadata.
 #[derive(Debug, Clone)]
 pub struct VersionCatalog {

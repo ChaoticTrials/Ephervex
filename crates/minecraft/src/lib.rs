@@ -91,7 +91,7 @@ mod test_support;
 
 pub use arguments::{ArgumentEntry, ArgumentForm, ArgumentGroup, Arguments};
 pub use assets::{AssetIndex, AssetIndexError, AssetObject};
-pub use catalog::{CachedManifest, ReleaseListing, VersionCatalog};
+pub use catalog::{CachedManifest, ReleaseListing, VersionCatalog, cached_version_manifest};
 pub use error::{LaunchError, LaunchResult, MinecraftError, MinecraftResult};
 pub use install::{
     ASSET_RESOURCE_BASE, ExcludedLibrary, ExclusionReason, Installation, InstallationPlan,

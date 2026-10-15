@@ -414,6 +414,19 @@ impl Organization {
         Ok(result)
     }
 
+    /// Stores one icon's PNG under its content name, unless it is already
+    /// there. Meant for the closure of [`Self::update`], so the file is never
+    /// collected before the organization names it.
+    pub fn store_icon(paths: &Paths, icon: &IconId, png: &[u8]) -> Result<(), OrganizationError> {
+        let path = paths.icon_file(icon);
+        if path.is_file() {
+            return Ok(());
+        }
+        crate::paths::create_dir_all(&paths.icons_dir())?;
+        write_bytes_atomic(&path, png, AtomicWriteOptions::private())
+            .map_err(|source| OrganizationError::Unwritable { path, source })
+    }
+
     fn write_locked(&self, paths: &Paths) -> Result<(), OrganizationError> {
         self.write_to(paths.organization_file())
     }

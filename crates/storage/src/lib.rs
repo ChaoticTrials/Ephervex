@@ -107,6 +107,9 @@ pub enum StorageError {
     /// Discovering or reading a log or crash report.
     #[error(transparent)]
     Diagnostics(#[from] DiagnosticError),
+    /// Favorites, groups and icons.
+    #[error(transparent)]
+    Organization(#[from] OrganizationError),
 }
 
 impl StorageError {
@@ -119,6 +122,7 @@ impl StorageError {
             Self::Path(error) => error.message_id(),
             Self::Lock(error) => error.message_id(),
             Self::Diagnostics(error) => error.message_id(),
+            Self::Organization(error) => error.message_id(),
         }
     }
 }

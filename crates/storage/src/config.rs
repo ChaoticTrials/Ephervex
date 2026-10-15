@@ -436,6 +436,11 @@ pub struct ApplicationDisplayConfig {
     pub color_scheme: String,
     /// Whether linked servers also appear in the global Servers list.
     pub show_linked_servers: bool,
+    /// The key the instance list is ordered by, by its recorded name.
+    ///
+    /// Text so a name a newer Ephervex wrote costs this build that one
+    /// setting. Resolved by the core crate, which falls back to the default.
+    pub instance_sort: String,
     /// Keys this build does not know about. See [`Config::unknown`].
     #[serde(flatten)]
     pub unknown: toml::Table,
@@ -448,10 +453,14 @@ impl Default for ApplicationDisplayConfig {
             technical_text_size: TechnicalTextSize::default(),
             color_scheme: ApplicationColorScheme::default().as_str().to_owned(),
             show_linked_servers: false,
+            instance_sort: DEFAULT_INSTANCE_SORT.to_owned(),
             unknown: toml::Table::new(),
         }
     }
 }
+
+/// The recorded name of the instance list's default order.
+pub const DEFAULT_INSTANCE_SORT: &str = "favorite";
 
 impl ApplicationDisplayConfig {
     /// The recorded theme, or the default for a name this build does not
