@@ -15977,6 +15977,222 @@ mod tests {
         );
     }
 
+    /// A server's Mods surface, shown on a window large enough to lay it out.
+    fn server_mods_window() -> (
+        AppWindow,
+        Workspace,
+        std::sync::mpsc::Receiver<Command>,
+        InstalledHost,
+    ) {
+        let ui = test_window();
+        register_i18n(&ui);
+        ui.window().set_size(slint::PhysicalSize::new(1600, 900));
+        let (workspace, commands) = test_workspace_sending(&ui);
+        let server = server_host();
+        workspace.state.borrow_mut().set_rows(
+            Vec::new(),
+            vec![ServerRow {
+                id: server.id().into(),
+                name: "Repro Server".into(),
+                installed: true,
+                loader_kind: "neoforge".into(),
+                ..ServerRow::default()
+            }],
+        );
+        workspace.open(&ui, server, Surface::Mods);
+        (ui, workspace, commands, server)
+    }
+
+    /// Hands one event to the window the way the event loop does.
+    fn deliver_event(ui: &AppWindow, workspace: &Workspace, event: Event) {
+        apply_event(
+            ui,
+            event,
+            &Rc::default(),
+            &Rc::default(),
+            &Rc::default(),
+            &Rc::new(RefCell::new(MinecraftDefaultsModel::new())),
+            &Rc::default(),
+            &Rc::default(),
+            &Rc::default(),
+            &Rc::default(),
+            &Rc::default(),
+            workspace,
+            &workspace.commands,
+        );
+    }
+
+    fn render() {
+        slint::platform::update_timers_and_animations();
+    }
+
+    fn on_screen(ui: &AppWindow, label: &str) -> bool {
+        ElementHandle::find_by_accessible_label(ui, label).any(|element| element.size().width > 0.0)
+    }
+
+    fn server_mod(project: &str, deleted: bool) -> backend::ManagedModData {
+        backend::ManagedModData {
+            project_id: project.to_owned(),
+            deleted,
+            logical_path: format!("mods/{project}.jar"),
+            title: "Repro Mod".to_owned(),
+            file_name: format!("{project}.jar"),
+            version: "1.0.0".to_owned(),
+            version_known: true,
+            provider: "Modrinth".to_owned(),
+            provider_kind: "modrinth".to_owned(),
+            origin: "Added".to_owned(),
+            origin_kind: "user".to_owned(),
+            compatibility: String::new(),
+            author: String::new(),
+            icon: String::new(),
+            enabled: true,
+            pack_owned: false,
+            can_manage: true,
+            can_change_version: true,
+            can_update: true,
+            can_remove: true,
+            can_delete_file: true,
+            restriction: String::new(),
+            suspect_reason: String::new(),
+            suspect_confidence: String::new(),
+        }
+    }
+
+    /// What the backend sends whenever it lists a host's mods: the crash
+    /// notice first, then the list.
+    fn deliver_listing(
+        ui: &AppWindow,
+        workspace: &Workspace,
+        server: InstalledHost,
+        mods: Vec<backend::ManagedModData>,
+    ) {
+        deliver_event(
+            ui,
+            workspace,
+            Event::CrashNotice(backend::CrashNoticeData {
+                host: server.id(),
+                host_kind: "server".to_owned(),
+                report: String::new(),
+                failure: String::new(),
+                client_code_on_server: false,
+                suggested: 0,
+            }),
+        );
+        deliver_event(
+            ui,
+            workspace,
+            Event::ManagedMods(backend::ManagedModsData {
+                host: server.id(),
+                host_kind: "server".to_owned(),
+                mods,
+                notice: String::new(),
+            }),
+        );
+    }
+
+    /// A jar deleted from the list turns into its restore row at once, without
+    /// leaving the surface and coming back.
+    #[test]
+    fn a_deleted_jar_shows_its_restore_row_as_soon_as_the_list_arrives() {
+        let (ui, workspace, _commands, server) = server_mods_window();
+        deliver_listing(&ui, &workspace, server, vec![server_mod("repro", false)]);
+        render();
+        let restore = lookup("gui-restore-mod");
+        assert!(!on_screen(&ui, &restore));
+
+        deliver_listing(&ui, &workspace, server, vec![server_mod("repro", true)]);
+        render();
+
+        assert!(
+            on_screen(&ui, &restore),
+            "the row offers to put the jar back"
+        );
+        assert!(
+            !on_screen(
+                &ui,
+                &lookup_args("gui-mod-loads", [("value", Arg::from("Repro Mod"))])
+            ),
+            "and no longer offers to turn it off"
+        );
+    }
+
+    /// The result of a finished install says so, rather than staying queued.
+    #[test]
+    fn a_result_installed_on_a_server_stops_saying_it_is_queued() {
+        let (ui, workspace, commands, server) = server_mods_window();
+        register_browser_install(&ui, &workspace.commands, &workspace);
+        register_mod_browser(&ui, &workspace.commands, &workspace);
+        let id = server.id();
+        ui.invoke_search_mods(
+            "server".into(),
+            id.as_str().into(),
+            "modrinth".into(),
+            "repro".into(),
+        );
+        let request_id = commands
+            .try_iter()
+            .find_map(|command| match command {
+                Command::SearchMods { request_id, .. } => Some(request_id),
+                _ => None,
+            })
+            .expect("a search");
+        deliver_event(
+            &ui,
+            &workspace,
+            Event::ModResults(backend::ModResultsData {
+                host: server,
+                provider: "modrinth".to_owned(),
+                query: "repro".to_owned(),
+                offset: 0,
+                rows: vec![backend::ModSearchData {
+                    project_id: "repro".to_owned(),
+                    title: "Repro Mod".to_owned(),
+                    description: String::new(),
+                    author: String::new(),
+                    icon: String::new(),
+                    note: String::new(),
+                    server_support: String::new(),
+                    blocked_reason: String::new(),
+                }],
+                total: 1,
+                next_offset: None,
+                request_id,
+                notice: String::new(),
+            }),
+        );
+        ui.invoke_install_from_browser(
+            "server".into(),
+            id.as_str().into(),
+            "modrinth".into(),
+            "repro".into(),
+        );
+        apply_mod_install_plan(
+            &ui,
+            server_plan(&id, "repro", &[]),
+            &workspace,
+            &workspace.commands,
+        );
+        render();
+        assert!(on_screen(&ui, &lookup("gui-mod-result-queued")));
+
+        deliver_listing(&ui, &workspace, server, vec![server_mod("repro", false)]);
+        deliver_event(
+            &ui,
+            &workspace,
+            Event::ModInstallFinished {
+                server: true,
+                instance: id.clone(),
+                provider: "modrinth".to_owned(),
+                project: "repro".to_owned(),
+            },
+        );
+        render();
+
+        assert!(on_screen(&ui, &lookup("gui-mod-result-installed")));
+        assert!(!on_screen(&ui, &lookup("gui-mod-result-queued")));
+    }
+
     /// A server's install is planned against the server and installed on it. No
     /// command the client's flow uses is issued, and the confirmation sends
     /// exactly the mods it named.
