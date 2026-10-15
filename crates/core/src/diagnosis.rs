@@ -83,7 +83,7 @@ pub enum JavaMismatch {
 }
 
 impl JavaMismatch {
-    fn of(reason: &RejectionReason) -> Self {
+    pub(crate) fn of(reason: &RejectionReason) -> Self {
         match reason {
             RejectionReason::MajorMismatch { required, found } => Self::Major {
                 required: *required,
@@ -577,10 +577,10 @@ impl FixOutcome {
 
 /// The pieces of a host record a diagnosis reads.
 pub(crate) struct HostFacts {
-    minecraft_version: String,
-    loader: LoaderSelection,
-    java_override: Option<PathBuf>,
-    jvm_override: Option<ephervex_model::JvmSettings>,
+    pub(crate) minecraft_version: String,
+    pub(crate) loader: LoaderSelection,
+    pub(crate) java_override: Option<PathBuf>,
+    pub(crate) jvm_override: Option<ephervex_model::JvmSettings>,
 }
 
 impl App {

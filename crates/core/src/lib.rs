@@ -45,6 +45,7 @@ mod host_recipe_gate;
 pub mod import;
 pub mod instance;
 pub mod isolation;
+pub mod java_choices;
 pub mod java_status;
 pub mod launch;
 pub mod licenses;
@@ -134,6 +135,10 @@ pub use isolation::{
     IsolationReconciliation, IsolationReport, IsolationRequest, IsolationResultCandidate,
     IsolationRound, IsolationRoundKind, IsolationRoundRecord, IsolationSession, IsolationStep,
     RoundAnswer, RoundContradiction,
+};
+pub use java_choices::{
+    AutomaticJava, JavaChoice, JavaChoices, JavaPinIndex, JavaRuntimePins, LauncherJavaChoice,
+    PinningHost,
 };
 pub use java_status::{
     ExpectedRuntime, HostJavaStatus, JavaInstallOffer, JavaSelectionMode, JavaStatusTone,

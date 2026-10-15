@@ -1412,7 +1412,7 @@ impl App {
     /// because what it runs must be what was checked. Either way the runtime is
     /// reported as found through the pin, so its origin does not depend on
     /// whether a scan happened to run first.
-    async fn identify_pinned_java(
+    pub(crate) async fn identify_pinned_java(
         &self,
         path: &Path,
         source: PinSource,

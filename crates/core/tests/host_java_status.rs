@@ -617,3 +617,378 @@ async fn the_status_and_a_diagnosis_classify_a_host_s_java_the_same_way() {
         }
     }
 }
+
+/// Runtimes of several versions, origins and architectures, with real
+/// executables so each can also be pinned.
+fn mixed_inventory(fixture: &Fixture) -> Vec<JavaRuntime> {
+    let mut foreign = scanned(
+        &fake_java(
+            &fixture.root().join("mixed-foreign"),
+            "21.0.9",
+            foreign_arch(),
+        ),
+        "21.0.9",
+        "Eclipse Adoptium",
+        JavaSourceKind::System,
+    );
+    foreign_arch().clone_into(&mut foreign.arch);
+    vec![
+        scanned(
+            &fixture.java("mixed-old-21", "21.0.3"),
+            "21.0.3",
+            "Ubuntu",
+            JavaSourceKind::System,
+        ),
+        scanned(
+            &fixture.java("mixed-17", "17.0.12"),
+            "17.0.12",
+            "Ubuntu",
+            JavaSourceKind::System,
+        ),
+        foreign,
+        scanned(
+            &fixture.java("mixed-system-21", "21.0.8"),
+            "21.0.8",
+            "Ubuntu",
+            JavaSourceKind::System,
+        ),
+        scanned(
+            &fixture.managed_java("21.0.8"),
+            "21.0.8",
+            "Eclipse Adoptium",
+            JavaSourceKind::Managed,
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn the_picker_lists_compatible_runtimes_in_selection_order_then_the_refused_ones() {
+    let mut fixture = Fixture::vanilla().await;
+    ephervex_core::test_support::use_java_inventory(&fixture.app, mixed_inventory(&fixture));
+    fixture.detect(true, false);
+
+    for host in fixture.hosts() {
+        let choices = fixture.app.java_choices(host).await.unwrap();
+        let listed: Vec<(String, bool)> = choices
+            .runtimes
+            .iter()
+            .map(|choice| (choice.runtime.version.clone(), choice.runtime.managed))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("21.0.8".to_owned(), true),
+                ("21.0.8".to_owned(), false),
+                ("21.0.3".to_owned(), false),
+                ("21.0.9".to_owned(), false),
+                ("17.0.12".to_owned(), false),
+            ],
+            "{host:?}"
+        );
+        assert!(matches!(
+            choices.runtimes[3].rejection,
+            Some(JavaMismatch::Architecture { .. })
+        ));
+        assert!(matches!(
+            choices.runtimes[4].rejection,
+            Some(JavaMismatch::Major {
+                required: 21,
+                found: 17
+            })
+        ));
+        let ephervex_core::AutomaticJava::Runtime(automatic) = &choices.automatic else {
+            panic!("{:?}", choices.automatic);
+        };
+        assert_eq!(automatic, &choices.runtimes[0].runtime);
+        assert_eq!(choices.mode, JavaSelectionMode::Automatic);
+        assert!(choices.launcher.is_none());
+        assert!(choices.runtimes.iter().all(|choice| !choice.current));
+    }
+}
+
+#[tokio::test]
+async fn every_picker_verdict_is_the_verdict_a_pin_of_that_runtime_gets() {
+    let mut fixture = Fixture::vanilla().await;
+    ephervex_core::test_support::use_java_inventory(&fixture.app, mixed_inventory(&fixture));
+    fixture.detect(true, false);
+
+    for host in fixture.hosts() {
+        let choices = fixture.app.java_choices(host).await.unwrap();
+        for choice in &choices.runtimes {
+            fixture.pin(host, &choice.runtime.path);
+            let status = fixture.status(host).await;
+            let expected = if choice.is_compatible() {
+                JavaStatusTone::Customized
+            } else {
+                JavaStatusTone::Problem
+            };
+            assert_eq!(
+                status.tone(),
+                expected,
+                "{host:?} {:?}",
+                choice.runtime.path
+            );
+            if let Some(rejection) = &choice.rejection {
+                assert!(
+                    matches!(
+                        problem(&status),
+                        FindingKind::JavaIncompatible { mismatch, .. } if mismatch == rejection
+                    ),
+                    "{:?}",
+                    status.findings
+                );
+            }
+            let marked = fixture.app.java_choices(host).await.unwrap();
+            let current: Vec<&PathBuf> = marked
+                .runtimes
+                .iter()
+                .filter(|entry| entry.current)
+                .map(|entry| &entry.runtime.path)
+                .collect();
+            assert_eq!(current, [&choice.runtime.path]);
+            assert_eq!(marked.mode, JavaSelectionMode::PinnedByHost);
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_pinned_runtime_the_scan_never_found_is_listed_as_the_current_choice() {
+    let fixture = Fixture::vanilla().await;
+    ephervex_core::test_support::use_java_inventory(&fixture.app, Vec::new());
+    let custom = fixture.java("custom-jdk", "21.0.8");
+
+    for host in fixture.hosts() {
+        fixture.pin(host, &custom);
+        let choices = fixture.app.java_choices(host).await.unwrap();
+        let [choice] = choices.runtimes.as_slice() else {
+            panic!("{:?}", choices.runtimes);
+        };
+        assert_eq!(choice.runtime.path, custom);
+        assert!(choice.current);
+        assert!(choice.is_compatible());
+        assert_eq!(
+            choices.automatic,
+            ephervex_core::AutomaticJava::Unavailable(
+                ephervex_core::JavaUnavailable::DetectionDisabled
+            )
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_launcher_preference_is_its_own_entry_with_its_verdict() {
+    let mut fixture = Fixture::vanilla().await;
+    ephervex_core::test_support::use_java_inventory(&fixture.app, Vec::new());
+    let preferred = fixture.java("preferred-17", "17.0.12");
+    fixture.prefer(&preferred);
+
+    for host in fixture.hosts() {
+        let choices = fixture.app.java_choices(host).await.unwrap();
+        assert_eq!(choices.mode, JavaSelectionMode::PinnedByLauncher);
+        let launcher = choices.launcher.expect("the launcher entry");
+        assert_eq!(launcher.path, preferred);
+        assert_eq!(
+            launcher.runtime.map(|runtime| runtime.version),
+            Some("17.0.12".to_owned())
+        );
+        assert!(matches!(
+            launcher.rejection,
+            Some(JavaMismatch::Major { found: 17, .. })
+        ));
+    }
+}
+
+#[tokio::test]
+async fn nothing_installed_with_downloads_on_resolves_automatic_to_a_download() {
+    let mut fixture = Fixture::vanilla().await;
+    ephervex_core::test_support::use_java_inventory(&fixture.app, Vec::new());
+    fixture.detect(true, true);
+
+    let choices = fixture.app.java_choices(fixture.client).await.unwrap();
+    assert_eq!(
+        choices.automatic,
+        ephervex_core::AutomaticJava::DownloadsAtLaunch { major: 21 }
+    );
+}
+
+#[tokio::test]
+async fn a_custom_path_is_probed_and_judged_by_the_host_s_rules() {
+    let fixture = Fixture::vanilla().await;
+    let old = fixture.java("custom-17", "17.0.12");
+    let fitting = fixture.java("custom-21", "21.0.8");
+    let not_java = fixture.root().join("custom-text");
+    std::fs::write(&not_java, b"text").unwrap();
+
+    for host in fixture.hosts() {
+        let refused = fixture.app.evaluate_java_path(host, &old).await.unwrap();
+        assert!(matches!(
+            refused.rejection,
+            Some(JavaMismatch::Major { found: 17, .. })
+        ));
+        assert_eq!(refused.runtime.vendor, "Eclipse Adoptium");
+        let accepted = fixture
+            .app
+            .evaluate_java_path(host, &fitting)
+            .await
+            .unwrap();
+        assert!(accepted.is_compatible());
+        assert!(!accepted.current);
+        assert!(
+            fixture
+                .app
+                .evaluate_java_path(host, &not_java)
+                .await
+                .is_err(),
+            "a path that is not a runtime cannot be chosen"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_pin_index_names_every_host_and_the_launcher_preference_pinning_a_runtime() {
+    let mut fixture = Fixture::vanilla().await;
+    let java = fixture.managed_java("21.0.8");
+    let other = fixture.java("unpinned-jdk", "21.0.8");
+    let link = fixture.root().join("java-link");
+    std::os::unix::fs::symlink(&java, &link).unwrap();
+    fixture.pin(fixture.client, &link);
+    fixture.pin(fixture.server, &java);
+    fixture.prefer(&java);
+
+    let index = fixture.app.java_pin_index().unwrap();
+    let pins = index.pins_for(&scanned(
+        &java,
+        "21.0.8",
+        "Eclipse Adoptium",
+        JavaSourceKind::Managed,
+    ));
+    let hosts: Vec<(InstalledHost, &str)> = pins
+        .hosts
+        .iter()
+        .map(|pin| (pin.host, pin.name.as_str()))
+        .collect();
+    assert_eq!(
+        hosts,
+        [(fixture.client, "Java"), (fixture.server, "Java server")]
+    );
+    assert!(pins.launcher);
+    assert!(
+        index
+            .pins_for(&scanned(&other, "21.0.8", "Ubuntu", JavaSourceKind::System))
+            .is_empty()
+    );
+}
+
+/// A managed Java 8 home whose `bin/java` and `jre/bin/java` are separate real
+/// files, as a scan records it: one runtime with both paths.
+fn split_java_8_home(fixture: &Fixture) -> (JavaRuntime, PathBuf) {
+    let home = fixture
+        .app
+        .paths()
+        .java_dir()
+        .join("8/eclipse-jdk8u312-b07");
+    let jdk = fake_java(&home, "1.8.0_312", jvm_arch());
+    let jre = fake_java(&home.join("jre"), "1.8.0_312", jvm_arch());
+    let mut runtime = scanned(&jdk, "1.8.0_312", "Temurin", JavaSourceKind::Managed);
+    runtime.origins.push(JavaOrigin {
+        kind: JavaSourceKind::Managed,
+        path: jre.clone(),
+    });
+    (runtime, jre)
+}
+
+#[tokio::test]
+async fn a_pin_through_the_jre_of_a_split_java_8_home_names_that_runtime() {
+    let mut fixture = Fixture::new(
+        "1.12.2",
+        LoaderSelection {
+            kind: LoaderKind::Forge,
+            version: Some("14.23.5.2860".to_owned()),
+        },
+    )
+    .await;
+    let (runtime, jre) = split_java_8_home(&fixture);
+    ephervex_core::test_support::use_java_inventory(&fixture.app, vec![runtime.clone()]);
+    fixture.pin(fixture.client, &jre);
+    fixture.prefer(&jre);
+
+    let pins = fixture.app.java_pin_index().unwrap().pins_for(&runtime);
+    assert_eq!(
+        pins.hosts.iter().map(|pin| pin.host).collect::<Vec<_>>(),
+        [fixture.client]
+    );
+    assert!(pins.launcher);
+
+    let choices = fixture.app.java_choices(fixture.client).await.unwrap();
+    let [choice] = choices.runtimes.as_slice() else {
+        panic!("one runtime, listed once: {:?}", choices.runtimes);
+    };
+    assert!(choice.current);
+    assert!(choice.is_compatible());
+}
+
+#[tokio::test]
+async fn the_pin_index_reads_a_client_pin_its_index_row_has_not_caught_up_with() {
+    let fixture = Fixture::vanilla().await;
+    let java = fixture.java("committed-jdk", "21.0.8");
+    let InstalledHost::Instance(id) = fixture.client else {
+        unreachable!()
+    };
+    ephervex_core::test_support::commit_client_without_index(&fixture.app, id, |record| {
+        record.java_override = Some(JavaOverride::new(&java));
+    })
+    .unwrap();
+
+    let pins = fixture.app.java_pin_index().unwrap().pins_for(&scanned(
+        &java,
+        "21.0.8",
+        "Ubuntu",
+        JavaSourceKind::System,
+    ));
+    assert_eq!(
+        pins.hosts.iter().map(|pin| pin.host).collect::<Vec<_>>(),
+        [fixture.client]
+    );
+}
+
+#[tokio::test]
+async fn the_pin_index_reads_a_server_pin_its_index_row_has_not_caught_up_with() {
+    let fixture = Fixture::vanilla().await;
+    let java = fixture.java("committed-server-jdk", "21.0.8");
+    let InstalledHost::Server(id) = fixture.server else {
+        unreachable!()
+    };
+    let mut record = fixture.app.server(id).unwrap();
+    record.java_override = Some(JavaOverride::new(&java));
+    ephervex_storage::metadata::write_server_metadata(&record.root, &record).unwrap();
+
+    let pins = fixture.app.java_pin_index().unwrap().pins_for(&scanned(
+        &java,
+        "21.0.8",
+        "Ubuntu",
+        JavaSourceKind::System,
+    ));
+    assert_eq!(
+        pins.hosts.iter().map(|pin| pin.host).collect::<Vec<_>>(),
+        [fixture.server]
+    );
+}
+
+#[tokio::test]
+async fn a_launcher_preference_that_is_not_a_runtime_is_never_compatible() {
+    let mut fixture = Fixture::vanilla().await;
+    ephervex_core::test_support::use_java_inventory(&fixture.app, Vec::new());
+    let missing = fixture.root().join("gone/bin/java");
+    fixture.prefer(&missing);
+
+    let choices = fixture.app.java_choices(fixture.client).await.unwrap();
+    let launcher = choices.launcher.expect("the launcher entry");
+    assert_eq!(launcher.path, missing);
+    assert!(launcher.runtime.is_none());
+    assert!(!launcher.is_compatible());
+    assert_eq!(
+        fixture.status(fixture.client).await.tone(),
+        JavaStatusTone::Problem,
+        "the status calls the same preference a problem"
+    );
+}
