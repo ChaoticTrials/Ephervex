@@ -51,3 +51,4 @@ so the reasoning trail survives.
 | [0043](0043-diagnostics-explains-and-changes-nothing-until-a-previewed-fix-is-applied.md) | Diagnostics explains, and changes nothing until a previewed fix is applied | Accepted |
 | [0044](0044-rpm-packages-are-published-to-the-signed-package-repository.md) | RPM packages are published to the signed package repository | Accepted (amends ADR 0026) |
 | [0045](0045-a-server-installs-catalog-mods-into-its-own-recipe.md) | A server installs catalog mods into its own recipe | Accepted |
+| [0046](0046-a-hosts-java-runtime-is-changed-through-a-previewed-fix.md) | A host's Java runtime is changed through a previewed fix | Accepted |

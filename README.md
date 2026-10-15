@@ -55,6 +55,10 @@ Current functionality includes:
 * exact Forge and NeoForge loader resolution and installation;
 * local Java discovery, compatibility checks, per-instance overrides, and
   managed OpenJDK installation;
+* a per-host view of the Java runtime it runs with (path, version, vendor,
+  architecture, and how it was chosen) next to what its Minecraft version and
+  loader expect, a runtime picker that marks compatible choices, and runtime
+  changes that are previewed before they are applied;
 * Microsoft and offline accounts with multiple-account selection and secure
   refresh-token storage where available;
 * application settings for interface text size, technical diagnostics text,
