@@ -246,6 +246,16 @@ not another host header or navigation structure. More than one host workspace
 can therefore be composed by a parent without teaching its surfaces about that
 parent.
 
+A server's Mods surface carries the same catalog browser as a client's, and it
+is absent for a Vanilla server and for one whose base installation is not
+complete. A result whose server side the catalog never stated is marked with a
+"?" and a hover and accessible label saying so. "Show incompatible mods" lists
+client-only mods marked "Client only" with Install disabled and the reason
+stated. Installing opens a confirmation when a mod, or one it needs, has an
+unstated server side or is a client-only required dependency, and otherwise
+installs at once; a running server's confirmation says the change applies at its
+next start.
+
 ### Split workspace
 
 The workspace can be split into two to four panes, each showing one host and

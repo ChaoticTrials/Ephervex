@@ -1,4 +1,4 @@
-//! Each shown host's mod list, and for a client the catalog browser beside it.
+//! Each shown host's mod list, and the catalog browser beside it.
 //!
 //! Kept per host rather than per pane: two panes on one client's Mods show one
 //! list, one filter, and one search. The lists themselves are the backend's; a
@@ -43,6 +43,8 @@ struct Browser {
     expected_request_id: String,
     /// How many rows the fill under way is aiming for.
     target: i32,
+    /// Whether results the host cannot take are listed too, marked as such.
+    include_incompatible: bool,
 }
 
 impl Browser {
@@ -67,6 +69,17 @@ impl Browser {
         self.results.clear();
         self.ran = false;
         self.notice.clear();
+        self.next_offset = -1;
+    }
+
+    /// Retires the search on screen, whose results were chosen under the other
+    /// setting.
+    fn reset_search(&mut self) {
+        self.search_provider.clear();
+        self.expected_request_id.clear();
+        self.loading = false;
+        self.requested_offset = 0;
+        self.results.clear();
         self.next_offset = -1;
     }
 }
@@ -137,6 +150,35 @@ impl ModViews {
         true
     }
 
+    /// Widens or narrows what the browser lists, and answers whether the change
+    /// retired a search that has to be asked again.
+    pub(super) fn set_include_incompatible(&mut self, host: InstalledHost, on: bool) -> bool {
+        let Some(mods) = self.hosts.get_mut(&host) else {
+            return false;
+        };
+        if mods.browser.include_incompatible == on {
+            return false;
+        }
+        mods.browser.include_incompatible = on;
+        let asked = mods.browser.ran;
+        if asked {
+            mods.browser.reset_search();
+        }
+        asked
+    }
+
+    /// The search that was on screen, asked again after a setting changed.
+    pub(super) fn repeat_search(
+        &mut self,
+        host: InstalledHost,
+        counter: &std::cell::Cell<u64>,
+        page_size: i32,
+    ) -> Option<Command> {
+        let browser = &self.hosts.get(&host)?.browser;
+        let (provider, query) = (browser.provider.clone(), browser.submitted.clone());
+        self.search(host, &provider, &query, counter, page_size)
+    }
+
     pub(super) fn switch_catalog(&mut self, host: InstalledHost, provider: &str) -> bool {
         let Some(mods) = self.hosts.get_mut(&host) else {
             return false;
@@ -155,9 +197,6 @@ impl ModViews {
         counter: &std::cell::Cell<u64>,
         page_size: i32,
     ) -> Option<Command> {
-        let InstalledHost::Instance(instance) = host else {
-            return None;
-        };
         let catalog = ModProvider::parse(provider)?;
         let mods = self.hosts.get_mut(&host)?;
         // Minted before anything about the browser changes, so an id that
@@ -177,11 +216,12 @@ impl ModViews {
         browser.target = page_size;
         browser.expected_request_id = request_id.to_string();
         Some(Command::SearchMods {
-            instance,
+            host,
             provider: catalog,
             query: query.to_owned(),
             offset: 0,
             limit: request_limit(),
+            include_incompatible: browser.include_incompatible,
             request_id,
         })
     }
@@ -196,9 +236,6 @@ impl ModViews {
         counter: &std::cell::Cell<u64>,
         page_size: i32,
     ) -> Option<Command> {
-        let InstalledHost::Instance(instance) = host else {
-            return None;
-        };
         let catalog = ModProvider::parse(provider)?;
         let mods = self.hosts.get_mut(&host)?;
         let request_id = next_mod_search_request_id(counter)?;
@@ -209,11 +246,12 @@ impl ModViews {
         browser.target = to_i32(browser.results.len()).saturating_add(page_size);
         browser.expected_request_id = request_id.to_string();
         Some(Command::SearchMods {
-            instance,
+            host,
             provider: catalog,
             query: query.to_owned(),
             offset: offset.try_into().unwrap_or(0),
             limit: request_limit(),
+            include_incompatible: browser.include_incompatible,
             request_id,
         })
     }
@@ -230,19 +268,19 @@ impl ModViews {
         queue: &BrowserInstallQueue,
         counter: &std::cell::Cell<u64>,
     ) -> Option<Command> {
-        let instance = backend::parse_instance_id(&results.instance)?;
-        let host = InstalledHost::Instance(instance);
+        let host = results.host;
         let mods = self.hosts.get_mut(&host)?;
+        let host_id = host.id();
         let browser = &mut mods.browser;
         let expected_offset = u32::try_from(browser.requested_offset).unwrap_or(0);
         if !presentation::search_page_belongs(
             presentation::BrowserQuestion {
-                instance: &results.instance,
+                instance: &host_id,
                 provider: &browser.search_provider,
                 reference: &browser.submitted,
             },
             presentation::BrowserQuestion {
-                instance: &results.instance,
+                instance: &host_id,
                 provider: &results.provider,
                 reference: &results.query,
             },
@@ -280,11 +318,12 @@ impl ModViews {
             browser.requested_offset = browser.next_offset;
             browser.expected_request_id = request_id.to_string();
             return Some(Command::SearchMods {
-                instance,
+                host,
                 provider: catalog,
                 query: results.query,
                 offset: u32::try_from(browser.next_offset).unwrap_or(0),
                 limit: request_limit(),
+                include_incompatible: browser.include_incompatible,
                 request_id,
             });
         }
@@ -292,14 +331,12 @@ impl ModViews {
         None
     }
 
-    /// Marks every client's results whose install is queued or under way.
+    /// Marks every host's results whose install is queued or under way.
     pub(super) fn mark_queued(&mut self, queue: &BrowserInstallQueue) -> Vec<InstalledHost> {
         let mut marked = Vec::new();
         for (&host, mods) in &mut self.hosts {
-            if matches!(host, InstalledHost::Instance(_)) {
-                mark_queued(host, mods, queue);
-                marked.push(host);
-            }
+            mark_queued(host, mods, queue);
+            marked.push(host);
         }
         marked
     }
@@ -351,6 +388,7 @@ fn write_view(view: &mut HostView, mods: &HostMods) {
     view.browser_notice = browser.notice.as_str().into();
     view.browser_results = reuse(&view.browser_results, browser.results.clone());
     view.browser_next_offset = browser.next_offset;
+    view.browser_include_incompatible = browser.include_incompatible;
 }
 
 /// Sends a command when there is one.
@@ -385,7 +423,7 @@ mod tests {
         title: &str,
     ) -> backend::ModResultsData {
         backend::ModResultsData {
-            instance: instance.to_string(),
+            host: InstalledHost::Instance(instance),
             provider: "modrinth".to_owned(),
             query: query.to_owned(),
             offset: 0,
@@ -396,6 +434,8 @@ mod tests {
                 author: String::new(),
                 icon: String::new(),
                 note: String::new(),
+                server_support: String::new(),
+                blocked_reason: String::new(),
             }],
             total: 1,
             next_offset: None,

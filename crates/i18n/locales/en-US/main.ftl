@@ -2195,6 +2195,12 @@ gui-search-compatible-mods = Search compatible mods...
 gui-mod-search-running = Searching...
 gui-no-mod-results = No matching mods
 gui-no-mod-results-detail = Nothing in this catalog matches that search for this instance's Minecraft version and loader.
+gui-server-catalog-compatibility = Search results are constrained to this server's exact Minecraft version and loader. Mods that only run on a client are left out.
+gui-no-server-mod-results-detail = Nothing in this catalog matches that search for this server's Minecraft version and loader.
+gui-show-incompatible-mods = Show incompatible mods
+gui-mod-server-support-unstated = Server support not stated
+gui-mod-client-only = Client only
+gui-hint-mod-client-only = A mod that only runs on a client is never installed on a server.
 gui-load-more = Load More
 gui-open-providers-settings = Open Providers & APIs
 gui-search = Search
@@ -2862,6 +2868,10 @@ gui-create-standalone-server-detail = Create and install a standalone exact serv
 gui-eula-create-warning = EULA consent is not implied. Starting is blocked until you explicitly review and accept it.
 gui-create-server = Create Server
 gui-mod-plan-compatible = Ephervex core checked compatibility with the selected instance.
+gui-server-mod-plan-compatible = Ephervex checked compatibility with the selected server.
+gui-server-mod-plan-unstated = The catalog does not state whether these run on a server. Installing them is your choice:
+gui-server-mod-plan-client-only = These required mods are marked as not running on a server. They are installed because the mod that needs them cannot load without them:
+gui-server-mod-plan-restart = This server is running. The change takes effect the next time it starts.
 gui-mod-plan-install = { $count ->
     [one] 1 file will be installed
    *[other] { $count } files will be installed
@@ -2983,6 +2993,7 @@ gui-folder-unavailable = Folder unavailable.
 gui-opened-path = Opened { $value }.
 gui-unknown-author = Unknown author
 gui-compatible = Compatible
+gui-incompatible = Does not fit this server
 gui-installed-managed-mods = { $count ->
     [one] Installed 1 managed mod with required dependencies.
    *[other] Installed { $count } managed mods with required dependencies.

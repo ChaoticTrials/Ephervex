@@ -10,13 +10,13 @@ mod support;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ephervex_gui::ui::{AppWindow, GuiI18n, InstanceRow, ModRow, ModSearchRow};
+use ephervex_gui::ui::{AppWindow, GuiI18n, InstanceRow, ModRow, ModSearchRow, ServerRow};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{
     AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions,
 };
 use slint::platform::PointerEventButton;
-use slint::{ComponentHandle, Image, ModelRc, PhysicalSize, SharedString, VecModel};
+use slint::{ComponentHandle, Image, Model, ModelRc, PhysicalSize, SharedString, VecModel};
 
 #[test]
 fn the_browser_row_installs_rather_than_offering_a_review() {
@@ -438,7 +438,7 @@ fn install_buttons(ui: &AppWindow) -> Vec<ElementHandle> {
 fn record_installs(ui: &AppWindow) -> Rc<RefCell<Vec<(String, String)>>> {
     let asked: Rc<RefCell<Vec<(String, String)>>> = Rc::default();
     let record = Rc::clone(&asked);
-    ui.on_install_from_browser(move |_instance, provider, project| {
+    ui.on_install_from_browser(move |_kind, _instance, provider, project| {
         record
             .borrow_mut()
             .push((provider.to_string(), project.to_string()));
@@ -471,6 +471,8 @@ fn result(project: &str, title: &str) -> ModSearchRow {
         icon: Image::default(),
         installed: false,
         queued: false,
+        server_support: SharedString::default(),
+        blocked_reason: SharedString::default(),
     }
 }
 
@@ -541,4 +543,270 @@ fn install_i18n(ui: &AppWindow) {
         )
         .into()
     });
+}
+
+// -- a server's browser ---------------------------------------------------
+
+/// The server and the projects each confirmed install named.
+type ConfirmedInstalls = Vec<(String, Vec<String>)>;
+
+/// A stopped, installed server on a modded loader.
+fn modded_server() -> ServerRow {
+    ServerRow {
+        id: "repro-server".into(),
+        name: "Repro Server".into(),
+        installed: true,
+        loader_kind: "neoforge".into(),
+        state: "Stopped".into(),
+        state_kind: "stopped".into(),
+        ..ServerRow::default()
+    }
+}
+
+fn server_browser(ui: &AppWindow, row: ServerRow, results: Vec<ModSearchRow>) {
+    support::show_server(ui, row, "Mods");
+    support::update_host(ui, 0, |view| {
+        view.browser_provider = "modrinth".into();
+        view.browser_results = ModelRc::new(VecModel::from(results));
+    });
+    settle(ui);
+}
+
+fn search_buttons(ui: &AppWindow) -> usize {
+    ElementHandle::find_by_accessible_label(ui, &lookup("gui-search"))
+        .filter(|element| {
+            element.size().width > 0.0 && element.accessible_role() == Some(AccessibleRole::Button)
+        })
+        .count()
+}
+
+#[test]
+fn a_servers_mods_surface_offers_the_catalog_browser() {
+    let ui = window();
+    server_browser(&ui, modded_server(), vec![result("utilitix", "UtilitiX")]);
+
+    assert_eq!(search_buttons(&ui), 1, "the server can search a catalog");
+    assert_eq!(install_buttons(&ui).len(), 1);
+}
+
+#[test]
+fn a_vanilla_server_has_no_catalog_browser() {
+    let ui = window();
+    server_browser(
+        &ui,
+        ServerRow {
+            loader_kind: "vanilla".into(),
+            ..modded_server()
+        },
+        vec![result("utilitix", "UtilitiX")],
+    );
+
+    assert_eq!(search_buttons(&ui), 0);
+    assert!(install_buttons(&ui).is_empty());
+}
+
+#[test]
+fn a_server_that_is_not_installed_has_no_catalog_browser() {
+    let ui = window();
+    server_browser(
+        &ui,
+        ServerRow {
+            installed: false,
+            ..modded_server()
+        },
+        Vec::new(),
+    );
+
+    assert_eq!(search_buttons(&ui), 0);
+}
+
+#[test]
+fn a_servers_install_names_the_server_and_not_a_client() {
+    let ui = window();
+    let asked: Rc<RefCell<Vec<(String, String, String)>>> = Rc::default();
+    let record = Rc::clone(&asked);
+    ui.on_install_from_browser(move |kind, id, _provider, project| {
+        record
+            .borrow_mut()
+            .push((kind.to_string(), id.to_string(), project.to_string()));
+    });
+    server_browser(&ui, modded_server(), vec![result("utilitix", "UtilitiX")]);
+
+    install_buttons(&ui)
+        .first()
+        .expect("the row offers Install")
+        .mock_single_click(PointerEventButton::Left);
+
+    assert_eq!(
+        asked.borrow().as_slice(),
+        [(
+            "server".to_owned(),
+            "repro-server".to_owned(),
+            "utilitix".to_owned()
+        )]
+    );
+}
+
+#[test]
+fn a_result_with_no_stated_server_side_carries_a_question_mark_that_says_so() {
+    let ui = window();
+    server_browser(
+        &ui,
+        modded_server(),
+        vec![ModSearchRow {
+            server_support: "unknown".into(),
+            ..result("utilitix", "UtilitiX")
+        }],
+    );
+
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-mod-server-support-unstated"))
+            .any(|element| element.size().width > 0.0),
+        "the badge has an accessible label"
+    );
+    assert_eq!(
+        install_buttons(&ui).len(),
+        1,
+        "an unstated side is still installable, after a confirmation"
+    );
+}
+
+#[test]
+fn a_result_whose_server_side_is_stated_carries_no_badge() {
+    let ui = window();
+    server_browser(&ui, modded_server(), vec![result("utilitix", "UtilitiX")]);
+
+    assert!(
+        !ElementHandle::find_by_accessible_label(&ui, &lookup("gui-mod-server-support-unstated"))
+            .any(|element| element.size().width > 0.0)
+    );
+    assert!(
+        !ElementHandle::find_by_accessible_label(&ui, &lookup("gui-mod-client-only"))
+            .any(|element| element.size().width > 0.0)
+    );
+}
+
+#[test]
+fn a_client_only_result_is_marked_and_its_install_cannot_be_pressed() {
+    let ui = window();
+    let asked: Rc<RefCell<Vec<String>>> = Rc::default();
+    let record = Rc::clone(&asked);
+    ui.on_install_from_browser(move |_, _, _, project| {
+        record.borrow_mut().push(project.to_string());
+    });
+    server_browser(
+        &ui,
+        modded_server(),
+        vec![ModSearchRow {
+            server_support: "client-only".into(),
+            blocked_reason: lookup("gui-hint-mod-client-only").into(),
+            ..result("sodium", "Sodium")
+        }],
+    );
+
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-mod-client-only"))
+            .any(|element| element.size().width > 0.0),
+        "the row says the mod is client only"
+    );
+    install_buttons(&ui)
+        .first()
+        .expect("the row still shows Install")
+        .mock_single_click(PointerEventButton::Left);
+    assert!(
+        asked.borrow().is_empty(),
+        "a client-only mod is never installed"
+    );
+}
+
+#[test]
+fn the_servers_browser_offers_the_incompatible_toggle_and_a_clients_does_not() {
+    let ui = window();
+    let toggled: Rc<RefCell<Vec<(String, String, bool)>>> = Rc::default();
+    let record = Rc::clone(&toggled);
+    ui.on_set_mod_include_incompatible(move |kind, id, on| {
+        record
+            .borrow_mut()
+            .push((kind.to_string(), id.to_string(), on));
+    });
+    server_browser(&ui, modded_server(), Vec::new());
+
+    ElementHandle::find_by_accessible_label(&ui, &lookup("gui-show-incompatible-mods"))
+        .find(|element| element.size().width > 0.0)
+        .expect("the server's browser offers the toggle")
+        .invoke_accessible_default_action();
+
+    assert_eq!(
+        toggled.borrow().as_slice(),
+        [("server".to_owned(), "repro-server".to_owned(), true)]
+    );
+
+    mod_browser(&ui, Vec::new());
+    settle(&ui);
+    assert!(
+        !ElementHandle::find_by_accessible_label(&ui, &lookup("gui-show-incompatible-mods"))
+            .any(|element| element.size().width > 0.0),
+        "a client's browser is unchanged"
+    );
+}
+
+#[test]
+fn a_server_confirmation_names_each_mod_whose_server_side_was_not_stated() {
+    let ui = window();
+    let asked: Rc<RefCell<ConfirmedInstalls>> = Rc::default();
+    let record = Rc::clone(&asked);
+    ui.on_install_server_mod(move |server, _provider, _project, _version, ids| {
+        record.borrow_mut().push((
+            server.to_string(),
+            ids.iter().map(|id| id.to_string()).collect(),
+        ));
+    });
+    server_browser(&ui, modded_server(), Vec::new());
+    ui.set_mod_plan_kind("server".into());
+    ui.set_mod_plan_instance("repro-server".into());
+    ui.set_mod_plan_provider("modrinth".into());
+    ui.set_mod_plan_project("utilitix".into());
+    ui.set_mod_plan_title("UtilitiX".into());
+    ui.set_mod_plan_install_count(2);
+    ui.set_mod_plan_unstated(ModelRc::new(VecModel::from(vec![
+        SharedString::from("Quiet Library"),
+        SharedString::from("Silent Helper"),
+    ])));
+    ui.set_mod_plan_unstated_ids(ModelRc::new(VecModel::from(vec![
+        SharedString::from("quiet-library"),
+        SharedString::from("silent-helper"),
+    ])));
+    ui.set_mod_plan_client_only(ModelRc::new(VecModel::from(vec![SharedString::from(
+        "Screen Helper says it does not run on a server, but UtilitiX needs it.",
+    )])));
+    ui.set_mod_plan_restart_note(lookup("gui-server-mod-plan-restart").into());
+    ui.set_modal("mod-plan".into());
+    settle(&ui);
+
+    for text in [
+        "- Quiet Library",
+        "- Silent Helper",
+        "Screen Helper says it does not run on a server, but UtilitiX needs it.",
+        &lookup("gui-server-mod-plan-restart"),
+    ] {
+        assert!(
+            ElementHandle::find_by_element_type_name(&ui, "Text")
+                .any(|element| element.accessible_label().as_deref() == Some(text)),
+            "the confirmation shows {text}"
+        );
+    }
+
+    ElementHandle::find_by_accessible_label(&ui, &lookup("gui-install-required"))
+        .find(|element| element.size().width > 0.0)
+        .expect("the confirmation installs")
+        .mock_single_click(PointerEventButton::Left);
+
+    assert_eq!(
+        asked.borrow().as_slice(),
+        [(
+            "repro-server".to_owned(),
+            vec!["quiet-library".to_owned(), "silent-helper".to_owned()]
+        )],
+        "the mods the dialog named are the ones confirmed"
+    );
 }

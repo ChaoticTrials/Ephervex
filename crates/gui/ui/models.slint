@@ -383,6 +383,12 @@ export struct ModSearchRow {
     installed: bool,
     // Whether an install for this project is queued or under way.
     queued: bool,
+    // What the catalog states about the server side, for a server's results:
+    // empty when it says the mod runs there, "unknown" when it says nothing,
+    // and "client-only" when it says the mod cannot.
+    server-support: string,
+    // Why this result cannot be installed here, already localized, or empty.
+    blocked-reason: string,
 }
 
 export struct DiagnosticRow {
@@ -637,6 +643,8 @@ export struct HostView {
     browser-results: [ModSearchRow],
     // Where the provider says its next page begins, or -1 once there is none.
     browser-next-offset: int,
+    // Whether results the host cannot take are listed too, marked as such.
+    browser-include-incompatible: bool,
     // The host's mod isolation, as its surface shows it. An empty phase is
     // the same as "none": nothing is set up.
     isolation-phase: string,

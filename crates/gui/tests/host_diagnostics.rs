@@ -266,7 +266,7 @@ fn each_missing_mod_offers_its_own_install_on_a_client() {
     let installs: Rc<RefCell<Vec<(String, String, String)>>> = Rc::default();
     let record = Rc::clone(&installs);
     // The browser's install never hears it: that one skips the confirmation.
-    ui.on_install_from_browser(|_, _, _| panic!("a Diagnostics install went the browser's way"));
+    ui.on_install_from_browser(|_, _, _, _| panic!("a Diagnostics install went the browser's way"));
     ui.on_install_from_diagnostics(move |instance, provider, project| {
         record.borrow_mut().push((
             instance.to_string(),
