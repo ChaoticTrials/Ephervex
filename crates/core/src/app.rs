@@ -693,6 +693,16 @@ impl App {
         Ok(self.registry().server(id)?)
     }
 
+    /// Fetches one server as its canonical metadata holds it.
+    ///
+    /// The server counterpart of [`Self::current_client`]: anything that shows
+    /// or plans from a server's Minecraft version, loader or overrides, or
+    /// changes them, reads this, so a lagging index row is never taken for the
+    /// current selection.
+    pub fn current_server(&self, id: ServerId) -> CoreResult<ServerRecord> {
+        Ok(self.registry().current_server(id)?)
+    }
+
     /// Lists every indexed client instance.
     pub fn list_clients(&self) -> CoreResult<Vec<ClientRecord>> {
         Ok(self.registry().list_clients()?)
@@ -1261,7 +1271,7 @@ impl App {
                 (record.loader, record.java_override, record.jvm_override)
             }
             JavaTarget::Server(id) => {
-                let record = self.server(id)?;
+                let record = self.current_server(id)?;
                 (record.loader, record.java_override, record.jvm_override)
             }
         })

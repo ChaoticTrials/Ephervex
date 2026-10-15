@@ -347,7 +347,7 @@ impl App {
             }
         }
         for listed in self.list_servers()? {
-            let server = self.registry().current_server(listed.id)?;
+            let server = self.current_server(listed.id)?;
             if let Some(java) = server.java_override {
                 hosts.push((
                     canonical(&java.path),

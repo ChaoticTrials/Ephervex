@@ -145,7 +145,8 @@ pub use java_choices::{
     PinningHost,
 };
 pub use java_failure::{
-    ClassVersionMismatch, JavaRefusal, JavaRuntimeFailure, class_version_mismatch,
+    ClassVersionMismatch, JavaRefusal, JavaRuntimeFailure, RefusedJavaChoice,
+    class_version_mismatch,
 };
 pub use java_install::HostJavaInstall;
 pub use java_status::{

@@ -86,6 +86,17 @@ pub enum JavaMismatch {
 }
 
 impl JavaMismatch {
+    /// A stable identifier for frontends and `--json`.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Major { .. } => "major",
+            Self::TooOld { .. } => "too-old",
+            Self::TooNew { .. } => "too-new",
+            Self::Architecture { .. } => "architecture",
+        }
+    }
+
     pub(crate) fn of(reason: &RejectionReason) -> Self {
         match reason {
             RejectionReason::MajorMismatch { required, found } => Self::Major {
@@ -126,6 +137,17 @@ pub enum JavaUnavailable {
     DetectionDisabled,
     /// Nothing installed qualifies and automatic download is off.
     NothingCompatible,
+}
+
+impl JavaUnavailable {
+    /// A stable identifier for frontends and `--json`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DetectionDisabled => "detection-disabled",
+            Self::NothingCompatible => "nothing-compatible",
+        }
+    }
 }
 
 /// A runtime a diagnosis found or would choose.
@@ -867,7 +889,7 @@ impl App {
                 }
             }
             InstalledHost::Server(id) => {
-                let record = self.server(id)?;
+                let record = self.current_server(id)?;
                 HostFacts {
                     minecraft_version: record.minecraft_version,
                     loader: record.loader,

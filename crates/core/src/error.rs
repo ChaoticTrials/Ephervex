@@ -533,7 +533,7 @@ impl CoreError {
             Self::StorageFull { .. } => "error-storage-full",
             Self::Minecraft(error) => error.message_id(),
             Self::Java(error) => error.message_id(),
-            Self::JavaRefused(refusal) => refusal.error().message_id(),
+            Self::JavaRefused(refusal) => refusal.message_id(),
             Self::JavaSettingsInvalid { .. } => "error-java-settings-invalid",
             Self::Loader(error) => error.message_id(),
             // Not `const`: this one chooses between message ids on the HTTP

@@ -1258,3 +1258,29 @@ async fn a_java_change_waits_for_a_running_server_to_stop() {
     assert!(refused.is_err());
     assert_eq!(runtime_settings(&fixture, fixture.server).0, Some(before));
 }
+
+#[tokio::test]
+async fn a_server_s_status_reads_the_pin_its_index_row_has_not_caught_up_with() {
+    let fixture = Fixture::vanilla().await;
+    let java = fixture.java("committed-status-jdk", "21.0.8");
+    let InstalledHost::Server(id) = fixture.server else {
+        unreachable!()
+    };
+    let mut record = fixture.app.server(id).unwrap();
+    record.java_override = Some(JavaOverride::new(&java));
+    ephervex_storage::metadata::write_server_metadata(&record.root, &record).unwrap();
+
+    let status = fixture.status(fixture.server).await;
+
+    assert_eq!(status.mode, JavaSelectionMode::PinnedByHost);
+    assert_eq!(status.pinned_path.as_deref(), Some(java.as_path()));
+    assert_eq!(
+        fixture
+            .app
+            .current_server(id)
+            .unwrap()
+            .java_override
+            .map(|java| java.path),
+        Some(java)
+    );
+}

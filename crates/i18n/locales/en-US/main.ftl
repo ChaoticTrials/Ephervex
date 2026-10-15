@@ -489,6 +489,9 @@ error-java-no-compatible-runtime = None of the Java runtimes on this computer ca
 error-java-pinned-incompatible = The Java runtime chosen for this instance cannot run that Minecraft version.
 .action = Clear the Java override so Ephervex picks a compatible runtime, or point it at one that matches.
 
+error-java-explicit-incompatible = The Java runtime given for this run cannot run that Minecraft version.
+.action = Leave out the Java path so Ephervex picks a compatible runtime, or give one that matches.
+
 error-java-runtime-unusable = That path is not a usable Java runtime.
 .action = Point Ephervex at the `java` program itself, usually inside a `bin` folder.
 

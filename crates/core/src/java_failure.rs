@@ -19,12 +19,33 @@ use crate::error::{CoreError, CoreResult};
 use crate::java_status::{ExpectedRuntime, JavaSelectionMode};
 use crate::mods::InstalledHost;
 
+/// How the runtime a refused launch or start tried came to be the one it
+/// tried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusedJavaChoice {
+    /// The host's settings chose it, as its status reports.
+    Selected(JavaSelectionMode),
+    /// Given for this launch or start alone, outranking every setting.
+    GivenForRun,
+}
+
+impl RefusedJavaChoice {
+    /// A stable identifier for frontends and `--json`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Selected(mode) => mode.as_str(),
+            Self::GivenForRun => "given-for-run",
+        }
+    }
+}
+
 /// A Java refusal before a launch or server start, with what it concerned.
 #[derive(Debug)]
 pub struct JavaRefusal {
     pub(crate) error: JavaError,
     /// How the refused runtime was chosen.
-    pub mode: JavaSelectionMode,
+    pub chosen: RefusedJavaChoice,
     /// The runtime the plan tried, when it could be identified.
     pub attempted: Option<JavaRuntimeSummary>,
     /// What the host's Minecraft and loader combination expects.
@@ -38,6 +59,20 @@ impl JavaRefusal {
     #[must_use]
     pub const fn error(&self) -> &JavaError {
         &self.error
+    }
+
+    /// The refusal's message, worded for a runtime given for one run when it
+    /// was not a setting.
+    #[must_use]
+    pub fn message_id(&self) -> &'static str {
+        match &self.error {
+            JavaError::PinnedRuntimeIncompatible { .. }
+                if self.chosen == RefusedJavaChoice::GivenForRun =>
+            {
+                "error-java-explicit-incompatible"
+            }
+            error => error.message_id(),
+        }
     }
 }
 
@@ -209,7 +244,7 @@ impl App {
         if error.is_cancellation() {
             return Err(error.into());
         }
-        let layer = if request.explicit_path.is_some() || facts.java_override.is_some() {
+        let layer = if facts.java_override.is_some() {
             Some(JavaLayer::Host)
         } else if self.java_settings().preferred_path.is_some() {
             Some(JavaLayer::Launcher)
@@ -224,7 +259,11 @@ impl App {
         };
         Err(CoreError::JavaRefused(Box::new(JavaRefusal {
             error,
-            mode: JavaSelectionMode::of_layer(layer),
+            chosen: if request.explicit_path.is_some() {
+                RefusedJavaChoice::GivenForRun
+            } else {
+                RefusedJavaChoice::Selected(JavaSelectionMode::of_layer(layer))
+            },
             attempted: refusal
                 .attempted
                 .as_ref()
@@ -470,7 +509,10 @@ mod tests {
             let error = fixture.refusal().await;
 
             let refusal = error.java_refusal().expect("a refusal with context");
-            assert_eq!(refusal.mode, JavaSelectionMode::PinnedByHost);
+            assert_eq!(
+                refusal.chosen,
+                RefusedJavaChoice::Selected(JavaSelectionMode::PinnedByHost)
+            );
             let attempted = refusal.attempted.as_ref().expect("the runtime it tried");
             assert_eq!(attempted.path, old);
             assert_eq!(attempted.version, "17.0.12");
@@ -489,6 +531,34 @@ mod tests {
                 "every predicate answers as the wrapped error does"
             );
             assert_eq!(error.message_id(), refusal.error().message_id());
+        }
+
+        /// A runtime given for one launch is not a setting, so the message
+        /// does not tell the user to clear an override.
+        #[tokio::test]
+        async fn a_refused_runtime_given_for_one_launch_is_not_called_an_override() {
+            let fixture = fixture().await;
+            let old = fake_java(&fixture.root().join("jdk-17"), "17.0.12");
+
+            let error = fixture
+                .app
+                .plan_java_for_host(
+                    InstalledHost::Instance(fixture.id),
+                    &JavaPlanRequest {
+                        target: JavaTarget::Client(fixture.id),
+                        explicit_path: Some(old),
+                        ..JavaPlanRequest::default()
+                    },
+                )
+                .await
+                .expect_err("the plan refuses");
+
+            assert_eq!(
+                error.java_refusal().expect("a refusal").chosen,
+                RefusedJavaChoice::GivenForRun
+            );
+            assert_eq!(error.message_id(), "error-java-explicit-incompatible");
+            assert!(ephervex_i18n::has_attribute(error.message_id(), "action"));
         }
 
         #[tokio::test]
@@ -513,7 +583,10 @@ mod tests {
             let error = fixture.refusal().await;
 
             let refusal = error.java_refusal().expect("a refusal with context");
-            assert_eq!(refusal.mode, JavaSelectionMode::Automatic);
+            assert_eq!(
+                refusal.chosen,
+                RefusedJavaChoice::Selected(JavaSelectionMode::Automatic)
+            );
             assert!(matches!(
                 refusal.error(),
                 JavaError::AutoDetectDisabled { required_major: 21 }
@@ -532,7 +605,10 @@ mod tests {
             let error = fixture.refusal().await;
 
             let refusal = error.java_refusal().expect("a refusal with context");
-            assert_eq!(refusal.mode, JavaSelectionMode::PinnedByLauncher);
+            assert_eq!(
+                refusal.chosen,
+                RefusedJavaChoice::Selected(JavaSelectionMode::PinnedByLauncher)
+            );
             assert!(refusal.mismatch.is_some());
         }
 
