@@ -76,6 +76,30 @@ fn both_directions_are_named_with_what_the_relation_said() {
     );
 }
 
+/// A mod whose releases could not be listed, as on a host whose loader
+/// cannot load mods, keeps its page together under its name rather than
+/// spreading the few lines it has over the dialog's height.
+#[test]
+fn a_page_without_releases_keeps_its_lines_together() {
+    let ui = window();
+    managing_a_mod(&ui);
+    let notice = lookup("error-mod-loader-cannot-host-mods");
+    ui.set_mod_action_notice(notice.clone().into());
+    slint::platform::update_timers_and_animations();
+    ui.window().take_snapshot().expect("render");
+
+    let shown = |text: &str| {
+        ElementHandle::find_by_accessible_label(&ui, text)
+            .find(|element| element.size().width > 0.0)
+            .expect(text)
+    };
+    let notice = shown(&notice);
+    let requires = shown(&lookup("gui-mod-requires"));
+    let gap =
+        requires.absolute_position().y - (notice.absolute_position().y + notice.size().height);
+    assert!(gap < 40.0, "the relations sit {gap}px under the notice");
+}
+
 #[test]
 fn a_dependent_that_is_turned_off_says_so() {
     let ui = window();

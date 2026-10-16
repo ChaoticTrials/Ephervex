@@ -929,8 +929,8 @@ pub struct ManagedModSnapshot {
     ///
     /// Carried here so every frontend reads one answer: the entries alone
     /// cannot say it, and a frontend that went looking for the instance
-    /// record itself would be a second place to decide policy. Always false
-    /// for a server, whose mods follow the client it is linked to.
+    /// record itself would be a second place to decide policy. For a server,
+    /// true when it was made here rather than reconstructed from a pack.
     pub mods_are_the_users: bool,
 }
 
@@ -1678,7 +1678,12 @@ impl App {
                 InstalledHost::Instance(instance) => self
                     .current_client(instance)
                     .is_ok_and(|record| record.allow_pack_mod_version_changes),
-                InstalledHost::Server(_) => false,
+                // A server made here rather than from a pack has no declaration
+                // to preserve, as a client made here has none. One from a pack
+                // keeps it until the user says otherwise.
+                InstalledHost::Server(server) => self.current_server(server).is_ok_and(|record| {
+                    record.source.is_manual() || record.allow_pack_mod_version_changes
+                }),
             },
         })
     }
@@ -2088,25 +2093,9 @@ impl App {
         cached
     }
 
-    /// Resolves a plan against a client instance's exact versions.
-    ///
-    /// `policy` is what separates installing from mutating: an install refuses
-    /// to move a mod that is already there, and a version change is a request
-    /// to do exactly that.
-    pub(crate) async fn plan_for(
-        &self,
-        record: &ClientRecord,
-        request: &ModInstallRequest,
-        policy: InstalledPolicy,
-        reporter: &OperationReporter,
-    ) -> CoreResult<ModInstallPlan> {
-        self.plan_for_host(&CatalogHost::client(record), request, policy, reporter)
-            .await
-    }
-
     /// Resolves a plan against one host's exact versions and its own installed
     /// set, which is read from that host's recipe and no other.
-    async fn plan_for_host(
+    pub(crate) async fn plan_for_host(
         &self,
         host: &CatalogHost,
         request: &ModInstallRequest,
@@ -2155,7 +2144,11 @@ impl App {
     }
 
     /// Marks a host as needing attention after an interrupted change.
-    fn add_host_attention(&self, host: InstalledHost, reason: AttentionReason) -> CoreResult<()> {
+    pub(crate) fn add_host_attention(
+        &self,
+        host: InstalledHost,
+        reason: AttentionReason,
+    ) -> CoreResult<()> {
         match host {
             InstalledHost::Instance(id) => {
                 self.registry().modify_client(id, |current| {
@@ -2357,7 +2350,7 @@ impl CatalogHost {
     }
 
     /// A server without its base installation has no game directory to write.
-    fn require_installed(&self) -> CoreResult<()> {
+    pub(crate) fn require_installed(&self) -> CoreResult<()> {
         if self.installed {
             Ok(())
         } else {
@@ -2431,21 +2424,8 @@ fn require_confirmed_server_support(
     }
 }
 
-/// Turns one planned mod into the recipe entry that records it.
-///
-/// The client requirement is `Required` regardless of what the project declares:
-/// the user asked for this mod on this client, which is a fact about the
-/// instance rather than a claim about the project. The *server* requirement is
-/// the project's own declaration, verbatim — including `unknown`, which stays
-/// undeclared rather than being resolved into a yes.
-pub(crate) fn recipe_entry(
-    planned: &PlannedMod,
-    provider: ModProvider,
-) -> CoreResult<PackFileRecipe> {
-    recipe_entry_for(planned, provider, PackSide::Client)
-}
-
-/// The same entry for whichever side is being written.
+/// Turns one planned mod into the recipe entry that records it, for whichever
+/// side is being written.
 ///
 /// A linked server's recipe is that server's desired state, not a copy of the
 /// client's: the side the operation is for is the one recorded as `Required` by
@@ -2772,9 +2752,10 @@ mod tests {
 
     #[test]
     fn a_recipe_entry_carries_everything_needed_to_resolve_the_mod_again() {
-        let entry = recipe_entry(
+        let entry = recipe_entry_for(
             &planned(SideSupport::Required, "library-1.0.0.jar"),
             ModProvider::Modrinth,
+            PackSide::Client,
         )
         .expect("entry");
 
@@ -2809,12 +2790,13 @@ mod tests {
 
     #[test]
     fn an_installed_mods_entry_carries_the_relations_its_catalog_declared() {
-        let entry = recipe_entry(
+        let entry = recipe_entry_for(
             &planned_needing(vec![
                 relation(ModRelationKind::Required, Some("qEH6GYul")),
                 relation(ModRelationKind::Optional, Some("3Gdi7Qgq")),
             ]),
             ModProvider::Modrinth,
+            PackSide::Client,
         )
         .expect("entry");
 
@@ -2838,8 +2820,12 @@ mod tests {
     fn a_mod_the_catalog_says_needs_nothing_records_an_answered_empty_set() {
         // Not `None`: the catalog answered. Recording it as unasked would send
         // a later warning to "Ephervex cannot tell" for a mod it can.
-        let entry =
-            recipe_entry(&planned_needing(Vec::new()), ModProvider::Modrinth).expect("entry");
+        let entry = recipe_entry_for(
+            &planned_needing(Vec::new()),
+            ModProvider::Modrinth,
+            PackSide::Client,
+        )
+        .expect("entry");
         assert_eq!(entry.recorded_relations(), Some(&[][..]));
     }
 
@@ -2851,12 +2837,13 @@ mod tests {
         // to an installed file is a jar-name comparison.
         let mut named_by_jar = relation(ModRelationKind::Optional, None);
         named_by_jar.file_name = Some("somelibrary.jar".to_owned());
-        let entry = recipe_entry(
+        let entry = recipe_entry_for(
             &planned_needing(vec![
                 named_by_jar,
                 relation(ModRelationKind::Required, Some("qEH6GYul")),
             ]),
             ModProvider::Modrinth,
+            PackSide::Client,
         )
         .expect("entry");
 
@@ -2873,9 +2860,10 @@ mod tests {
 
     #[test]
     fn a_relation_that_names_nothing_at_all_is_the_only_one_dropped() {
-        let entry = recipe_entry(
+        let entry = recipe_entry_for(
             &planned_needing(vec![relation(ModRelationKind::Required, None)]),
             ModProvider::Modrinth,
+            PackSide::Client,
         )
         .expect("entry");
         assert_eq!(
@@ -2889,7 +2877,8 @@ mod tests {
     fn a_release_declaring_client_only_is_recorded_client_only_though_its_project_is_not() {
         let mut planned = planned(SideSupport::Required, "a.jar");
         planned.version.server_side = SideSupport::Unsupported;
-        let entry = recipe_entry(&planned, ModProvider::Modrinth).expect("entry");
+        let entry =
+            recipe_entry_for(&planned, ModProvider::Modrinth, PackSide::Client).expect("entry");
         assert_eq!(
             entry.server,
             SideRequirement::Unsupported,
@@ -2899,9 +2888,10 @@ mod tests {
 
     #[test]
     fn an_undeclared_server_side_is_recorded_as_undeclared() {
-        let entry = recipe_entry(
+        let entry = recipe_entry_for(
             &planned(SideSupport::Unknown, "a.jar"),
             ModProvider::Modrinth,
+            PackSide::Client,
         )
         .expect("entry");
         assert_eq!(
@@ -2944,9 +2934,10 @@ mod tests {
             "",
             "nested/path.jar",
         ] {
-            let result = recipe_entry(
+            let result = recipe_entry_for(
                 &planned(SideSupport::Required, hostile),
                 ModProvider::Modrinth,
+                PackSide::Client,
             );
             assert!(
                 result.is_err(),

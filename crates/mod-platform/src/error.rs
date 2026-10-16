@@ -163,8 +163,8 @@ pub enum ModPlatformError {
     #[error("version `{version_id}` published no hash Ephervex can verify")]
     HashesMissing { version_id: String },
 
-    /// The instance's loader cannot host mods at all.
-    #[error("{loader} instances cannot install mods")]
+    /// The host's loader cannot load mods at all.
+    #[error("{loader} cannot load mods")]
     LoaderCannotHostMods { loader: LoaderKind },
 
     /// The exact version the user chose does not fit the instance.

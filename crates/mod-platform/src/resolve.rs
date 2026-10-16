@@ -328,12 +328,13 @@ pub struct ModInstallPlan {
 }
 
 impl ModInstallPlan {
-    /// The planned mods, root first, whose release and project both leave the
-    /// server side undeclared. Installing one on a server is an explicit choice,
-    /// not something the catalog confirmed.
+    /// The mods this plan would install, root first, whose release and project
+    /// both leave the server side undeclared. Installing one on a server is an
+    /// explicit choice, not something the catalog confirmed, and one already
+    /// installed was chosen when it was.
     #[must_use]
     pub fn undeclared_server_support(&self) -> Vec<&PlannedMod> {
-        self.all_mods()
+        self.to_install()
             .into_iter()
             .filter(|planned| planned.server_side() == crate::model::SideSupport::Unknown)
             .collect()

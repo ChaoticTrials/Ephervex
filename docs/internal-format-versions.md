@@ -19,6 +19,12 @@ the three host-facing format versions at `1` until the 1.0.0 boundary.
 | Mod display cache | `CACHE_VERSION` | 1 | Cache state may be discarded and rebuilt. |
 | Minecraft analysis workspace | `ANALYSIS_SCHEMA_VERSION` | 1 | Generated analysis state may be discarded and rebuilt. |
 
+A field that the index has no column for stays in the host's metadata alone
+until migration 2 is available after 1.0.0. A server's
+`allow_pack_mod_version_changes` is one: reading the index reports it off, and
+every read for showing or changing the server, and reconciliation, take it from
+the metadata.
+
 ## Persisted enum compatibility
 
 Unknown values are handled according to what the value authorizes:

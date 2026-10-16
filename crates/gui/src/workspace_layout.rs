@@ -31,11 +31,12 @@ const CLIENT_SURFACES: [Surface; 7] = [
     Surface::Diagnostics,
 ];
 
-const SERVER_SURFACES: [Surface; 8] = [
+const SERVER_SURFACES: [Surface; 9] = [
     Surface::Overview,
     Surface::Console,
     Surface::Mods,
     Surface::Isolation,
+    Surface::Settings,
     Surface::Properties,
     Surface::Snapshots,
     Surface::Logs,
@@ -1068,6 +1069,7 @@ mod tests {
             Surface::Overview,
             Surface::Mods,
             Surface::Isolation,
+            Surface::Settings,
             Surface::Snapshots,
             Surface::Logs,
             Surface::Diagnostics,
@@ -1079,13 +1081,6 @@ mod tests {
             layout.show_host(PaneId(1), client()).expect("host");
             assert_eq!(layout.pane(PaneId(1)).expect("pane").surface(), surface);
         }
-
-        let mut layout = WorkspaceLayout::single(client(), Surface::Settings);
-        layout.show_host(PaneId(1), server()).expect("host");
-        assert_eq!(
-            layout.pane(PaneId(1)).expect("pane").surface(),
-            Surface::Overview
-        );
 
         for surface in [Surface::Console, Surface::Properties] {
             let mut layout = WorkspaceLayout::single(server(), surface);

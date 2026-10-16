@@ -54,18 +54,17 @@ use ephervex_mod_platform::{
     AnnotatedVersion, InstalledPolicy, InstanceTarget, ModInstallPlan, ModProject, PlanWarning,
     PlannedMod, ProjectReplacement, annotate, newest_compatible,
 };
-use ephervex_model::{AttentionReason, InstanceId, ModOrigin, ModProvider, ModRelationKind};
+use ephervex_model::{AttentionReason, ModOrigin, ModProvider, ModRelationKind};
 use ephervex_pack::{
     ArtifactFetch, ManagedMutation, ManagedProject, ModIdentity, PackError, PackFileRecipe,
-    PackRecipe, PackSide, ProviderFileIdentity, RecordedMod, RelationTarget, SourceStore,
+    PackRecipe, ProviderFileIdentity, RecordedMod, RelationTarget, SourceStore,
 };
-use ephervex_storage::ClientRecord;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
 
 use crate::app::App;
 use crate::error::{CoreError, CoreResult};
-use crate::mods::{InstalledHost, ManagedModEntry, ManagedModSnapshot};
+use crate::mods::{CatalogHost, InstalledHost, ManagedModEntry, ManagedModSnapshot};
 
 /// Why a mod cannot be mutated.
 ///
@@ -414,7 +413,8 @@ pub struct PlannedFile {
 /// Everything a mutation would do, worked out without touching the instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModMutationPlan {
-    pub instance: InstanceId,
+    /// The client or server the mod is on.
+    pub host: InstalledHost,
     /// The mod the user acted on.
     pub target: PathBuf,
     pub name: String,
@@ -468,23 +468,23 @@ pub struct ModMutation {
 }
 
 impl App {
-    /// The releases of one managed mod, annotated against this instance.
+    /// The releases of one managed mod, annotated against its host.
     ///
     /// Offered for any mod with a project, including ones nothing may mutate: a
     /// pack's mod has versions worth seeing even though this build will not
     /// change it.
-    #[instrument(skip(self, reporter, cancel), fields(instance = %instance, target = %target.display()))]
+    #[instrument(skip_all, fields(target = %target.display()))]
     pub async fn managed_mod_versions(
         &self,
-        instance: InstanceId,
+        host: impl Into<InstalledHost>,
         target: &Path,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<ModVersionChoices> {
-        let record = self.current_client(instance)?;
-        let snapshot = self.managed_mod_snapshot(instance)?;
+        let host = self.catalog_host(host.into())?;
+        let snapshot = self.host_mod_snapshot(host.host)?;
         let entry = entry_at(&snapshot, target)?;
-        let mutability = effective_mutability(entry, record.allow_pack_mod_version_changes);
+        let mutability = effective_mutability(entry, snapshot.mods_are_the_users);
         if !mutability.can_list_versions {
             return Err(CoreError::ModMutationRestricted {
                 path: target.to_path_buf(),
@@ -504,7 +504,7 @@ impl App {
         // The catalog the mod was installed from, never a default: another
         // catalog's ids resolve to something else or to nothing.
         let provider = self.mod_provider(provider_kind)?;
-        let instance_target = crate::mods::CatalogHost::client(&record).target();
+        let instance_target = host.target();
         let loader = ephervex_mod_platform::loader_name_for(provider, &instance_target)?;
         let project = provider.project(project_id, reporter, cancel).await?;
         let versions: Vec<_> = provider
@@ -539,16 +539,16 @@ impl App {
     }
 
     /// Works out what changing one mod's version would involve.
-    #[instrument(skip(self, reporter, cancel), fields(instance = %instance, target = %target.display()))]
+    #[instrument(skip_all, fields(target = %target.display()))]
     pub async fn plan_mod_version_change(
         &self,
-        instance: InstanceId,
+        host: impl Into<InstalledHost>,
         target: &Path,
         choice: &ModVersionChoice,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<ModMutationPlan> {
-        let context = self.mutation_context(instance, target)?;
+        let context = self.mutation_context(host.into(), target)?;
         self.version_change_plan(&context, choice, reporter, cancel)
             .await
     }
@@ -559,25 +559,26 @@ impl App {
     /// that has been withdrawn or that no longer fits between planning and
     /// applying must fail the operation, and the only way to notice is to ask
     /// again with the same exact pin.
-    #[instrument(skip(self, reporter, cancel), fields(instance = %instance, target = %target.display()))]
+    #[instrument(skip_all, fields(target = %target.display()))]
     pub async fn change_managed_mod_version(
         &self,
-        instance: InstanceId,
+        host: impl Into<InstalledHost>,
         target: &Path,
         choice: &ModVersionChoice,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<ModMutation> {
-        self.refuse_mod_change_during_isolation(InstalledHost::Instance(instance))?;
+        let host = host.into();
+        self.refuse_mod_change_during_isolation(host)?;
         self.with_artifact_cache(Box::pin(self.change_managed_mod_version_holding_the_cache(
-            instance, target, choice, reporter, cancel,
+            host, target, choice, reporter, cancel,
         )))
         .await
     }
 
     async fn change_managed_mod_version_holding_the_cache(
         &self,
-        instance: InstanceId,
+        host: InstalledHost,
         target: &Path,
         choice: &ModVersionChoice,
         reporter: &OperationReporter,
@@ -585,10 +586,8 @@ impl App {
     ) -> CoreResult<ModMutation> {
         // Held from reading the recipe to committing it, so nothing else
         // writes this host's recipe in between and has its write overwritten.
-        let _gate = self
-            .hold_mod_change(InstalledHost::Instance(instance), cancel)
-            .await?;
-        let mut context = self.mutation_context(instance, target)?;
+        let _gate = self.hold_mod_change(host, cancel).await?;
+        let mut context = self.mutation_context(host, target)?;
         let plan = self
             .version_change_plan(&context, choice, reporter, cancel)
             .await?;
@@ -597,21 +596,21 @@ impl App {
             info!(target = %target.display(), "the mod is already at the requested version");
             return Ok(ModMutation {
                 report: ephervex_pack::ManagedMutationReport::default(),
-                snapshot: self.managed_mod_snapshot(instance)?,
+                snapshot: self.host_mod_snapshot(host)?,
                 plan,
             });
         }
 
         let (upserts, resolved) = self.upserts_for(&context, &plan, reporter).await?;
         let removals = removals_for(&plan);
-        let game_dir = ephervex_storage::metadata::client_game_dir(&context.record.root);
+        let game_dir = context.host.game_dir();
         if let Err(error) = self
             .commit(&mut context, &upserts, &removals, reporter, cancel)
             .await
         {
             return Err(match &resolved {
                 Some(resolved) => {
-                    self.as_manual_acquisition(error, target, resolved, &game_dir, PackSide::Client)
+                    self.as_manual_acquisition(error, target, resolved, &game_dir, host.side())
                         .await
                 }
                 None => error,
@@ -620,12 +619,12 @@ impl App {
 
         Ok(ModMutation {
             report: context.report,
-            snapshot: self.managed_mod_snapshot(instance)?,
+            snapshot: self.host_mod_snapshot(host)?,
             plan,
         })
     }
 
-    /// Moves one mod to the newest release that fits this instance.
+    /// Moves one mod to the newest release that fits its host.
     ///
     /// A thin naming of [`Self::change_managed_mod_version`], because "update"
     /// is a word for one particular choice of version rather than a different
@@ -633,13 +632,13 @@ impl App {
     /// point of having it.
     pub async fn update_managed_mod(
         &self,
-        instance: InstanceId,
+        host: impl Into<InstalledHost>,
         target: &Path,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<ModMutation> {
         self.change_managed_mod_version(
-            instance,
+            host,
             target,
             &ModVersionChoice::NewestCompatible,
             reporter,
@@ -649,34 +648,33 @@ impl App {
     }
 
     /// Works out what removing one mod would take with it.
-    #[instrument(skip(self, reporter, cancel), fields(instance = %instance, target = %target.display()))]
+    #[instrument(skip_all, fields(target = %target.display()))]
     pub async fn plan_mod_removal(
         &self,
-        instance: InstanceId,
+        host: impl Into<InstalledHost>,
         target: &Path,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<ModMutationPlan> {
-        let context = self.mutation_context(instance, target)?;
+        let context = self.mutation_context(host.into(), target)?;
         self.removal_plan(&context, reporter, cancel).await
     }
 
     /// Removes one mod, and the automatic dependencies nothing else needs.
-    #[instrument(skip(self, reporter, cancel), fields(instance = %instance, target = %target.display()))]
+    #[instrument(skip_all, fields(target = %target.display()))]
     pub async fn remove_managed_mod(
         &self,
-        instance: InstanceId,
+        host: impl Into<InstalledHost>,
         target: &Path,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<ModMutation> {
-        self.refuse_mod_change_during_isolation(InstalledHost::Instance(instance))?;
+        let host = host.into();
+        self.refuse_mod_change_during_isolation(host)?;
         // Held from reading the recipe to committing it, so nothing else
         // writes this host's recipe in between and has its write overwritten.
-        let _gate = self
-            .hold_mod_change(InstalledHost::Instance(instance), cancel)
-            .await?;
-        let mut context = self.mutation_context(instance, target)?;
+        let _gate = self.hold_mod_change(host, cancel).await?;
+        let mut context = self.mutation_context(host, target)?;
         let plan = self.removal_plan(&context, reporter, cancel).await?;
         let removals = removals_for(&plan);
         self.commit(&mut context, &[], &removals, reporter, cancel)
@@ -684,7 +682,7 @@ impl App {
 
         Ok(ModMutation {
             report: context.report,
-            snapshot: self.managed_mod_snapshot(instance)?,
+            snapshot: self.host_mod_snapshot(host)?,
             plan,
         })
     }
@@ -692,12 +690,13 @@ impl App {
     // -- planning ---------------------------------------------------------
 
     /// Loads everything a mutation needs and checks that it is allowed at all.
-    fn mutation_context(&self, instance: InstanceId, target: &Path) -> CoreResult<MutationContext> {
-        let record = self.current_client(instance)?;
-        let snapshot = self.managed_mod_snapshot(instance)?;
+    fn mutation_context(&self, host: InstalledHost, target: &Path) -> CoreResult<MutationContext> {
+        let host = self.catalog_host(host)?;
+        host.require_installed()?;
+        let snapshot = self.host_mod_snapshot(host.host)?;
         let entry = entry_at(&snapshot, target)?.clone();
 
-        let store = SourceStore::new(ephervex_storage::metadata::source_dir(&record.root));
+        let store = host.store();
         let recipe = if store.has_recipe() {
             store.read_recipe()?
         } else {
@@ -709,8 +708,9 @@ impl App {
         };
 
         Ok(MutationContext {
-            target: crate::mods::CatalogHost::client(&record).target(),
-            record,
+            target: host.target(),
+            host,
+            mods_are_the_users: snapshot.mods_are_the_users,
             entry,
             recipe,
             store,
@@ -726,10 +726,7 @@ impl App {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<ModMutationPlan> {
-        let mutability = effective_mutability(
-            &context.entry,
-            context.record.allow_pack_mod_version_changes,
-        );
+        let mutability = effective_mutability(&context.entry, context.mods_are_the_users);
         if !mutability.can_change_version {
             return Err(CoreError::ModMutationRestricted {
                 path: context.entry.logical_path.clone(),
@@ -763,10 +760,11 @@ impl App {
             }
         };
         let resolved = self
-            .resolve_replacement(&context.record, &request, reporter)
+            .resolve_replacement(&context.host, &request, reporter)
             .await?;
 
         refuse_to_move_other_mods(context, &resolved)?;
+        refuse_unconfirmed_server_support(context, &resolved)?;
 
         let candidate = resolved.root.version.id.clone();
         let outcome = if candidate == installed_version {
@@ -799,7 +797,7 @@ impl App {
             .await;
 
         Ok(ModMutationPlan {
-            instance: context.record.id,
+            host: context.host.host,
             target: context.entry.logical_path.clone(),
             name: display_name(&context.entry, &resolved),
             provider: context.entry.identity.provider(),
@@ -813,17 +811,14 @@ impl App {
         })
     }
 
-    /// The plan for taking one mod out of the instance.
+    /// The plan for taking one mod out of its host.
     async fn removal_plan(
         &self,
         context: &MutationContext,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<ModMutationPlan> {
-        let mutability = effective_mutability(
-            &context.entry,
-            context.record.allow_pack_mod_version_changes,
-        );
+        let mutability = effective_mutability(&context.entry, context.mods_are_the_users);
         if !mutability.can_remove {
             return Err(CoreError::ModMutationRestricted {
                 path: context.entry.logical_path.clone(),
@@ -854,7 +849,7 @@ impl App {
         removes.extend(orphans);
 
         Ok(ModMutationPlan {
-            instance: context.record.id,
+            host: context.host.host,
             target: context.entry.logical_path.clone(),
             name: context.entry.display_name().to_owned(),
             provider: context.entry.identity.provider(),
@@ -871,11 +866,11 @@ impl App {
     /// Resolves the replacement graph, allowing installed mods to move.
     async fn resolve_replacement(
         &self,
-        record: &ClientRecord,
+        host: &CatalogHost,
         request: &crate::mods::ModInstallRequest,
         reporter: &OperationReporter,
     ) -> CoreResult<ModInstallPlan> {
-        self.plan_for(record, request, InstalledPolicy::Replace, reporter)
+        self.plan_for_host(host, request, InstalledPolicy::Replace, reporter)
             .await
     }
 
@@ -1046,14 +1041,16 @@ impl App {
             .from_provider(context.provider())
             .at_version(version.clone());
         let resolved = self
-            .resolve_replacement(&context.record, &request, reporter)
+            .resolve_replacement(&context.host, &request, reporter)
             .await?;
 
         refuse_to_move_other_mods(context, &resolved)?;
 
         let upserts = written_mods(&resolved)
             .into_iter()
-            .map(|planned| crate::mods::recipe_entry(planned, resolved.provider))
+            .map(|planned| {
+                crate::mods::recipe_entry_for(planned, resolved.provider, context.host.side())
+            })
             .collect::<CoreResult<Vec<_>>>()?;
         Ok((upserts, Some(resolved)))
     }
@@ -1069,13 +1066,13 @@ impl App {
     ) -> CoreResult<()> {
         let manager = self.artifact_manager()?;
 
-        let retired = ephervex_storage::metadata::retired_dir(&context.record.root);
+        let retired = ephervex_storage::metadata::retired_dir(&context.host.root);
         let result = ephervex_pack::mutate_managed(ManagedMutation {
             recipe: &mut context.recipe,
             upserts,
             removals,
-            side: ephervex_pack::PackSide::Client,
-            game_dir: &ephervex_storage::metadata::client_game_dir(&context.record.root),
+            side: context.host.side(),
+            game_dir: &context.host.game_dir(),
             retired_dir: &retired,
             store: &context.store,
             fetch: ArtifactFetch {
@@ -1096,11 +1093,7 @@ impl App {
             Err(error) => !error.recovery_issues().is_empty(),
         };
         if recovery_needed {
-            context.record = self
-                .registry()
-                .modify_client(context.record.id, |current| {
-                    current.add_attention(AttentionReason::InterruptedMutation);
-                })?;
+            self.add_host_attention(context.host.host, AttentionReason::InterruptedMutation)?;
         }
 
         context.report = result?;
@@ -1111,7 +1104,9 @@ impl App {
 /// Everything one mutation reads and writes.
 #[derive(Debug)]
 struct MutationContext {
-    record: ClientRecord,
+    host: CatalogHost,
+    /// Whether the host's mods are the user's rather than a pack's record.
+    mods_are_the_users: bool,
     entry: ManagedModEntry,
     recipe: PackRecipe,
     target: InstanceTarget,
@@ -1123,7 +1118,7 @@ impl MutationContext {
     fn dependency_scope(&self) -> DependencyScope<'_> {
         DependencyScope {
             recipe: &self.recipe,
-            side: ephervex_pack::PackSide::Client,
+            side: self.host.side(),
             target: &self.target,
             provider: self.provider(),
         }
@@ -1161,6 +1156,40 @@ pub(crate) struct DependencyScope<'a> {
     /// its own roots. Asking one catalog about another's ids would resolve the
     /// wrong projects and collect mods that are still needed.
     pub provider: ModProvider,
+}
+
+/// Refuses a server version change that would add a mod whose catalog never
+/// stated server support. Installing one asks for that confirmation; a mod the
+/// server already records was confirmed when it was installed.
+fn refuse_unconfirmed_server_support(
+    context: &MutationContext,
+    resolved: &ModInstallPlan,
+) -> CoreResult<()> {
+    if context.host.side() != ephervex_pack::PackSide::Server {
+        return Ok(());
+    }
+    let projects: Vec<String> = resolved
+        .undeclared_server_support()
+        .into_iter()
+        .filter(|planned| {
+            context
+                .recipe
+                .managed_project(resolved.provider, &planned.project.id)
+                .is_none()
+        })
+        .map(|planned| {
+            if planned.project.title.is_empty() {
+                planned.project.id.clone()
+            } else {
+                planned.project.title.clone()
+            }
+        })
+        .collect();
+    if projects.is_empty() {
+        Ok(())
+    } else {
+        Err(CoreError::ModChangeServerSupportUnconfirmed { projects })
+    }
 }
 
 /// The entry at one logical path, or a refusal naming it.
@@ -1675,7 +1704,7 @@ mod tests {
     fn a_plan_that_changes_nothing_says_so() {
         let plan = ModMutationPlan {
             provider: Some(ModProvider::Modrinth),
-            instance: InstanceId::new(),
+            host: InstalledHost::Instance(ephervex_model::InstanceId::new()),
             target: PathBuf::from("mods/thing.jar"),
             name: "Thing".to_owned(),
             project_id: Some("ROOTPROJ".to_owned()),
@@ -1695,7 +1724,7 @@ mod tests {
         let target = PathBuf::from("mods/root.jar");
         let plan = ModMutationPlan {
             provider: Some(ModProvider::Modrinth),
-            instance: InstanceId::new(),
+            host: InstalledHost::Instance(ephervex_model::InstanceId::new()),
             target: target.clone(),
             name: "Root".to_owned(),
             project_id: Some("ROOTPROJ".to_owned()),

@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use ephervex_download::{CacheLayout, OperationReporter, hash_file};
-use ephervex_mod_platform::{ModVersionInfo, curseforge_fingerprint};
+use ephervex_mod_platform::{ModVersionInfo, SideSupport, curseforge_fingerprint};
 use ephervex_model::{Hash, HashAlgorithm, ModOrigin, ModProvider, ModRelationKind};
 use ephervex_pack::{ModIdentity, PackRecipe, RecipeRelation, RelationTarget, SourceStore};
 use tokio_util::sync::CancellationToken;
@@ -249,6 +249,9 @@ pub enum UnmetDependency {
         /// The host's own entry for it, when the host records the mod and only
         /// its jar is gone.
         recorded: Option<PathBuf>,
+        /// Whether the catalog says the mod runs on a server. `Unknown` until
+        /// the catalog has been asked.
+        server_side: SideSupport,
     },
     /// The jar is here and turned off.
     Disabled(ImpactedMod),
@@ -660,7 +663,8 @@ impl App {
         Some(recognition)
     }
 
-    /// Replaces a bare project id with the catalog's title, where it has one.
+    /// Replaces a bare project id with the catalog's title, where it has one,
+    /// and records whether the catalog says the mod runs on a server.
     async fn name_unmet_requirements(
         &self,
         problems: &mut RequirementProblems,
@@ -673,12 +677,11 @@ impl App {
                 .iter()
                 .filter_map(|unmet| match &unmet.dependency {
                     UnmetDependency::Missing {
-                        name,
                         project_id: Some(project),
                         provider: Some(provider),
                         proven: true,
                         ..
-                    } if *provider == catalog && name == project => Some(project.clone()),
+                    } if *provider == catalog => Some(project.clone()),
                     _ => None,
                 })
                 .collect::<BTreeSet<_>>()
@@ -702,12 +705,16 @@ impl App {
                     name,
                     project_id: Some(project),
                     provider: Some(provider),
+                    server_side,
                     ..
                 } = &mut unmet.dependency
                     && *provider == catalog
                     && let Some(found) = projects.iter().find(|found| &found.id == project)
                 {
-                    name.clone_from(&found.title);
+                    if name == project {
+                        name.clone_from(&found.title);
+                    }
+                    *server_side = found.server_side;
                 }
             }
         }
@@ -1155,6 +1162,7 @@ impl ModGraph {
                 provider: entry.provider,
                 proven,
                 recorded: None,
+                server_side: SideSupport::Unknown,
             },
         )
     }
@@ -1271,6 +1279,7 @@ impl ModGraph {
                                     provider: self.entries[found].provider,
                                     proven: true,
                                     recorded: Some(target.logical_path.clone()),
+                                    server_side: SideSupport::Unknown,
                                 },
                                 requirer,
                             ),
@@ -2213,6 +2222,7 @@ mod tests {
                 provider: Some(ModProvider::Modrinth),
                 proven: true,
                 recorded: None,
+                server_side: SideSupport::Unknown,
             },
             "with no remembered title the catalog's own id is all there is"
         );
@@ -3746,6 +3756,8 @@ mod tests {
     /// A Modrinth pack whose overrides brought CurseForge jars: JER requires
     /// JEI and Dynamic Trees BOP requires Biomes O' Plenty, both by CurseForge
     /// project. JEI is here, identified on Modrinth; Biomes O' Plenty is not.
+    /// Biomes O' Plenty's files name only the client, so the side a missing
+    /// mod's catalog states can be checked.
     async fn mixed_catalog_host(base: &Path) -> (App, InstalledHost, MockServer) {
         use std::sync::Arc;
 
@@ -3779,7 +3791,7 @@ mod tests {
             .and(route("/v1/mods"))
             .respond_with(ResponseTemplate::new(200).set_body_raw(
                 format!(
-                    r#"{{"data":[{{"id":{BIOMES_O_PLENTY},"gameId":432,"name":"Biomes O' Plenty","slug":"biomes-o-plenty","classId":6}},{{"id":{A_RESOURCE_PACK},"gameId":432,"name":"Faithful","slug":"faithful","classId":12}}]}}"#
+                    r#"{{"data":[{{"id":{BIOMES_O_PLENTY},"gameId":432,"name":"Biomes O' Plenty","slug":"biomes-o-plenty","classId":6,"latestFiles":[{{"gameVersions":["1.21.1","Client"]}}]}},{{"id":{A_RESOURCE_PACK},"gameId":432,"name":"Faithful","slug":"faithful","classId":12}}]}}"#
                 ),
                 "application/json",
             ))
@@ -3884,6 +3896,33 @@ mod tests {
             fingerprinted, 1,
             "only jars CurseForge had not identified are asked about"
         );
+    }
+
+    /// What the catalog says about a missing mod's server side is kept, so a
+    /// server is not offered a mod that never runs on one.
+    #[tokio::test]
+    async fn a_missing_requirement_keeps_the_server_side_its_catalog_states() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, host, _server) = mixed_catalog_host(base.path()).await;
+        let mut problems = app.requirement_problems(host).expect("problems");
+
+        app.confirm_unmet_requirements(
+            host,
+            &mut problems,
+            &OperationReporter::silent("test-confirm"),
+            &CancellationToken::new(),
+        )
+        .await;
+
+        let sides: Vec<SideSupport> = problems
+            .unmet
+            .iter()
+            .filter_map(|unmet| match &unmet.dependency {
+                UnmetDependency::Missing { server_side, .. } => Some(*server_side),
+                UnmetDependency::Disabled(_) => None,
+            })
+            .collect();
+        assert_eq!(sides, [SideSupport::Unsupported]);
     }
 
     #[tokio::test]

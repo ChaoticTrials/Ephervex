@@ -3706,23 +3706,19 @@ fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>, workspace: &
     let sender = commands.clone();
     let handle = ui.as_weak();
     let lists = workspace.clone();
-    ui.on_open_mod_manager(move |id, path| {
+    ui.on_open_mod_manager(move |kind, id, path| {
         let Some(ui) = handle.upgrade() else { return };
-        let Some(instance) = backend::parse_instance_id(&id) else {
+        let Some(host) = backend::parse_mod_host(&kind, &id) else {
             return;
         };
         lists.plan_requests.manager_opened();
         // The modal opens on the state the list already has, then fills in.
         // Waiting for the catalog before showing anything would make an offline
-        // instance feel broken.
+        // host feel broken.
         ui.set_mod_action_host(id);
+        ui.set_mod_action_host_kind(kind);
         ui.set_mod_action_path(path.clone());
-        ui.set_mod_action_name(
-            lists
-                .mods
-                .borrow()
-                .title(InstalledHost::Instance(instance), &path),
-        );
+        ui.set_mod_action_name(lists.mods.borrow().title(host, &path));
         ui.set_mod_action_notice(SharedString::default());
         ui.set_mod_action_selected(SharedString::default());
         ui.set_mod_action_project_url(SharedString::default());
@@ -3744,14 +3740,14 @@ fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>, workspace: &
         send(
             &sender,
             Command::LoadModRelations {
-                host: InstalledHost::Instance(instance),
+                host,
                 path: mod_path_key::decode(path.as_str()),
             },
         );
         send(
             &sender,
             Command::LoadModVersions {
-                instance,
+                host,
                 path: mod_path_key::decode(path.as_str()),
             },
         );
@@ -3760,11 +3756,16 @@ fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>, workspace: &
         send(
             &sender,
             Command::ResolveDeclaredRelations {
-                host: InstalledHost::Instance(instance),
+                host,
                 path: mod_path_key::decode(path.as_str()),
             },
         );
     });
+}
+
+/// The host the open mod dialog acts on.
+fn mod_action_host(ui: &AppWindow, id: &str) -> Option<InstalledHost> {
+    backend::parse_mod_host(&ui.get_mod_action_host_kind(), id)
 }
 
 /// Searching a catalog, paging further into the results, and switching which
@@ -4142,13 +4143,13 @@ fn register_mod_mutations(ui: &AppWindow, commands: &Sender<Command>, workspace:
 
     let sender = commands.clone();
     let handle = ui.as_weak();
-    ui.on_change_mod_version(move |instance, path, version| {
+    ui.on_change_mod_version(move |id, path, version| {
         let Some(ui) = handle.upgrade() else { return };
-        if let Some(instance) = backend::parse_instance_id(&instance) {
+        if let Some(host) = mod_action_host(&ui, &id) {
             send(
                 &sender,
                 Command::ChangeModVersion {
-                    instance,
+                    host,
                     path: mod_path_key::decode(path.as_str()),
                     version: version.to_string(),
                     servers: chosen_linked_servers(&ui),
@@ -4167,15 +4168,15 @@ fn register_mod_mutations(ui: &AppWindow, commands: &Sender<Command>, workspace:
     let sender = commands.clone();
     let handle = ui.as_weak();
     let plans = Rc::clone(&workspace.plan_requests);
-    ui.on_plan_mod_apply(move |instance, path, version| {
+    ui.on_plan_mod_apply(move |id, path, version| {
         let Some(ui) = handle.upgrade() else { return };
-        if let Some(instance) = backend::parse_instance_id(&instance) {
+        if let Some(host) = mod_action_host(&ui, &id) {
             let request = plans.ask(PlanKind::Apply, ui.get_modal().as_str());
             send(
                 &sender,
                 Command::PlanModApply {
                     request,
-                    instance,
+                    host,
                     path: mod_path_key::decode(path.as_str()),
                     version: version.to_string(),
                 },
@@ -4186,16 +4187,17 @@ fn register_mod_mutations(ui: &AppWindow, commands: &Sender<Command>, workspace:
     let sender = commands.clone();
     let handle = ui.as_weak();
     let plans = Rc::clone(&workspace.plan_requests);
-    ui.on_plan_mod_removal(move |id, path| {
+    ui.on_plan_mod_removal(move |kind, id, path| {
         let Some(ui) = handle.upgrade() else { return };
         ui.set_mod_action_host(id.clone());
-        if let Some(instance) = backend::parse_instance_id(&id) {
+        ui.set_mod_action_host_kind(kind.clone());
+        if let Some(host) = backend::parse_mod_host(&kind, &id) {
             let request = plans.ask(PlanKind::Removal, ui.get_modal().as_str());
             send(
                 &sender,
                 Command::PlanModRemoval {
                     request,
-                    instance,
+                    host,
                     path: mod_path_key::decode(path.as_str()),
                 },
             );
@@ -4204,13 +4206,13 @@ fn register_mod_mutations(ui: &AppWindow, commands: &Sender<Command>, workspace:
 
     let sender = commands.clone();
     let handle = ui.as_weak();
-    ui.on_remove_mod(move |instance, path| {
+    ui.on_remove_mod(move |id, path| {
         let Some(ui) = handle.upgrade() else { return };
-        if let Some(instance) = backend::parse_instance_id(&instance) {
+        if let Some(host) = mod_action_host(&ui, &id) {
             send(
                 &sender,
                 Command::RemoveMod {
-                    instance,
+                    host,
                     path: mod_path_key::decode(path.as_str()),
                     servers: chosen_linked_servers(&ui),
                 },
@@ -5582,24 +5584,24 @@ fn claim_server_start(
     true
 }
 
-/// The instance workspace's Settings tab: Java/JVM overrides and the
+/// A host workspace's Settings tab: its JVM settings, and a client's
 /// pack-owned-mod-mutation opt-in.
-fn register_instance_runtime_actions(
+fn register_host_runtime_actions(
     ui: &AppWindow,
     commands: &Sender<Command>,
     workspace: &Workspace,
 ) {
     let sender = commands.clone();
     let views = workspace.clone();
-    ui.on_save_instance_runtime(move |id, min, max, args| {
-        let Some(instance) = backend::parse_instance_id(&id) else {
+    ui.on_save_host_runtime(move |kind, id, min, max, args| {
+        let Some(host) = workspace::parse_host(&kind, &id) else {
             return;
         };
-        clear_runtime_error(&views, instance);
+        clear_runtime_error(&views, host);
         send(
             &sender,
-            Command::SaveInstanceRuntime {
-                instance,
+            Command::SaveHostRuntime {
+                host,
                 min_memory_mib: min.to_string(),
                 max_memory_mib: max.to_string(),
                 jvm_args: args.to_string(),
@@ -5609,13 +5611,13 @@ fn register_instance_runtime_actions(
 
     let sender = commands.clone();
     let views = workspace.clone();
-    ui.on_clear_instance_runtime(move |id| {
-        if let Some(instance) = backend::parse_instance_id(&id) {
-            clear_runtime_error(&views, instance);
+    ui.on_clear_host_runtime(move |kind, id| {
+        if let Some(host) = workspace::parse_host(&kind, &id) {
+            clear_runtime_error(&views, host);
             send(
                 &sender,
-                Command::SaveInstanceRuntime {
-                    instance,
+                Command::SaveHostRuntime {
+                    host,
                     min_memory_mib: String::new(),
                     max_memory_mib: String::new(),
                     jvm_args: String::new(),
@@ -5625,26 +5627,26 @@ fn register_instance_runtime_actions(
     });
 
     let sender = commands.clone();
-    ui.on_set_allow_pack_mod_version_changes(move |id, allow| {
-        if let Some(instance) = backend::parse_instance_id(&id) {
+    ui.on_set_allow_pack_mod_version_changes(move |kind, id, allow| {
+        if let Some(host) = workspace::parse_host(&kind, &id) {
             send(
                 &sender,
-                Command::SetAllowPackModVersionChanges { instance, allow },
+                Command::SetAllowPackModVersionChanges { host, allow },
             );
         }
     });
 }
 
-/// Forgets why the client's last runtime save was refused, so a new attempt
+/// Forgets why the host's last runtime save was refused, so a new attempt
 /// starts from a form with no verdict on it.
-fn clear_runtime_error(workspace: &Workspace, instance: ephervex_model::InstanceId) {
-    workspace.update(InstalledHost::Instance(instance), |view| {
+fn clear_runtime_error(workspace: &Workspace, host: InstalledHost) {
+    workspace.update(host, |view| {
         view.runtime_error = SharedString::default();
     });
 }
 
 fn register_server_actions(ui: &AppWindow, commands: &Sender<Command>, workspace: &Workspace) {
-    register_instance_runtime_actions(ui, commands, workspace);
+    register_host_runtime_actions(ui, commands, workspace);
 
     let sender = commands.clone();
     ui.on_repair_server(move |id| {
@@ -7749,20 +7751,19 @@ fn apply_event(
         Event::ArtifactCacheStatus(_) | Event::ArtifactCacheClearFinished => {
             apply_artifact_cache_event(ui, event);
         }
-        Event::InstanceRuntime(runtime) => {
-            // Kept with the instance it belongs to, so a late answer lands in
-            // its own view and never in the fields of another instance.
-            if let Some(instance) = backend::parse_instance_id(&runtime.instance) {
-                workspace.update(InstalledHost::Instance(instance), |view| {
-                    view.runtime_memory_min = runtime.min_memory.into();
-                    view.runtime_memory_max = runtime.max_memory.into();
-                    view.runtime_jvm_args = runtime.jvm_args.into();
-                    view.runtime_pinned = runtime.pinned;
-                    view.runtime_global = runtime.global.into();
-                    view.allow_pack_mod_changes = runtime.allow_pack_mod_version_changes;
-                    view.runtime_revision = view.runtime_revision.wrapping_add(1);
-                });
-            }
+        Event::HostRuntime(runtime) => {
+            // Kept with the host it belongs to, so a late answer lands in its
+            // own view and never in the fields of another host.
+            workspace.update(runtime.host, |view| {
+                view.runtime_memory_min = runtime.min_memory.into();
+                view.runtime_memory_max = runtime.max_memory.into();
+                view.runtime_jvm_args = runtime.jvm_args.into();
+                view.runtime_pinned = runtime.pinned;
+                view.runtime_global = runtime.global.into();
+                view.allow_pack_mod_changes = runtime.allow_pack_mod_version_changes;
+                view.pack_mod_changes_fixed = runtime.pack_mod_changes_fixed;
+                view.runtime_revision = view.runtime_revision.wrapping_add(1);
+            });
         }
         Event::CreationProgress {
             request_id,
@@ -7808,6 +7809,7 @@ fn apply_event(
                     host,
                     managed_mod_rows(data.mods),
                     data.notice,
+                    data.mods_are_the_users,
                 )
             {
                 mod_views::publish(workspace, &workspace.mods.borrow(), host);
@@ -9898,6 +9900,7 @@ fn plan_disposition(direct: bool, plan: &backend::ModPlanData) -> PlanDispositio
 /// Puts a plan in the confirmation dialog, addressed to the host it installs on.
 fn show_install_confirmation(ui: &AppWindow, plan: backend::ModPlanData) {
     ui.set_mod_action_host(plan.instance.as_str().into());
+    ui.set_mod_action_host_kind(if plan.server { "server" } else { "client" }.into());
     ui.set_mod_action_path(SharedString::default());
     ui.set_mod_plan_kind(if plan.server { "server" } else { "client" }.into());
     ui.set_mod_plan_unstated(model(
@@ -10085,6 +10088,7 @@ fn apply_mod_removal_plan(
     };
     // An install confirmation may have taken the addressing since the ask.
     ui.set_mod_action_host(data.instance.as_str().into());
+    ui.set_mod_action_host_kind(data.host_kind.as_str().into());
     ui.set_mod_action_path(data.logical_path.as_str().into());
     ui.set_mod_remove_returns_to_manager(matches!(awaited.asked_from, PlanAskedFrom::Manager(_)));
     ui.set_mod_action_name(data.name.into());
@@ -10737,8 +10741,8 @@ mod tests {
     fn a_runtime_save_starts_from_a_form_without_the_last_refusal() {
         let (ui, workspace, _, host) = isolation_window();
         let (sender, commands) = std::sync::mpsc::channel();
-        register_instance_runtime_actions(&ui, &sender, &workspace);
-        let (_, id) = kind_and_id(host);
+        register_host_runtime_actions(&ui, &sender, &workspace);
+        let (kind, id) = kind_and_id(host);
 
         apply_host_error(
             &workspace,
@@ -10746,12 +10750,18 @@ mod tests {
             backend::HostErrorSurface::Settings,
             "Not a Java".to_owned(),
         );
-        ui.invoke_save_instance_runtime(id.clone(), "1024".into(), "".into(), "".into());
+        ui.invoke_save_host_runtime(
+            kind.clone(),
+            id.clone(),
+            "1024".into(),
+            "".into(),
+            "".into(),
+        );
 
         assert_eq!(first_view(&ui).runtime_error, "");
         assert!(matches!(
             commands.try_recv(),
-            Ok(Command::SaveInstanceRuntime { .. })
+            Ok(Command::SaveHostRuntime { .. })
         ));
 
         apply_host_error(
@@ -10760,7 +10770,7 @@ mod tests {
             backend::HostErrorSurface::Settings,
             "Not a Java".to_owned(),
         );
-        ui.invoke_clear_instance_runtime(id);
+        ui.invoke_clear_host_runtime(kind, id);
         assert_eq!(first_view(&ui).runtime_error, "");
     }
 
@@ -12385,15 +12395,17 @@ mod tests {
                 mod_row("Iris", "iris.jar", "")
             ],
             String::new(),
+            false,
         ));
         assert!(mods.apply_list(
             server,
             vec![mod_row("Lithium", "lithium.jar", "")],
-            String::new()
+            String::new(),
+            false,
         ));
         assert!(mods.filter(client, "iris"));
         assert!(
-            !mods.apply_list(client_host(), Vec::new(), String::new()),
+            !mods.apply_list(client_host(), Vec::new(), String::new(), false),
             "a list for a host no pane shows lands nowhere"
         );
         drop(mods);
@@ -15977,6 +15989,239 @@ mod tests {
         );
     }
 
+    /// A server's Mods surface, shown on a window large enough to lay it out.
+    fn server_mods_window() -> (
+        AppWindow,
+        Workspace,
+        std::sync::mpsc::Receiver<Command>,
+        InstalledHost,
+    ) {
+        let ui = test_window();
+        register_i18n(&ui);
+        ui.window().set_size(slint::PhysicalSize::new(1600, 900));
+        let (workspace, commands) = test_workspace_sending(&ui);
+        let server = server_host();
+        workspace.state.borrow_mut().set_rows(
+            Vec::new(),
+            vec![ServerRow {
+                id: server.id().into(),
+                name: "Repro Server".into(),
+                installed: true,
+                loader_kind: "neoforge".into(),
+                ..ServerRow::default()
+            }],
+        );
+        workspace.open(&ui, server, Surface::Mods);
+        (ui, workspace, commands, server)
+    }
+
+    /// Hands one event to the window the way the event loop does.
+    fn deliver_event(ui: &AppWindow, workspace: &Workspace, event: Event) {
+        apply_event(
+            ui,
+            event,
+            &Rc::default(),
+            &Rc::default(),
+            &Rc::default(),
+            &Rc::new(RefCell::new(MinecraftDefaultsModel::new())),
+            &Rc::default(),
+            &Rc::default(),
+            &Rc::default(),
+            &Rc::default(),
+            &Rc::default(),
+            workspace,
+            &workspace.commands,
+        );
+    }
+
+    fn render() {
+        slint::platform::update_timers_and_animations();
+    }
+
+    fn on_screen(ui: &AppWindow, label: &str) -> bool {
+        ElementHandle::find_by_accessible_label(ui, label).any(|element| element.size().width > 0.0)
+    }
+
+    fn server_mod(project: &str, deleted: bool) -> backend::ManagedModData {
+        backend::ManagedModData {
+            project_id: project.to_owned(),
+            deleted,
+            logical_path: format!("mods/{project}.jar"),
+            title: "Repro Mod".to_owned(),
+            file_name: format!("{project}.jar"),
+            version: "1.0.0".to_owned(),
+            version_known: true,
+            provider: "Modrinth".to_owned(),
+            provider_kind: "modrinth".to_owned(),
+            origin: "Added".to_owned(),
+            origin_kind: "user".to_owned(),
+            compatibility: String::new(),
+            author: String::new(),
+            icon: String::new(),
+            enabled: true,
+            pack_owned: false,
+            can_manage: true,
+            can_change_version: true,
+            can_update: true,
+            can_remove: true,
+            can_delete_file: true,
+            restriction: String::new(),
+            suspect_reason: String::new(),
+            suspect_confidence: String::new(),
+        }
+    }
+
+    /// What the backend sends whenever it lists a host's mods: the crash
+    /// notice first, then the list.
+    fn deliver_listing(
+        ui: &AppWindow,
+        workspace: &Workspace,
+        server: InstalledHost,
+        suggested: usize,
+        mods: Vec<backend::ManagedModData>,
+    ) {
+        deliver_event(
+            ui,
+            workspace,
+            Event::CrashNotice(backend::CrashNoticeData {
+                host: server.id(),
+                host_kind: "server".to_owned(),
+                report: String::new(),
+                failure: String::new(),
+                client_code_on_server: false,
+                suggested,
+            }),
+        );
+        deliver_event(
+            ui,
+            workspace,
+            Event::ManagedMods(backend::ManagedModsData {
+                host: server.id(),
+                host_kind: "server".to_owned(),
+                mods,
+                mods_are_the_users: false,
+                notice: String::new(),
+            }),
+        );
+    }
+
+    /// A jar deleted from the list turns into its restore row at once, without
+    /// leaving the surface and coming back.
+    #[test]
+    fn a_deleted_jar_shows_its_restore_row_as_soon_as_the_list_arrives() {
+        let (ui, workspace, _commands, server) = server_mods_window();
+        deliver_listing(&ui, &workspace, server, 0, vec![server_mod("repro", false)]);
+        render();
+        let restore = lookup("gui-restore-mod");
+        assert!(!on_screen(&ui, &restore));
+
+        deliver_listing(&ui, &workspace, server, 0, vec![server_mod("repro", true)]);
+        render();
+
+        assert!(
+            on_screen(&ui, &restore),
+            "the row offers to put the jar back"
+        );
+        assert!(
+            !on_screen(
+                &ui,
+                &lookup_args("gui-mod-loads", [("value", Arg::from("Repro Mod"))])
+            ),
+            "and no longer offers to turn it off"
+        );
+    }
+
+    /// A notice that really changes the host, here a crash's suggested count
+    /// dropping as its suspect is put aside, does not hold back the list that
+    /// follows it.
+    #[test]
+    fn a_list_change_shows_after_a_crash_notice_that_changed() {
+        let (ui, workspace, _commands, server) = server_mods_window();
+        deliver_listing(&ui, &workspace, server, 1, vec![server_mod("repro", false)]);
+        render();
+
+        deliver_listing(&ui, &workspace, server, 0, vec![server_mod("repro", true)]);
+        render();
+
+        assert!(on_screen(&ui, &lookup("gui-restore-mod")));
+    }
+
+    /// The result of a finished install says so, rather than staying queued.
+    #[test]
+    fn a_result_installed_on_a_server_stops_saying_it_is_queued() {
+        let (ui, workspace, commands, server) = server_mods_window();
+        register_browser_install(&ui, &workspace.commands, &workspace);
+        register_mod_browser(&ui, &workspace.commands, &workspace);
+        let id = server.id();
+        ui.invoke_search_mods(
+            "server".into(),
+            id.as_str().into(),
+            "modrinth".into(),
+            "repro".into(),
+        );
+        let request_id = commands
+            .try_iter()
+            .find_map(|command| match command {
+                Command::SearchMods { request_id, .. } => Some(request_id),
+                _ => None,
+            })
+            .expect("a search");
+        deliver_event(
+            &ui,
+            &workspace,
+            Event::ModResults(backend::ModResultsData {
+                host: server,
+                provider: "modrinth".to_owned(),
+                query: "repro".to_owned(),
+                offset: 0,
+                rows: vec![backend::ModSearchData {
+                    project_id: "repro".to_owned(),
+                    title: "Repro Mod".to_owned(),
+                    description: String::new(),
+                    author: String::new(),
+                    icon: String::new(),
+                    note: String::new(),
+                    server_support: String::new(),
+                    blocked_reason: String::new(),
+                }],
+                total: 1,
+                next_offset: None,
+                request_id,
+                notice: String::new(),
+            }),
+        );
+        ui.invoke_install_from_browser(
+            "server".into(),
+            id.as_str().into(),
+            "modrinth".into(),
+            "repro".into(),
+        );
+        apply_mod_install_plan(
+            &ui,
+            server_plan(&id, "repro", &[]),
+            &workspace,
+            &workspace.commands,
+        );
+        render();
+        assert!(on_screen(&ui, &lookup("gui-mod-result-queued")));
+
+        deliver_listing(&ui, &workspace, server, 0, vec![server_mod("repro", false)]);
+        deliver_event(
+            &ui,
+            &workspace,
+            Event::ModInstallFinished {
+                server: true,
+                instance: id.clone(),
+                provider: "modrinth".to_owned(),
+                project: "repro".to_owned(),
+            },
+        );
+        render();
+
+        assert!(on_screen(&ui, &lookup("gui-mod-result-installed")));
+        assert!(!on_screen(&ui, &lookup("gui-mod-result-queued")));
+    }
+
     /// A server's install is planned against the server and installed on it. No
     /// command the client's flow uses is issued, and the confirmation sends
     /// exactly the mods it named.
@@ -16343,10 +16588,12 @@ mod tests {
         kind: PlanKind,
     ) -> u64 {
         register_mod_actions(ui, &workspace.commands, workspace);
-        ui.invoke_open_mod_manager(instance.into(), "mods/m.jar".into());
+        ui.invoke_open_mod_manager("client".into(), instance.into(), "mods/m.jar".into());
         commands.try_iter().for_each(drop);
         match kind {
-            PlanKind::Removal => ui.invoke_plan_mod_removal(instance.into(), "mods/m.jar".into()),
+            PlanKind::Removal => {
+                ui.invoke_plan_mod_removal("client".into(), instance.into(), "mods/m.jar".into());
+            }
             PlanKind::Apply => {
                 ui.invoke_plan_mod_apply(
                     instance.into(),
@@ -16356,6 +16603,43 @@ mod tests {
             }
         }
         requested_plan(commands)
+    }
+
+    /// A server's mod manager reads, changes, and removes the server's own
+    /// mod, never a client's.
+    #[test]
+    fn a_servers_mod_manager_addresses_every_request_to_the_server() {
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        register_mod_actions(&ui, &workspace.commands, &workspace);
+        let server = ephervex_model::ServerId::new();
+        let host = InstalledHost::Server(server);
+        let id = SharedString::from(server.to_string());
+
+        ui.invoke_open_mod_manager("server".into(), id.clone(), "mods/m.jar".into());
+        let opened: Vec<Command> = commands.try_iter().collect();
+        assert!(
+            opened.iter().any(
+                |command| matches!(command, Command::LoadModVersions { host: asked, .. } if *asked == host)
+            ),
+            "{opened:?}"
+        );
+
+        ui.invoke_plan_mod_apply(id.clone(), "mods/m.jar".into(), "v2".into());
+        ui.invoke_change_mod_version(id.clone(), "mods/m.jar".into(), "v2".into());
+        ui.invoke_plan_mod_removal("server".into(), id.clone(), "mods/m.jar".into());
+        ui.invoke_remove_mod(id, "mods/m.jar".into());
+        let hosts: Vec<InstalledHost> = commands
+            .try_iter()
+            .filter_map(|command| match command {
+                Command::PlanModApply { host, .. }
+                | Command::ChangeModVersion { host, .. }
+                | Command::PlanModRemoval { host, .. }
+                | Command::RemoveMod { host, .. } => Some(host),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(hosts, [host; 4]);
     }
 
     /// The number the next plan command carries.
@@ -16405,7 +16689,7 @@ mod tests {
         let (workspace, commands) = test_workspace_sending(&ui);
         let host = ephervex_model::InstanceId::new().to_string();
         let first = ask_from_manager(&ui, &workspace, &commands, &host, PlanKind::Removal);
-        ui.invoke_plan_mod_removal(host.as_str().into(), "mods/m.jar".into());
+        ui.invoke_plan_mod_removal("client".into(), host.as_str().into(), "mods/m.jar".into());
         let second = requested_plan(&commands);
 
         apply_mod_removal_plan(&ui, removal_plan(first, &host), &workspace);
@@ -16452,7 +16736,7 @@ mod tests {
         let request = ask_from_manager(&ui, &workspace, &commands, &host, PlanKind::Apply);
 
         ui.set_modal(SharedString::default());
-        ui.invoke_open_mod_manager(host.as_str().into(), "mods/m.jar".into());
+        ui.invoke_open_mod_manager("client".into(), host.as_str().into(), "mods/m.jar".into());
         apply_linked_confirmation(
             &ui,
             request,
@@ -16487,7 +16771,7 @@ mod tests {
         let (workspace, commands) = test_workspace_sending(&ui);
         register_mod_mutations(&ui, &workspace.commands, &workspace);
         let host = ephervex_model::InstanceId::new().to_string();
-        ui.invoke_plan_mod_removal(host.as_str().into(), "mods/m.jar".into());
+        ui.invoke_plan_mod_removal("client".into(), host.as_str().into(), "mods/m.jar".into());
         let request = requested_plan(&commands);
         open_install_confirmation(&ui, &workspace);
 
@@ -16510,7 +16794,7 @@ mod tests {
         let host = ephervex_model::InstanceId::new().to_string();
         let other = ephervex_model::InstanceId::new().to_string();
         ui.set_mod_action_path("mods/m.jar".into());
-        ui.invoke_plan_mod_removal(host.as_str().into(), "mods/m.jar".into());
+        ui.invoke_plan_mod_removal("client".into(), host.as_str().into(), "mods/m.jar".into());
         let request = requested_plan(&commands);
         // An install confirmation addressed its own instance, then closed.
         ui.set_mod_action_host(other.as_str().into());
@@ -17507,7 +17791,7 @@ mod tests {
         let (workspace, commands) = test_workspace_sending(&ui);
         register_mod_mutations(&ui, &workspace.commands, &workspace);
         let host = ephervex_model::InstanceId::new().to_string();
-        ui.invoke_plan_mod_removal(host.as_str().into(), "mods/m.jar".into());
+        ui.invoke_plan_mod_removal("client".into(), host.as_str().into(), "mods/m.jar".into());
         let card = requested_plan(&commands);
         let apply = ask_from_manager(&ui, &workspace, &commands, &host, PlanKind::Apply);
         apply_mod_acquisition(&ui, acquisition_prompt(1, &host), &workspace);

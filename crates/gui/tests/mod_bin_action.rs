@@ -3,18 +3,20 @@
 //! An instance preserving an imported pack's declaration puts a jar aside so
 //! it can come back, which is how a crash gets bisected. One whose mods are
 //! the user's own takes the mod out of the instance instead, dependencies and
-//! all. A library something else needs keeps the reversible bin either way,
+//! all, and so does a server made here rather than from a pack. A library something else needs keeps the reversible bin either way,
 //! because its release was never the user's to end.
 
 #![allow(clippy::expect_used, clippy::panic)]
 
 mod support;
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
-use ephervex_gui::ui::{AppWindow, GuiI18n, InstanceRow, ModRow};
+use ephervex_gui::ui::{AppWindow, GuiI18n, InstanceRow, ModRow, ServerRow};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
+use slint::platform::PointerEventButton;
 use slint::{ComponentHandle, Image, ModelRc, PhysicalSize, SharedString, VecModel};
 
 const MOD: &str = "Repro Mod";
@@ -74,6 +76,72 @@ fn a_jar_already_put_aside_offers_only_putting_it_back() {
     );
     assert!(bin(&ui, "gui-delete-mod").is_none());
     assert!(bin(&ui, "gui-remove-mod").is_none());
+}
+
+/// A server made here has no pack declaration to keep, so its bin takes the
+/// mod out of the server, and the server is the host it asks about.
+#[test]
+fn a_server_whose_mods_are_the_users_takes_the_mod_out_of_the_server() {
+    let ui = window();
+    let asked: Rc<RefCell<Vec<(String, String, String)>>> = Rc::default();
+    let record = Rc::clone(&asked);
+    ui.on_plan_mod_removal(move |kind, id, path| {
+        record
+            .borrow_mut()
+            .push((kind.to_string(), id.to_string(), path.to_string()));
+    });
+    show_server(&ui, true, &[row(true, true)]);
+
+    bin(&ui, "gui-remove-mod")
+        .expect("the bin takes the mod out")
+        .invoke_accessible_default_action();
+
+    assert_eq!(
+        asked.borrow().as_slice(),
+        [(
+            "server".to_owned(),
+            "a-server".to_owned(),
+            "mods/repro.jar".to_owned()
+        )]
+    );
+    assert!(bin(&ui, "gui-delete-mod").is_none());
+}
+
+#[test]
+fn a_server_from_a_pack_offers_the_reversible_bin() {
+    let ui = window();
+    show_server(&ui, false, &[row(true, true)]);
+
+    assert!(bin(&ui, "gui-delete-mod").is_some());
+    assert!(bin(&ui, "gui-remove-mod").is_none());
+}
+
+/// A server's mod opens the same manager a client's does, for the server.
+#[test]
+fn pressing_a_servers_mod_opens_its_manager_for_that_server() {
+    let ui = window();
+    let opened: Rc<RefCell<Vec<(String, String, String)>>> = Rc::default();
+    let record = Rc::clone(&opened);
+    ui.on_open_mod_manager(move |kind, id, path| {
+        record
+            .borrow_mut()
+            .push((kind.to_string(), id.to_string(), path.to_string()));
+    });
+    show_server(&ui, true, &[row(true, true)]);
+
+    ElementHandle::find_by_accessible_label(&ui, MOD)
+        .find(|element| element.size().width > 0.0)
+        .expect("the row is on screen")
+        .mock_single_click(PointerEventButton::Left);
+
+    assert_eq!(
+        opened.borrow().as_slice(),
+        [(
+            "server".to_owned(),
+            "a-server".to_owned(),
+            "mods/repro.jar".to_owned()
+        )]
+    );
 }
 
 #[test]
@@ -184,6 +252,20 @@ fn show(ui: &AppWindow, mods_are_the_users: bool, rows: &[ModRow]) {
     let mut view = support::client_view(client());
     view.allow_pack_mod_changes = mods_are_the_users;
     support::show(ui, 0, vec![view], vec![support::pane(1, 0, "Mods")]);
+    support::update_host(ui, 0, |view| {
+        view.mods = ModelRc::from(Rc::new(VecModel::from(rows.to_vec())));
+    });
+    slint::platform::update_timers_and_animations();
+    ui.window().take_snapshot().expect("render");
+}
+
+fn show_server(ui: &AppWindow, mods_are_the_users: bool, rows: &[ModRow]) {
+    let mut view = support::server_view(ServerRow {
+        id: "a-server".into(),
+        ..ServerRow::default()
+    });
+    view.mods_are_the_users = mods_are_the_users;
+    support::show(ui, 1, vec![view], vec![support::pane(1, 0, "Mods")]);
     support::update_host(ui, 0, |view| {
         view.mods = ModelRc::from(Rc::new(VecModel::from(rows.to_vec())));
     });

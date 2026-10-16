@@ -1039,7 +1039,7 @@ pack-requirement-unknown = Not stated
 
 # Why a mod cannot be changed or removed. Each names a different situation, and
 # the difference is what tells a user whether to expect this to change.
-mod-restriction-pack-owned = The imported pack declares this mod. Enable independent mod changes for this instance to change it on its own.
+mod-restriction-pack-owned = The imported pack declares this mod. Turn on Independent mod changes in Settings to change it on its own.
 mod-restriction-dependency = Another mod requires this one, so its release follows what needs it.
 mod-restriction-hand-placed = This jar was added by hand, so Ephervex leaves it alone. Remove it from the mods folder yourself.
 mod-restriction-identity-unresolved = Ephervex cannot tell which project this file is, so it has nothing to look up.
@@ -1149,7 +1149,7 @@ local-mod-not-a-jar = Not a JAR. Minecraft mods are .jar files.
 local-mod-unusable-name = Its name cannot be used for a file in the mods folder.
 local-mod-not-an-archive = Not a readable JAR. It may be incomplete or corrupt.
 local-mod-too-large = Too large to be a mod.
-local-mod-recorded-by-pack = The imported pack declares a mod with this file name, so a JAR cannot replace it. Enable independent mod changes for this instance to move the mod to another release.
+local-mod-recorded-by-pack = The imported pack declares a mod with this file name, so a JAR cannot replace it. Turn on Independent mod changes in Settings to move the mod to another release.
 
 # Why a mod belongs to an instance. Kept distinct because they are different
 # things to look at and, later, different things to change.
@@ -1558,6 +1558,7 @@ gui-diagnosis-dependency-missing = { $name } is not installed
 gui-diagnosis-dependency-missing-detail = Install it from the Mods page. Diagnostics does not choose a version for you.
 gui-diagnosis-dependency-restore-detail = This host records it, so restoring puts back the exact release it recorded.
 gui-diagnosis-dependency-install-detail = Installing takes the newest release for this host's Minecraft version and loader, and shows it before anything changes.
+gui-diagnosis-dependency-client-only-detail = { $name } runs only on a client, so it is not installed on a server. { $dependent } needs it, so it most likely belongs only on a client too. Turn it off on this server from the Mods page.
 gui-diagnosis-restore-mod = Restore { $name }
 gui-diagnosis-install-latest = Install latest compatible version
 gui-diagnosis-conflict = { $name } does not work with { $other }
@@ -1790,11 +1791,12 @@ error-mod-hand-placed-not-mutable = That jar was added by hand, so Ephervex does
 # chased, so the launcher says what it will not do and why.
 
 mod-search-empty = No mods matched.
-.action = Try a different search, or turn on incompatible results to see mods that do not fit this instance.
+.action = Try a different search, or add --include-incompatible to also list the mods that do not fit.
 mod-search-count = { $count ->
         [one] { $count } mod
        *[other] { $count } mods
     }
+mod-search-next-page = More may follow. Add --offset { $offset } to see the next page.
 mod-list-empty = No mods have been installed into this instance through a provider.
 mod-installed-count = { $count ->
         [one] { $count } installed mod
@@ -1930,6 +1932,7 @@ error-mod-acquisition-restricted = That mod's author does not allow other launch
 error-mod-client-only = { $project } is declared client-only, so it is not installed on a server.
 .action = Install it on a client instead.
 error-mod-server-support-unconfirmed = The catalog does not state whether { $mods } runs on a server.
+error-mod-change-server-support-unconfirmed = The catalog does not state whether { $mods } runs on a server. Install it on this server from the catalog first, which asks you to confirm it.
 .action = Confirm that you want it on this server and try again.
 
 error-mod-file-identity-mismatch = { $provider } answered about a different file than the one requested.
@@ -1941,8 +1944,8 @@ error-mod-primary-file-ambiguous = That version does not name exactly one file t
 error-mod-hashes-missing = That version published no checksum Ephervex can verify.
 .action = Every downloaded file is verified before it is installed, so this one is refused.
 
-error-mod-loader-cannot-host-mods = { $loader } instances cannot install mods.
-.action = Create a Forge or NeoForge instance to browse for mods.
+error-mod-loader-cannot-host-mods = { $loader } cannot load mods.
+.action = Mods need Forge or NeoForge. Create an instance or a server on one of them to install mods.
 
 # Never resolved by substituting a nearby release.
 error-mod-version-incompatible = That exact version does not fit this instance.
@@ -2319,7 +2322,7 @@ gui-restore-mod = Restore
 gui-mod-restored = Put the mod back.
 gui-mod-loads = Load { $value }
 gui-server-mods = Server mods
-gui-server-mods-detail = Everything in this server's mods folder, including jars you added yourself. Drop JARs here to add them. Turn off a mod to keep it installed while the loader skips it, which is how a client-only mod stops crashing a server.
+gui-server-mods-detail = Every mod on this server: the ones its pack brought, the ones you installed, and any jar you added yourself. Drop JARs here to add them.
 gui-no-server-mods-detail = This server was not built from a pack, so nothing here is recorded as belonging to it.
 # Shown when the mod's exact release cannot be proven from what Ephervex
 # recorded. The file is installed; only its version is unknown.
@@ -2343,9 +2346,9 @@ gui-loader-changed = This instance now runs { $value }.
 gui-modal-manage-mod = Manage Mod
 gui-modal-remove-mod = Remove Mod
 gui-modal-mod-acquire = Download This Release Yourself
-gui-mod-compatible-versions = Releases that fit this instance
+gui-mod-compatible-versions = Releases that fit this Minecraft version and loader
 gui-mod-versions-loading = Loading releases...
-gui-mod-no-compatible-versions = No release of this mod fits this instance's exact Minecraft version and loader.
+gui-mod-no-compatible-versions = No release of this mod fits this exact Minecraft version and loader.
 gui-mod-installed-version = Installed
 gui-mod-newest-version = Newest
 gui-mod-browser-download = Browser download
@@ -2362,13 +2365,13 @@ gui-mod-reset-to-pack-version = Reset to Pack's Version
 gui-mod-project-page-opened = Opened the project's page in your browser.
 gui-mod-project-page-open-failed = Could not open a browser.
 gui-mod-version-changed = { $value } now runs the release you selected.
-gui-mod-already-current = { $value } is already the newest release that fits this instance.
+gui-mod-already-current = { $value } is already the newest release that fits this Minecraft version and loader.
 gui-mod-repaired = { $value } was put back at its recorded release.
 gui-mod-removed = { $count ->
     [one] Removed 1 mod.
    *[other] Removed { $count } mods.
 }
-gui-mod-remove-detail = { $value } will be deleted from this instance.
+gui-mod-remove-detail = { $value } will be deleted from its mods folder.
 gui-mod-remove-dependencies = { $count ->
     [one] 1 mod was installed only for it and will go too:
    *[other] { $count } mods were installed only for it and will go too:
@@ -2409,11 +2412,15 @@ gui-instance-jvm-args-unsupported-escape = In the extra JVM arguments, a backsla
 gui-instance-runtime-save = Save Runtime Settings
 gui-instance-runtime-clear = Follow Global Settings
 gui-instance-runtime-saved = Saved this instance's runtime settings.
+gui-server-runtime-detail = What this server runs with. Anything left empty follows the global setting.
+gui-server-runtime-saved = Saved this server's runtime settings.
 # $first is the global heap range, $second the globally selected Java.
 gui-instance-runtime-global = Globally: { $first }, { $second }.
 gui-allow-pack-mod-changes = Independent mod changes
 gui-allow-pack-mod-changes-detail = An instance you created here starts with this on, because it declared nothing to preserve. An imported one starts with it off: the pack's declaration is treated as a historical record, so a mod it declares can only be inspected, and the bin puts a jar aside so you can put it back. Turning this on lets you update or change the version of a pack-declared mod for this instance only, and makes the bin take a mod out of the instance for good, along with the dependencies nothing else needs. "Reset to Pack's Version" always remains available to undo a version change, and turning a mod off is still how you put one aside to find which one crashes.
 gui-allow-pack-mod-changes-toggle = Let me change and remove this instance's mods
+gui-allow-pack-mod-changes-server-detail = A server you created here always treats its mods as yours, because it declared nothing to preserve. One built from a pack or from published server files starts with this off: the pack's declaration is treated as a historical record, so a mod it declares can only be inspected. Turning this on lets you update, change the version of, or remove a pack-declared mod on this server only.
+gui-allow-pack-mod-changes-server-toggle = Let me change and remove this server's mods
 gui-instance-settings-unavailable = Instance-owned Minecraft settings
 gui-instance-settings-unavailable-detail = The current core safely applies known Vanilla defaults when an instance is created, but does not expose a typed editor for an existing instance. Unknown and mod-added options remain untouched.
 gui-open-global-defaults = Open Global Defaults

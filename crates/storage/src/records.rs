@@ -196,6 +196,13 @@ pub struct ServerRecord {
     pub java_override: Option<JavaOverride>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jvm_override: Option<JvmSettings>,
+    /// Whether the user may change and remove the mods a pack declared for
+    /// this server, as a client's setting of the same name allows. A server
+    /// made here has no declaration to preserve and needs none. Kept in the
+    /// server's metadata only: the index has no column for it before 1.0.0
+    /// (ADR 0033).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_pack_mod_version_changes: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attention: Vec<AttentionReason>,
     pub created_at: DateTime<Utc>,

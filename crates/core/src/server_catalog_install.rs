@@ -260,6 +260,37 @@ async fn a_dependency_with_no_stated_server_side_is_reported_and_needs_confirmat
     assert!(world.server_jars(server).is_empty());
 }
 
+/// Confirming a mod's place on a server is asked once: a mod already on the
+/// server is not asked about again, alone or as another mod's dependency.
+#[tokio::test]
+async fn a_mod_already_on_the_server_needs_no_second_confirmation() {
+    let world = world().await;
+    let server = plain_server(&world);
+    install(
+        &world,
+        server,
+        &ModInstallRequest::new("UNKPROJ").confirming_server_support(["UNKPROJ"]),
+    )
+    .await
+    .expect("installs once confirmed");
+
+    for project in ["UNKPROJ", "NEEDSUNK"] {
+        let request = ModInstallRequest::new(project);
+        let planned = plan(&world, server, &request).await.expect("plans");
+        assert!(
+            planned.undeclared_server_support().is_empty(),
+            "{project}: nothing new needs confirming"
+        );
+        install(&world, server, &request)
+            .await
+            .unwrap_or_else(|error| panic!("{project}: {error:?}"));
+    }
+    assert!(installed_on_server(
+        &world.server_recipe(server),
+        "NEEDSUNK"
+    ));
+}
+
 #[tokio::test]
 async fn a_client_only_required_dependency_is_installed_with_a_warning_and_counts_as_installed() {
     let world = world().await;
@@ -534,4 +565,238 @@ async fn a_server_search_leaves_client_only_mods_out_and_a_client_search_keeps_t
 
     assert_eq!(ids(for_server), ["ROOTPROJ"]);
     assert_eq!(ids(for_client), ["ROOTPROJ", "CLIENTMOD"]);
+}
+
+#[tokio::test]
+async fn a_server_from_a_pack_says_its_mods_are_the_users_only_once_allowed() {
+    let world = world().await;
+    let made_here = plain_server(&world);
+    let mut record = world
+        .app
+        .registry_for_services()
+        .prepare_server(
+            NewServer::new("From A Pack", MINECRAFT, neoforge()).with_source(
+                ephervex_storage::ImportSource::imported(
+                    ephervex_model::ImportSourceKind::ModrinthPack,
+                    "report.mrpack",
+                ),
+            ),
+        )
+        .expect("prepare");
+    record.installation = ServerInstallation::Installed {
+        launch: ServerLaunch::Jar {
+            path: ServerRelativePath::new("server.jar").expect("launch path"),
+        },
+    };
+    let staging = record.root.with_extension("staging");
+    std::fs::create_dir_all(ephervex_storage::metadata::server_game_dir(&staging).join("mods"))
+        .expect("mods dir");
+    world
+        .app
+        .registry_for_services()
+        .publish_staged_server(&record, &staging)
+        .expect("publish");
+
+    let mods_are_the_users = |server| {
+        world
+            .app
+            .host_mod_snapshot(host(server))
+            .expect("snapshot")
+            .mods_are_the_users
+    };
+    assert!(mods_are_the_users(made_here));
+    assert!(!mods_are_the_users(record.id));
+
+    // The user can let the pack's mods be theirs, as on a client, and the
+    // choice is what the server's metadata records from then on.
+    world
+        .app
+        .set_server_allow_pack_mod_version_changes(record.id, true)
+        .expect("allow");
+    assert!(mods_are_the_users(record.id));
+    assert!(
+        world
+            .app
+            .current_server(record.id)
+            .expect("record")
+            .allow_pack_mod_version_changes
+    );
+    world
+        .app
+        .set_server_allow_pack_mod_version_changes(record.id, false)
+        .expect("disallow");
+    assert!(!mods_are_the_users(record.id));
+}
+
+#[tokio::test]
+async fn removing_a_servers_mod_takes_the_dependency_nothing_else_needs_with_it() {
+    let world = world().await;
+    let server = plain_server(&world);
+    install(&world, server, &ModInstallRequest::new("SECONDPROJ"))
+        .await
+        .expect("installs");
+    let target = PathBuf::from("mods/secondproj-SECONDV1.jar");
+
+    let plan = world
+        .app
+        .plan_mod_removal(host(server), &target, &silent(), &CancellationToken::new())
+        .await
+        .expect("plans");
+    assert_eq!(plan.host, host(server));
+    assert_eq!(
+        plan.removes
+            .iter()
+            .map(|file| file.project_id.as_deref().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        ["SECONDPROJ", "LIBPROJ"]
+    );
+
+    world
+        .app
+        .remove_managed_mod(host(server), &target, &silent(), &CancellationToken::new())
+        .await
+        .expect("removes");
+
+    assert!(world.server_jars(server).is_empty());
+    let recipe = world.server_recipe(server);
+    assert!(
+        recipe
+            .managed_project(ModProvider::Modrinth, "SECONDPROJ")
+            .is_none()
+    );
+    assert!(
+        recipe
+            .managed_project(ModProvider::Modrinth, "LIBPROJ")
+            .is_none()
+    );
+    assert!(world.client_jars().is_empty());
+}
+
+#[tokio::test]
+async fn a_servers_mod_moves_to_an_exact_release_resolved_for_that_server() {
+    let world = world().await;
+    let server = plain_server(&world);
+    install(
+        &world,
+        server,
+        &ModInstallRequest::new("MOVEPROJ").at_version("MOVEV1"),
+    )
+    .await
+    .expect("installs");
+
+    world
+        .app
+        .change_managed_mod_version(
+            host(server),
+            std::path::Path::new("mods/moveproj-MOVEV1.jar"),
+            &crate::ModVersionChoice::Exact("MOVEV2".to_owned()),
+            &silent(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("changes");
+
+    assert_eq!(
+        world.server_jars(server),
+        ["moveproj-MOVEV2.jar", "newlib-NEWV2.jar"]
+    );
+    let recipe = world.server_recipe(server);
+    assert!(installed_on_server(&recipe, "MOVEPROJ"));
+    assert!(installed_on_server(&recipe, "NEWLIB"));
+    assert_eq!(
+        recipe
+            .managed_project(ModProvider::Modrinth, "NEWLIB")
+            .expect("dependency")
+            .origin,
+        ModOrigin::RequiredDependency
+    );
+    assert!(world.client_jars().is_empty());
+}
+
+#[tokio::test]
+async fn a_server_mod_whose_jar_was_put_aside_can_still_be_removed() {
+    let world = world().await;
+    let server = plain_server(&world);
+    install(&world, server, &ModInstallRequest::new("SECONDPROJ"))
+        .await
+        .expect("installs");
+    let target = PathBuf::from("mods/secondproj-SECONDV1.jar");
+    world
+        .app
+        .delete_mod_files(host(server), std::slice::from_ref(&target))
+        .expect("puts the jar aside");
+
+    world
+        .app
+        .remove_managed_mod(host(server), &target, &silent(), &CancellationToken::new())
+        .await
+        .expect("removes");
+
+    let recipe = world.server_recipe(server);
+    assert!(
+        recipe
+            .managed_project(ModProvider::Modrinth, "SECONDPROJ")
+            .is_none()
+    );
+    assert!(
+        recipe
+            .managed_project(ModProvider::Modrinth, "LIBPROJ")
+            .is_none()
+    );
+    assert!(world.server_jars(server).is_empty());
+}
+
+#[tokio::test]
+async fn a_server_version_change_that_adds_an_undeclared_mod_is_refused_until_it_is_installed() {
+    let world = world().await;
+    let server = plain_server(&world);
+    install(
+        &world,
+        server,
+        &ModInstallRequest::new("LATERUNK").at_version("LATERUNKV1"),
+    )
+    .await
+    .expect("installs");
+    let target = std::path::Path::new("mods/laterunk-LATERUNKV1.jar");
+    let to_v2 = crate::ModVersionChoice::Exact("LATERUNKV2".to_owned());
+
+    let refused = world
+        .app
+        .change_managed_mod_version(
+            host(server),
+            target,
+            &to_v2,
+            &silent(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("refused");
+    assert!(
+        matches!(&refused, CoreError::ModChangeServerSupportUnconfirmed { projects } if projects == &["Undeclared Mod"]),
+        "{refused:?}"
+    );
+    assert_eq!(world.server_jars(server), ["laterunk-LATERUNKV1.jar"]);
+
+    install(
+        &world,
+        server,
+        &ModInstallRequest::new("UNKPROJ").confirming_server_support(vec!["UNKPROJ".to_owned()]),
+    )
+    .await
+    .expect("installs once confirmed");
+    world
+        .app
+        .change_managed_mod_version(
+            host(server),
+            target,
+            &to_v2,
+            &silent(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("changes once the mod is on the server");
+    assert_eq!(
+        world.server_jars(server),
+        ["laterunk-LATERUNKV2.jar", "unkproj-UNKV1.jar"]
+    );
 }

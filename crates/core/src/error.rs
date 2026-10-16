@@ -227,6 +227,12 @@ pub enum CoreError {
     #[error("server support for {} was not stated and was not confirmed", .projects.join(", "))]
     ModServerSupportUnconfirmed { projects: Vec<String> },
 
+    /// Changing a server mod's version would add mods whose catalog never
+    /// stated server support. Installing them from the catalog is where that
+    /// is confirmed.
+    #[error("server support for {} was not stated, and a version change does not confirm it", .projects.join(", "))]
+    ModChangeServerSupportUnconfirmed { projects: Vec<String> },
+
     /// The mod exists and its ownership or identity does not allow this.
     ///
     /// Carries the reason so a frontend explains the refusal rather than
@@ -576,6 +582,9 @@ impl CoreError {
             Self::ModAcquisitionRestricted { .. } => "error-mod-acquisition-restricted",
             Self::ModClientOnly { .. } => "error-mod-client-only",
             Self::ModServerSupportUnconfirmed { .. } => "error-mod-server-support-unconfirmed",
+            Self::ModChangeServerSupportUnconfirmed { .. } => {
+                "error-mod-change-server-support-unconfirmed"
+            }
             Self::ModMutationRestricted { restriction, .. } => restriction.message_id(),
             Self::ModIdentityIncomplete { .. } => "error-mod-identity-incomplete",
             Self::ModDependencyNotMovable { .. } => "error-mod-dependency-not-movable",
@@ -653,7 +662,8 @@ impl CoreError {
                 vec![("catalog", Arg::from(configured.clone()))]
             }
             Self::ModClientOnly { project } => vec![("project", Arg::from(project.clone()))],
-            Self::ModServerSupportUnconfirmed { projects } => {
+            Self::ModServerSupportUnconfirmed { projects }
+            | Self::ModChangeServerSupportUnconfirmed { projects } => {
                 vec![("mods", Arg::from(projects.join(", ")))]
             }
             // The first file named, because the sentence is a next step rather
@@ -863,6 +873,7 @@ impl CoreError {
             | Self::ModAcquisitionRestricted { .. }
             | Self::ModClientOnly { .. }
             | Self::ModServerSupportUnconfirmed { .. }
+            | Self::ModChangeServerSupportUnconfirmed { .. }
             | Self::ModMutationRestricted { .. }
             | Self::ModIdentityIncomplete { .. }
             | Self::ModDependencyNotMovable { .. }
@@ -976,6 +987,7 @@ impl CoreError {
             | Self::LoaderChangeBlockedByMods { .. }
             | Self::ModClientOnly { .. }
             | Self::ModServerSupportUnconfirmed { .. }
+            | Self::ModChangeServerSupportUnconfirmed { .. }
             | Self::ModCatalogPreferenceUnrecognized { .. }
             | Self::InstanceAlreadyPersistent { .. }
             | Self::InstanceRunning { .. }

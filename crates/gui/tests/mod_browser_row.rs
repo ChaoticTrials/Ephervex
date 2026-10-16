@@ -725,6 +725,201 @@ fn a_client_only_result_is_marked_and_its_install_cannot_be_pressed() {
     );
 }
 
+/// A result's server-support badge sits over its Install button, in the
+/// row's trailing column, the way a managed mod's badges sit over its bin.
+#[test]
+fn a_results_server_support_badge_sits_above_its_install_button() {
+    let ui = window();
+    for (support, label) in [
+        ("client-only", lookup("gui-mod-client-only")),
+        ("unknown", lookup("gui-mod-server-support-unstated")),
+    ] {
+        server_browser(
+            &ui,
+            modded_server(),
+            vec![ModSearchRow {
+                server_support: support.into(),
+                ..result("utilitix", "UtilitiX")
+            }],
+        );
+
+        let badge = ElementHandle::find_by_accessible_label(&ui, &label)
+            .find(|element| element.size().width > 0.0)
+            .expect("the row carries the badge");
+        let buttons = install_buttons(&ui);
+        let button = buttons.first().expect("the row shows Install");
+
+        assert!(
+            button.absolute_position().y >= badge.absolute_position().y + badge.size().height,
+            "{support}: the badge is above the button"
+        );
+        let badge_right = badge.absolute_position().x + badge.size().width;
+        let button_right = button.absolute_position().x + button.size().width;
+        assert!(
+            (badge_right - button_right).abs() < 1.0,
+            "{support}: the badge ends where the button ends, at {badge_right} and {button_right}"
+        );
+    }
+}
+
+/// The browser's heading row is as tall as the mod list's toolbar, so the two
+/// panels' descriptions start on one line.
+#[test]
+fn the_browsers_description_starts_level_with_the_mod_lists() {
+    let ui = window();
+    mod_browser(&ui, Vec::new());
+    settle(&ui);
+
+    let list = shown_text(&ui, "gui-managed-mods-detail")
+        .absolute_position()
+        .y;
+    let browser = shown_text(&ui, "gui-catalog-compatibility")
+        .absolute_position()
+        .y;
+    assert!(
+        (list - browser).abs() < 0.5,
+        "the descriptions start at {list} and {browser}"
+    );
+}
+
+/// A server's mod list is the panel a client's is: titled alike, its
+/// description under the toolbar at the panel's full width, level with the
+/// browser's.
+#[test]
+fn a_servers_mod_list_is_laid_out_like_a_clients() {
+    let ui = window();
+    mod_browser(&ui, Vec::new());
+    settle(&ui);
+    let client = shown_text(&ui, "gui-managed-mods-detail");
+    let (client_y, client_width) = (client.absolute_position().y, client.size().width);
+
+    server_browser(&ui, modded_server(), Vec::new());
+    shown_text(&ui, "gui-managed-mods");
+    let server = shown_text(&ui, "gui-server-mods-detail");
+    let filter = shown_text(&ui, "gui-filter-mods");
+    let browser = shown_text(&ui, "gui-server-catalog-compatibility");
+
+    let top = server.absolute_position().y;
+    assert!(
+        top >= filter.absolute_position().y + filter.size().height,
+        "the description sits under the toolbar"
+    );
+    assert!(
+        (top - client_y).abs() < 0.5,
+        "it starts at {top}, a client's at {client_y}"
+    );
+    assert!(
+        (server.size().width - client_width).abs() < 0.5,
+        "it is {} wide, a client's {client_width}",
+        server.size().width
+    );
+    assert!(
+        (top - browser.absolute_position().y).abs() < 0.5,
+        "it starts level with the browser's"
+    );
+}
+
+/// The missing-key notice takes the user to where the key is entered, from a
+/// client's browser and a server's alike, even though leaving the workspace
+/// takes the notice's own button away.
+#[test]
+fn the_missing_key_notice_opens_the_provider_settings() {
+    let ui = window();
+    let weak = ui.as_weak();
+    // As the controller closes it: the pane rows go at once, and the pane
+    // whose button asked goes with them.
+    ui.on_close_workspace(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_workspace_open(false);
+            let panes = ui.get_workspace_panes();
+            if let Some(panes) = panes
+                .as_any()
+                .downcast_ref::<VecModel<ephervex_gui::ui::WorkspacePaneRow>>()
+            {
+                while panes.row_count() > 0 {
+                    panes.remove(panes.row_count() - 1);
+                }
+            }
+        }
+    });
+    let missing_key = |view: &mut ephervex_gui::ui::HostView| {
+        view.browser_provider = "curseforge".into();
+        view.browser_notice = "CurseForge needs an API key, and none is configured.".into();
+    };
+
+    for server in [false, true] {
+        if server {
+            server_browser(&ui, modded_server(), Vec::new());
+        } else {
+            mod_browser(&ui, Vec::new());
+        }
+        support::update_host(&ui, 0, missing_key);
+        ui.set_settings_tab("General".into());
+        settle(&ui);
+
+        shown_text(&ui, "gui-open-providers-settings").mock_single_click(PointerEventButton::Left);
+        settle(&ui);
+
+        let host = if server { "server" } else { "client" };
+        assert_eq!(ui.get_page(), 4, "a {host}'s notice opens Settings");
+        assert_eq!(
+            ui.get_settings_tab(),
+            "Providers & APIs",
+            "a {host}'s notice opens the providers"
+        );
+        assert!(!ui.get_workspace_open(), "a {host}'s workspace closes");
+    }
+}
+
+/// The one element showing this text.
+fn shown_text(ui: &AppWindow, id: &str) -> ElementHandle {
+    ElementHandle::find_by_accessible_label(ui, &lookup(id))
+        .find(|element| element.size().width > 0.0)
+        .expect(id)
+}
+
+/// The badge sits at the window's trailing edge when the browser does, so
+/// what it says on hover opens toward the row rather than off the window.
+#[test]
+fn a_support_badges_explanation_stays_inside_the_window() {
+    let ui = window();
+    server_browser(
+        &ui,
+        modded_server(),
+        vec![ModSearchRow {
+            server_support: "unknown".into(),
+            ..result("utilitix", "UtilitiX")
+        }],
+    );
+    let label = lookup("gui-mod-server-support-unstated");
+    let badge = ElementHandle::find_by_accessible_label(&ui, &label)
+        .find(|element| element.size().width > 0.0)
+        .expect("the row carries the badge");
+    let (at, size) = (badge.absolute_position(), badge.size());
+
+    ui.window()
+        .dispatch_event(slint::platform::WindowEvent::PointerMoved {
+            position: slint::LogicalPosition::new(
+                at.x + size.width / 2.0,
+                at.y + size.height / 2.0,
+            ),
+        });
+    settle(&ui);
+
+    let explanation = ElementHandle::find_by_accessible_label(&ui, &label)
+        .find(|element| {
+            element.size().width > 0.0
+                && element.absolute_position().x + element.size().width <= at.x
+        })
+        .expect("hovering the badge explains it beside the badge");
+    let window = ui.window().size().to_logical(ui.window().scale_factor());
+    assert!(explanation.absolute_position().x >= 0.0);
+    assert!(
+        explanation.absolute_position().x + explanation.size().width <= window.width,
+        "the explanation ends inside the window"
+    );
+}
+
 #[test]
 fn the_servers_browser_offers_the_incompatible_toggle_and_a_clients_does_not() {
     let ui = window();

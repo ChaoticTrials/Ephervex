@@ -215,11 +215,17 @@ impl WorkspaceState {
         };
         change(reported);
         if let Some(index) = self.shown.iter().position(|&shown| shown == host)
-            && let Some(mut row) = self.host_views.row_data(index)
+            && let Some(shown_row) = self.host_views.row_data(index)
         {
+            let mut row = shown_row.clone();
             change_row(&mut row, reported);
             row.workflow_pane = workflow_pane(self.layout.as_ref(), host, &row.workflow_surface);
-            self.host_views.set_row_data(index, row);
+            // A rewritten row leaves the lists inside it waiting for the pane to
+            // read it again, and Slint drops an in-place change to such a list
+            // until then. Only a row that changed is rewritten.
+            if row != shown_row {
+                self.host_views.set_row_data(index, row);
+            }
         }
         true
     }
@@ -282,13 +288,15 @@ impl WorkspaceState {
             .filter(|host| !self.reported.contains_key(host))
             .collect::<Vec<_>>();
         for &host in &entered {
-            // The lists a render rewrites in place, made once per host so a
-            // render that changes nothing in them does not rebuild them.
+            // The lists written in place, made once per host so a write that
+            // changes nothing in them does not rebuild them.
             self.reported.insert(
                 host,
                 HostView {
                     linked_servers: ModelRc::new(VecModel::default()),
                     pending_servers: ModelRc::new(VecModel::default()),
+                    mods: ModelRc::new(VecModel::default()),
+                    browser_results: ModelRc::new(VecModel::default()),
                     ..HostView::default()
                 },
             );

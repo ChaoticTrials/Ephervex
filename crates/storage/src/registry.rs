@@ -1141,6 +1141,7 @@ impl Registry {
             source: request.source,
             java_override: None,
             jvm_override: None,
+            allow_pack_mod_version_changes: false,
             attention: request.attention,
             created_at: now,
             updated_at: now,
@@ -1721,6 +1722,8 @@ fn server_from_row(row: &Row<'_>) -> rusqlite::Result<Result<ServerRecord, Index
                 jvm_override.as_deref(),
                 "servers.jvm_override",
             )?,
+            // Held in the server's metadata alone; see `ServerRecord`.
+            allow_pack_mod_version_changes: false,
             attention: from_json::<Vec<AttentionReason>>(&attention, "servers.attention")?,
             created_at: timestamp_from_sql(&created_at, "servers.created_at")?,
             updated_at: timestamp_from_sql(&updated_at, "servers.updated_at")?,
@@ -1956,6 +1959,8 @@ fn server_with_newer_row(row: ServerRecord, mut canonical: ServerRecord) -> Serv
         returned
             .attention
             .retain(|reason| reason != &AttentionReason::MissingRoot);
+        // The index never holds it, so the metadata's answer stands.
+        returned.allow_pack_mod_version_changes = canonical.allow_pack_mod_version_changes;
         return returned;
     }
     canonical.root = row.root;

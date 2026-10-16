@@ -32,9 +32,14 @@ component SupportBadge inherits Rectangle {
         horizontal-alignment: center;
         vertical-alignment: center;
     }
-    TouchArea {}
-    Tooltip {
-        TooltipCard { text: root.description; }
+    touch := TouchArea {}
+    // Drawn inside the row, to the badge's left: the badge sits at the row's
+    // trailing edge, where a tooltip, which always opens rightward and is
+    // never moved back inside the window, would run off it.
+    if touch.has-hover : TooltipCard {
+        x: -self.width - 6px;
+        y: (root.height - self.height) / 2;
+        text: root.description;
     }
 }
 
@@ -59,7 +64,8 @@ export component ModBrowser inherits Rectangle {
     VerticalLayout {
         padding: 16px;
         spacing: 10px;
-        Heading { text: GuiI18n.text("gui-add-mods"); }
+        // As tall as the mod list's toolbar beside it, so both descriptions start on one line.
+        Heading { text: GuiI18n.text("gui-add-mods"); min-height: Theme.control-height; }
         BodyText {
             text: root.for-server ? GuiI18n.text("gui-server-catalog-compatibility") : GuiI18n.text("gui-catalog-compatibility");
             wrap: word-wrap;
@@ -134,17 +140,20 @@ export component ModBrowser inherits Rectangle {
                         VerticalLayout { alignment: center; ModArtwork { icon: mod.icon; origin-kind: "user"; } }
                         VerticalLayout {
                             horizontal-stretch: 1;
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Heading { text: mod.title; font-size: Theme.row-heading-size; overflow: elide; horizontal-stretch: 1; }
-                                if mod.server-support == "unknown" : SupportBadge { glyph: "?"; description: GuiI18n.text("gui-mod-server-support-unstated"); }
-                                if mod.server-support == "client-only" : Pill { text: GuiI18n.text("gui-mod-client-only"); tone-color: Theme.text-muted; content-height: 22px; }
-                            }
+                            Heading { text: mod.title; font-size: Theme.row-heading-size; overflow: elide; }
                             BodyText { text: mod.description; wrap: word-wrap; overflow: elide; vertical-alignment: top; height: Theme.body-size * 2.7; }
                             BodyText { text: GuiI18n.values("gui-mod-result-meta", mod.author, mod.note); color: Theme.text-muted; overflow: elide; }
                         }
+                        // What the server makes of the mod sits over the action
+                        // it affects, as a managed mod's badges sit over its bin.
                         VerticalLayout {
                             alignment: center;
+                            spacing: 6px;
+                            if mod.server-support == "unknown" || mod.server-support == "client-only" : HorizontalLayout {
+                                alignment: end;
+                                if mod.server-support == "unknown" : SupportBadge { glyph: "?"; description: GuiI18n.text("gui-mod-server-support-unstated"); }
+                                if mod.server-support == "client-only" : Pill { text: GuiI18n.text("gui-mod-client-only"); tone-color: Theme.text-muted; content-height: 22px; }
+                            }
                             AppButton {
                                 width: 120px;
                                 text: mod.installed ? GuiI18n.text("gui-mod-result-installed") : mod.queued ? GuiI18n.text("gui-mod-result-queued") : GuiI18n.text("gui-install");

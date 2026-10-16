@@ -5452,18 +5452,7 @@ async fn run_mod_install(
         let unconfirmed = plan.undeclared_server_support();
         if !unconfirmed.is_empty() {
             if !accept_unknown_server_support {
-                anyhow::bail!(
-                    "{}\n{}",
-                    ephervex_i18n::lookup_args(
-                        "mod-install-server-support-unconfirmed",
-                        [("mods", MessageArg::from(mod_names(&unconfirmed).join(", ")))],
-                    ),
-                    ephervex_i18n::lookup_attribute(
-                        "mod-install-server-support-unconfirmed",
-                        "action"
-                    )
-                    .unwrap_or_default()
-                );
+                return Err(unconfirmed_server_support(&mod_names(&unconfirmed)));
             }
             request = request.confirming_server_support(
                 unconfirmed
@@ -5479,6 +5468,19 @@ async fn run_mod_install(
         .await?;
     print_installed_mods(&installed, host, json);
     Ok(())
+}
+
+/// Refuses a server install that would add mods with no stated server side.
+///
+/// The next step is its own line of the failure, as every other failure's is,
+/// rather than a newline inside the first, which the terminal output escapes.
+fn unconfirmed_server_support(mods: &[String]) -> anyhow::Error {
+    let next = ephervex_i18n::lookup_attribute("mod-install-server-support-unconfirmed", "action")
+        .unwrap_or_default();
+    anyhow::anyhow!(next).context(ephervex_i18n::lookup_args(
+        "mod-install-server-support-unconfirmed",
+        [("mods", MessageArg::from(mods.join(", ")))],
+    ))
 }
 
 /// The display names of planned mods, falling back to the project id.
@@ -5508,7 +5510,7 @@ async fn run_mod_show(
     let details = app
         .mod_project(host, catalog, project, include_incompatible)
         .await?;
-    print_mod_project(&details, json);
+    print_mod_project(&details, host, json);
     Ok(())
 }
 
@@ -5864,27 +5866,7 @@ fn optional_unverified_text(candidate: &OptionalCandidate) -> Option<String> {
 
 fn print_mod_search(results: &ModSearchResults, host: InstalledHost, json: bool) {
     if json {
-        print_json(&serde_json::json!({
-            "provider": results.provider.as_str(),
-            "total_hits": results.total_hits,
-            "offset": results.offset,
-            "hits": results.hits.iter().map(|hit| serde_json::json!({
-                "project_id": hit.project.id,
-                "slug": hit.project.slug,
-                "title": hit.project.title,
-                "description": hit.project.description,
-                "author": hit.project.author,
-                "client_side": hit.project.client_side.to_string(),
-                "server_side": hit.project.server_side.to_string(),
-                "effective_server_side": hit.effective_sides().1.to_string(),
-                "best_version": hit.best_version.as_ref().map(|version| serde_json::json!({
-                    "id": version.id,
-                    "version_number": version.version_number,
-                    "file_name": version.file.file_name,
-                })),
-                "compatibility": compatibility_json(&hit.compatibility),
-            })).collect::<Vec<_>>(),
-        }));
+        print_json(&search_json(results));
         return;
     }
 
@@ -5893,25 +5875,13 @@ fn print_mod_search(results: &ModSearchResults, host: InstalledHost, json: bool)
         if let Some(action) = ephervex_i18n::lookup_attribute("mod-search-empty", "action") {
             outln!("  {action}");
         }
-        return;
     }
 
     for hit in &results.hits {
         outln!("{}  {}", hit.project.id, hit.project.title);
         outln!("  {}", hit.project.description);
-        if matches!(host, InstalledHost::Server(_)) {
-            match hit.effective_sides().1 {
-                SideSupport::Unknown => {
-                    outln!(
-                        "  {}",
-                        ephervex_i18n::lookup("mod-search-server-support-unstated")
-                    );
-                }
-                SideSupport::Unsupported => {
-                    outln!("  {}", ephervex_i18n::lookup("mod-search-client-only"));
-                }
-                SideSupport::Required | SideSupport::Optional => {}
-            }
+        if let Some(note) = server_support_note(host, hit.effective_sides().1) {
+            outln!("  {note}");
         }
         match &hit.best_version {
             Some(version) => outln!("  version: {} ({})", version.version_number, version.id),
@@ -5922,16 +5892,69 @@ fn print_mod_search(results: &ModSearchResults, host: InstalledHost, json: bool)
             }
         }
     }
-    outln!(
-        "{}",
-        ephervex_i18n::lookup_args(
-            "mod-search-count",
-            [("count", MessageArg::from(results.hits.len()))]
-        )
-    );
+    if !results.hits.is_empty() {
+        outln!(
+            "{}",
+            ephervex_i18n::lookup_args(
+                "mod-search-count",
+                [("count", MessageArg::from(results.hits.len()))]
+            )
+        );
+    }
+    // A page can show fewer mods than asked for, or none, when some did not
+    // fit, so where the next one starts is said rather than left to be
+    // worked out from what was shown.
+    if let Some(next) = results.next_offset {
+        outln!(
+            "{}",
+            ephervex_i18n::lookup_args(
+                "mod-search-next-page",
+                [("offset", MessageArg::from(next))]
+            )
+        );
+    }
 }
 
-fn print_mod_project(details: &ModProjectDetails, json: bool) {
+/// A page of search results for `--json`, with where the next page starts.
+fn search_json(results: &ModSearchResults) -> serde_json::Value {
+    serde_json::json!({
+        "provider": results.provider.as_str(),
+        "total_hits": results.total_hits,
+        "offset": results.offset,
+        "next_offset": results.next_offset,
+        "hits": results.hits.iter().map(|hit| serde_json::json!({
+            "project_id": hit.project.id,
+            "slug": hit.project.slug,
+            "title": hit.project.title,
+            "description": hit.project.description,
+            "author": hit.project.author,
+            "client_side": hit.project.client_side.to_string(),
+            "server_side": hit.project.server_side.to_string(),
+            "effective_server_side": hit.effective_sides().1.to_string(),
+            "best_version": hit.best_version.as_ref().map(|version| serde_json::json!({
+                "id": version.id,
+                "version_number": version.version_number,
+                "file_name": version.file.file_name,
+            })),
+            "compatibility": compatibility_json(&hit.compatibility),
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// What a server's listing says about a mod whose catalog does not confirm it
+/// runs on a server. Nothing for a client, or for a mod that does.
+fn server_support_note(host: InstalledHost, server_side: SideSupport) -> Option<String> {
+    if !matches!(host, InstalledHost::Server(_)) {
+        return None;
+    }
+    match server_side {
+        SideSupport::Unknown => Some(ephervex_i18n::lookup("mod-search-server-support-unstated")),
+        SideSupport::Unsupported => Some(ephervex_i18n::lookup("mod-search-client-only")),
+        SideSupport::Required | SideSupport::Optional => None,
+    }
+}
+
+fn print_mod_project(details: &ModProjectDetails, host: InstalledHost, json: bool) {
     if json {
         print_json(&serde_json::json!({
             "project_id": details.project.id,
@@ -5964,6 +5987,9 @@ fn print_mod_project(details: &ModProjectDetails, json: bool) {
         details.project.client_side,
         details.project.server_side
     );
+    if let Some(note) = server_support_note(host, details.project.server_side) {
+        outln!("  {note}");
+    }
     for entry in &details.versions {
         let marker = if Some(&entry.version.id) == details.default_version.as_ref() {
             "*"
@@ -10275,6 +10301,56 @@ mod tests {
         assert_eq!(
             ownership_json(None, Entitlements::owns_game),
             serde_json::Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn a_server_listing_marks_a_mod_its_catalog_does_not_confirm_runs_there() {
+        let server = InstalledHost::Server(ServerId::new());
+        let client = InstalledHost::Instance(InstanceId::new());
+        assert_eq!(
+            server_support_note(server, SideSupport::Unsupported),
+            Some(ephervex_i18n::lookup("mod-search-client-only"))
+        );
+        assert_eq!(
+            server_support_note(server, SideSupport::Unknown),
+            Some(ephervex_i18n::lookup("mod-search-server-support-unstated"))
+        );
+        assert_eq!(server_support_note(server, SideSupport::Required), None);
+        assert_eq!(server_support_note(client, SideSupport::Unsupported), None);
+    }
+
+    #[test]
+    fn a_search_page_says_where_the_next_one_starts() {
+        let page = ModSearchResults {
+            provider: ModProvider::CurseForge,
+            hits: Vec::new(),
+            total_hits: 40,
+            offset: 0,
+            next_offset: Some(3),
+        };
+        assert_eq!(search_json(&page)["next_offset"], 3);
+        let last = ModSearchResults {
+            next_offset: None,
+            ..page
+        };
+        assert!(search_json(&last)["next_offset"].is_null());
+    }
+
+    #[test]
+    fn an_unconfirmed_server_install_says_its_next_step_on_a_line_of_its_own() {
+        let refusal = unconfirmed_server_support(&["EMI".to_owned()]);
+        let lines: Vec<String> = refusal.chain().map(ToString::to_string).collect();
+
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].contains("EMI"), "{lines:?}");
+        assert!(
+            lines[1].contains("--accept-unknown-server-support"),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().all(|line| !line.contains('\n')),
+            "no line carries a newline the terminal would escape: {lines:?}"
         );
     }
 

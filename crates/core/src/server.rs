@@ -750,6 +750,43 @@ impl App {
             .update_server_committed_claimed(&mut record, &claim)?)
     }
 
+    /// Lets the user change and remove the mods a pack declared for this
+    /// server, or stops letting them, as [`App::set_allow_pack_mod_version_changes`]
+    /// does for a client. Available while the server runs, for the same reason:
+    /// it decides what the mod list offers, and the files it unlocks are read
+    /// at the next start.
+    pub fn set_server_allow_pack_mod_version_changes(
+        &self,
+        id: ServerId,
+        allow: bool,
+    ) -> CoreResult<ServerCommit<ServerRecord>> {
+        let claim = self
+            .registry_for_services()
+            .claim_host(ephervex_storage::RecordRef::Server(id))?;
+        let mut record = self.canonical_server_for_mutation(id)?;
+        record.allow_pack_mod_version_changes = allow;
+        Ok(self
+            .registry_for_services()
+            .update_server_committed_claimed(&mut record, &claim)?)
+    }
+
+    /// Replaces a server's own JVM settings and leaves its Java pin as it is,
+    /// both read from the record its claim holds, so a Java change made
+    /// meanwhile from elsewhere is never written back over. `None` follows the
+    /// global settings again.
+    pub fn set_server_jvm_settings(
+        &self,
+        id: ServerId,
+        jvm_override: Option<JvmSettings>,
+    ) -> CoreResult<ServerCommit<ServerRecord>> {
+        let (claim, mut record) = self.claim_stopped_server(id)?;
+        self.validate_jvm_override(jvm_override.as_ref())?;
+        record.jvm_override = jvm_override;
+        Ok(self
+            .registry_for_services()
+            .update_server_committed_claimed(&mut record, &claim)?)
+    }
+
     /// Replaces the server-specific Java and JVM overrides as one canonical
     /// metadata mutation. `None` restores the corresponding global setting.
     /// A relative Java path is stored as an absolute one.
@@ -3228,6 +3265,38 @@ mod tests {
                 .attention
                 .contains(&ephervex_model::AttentionReason::MissingRoot)
         );
+    }
+
+    #[test]
+    fn a_servers_jvm_settings_change_without_touching_its_java_pin() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let server = app
+            .registry_for_services()
+            .create_server(NewServer::new("jvm", "1.20.1", LoaderSelection::vanilla()))
+            .expect("scaffold");
+        let java = app
+            .set_server_java_override(server.id, Some(JavaOverride::new("/opt/jdk-21/bin/java")))
+            .expect("pin Java")
+            .record
+            .java_override;
+
+        let jvm = JvmSettings {
+            min_memory_mib: Some(1024),
+            max_memory_mib: Some(4096),
+            jvm_args: vec!["-Dkept=1".to_owned()],
+        };
+        let committed = app
+            .set_server_jvm_settings(server.id, Some(jvm.clone()))
+            .expect("save JVM settings");
+        assert_eq!(committed.record.jvm_override, Some(jvm));
+        assert_eq!(committed.record.java_override, java);
+
+        let cleared = app
+            .set_server_jvm_settings(server.id, None)
+            .expect("follow the global settings");
+        assert_eq!(cleared.record.jvm_override, None);
+        assert_eq!(cleared.record.java_override, java);
     }
 
     #[test]
