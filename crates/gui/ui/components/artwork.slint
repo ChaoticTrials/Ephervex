@@ -1,5 +1,6 @@
 // Loader glyphs and mod artwork, with the fallbacks drawn when no image is available.
 
+import { HostIcons } from "../globals.slint";
 import { Theme } from "../theme.slint";
 
 export component LoaderGlyph inherits Rectangle {
@@ -22,6 +23,25 @@ export component LoaderGlyph inherits Rectangle {
         image-fit: contain;
         colorize: root.border-color;
     }
+}
+
+// A host's own icon when it has one that loaded, and otherwise the loader
+// glyph, in the same 52px tile. The fallback is the glyph the host would show
+// without an icon, so the same host always looks the same.
+export component HostIcon inherits Rectangle {
+    // A position in `HostIcons.images`, or -1 for none.
+    in property <int> slot: -1;
+    in property <string> kind;
+    in property <bool> server: false;
+    width: 52px; height: 52px;
+    if root.slot >= 0 : Rectangle {
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.border;
+        clip: true;
+        Image { width: parent.width; height: parent.height; source: HostIcons.images[root.slot]; image-fit: contain; }
+    }
+    if root.slot < 0 : LoaderGlyph { kind: root.kind; server: root.server; }
 }
 
 // A mod's artwork, or the same shape without it. The rectangle is drawn

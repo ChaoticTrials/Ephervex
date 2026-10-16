@@ -53,3 +53,4 @@ so the reasoning trail survives.
 | [0045](0045-a-server-installs-catalog-mods-into-its-own-recipe.md) | A server installs catalog mods into its own recipe | Accepted |
 | [0046](0046-a-hosts-java-runtime-is-changed-through-a-previewed-fix.md) | A host's Java runtime is changed through a previewed fix | Accepted |
 | [0047](0047-a-theme-folder-carries-branding-confined-to-its-own-branding-folder.md) | A theme folder carries branding confined to its own branding folder | Accepted (amends ADR 0042) |
+| [0048](0048-instance-organization-is-presentation-state-outside-host-metadata.md) | Instance organization is presentation state outside host metadata | Accepted |

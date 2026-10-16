@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use ephervex_core::InstalledHost;
+use ephervex_core::{InstalledHost, SearchQuery};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use slint::{Model as _, ModelRc, SharedString, VecModel};
 
@@ -82,6 +82,24 @@ impl WorkspaceState {
 
     pub(super) const fn layout(&self) -> Option<&WorkspaceLayout> {
         self.layout.as_ref()
+    }
+
+    /// Where a host's icon is in the icon pool, or -1.
+    pub(super) fn icon_slot(&self, kind: &str, id: &str) -> i32 {
+        match kind {
+            "client" => self
+                .clients
+                .iter()
+                .find(|row| row.id == id)
+                .map(|row| row.icon_slot),
+            "server" => self
+                .servers
+                .iter()
+                .find(|row| row.id == id)
+                .map(|row| row.icon_slot),
+            _ => None,
+        }
+        .unwrap_or(-1)
     }
 
     /// Takes the newest rows of every host.
@@ -281,7 +299,10 @@ impl WorkspaceState {
             .map(|&host| self.host_view(host, lifecycle, &pending))
             .collect();
         let panes = pane_rows(layout, &hosts, &views, logs);
-        let (clients, servers) = self.host_choices(ui.get_show_linked_servers());
+        let (clients, servers) = self.host_choices(
+            ui.get_show_linked_servers(),
+            ui.get_pane_host_query().as_str(),
+        );
         sync_rows(&self.client_choices, clients);
         sync_rows(&self.server_choices, servers);
         sync_rows(&self.host_views, views);
@@ -353,26 +374,52 @@ impl WorkspaceState {
     /// What the host picker offers: every client with its linked servers, and
     /// the servers the Servers page lists, running hosts first. A client
     /// ranks by what runs on its card: itself and a linked server, then
-    /// itself, then only a linked server, then nothing.
+    /// itself, then only a linked server, then nothing. Within a rank,
+    /// favorites come first and the lists' own order decides the rest.
+    ///
+    /// `query` narrows the offer by the same matching the instance list uses.
+    /// A client stays when it or one of its linked servers matches, and shows
+    /// only the linked servers that match unless the client itself does.
     fn host_choices(
         &self,
         show_linked_servers: bool,
+        query: &str,
     ) -> (Vec<WorkspaceHostChoice>, Vec<WorkspaceHostChoice>) {
-        let mut clients: Vec<(u8, WorkspaceHostChoice)> = self
+        let query = SearchQuery::new(query);
+        let server_matches = |server: &ServerRow| {
+            query.matches_any([
+                server.name.as_str(),
+                server.minecraft.as_str(),
+                server.loader.as_str(),
+            ])
+        };
+        let mut clients: Vec<((u8, bool), WorkspaceHostChoice)> = self
             .clients
             .iter()
-            .map(|row| {
+            .filter_map(|row| {
+                let client_matches = query.matches_any([
+                    row.name.as_str(),
+                    row.minecraft.as_str(),
+                    row.loader.as_str(),
+                    row.source.as_str(),
+                    row.group_name.as_str(),
+                ]);
                 let linked_servers = self
                     .servers
                     .iter()
                     .filter(|server| server.linked_client_id == row.id);
+                if !client_matches && !linked_servers.clone().any(&server_matches) {
+                    return None;
+                }
                 let linked_running = linked_servers.clone().any(|server| server.can_stop);
                 let linked = linked_servers
+                    .filter(|server| client_matches || server_matches(server))
                     .map(|server| WorkspaceLinkedChoice {
                         id: server.id.clone(),
                         name: server.name.clone(),
                         state: server.state.clone(),
                         state_kind: server.state_kind.clone(),
+                        icon_slot: server.icon_slot,
                     })
                     .collect::<Vec<_>>();
                 let choice = WorkspaceHostChoice {
@@ -383,6 +430,8 @@ impl WorkspaceState {
                     loader_kind: row.loader_kind.clone(),
                     state: row.state.clone(),
                     state_kind: row.state_kind.clone(),
+                    favorite: row.favorite,
+                    icon_slot: row.icon_slot,
                     linked: ModelRc::new(VecModel::from(linked)),
                 };
                 let rank = match (row.can_kill, linked_running) {
@@ -391,13 +440,14 @@ impl WorkspaceState {
                     (false, true) => 2,
                     (false, false) => 3,
                 };
-                (rank, choice)
+                Some(((rank, !row.favorite), choice))
             })
             .collect();
-        let mut servers: Vec<(bool, WorkspaceHostChoice)> = self
+        let mut servers: Vec<((bool, bool), WorkspaceHostChoice)> = self
             .servers
             .iter()
             .filter(|row| show_linked_servers || row.linked_client_id.is_empty())
+            .filter(|row| server_matches(row))
             .map(|row| {
                 let choice = WorkspaceHostChoice {
                     kind: "server".into(),
@@ -407,14 +457,16 @@ impl WorkspaceState {
                     loader_kind: row.loader_kind.clone(),
                     state: row.state.clone(),
                     state_kind: row.state_kind.clone(),
+                    favorite: row.favorite,
+                    icon_slot: row.icon_slot,
                     linked: ModelRc::default(),
                 };
-                (row.can_stop, choice)
+                ((!row.can_stop, !row.favorite), choice)
             })
             .collect();
         // Stable, so hosts keep the lists' own order within each group.
         clients.sort_by_key(|(rank, _)| *rank);
-        servers.sort_by_key(|(running, _)| !running);
+        servers.sort_by_key(|(rank, _)| *rank);
         (
             clients.into_iter().map(|(_, choice)| choice).collect(),
             servers.into_iter().map(|(_, choice)| choice).collect(),
@@ -658,4 +710,125 @@ pub(super) fn parse_host(kind: &str, id: &str) -> Option<InstalledHost> {
 /// A pane id as the markup passes it.
 pub(super) fn pane_id(value: i32) -> Option<PaneId> {
     u32::try_from(value).ok().map(PaneId::from_raw)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    fn client(id: &str, name: &str, favorite: bool, running: bool) -> InstanceRow {
+        InstanceRow {
+            id: id.into(),
+            name: name.into(),
+            minecraft: "1.20.1".into(),
+            loader: "Vanilla".into(),
+            favorite,
+            can_kill: running,
+            icon_slot: -1,
+            ..InstanceRow::default()
+        }
+    }
+
+    fn server(id: &str, name: &str, linked_to: &str, favorite: bool) -> ServerRow {
+        ServerRow {
+            id: id.into(),
+            name: name.into(),
+            minecraft: "1.20.1".into(),
+            loader: "Vanilla".into(),
+            linked_client_id: linked_to.into(),
+            favorite,
+            icon_slot: -1,
+            ..ServerRow::default()
+        }
+    }
+
+    fn state(clients: Vec<InstanceRow>, servers: Vec<ServerRow>) -> WorkspaceState {
+        let mut state = WorkspaceState::default();
+        state.set_rows(clients, servers);
+        state
+    }
+
+    fn ids(choices: &[WorkspaceHostChoice]) -> Vec<String> {
+        choices.iter().map(|choice| choice.id.to_string()).collect()
+    }
+
+    #[test]
+    fn favorites_rank_first_within_a_running_rank_and_never_above_a_running_host() {
+        let state = state(
+            vec![
+                client("plain", "Plain", false, false),
+                client("fav", "Fav", true, false),
+                client("running", "Running", false, true),
+            ],
+            vec![
+                server("s-plain", "Server A", "", false),
+                server("s-fav", "Server B", "", true),
+            ],
+        );
+        let (clients, servers) = state.host_choices(false, "");
+        assert_eq!(ids(&clients), ["running", "fav", "plain"]);
+        assert_eq!(ids(&servers), ["s-fav", "s-plain"]);
+        assert!(
+            clients
+                .iter()
+                .find(|choice| choice.id == "fav")
+                .unwrap()
+                .favorite
+        );
+    }
+
+    #[test]
+    fn the_picker_search_filters_clients_and_their_linked_servers_by_the_list_rules() {
+        let state = state(
+            vec![
+                client("a", "Alpha repro", false, false),
+                client("b", "Beta", false, false),
+                client("c", "Gamma", false, false),
+            ],
+            vec![
+                server("s1", "Beta Server", "b", false),
+                server("s2", "Other", "b", false),
+                server("s3", "Standalone", "", false),
+            ],
+        );
+
+        let (clients, servers) = state.host_choices(false, "ALPHA");
+        assert_eq!(ids(&clients), ["a"]);
+        assert!(servers.is_empty());
+
+        // A matching linked server keeps its client, and only it is listed.
+        let (clients, _) = state.host_choices(false, "beta server");
+        assert_eq!(ids(&clients), ["b"]);
+        let linked = clients[0]
+            .linked
+            .iter()
+            .map(|server| server.id.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(linked, ["s1"]);
+
+        // A matching client keeps all of its linked servers.
+        let (clients, _) = state.host_choices(false, "beta");
+        assert_eq!(clients[0].linked.row_count(), 2);
+
+        let (clients, servers) = state.host_choices(false, "");
+        assert_eq!(clients.len(), 3);
+        assert_eq!(ids(&servers), ["s3"]);
+    }
+
+    #[test]
+    fn the_picker_is_offered_every_host_whatever_the_instance_list_hides() {
+        // The workspace is given the rows before the Instances page's filters,
+        // so a filter there cannot hide a host from a pane.
+        let state = state(
+            vec![
+                client("a", "Alpha", false, false),
+                client("b", "Beta", false, false),
+            ],
+            Vec::new(),
+        );
+        let (clients, _) = state.host_choices(false, "");
+        assert_eq!(ids(&clients), ["a", "b"]);
+    }
 }

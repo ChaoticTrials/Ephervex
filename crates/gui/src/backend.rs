@@ -40,6 +40,7 @@ use ephervex_core::{
 };
 use ephervex_core::{PlanWarning, PlannedMod};
 use ephervex_i18n::{Arg, lookup, lookup_args, lookup_attribute, lookup_attribute_args};
+use ephervex_model::GroupId;
 use ephervex_model::{
     AbsentModPolicy, InstanceId, LoaderKind, LoaderSelection, ModOrigin, ModProvider, Operation,
     OperationStatus, ServerId, SnapshotId, StorageClass,
@@ -87,6 +88,36 @@ pub enum Command {
     },
     /// Installs the managed Java a host expects.
     InstallHostJava(InstalledHost),
+    /// Marks or unmarks a host as a favorite.
+    SetFavorite {
+        host: InstalledHost,
+        favorite: bool,
+    },
+    /// Creates a group, and puts `assign_to` in it when given.
+    CreateGroup {
+        name: String,
+        assign_to: Option<InstanceId>,
+    },
+    RenameGroup {
+        group: GroupId,
+        name: String,
+    },
+    /// Deleting a group leaves its instances ungrouped.
+    DeleteGroup(GroupId),
+    SetClientGroup {
+        client: InstanceId,
+        group: Option<GroupId>,
+    },
+    /// Asks the desktop for an icon image, which comes back as
+    /// [`Event::HostIconPicked`].
+    PickHostIcon(InstalledHost),
+    SetHostIcon {
+        host: InstalledHost,
+        path: PathBuf,
+    },
+    ClearHostIcon(InstalledHost),
+    /// Records the order the instance list is kept in.
+    SetInstanceSort(ephervex_core::InstanceSort),
     LoadMinecraftReleases,
     WarmLanguageCatalog(String),
     LoadLoaderVersions {
@@ -813,6 +844,15 @@ pub struct LiveLogUpdate {
 pub struct Snapshot {
     pub instances: Vec<InstancePresentation>,
     pub servers: Vec<ServerPresentation>,
+    /// Every instance group, in name order.
+    pub groups: Vec<ephervex_core::InstanceGroup>,
+    /// Where an unreadable favorites, groups and icons file was kept, and
+    /// whether its previous copy was restored, when reading it set one aside.
+    pub organization_set_aside: Option<ephervex_core::SetAsideNotice>,
+    /// The order the instance list is kept in, as stored.
+    pub instance_sort: ephervex_core::InstanceSort,
+    /// How Minecraft versions rank, when the list is ordered by them.
+    pub version_order: ephervex_core::VersionOrder,
     pub accounts: Vec<AccountData>,
     /// Every shipped product preference and what is configured for it.
     pub minecraft_preferences: MinecraftPreferenceSnapshot,
@@ -2023,6 +2063,11 @@ pub enum Event {
         request_id: String,
     },
     StorageRootPicked(PathBuf),
+    /// An icon image the user chose for a host.
+    HostIconPicked {
+        host: InstalledHost,
+        path: PathBuf,
+    },
     ServerPackPicked {
         target: ServerPackTarget,
         path: PathBuf,
@@ -5100,6 +5145,108 @@ fn run_worker(
                     Err(error) => send_scoped_modal_error(&events, ModalScope::DELETE_MOD, &error),
                 }
             }
+            Command::SetFavorite { host, favorite } => {
+                let result = match host {
+                    InstalledHost::Instance(id) => app.set_client_favorite(id, favorite),
+                    InstalledHost::Server(id) => app.set_server_favorite(id, favorite),
+                };
+                match result {
+                    Ok(()) => send_snapshot(&mut app, &events),
+                    Err(error) => send_error(&events, &error),
+                }
+            }
+            Command::CreateGroup { name, assign_to } => {
+                let created = app.create_group(&name).and_then(|group| {
+                    if let Some(client) = assign_to {
+                        app.set_client_group(client, Some(group.id))?;
+                    }
+                    Ok(group)
+                });
+                match created {
+                    Ok(group) => {
+                        let _ = events.send(Event::CloseModal(ModalScope::RENAME));
+                        let _ = events.send(Event::Toast {
+                            message: localized_value("gui-group-created", &group.name),
+                            error: false,
+                        });
+                        send_snapshot(&mut app, &events);
+                    }
+                    Err(error) => send_modal_error(&events, &error),
+                }
+            }
+            Command::RenameGroup { group, name } => match app.rename_group(group, &name) {
+                Ok(group) => {
+                    let _ = events.send(Event::CloseModal(ModalScope::RENAME));
+                    let _ = events.send(Event::Toast {
+                        message: localized_value("gui-renamed", &group.name),
+                        error: false,
+                    });
+                    send_snapshot(&mut app, &events);
+                }
+                Err(error) => send_modal_error(&events, &error),
+            },
+            Command::DeleteGroup(group) => {
+                let name = app
+                    .organization_or_empty()
+                    .groups()
+                    .into_iter()
+                    .find(|candidate| candidate.id == group)
+                    .map(|candidate| candidate.name);
+                match app.delete_group(group) {
+                    Ok(()) => {
+                        if let Some(name) = name {
+                            let _ = events.send(Event::Toast {
+                                message: localized_value("gui-group-deleted", &name),
+                                error: false,
+                            });
+                        }
+                        send_snapshot(&mut app, &events);
+                    }
+                    Err(error) => send_error(&events, &error),
+                }
+            }
+            Command::SetClientGroup { client, group } => {
+                match app.set_client_group(client, group) {
+                    Ok(()) => send_snapshot(&mut app, &events),
+                    Err(error) => send_error(&events, &error),
+                }
+            }
+            Command::PickHostIcon(host) => {
+                let events = events.clone();
+                spawn_dialog(&dialogs, move || {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_title(lookup("gui-choose-icon"))
+                        .add_filter(lookup("gui-icon-images"), &["png", "jpg", "jpeg"])
+                        .pick_file()
+                    {
+                        let _ = events.send(Event::HostIconPicked { host, path });
+                    }
+                });
+            }
+            Command::SetHostIcon { host, path } => {
+                let result = match host {
+                    InstalledHost::Instance(id) => app.set_client_icon(id, &path),
+                    InstalledHost::Server(id) => app.set_server_icon(id, &path),
+                };
+                match result {
+                    Ok(()) => send_snapshot(&mut app, &events),
+                    Err(error) => send_error(&events, &error),
+                }
+            }
+            Command::ClearHostIcon(host) => {
+                let result = match host {
+                    InstalledHost::Instance(id) => app.clear_client_icon(id),
+                    InstalledHost::Server(id) => app.clear_server_icon(id),
+                };
+                match result {
+                    Ok(()) => send_snapshot(&mut app, &events),
+                    Err(error) => send_error(&events, &error),
+                }
+            }
+            Command::SetInstanceSort(sort) => match app.set_instance_sort(sort) {
+                Ok(()) => send_snapshot(&mut app, &events),
+                Err(error) => send_error(&events, &error),
+            },
             Command::RenameClient { id, name } => {
                 if refuse_dialog_while_changing(
                     &app,
@@ -6014,6 +6161,7 @@ fn send_snapshot_reporting(app: &mut App, events: &Sender<Event>) -> bool {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
     let servers = app.list_servers()?;
     let statuses = servers
@@ -6022,6 +6170,8 @@ fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
         .collect::<Result<Vec<_>, _>>()?;
     let clients = app.list_clients()?;
     let pairs = app.linked_pairs()?;
+    let organization = app.organization_or_empty();
+    let linking = app.linking_states()?;
     let mut connection_states = std::collections::HashMap::new();
     let mut instance_rows = Vec::new();
     for record in &clients {
@@ -6067,6 +6217,13 @@ fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
         presentation.pair = PairPresentation::of(record.id.into(), &pairs, &clients, &servers);
         presentation.snapshot_deletion_note =
             snapshot_deletion_note(app, InstalledHost::Instance(record.id));
+        presentation.icon = organization.client_icon(record.id);
+        presentation.facts.favorite = organization.is_favorite_client(record.id);
+        presentation.facts.group = organization.group_of(record.id);
+        presentation.facts.linking = linking
+            .get(&record.id)
+            .copied()
+            .unwrap_or(ephervex_core::LinkingState::None);
         instance_rows.push(presentation);
     }
     let mut server_rows = Vec::new();
@@ -6076,6 +6233,8 @@ fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
         presentation.snapshot_deletion_note =
             snapshot_deletion_note(app, InstalledHost::Server(server.id));
         presentation.apply_connection_state(connection_states.remove(&server.id));
+        presentation.favorite = organization.is_favorite_server(server.id);
+        presentation.icon = organization.server_icon(server.id);
         server_rows.push(presentation);
     }
     let accounts = app
@@ -6102,14 +6261,46 @@ fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
             "some configured Minecraft preferences are invalid"
         );
     }
+    let instance_sort = app.instance_sort();
     Ok(Snapshot {
         instances: instance_rows,
         servers: server_rows,
+        groups: organization.groups(),
+        organization_set_aside: ephervex_core::take_organization_notices()
+            .into_iter()
+            .next_back(),
+        instance_sort,
+        version_order: if instance_sort == ephervex_core::InstanceSort::Minecraft {
+            minecraft_version_order(app)
+        } else {
+            ephervex_core::VersionOrder::default()
+        },
         accounts,
         minecraft_preferences,
         settings: application_settings(app)?,
         eula: eula_data(&app.server_eula_status()),
     })
+}
+
+/// Release order from the cached manifest, never from the network. Skipped
+/// inside an async runtime, where it could not block.
+fn minecraft_version_order(app: &App) -> ephervex_core::VersionOrder {
+    static RUNTIME: std::sync::OnceLock<Option<tokio::runtime::Runtime>> =
+        std::sync::OnceLock::new();
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return ephervex_core::VersionOrder::default();
+    }
+    RUNTIME
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .ok()
+        })
+        .as_ref()
+        .map_or_else(ephervex_core::VersionOrder::default, |runtime| {
+            runtime.block_on(app.minecraft_version_order())
+        })
 }
 
 fn application_settings(app: &App) -> Result<SettingsData, CoreError> {

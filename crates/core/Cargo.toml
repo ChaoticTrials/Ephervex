@@ -60,6 +60,8 @@ reqwest.workspace = true
 sysinfo.workspace = true
 # Reading and writing a linked server's entry in a client's servers.dat.
 fastnbt.workspace = true
+# Naming an imported host icon by the hash of its stored bytes.
+sha2.workspace = true
 
 [dev-dependencies]
 # The integration tests seed the Java inventory through the test-support hooks,
@@ -74,7 +76,6 @@ zip.workspace = true
 wiremock.workspace = true
 # Fixture jars are hashed so the download manager's verification runs for real.
 sha1.workspace = true
-sha2.workspace = true
 hex.workspace = true
 # The managed-runtime install tests serve a Temurin-shaped tarball from a
 # loopback server.

@@ -74,6 +74,28 @@ export struct InstanceRow {
     pair-start-together: bool,
     // A start of the pair is under way, so neither side starts again.
     pair-starting: bool,
+    favorite: bool,
+    // The group the instance is in, both empty when it is in none.
+    group-id: string,
+    group-name: string,
+    // Where the group sits in the group choices, or -1 when ungrouped.
+    group-index: int,
+    // The group's color slot for `Theme.group-tone`.
+    group-tone: int,
+    // The instance's own icon, as a position in `HostIcons.images`, or -1
+    // when none is set or the file cannot be loaded, and the loader glyph is
+    // drawn instead. A position rather than an image, so a row still compares
+    // equal to itself.
+    icon-slot: int,
+}
+
+// One group instances can be put in.
+export struct GroupRow {
+    id: string,
+    name: string,
+    members: int,
+    // The color slot for `Theme.group-tone`.
+    tone: int,
 }
 
 export struct ServerRow {
@@ -111,6 +133,8 @@ export struct ServerRow {
     paired-client-name: string,
     pair-start-together: bool,
     pair-starting: bool,
+    favorite: bool,
+    icon-slot: int,
 }
 
 export struct ImpactRow {
@@ -257,6 +281,7 @@ export struct WorkspaceLinkedChoice {
     name: string,
     state: string,
     state-kind: string,
+    icon-slot: int,
 }
 
 // One host a pane can be pointed at, as the host picker's card shows it.
@@ -268,6 +293,8 @@ export struct WorkspaceHostChoice {
     loader-kind: string,
     state: string,
     state-kind: string,
+    favorite: bool,
+    icon-slot: int,
     // A client's linked servers, pickable from its card.
     linked: [WorkspaceLinkedChoice],
 }
@@ -428,6 +455,9 @@ export struct RunningRow {
     // and there is nothing yet to compare against.
     usage: string,
     last-line: string,
+    // The host's icon in `HostIcons.images`, or -1 when it has none or the
+    // host is not one the launcher lists.
+    icon-slot: int,
     controllable: bool,
     can-stop: bool,
 }

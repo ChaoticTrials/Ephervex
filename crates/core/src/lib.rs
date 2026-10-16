@@ -28,6 +28,7 @@ pub mod app;
 pub mod artifact_cache;
 mod artwork;
 mod blocking;
+mod bounded_image;
 pub mod bundle;
 pub mod connection;
 pub mod crash_analysis;
@@ -44,6 +45,7 @@ pub mod health;
 mod host_recipe_gate;
 pub mod import;
 pub mod instance;
+pub mod instance_listing;
 pub mod isolation;
 pub mod java_choices;
 pub mod java_failure;
@@ -64,6 +66,7 @@ mod mod_display_cache;
 pub mod mods;
 pub mod mutation;
 pub mod open_files;
+pub mod organization;
 pub mod pack_url;
 pub mod promotion;
 pub mod running;
@@ -134,6 +137,10 @@ pub use instance::{
     CreatedClient, MAX_ENTITY_NAME_CHARS, NameRefusal, PreferenceContext,
     global_minecraft_preferences, name_with_suffix, validated_entity_name,
 };
+pub use instance_listing::{
+    GroupFilter, InstanceFacts, InstanceFilter, InstanceSort, RunFilter, SearchQuery, VersionOrder,
+    list_instances, natural_compare,
+};
 pub use isolation::{
     IsolationCancel, IsolationCandidate, IsolationConfidence, IsolationError,
     IsolationLinkedServer, IsolationMissingDependency, IsolationOutcome, IsolationPlan,
@@ -164,7 +171,7 @@ pub use linked_mods::{
     LinkedModRoot, LinkedTargetBlock, LinkedTargetFailure, LinkedTargetOutcome, LinkedTargetPlan,
     LinkedTargetResult, LinkedTargetState,
 };
-pub use linked_pair::{LinkedPair, LinkedStart};
+pub use linked_pair::{LinkedPair, LinkedStart, LinkingState};
 pub use loader::{IncompatibleMod, LoaderVersionChange, LoaderVersionPlan};
 pub use local_mods::{
     LocalModOffer, LocalModPlan, LocalModRefusal, LocalModReport, MAX_LOCAL_MOD_BYTES,
@@ -183,6 +190,7 @@ pub use mutation::{
     ModMutability, ModMutation, ModMutationPlan, ModVersionChoice, ModVersionChoices,
     MutationRestriction, PlannedFile, PlannedOutcome, effective_mutability,
 };
+pub use organization::{IconRefusal, InstanceGroup, OrganizationView, take_organization_notices};
 pub use pack_url::{
     HostConsent, LAUNCHER_URL_SCHEME, LauncherUrl, LauncherUrlError, MAX_LAUNCHER_URL_BYTES,
     MAX_PACK_ARCHIVE_BYTES, PackConsents, PackSource, StagedPack,
@@ -352,6 +360,6 @@ pub use ephervex_storage::{
     ReconciliationReport, RecordRef, RunningLaunch, SECRET_KEY_MARKERS, SearchMatch, SearchOptions,
     SearchOutcome, ServerCommit, ServerCommitWarning, ServerDefaults, ServerFolder,
     ServerNetworkSettings, ServerOperatorIdentity, ServerOperatorProfile, ServerOperatorSetup,
-    ServerPortSelection, ServerRecord, ServerRootConflict, StorageError, TechnicalTextSize,
-    TextAnchor, TextView, running_state,
+    ServerPortSelection, ServerRecord, ServerRootConflict, SetAsideNotice, StorageError,
+    TechnicalTextSize, TextAnchor, TextView, running_state,
 };

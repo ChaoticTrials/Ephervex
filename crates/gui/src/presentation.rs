@@ -12,10 +12,10 @@ use ephervex_core::{
     ARTIFACT_CACHE_LIMIT_PRESETS, ArtifactCacheLimit, ArtifactCacheLimitError, BlockedProviderFile,
     ByteUnit, ClientRecord, DEFAULT_ARTIFACT_CACHE_LIMIT_BYTES, DeclaredProject,
     DependencyKnowledge, DependentMods, DiagnosticKind, DiagnosticScope, DuplicateFileReason,
-    DuplicateProviderFile, ImpactedMod, InstalledHost, LaunchAndConnectAvailability, LinkedPair,
-    ModPresence, ModRelations, NetworkAccess, PackAnalysis, PackSide, ProjectAvailability,
-    ProviderFileIdentity, RelatedMod, RequiredMods, RuntimeClassification, ServerRecord,
-    ServerStatus, format_binary_bytes,
+    DuplicateProviderFile, ImpactedMod, InstalledHost, InstanceFacts, LaunchAndConnectAvailability,
+    LinkedPair, LinkingState, ModPresence, ModRelations, NetworkAccess, PackAnalysis, PackSide,
+    ProjectAvailability, ProviderFileIdentity, RelatedMod, RequiredMods, RuntimeClassification,
+    ServerRecord, ServerStatus, format_binary_bytes,
 };
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use ephervex_model::{
@@ -133,6 +133,11 @@ pub struct InstancePresentation {
     pub launch_and_connect: Vec<ConnectPresentation>,
     /// Filled in from the pairs, which a record knows nothing about.
     pub pair: Option<PairPresentation>,
+    /// The stored icon file, when one is set and still on disk.
+    pub icon: Option<std::path::PathBuf>,
+    /// What search, filters and ordering read. Favorite, group and linking are
+    /// filled in from the organization, which a record knows nothing about.
+    pub facts: InstanceFacts,
 }
 
 /// The other side of a host's linked pair.
@@ -246,6 +251,14 @@ impl InstancePresentation {
                 })
                 .collect(),
             pair: None,
+            icon: None,
+            facts: InstanceFacts::from_record(
+                record,
+                false,
+                None,
+                LinkingState::None,
+                launch_state.is_some(),
+            ),
         }
     }
 }
@@ -280,6 +293,9 @@ pub struct ServerPresentation {
     pub destructive_recovery: bool,
     /// Filled in from the pairs, which a record knows nothing about.
     pub pair: Option<PairPresentation>,
+    /// Filled in from the organization, which a record knows nothing about.
+    pub favorite: bool,
+    pub icon: Option<std::path::PathBuf>,
 }
 
 impl ServerPresentation {
@@ -371,6 +387,8 @@ impl ServerPresentation {
             destructive_recovery: uncertain,
             snapshot_deletion_note: String::new(),
             pair: None,
+            favorite: false,
+            icon: None,
         }
     }
 

@@ -32,29 +32,30 @@ use ephervex_core::{
     DependentMods, DiagnosticEntry, DiagnosticFix, DiagnosticKind, DiagnosticRequest,
     DiagnosticScope, DiagnosticSearch, DirectoryState, DuplicateClient, EULA_CONFIRMATION_PHRASE,
     EntitlementLookup, Entitlements, EulaStatus, ExpectedRuntime, FileDisposition, FindingClass,
-    FindingKind, Freshness, GameExit, HostJavaInstall, HostJavaStatus, ImpactedMod, ImportRequest,
-    ImportedPack, IncompatibilityReason, InstallationHealth, InstalledHost, InstalledMods,
-    Integrity, IsolationRequest, IsolationRound, IsolationSession, IsolationStep, JavaCheck,
-    JavaHealth, JavaMismatch, JavaPathChoice, JavaPinIndex, JavaPlan, JavaPlanRequest, JavaRefusal,
-    JavaRuntime, JavaRuntimeFailure, JavaRuntimePins, JavaRuntimeSummary, JavaSelectionMode,
-    JavaTarget, JavaUnavailable, LaunchAndConnectEvent, LaunchAndConnectObserver,
-    LaunchAndConnectOptions, LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver,
-    LaunchOptions, LaunchOutcome, LaunchState, LoginFlow, LoginOptions, LoginRequest,
+    FindingKind, Freshness, GameExit, GroupFilter, HostJavaInstall, HostJavaStatus, ImpactedMod,
+    ImportRequest, ImportedPack, IncompatibilityReason, InstallationHealth, InstalledHost,
+    InstalledMods, InstanceFilter, InstanceGroup, InstanceSort, Integrity, IsolationRequest,
+    IsolationRound, IsolationSession, IsolationStep, JavaCheck, JavaHealth, JavaMismatch,
+    JavaPathChoice, JavaPinIndex, JavaPlan, JavaPlanRequest, JavaRefusal, JavaRuntime,
+    JavaRuntimeFailure, JavaRuntimePins, JavaRuntimeSummary, JavaSelectionMode, JavaTarget,
+    JavaUnavailable, LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions,
+    LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver, LaunchOptions,
+    LaunchOutcome, LaunchState, LinkingState, LoginFlow, LoginOptions, LoginRequest,
     MAX_SEARCH_MATCHES, MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod,
     ManagedModInstallation, ManagedModSnapshot, ModInstallPlan, ModInstallRequest, ModPresence,
     ModProjectDetails, ModRelations, ModSearchQuery, ModSearchResults, NetworkAccess, NewClient,
-    NewServer, OperationReporter, OptionalCandidate, OptionalSelection, OptionalStatus, OutputLine,
-    PackAnalysis, PackRecipe, PackSide, Paths, PlanWarning, PlannedMod, PreferenceApplication,
-    PreferenceId, PreferenceKey, ProcessMonitor, PromotionRequest, PromotionWarning,
-    ReconciliationReport, RefusedJavaChoice, RelatedMod, ReleaseListing, RequiredMods,
-    RequirementBasis, RoundAnswer, RuntimeClassification, RuntimeInventory, SearchOptions,
-    SecretString, ServerCommitWarning, ServerContentSource, ServerCreateOptions, ServerEvent,
-    ServerExit, ServerFolder, ServerNetworkChange, ServerObserver, ServerPersistenceHealth,
-    ServerRecord, ServerWarning, Session, SharedArtifactReport, SideSupport, SkipReason,
-    SnapshotOrigin, SnapshotRecord, SnapshotRestoreOptions, StartedServerLifetime,
-    SuspectConfidence, SuspectReason, TerminationRequests, TextAnchor, TextView,
-    UnknownServerFiles, UnverifiedOptional, VerificationReport, VersionMetadata, VersionRecord,
-    format_binary_bytes,
+    NewServer, OperationReporter, OptionalCandidate, OptionalSelection, OptionalStatus,
+    OrganizationView, OutputLine, PackAnalysis, PackRecipe, PackSide, Paths, PlanWarning,
+    PlannedMod, PreferenceApplication, PreferenceId, PreferenceKey, ProcessMonitor,
+    PromotionRequest, PromotionWarning, ReconciliationReport, RefusedJavaChoice, RelatedMod,
+    ReleaseListing, RequiredMods, RequirementBasis, RoundAnswer, RunFilter, RuntimeClassification,
+    RuntimeInventory, SearchOptions, SecretString, ServerCommitWarning, ServerContentSource,
+    ServerCreateOptions, ServerEvent, ServerExit, ServerFolder, ServerNetworkChange,
+    ServerObserver, ServerPersistenceHealth, ServerRecord, ServerWarning, Session,
+    SharedArtifactReport, SideSupport, SkipReason, SnapshotOrigin, SnapshotRecord,
+    SnapshotRestoreOptions, StartedServerLifetime, SuspectConfidence, SuspectReason,
+    TerminationRequests, TextAnchor, TextView, UnknownServerFiles, UnverifiedOptional,
+    VerificationReport, VersionMetadata, VersionOrder, VersionRecord, format_binary_bytes,
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{
@@ -115,6 +116,14 @@ enum Command {
     Instance {
         #[command(subcommand)]
         command: InstanceCommand,
+    },
+    /// Manage the groups instances are sorted into.
+    ///
+    /// A group is a plain label for finding instances. It never moves an
+    /// instance's files or changes its id.
+    Groups {
+        #[command(subcommand)]
+        command: GroupsCommand,
     },
     /// Operate on the set of servers.
     Servers {
@@ -979,8 +988,124 @@ enum JavaCommand {
 
 #[derive(Debug, Subcommand)]
 enum InstancesCommand {
-    /// List every indexed client instance.
+    /// List client instances, optionally narrowed and ordered.
+    ///
+    /// Every filter that is given must match. Favorites come first unless
+    /// `--sort` or the interface's chosen order says otherwise. Equal values
+    /// are ordered newest first, then by id, so the order is stable.
+    List(InstanceListArgs),
+}
+
+#[derive(Debug, Args)]
+struct InstanceListArgs {
+    /// Only instances whose name, Minecraft version, loader, source or group
+    /// contains this text, without regard to case.
+    #[arg(long, value_name = "TEXT")]
+    search: Option<String>,
+    /// Only favorites.
+    #[arg(long)]
+    favorite: bool,
+    /// Only instances in this group.
+    #[arg(long, value_name = "NAME", conflicts_with = "ungrouped")]
+    group: Option<String>,
+    /// Only instances that are in no group.
+    #[arg(long)]
+    ungrouped: bool,
+    /// Only instances on this exact Minecraft version.
+    #[arg(long, value_name = "VERSION")]
+    minecraft: Option<String>,
+    /// Only instances using this loader.
+    #[arg(long, value_enum)]
+    loader: Option<LoaderArg>,
+    #[command(flatten)]
+    run_state: RunStateArgs,
+    /// Only instances with this relation to linked servers: `paired` has a
+    /// paired server, `servers` has linked servers but none paired, `none` has
+    /// no linked server.
+    #[arg(long, value_enum)]
+    linking: Option<LinkingArg>,
+    /// Order the list by this key. Defaults to the order chosen in the
+    /// interface, which starts as `favorite`.
+    ///
+    /// `favorite` puts favorites first, `name` ignores case and orders numbers
+    /// by value ("test 2" before "test 10"), `minecraft` puts
+    /// the newest release first, and `loader` orders by loader and then by
+    /// newest loader version.
+    #[arg(long, value_enum)]
+    sort: Option<SortArg>,
+}
+
+#[derive(Debug, Args)]
+struct RunStateArgs {
+    /// Only instances that are launching or running.
+    #[arg(long, conflicts_with = "stopped")]
+    running: bool,
+    /// Only instances that are neither launching nor running.
+    #[arg(long)]
+    stopped: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SortArg {
+    Favorite,
+    Name,
+    Minecraft,
+    Loader,
+}
+
+impl From<SortArg> for InstanceSort {
+    fn from(value: SortArg) -> Self {
+        match value {
+            SortArg::Favorite => Self::Favorite,
+            SortArg::Name => Self::Name,
+            SortArg::Minecraft => Self::Minecraft,
+            SortArg::Loader => Self::Loader,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum LinkingArg {
+    Paired,
+    Servers,
+    None,
+}
+
+impl From<LinkingArg> for LinkingState {
+    fn from(value: LinkingArg) -> Self {
+        match value {
+            LinkingArg::Paired => Self::Paired,
+            LinkingArg::Servers => Self::LinkedServers,
+            LinkingArg::None => Self::None,
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+enum GroupsCommand {
+    /// List every group and how many instances it holds.
     List,
+    /// Create an empty group.
+    ///
+    /// Names are compared without regard to case, so `Bisect` and `bisect`
+    /// are the same group.
+    Create {
+        /// The new group's name.
+        name: String,
+    },
+    /// Rename a group. Its instances stay in it.
+    Rename {
+        /// The group's current name, without regard to case.
+        name: String,
+        /// The name it takes.
+        new_name: String,
+    },
+    /// Delete a group. Its instances become ungrouped and are otherwise
+    /// untouched.
+    Delete {
+        /// The group's name, without regard to case.
+        name: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1110,6 +1235,39 @@ enum InstanceCommand {
         /// Move the instance alone and leave its linked servers temporary.
         #[arg(long)]
         no_servers: bool,
+    },
+    /// Mark an instance as a favorite so it lists first.
+    Favorite { id: InstanceId },
+    /// Remove an instance's favorite mark.
+    Unfavorite { id: InstanceId },
+    /// Put an instance in a group, or take it out of its group with `--none`.
+    ///
+    /// The group must already exist; see `ephervex groups create`. Grouping
+    /// never moves the instance or changes its id.
+    Group {
+        id: InstanceId,
+        /// The group's name, without regard to case.
+        #[arg(required_unless_present = "none")]
+        name: Option<String>,
+        /// Leave the instance in no group.
+        #[arg(long, conflicts_with = "name")]
+        none: bool,
+    },
+    /// Set an instance's icon from a PNG or JPEG file, or remove it with
+    /// `--clear`.
+    ///
+    /// The image is checked, scaled down to at most 256 pixels and stored by
+    /// content; the original file is not kept or referenced. Without an icon,
+    /// the instance shows its loader's symbol. `--json` reports the stored
+    /// file as `icon`.
+    Icon {
+        id: InstanceId,
+        /// The image file to use.
+        #[arg(required_unless_present = "clear")]
+        path: Option<PathBuf>,
+        /// Remove the icon.
+        #[arg(long, conflicts_with = "path")]
+        clear: bool,
     },
 }
 
@@ -1324,6 +1482,24 @@ enum ServerCommand {
             long,
             conflicts_with_all = ["java", "min_memory", "max_memory", "jvm_args"]
         )]
+        clear: bool,
+    },
+    /// Mark a server as a favorite so it lists first in the interface.
+    Favorite { id: ServerId },
+    /// Remove a server's favorite mark.
+    Unfavorite { id: ServerId },
+    /// Set a server's icon from a PNG or JPEG file, or remove it with
+    /// `--clear`.
+    ///
+    /// The image is checked, scaled down to at most 256 pixels and stored by
+    /// content. `--json` reports the stored file as `icon`.
+    Icon {
+        id: ServerId,
+        /// The image file to use.
+        #[arg(required_unless_present = "clear")]
+        path: Option<PathBuf>,
+        /// Remove the icon.
+        #[arg(long, conflicts_with = "path")]
         clear: bool,
     },
     /// List the mods a server has, and whether the loader will load each one.
@@ -1721,7 +1897,9 @@ fn main() -> ExitCode {
         return run_doctor(cli.json);
     }
 
-    match run(&cli) {
+    let outcome = run(&cli);
+    report_organization_notices();
+    match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             report_failure(&error, cli.json);
@@ -1890,14 +2068,10 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
             let mut app = open_app()?;
             run_preferences_command(&mut app, command, cli.json)
         }
-        Command::Instances { command } => {
+        Command::Instances { command } => run_instances_command(command, cli.json),
+        Command::Groups { command } => {
             let app = open_app()?;
-            match command {
-                InstancesCommand::List => {
-                    list_instances(&app, cli.json)?;
-                }
-            }
-            Ok(())
+            run_groups_command(&app, command, cli.json)
         }
         Command::Instance { command } => {
             let app = open_app()?;
@@ -2144,6 +2318,7 @@ fn print_snapshot(snapshot: &SnapshotRecord, json: bool) -> anyhow::Result<()> {
 
 // ------------------------------------------------------------------- commands
 
+#[allow(clippy::too_many_lines)]
 async fn run_instance_command(
     app: &App,
     command: &InstanceCommand,
@@ -2246,8 +2421,46 @@ async fn run_instance_command(
             servers,
             no_servers,
         } => run_instance_persist(app, *id, servers, *no_servers, json)?,
+        InstanceCommand::Favorite { .. }
+        | InstanceCommand::Unfavorite { .. }
+        | InstanceCommand::Group { .. }
+        | InstanceCommand::Icon { .. } => run_instance_organization_command(app, command, json)?,
     }
     Ok(())
+}
+
+fn run_instance_organization_command(
+    app: &App,
+    command: &InstanceCommand,
+    json: bool,
+) -> anyhow::Result<()> {
+    let id = match command {
+        InstanceCommand::Favorite { id } => {
+            app.set_client_favorite(*id, true)?;
+            *id
+        }
+        InstanceCommand::Unfavorite { id } => {
+            app.set_client_favorite(*id, false)?;
+            *id
+        }
+        InstanceCommand::Group { id, name, none } => {
+            let group = match (name, none) {
+                (Some(name), false) => Some(named_group(app, name)?.id),
+                _ => None,
+            };
+            app.set_client_group(*id, group)?;
+            *id
+        }
+        InstanceCommand::Icon { id, path, clear } => {
+            match (path, clear) {
+                (Some(path), false) => app.set_client_icon(*id, path)?,
+                _ => app.clear_client_icon(*id)?,
+            }
+            *id
+        }
+        _ => return Ok(()),
+    };
+    print_instance(app, &app.current_client(id)?, json)
 }
 
 async fn run_instance_delete(
@@ -2519,12 +2732,21 @@ async fn run_server_command(
             print_server_commit(&committed.record, &committed.warnings, json);
         }
         ServerCommand::Runtime { .. } => run_server_runtime(app, command, json).await?,
-        ServerCommand::Show { id } => {
-            if json {
-                print_json(&server_status_json(app, *id)?);
-            } else {
-                print_server(&app.server(*id)?, false);
+        ServerCommand::Show { id } => print_server_with_organization(app, *id, json)?,
+        ServerCommand::Favorite { id } => {
+            app.set_server_favorite(*id, true)?;
+            print_server_with_organization(app, *id, json)?;
+        }
+        ServerCommand::Unfavorite { id } => {
+            app.set_server_favorite(*id, false)?;
+            print_server_with_organization(app, *id, json)?;
+        }
+        ServerCommand::Icon { id, path, clear } => {
+            match (path, clear) {
+                (Some(path), false) => app.set_server_icon(*id, path)?,
+                _ => app.clear_server_icon(*id)?,
             }
+            print_server_with_organization(app, *id, json)?;
         }
         ServerCommand::Mods { id } => {
             print_host_mods(&app.server_mod_snapshot(*id)?, json);
@@ -4175,31 +4397,157 @@ fn show_config(config: &Config, paths: &Paths, json: bool) -> anyhow::Result<()>
     Ok(())
 }
 
-fn list_instances(app: &App, json: bool) -> anyhow::Result<()> {
-    let records = app.list_clients()?;
+/// Says on standard error that an unreadable favorites, groups and icons file
+/// was set aside, and whether its previous copy took its place, whichever
+/// call did it.
+fn report_organization_notices() {
+    for notice in ephervex_core::take_organization_notices() {
+        eprintln!(
+            "{}",
+            ephervex_i18n::lookup_args(
+                if notice.restored {
+                    "organization-restored"
+                } else {
+                    "organization-set-aside"
+                },
+                [(
+                    "path",
+                    MessageArg::from(notice.set_aside.display().to_string())
+                )]
+            )
+        );
+    }
+}
+
+/// What the list and the JSON need beyond a record: favorites, groups, icons
+/// and how each client relates to linked servers.
+struct Organized {
+    view: OrganizationView,
+    linking: std::collections::HashMap<InstanceId, LinkingState>,
+}
+
+impl Organized {
+    fn load(app: &App) -> anyhow::Result<Self> {
+        Ok(Self {
+            view: app.organization()?,
+            linking: app.linking_states()?,
+        })
+    }
+
+    /// For output that only decorates a record: without favorites, groups,
+    /// icons and links when they cannot be read, rather than failing a command
+    /// that already did its job.
+    fn load_lenient(app: &App) -> Self {
+        Self {
+            view: app.organization_or_empty(),
+            linking: app.linking_states().unwrap_or_default(),
+        }
+    }
+}
+
+fn run_instances_command(command: &InstancesCommand, json: bool) -> anyhow::Result<()> {
+    let app = open_app()?;
+    match command {
+        InstancesCommand::List(args) => print_instance_list(&app, args, json),
+    }
+}
+
+fn instance_filter(app: &App, args: &InstanceListArgs) -> anyhow::Result<InstanceFilter> {
+    let group = match (&args.group, args.ungrouped) {
+        (Some(name), _) => GroupFilter::Group(
+            app.organization()?
+                .group_named(name)
+                .ok_or_else(|| CoreError::GroupNotFound {
+                    group: name.clone(),
+                })?
+                .id,
+        ),
+        (None, true) => GroupFilter::Ungrouped,
+        (None, false) => GroupFilter::Any,
+    };
+    Ok(InstanceFilter {
+        query: args.search.clone().unwrap_or_default(),
+        storage: None,
+        favorites_only: args.favorite,
+        minecraft_version: args.minecraft.clone(),
+        loader: args.loader.map(Into::into),
+        run_state: match (args.run_state.running, args.run_state.stopped) {
+            (true, _) => Some(RunFilter::Running),
+            (_, true) => Some(RunFilter::Stopped),
+            _ => None,
+        },
+        linking: args.linking.map(Into::into),
+        group,
+    })
+}
+
+fn print_instance_list(app: &App, args: &InstanceListArgs, json: bool) -> anyhow::Result<()> {
+    let filter = instance_filter(app, args)?;
+    let sort = args.sort.map_or_else(|| app.instance_sort(), Into::into);
+    let order = if sort == InstanceSort::Minecraft {
+        tokio::runtime::Runtime::new()?.block_on(app.minecraft_version_order())
+    } else {
+        VersionOrder::default()
+    };
+    let listed = ephervex_core::list_instances(app.instance_facts()?, &filter, sort, &order);
+    let mut records = app
+        .list_clients()?
+        .into_iter()
+        .map(|record| (record.id, record))
+        .collect::<std::collections::HashMap<_, _>>();
+    let organized = Organized::load(app)?;
 
     if json {
-        let values: Vec<_> = records
+        let values: Vec<_> = listed
             .iter()
-            .map(|record| instance_json(app, record))
+            .filter_map(|facts| records.get(&facts.id))
+            .map(|record| instance_json_with(app, record, &organized))
             .collect::<Result<_, _>>()?;
         print_json(&serde_json::Value::Array(values));
         return Ok(());
     }
 
-    if records.is_empty() {
-        outln!("{}", ephervex_i18n::lookup("instances-list-empty"));
+    if listed.is_empty() {
+        outln!(
+            "{}",
+            ephervex_i18n::lookup(if filter.is_active() && !records.is_empty() {
+                "instances-list-none-match"
+            } else {
+                "instances-list-empty"
+            })
+        );
         return Ok(());
     }
 
-    for record in &records {
+    for facts in &listed {
+        let Some(record) = records.remove(&facts.id) else {
+            continue;
+        };
         // The summary message already carries the name, so there is no separate
         // name column: one source of that string, not two.
         outln!(
-            "{}  {:<11} {}{}",
+            "{}  {:<11} {}{}{}{}",
             record.id,
             record.storage.to_string(),
-            summarize(record),
+            summarize(&record),
+            if facts.favorite {
+                format!(
+                    "  {}",
+                    ephervex_i18n::lookup("instances-list-favorite-marker")
+                )
+            } else {
+                String::new()
+            },
+            facts
+                .group
+                .as_ref()
+                .map_or_else(String::new, |group| format!(
+                    "  {}",
+                    ephervex_i18n::lookup_args(
+                        "instances-list-group-marker",
+                        [("group", MessageArg::from(group.name.as_str()))]
+                    )
+                )),
             if record.needs_attention() {
                 "  [needs attention]"
             } else {
@@ -4207,6 +4555,7 @@ fn list_instances(app: &App, json: bool) -> anyhow::Result<()> {
             }
         );
     }
+    let records = listed;
     outln!(
         "{}",
         ephervex_i18n::lookup_args(
@@ -4215,6 +4564,104 @@ fn list_instances(app: &App, json: bool) -> anyhow::Result<()> {
         )
     );
     Ok(())
+}
+
+fn run_groups_command(app: &App, command: &GroupsCommand, json: bool) -> anyhow::Result<()> {
+    match command {
+        GroupsCommand::List => {
+            let view = app.organization()?;
+            let facts = app.instance_facts()?;
+            let counts: Vec<(InstanceGroup, usize)> = view
+                .groups()
+                .into_iter()
+                .map(|group| {
+                    let members = facts
+                        .iter()
+                        .filter(|facts| facts.group.as_ref().is_some_and(|g| g.id == group.id))
+                        .count();
+                    (group, members)
+                })
+                .collect();
+            if json {
+                print_json(&serde_json::Value::Array(
+                    counts
+                        .iter()
+                        .map(|(group, members)| group_json(group, *members))
+                        .collect(),
+                ));
+            } else if counts.is_empty() {
+                outln!("{}", ephervex_i18n::lookup("groups-list-empty"));
+            } else {
+                for (group, members) in &counts {
+                    outln!(
+                        "{}  {}  ({})",
+                        group.id,
+                        group.name,
+                        ephervex_i18n::lookup_args(
+                            "groups-list-members",
+                            [("count", MessageArg::from(*members))]
+                        )
+                    );
+                }
+            }
+        }
+        GroupsCommand::Create { name } => print_group(app, &app.create_group(name)?, json),
+        GroupsCommand::Rename { name, new_name } => {
+            let group = named_group(app, name)?;
+            print_group(app, &app.rename_group(group.id, new_name)?, json);
+        }
+        GroupsCommand::Delete { name } => {
+            let group = named_group(app, name)?;
+            let members = group_member_count(app, &group);
+            app.delete_group(group.id)?;
+            if json {
+                print_json(&serde_json::json!({ "deleted": group_json(&group, members) }));
+            } else {
+                eprintln!(
+                    "{}",
+                    ephervex_i18n::lookup_args(
+                        "group-deleted",
+                        [("name", MessageArg::from(group.name.as_str()))]
+                    )
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn named_group(app: &App, name: &str) -> anyhow::Result<InstanceGroup> {
+    Ok(app
+        .organization()?
+        .group_named(name)
+        .ok_or_else(|| CoreError::GroupNotFound {
+            group: name.to_owned(),
+        })?)
+}
+
+fn group_member_count(app: &App, group: &InstanceGroup) -> usize {
+    app.instance_facts().map_or(0, |facts| {
+        facts
+            .iter()
+            .filter(|facts| facts.group.as_ref().is_some_and(|g| g.id == group.id))
+            .count()
+    })
+}
+
+fn group_json(group: &InstanceGroup, instances: usize) -> serde_json::Value {
+    serde_json::json!({
+        "id": group.id.to_string(),
+        "name": group.name,
+        "instances": instances,
+    })
+}
+
+fn print_group(app: &App, group: &InstanceGroup, json: bool) {
+    if json {
+        print_json(&group_json(group, group_member_count(app, group)));
+    } else {
+        outln!("{}  {}", group.id, group.name);
+    }
 }
 
 fn list_servers(app: &App, json: bool) -> anyhow::Result<()> {
@@ -7888,6 +8335,13 @@ fn print_instance(app: &App, record: &ClientRecord, json: bool) -> anyhow::Resul
         outln!("minecraft: {}", record.minecraft_version);
         outln!("loader:    {}", record.loader);
         outln!("root:      {}", record.root.display());
+        let view = app.organization_or_empty();
+        if view.is_favorite_client(record.id) {
+            outln!("favorite:  yes");
+        }
+        if let Some(group) = view.group_of(record.id) {
+            outln!("group:     {}", group.name);
+        }
         if let Some(state) = app.launch_state(record.id)? {
             outln!("running:   {}", describe_running(&state));
         }
@@ -8911,7 +9365,35 @@ fn print_server_status(app: &App, id: ServerId, json: bool) -> anyhow::Result<()
 fn server_status_json(app: &App, id: ServerId) -> anyhow::Result<serde_json::Value> {
     let status = app.server_status(id)?;
     let capture = app.server_output(id, 0)?;
-    Ok(server_status_json_from_parts(&status, &capture))
+    let mut value = server_status_json_from_parts(&status, &capture);
+    let view = app.organization_or_empty();
+    if let Some(server) = value
+        .get_mut("server")
+        .and_then(|server| server.as_object_mut())
+    {
+        server.insert("favorite".to_owned(), view.is_favorite_server(id).into());
+        server.insert(
+            "icon".to_owned(),
+            view.server_icon(id)
+                .map_or(serde_json::Value::Null, |path| {
+                    serde_json::Value::String(json_path(&path))
+                }),
+        );
+    }
+    Ok(value)
+}
+
+/// A server's record, with whether it is a favorite when it is.
+fn print_server_with_organization(app: &App, id: ServerId, json: bool) -> anyhow::Result<()> {
+    if json {
+        print_json(&server_status_json(app, id)?);
+    } else {
+        print_server(&app.server(id)?, false);
+        if app.organization_or_empty().is_favorite_server(id) {
+            outln!("favorite:  yes");
+        }
+    }
+    Ok(())
 }
 
 fn server_status_json_from_parts(
@@ -9156,7 +9638,28 @@ fn print_captured_line(line: &CapturedLine) {
 }
 
 fn instance_json(app: &App, record: &ClientRecord) -> anyhow::Result<serde_json::Value> {
+    instance_json_with(app, record, &Organized::load_lenient(app))
+}
+
+/// `icon` is the stored image file, or null when there is none or it is gone.
+fn instance_json_with(
+    app: &App,
+    record: &ClientRecord,
+    organized: &Organized,
+) -> anyhow::Result<serde_json::Value> {
     Ok(serde_json::json!({
+            "favorite": organized.view.is_favorite_client(record.id),
+            "linking": organized
+                .linking
+                .get(&record.id)
+                .copied()
+                .unwrap_or(LinkingState::None)
+                .as_str(),
+            "group": organized.view.group_of(record.id).map(|group| serde_json::json!({
+                "id": group.id.to_string(),
+                "name": group.name,
+            })),
+            "icon": organized.view.client_icon(record.id).map(|path| json_path(&path)),
             "id": record.id.to_string(),
             "name": record.name,
             "storage": record.storage.to_string(),

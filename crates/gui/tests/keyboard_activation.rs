@@ -103,10 +103,14 @@ fn space_flips_the_focused_switch() {
     let ui = window();
     open_create_instance(&ui);
     let before = ui.get_create_persistent();
+    // The dialog is drawn after the page behind it, so its switch is the last
+    // checkbox: the page has filter chips of its own.
     let switch = ElementQuery::from_root(&ui)
         .match_descendants()
         .match_accessible_role(AccessibleRole::Checkbox)
-        .find_first()
+        .find_all()
+        .into_iter()
+        .next_back()
         .expect("the dialog has a switch");
 
     assert!(tab_to(&ui, &switch), "Tab never reached the switch");

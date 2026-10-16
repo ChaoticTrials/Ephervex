@@ -624,6 +624,7 @@ impl App {
             // wants those mods, and a duplication is not a decision about it.
             forget_absent_mods(&copy.record.root);
         }
+        self.inherit_organization(source, copy.record.id);
         Ok(copy)
     }
 

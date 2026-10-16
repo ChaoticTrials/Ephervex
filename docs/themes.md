@@ -116,6 +116,12 @@ also holds a commented-out `[branding]` section for use in a theme folder.
 | `vanilla` | The vanilla game's mark |
 | `forge` | The Forge loader's mark |
 | `neoforge` | The NeoForge loader's mark |
+| `group-tone-1` | The first color instance groups are told apart by |
+| `group-tone-2` | The second color instance groups are told apart by |
+| `group-tone-3` | The third color instance groups are told apart by |
+| `group-tone-4` | The fourth color instance groups are told apart by |
+| `group-tone-5` | The fifth color instance groups are told apart by |
+| `group-tone-6` | The sixth color instance groups are told apart by |
 | `shadow` | A popover's shadow; usually a translucent black |
 | `scrim` | The wash behind a dialog; usually a translucent black |
 

@@ -39,6 +39,38 @@ impl LinkedPair {
     }
 }
 
+/// How a client relates to linked servers, for filtering the instance list.
+///
+/// Advisory and derived: every client is in exactly one state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkingState {
+    /// It has a pair: one of its linked servers is shown beside it.
+    Paired,
+    /// A server links to it, but it is unpaired.
+    LinkedServers,
+    /// No server links to it.
+    None,
+}
+
+impl LinkingState {
+    /// A stable identifier for `--json` output and command-line options.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Paired => "paired",
+            Self::LinkedServers => "servers",
+            Self::None => "none",
+        }
+    }
+
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        [Self::Paired, Self::LinkedServers, Self::None]
+            .into_iter()
+            .find(|state| state.as_str() == name)
+    }
+}
+
 /// What pressing Launch or Start on one side of a pair does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkedStart {
@@ -101,6 +133,36 @@ impl App {
                 )
             })
             .collect())
+    }
+
+    /// The [`LinkingState`] of every client.
+    ///
+    /// A pair that names a server no longer linked to its client counts as
+    /// not paired, because pairs are resolved against the live links.
+    pub fn linking_states(&self) -> CoreResult<HashMap<InstanceId, LinkingState>> {
+        let links = self.server_links()?;
+        let mut states: HashMap<InstanceId, LinkingState> = self
+            .list_clients()?
+            .into_iter()
+            .map(|client| (client.id, LinkingState::None))
+            .collect();
+        for (client, servers) in &links {
+            let paired = resolve(
+                *client,
+                servers,
+                self.config().linked_pairs.get(&client.to_string()),
+            )
+            .is_some();
+            states.insert(
+                *client,
+                if paired {
+                    LinkingState::Paired
+                } else {
+                    LinkingState::LinkedServers
+                },
+            );
+        }
+        Ok(states)
     }
 
     /// The pair `host` belongs to, if any.

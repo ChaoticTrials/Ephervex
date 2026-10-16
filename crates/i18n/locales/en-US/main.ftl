@@ -34,6 +34,7 @@ storage-class-persistent-description = Lives under the configured instance direc
 ## Instance and server listings
 
 instances-list-empty = No instances yet.
+instances-list-none-match = No instances match.
 servers-list-empty = No servers yet.
 
 instances-list-count = { $count ->
@@ -45,6 +46,25 @@ servers-list-count = { $count ->
         [one] { $count } server
        *[other] { $count } servers
     }
+
+instances-list-favorite-marker = [favorite]
+
+# $group is the user's own group name.
+instances-list-group-marker = [group: { $group }]
+
+groups-list-empty = No groups yet. Create one with `ephervex groups create`.
+
+groups-list-members = { $count ->
+        [one] { $count } instance
+       *[other] { $count } instances
+    }
+
+# $name is the user's own group name.
+# $path is where the unreadable file was kept.
+organization-set-aside = The favorites, groups and icons file could not be read, so they start empty. The unreadable file was kept as { $path }.
+organization-restored = The favorites, groups and icons file could not be read, so its copy from before the last change was restored. The unreadable file was kept as { $path }.
+
+group-deleted = Deleted the group { $name }. Its instances are now ungrouped.
 
 # $name is user-authored and $version is a Minecraft version string; neither is
 # translated.
@@ -194,6 +214,43 @@ error-config-unsupported-schema = This configuration was written by a newer vers
 # routinely attach to bug reports.
 error-config-secret-rejected = Refusing to save a credential into the configuration file.
 .action = The key { $key } looks like a secret. Secrets are stored in the system keyring instead, and configuration only records that one exists.
+
+## Organization errors
+
+error-organization-unreadable = The favorites, groups and icons file could not be read.
+.action = Check that { $path } exists and is readable. Favorites, groups and icons are not applied until it is.
+
+error-organization-unwritable = Favorites, groups and icons could not be saved.
+.action = Check that { $path } is writable and that the filesystem is not full.
+
+error-organization-busy = Another Ephervex window or command is saving favorites, groups or icons right now.
+.action = Try again in a moment. If it keeps happening, check which process holds { $path }.
+
+## Group and icon errors
+
+error-group-name-taken = A group named { $name } already exists.
+.action = Group names are compared without regard to case. Choose a different name.
+
+error-group-not-found = That group does not exist.
+.action = List the groups to see their names. It may have been deleted already.
+
+error-icon-unreadable = The icon file could not be read.
+.action = Check that the file exists and that you can read it.
+
+error-icon-not-a-file = The icon path is not a file.
+.action = Pick a PNG or JPEG image file.
+
+error-icon-too-large = The icon file is too large.
+.action = Pick an image smaller than { $limit_mib } MiB.
+
+error-icon-unsupported-format = Only PNG and JPEG images can be used as icons.
+.action = Convert the image to PNG or JPEG and pick it again.
+
+error-icon-not-an-image = The icon file is not a readable image.
+.action = Pick a PNG or JPEG image that opens in an image viewer.
+
+error-icon-too-many-pixels = The icon image is too large.
+.action = Pick a smaller image. An icon picture can be at most { $limit } pixels on a side and { $megapixels } megapixels in total.
 
 ## Artifact cache errors
 
@@ -2019,6 +2076,75 @@ gui-client-instances-count = { $count ->
     [one] 1 client instance
    *[other] { $count } client instances
 }
+gui-instances-shown-of-total = { $first } of { $second } instances
+gui-favorites = Favorites
+gui-favorites-only = Show only favorites
+gui-more-filters = Filters
+gui-more-filters-active = Filters ({ $value })
+gui-no-matching-instances = No instances match
+gui-no-matching-instances-detail = The search and filters hide every instance. Clear them to see them all.
+gui-clear-filters = Clear filters
+gui-filter-minecraft-version = Filter by Minecraft version
+gui-filter-loader = Filter by loader
+gui-filter-run-state = Filter by running state
+gui-filter-linking = Filter by linked servers
+gui-filter-group = Filter by group
+gui-sort-by = Sort instances by
+gui-sort-caption = Sort by
+gui-minecraft-version = Minecraft version
+gui-running-state = Running state
+gui-filter-any-version = Any Minecraft version
+gui-filter-any-loader = Any loader
+gui-loader-vanilla = Vanilla
+gui-loader-forge = Forge
+gui-loader-neoforge = NeoForge
+gui-filter-any-run-state = Running or stopped
+gui-filter-running = Running
+gui-filter-stopped = Stopped
+gui-filter-any-linking = Any linked servers
+gui-filter-linking-paired = Paired with a server
+gui-filter-linking-servers = Linked servers, not paired
+gui-filter-linking-none = No linked servers
+gui-filter-any-group = Any group
+gui-filter-ungrouped = Ungrouped
+gui-sort-favorites = Favorites first
+gui-sort-name = Name
+gui-sort-minecraft = Minecraft version
+gui-sort-loader = Loader
+gui-filter-hosts = Filter instances and servers...
+gui-favorite-host = Mark { $value } as a favorite
+gui-unfavorite-host = Remove { $value } from favorites
+gui-add-favorite = Add to favorites
+gui-remove-favorite = Remove from favorites
+gui-organization = Organization
+gui-group = Group
+gui-remove-from-group = Remove from group
+gui-not-in-a-group = Not in a group
+gui-hint-not-in-a-group = This instance is not in a group.
+gui-set-group = Set group
+gui-new-group = New group
+gui-new-group-ellipsis = New group...
+gui-create-group = Create
+gui-delete-group = Delete
+gui-manage-groups-ellipsis = Manage groups...
+gui-groups = Groups
+gui-modal-groups = Groups
+gui-modal-new-group = New group
+gui-groups-detail = Groups are labels for finding instances. Putting an instance in a group never moves its files or changes its identity. Deleting a group leaves its instances ungrouped.
+gui-new-group-detail = Name the group. Names are compared without regard to case.
+gui-groups-none = No groups yet.
+gui-group-members-count = { $count ->
+    [one] 1 instance
+   *[other] { $count } instances
+}
+gui-organization-set-aside = Favorites, groups and icons could not be read, so they start empty. The unreadable file was kept as { $value }.
+gui-organization-restored = Favorites, groups and icons could not be read, so their copy from before the last change was restored. The unreadable file was kept as { $value }.
+gui-group-created = Created the group { $value }.
+gui-group-deleted = Deleted the group { $value }. Its instances are now ungrouped.
+gui-choose-icon = Choose icon
+gui-choose-icon-ellipsis = Choose icon...
+gui-remove-icon = Remove icon
+gui-icon-images = PNG and JPEG images
 gui-attention = ATTENTION
 gui-managed-mods-count = { $count ->
     [one] 1 managed mod

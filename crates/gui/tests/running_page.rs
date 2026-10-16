@@ -235,6 +235,7 @@ fn running_page(ui: &AppWindow, rows: Vec<RunningRow>) {
 
 fn client() -> RunningRow {
     RunningRow {
+        icon_slot: -1,
         kind: "client".into(),
         id: "repro-client".into(),
         launch: SharedString::default(),
@@ -250,6 +251,7 @@ fn client() -> RunningRow {
 
 fn server() -> RunningRow {
     RunningRow {
+        icon_slot: -1,
         kind: "server".into(),
         id: "repro-server".into(),
         launch: SharedString::default(),

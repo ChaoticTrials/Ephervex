@@ -36,6 +36,7 @@ pub mod folders;
 pub mod index;
 pub mod lock;
 pub mod metadata;
+pub mod organization;
 pub mod paths;
 pub mod reconcile;
 pub mod records;
@@ -68,6 +69,10 @@ pub use lock::{
     RunningLaunch, force_release, running_launches, running_state, validate_launch_id,
 };
 pub use metadata::{METADATA_VERSION, MetadataError};
+pub use organization::{
+    ICON_FILE_EXTENSION, IconId, ORGANIZATION_FORMAT_VERSION, Organization, OrganizationError,
+    OrganizationLoad, SetAsideNotice, take_set_aside_notices,
+};
 pub use paths::{PathError, Paths, utf8_path};
 pub use reconcile::{
     ClientRootConflict, ReconciledRecord, ReconciliationReport, RecordRef, ServerRootConflict,
@@ -102,6 +107,9 @@ pub enum StorageError {
     /// Discovering or reading a log or crash report.
     #[error(transparent)]
     Diagnostics(#[from] DiagnosticError),
+    /// Favorites, groups and icons.
+    #[error(transparent)]
+    Organization(#[from] OrganizationError),
 }
 
 impl StorageError {
@@ -114,6 +122,7 @@ impl StorageError {
             Self::Path(error) => error.message_id(),
             Self::Lock(error) => error.message_id(),
             Self::Diagnostics(error) => error.message_id(),
+            Self::Organization(error) => error.message_id(),
         }
     }
 }

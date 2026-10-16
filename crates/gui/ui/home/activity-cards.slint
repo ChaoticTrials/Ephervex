@@ -1,6 +1,6 @@
 // The Running and Activity pages' cards.
 
-import { LoaderGlyph } from "../components/artwork.slint";
+import { HostIcon } from "../components/artwork.slint";
 import { AppButton, Pill } from "../components/controls.slint";
 import { BodyText, Heading } from "../components/text.slint";
 import { GuiI18n } from "../globals.slint";
@@ -41,7 +41,7 @@ export component RunningCard inherits Rectangle {
         cross-axis-alignment: center;
         VerticalLayout {
             alignment: center;
-            LoaderGlyph { server: root.item.kind == "server"; kind: "vanilla"; }
+            HostIcon { slot: root.item.icon-slot; server: root.item.kind == "server"; kind: "vanilla"; }
         }
         VerticalLayout {
             alignment: center;

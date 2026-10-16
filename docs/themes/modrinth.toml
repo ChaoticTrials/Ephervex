@@ -71,6 +71,14 @@ vanilla = "#91bd59"
 forge = "#5981c0"
 neoforge = "#c0664d"
 
+# The colors instance groups are told apart by.
+group-tone-1 = "#4f9cff"
+group-tone-2 = "#1bd96a"
+group-tone-3 = "#ffa347"
+group-tone-4 = "#c78aff"
+group-tone-5 = "#ff6b9a"
+group-tone-6 = "#3fd6c6"
+
 # What is drawn over the window.
 shadow = "#00000099"
 scrim = "#000000a6"

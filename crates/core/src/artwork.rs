@@ -50,28 +50,8 @@ use ephervex_pack::PackError;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
+use crate::bounded_image::{ARTWORK_BOUNDS, ImageRefusal, decode_bounded, encode_png};
 use crate::error::{CoreError, CoreResult};
-
-/// The largest a project icon may be on either side.
-///
-/// Generous for something drawn at 38 logical pixels, and small enough that the
-/// worst case is a rounding error rather than a memory event.
-const MAX_ARTWORK_DIMENSION: u32 = 2048;
-
-/// The largest a project icon may be in total pixels.
-///
-/// Separate from the per-side bound because the two catch different things: a
-/// 2048×2048 image passes both side limits and is still four megapixels, and a
-/// 16×100000 image is inside no reasonable idea of an icon at all.
-const MAX_ARTWORK_PIXELS: u64 = 1024 * 1024;
-
-/// The ceiling the decoder itself is given, in bytes.
-///
-/// Enforced by the decoder while it works rather than checked afterwards, so a
-/// format that lies about its dimensions still cannot allocate its way through
-/// the machine. Four bytes per pixel at the pixel ceiling, doubled for the
-/// intermediate buffers a decoder is entitled to.
-const MAX_DECODE_BYTES: u64 = MAX_ARTWORK_PIXELS * 4 * 2;
 
 /// The PNG signature, which is what a usable cache entry starts with.
 const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
@@ -201,69 +181,17 @@ fn publish_normalized(source: &Path, destination: &Path, project: &str) -> CoreR
 /// too large to be an icon all come back as the same kind of refusal: this is
 /// not usable artwork.
 pub(crate) fn normalize(source: &Path, project: &str) -> CoreResult<Vec<u8>> {
-    let (width, height) = dimensions(source, project)?;
-    let pixels = u64::from(width) * u64::from(height);
-    if width > MAX_ARTWORK_DIMENSION || height > MAX_ARTWORK_DIMENSION {
-        return Err(CoreError::ArtworkUnusable {
-            project: project.to_owned(),
-            detail: format!("{width}x{height} is larger than a project icon can be"),
-        });
-    }
-    if pixels > MAX_ARTWORK_PIXELS {
-        return Err(CoreError::ArtworkUnusable {
-            project: project.to_owned(),
-            detail: format!("{pixels} pixels is more than a project icon can be"),
-        });
-    }
-
-    let mut reader = reader(source, project)?;
-    // The decoder enforces this while it works. The checks above have already
-    // read the header, but a header is a claim: a format that under-reports its
-    // size would otherwise allocate past every bound this function states.
-    let mut limits = image::Limits::no_limits();
-    limits.max_image_width = Some(MAX_ARTWORK_DIMENSION);
-    limits.max_image_height = Some(MAX_ARTWORK_DIMENSION);
-    limits.max_alloc = Some(MAX_DECODE_BYTES);
-    reader.limits(limits);
-
-    let decoded = reader
-        .decode()
-        .map_err(|error| CoreError::ArtworkUnusable {
-            project: project.to_owned(),
-            detail: error.to_string(),
-        })?;
-
-    let mut png = Vec::new();
-    decoded
-        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
-        .map_err(|error| CoreError::ArtworkUnusable {
-            project: project.to_owned(),
-            detail: error.to_string(),
-        })?;
-    Ok(png)
-}
-
-/// What the image says it is, before anything is decoded.
-fn dimensions(source: &Path, project: &str) -> CoreResult<(u32, u32)> {
-    reader(source, project)?
-        .into_dimensions()
-        .map_err(|error| CoreError::ArtworkUnusable {
-            project: project.to_owned(),
-            detail: error.to_string(),
-        })
-}
-
-/// A reader whose format came from the file's own bytes.
-fn reader(
-    source: &Path,
-    project: &str,
-) -> CoreResult<image::ImageReader<std::io::BufReader<std::fs::File>>> {
-    image::ImageReader::open(source)
-        .and_then(image::ImageReader::with_guessed_format)
-        .map_err(|error| CoreError::ArtworkUnusable {
-            project: project.to_owned(),
-            detail: error.to_string(),
-        })
+    let unusable = |refusal: ImageRefusal| CoreError::ArtworkUnusable {
+        project: project.to_owned(),
+        detail: refusal.to_string(),
+    };
+    let decoded = decode_bounded(
+        || std::fs::File::open(source).map(std::io::BufReader::new),
+        None,
+        ARTWORK_BOUNDS,
+    )
+    .map_err(unusable)?;
+    encode_png(&decoded).map_err(unusable)
 }
 
 /// Where a file waits while it is being fetched or written.
