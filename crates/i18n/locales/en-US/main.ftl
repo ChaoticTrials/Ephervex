@@ -1790,7 +1790,7 @@ error-mod-hand-placed-not-mutable = That jar was added by hand, so Ephervex does
 # chased, so the launcher says what it will not do and why.
 
 mod-search-empty = No mods matched.
-.action = Try a different search, or turn on incompatible results to see mods that do not fit this instance.
+.action = Try a different search, or add --include-incompatible to also list the mods that do not fit.
 mod-search-count = { $count ->
         [one] { $count } mod
        *[other] { $count } mods
@@ -1942,8 +1942,8 @@ error-mod-primary-file-ambiguous = That version does not name exactly one file t
 error-mod-hashes-missing = That version published no checksum Ephervex can verify.
 .action = Every downloaded file is verified before it is installed, so this one is refused.
 
-error-mod-loader-cannot-host-mods = { $loader } instances cannot install mods.
-.action = Create a Forge or NeoForge instance to browse for mods.
+error-mod-loader-cannot-host-mods = { $loader } cannot load mods.
+.action = Mods need Forge or NeoForge. Create an instance or a server on one of them to install mods.
 
 # Never resolved by substituting a nearby release.
 error-mod-version-incompatible = That exact version does not fit this instance.
