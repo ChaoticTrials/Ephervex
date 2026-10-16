@@ -260,6 +260,37 @@ async fn a_dependency_with_no_stated_server_side_is_reported_and_needs_confirmat
     assert!(world.server_jars(server).is_empty());
 }
 
+/// Confirming a mod's place on a server is asked once: a mod already on the
+/// server is not asked about again, alone or as another mod's dependency.
+#[tokio::test]
+async fn a_mod_already_on_the_server_needs_no_second_confirmation() {
+    let world = world().await;
+    let server = plain_server(&world);
+    install(
+        &world,
+        server,
+        &ModInstallRequest::new("UNKPROJ").confirming_server_support(["UNKPROJ"]),
+    )
+    .await
+    .expect("installs once confirmed");
+
+    for project in ["UNKPROJ", "NEEDSUNK"] {
+        let request = ModInstallRequest::new(project);
+        let planned = plan(&world, server, &request).await.expect("plans");
+        assert!(
+            planned.undeclared_server_support().is_empty(),
+            "{project}: nothing new needs confirming"
+        );
+        install(&world, server, &request)
+            .await
+            .unwrap_or_else(|error| panic!("{project}: {error:?}"));
+    }
+    assert!(installed_on_server(
+        &world.server_recipe(server),
+        "NEEDSUNK"
+    ));
+}
+
 #[tokio::test]
 async fn a_client_only_required_dependency_is_installed_with_a_warning_and_counts_as_installed() {
     let world = world().await;
