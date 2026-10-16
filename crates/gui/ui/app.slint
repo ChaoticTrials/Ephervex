@@ -1391,7 +1391,8 @@ export component AppWindow inherits Window {
                                         install(project) => { root.install-from-browser(host.kind, host.id, host.browser-provider, project); }
                                         set-include-incompatible(on) => { root.set-mod-include-incompatible(host.kind, host.id, on); }
                                         set-page-size(label) => { root.set-mod-page-size(label); }
-                                        open-provider-settings => { root.close-workspace(); root.page = 4; root.settings-tab = "Providers & APIs"; }
+                                        // Closing the workspace drops this pane mid-handler, so navigate first.
+                                        open-provider-settings => { root.page = 4; root.settings-tab = "Providers & APIs"; root.close-workspace(); }
                                     }
                                 }
                                 if host.available && pane.surface == "Isolation" : IsolationSurface {
@@ -1574,7 +1575,8 @@ export component AppWindow inherits Window {
                                         install(project) => { root.install-from-browser(host.kind, host.id, host.browser-provider, project); }
                                         set-include-incompatible(on) => { root.set-mod-include-incompatible(host.kind, host.id, on); }
                                         set-page-size(label) => { root.set-mod-page-size(label); }
-                                        open-provider-settings => { root.close-workspace(); root.page = 4; root.settings-tab = "Providers & APIs"; }
+                                        // Closing the workspace drops this pane mid-handler, so navigate first.
+                                        open-provider-settings => { root.page = 4; root.settings-tab = "Providers & APIs"; root.close-workspace(); }
                                     }
                                 }
                                 if host.available && host.kind == "server" && pane.surface == "Properties" : ServerPropertiesForm {

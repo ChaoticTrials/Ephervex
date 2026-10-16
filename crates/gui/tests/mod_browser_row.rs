@@ -819,6 +819,58 @@ fn a_servers_mod_list_is_laid_out_like_a_clients() {
     );
 }
 
+/// The missing-key notice takes the user to where the key is entered, from a
+/// client's browser and a server's alike, even though leaving the workspace
+/// takes the notice's own button away.
+#[test]
+fn the_missing_key_notice_opens_the_provider_settings() {
+    let ui = window();
+    let weak = ui.as_weak();
+    // As the controller closes it: the pane rows go at once, and the pane
+    // whose button asked goes with them.
+    ui.on_close_workspace(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_workspace_open(false);
+            let panes = ui.get_workspace_panes();
+            if let Some(panes) = panes
+                .as_any()
+                .downcast_ref::<VecModel<ephervex_gui::ui::WorkspacePaneRow>>()
+            {
+                while panes.row_count() > 0 {
+                    panes.remove(panes.row_count() - 1);
+                }
+            }
+        }
+    });
+    let missing_key = |view: &mut ephervex_gui::ui::HostView| {
+        view.browser_provider = "curseforge".into();
+        view.browser_notice = "CurseForge needs an API key, and none is configured.".into();
+    };
+
+    for server in [false, true] {
+        if server {
+            server_browser(&ui, modded_server(), Vec::new());
+        } else {
+            mod_browser(&ui, Vec::new());
+        }
+        support::update_host(&ui, 0, missing_key);
+        ui.set_settings_tab("General".into());
+        settle(&ui);
+
+        shown_text(&ui, "gui-open-providers-settings").mock_single_click(PointerEventButton::Left);
+        settle(&ui);
+
+        let host = if server { "server" } else { "client" };
+        assert_eq!(ui.get_page(), 4, "a {host}'s notice opens Settings");
+        assert_eq!(
+            ui.get_settings_tab(),
+            "Providers & APIs",
+            "a {host}'s notice opens the providers"
+        );
+        assert!(!ui.get_workspace_open(), "a {host}'s workspace closes");
+    }
+}
+
 /// The one element showing this text.
 fn shown_text(ui: &AppWindow, id: &str) -> ElementHandle {
     ElementHandle::find_by_accessible_label(ui, &lookup(id))
