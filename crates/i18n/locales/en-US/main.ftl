@@ -2590,7 +2590,7 @@ gui-application-display-detail = These settings affect Ephervex only. They do no
 gui-application-text-size = Interface text size
 gui-application-text-size-detail = Adjust text across Ephervex while keeping the desktop layout and controls at their normal size.
 gui-application-color-scheme = Interface theme
-gui-application-color-scheme-detail = The colors Ephervex paints itself in. Add your own themes as TOML files or theme folders in { $value }. Minecraft is unaffected.
+gui-application-color-scheme-detail = The colors Ephervex paints itself in. Minecraft is unaffected.
 gui-theme-problems-summary = { $count ->
     [one] 1 problem in the themes folder.
    *[other] { $count } problems in the themes folder.
@@ -2633,6 +2633,10 @@ gui-theme-branding-decode-limit = Needs more memory to decode than a branding im
 gui-theme-branding-unreadable = Could not be read. The default is shown instead.
 gui-color-scheme-dark = Dark
 gui-color-scheme-light = Light
+gui-seasonal-themes = Seasonal themes
+gui-seasonal-themes-detail = Dress Ephervex up for special days in place of Dark or Light. Your own themes are never replaced, and your chosen theme comes back afterward.
+gui-seasonal-theme-shown = The { $season } theme is shown right now. Turn this off to see { $value } again.
+gui-seasonal-theme-halloween = Halloween
 gui-technical-text-size = Diagnostics and console text
 gui-technical-text-size-detail = Set the monospace size used for selectable logs, crash reports, and server console output.
 gui-text-scale-90 = 90%

@@ -5,6 +5,7 @@
 //! hands that to `Theme`, which is the only reader. Components read `Theme`
 //! tokens and never learn which palette is active or where it came from.
 
+use ephervex_core::seasonal_theme::{SeasonalTheme, ShownTheme};
 use ephervex_core::{ApplicationColorScheme, ApplicationTheme};
 use ephervex_i18n::lookup;
 use slint::{Color, ComponentHandle};
@@ -131,10 +132,26 @@ fn built_in_palette(ui: &AppWindow, scheme: ApplicationColorScheme) -> ThemePale
     }
 }
 
+/// The built-in palette a seasonal theme paints in. Seasonal palettes are
+/// never offered in the theme list.
+fn seasonal_palette(ui: &AppWindow, theme: SeasonalTheme) -> ThemePalette {
+    let palettes = ui.global::<BuiltInPalettes>();
+    match theme {
+        SeasonalTheme::Halloween => palettes.get_halloween(),
+    }
+}
+
 fn built_in_label(scheme: ApplicationColorScheme) -> String {
     lookup(match scheme {
         ApplicationColorScheme::Dark => "gui-color-scheme-dark",
         ApplicationColorScheme::Light => "gui-color-scheme-light",
+    })
+}
+
+/// What the settings page calls a seasonal theme while it is shown.
+pub(crate) fn seasonal_label(theme: SeasonalTheme) -> String {
+    lookup(match theme {
+        SeasonalTheme::Halloween => "gui-seasonal-theme-halloween",
     })
 }
 
@@ -163,22 +180,25 @@ fn user_palette(ui: &AppWindow, theme: &UserTheme) -> ThemePalette {
     palette
 }
 
-/// The complete palette a preference paints in. A user theme whose file is
+/// The complete palette a shown theme paints in. A user theme whose file is
 /// gone paints in the default scheme, and the preference is left as it is.
-fn resolve(ui: &AppWindow, theme: &ApplicationTheme, user_themes: &[UserTheme]) -> ThemePalette {
-    match theme {
-        ApplicationTheme::BuiltIn(scheme) => built_in_palette(ui, *scheme),
-        ApplicationTheme::User(id) => user_themes.iter().find(|user| user.id == *id).map_or_else(
-            || built_in_palette(ui, ApplicationColorScheme::default()),
-            |user| user_palette(ui, user),
-        ),
+fn resolve(ui: &AppWindow, shown: &ShownTheme, user_themes: &[UserTheme]) -> ThemePalette {
+    match shown {
+        ShownTheme::Seasonal(theme) => seasonal_palette(ui, *theme),
+        ShownTheme::Recorded(ApplicationTheme::BuiltIn(scheme)) => built_in_palette(ui, *scheme),
+        ShownTheme::Recorded(ApplicationTheme::User(id)) => {
+            user_themes.iter().find(|user| user.id == *id).map_or_else(
+                || built_in_palette(ui, ApplicationColorScheme::default()),
+                |user| user_palette(ui, user),
+            )
+        }
     }
 }
 
-/// Repaints the interface in the palette the preference resolves to.
-pub(crate) fn apply_theme(ui: &AppWindow, theme: &ApplicationTheme, user_themes: &[UserTheme]) {
+/// Repaints the interface in the palette the shown theme resolves to.
+pub(crate) fn apply_theme(ui: &AppWindow, shown: &ShownTheme, user_themes: &[UserTheme]) {
     ui.global::<Theme>()
-        .set_palette(resolve(ui, theme, user_themes));
+        .set_palette(resolve(ui, shown, user_themes));
 }
 
 /// One entry of the theme list.
@@ -225,6 +245,10 @@ mod tests {
 
     const SCHEMES: [ApplicationColorScheme; 2] = BUILT_IN;
 
+    fn recorded(theme: ApplicationTheme) -> ShownTheme {
+        ShownTheme::Recorded(theme)
+    }
+
     fn window() -> AppWindow {
         i_slint_backend_testing::init_no_event_loop();
         AppWindow::new().expect("window")
@@ -270,7 +294,7 @@ mod tests {
         let ui = window();
         let theme = ui.global::<Theme>();
         for scheme in SCHEMES.into_iter().chain(SCHEMES.into_iter().rev()) {
-            apply_theme(&ui, &ApplicationTheme::BuiltIn(scheme), &[]);
+            apply_theme(&ui, &recorded(ApplicationTheme::BuiltIn(scheme)), &[]);
             let palette = built_in_palette(&ui, scheme);
             assert_eq!(resolved(&theme), named(&palette), "{scheme:?}");
             assert_eq!(theme.get_widget_scheme(), palette.widget_scheme);
@@ -278,6 +302,39 @@ mod tests {
         let dark = built_in_palette(&ui, ApplicationColorScheme::Dark);
         let light = built_in_palette(&ui, ApplicationColorScheme::Light);
         assert_ne!(dark, light, "two schemes that paint the same");
+    }
+
+    /// One Halloween palette stands in for Dark and Light alike.
+    #[test]
+    fn the_halloween_season_paints_in_its_own_palette_over_either_scheme() {
+        let ui = window();
+        let halloween = seasonal_palette(&ui, SeasonalTheme::Halloween);
+        for scheme in SCHEMES {
+            apply_theme(&ui, &recorded(ApplicationTheme::BuiltIn(scheme)), &[]);
+            apply_theme(&ui, &ShownTheme::Seasonal(SeasonalTheme::Halloween), &[]);
+            assert_eq!(ui.global::<Theme>().get_palette(), halloween, "{scheme:?}");
+            assert_ne!(halloween, built_in_palette(&ui, scheme));
+        }
+    }
+
+    /// The catalog and loader marks are how a service is recognized, so the
+    /// Halloween palette keeps Dark's.
+    #[test]
+    fn halloween_keeps_the_service_marks_of_dark() {
+        let ui = window();
+        let dark = built_in_palette(&ui, ApplicationColorScheme::Dark);
+        let pumpkin = seasonal_palette(&ui, SeasonalTheme::Halloween);
+        let marks = |palette: &ThemePalette| {
+            [
+                palette.modrinth,
+                palette.curseforge,
+                palette.vanilla,
+                palette.forge,
+                palette.neoforge,
+            ]
+        };
+        assert_eq!(marks(&pumpkin), marks(&dark));
+        assert_eq!(pumpkin.widget_scheme, dark.widget_scheme);
     }
 
     fn user(
@@ -304,7 +361,11 @@ mod tests {
             &[("border", marker)],
         )];
 
-        apply_theme(&ui, &ApplicationTheme::User("mine".to_owned()), &themes);
+        apply_theme(
+            &ui,
+            &recorded(ApplicationTheme::User("mine".to_owned())),
+            &themes,
+        );
 
         let mut expected = built_in_palette(&ui, ApplicationColorScheme::Light);
         expected.border = marker;
@@ -345,7 +406,11 @@ mod tests {
             ),
         ];
         let palette_of = |id: &str| {
-            apply_theme(&ui, &ApplicationTheme::User(id.to_owned()), &themes);
+            apply_theme(
+                &ui,
+                &recorded(ApplicationTheme::User(id.to_owned())),
+                &themes,
+            );
             ui.global::<Theme>().get_palette()
         };
 
@@ -372,10 +437,14 @@ mod tests {
         let ui = window();
         apply_theme(
             &ui,
-            &ApplicationTheme::BuiltIn(ApplicationColorScheme::Light),
+            &recorded(ApplicationTheme::BuiltIn(ApplicationColorScheme::Light)),
             &[],
         );
-        apply_theme(&ui, &ApplicationTheme::User("gone".to_owned()), &[]);
+        apply_theme(
+            &ui,
+            &recorded(ApplicationTheme::User("gone".to_owned())),
+            &[],
+        );
         assert_eq!(
             ui.global::<Theme>().get_palette(),
             built_in_palette(&ui, ApplicationColorScheme::default())
@@ -481,7 +550,10 @@ mod tests {
             assert_eq!(set, fields, "palette `{name}` does not set every token");
             seen += 1;
         }
-        assert_eq!(seen, SCHEMES.len());
+        assert_eq!(
+            seen,
+            SCHEMES.len() + ephervex_core::seasonal_theme::THEME_SEASONS.len()
+        );
     }
 
     /// `Theme` is the contract: each color token reads the palette field of the
@@ -561,11 +633,16 @@ mod tests {
         (a.max(b) + 0.05) / (a.min(b) + 0.05)
     }
 
-    fn built_ins() -> Vec<(ApplicationColorScheme, ThemePalette)> {
+    /// Every palette Ephervex ships, selectable or seasonal.
+    fn built_ins() -> Vec<(String, ThemePalette)> {
         let ui = window();
         SCHEMES
             .into_iter()
-            .map(|scheme| (scheme, built_in_palette(&ui, scheme)))
+            .map(|scheme| (format!("{scheme:?}"), built_in_palette(&ui, scheme)))
+            .chain(std::iter::once((
+                "Halloween".to_owned(),
+                seasonal_palette(&ui, SeasonalTheme::Halloween),
+            )))
             .collect()
     }
 
@@ -575,7 +652,7 @@ mod tests {
     fn the_knob_of_a_switch_that_is_on_stands_apart_from_its_track() {
         for (scheme, palette) in built_ins() {
             let ratio = contrast(palette.toggle_knob, palette.toggle_on);
-            assert!(ratio >= 3.0, "{scheme:?}: knob over track is {ratio:.2}:1");
+            assert!(ratio >= 3.0, "{scheme}: knob over track is {ratio:.2}:1");
         }
     }
 
@@ -603,7 +680,38 @@ mod tests {
                 let ratio = contrast(caption, fill);
                 assert!(
                     ratio >= minimum,
-                    "{scheme:?} {name}: {ratio:.2}:1 is under {minimum}:1"
+                    "{scheme} {name}: {ratio:.2}:1 is under {minimum}:1"
+                );
+            }
+        }
+    }
+
+    /// Every level of text is drawn on every page floor and card.
+    #[test]
+    fn halloween_text_is_readable_on_every_surface() {
+        let ui = window();
+        let palette = seasonal_palette(&ui, SeasonalTheme::Halloween);
+        for (floor, name) in [
+            (palette.background, "background"),
+            (palette.surface, "surface"),
+            (palette.field, "field"),
+            (palette.elevated, "elevated"),
+            (palette.bar, "bar"),
+            (palette.selection, "selection"),
+            (palette.selection_card, "selection-card"),
+        ] {
+            for (text, level, minimum) in [
+                (palette.text, "text", 7.0),
+                (palette.text_secondary, "secondary", 4.5),
+                (palette.text_muted, "muted", 3.0),
+                (palette.accent, "accent", 4.5),
+                (palette.warning, "warning", 4.5),
+                (palette.danger, "danger", 4.5),
+            ] {
+                let ratio = contrast(text, floor);
+                assert!(
+                    ratio >= minimum,
+                    "{level} on {name} is {ratio:.2}:1, under {minimum}:1"
                 );
             }
         }
@@ -614,11 +722,11 @@ mod tests {
     fn text_is_readable_on_a_field() {
         for (scheme, palette) in built_ins() {
             let ratio = contrast(palette.text, palette.field);
-            assert!(ratio >= 7.0, "{scheme:?}: text on a field is {ratio:.2}:1");
+            assert!(ratio >= 7.0, "{scheme}: text on a field is {ratio:.2}:1");
             let ratio = contrast(palette.text_secondary, palette.field);
             assert!(
                 ratio >= 4.5,
-                "{scheme:?}: secondary text on a field is {ratio:.2}:1"
+                "{scheme}: secondary text on a field is {ratio:.2}:1"
             );
         }
     }
@@ -630,7 +738,7 @@ mod tests {
         for (scheme, palette) in built_ins() {
             assert!(
                 palette.scrim.alpha() >= 0x99,
-                "{scheme:?}: scrim alpha {}",
+                "{scheme}: scrim alpha {}",
                 palette.scrim.alpha()
             );
         }

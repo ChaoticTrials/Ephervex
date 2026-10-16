@@ -1,8 +1,9 @@
 # Themes
 
-Ephervex ships a Dark and a Light theme. You can add your own as TOML files or
-theme folders, and they appear in Settings > General > Interface theme next to
-the built-in ones. A theme changes colors, and a theme folder can also replace
+Ephervex ships a Dark and a Light theme, and a Halloween theme that only
+shows itself during its season. You can add your own as TOML files or theme
+folders, and they appear in Settings > General > Interface theme next to the
+built-in ones. A theme changes colors, and a theme folder can also replace
 the logo and the window icon. Text size is its own setting, and fonts and layout
 cannot be changed by a theme.
 
@@ -13,7 +14,8 @@ cannot be changed by a theme.
 ```
 
 Or `$XDG_CONFIG_HOME/ephervex/themes/` when `XDG_CONFIG_HOME` is set. The folder
-does not exist until you create it. The settings page shows the exact path.
+does not exist until you create it. When a theme has a problem, Show problems
+in the theme setting names the exact path.
 
 A theme that brings its own images is a folder instead of a file:
 
@@ -148,8 +150,9 @@ A theme folder can name two images under `[branding]`:
 
 Both are optional, and each one falls back to the Ephervex logo on its own:
 a theme that sets only `logo` keeps the default window icon. A built-in theme's
-branding is compiled into the application and never read from disk; Dark and
-Light use the Ephervex logo.
+branding is compiled into the application and never read from disk. Dark and
+Light use the Ephervex logo, and the Halloween theme uses its pumpkin ghost as
+both logo and window icon.
 
 Each value is a file name inside the theme's own `branding/` folder, such as
 `"logo.png"` or `"icons/app.webp"`. Do not write `branding/` in front of it.
@@ -193,6 +196,51 @@ takes the icon from the window:
   installed one. The logo inside the window still follows the theme.
 - Ephervex is built for Linux only, so there is no macOS Dock or Windows
   taskbar icon to change.
+
+## Seasonal themes
+
+A seasonal theme stands in for Dark or Light while its season lasts. It is not
+in the theme list and cannot be chosen; there is one palette per season,
+whichever of Dark and Light you chose.
+
+| Theme | Season |
+|---|---|
+| Halloween | October 25 through October 31 |
+
+The season follows the computer's local date. It starts at midnight on its
+first day and ends at midnight after its last day, also while Ephervex stays
+open: the date is checked once a minute, and the theme changes once at each
+boundary.
+
+A theme of your own is never replaced. To keep Dark or Light during a season,
+turn off Settings > General > Seasonal themes; the theme you chose is shown
+straight away.
+
+A season never changes your theme setting. The theme list keeps showing your
+choice, the Seasonal themes setting says which theme the season is showing,
+and your theme comes back when the season ends, also after a restart.
+
+A seasonal theme replaces the colors and the logo and window icon together.
+The icon Ephervex was installed with does not change, as described under
+[Window and taskbar icons](#window-and-taskbar-icons). A seasonal theme is not
+a `parent` a theme file can name.
+
+### Adding a seasonal theme
+
+A seasonal theme has four parts:
+
+1. A `SeasonalTheme` value (`crates/core/src/seasonal_theme.rs`) and its first
+   and last day in `THEME_SEASONS` there. Seasons must not overlap, and one may
+   run over the turn of the year, such as December 24 to January 6.
+2. Its palette in `BuiltInPalettes` (`crates/gui/ui/palettes.slint`), which
+   sets every color token, read by `seasonal_palette` in
+   `crates/gui/src/palette.rs`.
+3. Its logo and icon, if it has its own, in `SEASONAL_BRANDING`
+   (`crates/gui/src/theme_files.rs`), compiled in from `assets/themes/`.
+4. Its name in the localization files, for the note the settings page shows
+   while it is active.
+
+Nothing else checks dates. See ADR 0049 for the rules a season follows.
 
 ## What a theme does not reach
 

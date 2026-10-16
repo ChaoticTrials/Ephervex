@@ -128,6 +128,9 @@ pub struct ApplicationDisplaySettings {
     pub text_scale: ApplicationTextScale,
     pub technical_text_size: TechnicalTextSize,
     pub theme: ApplicationTheme,
+    /// Whether a seasonal theme may stand in for a built-in theme. See
+    /// [`crate::seasonal_theme`].
+    pub seasonal_themes: bool,
     pub show_linked_servers: bool,
 }
 
@@ -436,8 +439,15 @@ impl App {
             text_scale: self.storage.config.display.text_scale,
             technical_text_size: self.storage.config.display.technical_text_size,
             theme: self.storage.config.display.theme(),
+            seasonal_themes: self.storage.config.display.seasonal_themes,
             show_linked_servers: self.storage.config.display.show_linked_servers,
         }
+    }
+
+    /// Persists whether seasonal themes may stand in for a built-in theme.
+    /// The recorded theme is left as it is.
+    pub fn set_seasonal_themes(&mut self, enabled: bool) -> CoreResult<()> {
+        self.mutate_config(|config| config.display.seasonal_themes = enabled)
     }
 
     /// Persists whether linked servers are included in the global Servers list.
@@ -3196,6 +3206,7 @@ mod tests {
                 text_scale: ApplicationTextScale::Default,
                 technical_text_size: TechnicalTextSize::Default,
                 theme: ApplicationTheme::BuiltIn(ApplicationColorScheme::Dark),
+                seasonal_themes: true,
                 show_linked_servers: false,
             }
         );
@@ -3215,8 +3226,59 @@ mod tests {
                 text_scale: ApplicationTextScale::Large,
                 technical_text_size: TechnicalTextSize::Comfortable,
                 theme: ApplicationTheme::BuiltIn(ApplicationColorScheme::Light),
+                seasonal_themes: true,
                 show_linked_servers: false,
             }
+        );
+    }
+
+    /// A season's theme is worked out from the recorded theme each time, so
+    /// nothing a season shows is ever written, and a start after the season
+    /// shows the recorded theme again.
+    #[test]
+    fn a_seasonal_theme_never_replaces_the_recorded_theme() {
+        use crate::seasonal_theme::{SeasonalTheme, ShownTheme, shown_theme};
+
+        let base = tempfile::tempdir().expect("temp dir");
+        let halloween = chrono::NaiveDate::from_ymd_opt(2026, 10, 31).expect("date");
+        let november = chrono::NaiveDate::from_ymd_opt(2026, 11, 1).expect("date");
+        let light = ApplicationTheme::BuiltIn(ApplicationColorScheme::Light);
+        let mut app = app_rooted_at(base.path());
+        app.set_application_display_settings(
+            ApplicationTextScale::Default,
+            TechnicalTextSize::Default,
+            &light,
+        )
+        .expect("choose light");
+        let display = app.application_display_settings();
+        assert_eq!(
+            shown_theme(&display.theme, display.seasonal_themes, halloween),
+            ShownTheme::Seasonal(SeasonalTheme::Halloween)
+        );
+        // Every display save sends the recorded theme, not the shown one.
+        app.set_application_display_settings(
+            ApplicationTextScale::Large,
+            TechnicalTextSize::Default,
+            &display.theme,
+        )
+        .expect("save in season");
+        assert_eq!(app.config().display.color_scheme, "light");
+
+        let reopened = app_rooted_at(base.path());
+        let display = reopened.application_display_settings();
+        assert_eq!(display.theme, light);
+        assert_eq!(
+            shown_theme(&display.theme, display.seasonal_themes, november),
+            ShownTheme::Recorded(light.clone())
+        );
+
+        app.set_seasonal_themes(false).expect("turn off");
+        let reopened = app_rooted_at(base.path());
+        let display = reopened.application_display_settings();
+        assert!(!display.seasonal_themes);
+        assert_eq!(
+            shown_theme(&display.theme, display.seasonal_themes, halloween),
+            ShownTheme::Recorded(light)
         );
     }
 

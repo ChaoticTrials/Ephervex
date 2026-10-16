@@ -568,6 +568,8 @@ pub enum Command {
     SaveDependencyWarning(bool),
     /// Stop acting on what a mod change affects, or start again.
     SaveDependencyFollowing(bool),
+    /// Whether a seasonal theme may stand in for a built-in theme.
+    SaveSeasonalThemes(bool),
     /// Ask each catalog what this host's mods need, and record the answers.
     ///
     /// `reload` is the mod whose own page is open, so the answer it is showing
@@ -927,11 +929,17 @@ pub struct SettingsData {
     pub mod_catalog_origin: SettingOrigin,
     pub text_scale_percent: u16,
     pub technical_text_size_pixels: u16,
-    /// Which theme the interface paints in.
+    /// The theme the user chose, as recorded. What the settings page shows
+    /// and saves.
     pub theme: ephervex_core::ApplicationTheme,
+    /// Whether a seasonal theme may stand in for a built-in theme.
+    pub seasonal_themes: bool,
+    /// The theme the interface paints in today: [`Self::theme`], or a
+    /// season's theme standing in for it.
+    pub shown_theme: ephervex_core::seasonal_theme::ShownTheme,
     /// The themes the user added, read from [`Self::themes_folder`].
     pub user_themes: crate::theme_files::UserThemes,
-    /// The chosen theme's decoded logo and window icon.
+    /// The shown theme's decoded logo and window icon.
     pub branding: crate::theme_files::BrandingImages,
     pub themes_folder: String,
     pub show_linked_servers: bool,
@@ -5450,6 +5458,14 @@ fn run_worker(
                     send_snapshot(&mut app, &events);
                 }
             }
+            Command::SaveSeasonalThemes(enabled) => {
+                // The switch is refreshed either way, so a refused write
+                // leaves it showing what is stored.
+                if let Err(error) = app.set_seasonal_themes(enabled) {
+                    send_error(&events, &error);
+                }
+                send_snapshot(&mut app, &events);
+            }
             Command::LoadModRelations { host, path } => {
                 send_mod_relations(&app, host, &path, &BTreeMap::new(), &events);
             }
@@ -6425,18 +6441,23 @@ fn minecraft_version_order(app: &App) -> ephervex_core::VersionOrder {
 }
 
 fn application_settings(app: &App) -> Result<SettingsData, CoreError> {
+    application_settings_on(app, chrono::Local::now().date_naive())
+}
+
+/// The settings as they are on `today`, the user's local calendar date, which
+/// decides whether a season's theme is shown.
+fn application_settings_on(app: &App, today: chrono::NaiveDate) -> Result<SettingsData, CoreError> {
     let api = app.api_settings()?;
     let display = app.application_display_settings();
+    let shown_theme =
+        ephervex_core::seasonal_theme::shown_theme(&display.theme, display.seasonal_themes, today);
     let themes_folder = app
         .paths()
         .config_dir()
         .join(crate::theme_files::THEMES_FOLDER);
     let mut user_themes = crate::theme_files::read_user_themes(&themes_folder);
-    let branding = crate::theme_files::read_selected_branding(
-        &themes_folder,
-        &mut user_themes,
-        &display.theme,
-    );
+    let branding =
+        crate::theme_files::read_selected_branding(&themes_folder, &mut user_themes, &shown_theme);
     let storage = app.persistent_storage_settings();
     let java = app.java_settings();
     let server = app.server_application_settings();
@@ -6471,6 +6492,8 @@ fn application_settings(app: &App) -> Result<SettingsData, CoreError> {
         text_scale_percent: display.text_scale.percent(),
         technical_text_size_pixels: display.technical_text_size.pixels(),
         theme: display.theme,
+        seasonal_themes: display.seasonal_themes,
+        shown_theme,
         user_themes,
         branding,
         themes_folder: themes_folder.display().to_string(),
@@ -13872,6 +13895,43 @@ mod tests {
             snapshot.settings.text_scale_percent,
             ephervex_core::ApplicationTextScale::Large.percent()
         );
+    }
+
+    /// In season the snapshot paints in the season's theme and carries its
+    /// mascot, while the page still shows and saves the recorded theme.
+    #[test]
+    fn a_snapshot_in_season_shows_the_seasons_theme_and_records_the_users() {
+        use ephervex_core::seasonal_theme::{SeasonalTheme, ShownTheme};
+
+        without_desktop_keyring();
+        let base = tempfile::tempdir().expect("a disposable root");
+        let paths = ephervex_core::Paths::rooted_at(base.path());
+        let mut app = App::open_at(paths).expect("the app opens");
+        let date = |month, day| chrono::NaiveDate::from_ymd_opt(2026, month, day).expect("date");
+
+        let halloween = application_settings_on(&app, date(10, 31)).expect("settings");
+        assert_eq!(halloween.theme, ephervex_core::ApplicationTheme::default());
+        assert_eq!(
+            halloween.shown_theme,
+            ShownTheme::Seasonal(SeasonalTheme::Halloween)
+        );
+        assert!(halloween.branding.logo.is_some() && halloween.branding.icon.is_some());
+
+        let november = application_settings_on(&app, date(11, 1)).expect("settings");
+        assert_eq!(
+            november.shown_theme,
+            ShownTheme::Recorded(november.theme.clone())
+        );
+        assert_eq!(
+            november.branding,
+            crate::theme_files::BrandingImages::default()
+        );
+
+        app.set_seasonal_themes(false).expect("turn off");
+        let off = application_settings_on(&app, date(10, 31)).expect("settings");
+        assert!(!off.seasonal_themes);
+        assert_eq!(off.shown_theme, ShownTheme::Recorded(off.theme.clone()));
+        assert_eq!(off.branding, crate::theme_files::BrandingImages::default());
     }
 
     fn settles(received: &std::sync::mpsc::Receiver<Event>) -> Vec<u64> {
