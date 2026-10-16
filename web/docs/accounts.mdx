@@ -59,9 +59,8 @@ Use the code shown in your app; the one in this screenshot is an example.
 
 <ThemeScreenshot state="accounts-device-code" alt="Accounts page with a notification showing the Microsoft sign-in address and an example device code" />
 
-The desktop sign-in requires an available Secret Service provider. If one is
-unavailable, use the CLI's explicit session-only option or set up a provider
-such as GNOME Keyring or KWallet.
+The desktop sign-in requires an available Secret Service provider. If none is
+available, install or unlock a keyring such as GNOME Keyring or KWallet.
 
 </TabItem>
 <TabItem value="cli" label="CLI">
@@ -131,7 +130,9 @@ an account, use its UUID or an unambiguous display name from `account list`.
 
 **Settings > Accounts** shows each account's type, credential state, and
 default marker. Select **Remove** beside an account to remove it. Removing a
-Microsoft account also deletes that account's stored credential.
+Microsoft account also deletes that account's stored credential. If the keyring
+cannot be reached, the account is still removed and the credential is deleted
+once the keyring is available.
 
 </TabItem>
 <TabItem value="cli" label="CLI">
@@ -152,5 +153,7 @@ account.
 </Tabs>
 
 If a Microsoft account shows **Sign-in required**, sign in again before using
-it for an authenticated launch. Run `ephervex doctor` to check whether the
-credential store is reachable; it does not reveal stored credentials.
+it for an authenticated launch. If it shows **Unknown, secret storage is
+unavailable**, the keyring cannot be reached. Unlock or fix the keyring instead
+of signing in again. Run `ephervex doctor` to check whether the credential
+store is reachable; it does not reveal stored credentials.

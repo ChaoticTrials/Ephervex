@@ -57,6 +57,11 @@ the snapshot are removed from those parts; restore does not merge them. Keep
 the default **Before restore** safety snapshot if you may need the current state.
 :::
 
+A snapshot cannot be restored while a [mod isolation](./mod-isolation.mdx)
+session is active on the same host. Choose **Finish** or **Cancel isolation**
+first (`ephervex mod isolate finish` or `ephervex mod isolate cancel` in the
+CLI), then restore.
+
 <Tabs groupId="interface" queryString="interface">
 <TabItem value="gui" label="Desktop" default>
 

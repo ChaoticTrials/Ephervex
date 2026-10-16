@@ -9,8 +9,7 @@ import styles from './feature-list.module.css';
 # Feature List
 
 Choose what you want to do. **Guide** links lead to instructions for the
-desktop app and CLI. **Overview** links show the feature in the interface tour;
-their detailed guides are still being written.
+desktop app and CLI.
 
 ## Set up Ephervex
 
@@ -27,11 +26,23 @@ their detailed guides are still being written.
     <p>Check the installation, add an account, create an instance, and launch Minecraft.</p>
     <span className={styles.action}>Getting Started <span aria-hidden="true">→</span></span>
   </Link>
+  <Link className={styles.card} to="/docs/v1/interface-tour">
+    <span className={styles.kind}>Guide</span>
+    <h3>See the interface</h3>
+    <p>Browse the main screens of the desktop app with sample data.</p>
+    <span className={styles.action}>Interface tour <span aria-hidden="true">→</span></span>
+  </Link>
   <Link className={styles.card} to="/docs/v1/command-line">
     <span className={styles.kind}>Guide</span>
     <h3>Use the command line</h3>
     <p>Find help, check the installation, enable completions, and discover CLI-only tools.</p>
     <span className={styles.action}>Command-line guide <span aria-hidden="true">→</span></span>
+  </Link>
+  <Link className={styles.card} to="/docs/v1/cli-output">
+    <span className={styles.kind}>Guide</span>
+    <h3>Script the command line</h3>
+    <p>Parse JSON results, foreground streams, errors, and exit statuses.</p>
+    <span className={styles.action}>JSON and exit status <span aria-hidden="true">→</span></span>
   </Link>
   <Link className={styles.card} to="/docs/v1/accounts">
     <span className={styles.kind}>Guide</span>

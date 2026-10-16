@@ -37,7 +37,9 @@ current view.
 <ThemeScreenshot state="client-crash-reports" alt="Crash Reports view with a report selected" />
 
 After a failed run, the notice in the workspace can take you straight to its
-crash report, log, or **Diagnostics**.
+crash report, log, or **Diagnostics**. It also shows a quick diagnosis that
+does not hash recorded files. Select **Diagnose again** in **Diagnostics** to
+run the full check.
 
 <ThemeScreenshot state="client-run-failure-notice" alt="Client crash notice with Open Diagnostics, Open crash report, and Open log actions" />
 
@@ -69,10 +71,12 @@ Ephervex's own logs.
 ## Diagnose a failed run
 
 Desktop **Diagnostics** checks Java and JVM settings, mod requirements, the
-latest run's log and crash reports, and recorded files. File hashing can take
-time on a large pack. The result separates problems from valid customizations
-and may suggest a likely cause after a failed run. It cannot prove every
-possible cause of a crash.
+latest run's log and crash reports, and recorded files. The full check hashes
+every recorded file, which can take time on a large pack. After a failed run,
+Ephervex first runs a quicker diagnosis that skips hashing; its summary says
+"Recorded files were not hashed." The result separates problems from valid
+customizations and may suggest a likely cause after a failed run. It cannot
+prove every possible cause of a crash.
 
 <Tabs groupId="interface" queryString="interface">
 <TabItem value="gui" label="Desktop" default>
@@ -81,8 +85,8 @@ Open the affected client or server workspace, select **Diagnostics**, then
 **Diagnose**. Read the problem cards and **What was checked**. A finding can
 link to a log, crash report, Mods, or settings. If it offers a fix, select
 **Review fix** to see the proposed changes. Nothing changes until you select
-**Apply**. After changing the host yourself, select **Diagnose again** for a
-current result.
+**Apply**. Select **Diagnose** (or **Diagnose again**, once a result is
+shown) to run the full check, including after you change the host yourself.
 
 <ThemeScreenshot state="client-diagnostics-result" alt="Diagnostics result showing likely problems and completed checks" />
 
@@ -114,11 +118,13 @@ proof that it alone caused the failure.
 ## Prepare a report or bundle
 
 **Copy technical report** produces a readable summary of a desktop diagnosis
-for a bug report. A diagnostic bundle is a ZIP file saved locally. Ephervex
+for a bug report. It shortens paths in your home folder and leaves out JVM
+argument values. A diagnostic bundle is a ZIP file saved locally. Ephervex
 does not upload it. The bundle contains a manifest of included, omitted, and
 unreadable parts.
 
-Logs and crash reports are copied as they are. Minecraft and mods may have
+Unlike the technical report, the bundle does not shorten paths. Logs and crash
+reports are copied as they are. Minecraft and mods may have
 written player names, server addresses, or local paths into them. Review what
 you select before sharing the archive. Ephervex does not offer its
 configuration file, credentials, or tokens as bundle parts.
@@ -132,7 +138,8 @@ after a diagnosis if a text summary is enough. For an archive, select
 log and crash report
 when present, plus recorded contents and the host record. Older files are
 available but unselected. Review the checklist and sizes, choose the files
-you need, then select **Export bundle** and pick a save location. **Show in
+you need (**Choose all** and **Choose none** change the whole selection), then
+select **Export bundle** and pick a save location. **Show in
 folder** opens the saved archive's location. If a selected file disappeared
 before export, the result and manifest identify it.
 

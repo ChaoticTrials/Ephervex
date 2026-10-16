@@ -36,7 +36,10 @@ it. Linked temporary servers move too unless you choose to leave them behind.
 
 Choose the exact Minecraft release you need. Vanilla needs no loader build;
 Forge and NeoForge need an exact build that supports that release. Ephervex
-does not replace an unsupported selection with another version.
+does not replace an unsupported selection with another version. For Minecraft
+1.12.2, Forge builds older than 14.23.5.2851 use an installer format Ephervex
+does not support. They are not offered, and selecting one by exact version is
+refused.
 
 <Tabs groupId="interface" queryString="interface">
 <TabItem value="gui" label="Desktop" default>
@@ -130,10 +133,14 @@ ephervex instance duplicate INSTANCE_ID
 ephervex instance persist INSTANCE_ID
 ```
 
-`duplicate` uses the original's storage type. Add `--name "Copy Name"` or
-`--persistent` to choose a different name or storage type. `persist` moves all
-linked temporary servers by default; use `--no-servers` to leave them in
-temporary storage, or repeat `--server SERVER_ID` to select specific servers.
+`duplicate` uses the original's storage type. Add `--name "Copy Name"`,
+`--temporary`, or `--persistent` to choose a different name or storage type.
+By default the copy also records mods the original lists but no longer has in
+its mods folder; add `--drop-absent-mods` to leave those out.
+
+`persist` moves all linked temporary servers by default; use `--no-servers` to
+leave them in temporary storage, or repeat `--server SERVER_ID` to select
+specific servers.
 
 </TabItem>
 </Tabs>
@@ -148,8 +155,9 @@ in MiB.
 <TabItem value="gui" label="Desktop" default>
 
 Open the instance workspace, then **Settings**. Under **Java and memory**,
-enter the values to override and select **Save**. Empty fields follow the
-global settings. **Clear Overrides** removes all instance-specific values.
+enter the values to override and select **Save Runtime Settings**. Empty
+fields follow the global settings. **Follow Global Settings** appears while any
+value is overridden and removes all instance-specific values.
 
 <ThemeScreenshot state="client-settings" alt="Instance Settings with Java path, memory, and JVM argument overrides" />
 
@@ -176,7 +184,9 @@ list; repeat it for every argument you want in the list.
 For a Forge or NeoForge instance, open its workspace **Overview** and select
 **Change Build**. Choose another offered build of the same loader for the
 instance's Minecraft release, then select **Install and Switch**. Installed
-mods are left in place, so check their compatibility with the new build.
+mods are left in place, so check their compatibility with the new build. Stop
+the game first: the button stays available, but the change is refused while the
+instance is running.
 
 <ThemeScreenshot state="instance-change-loader-dialog" alt="Change Loader Build dialog with the current build, the build to move to, and a note that installed mods are left as they are" />
 
@@ -205,15 +215,18 @@ failing.
 :::warning
 Deleting an instance also removes its linked servers from Ephervex. Decide
 whether to keep their directories before confirming. **Delete Files** also
-removes saves and server worlds in those directories.
+removes saves and server worlds in those directories, and the retained
+snapshots of the instance and its servers.
 :::
 
 <Tabs groupId="interface" queryString="interface">
 <TabItem value="gui" label="Desktop" default>
 
 Stop the game, open the instance card's menu, and select **Delete Instance**.
-The dialog lists affected linked servers. Choose **Remove from Ephervex** to
-leave files on disk, or **Delete Files** to remove the managed directories.
+The dialog lists affected linked servers. Choose **Keep Files** to leave files
+on disk, or **Delete Files** to remove the managed directories. While linked
+servers are running, the buttons read **Stop and Keep Files** and **Stop and
+Delete Files**, and they stop those servers first.
 
 <ThemeScreenshot state="instance-delete-confirmation" alt="Delete Instance dialog listing the linked server it affects, with Cancel, Stop and Keep Files, and Stop and Delete Files" />
 

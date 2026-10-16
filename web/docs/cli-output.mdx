@@ -13,8 +13,11 @@ ephervex --json config show
 ```
 
 Keep stdout and stderr separate. Results go to stdout; progress, logging, and
-command failures go to stderr. Do not use `2>&1` when parsing JSON. Help,
-argument errors, and shell completion scripts keep their normal text format.
+command failures go to stderr, as does the text-mode "server exited with code
+N" line. Interactive questions also go to stderr; with `--json` or without a
+terminal, a command that would ask fails instead. Do not use
+`2>&1` when parsing JSON. Help, argument errors, and shell completion scripts
+keep their normal text format.
 
 ## Result shapes
 
@@ -71,10 +74,16 @@ several lines.
 `exit_code`, and `exit_signal`. Command arguments are redacted. A dry run has
 no game exit code or signal.
 
+`launch --server SERVER` prints a different summary. It adds `server`,
+`connection_target`, and `server_started`, and omits `classpath_entries`,
+`natives_directory`, and `assets`.
+
 `server start` emits objects distinguished by `event`, including `preparing`,
-`started`, `output`, `warning`, `capture_pruned`, `capture_unavailable`, and
-`exited`. An `output` event contains a captured `line`; an `exited` event
-contains `code` and `signal`. Progress can still appear as text on stderr.
+`started`, `output`, `warning`, `capture_pruned`, `capture_unavailable`,
+`output_dropped`, and `exited`. An `output` event contains a captured `line`;
+an `output_dropped` event contains `lines`, the number of queued console lines
+skipped because a reader was too slow; an `exited` event contains `code` and
+`signal`. Progress can still appear as text on stderr.
 
 ## Failures
 
@@ -115,6 +124,9 @@ Specific cases:
 - `server start` fails if the server exits before finishing startup, even with
   child status `0`. After startup, an unrequested unsuccessful exit fails.
   A requested stop succeeds.
+- `server stop`, `server restart`, `server kill`, and `server console` fail
+  when the server refuses the request. `server restart` also fails if the
+  server stopped but could not be started again.
 
 A downstream reader closing a pipe is treated as a normal end. Foreground runs
 stop their supervised child before returning. Other stdout write failures

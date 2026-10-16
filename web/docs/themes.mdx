@@ -60,7 +60,8 @@ digits, `-`, or `_` in the name. The `name` field is the label shown in the
 selector. Set `parent` to `"dark"` or `"light"`; omitted colors come from
 that parent, including the color scheme used by standard controls.
 `format_version`, `name`, `parent`, and `[colors]` may all be omitted. The
-defaults are format 1, the file name, Dark, and no overrides.
+defaults are format 1, the file name, Dark, and no overrides. Names longer
+than 64 characters are cut to 64.
 
 Colors must be quoted hexadecimal values in `"#rrggbb"` form. Use
 `"#rrggbbaa"` when a color needs transparency. Edit the file, then select
@@ -93,25 +94,36 @@ add more when a control needs a different color.
 
 | Tokens | What they color |
 | --- | --- |
-| `background`, `surface`, `elevated`, `overlay`, `border`, `bar`, `well` | Page floors, cards, popovers, borders, bars, and technical views |
-| `selection`, `selection-card`, `selection-strong`, `toggle-on`, `capture-active` | Selected rows, cards, chips, switches, and key capture |
+| `background`, `surface`, `field`, `elevated`, `overlay`, `border`, `bar`, `well` | Page floors, cards, text inputs and dropdowns, popovers, borders, bars, and technical views |
+| `selection`, `selection-card`, `selection-strong`, `toggle-on`, `toggle-knob`, `capture-active` | Selected rows, cards, chips, switches (track and knob), and key capture |
 | `accent`, `accent-secondary`, `success`, `warning`, `danger` | Focus, links, highlights, and status messages |
 | `primary-fill`, `primary-fill-hover`, `danger-fill`, `danger-fill-hover` | Filled buttons and their hover states |
-| `text`, `text-secondary`, `text-muted`, `on-danger`, `log-error` | Text, button captions, and error lines in logs |
+| `text`, `text-secondary`, `text-muted`, `on-primary`, `on-danger`, `log-error` | Text, button captions, and error lines in logs |
 | `server`, `modrinth`, `curseforge`, `vanilla`, `forge`, `neoforge` | Server, catalog, and loader marks |
 | `shadow`, `scrim` | Popover shadows and the wash behind dialogs |
 
-Keep text readable against `background`, `surface`, and `elevated`. A
-primary button uses `text` over `primary-fill`; a destructive button uses
-`on-danger` over `danger-fill`.
+Keep text readable against `background`, `surface`, `field`, and `elevated`.
+A primary button uses `on-primary` over `primary-fill`; a destructive button
+uses `on-danger` over `danger-fill`. Keep `toggle-knob` distinct from
+`toggle-on`, so the knob of a switch that is on stands out from its track.
+
+A theme that sets `accent`, `background`, or `text` and leaves out
+`toggle-knob`, `field`, or `on-primary` respectively gives that token the
+color it set. Otherwise, omitted colors come from the parent.
+
+Dropdowns, sliders, and spinners use the colors above. Scroll bars, lists, and
+the context menus opened by a right-click or a "Launch as" button take no
+theme colors. They follow only the light or dark look of the parent, so a
+theme with a very different palette can leave them looking out of place.
 
 ## Fix a theme that does not load
 
 Check **Settings > General > Interface theme** for a message naming the file
 and problem. Ephervex skips a file with invalid TOML, an unsupported parent,
-a newer format version, a wrong field type, or an invalid color. Unknown color
-names and other unknown keys are reported and ignored while the rest of the
-theme loads.
+a newer format version, a wrong field type, or an invalid color. It also skips
+a file whose name uses anything other than lowercase letters, digits, `-`, and
+`_`, and a file that is not UTF-8 text. Unknown color names and other unknown
+keys are reported and ignored while the rest of the theme loads.
 
 Theme files are limited to 64 KiB each, and Ephervex reads at most 100 of
 them. If the selected file cannot be read, Ephervex uses Dark while keeping

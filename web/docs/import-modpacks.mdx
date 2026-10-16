@@ -17,6 +17,10 @@ are not supported. The archive is identified by its contents, so changing its
 file extension does not change its format. Release builds include the
 CurseForge API access needed for imports; no key setup is required.
 
+A pack that pins a Forge build for Minecraft 1.12.2 older than 14.23.5.2851 is
+refused before anything is downloaded, because those builds use an older
+installer format that Ephervex does not support.
+
 <ThemeScreenshot state="import-modpack-ready" alt="Desktop import review showing the pack, Minecraft release, loader, optional files, and storage choices" />
 
 :::note
@@ -35,7 +39,8 @@ unless you choose persistent storage.
 <TabItem value="gui" label="Desktop" default>
 
 On **Instances**, select **Import Modpack**. Choose an archive with **Browse**,
-or drop it onto the Instances page.
+or drop it onto the Instances page. Dropping a file works only on X11 or
+XWayland; see [Limitations and Troubleshooting](./troubleshooting.mdx).
 
 <ThemeScreenshot state="file-drop-overlay" alt="Instances page showing the Drop to import target while an archive is dragged over Ephervex" />
 

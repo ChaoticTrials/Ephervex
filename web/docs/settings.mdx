@@ -12,7 +12,8 @@ import ThemeScreenshot from '@site/src/components/ThemeScreenshot';
 Open **Settings** to change Ephervex-wide behavior. A client instance's own
 Java and memory overrides live in its [workspace Settings](./instances.mdx#set-java-and-memory-for-one-instance).
 Account management has its [own guide](./accounts.mdx). The sections below
-cover the remaining settings pages and the CLI commands available for them.
+cover the remaining settings pages, including **About & Licenses**, and the
+CLI commands available for them.
 
 ## General
 
@@ -48,8 +49,9 @@ ephervex config show
 ephervex config pack-hosts
 ```
 
-To forget one trusted host, run `ephervex config pack-hosts --forget HOST`.
-The other General controls are managed in the desktop app.
+To forget one trusted host, run `ephervex config pack-hosts --forget HOST`
+(repeat the option for more hosts), or `ephervex config pack-hosts --forget-all`
+to forget every host. The other General controls are managed in the desktop app.
 
 </TabItem>
 </Tabs>
@@ -72,6 +74,10 @@ see which choices it supports; the preview does not change the saved defaults.
 Edit the preferences you want and select **Save Changes**. Use **Discard
 Changes** to abandon unsaved edits, or **Reset** on one preference to stop
 overriding it.
+
+To change a key binding, select its control, or focus it and press Enter or
+Space, then press the new key or mouse button. Escape leaves the binding as
+it was, and Delete or Backspace unbinds it.
 
 <ThemeScreenshot state="settings-minecraft-defaults" alt="Minecraft defaults with categories, preference controls, and compatibility preview" />
 
@@ -106,6 +112,8 @@ instance can [override them](./instances.mdx#set-java-and-memory-for-one-instanc
 
 Open **Settings > Java**. Set runtime detection, managed downloads, memory,
 and an optional preferred Java path, then select **Save Java Settings**.
+Memory values are in MiB, digits only, and must be greater than zero; the
+minimum cannot exceed the maximum, and Ephervex refuses to save other values.
 **Refresh Runtimes** rescans installed runtimes. The list shows each path,
 version, and origin; only runtimes Ephervex downloaded offer a remove action.
 
@@ -220,3 +228,13 @@ occupy less physical disk space than shown. The CLI has no equivalent full
 disk-usage view.
 
 <ThemeScreenshot state="settings-disk-usage" alt="Disk usage view with measured categories and retention groups" />
+
+## About & Licenses
+
+**Settings > About & Licenses** shows the open-source packages Ephervex is
+built on and the license each is under. Select a package to read its license
+text. The list is built into the release, so viewing it contacts nothing.
+
+On the CLI, `ephervex licenses` shows a count per license, `--all` lists every
+package, and `--text LICENSE` prints the full text for one license identifier,
+such as `MIT`.

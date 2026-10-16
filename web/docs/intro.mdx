@@ -42,7 +42,9 @@ runtimes can be reused across environments.
 Ephervex supports Linux on `x86_64` and `aarch64`. On `x86_64`, it supports Minecraft
 **release versions 1.12.2 and newer** with Vanilla, Forge, or NeoForge. A loader
 must support the exact Minecraft release you choose. Ephervex does not
-substitute a different version when a selection is unsupported. On ARM, a
+substitute a different version when a selection is unsupported. For Minecraft
+1.12.2, Forge builds older than 14.23.5.2851 use an older installer format. They
+are left out of build lists and refused when selected. On ARM, a
 Minecraft version also needs compatible native libraries; see
 [installation](/install).
 

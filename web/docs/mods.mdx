@@ -49,6 +49,10 @@ ephervex mod search INSTANCE_ID QUERY --provider modrinth
 ephervex mod show INSTANCE_ID PROJECT_ID --provider modrinth
 ```
 
+Add `--include-incompatible` to `mod search` or `mod show` to also list
+results that do not fit the instance, each with the reason. They still cannot
+be installed.
+
 Plan and install an exact release, or omit `--version` to choose the newest
 compatible one. Ephervex refuses a named release that does not fit the
 instance.
@@ -100,8 +104,9 @@ hand. Use the desktop mods list or inspect the folder to see those files.
 ## Enable, disable, or put aside a mod
 
 Disabling a mod leaves its JAR and record in place, but keeps the loader from
-loading it. Deleting a recorded mod's JAR puts it aside while retaining the
-record, so **Restore** or repair can fetch it again. A hand-placed JAR cannot
+loading it. While **Independent mod changes** is off, deleting a recorded mod's
+JAR puts it aside while retaining the record, so **Restore** or repair can
+fetch it again. A hand-placed JAR cannot
 be restored by Ephervex after deletion.
 
 Dependencies matter: turning off a mod may also require turning off mods that
@@ -114,7 +119,11 @@ before a desktop change.
 In **Mods**, use the switch on a mod card to turn it off or on. The impact
 dialog names affected mods and can apply the dependent changes together. Use
 the card's delete action to put a recorded JAR aside; its row then offers
-**Restore**. Deleting a JAR you added by hand removes that file.
+**Restore**. This applies while **Independent mod changes** is off, as it is
+for an imported pack. When it is on, as it is for an instance created in
+Ephervex, the card action opens a removal plan instead. The plan removes the
+mod and any dependencies nothing else needs, and offers no **Restore**.
+Deleting a JAR you added by hand removes that file.
 
 <ThemeScreenshot state="mod-missing-file" alt="Mods list where a deleted pack mod shows Deleted and a Restore button" />
 
@@ -123,10 +132,13 @@ the card's delete action to put a recorded JAR aside; its row then offers
 </TabItem>
 <TabItem value="cli" label="CLI">
 
-Use the path shown by `mod list`, such as `mods/example.jar`:
+`mod list` shows only provider-managed mods, by file name. To get the
+`mods/...` path of every mod, including JARs you placed by hand, use
+`mod dependencies`, then pass that path, such as `mods/example.jar`:
 
 ```bash
 ephervex mod list INSTANCE_ID
+ephervex mod dependencies --instance INSTANCE_ID
 ephervex mod disable --instance INSTANCE_ID mods/example.jar
 ephervex mod enable --instance INSTANCE_ID mods/example.jar
 ephervex mod delete --instance INSTANCE_ID mods/example.jar
@@ -169,11 +181,24 @@ new project at an exact release; it does not replace a different release of a
 project already installed. The CLI's `mod delete` removes a JAR but keeps its
 record.
 
+In the desktop app, the install plan, the change and remove dialogs, and
+**Apply Mod Change** show a **Linked servers** panel when the instance has
+linked servers. Select the servers that should receive the same change. Every
+selected server gets the exact release the client settles on. A server that
+cannot take it is marked **Unavailable** with the reason, for example an
+unsupported Minecraft version or loader, or a mod the server's own pack
+declares. Each server has its own result. This carries a client change to
+servers already linked to the instance; it does not install catalog mods on a
+server directly.
+
 ## Review dependency information
 
 Ephervex records dependencies when it installs a mod and when it imports a
-CurseForge pack. Some imported mods have no recorded relations yet. "No
-dependency information recorded" does not mean the mod needs nothing.
+CurseForge pack. Some imported mods have no recorded relations yet. **Manage
+Mod** then says "Nothing has asked its catalog what it needs.", which does not
+mean the mod needs nothing. For a JAR Ephervex cannot identify, it says
+"Ephervex cannot tell what this JAR is, so no catalog can be asked what it
+needs."
 
 <Tabs groupId="interface" queryString="interface">
 <TabItem value="gui" label="Desktop" default>
@@ -191,7 +216,9 @@ ephervex mod refresh --instance INSTANCE_ID
 ```
 
 `dependencies` reads local records and works offline. `refresh` asks the
-catalogs for current relation information and stores the answers it gets.
+catalogs for current relation information and stores the answers it gets. If a
+catalog cannot be reached, `refresh` still records the answers from the
+catalogs that responded, then exits with an error naming the ones that did not.
 
 </TabItem>
 </Tabs>

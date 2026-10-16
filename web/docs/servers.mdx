@@ -68,7 +68,9 @@ not run the archive's installer or start script.
 </Tabs>
 
 A linked server is rebuilt from the client's retained pack recipe. JARs added
-manually to the client afterward are not copied automatically. Pack files
+manually to the client afterward are not copied automatically. A mod change
+made through the desktop app's mod dialogs can be carried to the linked servers
+you select; see [Mods](./mods.mdx). Pack files
 whose server side is undeclared are included by default; the CLI can narrow
 them with repeated `--include-unknown PATH` flags or omit them with
 `--skip-unknown`. Review the server's **Mods** tab before starting a test.
@@ -123,8 +125,8 @@ flags an exposed offline-mode server as unsafe.
 Stop the server, open **Properties**, and edit **Access**, **Port**, and
 **Online mode**. The same page has message of the day, maximum players,
 difficulty, game mode, flight, PvP, and allowlist controls. Select **Save
-Changes** to apply them. The save action is available while the server is
-stopped.
+Changes** to apply them. **Save Changes** is available while the server is
+stopped or after a run failed.
 
 **1** marks **Access**, where you choose who can connect.
 
@@ -164,7 +166,11 @@ Open the server workspace from **Servers** or its linked client. Select
 **Start**. The **Overview** shows its address and runtime state. Open
 **Console** to watch output and send a command. Use **Stop** for a graceful
 shutdown or **Restart** to stop and start it again. **Force Kill** is available
-if it cannot stop normally.
+if it cannot stop normally. The console starts over with only the new run's
+output whenever the server starts, including **Launch Client & Connect**, a
+paired launch, and **Restart**. Quitting the desktop app stops every server it
+started: it requests a graceful stop first and kills a server that does not
+exit.
 
 <ThemeScreenshot state="server-console" alt="Running server console with live output and a command field" />
 
@@ -172,8 +178,9 @@ if it cannot stop normally.
 <TabItem value="cli" label="CLI">
 
 Find the server ID with `ephervex servers list`. `start` runs in the
-foreground and streams output; Ctrl-C requests a graceful stop. From another
-terminal, you can inspect it or send a console command:
+foreground and streams output. Ctrl-C, a terminal hangup, or a termination
+signal requests a graceful stop; a second Ctrl-C or signal kills the server.
+From another terminal, you can inspect it or send a console command:
 
 ```bash
 ephervex server start SERVER_ID
