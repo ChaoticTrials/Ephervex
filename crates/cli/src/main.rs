@@ -5510,7 +5510,7 @@ async fn run_mod_show(
     let details = app
         .mod_project(host, catalog, project, include_incompatible)
         .await?;
-    print_mod_project(&details, json);
+    print_mod_project(&details, host, json);
     Ok(())
 }
 
@@ -5901,19 +5901,8 @@ fn print_mod_search(results: &ModSearchResults, host: InstalledHost, json: bool)
     for hit in &results.hits {
         outln!("{}  {}", hit.project.id, hit.project.title);
         outln!("  {}", hit.project.description);
-        if matches!(host, InstalledHost::Server(_)) {
-            match hit.effective_sides().1 {
-                SideSupport::Unknown => {
-                    outln!(
-                        "  {}",
-                        ephervex_i18n::lookup("mod-search-server-support-unstated")
-                    );
-                }
-                SideSupport::Unsupported => {
-                    outln!("  {}", ephervex_i18n::lookup("mod-search-client-only"));
-                }
-                SideSupport::Required | SideSupport::Optional => {}
-            }
+        if let Some(note) = server_support_note(host, hit.effective_sides().1) {
+            outln!("  {note}");
         }
         match &hit.best_version {
             Some(version) => outln!("  version: {} ({})", version.version_number, version.id),
@@ -5933,7 +5922,20 @@ fn print_mod_search(results: &ModSearchResults, host: InstalledHost, json: bool)
     );
 }
 
-fn print_mod_project(details: &ModProjectDetails, json: bool) {
+/// What a server's listing says about a mod whose catalog does not confirm it
+/// runs on a server. Nothing for a client, or for a mod that does.
+fn server_support_note(host: InstalledHost, server_side: SideSupport) -> Option<String> {
+    if !matches!(host, InstalledHost::Server(_)) {
+        return None;
+    }
+    match server_side {
+        SideSupport::Unknown => Some(ephervex_i18n::lookup("mod-search-server-support-unstated")),
+        SideSupport::Unsupported => Some(ephervex_i18n::lookup("mod-search-client-only")),
+        SideSupport::Required | SideSupport::Optional => None,
+    }
+}
+
+fn print_mod_project(details: &ModProjectDetails, host: InstalledHost, json: bool) {
     if json {
         print_json(&serde_json::json!({
             "project_id": details.project.id,
@@ -5966,6 +5968,9 @@ fn print_mod_project(details: &ModProjectDetails, json: bool) {
         details.project.client_side,
         details.project.server_side
     );
+    if let Some(note) = server_support_note(host, details.project.server_side) {
+        outln!("  {note}");
+    }
     for entry in &details.versions {
         let marker = if Some(&entry.version.id) == details.default_version.as_ref() {
             "*"
@@ -10278,6 +10283,22 @@ mod tests {
             ownership_json(None, Entitlements::owns_game),
             serde_json::Value::Bool(false)
         );
+    }
+
+    #[test]
+    fn a_server_listing_marks_a_mod_its_catalog_does_not_confirm_runs_there() {
+        let server = InstalledHost::Server(ServerId::new());
+        let client = InstalledHost::Instance(InstanceId::new());
+        assert_eq!(
+            server_support_note(server, SideSupport::Unsupported),
+            Some(ephervex_i18n::lookup("mod-search-client-only"))
+        );
+        assert_eq!(
+            server_support_note(server, SideSupport::Unknown),
+            Some(ephervex_i18n::lookup("mod-search-server-support-unstated"))
+        );
+        assert_eq!(server_support_note(server, SideSupport::Required), None);
+        assert_eq!(server_support_note(client, SideSupport::Unsupported), None);
     }
 
     #[test]
