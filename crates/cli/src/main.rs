@@ -5866,27 +5866,7 @@ fn optional_unverified_text(candidate: &OptionalCandidate) -> Option<String> {
 
 fn print_mod_search(results: &ModSearchResults, host: InstalledHost, json: bool) {
     if json {
-        print_json(&serde_json::json!({
-            "provider": results.provider.as_str(),
-            "total_hits": results.total_hits,
-            "offset": results.offset,
-            "hits": results.hits.iter().map(|hit| serde_json::json!({
-                "project_id": hit.project.id,
-                "slug": hit.project.slug,
-                "title": hit.project.title,
-                "description": hit.project.description,
-                "author": hit.project.author,
-                "client_side": hit.project.client_side.to_string(),
-                "server_side": hit.project.server_side.to_string(),
-                "effective_server_side": hit.effective_sides().1.to_string(),
-                "best_version": hit.best_version.as_ref().map(|version| serde_json::json!({
-                    "id": version.id,
-                    "version_number": version.version_number,
-                    "file_name": version.file.file_name,
-                })),
-                "compatibility": compatibility_json(&hit.compatibility),
-            })).collect::<Vec<_>>(),
-        }));
+        print_json(&search_json(results));
         return;
     }
 
@@ -5895,7 +5875,6 @@ fn print_mod_search(results: &ModSearchResults, host: InstalledHost, json: bool)
         if let Some(action) = ephervex_i18n::lookup_attribute("mod-search-empty", "action") {
             outln!("  {action}");
         }
-        return;
     }
 
     for hit in &results.hits {
@@ -5913,13 +5892,53 @@ fn print_mod_search(results: &ModSearchResults, host: InstalledHost, json: bool)
             }
         }
     }
-    outln!(
-        "{}",
-        ephervex_i18n::lookup_args(
-            "mod-search-count",
-            [("count", MessageArg::from(results.hits.len()))]
-        )
-    );
+    if !results.hits.is_empty() {
+        outln!(
+            "{}",
+            ephervex_i18n::lookup_args(
+                "mod-search-count",
+                [("count", MessageArg::from(results.hits.len()))]
+            )
+        );
+    }
+    // A page can show fewer mods than asked for, or none, when some did not
+    // fit, so where the next one starts is said rather than left to be
+    // worked out from what was shown.
+    if let Some(next) = results.next_offset {
+        outln!(
+            "{}",
+            ephervex_i18n::lookup_args(
+                "mod-search-next-page",
+                [("offset", MessageArg::from(next))]
+            )
+        );
+    }
+}
+
+/// A page of search results for `--json`, with where the next page starts.
+fn search_json(results: &ModSearchResults) -> serde_json::Value {
+    serde_json::json!({
+        "provider": results.provider.as_str(),
+        "total_hits": results.total_hits,
+        "offset": results.offset,
+        "next_offset": results.next_offset,
+        "hits": results.hits.iter().map(|hit| serde_json::json!({
+            "project_id": hit.project.id,
+            "slug": hit.project.slug,
+            "title": hit.project.title,
+            "description": hit.project.description,
+            "author": hit.project.author,
+            "client_side": hit.project.client_side.to_string(),
+            "server_side": hit.project.server_side.to_string(),
+            "effective_server_side": hit.effective_sides().1.to_string(),
+            "best_version": hit.best_version.as_ref().map(|version| serde_json::json!({
+                "id": version.id,
+                "version_number": version.version_number,
+                "file_name": version.file.file_name,
+            })),
+            "compatibility": compatibility_json(&hit.compatibility),
+        })).collect::<Vec<_>>(),
+    })
 }
 
 /// What a server's listing says about a mod whose catalog does not confirm it
@@ -10299,6 +10318,23 @@ mod tests {
         );
         assert_eq!(server_support_note(server, SideSupport::Required), None);
         assert_eq!(server_support_note(client, SideSupport::Unsupported), None);
+    }
+
+    #[test]
+    fn a_search_page_says_where_the_next_one_starts() {
+        let page = ModSearchResults {
+            provider: ModProvider::CurseForge,
+            hits: Vec::new(),
+            total_hits: 40,
+            offset: 0,
+            next_offset: Some(3),
+        };
+        assert_eq!(search_json(&page)["next_offset"], 3);
+        let last = ModSearchResults {
+            next_offset: None,
+            ..page
+        };
+        assert!(search_json(&last)["next_offset"].is_null());
     }
 
     #[test]

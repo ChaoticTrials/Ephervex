@@ -1796,6 +1796,7 @@ mod-search-count = { $count ->
         [one] { $count } mod
        *[other] { $count } mods
     }
+mod-search-next-page = More may follow. Add --offset { $offset } to see the next page.
 mod-list-empty = No mods have been installed into this instance through a provider.
 mod-installed-count = { $count ->
         [one] { $count } installed mod
