@@ -5452,18 +5452,7 @@ async fn run_mod_install(
         let unconfirmed = plan.undeclared_server_support();
         if !unconfirmed.is_empty() {
             if !accept_unknown_server_support {
-                anyhow::bail!(
-                    "{}\n{}",
-                    ephervex_i18n::lookup_args(
-                        "mod-install-server-support-unconfirmed",
-                        [("mods", MessageArg::from(mod_names(&unconfirmed).join(", ")))],
-                    ),
-                    ephervex_i18n::lookup_attribute(
-                        "mod-install-server-support-unconfirmed",
-                        "action"
-                    )
-                    .unwrap_or_default()
-                );
+                return Err(unconfirmed_server_support(&mod_names(&unconfirmed)));
             }
             request = request.confirming_server_support(
                 unconfirmed
@@ -5479,6 +5468,19 @@ async fn run_mod_install(
         .await?;
     print_installed_mods(&installed, host, json);
     Ok(())
+}
+
+/// Refuses a server install that would add mods with no stated server side.
+///
+/// The next step is its own line of the failure, as every other failure's is,
+/// rather than a newline inside the first, which the terminal output escapes.
+fn unconfirmed_server_support(mods: &[String]) -> anyhow::Error {
+    let next = ephervex_i18n::lookup_attribute("mod-install-server-support-unconfirmed", "action")
+        .unwrap_or_default();
+    anyhow::anyhow!(next).context(ephervex_i18n::lookup_args(
+        "mod-install-server-support-unconfirmed",
+        [("mods", MessageArg::from(mods.join(", ")))],
+    ))
 }
 
 /// The display names of planned mods, falling back to the project id.
@@ -10275,6 +10277,23 @@ mod tests {
         assert_eq!(
             ownership_json(None, Entitlements::owns_game),
             serde_json::Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn an_unconfirmed_server_install_says_its_next_step_on_a_line_of_its_own() {
+        let refusal = unconfirmed_server_support(&["EMI".to_owned()]);
+        let lines: Vec<String> = refusal.chain().map(ToString::to_string).collect();
+
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].contains("EMI"), "{lines:?}");
+        assert!(
+            lines[1].contains("--accept-unknown-server-support"),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().all(|line| !line.contains('\n')),
+            "no line carries a newline the terminal would escape: {lines:?}"
         );
     }
 
