@@ -22,6 +22,14 @@ pub(super) fn load(commands: &Sender<Command>, host: InstalledHost, choices: boo
     send(commands, Command::LoadHostJava { host, choices });
 }
 
+/// Asks every shown host for its Java again, once the runtimes they can use
+/// may have changed.
+pub(super) fn reload_shown(workspace: &Workspace) {
+    for host in workspace.state.borrow().shown() {
+        load(&workspace.commands, host, true);
+    }
+}
+
 fn row(choice: &JavaChoiceView) -> JavaChoiceRow {
     JavaChoiceRow {
         key: choice.key.as_str().into(),

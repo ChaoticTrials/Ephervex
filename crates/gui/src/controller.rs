@@ -1830,6 +1830,17 @@ fn apply_server_tool_event(
     if matches!(event, backend::ServerToolEvent::Started) {
         workspace.forget_last_run(InstalledHost::Server(server));
     }
+    // A start may have installed the managed runtime it planned, whether it
+    // then came up, failed or was abandoned.
+    if matches!(
+        event,
+        backend::ServerToolEvent::Started
+            | backend::ServerToolEvent::StartAbandoned
+            | backend::ServerToolEvent::RestartFailed { .. }
+            | backend::ServerToolEvent::Finished { .. }
+    ) {
+        java_runtime::reload_shown(workspace);
+    }
     if matches!(
         event,
         backend::ServerToolEvent::Started
@@ -7661,7 +7672,11 @@ fn apply_event(
             minecraft,
             message,
         } => apply_loader_versions_failure(ui, instance, loader, &minecraft, message),
-        Event::LoaderChangeFinished { instance } => apply_loader_change_finished(ui, instance),
+        Event::LoaderChangeFinished { instance } => {
+            apply_loader_change_finished(ui, instance);
+            // The loader decides which Java the instance expects.
+            java_runtime::load(&workspace.commands, InstalledHost::Instance(instance), true);
+        }
         Event::LoaderChangeFailed { instance, message } => {
             apply_loader_change_failure(ui, instance, message);
         }
@@ -7820,9 +7835,7 @@ fn apply_event(
             ui.set_java_runtimes(model(java_rows(rows)));
             // A runtime that came or went can change what a host resolves to
             // or whether its pin still runs, so each shown host reads it again.
-            for host in workspace.state.borrow().shown() {
-                java_runtime::load(&workspace.commands, host, true);
-            }
+            java_runtime::reload_shown(workspace);
         }
         Event::Activity(activity) => {
             apply_isolation_stage(ui, &workspace.isolation.borrow(), &activity);
@@ -8011,7 +8024,10 @@ fn apply_event(
         Event::CreationFinished { request_id } => {
             creations.borrow_mut().finish(&request_id);
             apply_pending_creations(ui, &creations.borrow());
+            // Installing a server can install the managed runtime it needs.
+            java_runtime::reload_shown(workspace);
         }
+        Event::JavaPlanned => java_runtime::reload_shown(workspace),
         // A discarded result belongs to an attempt this flow no longer tracks
         // (superseded, the modal was closed and reopened, or an unrelated
         // submission finished): there is nothing that should touch whatever
@@ -8065,6 +8081,8 @@ fn apply_event(
             creations.borrow_mut().finish(&request_id);
             apply_pending_creations(ui, &creations.borrow());
             apply_import_submission_finished(ui, import_flow, generation, succeeded);
+            // An import can install a linked server, and with it a runtime.
+            java_runtime::reload_shown(workspace);
         }
         Event::StorageRootPicked(path) => {
             ui.set_persistent_root(path.display().to_string().into());
@@ -12364,6 +12382,30 @@ mod tests {
         test_workspace_sending(ui).0
     }
 
+    /// A start plans its Java before it can fail, and may have installed a
+    /// managed runtime by then, so even an abandoned start re-reads what the
+    /// shown hosts run.
+    #[test]
+    fn an_abandoned_server_start_reads_the_shown_hosts_java_again() {
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        let host = client_host();
+        workspace.open(&ui, host, Surface::Diagnostics);
+        commands.try_iter().for_each(drop);
+
+        apply_server_tool_event(
+            &ui,
+            &workspace,
+            ephervex_model::ServerId::new(),
+            backend::ServerToolEvent::StartAbandoned,
+        );
+
+        assert!(commands.try_iter().any(|command| matches!(
+            command,
+            Command::LoadHostJava { host: loaded, choices: true } if loaded == host
+        )));
+    }
+
     /// The launcher preference can pin a listed runtime, so a saved Java
     /// setting reads the list, and its pins, again.
     #[test]
@@ -12579,7 +12621,11 @@ mod tests {
                 failure: Some("replacement failed".to_owned()),
             },
         );
-        let sent: Vec<_> = commands.try_iter().collect();
+        // The shown hosts also read their Java again; only diagnoses count here.
+        let sent: Vec<_> = commands
+            .try_iter()
+            .filter(|command| !matches!(command, Command::LoadHostJava { .. }))
+            .collect();
         assert!(
             matches!(sent.as_slice(), [Command::ExplainServerFailure { server: id, failure, .. }]
             if *id == server && failure == "replacement failed")

@@ -1600,6 +1600,9 @@ pub enum Event {
     InstanceRuntime(InstanceRuntimeData),
     /// A host's Java, as [`Command::LoadHostJava`] read it.
     HostJava(Box<HostJavaData>),
+    /// A launch chose its Java runtime or ended, either of which may follow
+    /// the install of a managed one.
+    JavaPlanned,
     /// The verdict on a path [`Command::CheckHostJavaPath`] probed.
     HostJavaPathChecked {
         host: InstalledHost,
@@ -5737,16 +5740,15 @@ fn run_worker(
                 let paths = app.paths().clone();
                 let events = events.clone();
                 java_lane.submit(Box::new(move || {
-                    let known = inventory.lock().ok().and_then(|slot| slot.clone());
                     run_detached(
                         paths,
                         events,
                         |_| {},
                         move |app, events, runtime| {
-                            let scanned = match known {
-                                Some(known) => Ok(known),
-                                None => runtime.block_on(app.java_runtimes()),
-                            };
+                            // A known inventory is reused, and only caught up
+                            // with the managed store.
+                            adopt_known_inventory(&app, &inventory);
+                            let scanned = runtime.block_on(app.java_runtimes());
                             send_java_inventory(&app, scanned, &inventory, &events);
                         },
                     );
@@ -8085,6 +8087,9 @@ fn spawn_launch(
                 if let Ok(mut app) = App::open_at(paths) {
                     send_snapshot(&mut app, &events);
                 }
+                // A launch that failed or was canceled after its Java install
+                // never reached Starting.
+                let _ = events.send(Event::JavaPlanned);
                 let failure = launch_failure(&result, cancel.is_cancelled());
                 explain_failed_run(
                     &app,
@@ -8509,6 +8514,7 @@ fn forward_launch_event(
             send_operation(events, &operation, entity.to_owned(), true);
         }
         LaunchEvent::Starting(_) => {
+            let _ = events.send(Event::JavaPlanned);
             let _ = events.send(Event::Toast {
                 message: localized_value("gui-starting-minecraft", entity),
                 error: false,
