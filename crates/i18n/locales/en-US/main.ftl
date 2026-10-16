@@ -1558,6 +1558,7 @@ gui-diagnosis-dependency-missing = { $name } is not installed
 gui-diagnosis-dependency-missing-detail = Install it from the Mods page. Diagnostics does not choose a version for you.
 gui-diagnosis-dependency-restore-detail = This host records it, so restoring puts back the exact release it recorded.
 gui-diagnosis-dependency-install-detail = Installing takes the newest release for this host's Minecraft version and loader, and shows it before anything changes.
+gui-diagnosis-dependency-client-only-detail = { $name } runs only on a client, so it is not installed on a server. { $dependent } needs it, so it most likely belongs only on a client too. Turn it off on this server from the Mods page.
 gui-diagnosis-restore-mod = Restore { $name }
 gui-diagnosis-install-latest = Install latest compatible version
 gui-diagnosis-conflict = { $name } does not work with { $other }
