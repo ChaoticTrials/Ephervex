@@ -47,8 +47,9 @@ so the reasoning trail survives.
 | [0039](0039-a-split-workspace-composes-host-views-and-owns-no-feature-state.md) | A split workspace composes host views and owns no feature state | Accepted |
 | [0040](0040-a-linked-pair-chooses-one-linked-server-and-starts-as-one-operation.md) | A linked pair chooses one linked server and starts as one operation | Accepted |
 | [0041](0041-a-theme-is-a-complete-color-palette.md) | A theme is a complete color palette | Accepted |
-| [0042](0042-user-themes-are-toml-files-over-a-built-in-parent.md) | User themes are TOML files over a built-in parent | Accepted |
+| [0042](0042-user-themes-are-toml-files-over-a-built-in-parent.md) | User themes are TOML files over a built-in parent | Accepted (amended by ADR 0047) |
 | [0043](0043-diagnostics-explains-and-changes-nothing-until-a-previewed-fix-is-applied.md) | Diagnostics explains, and changes nothing until a previewed fix is applied | Accepted |
 | [0044](0044-rpm-packages-are-published-to-the-signed-package-repository.md) | RPM packages are published to the signed package repository | Accepted (amends ADR 0026) |
 | [0045](0045-a-server-installs-catalog-mods-into-its-own-recipe.md) | A server installs catalog mods into its own recipe | Accepted |
 | [0046](0046-a-hosts-java-runtime-is-changed-through-a-previewed-fix.md) | A host's Java runtime is changed through a previewed fix | Accepted |
+| [0047](0047-a-theme-folder-carries-branding-confined-to-its-own-branding-folder.md) | A theme folder carries branding confined to its own branding folder | Accepted (amends ADR 0042) |

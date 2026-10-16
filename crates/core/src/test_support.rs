@@ -6,8 +6,9 @@
 //! would reach the developer's Secret Service and can raise an unlock prompt.
 //!
 //! It also builds client fixtures that need no provider metadata, so a
-//! frontend test can exercise a client reader without a network, and fixes the
-//! Java inventory, so no test probes a runtime installed on the machine.
+//! frontend test can exercise a client reader without a network, fixes the
+//! Java inventory, so no test probes a runtime installed on the machine, and
+//! builds images for the theme folders a frontend test writes.
 
 use std::sync::{Arc, OnceLock};
 
@@ -73,4 +74,23 @@ pub fn java_refusal_error(
         expected,
         mismatch,
     }))
+}
+
+/// A `width` by `height` PNG filled with one straight-alpha RGBA color.
+///
+/// # Panics
+///
+/// If encoding fails, which a test fixture cannot recover from.
+#[must_use]
+#[allow(clippy::expect_used)]
+pub fn solid_png(width: u32, height: u32, rgba: [u8; 4]) -> Vec<u8> {
+    let image = image::RgbaImage::from_pixel(width, height, image::Rgba(rgba));
+    let mut bytes = Vec::new();
+    image
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .expect("a solid image encodes as PNG");
+    bytes
 }

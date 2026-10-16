@@ -97,11 +97,16 @@ it to one complete palette and writes it to `Theme`, and is the only place that
 chooses one. Adding a built-in palette is a `BuiltInPalettes` entry, a scheme
 that resolves to it, and its label in the theme list.
 
-User themes are TOML files in the `themes` folder under the configuration
-directory (ADR 0042, format in `docs/themes.md`). `crates/gui/src/theme_files.rs`
-reads them on the backend thread whenever the settings snapshot is built, and
-the snapshot carries the usable themes and a localized line for every file
-problem. `palette.rs` resolves a user theme by starting from its built-in
+User themes are TOML files or theme folders in the `themes` folder under the
+configuration directory (ADR 0042, ADR 0047, format in `docs/themes.md`).
+`crates/gui/src/theme_files.rs` reads them on the backend thread whenever the
+settings snapshot is built, and the snapshot carries the usable themes, the
+chosen theme folder's decoded branding images, and a localized line for every
+file problem. Files inside a theme folder are opened only through
+`ephervex_core::theme_package`, which walks each component with `O_NOFOLLOW`
+from the directory opened before it and bounds what it decodes.
+`crates/gui/src/branding.rs` shows the images, and the markup falls back to the
+embedded logo whenever one is empty. `palette.rs` resolves a user theme by starting from its built-in
 parent and replacing the colors the file sets, so a user theme is complete by
 construction. A chosen user theme whose file is gone or unusable paints in the
 default palette, and the recorded choice stays.
@@ -111,8 +116,9 @@ Text sizes, the resolved monospace family, and the shared measurements stay in
 heights that virtualized lists and scroll arithmetic depend on, pane and tab
 geometry), and a palette never changes them.
 
-A theme file can set colors only. Token names are part of its format, so a
-token can be added but never renamed or removed.
+A theme can set colors, and a theme folder also its logo and window icon.
+Token names are part of its format, so a token can be added but never renamed
+or removed.
 
 ## Instance and shared-storage model
 

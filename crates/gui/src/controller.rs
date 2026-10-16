@@ -8806,11 +8806,12 @@ fn apply_artifact_cache_status(ui: &AppWindow, status: ArtifactCacheStatusData) 
     ui.set_artifact_cache_clearing(false);
 }
 
-/// The theme list, the chosen theme, and the palette it paints in.
+/// The theme list, the chosen theme, and the palette and branding it shows.
 fn apply_theme_settings(
     ui: &AppWindow,
     theme: &ephervex_core::ApplicationTheme,
     user_themes: &crate::theme_files::UserThemes,
+    branding: &crate::theme_files::BrandingImages,
     themes_folder: &str,
 ) {
     let choices = crate::palette::theme_choices(&user_themes.themes);
@@ -8831,8 +8832,15 @@ fn apply_theme_settings(
     );
     ui.set_application_theme(theme.to_stored().into());
     ui.set_themes_folder(themes_folder.into());
-    ui.set_theme_problems(user_themes.problems.join("\n").into());
+    ui.set_theme_problems(model(
+        user_themes
+            .problems
+            .iter()
+            .map(|problem| SharedString::from(problem.as_str()))
+            .collect(),
+    ));
     crate::palette::apply_theme(ui, theme, &user_themes.themes);
+    crate::branding::apply_branding(ui, branding);
 }
 
 /// Shows `incoming` unless the field holds an edit the user has not saved.
@@ -9055,6 +9063,7 @@ fn apply_snapshot(
         ui,
         &settings.theme,
         &settings.user_themes,
+        &settings.branding,
         &settings.themes_folder,
     );
     ui.set_eula_accepted(eula.accepted);
@@ -14495,6 +14504,7 @@ mod tests {
                 name: "Modrinth".to_owned(),
                 parent: ephervex_core::ApplicationColorScheme::Dark,
                 colors: vec![("accent", accent)],
+                branding: crate::theme_files::ThemeBranding::default(),
             }],
             problems: vec!["broken.toml: Skipped.".to_owned()],
         }
@@ -14506,7 +14516,13 @@ mod tests {
         let accent = slint::Color::from_argb_u8(255, 1, 2, 3);
         let chosen = ephervex_core::ApplicationTheme::User("modrinth".to_owned());
 
-        apply_theme_settings(&ui, &chosen, &modrinth_theme(accent), "/config/themes");
+        apply_theme_settings(
+            &ui,
+            &chosen,
+            &modrinth_theme(accent),
+            &crate::theme_files::BrandingImages::default(),
+            "/config/themes",
+        );
 
         let labels: Vec<SharedString> = ui.get_theme_labels().iter().collect();
         assert_eq!(
@@ -14522,8 +14538,79 @@ mod tests {
         assert_eq!(ui.get_theme_index(), 2);
         assert_eq!(ui.get_application_theme(), "user:modrinth");
         assert_eq!(ui.get_themes_folder(), "/config/themes");
-        assert_eq!(ui.get_theme_problems(), "broken.toml: Skipped.");
+        let problems: Vec<SharedString> = ui.get_theme_problems().iter().collect();
+        assert_eq!(problems, ["broken.toml: Skipped."]);
         assert_eq!(ui.global::<Theme>().get_accent(), accent);
+    }
+
+    /// The chosen theme folder's decoded branding, read the way a settings
+    /// snapshot reads it.
+    fn branding_of(folder: &std::path::Path, id: &str) -> crate::theme_files::BrandingImages {
+        let mut themes = crate::theme_files::read_user_themes(folder);
+        let images = crate::theme_files::read_selected_branding(
+            folder,
+            &mut themes,
+            &ephervex_core::ApplicationTheme::User(id.to_owned()),
+        );
+        assert!(themes.problems.is_empty(), "{:?}", themes.problems);
+        images
+    }
+
+    #[test]
+    fn switching_themes_shows_each_themes_branding_and_returns_to_the_default() {
+        let folder = tempfile::tempdir().expect("temp dir");
+        for (id, rgba) in [
+            ("orange", [255, 128, 0, 255]),
+            ("violet", [128, 0, 255, 255]),
+        ] {
+            let branding = folder.path().join(id).join("branding");
+            std::fs::create_dir_all(&branding).expect("package");
+            std::fs::write(
+                folder.path().join(id).join("theme.toml"),
+                "[branding]\nlogo = \"logo.png\"\nicon = \"icon.png\"",
+            )
+            .expect("manifest");
+            let png = ephervex_core::test_support::solid_png(6, 3, rgba);
+            std::fs::write(branding.join("logo.png"), &png).expect("logo");
+            std::fs::write(branding.join("icon.png"), &png).expect("icon");
+        }
+        let ui = test_window();
+        let themes = crate::theme_files::read_user_themes(folder.path());
+        let pixel = |image: slint::Image| {
+            let buffer = image.to_rgba8().expect("pixels");
+            let first = buffer.as_slice()[0];
+            (
+                buffer.width(),
+                buffer.height(),
+                [first.r, first.g, first.b, first.a],
+            )
+        };
+
+        for (id, rgba) in [
+            ("orange", [255, 128, 0, 255]),
+            ("violet", [128, 0, 255, 255]),
+            ("orange", [255, 128, 0, 255]),
+        ] {
+            let chosen = ephervex_core::ApplicationTheme::User(id.to_owned());
+            apply_theme_settings(&ui, &chosen, &themes, &branding_of(folder.path(), id), "");
+            assert_eq!(pixel(ui.get_theme_logo()), (6, 3, rgba), "{id} logo");
+            // The square icon's top-left corner is padding.
+            assert_eq!(
+                pixel(ui.get_theme_icon()),
+                (6, 6, [0, 0, 0, 0]),
+                "{id} icon"
+            );
+        }
+
+        apply_theme_settings(
+            &ui,
+            &ephervex_core::ApplicationTheme::default(),
+            &themes,
+            &crate::theme_files::BrandingImages::default(),
+            "",
+        );
+        assert_eq!(ui.get_theme_logo().size().width, 0, "the default logo");
+        assert_eq!(ui.get_theme_icon().size().width, 0, "the default icon");
     }
 
     #[test]

@@ -12,6 +12,16 @@ format_version = 1
 name = "Modrinth"
 parent = "dark"
 
+# A theme folder can also replace the logo and the window icon. A single file
+# has no branding folder, so this section is commented out. To use it, move
+# this file to ~/.config/ephervex/themes/modrinth/theme.toml, put the images
+# in ~/.config/ephervex/themes/modrinth/branding/, and remove the leading "# "
+# from the three lines below. The names are relative to that branding folder.
+#
+# [branding]
+# logo = "logo.png"
+# icon = "icon.png"
+
 [colors]
 # Surfaces, from the window floor up to a popover.
 background = "#16181c"
