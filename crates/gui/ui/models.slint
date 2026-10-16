@@ -679,6 +679,9 @@ export struct HostView {
     java-custom-error: string,
     java-custom-checking: bool,
     allow-pack-mod-changes: bool,
+    // Whether that choice is fixed: a server made here has no pack
+    // declaration to preserve, so its mods are always the user's.
+    pack-mod-changes-fixed: bool,
     // Whether the listed mods are the user's rather than a pack's record, as
     // the list itself says.
     mods-are-the-users: bool,

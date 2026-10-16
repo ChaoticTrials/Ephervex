@@ -121,7 +121,7 @@ fn the_pack_mod_opt_in_survives_leaving_its_tab() {
     let ui = window();
     let asked: Rc<RefCell<Vec<(String, bool)>>> = Rc::default();
     let record = Rc::clone(&asked);
-    ui.on_set_allow_pack_mod_version_changes(move |instance, allow| {
+    ui.on_set_allow_pack_mod_version_changes(move |_, instance, allow| {
         record.borrow_mut().push((instance.to_string(), allow));
     });
 
@@ -172,8 +172,8 @@ fn opt_in(ui: &AppWindow) -> Option<ElementHandle> {
 }
 
 /// The header names the Java a host would run with once its status is read,
-/// and pressing it opens the host's runtime settings: Settings on a client,
-/// Properties on a server.
+/// and pressing it opens the host's runtime settings, the Settings tab on a
+/// client and a server alike.
 #[test]
 fn the_header_java_pill_opens_the_hosts_runtime_settings() {
     let ui = window();
@@ -230,7 +230,7 @@ fn the_header_java_pill_opens_the_hosts_runtime_settings() {
         .expect("a server's header shows it too")
         .invoke_accessible_default_action();
     settle(&ui);
-    assert_eq!(support::surface(&ui, 0), "Properties");
+    assert_eq!(support::surface(&ui, 0), "Settings");
 }
 
 fn client_workspace(ui: &AppWindow) {

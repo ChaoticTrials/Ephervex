@@ -5584,24 +5584,24 @@ fn claim_server_start(
     true
 }
 
-/// The instance workspace's Settings tab: Java/JVM overrides and the
+/// A host workspace's Settings tab: its JVM settings, and a client's
 /// pack-owned-mod-mutation opt-in.
-fn register_instance_runtime_actions(
+fn register_host_runtime_actions(
     ui: &AppWindow,
     commands: &Sender<Command>,
     workspace: &Workspace,
 ) {
     let sender = commands.clone();
     let views = workspace.clone();
-    ui.on_save_instance_runtime(move |id, min, max, args| {
-        let Some(instance) = backend::parse_instance_id(&id) else {
+    ui.on_save_host_runtime(move |kind, id, min, max, args| {
+        let Some(host) = workspace::parse_host(&kind, &id) else {
             return;
         };
-        clear_runtime_error(&views, instance);
+        clear_runtime_error(&views, host);
         send(
             &sender,
-            Command::SaveInstanceRuntime {
-                instance,
+            Command::SaveHostRuntime {
+                host,
                 min_memory_mib: min.to_string(),
                 max_memory_mib: max.to_string(),
                 jvm_args: args.to_string(),
@@ -5611,13 +5611,13 @@ fn register_instance_runtime_actions(
 
     let sender = commands.clone();
     let views = workspace.clone();
-    ui.on_clear_instance_runtime(move |id| {
-        if let Some(instance) = backend::parse_instance_id(&id) {
-            clear_runtime_error(&views, instance);
+    ui.on_clear_host_runtime(move |kind, id| {
+        if let Some(host) = workspace::parse_host(&kind, &id) {
+            clear_runtime_error(&views, host);
             send(
                 &sender,
-                Command::SaveInstanceRuntime {
-                    instance,
+                Command::SaveHostRuntime {
+                    host,
                     min_memory_mib: String::new(),
                     max_memory_mib: String::new(),
                     jvm_args: String::new(),
@@ -5627,26 +5627,26 @@ fn register_instance_runtime_actions(
     });
 
     let sender = commands.clone();
-    ui.on_set_allow_pack_mod_version_changes(move |id, allow| {
-        if let Some(instance) = backend::parse_instance_id(&id) {
+    ui.on_set_allow_pack_mod_version_changes(move |kind, id, allow| {
+        if let Some(host) = workspace::parse_host(&kind, &id) {
             send(
                 &sender,
-                Command::SetAllowPackModVersionChanges { instance, allow },
+                Command::SetAllowPackModVersionChanges { host, allow },
             );
         }
     });
 }
 
-/// Forgets why the client's last runtime save was refused, so a new attempt
+/// Forgets why the host's last runtime save was refused, so a new attempt
 /// starts from a form with no verdict on it.
-fn clear_runtime_error(workspace: &Workspace, instance: ephervex_model::InstanceId) {
-    workspace.update(InstalledHost::Instance(instance), |view| {
+fn clear_runtime_error(workspace: &Workspace, host: InstalledHost) {
+    workspace.update(host, |view| {
         view.runtime_error = SharedString::default();
     });
 }
 
 fn register_server_actions(ui: &AppWindow, commands: &Sender<Command>, workspace: &Workspace) {
-    register_instance_runtime_actions(ui, commands, workspace);
+    register_host_runtime_actions(ui, commands, workspace);
 
     let sender = commands.clone();
     ui.on_repair_server(move |id| {
@@ -7751,20 +7751,19 @@ fn apply_event(
         Event::ArtifactCacheStatus(_) | Event::ArtifactCacheClearFinished => {
             apply_artifact_cache_event(ui, event);
         }
-        Event::InstanceRuntime(runtime) => {
-            // Kept with the instance it belongs to, so a late answer lands in
-            // its own view and never in the fields of another instance.
-            if let Some(instance) = backend::parse_instance_id(&runtime.instance) {
-                workspace.update(InstalledHost::Instance(instance), |view| {
-                    view.runtime_memory_min = runtime.min_memory.into();
-                    view.runtime_memory_max = runtime.max_memory.into();
-                    view.runtime_jvm_args = runtime.jvm_args.into();
-                    view.runtime_pinned = runtime.pinned;
-                    view.runtime_global = runtime.global.into();
-                    view.allow_pack_mod_changes = runtime.allow_pack_mod_version_changes;
-                    view.runtime_revision = view.runtime_revision.wrapping_add(1);
-                });
-            }
+        Event::HostRuntime(runtime) => {
+            // Kept with the host it belongs to, so a late answer lands in its
+            // own view and never in the fields of another host.
+            workspace.update(runtime.host, |view| {
+                view.runtime_memory_min = runtime.min_memory.into();
+                view.runtime_memory_max = runtime.max_memory.into();
+                view.runtime_jvm_args = runtime.jvm_args.into();
+                view.runtime_pinned = runtime.pinned;
+                view.runtime_global = runtime.global.into();
+                view.allow_pack_mod_changes = runtime.allow_pack_mod_version_changes;
+                view.pack_mod_changes_fixed = runtime.pack_mod_changes_fixed;
+                view.runtime_revision = view.runtime_revision.wrapping_add(1);
+            });
         }
         Event::CreationProgress {
             request_id,
@@ -10742,8 +10741,8 @@ mod tests {
     fn a_runtime_save_starts_from_a_form_without_the_last_refusal() {
         let (ui, workspace, _, host) = isolation_window();
         let (sender, commands) = std::sync::mpsc::channel();
-        register_instance_runtime_actions(&ui, &sender, &workspace);
-        let (_, id) = kind_and_id(host);
+        register_host_runtime_actions(&ui, &sender, &workspace);
+        let (kind, id) = kind_and_id(host);
 
         apply_host_error(
             &workspace,
@@ -10751,12 +10750,18 @@ mod tests {
             backend::HostErrorSurface::Settings,
             "Not a Java".to_owned(),
         );
-        ui.invoke_save_instance_runtime(id.clone(), "1024".into(), "".into(), "".into());
+        ui.invoke_save_host_runtime(
+            kind.clone(),
+            id.clone(),
+            "1024".into(),
+            "".into(),
+            "".into(),
+        );
 
         assert_eq!(first_view(&ui).runtime_error, "");
         assert!(matches!(
             commands.try_recv(),
-            Ok(Command::SaveInstanceRuntime { .. })
+            Ok(Command::SaveHostRuntime { .. })
         ));
 
         apply_host_error(
@@ -10765,7 +10770,7 @@ mod tests {
             backend::HostErrorSurface::Settings,
             "Not a Java".to_owned(),
         );
-        ui.invoke_clear_instance_runtime(id);
+        ui.invoke_clear_host_runtime(kind, id);
         assert_eq!(first_view(&ui).runtime_error, "");
     }
 

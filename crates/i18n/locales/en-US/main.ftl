@@ -1039,7 +1039,7 @@ pack-requirement-unknown = Not stated
 
 # Why a mod cannot be changed or removed. Each names a different situation, and
 # the difference is what tells a user whether to expect this to change.
-mod-restriction-pack-owned = The imported pack declares this mod. Enable independent mod changes for this instance to change it on its own.
+mod-restriction-pack-owned = The imported pack declares this mod. Turn on Independent mod changes in Settings to change it on its own.
 mod-restriction-dependency = Another mod requires this one, so its release follows what needs it.
 mod-restriction-hand-placed = This jar was added by hand, so Ephervex leaves it alone. Remove it from the mods folder yourself.
 mod-restriction-identity-unresolved = Ephervex cannot tell which project this file is, so it has nothing to look up.
@@ -1149,7 +1149,7 @@ local-mod-not-a-jar = Not a JAR. Minecraft mods are .jar files.
 local-mod-unusable-name = Its name cannot be used for a file in the mods folder.
 local-mod-not-an-archive = Not a readable JAR. It may be incomplete or corrupt.
 local-mod-too-large = Too large to be a mod.
-local-mod-recorded-by-pack = The imported pack declares a mod with this file name, so a JAR cannot replace it. Enable independent mod changes for this instance to move the mod to another release.
+local-mod-recorded-by-pack = The imported pack declares a mod with this file name, so a JAR cannot replace it. Turn on Independent mod changes in Settings to move the mod to another release.
 
 # Why a mod belongs to an instance. Kept distinct because they are different
 # things to look at and, later, different things to change.
@@ -2412,11 +2412,15 @@ gui-instance-jvm-args-unsupported-escape = In the extra JVM arguments, a backsla
 gui-instance-runtime-save = Save Runtime Settings
 gui-instance-runtime-clear = Follow Global Settings
 gui-instance-runtime-saved = Saved this instance's runtime settings.
+gui-server-runtime-detail = What this server runs with. Anything left empty follows the global setting.
+gui-server-runtime-saved = Saved this server's runtime settings.
 # $first is the global heap range, $second the globally selected Java.
 gui-instance-runtime-global = Globally: { $first }, { $second }.
 gui-allow-pack-mod-changes = Independent mod changes
 gui-allow-pack-mod-changes-detail = An instance you created here starts with this on, because it declared nothing to preserve. An imported one starts with it off: the pack's declaration is treated as a historical record, so a mod it declares can only be inspected, and the bin puts a jar aside so you can put it back. Turning this on lets you update or change the version of a pack-declared mod for this instance only, and makes the bin take a mod out of the instance for good, along with the dependencies nothing else needs. "Reset to Pack's Version" always remains available to undo a version change, and turning a mod off is still how you put one aside to find which one crashes.
 gui-allow-pack-mod-changes-toggle = Let me change and remove this instance's mods
+gui-allow-pack-mod-changes-server-detail = A server you created here always treats its mods as yours, because it declared nothing to preserve. One built from a pack or from published server files starts with this off: the pack's declaration is treated as a historical record, so a mod it declares can only be inspected. Turning this on lets you update, change the version of, or remove a pack-declared mod on this server only.
+gui-allow-pack-mod-changes-server-toggle = Let me change and remove this server's mods
 gui-instance-settings-unavailable = Instance-owned Minecraft settings
 gui-instance-settings-unavailable-detail = The current core safely applies known Vanilla defaults when an instance is created, but does not expose a typed editor for an existing instance. Unknown and mod-added options remain untouched.
 gui-open-global-defaults = Open Global Defaults

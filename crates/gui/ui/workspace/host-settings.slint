@@ -1,4 +1,4 @@
-// A host's own settings forms: client runtime options and server properties.
+// A host's own settings forms: runtime options and server properties.
 
 import { ScrollView } from "std-widgets.slint";
 import { ChoiceBox } from "../components/selection.slint";
@@ -167,14 +167,14 @@ export component JavaRuntimeSection inherits VerticalLayout {
     }
 }
 
-// A client's own runtime settings, edited here and saved together. The
-// fields start from what is stored and start over whenever it is read again
-// or the pane shows another host.
-export component ClientRuntimeForm inherits ScrollView {
+// A client's or a server's own runtime settings, edited here and saved
+// together. The fields start from what is stored and start over whenever it
+// is read again or the pane shows another host.
+export component HostRuntimeForm inherits ScrollView {
     in property <HostView> host;
     in property <string> error;
-    // (host, minimum memory, maximum memory, arguments)
-    callback save(string, string, string, string);
+    // (minimum memory, maximum memory, arguments)
+    callback save(string, string, string);
     callback load-java();
     callback choose-java(string);
     callback check-java-path(string);
@@ -182,9 +182,10 @@ export component ClientRuntimeForm inherits ScrollView {
     callback cancel-fix();
     callback apply-fix();
     in property <bool> busy;
-    callback clear(string);
-    callback allow-pack-mod-changes(string, bool);
+    callback clear();
+    callback allow-pack-mod-changes(bool);
     callback open-global-defaults();
+    property <bool> for-client: root.host.kind == "client";
     property <int> revision: root.host.runtime-revision;
     property <string> host-id: root.host.id;
     changed revision => { root.reset(); }
@@ -197,7 +198,7 @@ export component ClientRuntimeForm inherits ScrollView {
     }
     viewport-width: self.width;
     VerticalLayout { alignment: start; width: min(parent.width, 720px); spacing: 12px;
-        SectionTitle { title: GuiI18n.text("gui-instance-runtime"); detail: GuiI18n.text("gui-instance-runtime-detail"); }
+        SectionTitle { title: GuiI18n.text("gui-instance-runtime"); detail: root.for-client ? GuiI18n.text("gui-instance-runtime-detail") : GuiI18n.text("gui-server-runtime-detail"); }
         BodyText { text: root.host.runtime-global; color: Theme.text-muted; wrap: word-wrap; }
         HorizontalLayout { spacing: 12px;
             VerticalLayout { spacing: 4px; FieldLabel { text: GuiI18n.text("gui-java-memory-min"); } min-field := TextField { placeholder: GuiI18n.text("gui-instance-runtime-inherited"); accessible-name: GuiI18n.text("gui-java-memory-min"); input-type: InputType.number; width: 190px; } }
@@ -208,14 +209,14 @@ export component ClientRuntimeForm inherits ScrollView {
         args-field := TextField { placeholder: GuiI18n.text("gui-instance-jvm-args-placeholder"); accessible-name: GuiI18n.text("gui-instance-jvm-args"); }
         if root.error != "" : BodyText { text: root.error; color: Theme.danger; wrap: word-wrap; }
         HorizontalLayout { spacing: 8px;
-            if root.host.runtime-pinned : AppButton { text: GuiI18n.text("gui-instance-runtime-clear"); clicked => { root.clear(root.host.id); } }
+            if root.host.runtime-pinned : AppButton { text: GuiI18n.text("gui-instance-runtime-clear"); clicked => { root.clear(); } }
             Rectangle { horizontal-stretch: 1; }
-            AppButton { text: GuiI18n.text("gui-instance-runtime-save"); tone: "primary"; clicked => { root.save(root.host.id, min-field.text, max-field.text, args-field.text); } }
+            AppButton { text: GuiI18n.text("gui-instance-runtime-save"); tone: "primary"; clicked => { root.save(min-field.text, max-field.text, args-field.text); } }
         }
         Divider { }
-        SectionTitle { title: GuiI18n.text("gui-allow-pack-mod-changes"); detail: GuiI18n.text("gui-allow-pack-mod-changes-detail"); }
-        // Its position is what the instance records, read back after the change.
-        LabeledToggle { width: min(parent.width, 520px); label: GuiI18n.text("gui-allow-pack-mod-changes-toggle"); checked: root.host.allow-pack-mod-changes; sets-its-own-position: false; toggled(value) => { root.allow-pack-mod-changes(root.host.id, value); } }
+        SectionTitle { title: GuiI18n.text("gui-allow-pack-mod-changes"); detail: root.for-client ? GuiI18n.text("gui-allow-pack-mod-changes-detail") : GuiI18n.text("gui-allow-pack-mod-changes-server-detail"); }
+        // Its position is what the host records, read back after the change.
+        LabeledToggle { width: min(parent.width, 520px); label: root.for-client ? GuiI18n.text("gui-allow-pack-mod-changes-toggle") : GuiI18n.text("gui-allow-pack-mod-changes-server-toggle"); checked: root.host.allow-pack-mod-changes; enabled: !root.host.pack-mod-changes-fixed; sets-its-own-position: false; toggled(value) => { root.allow-pack-mod-changes(value); } }
         Divider { }
         JavaRuntimeSection {
             host: root.host;
@@ -228,9 +229,9 @@ export component ClientRuntimeForm inherits ScrollView {
             cancel-fix => { root.cancel-fix(); }
             apply-fix => { root.apply-fix(); }
         }
-        Divider { }
-        SectionTitle { title: GuiI18n.text("gui-instance-settings-unavailable"); detail: GuiI18n.text("gui-instance-settings-unavailable-detail"); }
-        HorizontalLayout { AppButton { text: GuiI18n.text("gui-open-global-defaults"); clicked => { root.open-global-defaults(); } } Rectangle { horizontal-stretch: 1; } }
+        if root.for-client : Divider { }
+        if root.for-client : SectionTitle { title: GuiI18n.text("gui-instance-settings-unavailable"); detail: GuiI18n.text("gui-instance-settings-unavailable-detail"); }
+        if root.for-client : HorizontalLayout { AppButton { text: GuiI18n.text("gui-open-global-defaults"); clicked => { root.open-global-defaults(); } } Rectangle { horizontal-stretch: 1; } }
     }
 }
 
@@ -245,13 +246,6 @@ export component ServerPropertiesForm inherits ScrollView {
     // allowlist, online mode, access, address, port, unset keys)
     callback save(string, string, string, string, string, bool, bool, bool, bool, string, string, string, string);
     callback review-eula();
-    callback load-java();
-    callback choose-java(string);
-    callback check-java-path(string);
-    callback install-java();
-    callback cancel-fix();
-    callback apply-fix();
-    in property <bool> busy;
     property <string> access;
     property <string> difficulty;
     property <string> gamemode;
@@ -298,17 +292,5 @@ export component ServerPropertiesForm inherits ScrollView {
         if PropertyRules.is-unset(root.unset, "allow-flight") || PropertyRules.is-unset(root.unset, "pvp") || PropertyRules.is-unset(root.unset, "white-list") : BodyText { text: GuiI18n.text("gui-property-toggles-unset-detail"); wrap: word-wrap; }
         Rectangle { height: 84px; border-radius: 8px; border-width: 1px; border-color: root.eula-accepted ? Theme.success : Theme.warning; background: Theme.surface; HorizontalLayout { padding: 14px; VerticalLayout { Heading { text: GuiI18n.text("gui-server-eula"); font-size: Theme.row-heading-size; } BodyText { text: root.eula-status; wrap: word-wrap; } } AppButton { text: root.eula-accepted ? GuiI18n.text("gui-eula-review") : GuiI18n.text("gui-eula-review-accept"); clicked => { root.review-eula(); } } } }
         ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-changes"); tone: "primary"; enabled: ServerHints.can-save(root.host.server.state-kind); hint: ServerHints.save(root.host.server.state-kind); clicked => { root.save(root.host.id, motd-field.text, players-field.text, root.difficulty, root.gamemode, root.allow-flight, root.pvp, root.allowlist, root.online-mode, root.access, address-field.text, port-field.text, root.unset); } } }
-        Divider { }
-        JavaRuntimeSection {
-            host: root.host;
-            can-change: !root.busy;
-            change-hint: GuiI18n.text("gui-hint-busy");
-            load => { root.load-java(); }
-            choose(key) => { root.choose-java(key); }
-            check-path(path) => { root.check-java-path(path); }
-            install => { root.install-java(); }
-            cancel-fix => { root.cancel-fix(); }
-            apply-fix => { root.apply-fix(); }
-        }
     }
 }

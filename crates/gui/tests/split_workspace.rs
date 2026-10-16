@@ -468,7 +468,7 @@ fn tabs_that_do_not_fit_wait_under_more() {
         placed(1, CLIENT, "Overview", 0, 0, false),
         placed(2, SERVER, "Diagnostics", 1, 0, false),
     ];
-    panes[1].surface_choice = 7;
+    panes[1].surface_choice = 8;
     split(&ui, panes);
 
     let tab = |label: &str| in_pane(&ui, 2, &lookup(label), AccessibleRole::Button).len();
@@ -621,12 +621,19 @@ fn close_first_pane(ui: &AppWindow, remaining: WorkspacePaneRow, host: HostView)
     settle(ui);
 }
 
-/// What a pane's Settings form saves when Save is pressed.
+/// What a pane's Settings form saves when Save is pressed: the host's id and
+/// the minimum memory.
 fn save_runtime(ui: &AppWindow, pane: i32) -> (String, String) {
+    let (_, id, min_memory) = save_host_runtime(ui, pane);
+    (id, min_memory)
+}
+
+/// What a pane's Settings form saves when Save is pressed, with the host's kind.
+fn save_host_runtime(ui: &AppWindow, pane: i32) -> (String, String, String) {
     let saved = Rc::new(RefCell::new(None));
     let sink = Rc::clone(&saved);
-    ui.on_save_instance_runtime(move |id, min_memory, _, _| {
-        *sink.borrow_mut() = Some((id.to_string(), min_memory.to_string()));
+    ui.on_save_host_runtime(move |kind, id, min_memory, _, _| {
+        *sink.borrow_mut() = Some((kind.to_string(), id.to_string(), min_memory.to_string()));
     });
     in_pane(
         ui,
@@ -935,6 +942,70 @@ fn a_runtime_form_follows_the_host_after_the_pane_before_it_closes() {
         runtime_host("bbbb", "2048"),
     );
     assert_eq!(save_runtime(&ui, 2), ("bbbb".to_owned(), "2048".to_owned()));
+}
+
+/// A server has a Settings tab of its own: its runtime form and its pack-mod
+/// setting change the server, beside a client's that change the client.
+#[test]
+fn a_servers_settings_save_its_own_runtime_beside_a_clients() {
+    let ui = window();
+    // Tall enough that the pack-mod setting, below the Java runtime section,
+    // lies inside each pane.
+    ui.window().set_size(PhysicalSize::new(2400, 2400));
+    let mut server_view = support::server_view(ServerRow {
+        id: "cccc".into(),
+        ..server(false)
+    });
+    server_view.runtime_memory_min = "3072".into();
+    server_view.runtime_revision = 1;
+    support::show(
+        &ui,
+        0,
+        vec![runtime_host("aaaa", "1024"), server_view],
+        vec![
+            placed(1, 0, "Settings", 0, 0, false),
+            placed(2, 1, "Settings", 1, 0, false),
+        ],
+    );
+    settle(&ui);
+
+    assert_eq!(
+        save_host_runtime(&ui, 1),
+        ("client".to_owned(), "aaaa".to_owned(), "1024".to_owned())
+    );
+    assert_eq!(
+        save_host_runtime(&ui, 2),
+        ("server".to_owned(), "cccc".to_owned(), "3072".to_owned())
+    );
+    // Each pane offers its own host's pack-mod setting, and switching it
+    // names that host.
+    let switched = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&switched);
+    ui.on_set_allow_pack_mod_version_changes(move |kind, id, allow| {
+        sink.borrow_mut()
+            .push((kind.to_string(), id.to_string(), allow));
+    });
+    for (pane, label) in [
+        (1, "gui-allow-pack-mod-changes-toggle"),
+        (2, "gui-allow-pack-mod-changes-server-toggle"),
+    ] {
+        let area = pane_area(&ui, pane);
+        ElementHandle::find_by_accessible_label(&ui, &lookup(label))
+            .find(|element| {
+                element.size().width > 0.0
+                    && element.accessible_role() == Some(AccessibleRole::Checkbox)
+                    && area.contains(Area::of(element))
+            })
+            .unwrap_or_else(|| panic!("pane {pane} offers {label}"))
+            .invoke_accessible_default_action();
+    }
+    assert_eq!(
+        switched.borrow().as_slice(),
+        [
+            ("client".to_owned(), "aaaa".to_owned(), true),
+            ("server".to_owned(), "cccc".to_owned(), true),
+        ]
+    );
 }
 
 /// A pane's Properties form shows and saves the host the pane shows, not the

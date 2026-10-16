@@ -277,11 +277,8 @@ impl DiagnosisFlowState {
     }
 }
 
-fn finding_row(host: InstalledHost, key: String, finding: &FindingView) -> DiagnosticFindingRow {
-    // A server has no runtime settings surface to send anyone to.
-    let route = finding.route.filter(|route| {
-        !(matches!(host, InstalledHost::Server(_)) && *route == FindingRoute::HostSettings)
-    });
+fn finding_row(key: String, finding: &FindingView) -> DiagnosticFindingRow {
+    let route = finding.route;
     let more = finding.files.len().saturating_sub(LISTED_FILES);
     DiagnosticFindingRow {
         key: key.into(),
@@ -371,7 +368,7 @@ fn summary(shown: &Shown) -> (String, String) {
     (title, detail)
 }
 
-fn write_result(view: &mut HostView, host: InstalledHost, shown: Option<&Shown>) {
+fn write_result(view: &mut HostView, shown: Option<&Shown>) {
     let Some(shown) = shown else {
         view.diagnosis_failure = SharedString::default();
         view.diagnosis_healthy = false;
@@ -389,7 +386,7 @@ fn write_result(view: &mut HostView, host: InstalledHost, shown: Option<&Shown>)
             findings
                 .iter()
                 .enumerate()
-                .map(|(index, finding)| finding_row(host, finding_key(problem, index), finding))
+                .map(|(index, finding)| finding_row(finding_key(problem, index), finding))
                 .collect(),
         )
     };
@@ -469,7 +466,7 @@ fn render(workspace: &Workspace, state: &DiagnosisFlowState, host: InstalledHost
         view.diagnosis_progress = surface.progress.as_str().into();
         view.diagnosis_error = error.into();
         view.diagnosis_stale = surface.stale;
-        write_result(view, host, surface.shown.as_ref());
+        write_result(view, surface.shown.as_ref());
         write_review(view, surface.review.as_ref());
         let outcome = surface.outcome.as_ref();
         view.fix_result = outcome
@@ -1183,4 +1180,31 @@ fn register_bundle(ui: &AppWindow, commands: &Sender<Command>, workspace: &Works
             );
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A finding about a host's own runtime leads to that host's Settings tab,
+    /// which a server has as well as a client.
+    #[test]
+    fn a_runtime_finding_leads_to_the_hosts_settings() {
+        let finding = FindingView {
+            class: ephervex_core::FindingClass::Problem,
+            title: "Java".to_owned(),
+            detail: String::new(),
+            chain: Vec::new(),
+            files: Vec::new(),
+            fix: None,
+            fix_label: String::new(),
+            route: Some(FindingRoute::HostSettings),
+            install: None,
+        };
+
+        let row = finding_row("problem-0".to_owned(), &finding);
+
+        assert_eq!(row.route, FindingRoute::HostSettings.as_str());
+        assert_eq!(row.route_label, lookup(FindingRoute::HostSettings.label()));
+    }
 }

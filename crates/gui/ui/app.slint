@@ -76,7 +76,7 @@ import { DiskUsagePanel, OverrideCard } from "settings/application.slint";
 import { MinecraftPreferenceRowCard } from "settings/minecraft-defaults.slint";
 import { Theme } from "theme.slint";
 import { DiagnosticsSurface, RunFailureNotice } from "workspace/diagnostics.slint";
-import { ClientRuntimeForm, ServerPropertiesForm } from "workspace/host-settings.slint";
+import { HostRuntimeForm, ServerPropertiesForm } from "workspace/host-settings.slint";
 import { HostPickerCard, HostWorkspace, WorkspaceTab } from "workspace/host-workspace.slint";
 import { IsolationSurface } from "workspace/isolation.slint";
 import { CrashNotice, DiagnosticFileList, LiveLogViewer } from "workspace/logs.slint";
@@ -700,15 +700,17 @@ export component AppWindow inherits Window {
     callback delete-client(string, bool, bool);
     callback delete-server(string, bool);
     callback repair-server(string);
-    callback save-instance-runtime(string, string, string, string);
+    // (kind, id, minimum memory, maximum memory, arguments)
+    callback save-host-runtime(string, string, string, string, string);
     // A host's Java: read it, choose a runtime for review, check a path the
     // user typed, or install the runtime the host expects.
     callback load-host-java(string, string);
     callback choose-host-java(string, string, string);
     callback check-host-java-path(string, string, string);
     callback install-host-java(string, string);
-    callback clear-instance-runtime(string);
-    callback set-allow-pack-mod-version-changes(string, bool);
+    callback clear-host-runtime(string, string);
+    // (kind, id, allow)
+    callback set-allow-pack-mod-version-changes(string, string, bool);
     callback load-instance-workspace(string);
     // Opens the workspace on one host and surface: (kind, id, surface).
     callback open-workspace(string, string, string);
@@ -1246,7 +1248,7 @@ export component AppWindow inherits Window {
                                 java-tone: host.java-tone;
                                 java-tone-label: host.java-tone-label;
                                 java-origin: host.java-origin;
-                                open-java => { root.show-pane-surface(pane.id, self.is-client ? "Settings" : "Properties"); }
+                                open-java => { root.show-pane-surface(pane.id, "Settings"); }
                                 choose-host => { root.pane-host-picker-pane = pane.id; root.pane-host-picker-kind = host.kind; root.pane-host-picker-id = host.id; root.pane-host-query = ""; root.pane-host-query-changed(); root.modal = "pane-host"; }
                                 split-beside => { root.split-pane-beside(pane.id); }
                                 split-below => { root.split-pane-below(pane.id); }
@@ -1419,19 +1421,19 @@ export component AppWindow inherits Window {
                                     retry-recovery => { root.retry-isolation-recovery(host.kind, host.id); }
                                     close => { root.dismiss-isolation(host.kind, host.id); root.show-pane-surface(pane.id, "Mods"); }
                                 }
-                                if host.available && host.kind == "client" && pane.surface == "Settings" : ClientRuntimeForm {
+                                if host.available && pane.surface == "Settings" : HostRuntimeForm {
                                     host: host;
                                     error: host.runtime-error;
                                     busy: root.host-busy-kind == host.kind && root.host-busy-id == host.id;
-                                    save(id, min, max, args) => { root.save-instance-runtime(id, min, max, args); }
+                                    save(min, max, args) => { root.save-host-runtime(host.kind, host.id, min, max, args); }
                                     load-java => { root.load-host-java(host.kind, host.id); }
                                     choose-java(key) => { root.choose-host-java(host.kind, host.id, key); }
                                     check-java-path(path) => { root.check-host-java-path(host.kind, host.id, path); }
                                     install-java => { root.install-host-java(host.kind, host.id); }
                                     cancel-fix => { root.cancel-fix(host.kind, host.id); }
                                     apply-fix => { root.apply-fix(host.kind, host.id); }
-                                    clear(id) => { root.clear-instance-runtime(id); }
-                                    allow-pack-mod-changes(id, allow) => { root.set-allow-pack-mod-version-changes(id, allow); }
+                                    clear => { root.clear-host-runtime(host.kind, host.id); }
+                                    allow-pack-mod-changes(allow) => { root.set-allow-pack-mod-version-changes(host.kind, host.id, allow); }
                                     open-global-defaults => { root.close-workspace(); root.page = 4; root.settings-tab = "Minecraft"; }
                                 }
                                 if host.available && host.kind == "client" && pane.surface == "Snapshots" : SnapshotPanel {
@@ -1585,13 +1587,6 @@ export component AppWindow inherits Window {
                                     eula-status: root.eula-status;
                                     save(id, motd, players, difficulty, gamemode, flight, pvp, allowlist, online, access, address, port, unset) => { root.save-server-properties(id, motd, players, difficulty, gamemode, flight, pvp, allowlist, online, access, address, port, unset); }
                                     review-eula => { root.modal = "eula"; }
-                                    busy: root.host-busy-kind == host.kind && root.host-busy-id == host.id;
-                                    load-java => { root.load-host-java(host.kind, host.id); }
-                                    choose-java(key) => { root.choose-host-java(host.kind, host.id, key); }
-                                    check-java-path(path) => { root.check-host-java-path(host.kind, host.id, path); }
-                                    install-java => { root.install-host-java(host.kind, host.id); }
-                                    cancel-fix => { root.cancel-fix(host.kind, host.id); }
-                                    apply-fix => { root.apply-fix(host.kind, host.id); }
                                 }
                             }
                         }

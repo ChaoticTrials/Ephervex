@@ -132,19 +132,19 @@ pub enum Command {
     /// Records the Minecraft releases to offer first, in the order given.
     SetFavoriteMinecraftVersions(Vec<String>),
     CancelOperation(String),
-    /// Replace one instance's own JVM settings. A blank memory field restores
-    /// the global setting. `jvm_args` and the memory fields are the typed text.
-    /// The instance's Java pin is never touched here: choosing a runtime is a
-    /// previewed change of its own.
-    SaveInstanceRuntime {
-        instance: InstanceId,
+    /// Replace one client's or server's own JVM settings. A blank memory field
+    /// restores the global setting. `jvm_args` and the memory fields are the
+    /// typed text. The host's Java pin is never touched here: choosing a
+    /// runtime is a previewed change of its own.
+    SaveHostRuntime {
+        host: InstalledHost,
         min_memory_mib: String,
         max_memory_mib: String,
         jvm_args: String,
     },
-    /// Turns pack-owned mod mutation on or off for one instance.
+    /// Turns pack-owned mod mutation on or off for one client or server.
     SetAllowPackModVersionChanges {
-        instance: InstanceId,
+        host: InstalledHost,
         allow: bool,
     },
     /// Pairs a client with one of its linked servers, or changes whether
@@ -1295,10 +1295,10 @@ pub struct HostJavaData {
     pub choices: Option<Vec<JavaChoiceView>>,
 }
 
-/// One instance's own runtime settings, and what it would otherwise inherit.
+/// One host's own runtime settings, and what it would otherwise inherit.
 #[derive(Debug, Clone)]
-pub struct InstanceRuntimeData {
-    pub instance: String,
+pub struct HostRuntimeData {
+    pub host: InstalledHost,
     pub min_memory: String,
     pub max_memory: String,
     pub jvm_args: String,
@@ -1308,7 +1308,11 @@ pub struct InstanceRuntimeData {
     /// An already-localized sentence naming what the global settings are, so
     /// an empty field reads as a choice rather than as missing information.
     pub global: String,
+    /// Whether the pack-declared mods are the user's to change.
     pub allow_pack_mod_version_changes: bool,
+    /// Whether that cannot be switched off: a server made here has no
+    /// declaration to preserve.
+    pub pack_mod_changes_fixed: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1646,7 +1650,7 @@ pub enum Event {
         event: ServerToolEvent,
     },
     Snapshot(Box<Snapshot>),
-    InstanceRuntime(InstanceRuntimeData),
+    HostRuntime(HostRuntimeData),
     /// A host's Java, as [`Command::LoadHostJava`] read it.
     HostJava(Box<HostJavaData>),
     /// A launch chose its Java runtime or ended, either of which may follow
@@ -2976,14 +2980,13 @@ fn run_worker(
                     }
                 }
             }
-            Command::SaveInstanceRuntime {
-                instance,
+            Command::SaveHostRuntime {
+                host,
                 min_memory_mib,
                 max_memory_mib,
                 jvm_args,
             } => {
-                if refuse_save_while_changing(&changing, InstalledHost::Instance(instance), &events)
-                {
+                if refuse_save_while_changing(&changing, host, &events) {
                     continue;
                 }
                 // Text that cannot be read as one argument list is refused,
@@ -2993,7 +2996,7 @@ fn run_worker(
                     Err(error) => {
                         send_host_error_message(
                             &events,
-                            InstalledHost::Instance(instance),
+                            host,
                             HostErrorSurface::Settings,
                             lookup(error.message_id()),
                         );
@@ -3010,7 +3013,7 @@ fn run_worker(
                 let Ok((min_memory_mib, max_memory_mib)) = memory else {
                     send_host_error_message(
                         &events,
-                        InstalledHost::Instance(instance),
+                        host,
                         HostErrorSurface::Settings,
                         lookup(crate::memory_input::NotANumber::MESSAGE_ID),
                     );
@@ -3021,31 +3024,56 @@ fn run_worker(
                     max_memory_mib,
                     jvm_args,
                 };
-                let result =
-                    app.set_client_jvm_settings(instance, (!jvm.pins_nothing()).then_some(jvm));
+                let jvm = (!jvm.pins_nothing()).then_some(jvm);
+                // What the commit warns about, said once the save is confirmed.
+                let result = match host {
+                    InstalledHost::Instance(instance) => {
+                        app.set_client_jvm_settings(instance, jvm).map(|committed| {
+                            committed
+                                .warnings
+                                .iter()
+                                .map(ephervex_core::instance::client_commit_warning_message)
+                                .collect::<Vec<_>>()
+                        })
+                    }
+                    InstalledHost::Server(server) => {
+                        app.set_server_jvm_settings(server, jvm).map(|committed| {
+                            committed
+                                .warnings
+                                .iter()
+                                .map(ephervex_core::server::server_commit_warning_message)
+                                .collect::<Vec<_>>()
+                        })
+                    }
+                };
                 match result {
-                    Ok(committed) => {
+                    Ok(warnings) => {
                         let _ = events.send(Event::Toast {
-                            message: lookup("gui-instance-runtime-saved"),
+                            message: lookup(match host {
+                                InstalledHost::Instance(_) => "gui-instance-runtime-saved",
+                                InstalledHost::Server(_) => "gui-server-runtime-saved",
+                            }),
                             error: false,
                         });
-                        send_client_commit_warnings(&events, &committed.warnings);
+                        for message in warnings {
+                            let _ = events.send(Event::Toast {
+                                message,
+                                error: true,
+                            });
+                        }
                         send_snapshot(&mut app, &events);
                         // The form starts over from what was stored, which
                         // also says whether anything is pinned now.
-                        if let Ok(runtime) = instance_runtime_data(&app, instance) {
-                            let _ = events.send(Event::InstanceRuntime(runtime));
+                        if let Ok(runtime) = host_runtime_data(&app, host) {
+                            let _ = events.send(Event::HostRuntime(runtime));
                         }
                     }
                     // Shown on the form the fields are on, not as a toast the
                     // user has to catch: a refused save leaves them looking at
-                    // values that are not what the instance has.
-                    Err(error) => send_host_error(
-                        &events,
-                        InstalledHost::Instance(instance),
-                        HostErrorSurface::Settings,
-                        &error,
-                    ),
+                    // values that are not what the host has.
+                    Err(error) => {
+                        send_host_error(&events, host, HostErrorSurface::Settings, &error);
+                    }
                 }
             }
             Command::SetLinkedPair {
@@ -3086,25 +3114,30 @@ fn run_worker(
                     Err(error) => send_error(&events, &error),
                 }
             }
-            Command::SetAllowPackModVersionChanges { instance, allow } => {
+            Command::SetAllowPackModVersionChanges { host, allow } => {
                 // No toast. The toggle itself is the confirmation; a refusal
                 // is still reported, because then nothing on screen changed.
-                if !refuse_while_changing(&changing, InstalledHost::Instance(instance), &events) {
-                    match app.set_allow_pack_mod_version_changes(instance, allow) {
-                        Ok(committed) => {
-                            send_client_commit_warnings(&events, &committed.warnings);
+                if !refuse_while_changing(&changing, host, &events) {
+                    let result = match host {
+                        InstalledHost::Instance(instance) => app
+                            .set_allow_pack_mod_version_changes(instance, allow)
+                            .map(|committed| {
+                                send_client_commit_warnings(&events, &committed.warnings);
+                            }),
+                        InstalledHost::Server(server) => app
+                            .set_server_allow_pack_mod_version_changes(server, allow)
+                            .map(|committed| {
+                                send_server_commit_warnings(&events, &committed.warnings);
+                            }),
+                    };
+                    match result {
+                        Ok(()) => {
                             send_snapshot(&mut app, &events);
                             // The setting decides what each row may have done
                             // to it, so the list it decides for is re-read
                             // here rather than at the next time the tab
                             // happens to be opened.
-                            send_host_mods(
-                                &app,
-                                InstalledHost::Instance(instance),
-                                &events,
-                                &refreshed_mods,
-                                false,
-                            );
+                            send_host_mods(&app, host, &events, &refreshed_mods, false);
                         }
                         Err(error) => send_error(&events, &error),
                     }
@@ -3113,8 +3146,8 @@ fn run_worker(
                 // after a refusal the toggle shows what the user asked for
                 // rather than what was stored, and it is the only thing on
                 // screen saying which it is.
-                if let Ok(runtime) = instance_runtime_data(&app, instance) {
-                    let _ = events.send(Event::InstanceRuntime(runtime));
+                if let Ok(runtime) = host_runtime_data(&app, host) {
+                    let _ = events.send(Event::HostRuntime(runtime));
                 }
             }
             Command::RepairServer(id) => {
@@ -3936,8 +3969,8 @@ fn run_worker(
                     }
                 }
 
-                if let Ok(runtime) = instance_runtime_data(&app, instance) {
-                    let _ = events.send(Event::InstanceRuntime(runtime));
+                if let Ok(runtime) = host_runtime_data(&app, InstalledHost::Instance(instance)) {
+                    let _ = events.send(Event::HostRuntime(runtime));
                 }
                 send_isolation_state(
                     &app,
@@ -4034,12 +4067,19 @@ fn run_worker(
                         // lives in the restored directory itself.
                         match host {
                             InstalledHost::Instance(instance) => {
-                                if let Ok(runtime) = instance_runtime_data(&app, instance) {
-                                    let _ = reports.send(Event::InstanceRuntime(runtime));
+                                if let Ok(runtime) =
+                                    host_runtime_data(&app, InstalledHost::Instance(instance))
+                                {
+                                    let _ = reports.send(Event::HostRuntime(runtime));
                                 }
                             }
                             InstalledHost::Server(server) => {
                                 send_server_workspace(&app, server, &reports);
+                                if let Ok(runtime) =
+                                    host_runtime_data(&app, InstalledHost::Server(server))
+                                {
+                                    let _ = reports.send(Event::HostRuntime(runtime));
+                                }
                             }
                         }
                         send_client_commit_warnings(&reports, &restore.warnings);
@@ -5074,6 +5114,12 @@ fn run_worker(
                 let review = app.crash_review(host).ok().flatten();
                 let _ = events.send(Event::CrashNotice(crash_notice_data(host, review.as_ref())));
                 send_server_workspace(&app, server, &events);
+                // Only here, on a restore, and after a save: a run ending or
+                // a Properties save leaves the runtime as it was, and reading
+                // it again would undo what is being typed on the form.
+                if let Ok(runtime) = host_runtime_data(&app, host) {
+                    let _ = events.send(Event::HostRuntime(runtime));
+                }
                 send_isolation_state(
                     &app,
                     InstalledHost::Server(server),
@@ -10028,13 +10074,31 @@ fn analyze_import(
     }
 }
 
-fn instance_runtime_data(app: &App, instance: InstanceId) -> CoreResult<InstanceRuntimeData> {
-    let record = app.current_client(instance)?;
+fn host_runtime_data(app: &App, host: InstalledHost) -> CoreResult<HostRuntimeData> {
+    let (jvm_override, allow_pack_mod_version_changes, pack_mod_changes_fixed) = match host {
+        InstalledHost::Instance(instance) => {
+            let record = app.current_client(instance)?;
+            (
+                record.jvm_override,
+                record.allow_pack_mod_version_changes,
+                false,
+            )
+        }
+        InstalledHost::Server(server) => {
+            let record = app.current_server(server)?;
+            let made_here = record.source.is_manual();
+            (
+                record.jvm_override,
+                made_here || record.allow_pack_mod_version_changes,
+                made_here,
+            )
+        }
+    };
     let global = app.java_settings();
-    let jvm = record.jvm_override.as_ref();
+    let jvm = jvm_override.as_ref();
     let number = |value: Option<u32>| value.map(|mib| mib.to_string()).unwrap_or_default();
-    Ok(InstanceRuntimeData {
-        instance: instance.to_string(),
+    Ok(HostRuntimeData {
+        host,
         min_memory: number(jvm.and_then(|jvm| jvm.min_memory_mib)),
         max_memory: number(jvm.and_then(|jvm| jvm.max_memory_mib)),
         jvm_args: jvm
@@ -10049,7 +10113,8 @@ fn instance_runtime_data(app: &App, instance: InstanceId) -> CoreResult<Instance
                 |path| path.display().to_string(),
             ),
         ),
-        allow_pack_mod_version_changes: record.allow_pack_mod_version_changes,
+        allow_pack_mod_version_changes,
+        pack_mod_changes_fixed,
     })
 }
 
@@ -12898,7 +12963,8 @@ mod tests {
         })
         .expect("a committed change");
 
-        let runtime = instance_runtime_data(&app, client.id).expect("runtime data");
+        let runtime =
+            host_runtime_data(&app, InstalledHost::Instance(client.id)).expect("runtime data");
 
         assert_eq!(runtime.min_memory, "2048");
         assert_eq!(runtime.max_memory, "4096");
