@@ -40,7 +40,7 @@
 //! offering a Refresh is the caller's job - `ephervex-core` does it for both
 //! frontends.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -183,6 +183,41 @@ pub struct ProbeFailure {
     pub error: Arc<ProbeError>,
 }
 
+/// A managed store's directory, as written and as resolved.
+struct StoreRoot {
+    written: PathBuf,
+    resolved: Option<PathBuf>,
+}
+
+impl StoreRoot {
+    fn new(root: &Path) -> Self {
+        Self {
+            written: root.to_path_buf(),
+            resolved: std::fs::canonicalize(root).ok(),
+        }
+    }
+
+    /// Whether `origin` is a managed candidate under this store, by the path
+    /// it was found at rather than where that path resolves.
+    fn found(&self, origin: &JavaOrigin) -> bool {
+        origin.kind == JavaSourceKind::Managed
+            && (origin.path.starts_with(&self.written)
+                || self
+                    .resolved
+                    .as_ref()
+                    .is_some_and(|resolved| origin.path.starts_with(resolved)))
+    }
+}
+
+/// The order an inventory lists runtimes in: newest first, then by path so the
+/// order is stable between scans.
+fn inventory_order(left: &JavaRuntime, right: &JavaRuntime) -> std::cmp::Ordering {
+    right
+        .version
+        .cmp(&left.version)
+        .then_with(|| left.executable.cmp(&right.executable))
+}
+
 /// Every runtime found by one scan.
 #[derive(Debug, Clone)]
 pub struct RuntimeInventory {
@@ -204,6 +239,86 @@ impl RuntimeInventory {
         self.runtimes
             .iter()
             .filter(move |runtime| runtime.version.major == major)
+    }
+
+    /// Adds a runtime found after the scan, replacing the entry for the same
+    /// executable and keeping the inventory newest first.
+    pub fn remember(&mut self, runtime: JavaRuntime) {
+        self.runtimes
+            .retain(|known| known.executable != runtime.executable);
+        let position = self
+            .runtimes
+            .partition_point(|known| inventory_order(known, &runtime).is_lt());
+        self.runtimes.insert(position, runtime);
+    }
+
+    /// Whether the runtimes the managed store at `root` publishes are the
+    /// managed runtimes this inventory holds, so an install or removal made
+    /// since the scan, by any process, is noticed. Reads directories and runs
+    /// nothing.
+    #[must_use]
+    pub fn matches_managed_store(&self, root: &Path) -> bool {
+        let published: BTreeSet<PathBuf> = JavaDiscovery::isolated()
+            .with_managed_root(root)
+            .candidates()
+            .iter()
+            .filter_map(|origin| canonical_executable(&origin.path))
+            .collect();
+        let store = StoreRoot::new(root);
+        let resolved = |origin: &JavaOrigin| {
+            canonical_executable(&origin.path).unwrap_or_else(|| origin.path.clone())
+        };
+        let mut held = BTreeSet::new();
+        for runtime in &self.runtimes {
+            let mut found_there = runtime
+                .origins
+                .iter()
+                .filter(|origin| store.found(origin))
+                .peekable();
+            if found_there.peek().is_some() {
+                held.insert(runtime.executable.clone());
+                held.extend(found_there.map(resolved));
+            }
+        }
+        held.extend(
+            self.failures
+                .iter()
+                .filter(|failure| store.found(&failure.origin))
+                .map(|failure| resolved(&failure.origin)),
+        );
+        published == held
+    }
+
+    /// This inventory with what was found in the managed store at `root`
+    /// replaced by `managed`, a scan of that store alone. A runtime also found
+    /// elsewhere keeps its other origins.
+    #[must_use]
+    pub fn with_managed_from(&self, root: &Path, managed: Self) -> Self {
+        let store = StoreRoot::new(root);
+        let mut updated = self.clone();
+        updated.runtimes.retain_mut(|runtime| {
+            runtime.origins.retain(|origin| !store.found(origin));
+            !runtime.origins.is_empty()
+        });
+        updated
+            .failures
+            .retain(|failure| !store.found(&failure.origin));
+        for runtime in managed.runtimes {
+            match updated
+                .runtimes
+                .iter_mut()
+                .find(|known| known.executable == runtime.executable)
+            {
+                Some(known) => {
+                    for origin in runtime.origins {
+                        known.absorb(origin);
+                    }
+                }
+                None => updated.remember(runtime),
+            }
+        }
+        updated.failures.extend(managed.failures);
+        updated
     }
 
     /// The runtime at a given canonical path, if it was found.
@@ -320,13 +435,7 @@ impl JavaDiscovery {
 
         let mut runtimes = merge_split_jdk_homes(runtimes);
 
-        // Newest first, then by path so the order is stable between scans.
-        runtimes.sort_by(|left, right| {
-            right
-                .version
-                .cmp(&left.version)
-                .then_with(|| left.executable.cmp(&right.executable))
-        });
+        runtimes.sort_by(inventory_order);
 
         RuntimeInventory {
             runtimes,
@@ -665,6 +774,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_inventory_notices_a_managed_runtime_installed_or_removed_after_its_scan() {
+        let temp = tempfile::tempdir().expect("temp");
+        let managed = temp.path().join("java");
+        let major = managed.join("17");
+        std::fs::create_dir_all(&major).expect("create major dir");
+        fake_jdk(
+            &major,
+            "eclipse-jdk-17.0.12+7",
+            "17.0.12",
+            "17.0.12+7",
+            "Eclipse Adoptium",
+        );
+        let discovery = JavaDiscovery::isolated().with_managed_root(&managed);
+        let scanned = discovery.discover().await;
+        assert!(scanned.matches_managed_store(&managed));
+
+        let newer = managed.join("21");
+        std::fs::create_dir_all(&newer).expect("create major dir");
+        fake_jdk(
+            &newer,
+            "eclipse-jdk-21.0.8+9",
+            "21.0.8",
+            "21.0.8+9",
+            "Eclipse Adoptium",
+        );
+        assert!(!scanned.matches_managed_store(&managed));
+        let caught_up = scanned.with_managed_from(&managed, discovery.discover().await);
+        assert!(caught_up.matches_managed_store(&managed));
+        assert_eq!(caught_up.runtimes.len(), 2);
+        assert_eq!(caught_up.runtimes[0].version.major, 21);
+
+        std::fs::remove_dir_all(&newer).expect("remove the newer runtime");
+        assert!(!caught_up.matches_managed_store(&managed));
+    }
+
+    #[tokio::test]
+    async fn a_managed_build_linked_to_a_runtime_outside_the_store_matches_after_one_scan() {
+        let temp = tempfile::tempdir().expect("temp");
+        let outside = temp.path().join("jvm");
+        std::fs::create_dir_all(&outside).expect("create outside dir");
+        fake_jdk(
+            &outside,
+            "temurin-21",
+            "21.0.8",
+            "21.0.8+9",
+            "Eclipse Adoptium",
+        );
+        let managed = temp.path().join("java");
+        let major = managed.join("21");
+        std::fs::create_dir_all(&major).expect("create major dir");
+        let link = major.join("eclipse-jdk-21.0.8+9");
+        std::os::unix::fs::symlink(outside.join("temurin-21"), &link).expect("link");
+        let discovery = JavaDiscovery::isolated()
+            .with_managed_root(&managed)
+            .with_system_directory(&outside);
+
+        let scanned = discovery.discover().await;
+        assert!(scanned.matches_managed_store(&managed));
+
+        std::fs::remove_file(&link).expect("unlink");
+        assert!(!scanned.matches_managed_store(&managed));
+        let caught_up = scanned.with_managed_from(
+            &managed,
+            JavaDiscovery::isolated()
+                .with_managed_root(&managed)
+                .discover()
+                .await,
+        );
+        assert!(caught_up.matches_managed_store(&managed));
+        assert_eq!(caught_up.runtimes.len(), 1, "the system copy stays");
+        assert!(!caught_up.runtimes[0].is_managed());
+    }
+
+    #[tokio::test]
+    async fn a_scan_that_found_no_managed_store_matches_its_absence() {
+        let temp = tempfile::tempdir().expect("temp");
+        let inventory = JavaDiscovery::isolated().discover().await;
+        assert!(inventory.matches_managed_store(&temp.path().join("java")));
+    }
+
+    #[tokio::test]
     async fn a_managed_runtime_is_found_and_marked_as_managed() {
         let temp = tempfile::tempdir().expect("temp");
         let managed = temp.path().join("java");
@@ -867,5 +1057,55 @@ mod tests {
     #[test]
     fn an_absent_directory_yields_no_candidates_rather_than_an_error() {
         assert!(children(Path::new("/nonexistent/ephervex/jvm")).is_empty());
+    }
+
+    #[test]
+    fn a_runtime_remembered_after_the_scan_takes_its_place_newest_first() {
+        let at = |path: &str, version: JavaVersion| JavaRuntime {
+            executable: PathBuf::from(path),
+            home: None,
+            version,
+            version_string: version.to_string(),
+            runtime_version: version.to_string(),
+            vendor: "Eclipse Adoptium".to_owned(),
+            arch: "amd64".to_owned(),
+            origins: Vec::new(),
+        };
+        let mut inventory = RuntimeInventory {
+            runtimes: vec![
+                at("/jdk/21/bin/java", JavaVersion::new(21, 0, 8)),
+                at("/jdk/8/bin/java", JavaVersion::new(8, 0, 402)),
+            ],
+            failures: Vec::new(),
+            probed: 2,
+            candidates: 2,
+            scanned_at: Utc::now(),
+        };
+
+        inventory.remember(at("/jdk/25/bin/java", JavaVersion::new(25, 0, 1)));
+        inventory.remember(at("/jdk/17/bin/java", JavaVersion::new(17, 0, 12)));
+        let mut reinstalled = at("/jdk/21/bin/java", JavaVersion::new(21, 0, 8));
+        reinstalled.vendor = "Reinstalled".to_owned();
+        inventory.remember(reinstalled);
+
+        let listed: Vec<(&str, &str)> = inventory
+            .runtimes
+            .iter()
+            .map(|runtime| {
+                (
+                    runtime.executable.to_str().unwrap_or_default(),
+                    runtime.vendor.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("/jdk/25/bin/java", "Eclipse Adoptium"),
+                ("/jdk/21/bin/java", "Reinstalled"),
+                ("/jdk/17/bin/java", "Eclipse Adoptium"),
+                ("/jdk/8/bin/java", "Eclipse Adoptium"),
+            ]
+        );
     }
 }

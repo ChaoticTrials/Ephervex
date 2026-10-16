@@ -24,7 +24,44 @@ impl Sandbox {
             std::fs::create_dir_all(directory.path().join(child)).expect("create root");
         }
         support::seed_provider_metadata(directory.path());
+        // Java detection is off, so reading a host's runtime status never
+        // probes the runtimes installed on the machine running the tests.
+        let config = directory.path().join("config/ephervex");
+        std::fs::create_dir_all(&config).expect("config dir");
+        std::fs::write(
+            config.join("config.toml"),
+            "schema_version = 1\n\n[java]\nauto_detect = false\nauto_download = false\n",
+        )
+        .expect("write config");
         Self { directory }
+    }
+
+    /// An executable that answers the property probe as a JVM of `version`
+    /// would.
+    fn fake_java(&self, name: &str, version: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let home = self.directory.path().join(name);
+        let executable = home.join("bin/java");
+        std::fs::create_dir_all(executable.parent().expect("bin")).expect("bin dir");
+        let arch = if cfg!(target_arch = "aarch64") {
+            "aarch64"
+        } else {
+            "amd64"
+        };
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\ncat >&2 <<'EOF'\nProperty settings:\n    java.home = {home}\n    \
+                 java.runtime.version = {version}+7\n    java.vendor = Eclipse Adoptium\n    \
+                 java.version = {version}\n    os.arch = {arch}\nEOF\n",
+                home = home.display(),
+            ),
+        )
+        .expect("write java");
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+            .expect("make java executable");
+        executable
     }
 
     fn run_in(&self, working: &Path, args: &[&str]) -> Output {
@@ -121,7 +158,9 @@ fn an_option_changes_only_its_own_value_and_keeps_the_other_pins() {
     assert_eq!(after_args["jvm_args"], serde_json::json!(["-Dbar=2"]));
 
     // Reading back without options changes nothing, and `--clear` removes every pin.
-    let shown = sandbox.json(&["--json", "instance", "runtime", &id]);
+    let mut shown = sandbox.json(&["--json", "instance", "runtime", &id]);
+    assert!(shown["status"].is_object(), "{shown}");
+    shown.as_object_mut().expect("an object").remove("status");
     assert_eq!(shown, after_args);
     let cleared = sandbox.json(&["--json", "instance", "runtime", &id, "--clear"]);
     assert!(cleared["java"].is_null());
@@ -283,4 +322,164 @@ fn a_runtime_option_derives_from_the_committed_pins_when_the_index_row_lags() {
     assert_eq!(changed["min_memory_mib"], 2048);
     assert_eq!(changed["max_memory_mib"], 3072);
     assert_eq!(changed["jvm_args"], serde_json::json!(["-Dbar=2"]));
+}
+
+#[test]
+fn reading_the_runtime_also_reports_which_java_runs_what_is_expected_and_whether_they_fit() {
+    let sandbox = Sandbox::new();
+    let id = sandbox.create();
+    let java = sandbox.fake_java("jdk-17", "17.0.12");
+    let java = java.to_str().expect("a UTF-8 path");
+    let changed = sandbox.json(&["--json", "instance", "runtime", &id, "--java", java]);
+    assert!(
+        changed.get("status").is_none(),
+        "a change does not read the status: {changed}"
+    );
+
+    let shown = sandbox.json(&["--json", "instance", "runtime", &id]);
+
+    let status = &shown["status"];
+    assert_eq!(status["status"], "customized");
+    assert_eq!(status["mode"], "host");
+    assert_eq!(status["runtime"]["major"], 17);
+    assert_eq!(status["runtime"]["version"], "17.0.12");
+    assert_eq!(status["runtime"]["vendor"], "Eclipse Adoptium");
+    assert_eq!(status["runtime"]["managed"], false);
+    assert_eq!(status["runtime"]["source"], "user-supplied");
+    assert_eq!(status["expected"]["major"], 17);
+    assert!(status["expected"]["bounded_by"].is_null());
+    assert_eq!(status["problems"], serde_json::json!([]));
+
+    let text = sandbox.run_in(sandbox.directory.path(), &["instance", "runtime", &id]);
+    assert!(text.status.success());
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(
+        text.contains("runtime:    java 17.0.12 (Eclipse Adoptium, ")
+            && text.contains("(pinned by this host)")
+            && text.contains("expected:   java 17")
+            && text.contains("status:     customized"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_pin_of_the_wrong_major_reads_as_a_problem_with_its_mismatch() {
+    let sandbox = Sandbox::new();
+    let id = sandbox.create();
+    let java = sandbox.fake_java("jdk-21", "21.0.8");
+    let java = java.to_str().expect("a UTF-8 path");
+    sandbox.json(&["--json", "instance", "runtime", &id, "--java", java]);
+
+    let status = sandbox.json(&["--json", "instance", "runtime", &id])["status"].clone();
+
+    assert_eq!(status["status"], "problem");
+    assert_eq!(status["problems"][0]["kind"], "incompatible");
+    assert_eq!(status["problems"][0]["layer"], "host");
+    assert_eq!(
+        status["problems"][0]["mismatch"],
+        serde_json::json!({"kind": "major", "required": 17, "found": 21})
+    );
+    assert_eq!(status["install"]["major"], 17);
+
+    let text = sandbox.run_in(sandbox.directory.path(), &["instance", "runtime", &id]);
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(
+        text.contains(&format!(
+            "install:    ephervex java install --instance {id} (java 17)"
+        )),
+        "the install line names the host, so the loader's limits apply:\n{text}"
+    );
+}
+
+#[test]
+fn java_install_takes_a_version_or_one_host() {
+    let sandbox = Sandbox::new();
+    let id = sandbox.create();
+
+    for args in [
+        vec!["java", "install"],
+        vec!["java", "install", "21", "--instance", &id],
+        vec![
+            "java",
+            "install",
+            "--instance",
+            &id,
+            "--server",
+            "00000000-0000-4000-8000-000000000000",
+        ],
+    ] {
+        let output = sandbox.run_in(sandbox.directory.path(), &args);
+        assert!(!output.status.success(), "{args:?}");
+        assert_eq!(output.status.code(), Some(2), "a usage error: {args:?}");
+    }
+
+    let help = sandbox.run_in(sandbox.directory.path(), &["java", "install", "--help"]);
+    let help = String::from_utf8_lossy(&help.stdout);
+    assert!(
+        help.contains("--instance") && help.contains("--server"),
+        "{help}"
+    );
+}
+
+#[test]
+fn server_runtime_help_mirrors_instance_runtime_and_names_the_stopped_server_rule() {
+    let sandbox = Sandbox::new();
+
+    let help = sandbox.run_in(sandbox.directory.path(), &["server", "runtime", "--help"]);
+    assert!(help.status.success());
+    let text = String::from_utf8_lossy(&help.stdout);
+    for option in [
+        "--java",
+        "--min-memory",
+        "--max-memory",
+        "--jvm-arg",
+        "--clear",
+    ] {
+        assert!(text.contains(option), "{option} missing from:\n{text}");
+    }
+    assert!(text.contains("stopped"), "help was:\n{text}");
+}
+
+#[test]
+fn server_runtime_refuses_a_server_that_does_not_exist() {
+    let sandbox = Sandbox::new();
+
+    let output = sandbox.run_in(
+        sandbox.directory.path(),
+        &[
+            "server",
+            "runtime",
+            "00000000-0000-4000-8000-000000000000",
+            "--min-memory",
+            "1024",
+        ],
+    );
+
+    assert!(!output.status.success());
+}
+
+#[test]
+fn java_select_takes_a_server_or_an_instance_but_not_both() {
+    let sandbox = Sandbox::new();
+    let id = sandbox.create();
+
+    let output = sandbox.run_in(
+        sandbox.directory.path(),
+        &[
+            "java",
+            "select",
+            "1.20.1",
+            "--instance",
+            &id,
+            "--server",
+            "00000000-0000-4000-8000-000000000000",
+        ],
+    );
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("cannot be used with"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

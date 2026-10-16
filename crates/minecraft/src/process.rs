@@ -67,6 +67,11 @@ const MAX_QUEUED_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 /// How long output keeps being read after the game process has ended.
 const OUTPUT_DRAIN_GRACE: Duration = Duration::from_millis(200);
 
+/// How many lines of each stream are kept as the game's early output: enough
+/// for what a JVM prints when it cannot start the game, bounded so a game that
+/// runs for hours keeps nothing more.
+pub const EARLY_OUTPUT_LINES: usize = 64;
+
 /// Which pipe a line arrived on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputStream {
@@ -367,12 +372,26 @@ impl GameProcess {
     /// signal, rather than detaching and reporting an exit that did not happen.
     /// Once the game has ended, output a descendant still holds open is read
     /// only for a short while, so the call returns even if one lingers.
-    #[instrument(skip_all, fields(pid = self.pid))]
     pub async fn wait(
-        mut self,
+        self,
         observer: &LaunchObserver,
         cancel: &CancellationToken,
     ) -> LaunchResult<GameExit> {
+        Ok(self.wait_with_early_output(observer, cancel).await?.0)
+    }
+
+    /// Like [`Self::wait`], also returning the first lines each stream
+    /// printed, exactly as the process wrote them: stderr's first, then
+    /// stdout's, each at most [`EARLY_OUTPUT_LINES`].
+    ///
+    /// What a JVM prints when it cannot start the game, such as a class
+    /// compiled for a newer Java, is in these lines and nowhere else.
+    #[instrument(skip_all, fields(pid = self.pid))]
+    pub async fn wait_with_early_output(
+        mut self,
+        observer: &LaunchObserver,
+        cancel: &CancellationToken,
+    ) -> LaunchResult<(GameExit, Vec<String>)> {
         let stdout = self.child.stdout.take();
         let stderr = self.child.stderr.take();
         let stop_reading = CancellationToken::new();
@@ -380,21 +399,21 @@ impl GameProcess {
             tokio::join!(
                 read_output(stdout, OutputStream::Stdout, observer, &stop_reading),
                 read_output(stderr, OutputStream::Stderr, observer, &stop_reading),
-            );
+            )
         };
         tokio::pin!(readers);
         let supervised = self.supervise(cancel);
         tokio::pin!(supervised);
 
-        let mut readers_done = false;
+        let mut early = None;
         let supervision = loop {
             tokio::select! {
-                () = &mut readers, if !readers_done => readers_done = true,
+                read = &mut readers, if early.is_none() => early = Some(read),
                 supervision = &mut supervised => break supervision,
             }
         };
 
-        if !readers_done {
+        if early.is_none() {
             // A game stopped by cancel has had its whole group killed, so its
             // pipes close on their own and the grace period only has to cover
             // reading what is already buffered.
@@ -404,14 +423,14 @@ impl GameProcess {
             tokio::select! {
                 // Readers first, so buffered output wins a tie with the timer.
                 biased;
-                () = &mut readers => readers_done = true,
+                read = &mut readers => early = Some(read),
                 () = &mut grace => {}
                 () = cancel.cancelled(), if watch_cancel => {}
             }
-            if !readers_done {
+            if early.is_none() {
                 debug!("stopped reading output a descendant still holds open");
                 stop_reading.cancel();
-                readers.await;
+                early = Some(readers.await);
             }
         }
 
@@ -421,7 +440,9 @@ impl GameProcess {
             signal: exit.signal,
         });
         info!(?exit, "minecraft exited");
-        Ok(exit)
+        let (stdout, mut stderr) = early.unwrap_or_default();
+        stderr.extend(stdout);
+        Ok((exit, stderr))
     }
 
     /// Waits for the child, killing it if the launch is canceled.
@@ -510,11 +531,13 @@ async fn read_output<R>(
     stream: OutputStream,
     observer: &LaunchObserver,
     stop: &CancellationToken,
-) where
+) -> Vec<String>
+where
     R: tokio::io::AsyncRead + Unpin,
 {
+    let mut early = Vec::new();
     let Some(pipe) = pipe else {
-        return;
+        return early;
     };
     let mut reader = BufReader::new(pipe);
     let mut parser = Log4jReader::new();
@@ -545,6 +568,9 @@ async fn read_output<R>(
                 if omitted_bytes > 0 {
                     let _ = write!(text, " [truncated, {omitted_bytes} bytes omitted]");
                 }
+                if early.len() < EARLY_OUTPUT_LINES {
+                    early.push(text.clone());
+                }
                 emit(parser.push(&text));
             }
             Err(error) => {
@@ -555,6 +581,7 @@ async fn read_output<R>(
     }
 
     emit(parser.flush());
+    early
 }
 
 async fn read_limited_line<R>(
@@ -648,6 +675,32 @@ mod tests {
         assert_eq!(exited, Some(Some(3)));
         assert!(lines.contains(&(OutputStream::Stdout, "first".to_owned())));
         assert!(lines.contains(&(OutputStream::Stderr, "second".to_owned())));
+    }
+
+    #[tokio::test]
+    async fn the_first_lines_of_each_stream_are_kept_verbatim_and_bounded() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let script = format!(
+            "echo out; i=0; while [ $i -lt {} ]; do echo \"err $i\" 1>&2; i=$((i+1)); done; exit 1",
+            EARLY_OUTPUT_LINES + 10
+        );
+        let observer = LaunchObserver::silent();
+
+        let process =
+            GameProcess::start(&shell(&script, directory.path()), &observer).expect("starts");
+        let (exit, early) = process
+            .wait_with_early_output(&observer, &CancellationToken::new())
+            .await
+            .expect("waits");
+
+        assert_eq!(exit.code, Some(1));
+        assert_eq!(early.len(), EARLY_OUTPUT_LINES + 1);
+        assert_eq!(early[0], "err 0");
+        assert_eq!(
+            early[EARLY_OUTPUT_LINES - 1],
+            format!("err {}", EARLY_OUTPUT_LINES - 1)
+        );
+        assert_eq!(early[EARLY_OUTPUT_LINES], "out");
     }
 
     #[tokio::test]

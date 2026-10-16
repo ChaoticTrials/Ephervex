@@ -6,11 +6,13 @@
 //! would reach the developer's Secret Service and can raise an unlock prompt.
 //!
 //! It also builds client fixtures that need no provider metadata, so a
-//! frontend test can exercise a client reader without a network.
+//! frontend test can exercise a client reader without a network, and fixes the
+//! Java inventory, so no test probes a runtime installed on the machine.
 
 use std::sync::{Arc, OnceLock};
 
 use ephervex_auth::{CredentialStore, MemoryStore};
+use ephervex_java::JavaRuntime;
 use ephervex_model::InstanceId;
 use ephervex_storage::{ClientRecord, NewClient};
 
@@ -47,4 +49,28 @@ pub fn commit_client_without_index(
     change: impl FnOnce(&mut ClientRecord),
 ) -> CoreResult<ClientRecord> {
     app.commit_client_without_index_for_test(id, change)
+}
+
+/// Replaces an app's Java inventory with these runtimes, as if a scan had
+/// found exactly them. A later refresh scans the machine again.
+pub fn use_java_inventory(app: &App, runtimes: Vec<JavaRuntime>) {
+    app.use_java_inventory_for_test(runtimes);
+}
+
+/// A launch or start refusal of its Java, as a frontend receives one, so a
+/// frontend test can render it without planning a launch.
+pub fn java_refusal_error(
+    error: ephervex_java::JavaError,
+    mode: crate::JavaSelectionMode,
+    attempted: Option<crate::JavaRuntimeSummary>,
+    expected: crate::ExpectedRuntime,
+    mismatch: Option<crate::JavaMismatch>,
+) -> crate::CoreError {
+    crate::CoreError::JavaRefused(Box::new(crate::JavaRefusal {
+        error,
+        chosen: crate::RefusedJavaChoice::Selected(mode),
+        attempted,
+        expected,
+        mismatch,
+    }))
 }

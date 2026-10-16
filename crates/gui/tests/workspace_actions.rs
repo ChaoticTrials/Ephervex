@@ -125,6 +125,9 @@ fn the_pack_mod_opt_in_survives_leaving_its_tab() {
         record.borrow_mut().push((instance.to_string(), allow));
     });
 
+    // Tall enough that the opt-in, below the Java runtime section, lies
+    // inside the pane.
+    ui.window().set_size(PhysicalSize::new(1480, 2400));
     client_workspace(&ui);
     support::set_surface(&ui, 1, "Settings");
     settle(&ui);
@@ -166,6 +169,68 @@ fn opt_in(ui: &AppWindow) -> Option<ElementHandle> {
                 && element.accessible_role() == Some(AccessibleRole::Checkbox)
         },
     )
+}
+
+/// The header names the Java a host would run with once its status is read,
+/// and pressing it opens the host's runtime settings: Settings on a client,
+/// Properties on a server.
+#[test]
+fn the_header_java_pill_opens_the_hosts_runtime_settings() {
+    let ui = window();
+    client_workspace(&ui);
+    let note = lookup_args(
+        "gui-java-pill-note",
+        [
+            ("first", Arg::from("chosen automatically")),
+            ("second", Arg::from("Healthy")),
+        ],
+    );
+    let label = lookup_args(
+        "gui-java-pill",
+        [
+            ("first", Arg::from("Java 21.0.8 (Eclipse Adoptium)")),
+            ("second", Arg::from(note.as_str())),
+        ],
+    );
+    assert!(
+        widest(&ui, &label).is_none(),
+        "nothing is claimed before the status is read"
+    );
+
+    support::update_host(&ui, 0, |view| {
+        view.java_summary = "Java 21.0.8 (Eclipse Adoptium)".into();
+        view.java_tone = "healthy".into();
+        view.java_tone_label = "Healthy".into();
+        view.java_origin = "chosen automatically".into();
+    });
+    settle(&ui);
+    widest(&ui, &label)
+        .expect("the header shows the runtime")
+        .invoke_accessible_default_action();
+    settle(&ui);
+    assert_eq!(support::surface(&ui, 0), "Settings");
+
+    support::show_server(
+        &ui,
+        ServerRow {
+            id: "repro-server".into(),
+            ..ServerRow::default()
+        },
+        "Overview",
+    );
+    support::follow_surface_requests(&ui);
+    support::update_host(&ui, 0, |view| {
+        view.java_summary = "Java 21.0.8 (Eclipse Adoptium)".into();
+        view.java_tone = "healthy".into();
+        view.java_tone_label = "Healthy".into();
+        view.java_origin = "chosen automatically".into();
+    });
+    settle(&ui);
+    widest(&ui, &label)
+        .expect("a server's header shows it too")
+        .invoke_accessible_default_action();
+    settle(&ui);
+    assert_eq!(support::surface(&ui, 0), "Properties");
 }
 
 fn client_workspace(ui: &AppWindow) {

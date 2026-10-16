@@ -1702,6 +1702,7 @@ version = "0.11.0"
 dependencies = [
  "chrono",
  "ephervex-auth",
+ "ephervex-core",
  "ephervex-download",
  "ephervex-i18n",
  "ephervex-java",
@@ -1714,6 +1715,7 @@ dependencies = [
  "ephervex-server",
  "ephervex-storage",
  "fastnbt",
+ "flate2",
  "futures-util",
  "hex",
  "image",
@@ -1725,6 +1727,7 @@ dependencies = [
  "sha1",
  "sha2 0.11.0",
  "sysinfo",
+ "tar",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",

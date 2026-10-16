@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use ephervex_core::{
     App, CoreError, DiagnosisRequest, DiagnosticFix, FindingClass, FindingKind, HostDiagnosis,
-    InstalledHost, JavaLayer, JavaMismatch, Paths, ProposedChange, RecommendedJava,
+    InstalledHost, JavaLayer, JavaMismatch, JavaSelectionMode, Paths, ProposedChange, ResolvedJava,
     UnmetDependency,
 };
 use ephervex_download::{
@@ -316,19 +316,28 @@ async fn using_the_recommended_java_previews_both_runtimes_and_changes_only_this
         .preview_fix(fixture.host(), fix.as_ref().unwrap())
         .await
         .unwrap();
-    let [
-        ProposedChange::UseJava {
-            current_path,
-            current_version,
-            recommended: RecommendedJava::Installed(recommended),
-            required_major: 21,
-        },
-    ] = preview.changes.as_slice()
-    else {
+    let [ProposedChange::UseJava(change)] = preview.changes.as_slice() else {
         panic!("{:?}", preview.changes);
     };
-    assert_eq!(current_path, &pinned);
-    assert_eq!(current_version.as_deref(), Some("17.0.12"));
+    assert_eq!(change.expected.major(), 21);
+    assert_eq!(change.current.mode, JavaSelectionMode::PinnedByHost);
+    let ResolvedJava::Runtime {
+        runtime: current,
+        rejection: Some(JavaMismatch::Major { found: 17, .. }),
+    } = &change.current.resolved
+    else {
+        panic!("{:?}", change.current);
+    };
+    assert_eq!(current.path, pinned);
+    assert_eq!(current.version, "17.0.12");
+    assert_eq!(change.proposed.mode, JavaSelectionMode::PinnedByLauncher);
+    let ResolvedJava::Runtime {
+        runtime: recommended,
+        rejection: None,
+    } = &change.proposed.resolved
+    else {
+        panic!("{:?}", change.proposed);
+    };
     assert_eq!(recommended.version, "21.0.8");
     assert!(preview.blocked.is_none());
     assert!(

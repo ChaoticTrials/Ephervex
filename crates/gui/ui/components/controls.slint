@@ -724,6 +724,44 @@ export component Pill inherits Rectangle {
     }
 }
 
+// A pill that can be pressed: a short status a person can act on. It reaches
+// the keyboard like a button, and says on hover what the short text leaves
+// out.
+export component PillButton inherits Rectangle {
+    in property <string> text;
+    in property <color> tone-color: Theme.text-secondary;
+    // Shown on hover: what the pill stands for in full.
+    in property <string> note;
+    in property <string> accessible-name: root.text;
+    callback clicked();
+    height: 24px;
+    width: label.preferred-width + 18px;
+    horizontal-stretch: 0;
+    border-radius: 5px;
+    border-width: 1px;
+    border-color: root.tone-color.with-alpha(area.has-hover ? 0.9 : 0.55);
+    background: root.tone-color.with-alpha(area.has-hover ? 0.2 : 0.12);
+    accessible-role: button;
+    accessible-label: root.accessible-name;
+    accessible-action-default => { root.clicked(); }
+    label := Text {
+        text: root.text;
+        color: root.tone-color;
+        font-size: Theme.caption-size;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    KeyboardFocus { width: root.width; height: root.height; ring-radius: 5px; activated => { root.clicked(); } }
+    area := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+    }
+    if root.note != "" && area.has-hover : Tooltip {
+        TooltipCard { text: root.note; }
+    }
+}
+
 export component NavItem inherits Rectangle {
     in property <image> icon;
     in property <string> label;

@@ -18,6 +18,7 @@
 //! | [`discovery`] | finding candidates, deduplicating them, and probing them |
 //! | [`requirement`] | the Java major a Minecraft version needs |
 //! | [`rules`] | the hook a loader uses to constrain the choice further |
+//! | [`expected`] | the requirement a host states, as a major plus loader bounds |
 //! | [`selection`] | choosing, including instance and launch overrides |
 //! | [`adoptium`] | the Temurin release index |
 //! | [`managed`] | downloading and installing a runtime, without root |
@@ -66,6 +67,7 @@ pub mod adoptium;
 pub mod archive;
 pub mod discovery;
 pub mod error;
+pub mod expected;
 mod install_lock;
 pub mod managed;
 pub mod probe;
@@ -81,6 +83,7 @@ pub use discovery::{
     SYSTEM_JVM_DIRECTORIES,
 };
 pub use error::{JavaError, JavaResult, ProbeError};
+pub use expected::ExpectedJava;
 pub use managed::{ManagedInstallation, ManagedJavaProvider};
 pub use probe::{PROBE_TIMEOUT, ProbeReport, probe};
 pub use requirement::{RequiredJava, RequirementBasis, fallback_major};
@@ -91,6 +94,6 @@ pub use rules::{
 pub use selection::{
     EffectiveJvmSettings, GlobalJavaSettings, JavaPathChoice, JavaPreference, JvmField,
     JvmSettingLayer, MemoryRangeViolation, PinSource, RejectedRuntime, Selection, check_pinned,
-    select,
+    compare_preference, evaluate_runtime, select,
 };
 pub use version::JavaVersion;

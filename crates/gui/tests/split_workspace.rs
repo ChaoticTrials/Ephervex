@@ -570,12 +570,12 @@ fn two_panes_on_one_host_show_one_state() {
 
 /// A client host whose stored runtime settings differ from the other's, with
 /// the same revision every host has after its first load.
-fn runtime_host(id: &str, java: &str) -> HostView {
+fn runtime_host(id: &str, min_memory: &str) -> HostView {
     let mut view = support::client_view(InstanceRow {
         id: id.into(),
         ..instance(false)
     });
-    view.runtime_java = java.into();
+    view.runtime_memory_min = min_memory.into();
     view.runtime_revision = 1;
     view
 }
@@ -625,8 +625,8 @@ fn close_first_pane(ui: &AppWindow, remaining: WorkspacePaneRow, host: HostView)
 fn save_runtime(ui: &AppWindow, pane: i32) -> (String, String) {
     let saved = Rc::new(RefCell::new(None));
     let sink = Rc::clone(&saved);
-    ui.on_save_instance_runtime(move |id, java, _, _, _| {
-        *sink.borrow_mut() = Some((id.to_string(), java.to_string()));
+    ui.on_save_instance_runtime(move |id, min_memory, _, _| {
+        *sink.borrow_mut() = Some((id.to_string(), min_memory.to_string()));
     });
     in_pane(
         ui,
@@ -892,17 +892,11 @@ fn a_panes_runtime_form_follows_the_host_the_pane_shows() {
     support::show(
         &ui,
         0,
-        vec![
-            runtime_host("aaaa", "/opt/java-A"),
-            runtime_host("bbbb", "/opt/java-B"),
-        ],
+        vec![runtime_host("aaaa", "1024"), runtime_host("bbbb", "2048")],
         panes(),
     );
     settle(&ui);
-    assert_eq!(
-        save_runtime(&ui, 1),
-        ("aaaa".to_owned(), "/opt/java-A".to_owned())
-    );
+    assert_eq!(save_runtime(&ui, 1), ("aaaa".to_owned(), "1024".to_owned()));
 
     let rows = ui.get_workspace_panes();
     rows.set_row_data(
@@ -915,7 +909,7 @@ fn a_panes_runtime_form_follows_the_host_the_pane_shows() {
     settle(&ui);
     assert_eq!(
         save_runtime(&ui, 1),
-        ("bbbb".to_owned(), "/opt/java-B".to_owned()),
+        ("bbbb".to_owned(), "2048".to_owned()),
         "a pane pointed at another host"
     );
 }
@@ -928,10 +922,7 @@ fn a_runtime_form_follows_the_host_after_the_pane_before_it_closes() {
     support::show(
         &ui,
         0,
-        vec![
-            runtime_host("aaaa", "/opt/java-A"),
-            runtime_host("bbbb", "/opt/java-B"),
-        ],
+        vec![runtime_host("aaaa", "1024"), runtime_host("bbbb", "2048")],
         vec![
             placed(1, 0, "Settings", 0, 0, false),
             placed(2, 1, "Settings", 1, 0, false),
@@ -941,12 +932,9 @@ fn a_runtime_form_follows_the_host_after_the_pane_before_it_closes() {
     close_first_pane(
         &ui,
         placed(2, 0, "Settings", 0, 0, false),
-        runtime_host("bbbb", "/opt/java-B"),
+        runtime_host("bbbb", "2048"),
     );
-    assert_eq!(
-        save_runtime(&ui, 2),
-        ("bbbb".to_owned(), "/opt/java-B".to_owned())
-    );
+    assert_eq!(save_runtime(&ui, 2), ("bbbb".to_owned(), "2048".to_owned()));
 }
 
 /// A pane's Properties form shows and saves the host the pane shows, not the

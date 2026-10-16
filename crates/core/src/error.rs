@@ -78,6 +78,12 @@ pub enum CoreError {
     #[error(transparent)]
     Java(#[from] JavaError),
 
+    /// A launch or server start refused its Java runtime, with the runtime it
+    /// tried and what the host expects. Every predicate answers as it does for
+    /// the [`JavaError`] it carries.
+    #[error(transparent)]
+    JavaRefused(Box<crate::java_failure::JavaRefusal>),
+
     /// The effective JVM heap range cannot produce a valid Java command.
     /// Each bound names the layer that supplied it.
     #[error(
@@ -527,6 +533,7 @@ impl CoreError {
             Self::StorageFull { .. } => "error-storage-full",
             Self::Minecraft(error) => error.message_id(),
             Self::Java(error) => error.message_id(),
+            Self::JavaRefused(refusal) => refusal.message_id(),
             Self::JavaSettingsInvalid { .. } => "error-java-settings-invalid",
             Self::Loader(error) => error.message_id(),
             // Not `const`: this one chooses between message ids on the HTTP
@@ -712,6 +719,7 @@ impl CoreError {
             Self::Launch(error) => error.is_cancellation(),
             Self::Minecraft(error) => error.is_cancellation(),
             Self::Java(error) => error.is_cancellation(),
+            Self::JavaRefused(refusal) => refusal.error().is_cancellation(),
             Self::Pack(error) => error.is_cancellation(),
             Self::Snapshot(error) => error.is_cancellation(),
             Self::Isolation(error) => error.is_cancellation(),
@@ -807,6 +815,7 @@ impl CoreError {
     pub const fn required_java_major(&self) -> Option<u32> {
         match self {
             Self::Java(error) => error.required_major(),
+            Self::JavaRefused(refusal) => refusal.error().required_major(),
             Self::Storage(_)
             | Self::StorageFull { .. }
             | Self::ArtifactCache(_)
@@ -863,10 +872,24 @@ impl CoreError {
         }
     }
 
+    /// The runtime a launch or start refused and what the host expected, when
+    /// the failure is such a refusal.
+    #[must_use]
+    pub fn java_refusal(&self) -> Option<&crate::java_failure::JavaRefusal> {
+        match self {
+            Self::JavaRefused(refusal) => Some(refusal),
+            _ => None,
+        }
+    }
+
     /// Whether downloading a managed runtime is a sensible next step.
     #[must_use]
     pub const fn managed_java_would_help(&self) -> bool {
-        matches!(self, Self::Java(error) if error.managed_download_would_help())
+        match self {
+            Self::Java(error) => error.managed_download_would_help(),
+            Self::JavaRefused(refusal) => refusal.error().managed_download_would_help(),
+            _ => false,
+        }
     }
 
     /// The path this failure is about, where it names one.
@@ -884,6 +907,7 @@ impl CoreError {
             Self::StorageFull { path } => path.clone(),
             Self::Minecraft(error) => error.failing_path(),
             Self::Java(error) => error.failing_path(),
+            Self::JavaRefused(refusal) => refusal.error().failing_path(),
             Self::Loader(error) => error.failing_path(),
             Self::Launch(error) => error.failing_path(),
             Self::Options(error) => error.failing_path(),

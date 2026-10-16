@@ -364,6 +364,9 @@ export component AppWindow inherits Window {
     in-out property <[ToastRow]> toasts;
     in-out property <string> pending-action-id;
     in-out property <string> pending-action-name;
+    // The settings that pin the runtime the removal confirmation names.
+    in-out property <string> pending-java-pinning;
+    in-out property <bool> pending-java-pins-known: true;
     // How many servers go with the instance the delete dialog is about, so
     // "Delete Files" is never a surprise.
     in-out property <int> pending-action-linked-servers: 0;
@@ -644,7 +647,13 @@ export component AppWindow inherits Window {
     callback delete-client(string, bool, bool);
     callback delete-server(string, bool);
     callback repair-server(string);
-    callback save-instance-runtime(string, string, string, string, string);
+    callback save-instance-runtime(string, string, string, string);
+    // A host's Java: read it, choose a runtime for review, check a path the
+    // user typed, or install the runtime the host expects.
+    callback load-host-java(string, string);
+    callback choose-host-java(string, string, string);
+    callback check-host-java-path(string, string, string);
+    callback install-host-java(string, string);
     callback clear-instance-runtime(string);
     callback set-allow-pack-mod-version-changes(string, bool);
     callback load-instance-workspace(string);
@@ -1135,6 +1144,11 @@ export component AppWindow inherits Window {
                                 pair-label: self.pair-display == "" ? GuiI18n.text("gui-paired") : GuiI18n.value(self.is-client ? "gui-paired-server-state" : "gui-paired-client-state", self.pair-display);
                                 pair-state-kind: host.pair-restart-stage != "" ? "restarting" : host.pair-state-kind;
                                 pair-starting: self.is-client ? host.client.pair-starting : host.server.pair-starting;
+                                java-summary: host.java-summary;
+                                java-tone: host.java-tone;
+                                java-tone-label: host.java-tone-label;
+                                java-origin: host.java-origin;
+                                open-java => { root.show-pane-surface(pane.id, self.is-client ? "Settings" : "Properties"); }
                                 choose-host => { root.pane-host-picker-pane = pane.id; root.pane-host-picker-kind = host.kind; root.pane-host-picker-id = host.id; root.modal = "pane-host"; }
                                 split-beside => { root.split-pane-beside(pane.id); }
                                 split-below => { root.split-pane-below(pane.id); }
@@ -1302,7 +1316,14 @@ export component AppWindow inherits Window {
                                 if host.available && host.kind == "client" && pane.surface == "Settings" : ClientRuntimeForm {
                                     host: host;
                                     error: host.runtime-error;
-                                    save(id, java, min, max, args) => { root.save-instance-runtime(id, java, min, max, args); }
+                                    busy: root.host-busy-kind == host.kind && root.host-busy-id == host.id;
+                                    save(id, min, max, args) => { root.save-instance-runtime(id, min, max, args); }
+                                    load-java => { root.load-host-java(host.kind, host.id); }
+                                    choose-java(key) => { root.choose-host-java(host.kind, host.id, key); }
+                                    check-java-path(path) => { root.check-host-java-path(host.kind, host.id, path); }
+                                    install-java => { root.install-host-java(host.kind, host.id); }
+                                    cancel-fix => { root.cancel-fix(host.kind, host.id); }
+                                    apply-fix => { root.apply-fix(host.kind, host.id); }
                                     clear(id) => { root.clear-instance-runtime(id); }
                                     allow-pack-mod-changes(id, allow) => { root.set-allow-pack-mod-version-changes(id, allow); }
                                     open-global-defaults => { root.close-workspace(); root.page = 4; root.settings-tab = "Minecraft"; }
@@ -1449,6 +1470,13 @@ export component AppWindow inherits Window {
                                     eula-status: root.eula-status;
                                     save(id, motd, players, difficulty, gamemode, flight, pvp, allowlist, online, access, address, port, unset) => { root.save-server-properties(id, motd, players, difficulty, gamemode, flight, pvp, allowlist, online, access, address, port, unset); }
                                     review-eula => { root.modal = "eula"; }
+                                    busy: root.host-busy-kind == host.kind && root.host-busy-id == host.id;
+                                    load-java => { root.load-host-java(host.kind, host.id); }
+                                    choose-java(key) => { root.choose-host-java(host.kind, host.id, key); }
+                                    check-java-path(path) => { root.check-host-java-path(host.kind, host.id, path); }
+                                    install-java => { root.install-host-java(host.kind, host.id); }
+                                    cancel-fix => { root.cancel-fix(host.kind, host.id); }
+                                    apply-fix => { root.apply-fix(host.kind, host.id); }
                                 }
                             }
                         }
@@ -1791,12 +1819,12 @@ export component AppWindow inherits Window {
                                 VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-java-refresh"); clicked => { root.refresh-java(); } } }
                             }
                             if root.java-runtimes.length == 0 : EmptyState { title: GuiI18n.text("gui-java-no-runtimes"); message: GuiI18n.text("gui-java-no-runtimes-detail"); }
-                            for java in root.java-runtimes : Rectangle { height: 75px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; HorizontalLayout { padding: 12px; spacing: 10px; VerticalLayout { horizontal-stretch: 1; VerticalLayout { alignment: center; Heading { text: java.version + " | " + java.vendor; font-size: Theme.row-heading-size; } BodyText { text: java.path; overflow: elide; } } } VerticalLayout { alignment: center; Pill { text: java.origin; tone-color: Theme.accent-secondary; } }
+                            for java in root.java-runtimes : Rectangle { height: java.pinned-by == "" ? 75px : 97px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; HorizontalLayout { padding: 12px; spacing: 10px; VerticalLayout { horizontal-stretch: 1; VerticalLayout { alignment: center; Heading { text: java.title; font-size: Theme.row-heading-size; } BodyText { text: java.path; overflow: elide; } if java.pinned-by != "" : BodyText { text: java.pinned-by; color: Theme.text-muted; overflow: elide; } } } VerticalLayout { alignment: center; Pill { text: java.origin; tone-color: java.origin == "managed" ? Theme.accent : java.origin == "system" || java.origin == "sdkman" ? Theme.text-secondary : Theme.accent-secondary; } }
                                 // Only what the launcher installed itself offers the
                                 // bin: a runtime found on the system belongs to
                                 // whoever put it there. The slot is kept either way,
                                 // so the badges stay in one column down the list.
-                                VerticalLayout { width: Theme.control-height; alignment: center; if java.origin == "managed" : IconButton { icon: @image-url("../../../assets/icons/trash.svg"); accessible-name: GuiI18n.value("gui-java-remove-runtime", java.path); clicked => { root.pending-action-name = java.version + " | " + java.vendor; root.pending-action-id = java.path; root.modal = "remove-java-runtime"; } } }
+                                VerticalLayout { width: Theme.control-height; alignment: center; if java.origin == "managed" : IconButton { icon: @image-url("../../../assets/icons/trash.svg"); accessible-name: GuiI18n.value("gui-java-remove-runtime", java.path); clicked => { root.pending-action-name = java.title; root.pending-action-id = java.path; root.pending-java-pinning = java.pinning; root.pending-java-pins-known = java.pins-known; root.modal = "remove-java-runtime"; } } }
                             } }
                         }
                         if root.settings-tab == "Accounts" : VerticalLayout { spacing: 12px;
@@ -2035,7 +2063,7 @@ export component AppWindow inherits Window {
         TouchArea { clicked => { } }
         Rectangle {
             width: root.modal == "license" || root.modal == "third-party" ? min(820px, parent.width - 80px) : root.modal == "mod-plan" || root.modal == "mod-apply" || root.modal == "mod-remove" || root.modal == "mod-result" || root.modal == "mod-manage" || root.modal == "mod-acquire" ? min(720px, parent.width - 80px) : min(620px, parent.width - 80px);
-            height: root.modal == "license" || root.modal == "third-party" ? min(720px, parent.height - 80px) : root.modal == "import" || root.modal == "pane-host" ? min(620px, parent.height - 80px) : root.modal == "mod-plan" ? min(500px * Theme.text-scale + root.linked-targets.length * 68px + 14px + root.mod-plan-extra, parent.height - 80px) : root.modal == "mod-manage" ? min(620px, parent.height - 80px) : root.modal == "mod-acquire" ? min(260px * Theme.text-scale + root.mod-acquisition-items.length * 64px, parent.height - 80px) : root.modal == "mod-apply" ? min(370px * Theme.text-scale + root.linked-targets.length * 68px + 14px, parent.height - 80px) : root.modal == "mod-result" ? min(300px * Theme.text-scale + root.linked-results.length * 68px + 14px, parent.height - 80px) : root.modal == "loader-change" ? 400px : root.modal == "mod-remove" ? min((root.linked-targets.length > 0 ? 424px : 300px) * Theme.text-scale + root.mod-removal-dependencies.length * 24px + root.linked-targets.length * 68px, parent.height - 80px) : root.modal == "eula" ? 440px : root.modal == "kill" ? 300px : root.modal == "delete-instance" || root.modal == "delete-server" ? 330px : root.modal == "rename" ? 300px : root.modal == "snapshot-create" || root.modal == "snapshot-restore" || root.modal == "snapshot-rename" || root.modal == "snapshot-delete" ? 330px : root.modal == "mod-impact" ? min(300px * Theme.text-scale + (root.mod-impact-breaks.length + root.mod-impact-degrades.length + root.mod-impact-unknown.length + root.mod-impact-unidentifiable.length + root.mod-requires-disabled.length + root.mod-requires-absent.length + root.mod-requires-incompatible.length) * 24px, parent.height - 80px) : root.modal == "delete-mod" ? 320px : root.modal == "remove-java-runtime" ? 320px : root.modal == "mod-clash" ? 380px : root.modal == "absent-mods" ? min(250px + root.absent-mods.length * 22px, parent.height - 80px) : root.modal == "make-persistent" ? min(290px + root.promote-servers.length * 28px, parent.height - 80px) : root.modal == "open-pack-link" ? 300px : root.modal == "create-server" ? min((root.create-server-client-id == "" ? 640px : 535px) + (root.create-server-client-id == "" && root.create-server-loader != "Vanilla" ? 44px : 0px), parent.height - 80px) : 570px;
+            height: root.modal == "license" || root.modal == "third-party" ? min(720px, parent.height - 80px) : root.modal == "import" || root.modal == "pane-host" ? min(620px, parent.height - 80px) : root.modal == "mod-plan" ? min(500px * Theme.text-scale + root.linked-targets.length * 68px + 14px + root.mod-plan-extra, parent.height - 80px) : root.modal == "mod-manage" ? min(620px, parent.height - 80px) : root.modal == "mod-acquire" ? min(260px * Theme.text-scale + root.mod-acquisition-items.length * 64px, parent.height - 80px) : root.modal == "mod-apply" ? min(370px * Theme.text-scale + root.linked-targets.length * 68px + 14px, parent.height - 80px) : root.modal == "mod-result" ? min(300px * Theme.text-scale + root.linked-results.length * 68px + 14px, parent.height - 80px) : root.modal == "loader-change" ? 400px : root.modal == "mod-remove" ? min((root.linked-targets.length > 0 ? 424px : 300px) * Theme.text-scale + root.mod-removal-dependencies.length * 24px + root.linked-targets.length * 68px, parent.height - 80px) : root.modal == "eula" ? 440px : root.modal == "kill" ? 300px : root.modal == "delete-instance" || root.modal == "delete-server" ? 330px : root.modal == "rename" ? 300px : root.modal == "snapshot-create" || root.modal == "snapshot-restore" || root.modal == "snapshot-rename" || root.modal == "snapshot-delete" ? 330px : root.modal == "mod-impact" ? min(300px * Theme.text-scale + (root.mod-impact-breaks.length + root.mod-impact-degrades.length + root.mod-impact-unknown.length + root.mod-impact-unidentifiable.length + root.mod-requires-disabled.length + root.mod-requires-absent.length + root.mod-requires-incompatible.length) * 24px, parent.height - 80px) : root.modal == "delete-mod" ? 320px : root.modal == "remove-java-runtime" ? (root.pending-java-pinning == "" && root.pending-java-pins-known ? 320px : 320px + 66px * Theme.text-scale) : root.modal == "mod-clash" ? 380px : root.modal == "absent-mods" ? min(250px + root.absent-mods.length * 22px, parent.height - 80px) : root.modal == "make-persistent" ? min(290px + root.promote-servers.length * 28px, parent.height - 80px) : root.modal == "open-pack-link" ? 300px : root.modal == "create-server" ? min((root.create-server-client-id == "" ? 640px : 535px) + (root.create-server-client-id == "" && root.create-server-loader != "Vanilla" ? 44px : 0px), parent.height - 80px) : 570px;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             border-radius: 8px;
@@ -2527,7 +2555,7 @@ export component AppWindow inherits Window {
                     ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-delete"); tone: "danger"; clicked => { root.modal = ""; root.delete-snapshot(root.snapshot-host-kind, root.snapshot-host-id, root.snapshot-action-id); } } }
                 }
                 if root.modal == "delete-mod" : VerticalLayout { spacing: 14px; BodyText { text: GuiI18n.value(root.mod-action-is-hand-placed ? "gui-delete-mod-detail" : "gui-delete-restorable-mod-detail", root.pending-action-name); color: Theme.warning; wrap: word-wrap; } BodyText { text: GuiI18n.text(root.mod-action-is-hand-placed ? "gui-delete-mod-note" : "gui-delete-restorable-mod-note"); wrap: word-wrap; } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; root.modal-error = ""; } } AppButton { text: GuiI18n.text("gui-delete"); tone: "danger"; clicked => { root.delete-hand-placed-mod(root.pending-action-kind, root.pending-action-id, root.mod-action-path); } } } }
-                if root.modal == "remove-java-runtime" : VerticalLayout { spacing: 14px; BodyText { text: GuiI18n.value("gui-java-remove-runtime-detail", root.pending-action-name); color: Theme.warning; wrap: word-wrap; } BodyText { text: root.pending-action-id; color: Theme.text-muted; wrap: word-wrap; } BodyText { text: GuiI18n.text("gui-java-remove-runtime-note"); wrap: word-wrap; } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; root.modal-error = ""; } } AppButton { text: GuiI18n.text("gui-remove"); tone: "danger"; clicked => { root.remove-java-runtime(root.pending-action-id); root.modal = ""; root.modal-error = ""; } } } }
+                if root.modal == "remove-java-runtime" : VerticalLayout { spacing: 14px; BodyText { text: GuiI18n.value("gui-java-remove-runtime-detail", root.pending-action-name); color: Theme.warning; wrap: word-wrap; } BodyText { text: root.pending-action-id; color: Theme.text-muted; wrap: word-wrap; } if root.pending-java-pinning != "" : BodyText { text: GuiI18n.value("gui-java-remove-runtime-pinned", root.pending-java-pinning); color: Theme.warning; wrap: word-wrap; } if !root.pending-java-pins-known : BodyText { text: GuiI18n.text("gui-java-remove-runtime-pins-unknown"); color: Theme.warning; wrap: word-wrap; } BodyText { text: GuiI18n.text("gui-java-remove-runtime-note"); wrap: word-wrap; } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; root.modal-error = ""; } } AppButton { text: GuiI18n.text("gui-remove"); tone: "danger"; clicked => { root.remove-java-runtime(root.pending-action-id); root.modal = ""; root.modal-error = ""; } } } }
                 if root.modal == "mod-clash" && root.mod-clash-index < root.mod-clashes.length : VerticalLayout { spacing: 14px; BodyText { text: GuiI18n.value("gui-mod-clash-detail", root.mod-clashes[root.mod-clash-index].file-name); wrap: word-wrap; } if root.mod-clashes[root.mod-clash-index].existing-is-disabled : BodyText { text: GuiI18n.text("gui-mod-clash-disabled"); color: Theme.warning; wrap: word-wrap; } if root.mod-clashes[root.mod-clash-index].existing-is-recorded : BodyText { text: GuiI18n.text("gui-mod-clash-recorded"); color: Theme.warning; wrap: word-wrap; } if root.mod-clashes.length > 1 : BodyText { text: GuiI18n.values("gui-mod-clash-progress", root.mod-clash-index + 1, root.mod-clashes.length); color: Theme.text-muted; font-size: Theme.caption-size; } ActionRow { AppButton { text: GuiI18n.text("gui-skip-all"); clicked => { root.resolve-mod-clash("skip-all"); } } AppButton { text: GuiI18n.text("gui-overwrite-all"); clicked => { root.resolve-mod-clash("overwrite-all"); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-skip"); clicked => { root.resolve-mod-clash("skip"); } } AppButton { text: GuiI18n.text("gui-overwrite"); tone: "primary"; clicked => { root.resolve-mod-clash("overwrite"); } } } }
                 if root.modal == "pane-host" : VerticalLayout { spacing: 12px;
                     ScrollView {

@@ -5,6 +5,7 @@ pub mod binding_capture;
 pub mod controller;
 pub mod diagnosis_view;
 pub mod file_drop;
+pub mod java_view;
 mod jvm_arguments;
 mod memory_input;
 pub mod minecraft_defaults;

@@ -29,21 +29,24 @@ use ephervex_core::{
     ConfigurationHealth, ControlResponse, CoreError, CrashReview, CreatedClient,
     CredentialBackendHealth, CredentialOutcome, CredentialPresence, CredentialStorage,
     DEFAULT_DIAGNOSTIC_BYTES, DEFAULT_SEARCH_LIMIT, DependencyKnowledge, DependencyRefreshReport,
-    DependentMods, DiagnosticEntry, DiagnosticKind, DiagnosticRequest, DiagnosticScope,
-    DiagnosticSearch, DirectoryState, DuplicateClient, EULA_CONFIRMATION_PHRASE, EntitlementLookup,
-    Entitlements, EulaStatus, FileDisposition, Freshness, GameExit, ImpactedMod, ImportRequest,
+    DependentMods, DiagnosticEntry, DiagnosticFix, DiagnosticKind, DiagnosticRequest,
+    DiagnosticScope, DiagnosticSearch, DirectoryState, DuplicateClient, EULA_CONFIRMATION_PHRASE,
+    EntitlementLookup, Entitlements, EulaStatus, ExpectedRuntime, FileDisposition, FindingClass,
+    FindingKind, Freshness, GameExit, HostJavaInstall, HostJavaStatus, ImpactedMod, ImportRequest,
     ImportedPack, IncompatibilityReason, InstallationHealth, InstalledHost, InstalledMods,
-    Integrity, IsolationRequest, IsolationRound, IsolationSession, IsolationStep, JavaHealth,
-    JavaPathChoice, JavaPlan, JavaPlanRequest, JavaRuntime, JavaTarget, LaunchAndConnectEvent,
-    LaunchAndConnectObserver, LaunchAndConnectOptions, LaunchAndConnectOutcome, LaunchEvent,
-    LaunchFeatures, LaunchObserver, LaunchOptions, LaunchOutcome, LaunchState, LoginFlow,
-    LoginOptions, LoginRequest, MAX_SEARCH_MATCHES, MINECRAFT_EULA_REFERENCE, ManagedInstallation,
-    ManagedMod, ManagedModInstallation, ManagedModSnapshot, ModInstallPlan, ModInstallRequest,
-    ModPresence, ModProjectDetails, ModRelations, ModSearchQuery, ModSearchResults, NetworkAccess,
-    NewClient, NewServer, OperationReporter, OptionalCandidate, OptionalSelection, OptionalStatus,
-    OutputLine, PackAnalysis, PackRecipe, PackSide, Paths, PlanWarning, PlannedMod,
-    PreferenceApplication, PreferenceId, PreferenceKey, ProcessMonitor, PromotionRequest,
-    PromotionWarning, ReconciliationReport, RelatedMod, ReleaseListing, RequiredMods,
+    Integrity, IsolationRequest, IsolationRound, IsolationSession, IsolationStep, JavaCheck,
+    JavaHealth, JavaMismatch, JavaPathChoice, JavaPinIndex, JavaPlan, JavaPlanRequest, JavaRefusal,
+    JavaRuntime, JavaRuntimeFailure, JavaRuntimePins, JavaRuntimeSummary, JavaSelectionMode,
+    JavaTarget, JavaUnavailable, LaunchAndConnectEvent, LaunchAndConnectObserver,
+    LaunchAndConnectOptions, LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver,
+    LaunchOptions, LaunchOutcome, LaunchState, LoginFlow, LoginOptions, LoginRequest,
+    MAX_SEARCH_MATCHES, MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod,
+    ManagedModInstallation, ManagedModSnapshot, ModInstallPlan, ModInstallRequest, ModPresence,
+    ModProjectDetails, ModRelations, ModSearchQuery, ModSearchResults, NetworkAccess, NewClient,
+    NewServer, OperationReporter, OptionalCandidate, OptionalSelection, OptionalStatus, OutputLine,
+    PackAnalysis, PackRecipe, PackSide, Paths, PlanWarning, PlannedMod, PreferenceApplication,
+    PreferenceId, PreferenceKey, ProcessMonitor, PromotionRequest, PromotionWarning,
+    ReconciliationReport, RefusedJavaChoice, RelatedMod, ReleaseListing, RequiredMods,
     RequirementBasis, RoundAnswer, RuntimeClassification, RuntimeInventory, SearchOptions,
     SecretString, ServerCommitWarning, ServerContentSource, ServerCreateOptions, ServerEvent,
     ServerExit, ServerFolder, ServerNetworkChange, ServerObserver, ServerPersistenceHealth,
@@ -55,8 +58,8 @@ use ephervex_core::{
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{
-    AbsentModPolicy, DefaultModCatalog, InstanceId, JavaOverride, LoaderKind, LoaderSelection,
-    ModProvider, OperationId, ServerId, SnapshotId, StorageClass,
+    AbsentModPolicy, DefaultModCatalog, InstanceId, JavaOverride, JvmSettings, LoaderKind,
+    LoaderSelection, ModProvider, OperationId, ServerId, SnapshotId, StorageClass,
 };
 
 #[derive(Debug, Parser)]
@@ -931,7 +934,8 @@ enum MinecraftCommand {
 
 #[derive(Debug, Subcommand)]
 enum JavaCommand {
-    /// List the Java runtimes found on this computer.
+    /// List the Java runtimes found on this computer, and the hosts and the
+    /// launcher preference that pin each one.
     List,
     /// Rescan for Java runtimes, ignoring the cached result.
     Refresh,
@@ -944,6 +948,9 @@ enum JavaCommand {
         /// Apply this instance's Java and JVM overrides.
         #[arg(long)]
         instance: Option<InstanceId>,
+        /// Apply this server's Java and JVM overrides.
+        #[arg(long, conflicts_with = "instance")]
+        server: Option<ServerId>,
         /// Use this runtime instead of selecting one. Outranks every setting.
         #[arg(long)]
         java_path: Option<PathBuf>,
@@ -952,9 +959,21 @@ enum JavaCommand {
         install: bool,
     },
     /// Download and install a managed Temurin runtime.
+    ///
+    /// With `--instance` or `--server`, installs the Java that host expects:
+    /// its required version, no later than the update its loader accepts. The
+    /// host keeps its Java setting; when it would not use the new runtime on its
+    /// own, the command prints how to pin it.
     Install {
         /// Java major version, e.g. `21`.
-        major: u32,
+        #[arg(required_unless_present_any = ["instance", "server"])]
+        major: Option<u32>,
+        /// Install the Java this instance expects.
+        #[arg(long, conflicts_with_all = ["major", "server"])]
+        instance: Option<InstanceId>,
+        /// Install the Java this server expects.
+        #[arg(long, conflicts_with_all = ["major", "instance"])]
+        server: Option<ServerId>,
     },
 }
 
@@ -1017,7 +1036,9 @@ enum InstanceCommand {
     ///
     /// Each value falls back to the global setting until it is pinned here.
     /// An option changes only its own value and keeps the others as pinned.
-    /// With no options, prints what is pinned.
+    /// With no options, prints what is pinned, the Java runtime the instance
+    /// would run with, the Java its Minecraft and loader expect, and whether
+    /// the two fit.
     Runtime {
         id: InstanceId,
         /// Use this Java executable instead of the selected one.
@@ -1276,6 +1297,35 @@ enum ServerCommand {
     },
     /// Show canonical server metadata.
     Show { id: ServerId },
+    /// Show or change this server's own Java and JVM settings.
+    ///
+    /// Each value falls back to the global setting until it is pinned here.
+    /// An option changes only its own value and keeps the others as pinned.
+    /// With no options, prints what is pinned, the Java runtime the server
+    /// would run with, the Java its Minecraft and loader expect, and whether
+    /// the two fit. A change needs the server to be stopped.
+    Runtime {
+        id: ServerId,
+        /// Use this Java executable instead of the selected one.
+        #[arg(long, value_name = "PATH")]
+        java: Option<PathBuf>,
+        /// Minimum heap size in MiB.
+        #[arg(long, value_name = "MIB")]
+        min_memory: Option<u32>,
+        /// Maximum heap size in MiB.
+        #[arg(long, value_name = "MIB")]
+        max_memory: Option<u32>,
+        /// One extra JVM argument. Repeatable, and replaces the pinned list.
+        // Hyphen values are allowed because every JVM argument begins with one.
+        #[arg(long = "jvm-arg", value_name = "ARG", allow_hyphen_values = true)]
+        jvm_args: Vec<String>,
+        /// Remove every override and follow the global settings again.
+        #[arg(
+            long,
+            conflicts_with_all = ["java", "min_memory", "max_memory", "jvm_args"]
+        )]
+        clear: bool,
+    },
     /// List the mods a server has, and whether the loader will load each one.
     ///
     /// A server reconstructed from a client pack carries whatever the pack
@@ -2177,7 +2227,7 @@ async fn run_instance_command(
             };
             print_folder(path.as_deref(), folder.as_str(), json)?;
         }
-        InstanceCommand::Runtime { .. } => run_instance_runtime(app, command, json)?,
+        InstanceCommand::Runtime { .. } => run_instance_runtime(app, command, json).await?,
         InstanceCommand::Delete {
             id,
             keep_files,
@@ -2468,6 +2518,7 @@ async fn run_server_command(
                 .await?;
             print_server_commit(&committed.record, &committed.warnings, json);
         }
+        ServerCommand::Runtime { .. } => run_server_runtime(app, command, json).await?,
         ServerCommand::Show { id } => {
             if json {
                 print_json(&server_status_json(app, *id)?);
@@ -3289,6 +3340,7 @@ fn report_connected_launch(outcome: &LaunchAndConnectOutcome, json: bool) {
             "dry_run": outcome.launch.exit.is_none(),
             "exit_code": outcome.launch.exit.and_then(|exit| exit.code),
             "exit_signal": outcome.launch.exit.and_then(|exit| exit.signal),
+            "java_failure": outcome.launch.java_failure.as_deref().map(java_failure_json),
         });
         print_json(&value);
     } else {
@@ -3441,6 +3493,7 @@ fn report_launch(outcome: &LaunchOutcome, json: bool) {
             "dry_run": outcome.exit.is_none(),
             "exit_code": outcome.exit.and_then(|exit| exit.code),
             "exit_signal": outcome.exit.and_then(|exit| exit.signal),
+            "java_failure": outcome.java_failure.as_deref().map(java_failure_json),
         });
         print_json(&value);
         return;
@@ -3453,6 +3506,11 @@ fn report_launch(outcome: &LaunchOutcome, json: bool) {
             outln!("  {argument}");
         }
         eprintln!("{}", ephervex_i18n::lookup("launch-command-redacted"));
+    }
+    if let Some(failure) = &outcome.java_failure {
+        for line in java_failure_lines(failure) {
+            eprintln!("{}", terminal_safe(&line));
+        }
     }
 }
 
@@ -5886,9 +5944,17 @@ async fn run_minecraft_command(
 
 async fn run_java_command(app: &App, command: &JavaCommand, json: bool) -> anyhow::Result<()> {
     match command {
-        JavaCommand::List => show_runtimes(app.java_runtimes().await?.as_ref(), json),
+        JavaCommand::List => show_runtimes(
+            app.java_runtimes().await?.as_ref(),
+            readable_pin_index(app).as_ref(),
+            json,
+        ),
         JavaCommand::Refresh => {
-            show_runtimes(app.refresh_java_runtimes().await?.as_ref(), json);
+            show_runtimes(
+                app.refresh_java_runtimes().await?.as_ref(),
+                readable_pin_index(app).as_ref(),
+                json,
+            );
         }
         JavaCommand::Test { path } => {
             let runtime = app.test_java_runtime(path).await?;
@@ -5897,14 +5963,20 @@ async fn run_java_command(app: &App, command: &JavaCommand, json: bool) -> anyho
         JavaCommand::Select {
             minecraft,
             instance,
+            server,
             java_path,
             install,
         } => {
+            let target = match (instance, server) {
+                (Some(instance), _) => JavaTarget::Client(*instance),
+                (None, Some(server)) => JavaTarget::Server(*server),
+                (None, None) => JavaTarget::VersionOnly,
+            };
             let plan = app
                 .plan_java(
                     minecraft,
                     &JavaPlanRequest {
-                        target: instance.map_or(JavaTarget::VersionOnly, JavaTarget::Client),
+                        target,
                         explicit_path: java_path.clone(),
                         install_if_missing: *install,
                         ..JavaPlanRequest::default()
@@ -5913,9 +5985,31 @@ async fn run_java_command(app: &App, command: &JavaCommand, json: bool) -> anyho
                 .await?;
             show_java_plan(&plan, json);
         }
-        JavaCommand::Install { major } => {
-            let installed = app.install_java(*major).await?;
-            show_managed_install(&installed, json);
+        JavaCommand::Install {
+            major,
+            instance,
+            server,
+        } => {
+            let host = instance
+                .map(InstalledHost::Instance)
+                .or_else(|| server.map(InstalledHost::Server));
+            match (host, major) {
+                (Some(host), _) => {
+                    let installed = app
+                        .install_java_for_host(
+                            host,
+                            &OperationReporter::silent("installing-java"),
+                            &CancellationToken::new(),
+                        )
+                        .await?;
+                    show_host_java_install(host, &installed, json);
+                }
+                (None, Some(major)) => {
+                    let installed = app.install_java(*major).await?;
+                    show_managed_install(&installed, json);
+                }
+                (None, None) => anyhow::bail!("name a Java version, an instance, or a server"),
+            }
         }
     }
     Ok(())
@@ -6476,10 +6570,41 @@ fn show_api_settings(settings: &ApiSettings, json: bool) {
     );
 }
 
-fn show_runtimes(inventory: &RuntimeInventory, json: bool) {
+/// What pins each runtime, or `None` after a warning when a host record
+/// cannot be read, so the runtimes are still listed.
+fn readable_pin_index(app: &App) -> Option<JavaPinIndex> {
+    match app.java_pin_index() {
+        Ok(pins) => Some(pins),
+        Err(error) => {
+            let (summary, _) = localized_failure(&error);
+            eprintln!(
+                "warning: could not check which settings pin each runtime: {}",
+                terminal_safe(&summary)
+            );
+            None
+        }
+    }
+}
+
+/// A runtime's `pinned_by` value: null when the pins could not be read.
+fn runtime_pinned_by_json(runtime: &JavaRuntime, pins: Option<&JavaPinIndex>) -> serde_json::Value {
+    pins.map_or(serde_json::Value::Null, |pins| {
+        runtime_pins_json(&pins.pins_for(runtime))
+    })
+}
+
+fn show_runtimes(inventory: &RuntimeInventory, pins: Option<&JavaPinIndex>, json: bool) {
     if json {
         print_json(&serde_json::json!({
-                    "runtimes": inventory.runtimes.iter().map(runtime_json).collect::<Vec<_>>(),
+                    "runtimes": inventory
+                        .runtimes
+                        .iter()
+                        .map(|runtime| {
+                            let mut value = runtime_json(runtime);
+                            value["pinned_by"] = runtime_pinned_by_json(runtime, pins);
+                            value
+                        })
+                        .collect::<Vec<_>>(),
                     "failures": inventory
         .failures
         .iter()
@@ -6509,6 +6634,15 @@ fn show_runtimes(inventory: &RuntimeInventory, json: bool) {
                 runtime.executable.display()
             );
             outln!("     {}", runtime.vendor);
+            let Some(pinned) = pins.map(|pins| pins.pins_for(runtime)) else {
+                continue;
+            };
+            for host in &pinned.hosts {
+                outln!("     pinned by {} {}", host.host.kind(), host.name);
+            }
+            if pinned.launcher {
+                outln!("     pinned by the launcher preference");
+            }
         }
         outln!(
             "{}",
@@ -6673,6 +6807,46 @@ fn show_managed_install(installed: &ManagedInstallation, json: bool) {
             "already installed"
         }
     );
+}
+
+/// A runtime installed for one host, and how the host would start using it.
+fn show_host_java_install(host: InstalledHost, installed: &HostJavaInstall, json: bool) {
+    let pin = match &installed.follow_up {
+        Some(DiagnosticFix::PinJava(path)) => Some(path),
+        _ => None,
+    };
+    if json {
+        print_json(&serde_json::json!({
+            "host": { "kind": host.kind(), "id": host.id() },
+            "installation": {
+                "release": installed.installation.release.release_name,
+                "directory": json_path(&installed.installation.directory),
+                "newly_installed": installed.installation.newly_installed,
+                "runtime": runtime_json(&installed.installation.runtime),
+            },
+            "status": java_status_json(&installed.status),
+            "pin_offered": pin.map(|path| json_path(path)),
+        }));
+        return;
+    }
+    show_managed_install(&installed.installation, false);
+    print_java_status(&installed.status);
+    if let Some(path) = pin {
+        outln!(
+            "to use it:  ephervex {} runtime {} --java {}",
+            host_command(host),
+            host.id(),
+            path.display()
+        );
+    }
+}
+
+/// The command family a host is addressed through.
+const fn host_command(host: InstalledHost) -> &'static str {
+    match host {
+        InstalledHost::Instance(_) => "instance",
+        InstalledHost::Server(_) => "server",
+    }
 }
 
 fn runtime_json(runtime: &JavaRuntime) -> serde_json::Value {
@@ -7818,7 +7992,7 @@ fn preference_names(ids: &[PreferenceId]) -> Vec<&str> {
 /// An unavailable folder is a failure with an exit code, not a silent success:
 /// a script that asked for the crash reports of an instance that has never
 /// crashed should be able to tell.
-/// What one `instance runtime` invocation asked for.
+/// What one `instance runtime` or `server runtime` invocation asked for.
 #[derive(Clone, Copy)]
 struct RuntimeArgs<'a> {
     java: Option<&'a Path>,
@@ -7828,7 +8002,11 @@ struct RuntimeArgs<'a> {
     clear: bool,
 }
 
-fn run_instance_runtime(app: &App, command: &InstanceCommand, json: bool) -> anyhow::Result<()> {
+async fn run_instance_runtime(
+    app: &App,
+    command: &InstanceCommand,
+    json: bool,
+) -> anyhow::Result<()> {
     let InstanceCommand::Runtime {
         id,
         java,
@@ -7840,91 +8018,479 @@ fn run_instance_runtime(app: &App, command: &InstanceCommand, json: bool) -> any
     else {
         return Ok(());
     };
-    let committed = apply_instance_runtime(
-        app,
-        *id,
-        RuntimeArgs {
-            java: java.as_deref(),
-            min_memory: *min_memory,
-            max_memory: *max_memory,
-            jvm_args,
-            clear: *clear,
-        },
-    )?;
-    print_instance_runtime(&committed.record, &committed.warnings, json);
+    let args = RuntimeArgs {
+        java: java.as_deref(),
+        min_memory: *min_memory,
+        max_memory: *max_memory,
+        jvm_args,
+        clear: *clear,
+    };
+    let record = app.current_client(*id)?;
+    let committed = match args.requested(record.java_override.clone(), record.jvm_override.clone())
+    {
+        Some((java, jvm)) => app.set_client_runtime_settings(*id, java, jvm)?,
+        None => ClientCommit::clean(record),
+    };
+    let status = if args.asks_for_a_change() {
+        None
+    } else {
+        Some(app.host_java_status(InstalledHost::Instance(*id)).await?)
+    };
+    let settings = HostRuntimeSettings {
+        java: committed.record.java_override.as_ref(),
+        jvm: committed.record.jvm_override.as_ref(),
+        status: status.as_ref(),
+    };
+    if json {
+        let mut value = settings.json();
+        value["instance"] = serde_json::json!(committed.record.id.to_string());
+        value["warnings"] = serde_json::json!(client_commit_warnings_json(&committed.warnings));
+        print_json(&value);
+    } else {
+        settings.print();
+        print_client_commit_warnings(&committed.warnings);
+    }
     Ok(())
 }
 
-/// Applies a runtime change, or reads the instance back when none was asked for.
-///
-/// Each option changes only the value it names and leaves every other pinned
-/// value as it was. `--jvm-arg` replaces the pinned argument list as a whole.
-fn apply_instance_runtime(
-    app: &App,
-    id: InstanceId,
-    args: RuntimeArgs<'_>,
-) -> anyhow::Result<ClientCommit<ClientRecord>> {
-    if args.clear {
-        return Ok(app.set_client_runtime_settings(id, None, None)?);
+async fn run_server_runtime(app: &App, command: &ServerCommand, json: bool) -> anyhow::Result<()> {
+    let ServerCommand::Runtime {
+        id,
+        java,
+        min_memory,
+        max_memory,
+        jvm_args,
+        clear,
+    } = command
+    else {
+        return Ok(());
+    };
+    let args = RuntimeArgs {
+        java: java.as_deref(),
+        min_memory: *min_memory,
+        max_memory: *max_memory,
+        jvm_args,
+        clear: *clear,
+    };
+    let record = app.current_server(*id)?;
+    let (record, warnings) =
+        match args.requested(record.java_override.clone(), record.jvm_override.clone()) {
+            Some((java, jvm)) => {
+                let committed = app.set_server_runtime_settings(*id, java, jvm)?;
+                (committed.record, committed.warnings)
+            }
+            None => (record, Vec::new()),
+        };
+    let status = if args.asks_for_a_change() {
+        None
+    } else {
+        Some(app.host_java_status(InstalledHost::Server(*id)).await?)
+    };
+    let settings = HostRuntimeSettings {
+        java: record.java_override.as_ref(),
+        jvm: record.jvm_override.as_ref(),
+        status: status.as_ref(),
+    };
+    if json {
+        let mut value = settings.json();
+        value["server"] = serde_json::json!(record.id.to_string());
+        value["warnings"] = serde_json::json!(server_commit_warnings_json(&warnings));
+        print_json(&value);
+    } else {
+        settings.print();
+        print_server_commit_warnings(&warnings);
     }
-    let asked = args.java.is_some()
-        || args.min_memory.is_some()
-        || args.max_memory.is_some()
-        || !args.jvm_args.is_empty();
-    let record = app.current_client(id)?;
-    if !asked {
-        return Ok(ClientCommit::clean(record));
-    }
-    let java = args.java.map(JavaOverride::new).or(record.java_override);
-    let mut jvm = record.jvm_override.unwrap_or_default();
-    jvm.min_memory_mib = args.min_memory.or(jvm.min_memory_mib);
-    jvm.max_memory_mib = args.max_memory.or(jvm.max_memory_mib);
-    if !args.jvm_args.is_empty() {
-        jvm.jvm_args = args.jvm_args.to_vec();
-    }
-    Ok(app.set_client_runtime_settings(id, java, (!jvm.pins_nothing()).then_some(jvm))?)
+    Ok(())
 }
 
-/// What one instance pins for itself, and what it leaves to the global setting.
-fn print_instance_runtime(record: &ClientRecord, warnings: &[ClientCommitWarning], json: bool) {
-    let java = record
-        .java_override
-        .as_ref()
-        .map(|java| java.path.display().to_string());
-    let jvm = record.jvm_override.as_ref();
-    if json {
-        print_json(&serde_json::json!({
-            "instance": record.id.to_string(),
-            "java": java,
+impl RuntimeArgs<'_> {
+    const fn asks_for_a_change(&self) -> bool {
+        self.clear
+            || self.java.is_some()
+            || self.min_memory.is_some()
+            || self.max_memory.is_some()
+            || !self.jvm_args.is_empty()
+    }
+
+    /// The overrides a host stores after this invocation, or `None` when it
+    /// asked for no change.
+    ///
+    /// Each option changes only the value it names and leaves every other
+    /// pinned value as it was. `--jvm-arg` replaces the pinned argument list
+    /// as a whole.
+    fn requested(
+        &self,
+        java: Option<JavaOverride>,
+        jvm: Option<JvmSettings>,
+    ) -> Option<(Option<JavaOverride>, Option<JvmSettings>)> {
+        if self.clear {
+            return Some((None, None));
+        }
+        if !self.asks_for_a_change() {
+            return None;
+        }
+        let java = self.java.map(JavaOverride::new).or(java);
+        let mut jvm = jvm.unwrap_or_default();
+        jvm.min_memory_mib = self.min_memory.or(jvm.min_memory_mib);
+        jvm.max_memory_mib = self.max_memory.or(jvm.max_memory_mib);
+        if !self.jvm_args.is_empty() {
+            jvm.jvm_args = self.jvm_args.to_vec();
+        }
+        Some((java, (!jvm.pins_nothing()).then_some(jvm)))
+    }
+}
+
+/// What one host pins for itself, and, when asked, how its Java fits.
+struct HostRuntimeSettings<'a> {
+    java: Option<&'a JavaOverride>,
+    jvm: Option<&'a JvmSettings>,
+    status: Option<&'a HostJavaStatus>,
+}
+
+impl HostRuntimeSettings<'_> {
+    fn json(&self) -> serde_json::Value {
+        let jvm = self.jvm;
+        let mut value = serde_json::json!({
+            "java": self.java.map(|java| java.path.display().to_string()),
             "min_memory_mib": jvm.and_then(|jvm| jvm.min_memory_mib),
             "max_memory_mib": jvm.and_then(|jvm| jvm.max_memory_mib),
             "jvm_args": jvm.map(|jvm| jvm.jvm_args.clone()).unwrap_or_default(),
-            "warnings": client_commit_warnings_json(warnings),
-        }));
-        return;
-    }
-    let global = "follows the global setting";
-    outln!("java:       {}", java.as_deref().unwrap_or(global));
-    outln!(
-        "min memory: {}",
-        jvm.and_then(|jvm| jvm.min_memory_mib)
-            .map_or_else(|| global.to_owned(), |mib| format!("{mib} MiB"))
-    );
-    outln!(
-        "max memory: {}",
-        jvm.and_then(|jvm| jvm.max_memory_mib)
-            .map_or_else(|| global.to_owned(), |mib| format!("{mib} MiB"))
-    );
-    let args = jvm.map(|jvm| jvm.jvm_args.as_slice()).unwrap_or_default();
-    outln!(
-        "jvm args:   {}",
-        if args.is_empty() {
-            global.to_owned()
-        } else {
-            args.join(" ")
+        });
+        if let Some(status) = self.status {
+            value["status"] = java_status_json(status);
         }
-    );
-    print_client_commit_warnings(warnings);
+        value
+    }
+
+    fn print(&self) {
+        let global = "follows the global setting";
+        let jvm = self.jvm;
+        outln!(
+            "java:       {}",
+            self.java
+                .map_or_else(|| global.to_owned(), |java| java.path.display().to_string())
+        );
+        outln!(
+            "min memory: {}",
+            jvm.and_then(|jvm| jvm.min_memory_mib)
+                .map_or_else(|| global.to_owned(), |mib| format!("{mib} MiB"))
+        );
+        outln!(
+            "max memory: {}",
+            jvm.and_then(|jvm| jvm.max_memory_mib)
+                .map_or_else(|| global.to_owned(), |mib| format!("{mib} MiB"))
+        );
+        let args = jvm.map(|jvm| jvm.jvm_args.as_slice()).unwrap_or_default();
+        outln!(
+            "jvm args:   {}",
+            if args.is_empty() {
+                global.to_owned()
+            } else {
+                args.join(" ")
+            }
+        );
+        if let Some(status) = self.status {
+            print_java_status(status);
+        }
+    }
+}
+
+/// The Java a host would run with, what it expects, and whether the two fit.
+fn print_java_status(status: &HostJavaStatus) {
+    if let Some(runtime) = status.runtime() {
+        outln!(
+            "runtime:    {} ({})",
+            runtime_summary_text(runtime),
+            selection_text(status.mode, runtime.managed)
+        );
+        outln!("            {}", runtime.path.display());
+    } else if let JavaCheck::Failed(error) = &status.check {
+        outln!("runtime:    not checked ({error})");
+    } else if let JavaCheck::DownloadsAtLaunch { required_major } = &status.check {
+        outln!("runtime:    managed java {required_major}, downloaded at the next launch");
+    } else if let Some(path) = &status.pinned_path {
+        outln!(
+            "runtime:    none usable ({}): {}",
+            selection_text(status.mode, false),
+            path.display()
+        );
+    } else {
+        outln!("runtime:    none usable");
+    }
+    outln!("expected:   {}", expected_text(&status.expected));
+    outln!("status:     {}", status.tone().as_str());
+    for finding in status
+        .findings
+        .iter()
+        .filter(|finding| finding.class() == FindingClass::Problem)
+    {
+        outln!("problem:    {}", java_problem_text(&finding.kind));
+    }
+    if let Some(offer) = status.install {
+        outln!(
+            "install:    ephervex java install --{} {} (java {}{})",
+            host_command(status.host),
+            status.host.id(),
+            offer.major,
+            offer
+                .maximum_update
+                .map_or_else(String::new, |update| format!(", update {update} or older"))
+        );
+    }
+}
+
+/// "java 21.0.8 (Eclipse Adoptium, amd64)": the values the runtime reported.
+/// A vendor or architecture the runtime did not report reads as such.
+fn runtime_summary_text(runtime: &JavaRuntimeSummary) -> String {
+    let reported = |value: &str, missing: &'static str| {
+        if value.trim().is_empty() {
+            missing.to_owned()
+        } else {
+            value.to_owned()
+        }
+    };
+    format!(
+        "java {} ({}, {})",
+        runtime.version,
+        reported(&runtime.vendor, "vendor not reported"),
+        reported(&runtime.arch, "architecture not reported")
+    )
+}
+
+/// How a runtime was chosen, and whether Ephervex manages it.
+fn selection_text(mode: JavaSelectionMode, managed: bool) -> String {
+    let chosen = match mode {
+        JavaSelectionMode::Automatic => "chosen automatically",
+        JavaSelectionMode::PinnedByHost => "pinned by this host",
+        JavaSelectionMode::PinnedByLauncher => "pinned by the launcher preference",
+    };
+    if managed {
+        format!("{chosen}, managed by Ephervex")
+    } else {
+        chosen.to_owned()
+    }
+}
+
+/// "java 17", or "java 8, update 320 or older (Forge)".
+fn expected_text(expected: &ExpectedRuntime) -> String {
+    let major = expected.major();
+    let Some(loader) = expected.bounded_by() else {
+        return format!("java {major}");
+    };
+    match (expected.java.minimum, expected.java.maximum) {
+        (Some(minimum), Some(maximum)) => format!(
+            "java {major}, update {} to {} ({loader})",
+            minimum.update, maximum.update
+        ),
+        (None, Some(maximum)) => {
+            format!(
+                "java {major}, update {} or older ({loader})",
+                maximum.update
+            )
+        }
+        (Some(minimum), None) => {
+            format!(
+                "java {major}, update {} or newer ({loader})",
+                minimum.update
+            )
+        }
+        (None, None) => format!("java {major}"),
+    }
+}
+
+/// A Java problem a host's status reports, in one line.
+fn java_problem_text(kind: &FindingKind) -> String {
+    match kind {
+        FindingKind::JavaIncompatible { mismatch, .. } => mismatch.to_string(),
+        FindingKind::JavaUnusable { path, .. } => {
+            format!("{} is not a Java runtime that can be run", path.display())
+        }
+        FindingKind::JavaUnavailable {
+            reason: JavaUnavailable::DetectionDisabled,
+            ..
+        } => "Java detection is off and nothing is pinned".to_owned(),
+        FindingKind::JavaUnavailable {
+            reason: JavaUnavailable::NothingCompatible,
+            ..
+        } => "no compatible runtime is installed and automatic download is off".to_owned(),
+        _ => String::new(),
+    }
+}
+
+/// What a refused runtime was, what the host expected, and how they differ.
+fn java_refusal_lines(refusal: &JavaRefusal) -> Vec<String> {
+    let chosen = match refusal.chosen {
+        RefusedJavaChoice::GivenForRun => "given on the command line".to_owned(),
+        RefusedJavaChoice::Selected(mode) => selection_text(
+            mode,
+            refusal
+                .attempted
+                .as_ref()
+                .is_some_and(|runtime| runtime.managed),
+        ),
+    };
+    let mut lines = Vec::new();
+    match &refusal.attempted {
+        Some(runtime) => {
+            lines.push(format!(
+                "tried:    {} ({chosen})",
+                runtime_summary_text(runtime)
+            ));
+            lines.push(format!("          {}", runtime.path.display()));
+        }
+        None => lines.push(format!("tried:    no usable runtime ({chosen})")),
+    }
+    lines.push(format!("expected: {}", expected_text(&refusal.expected)));
+    if let Some(mismatch) = &refusal.mismatch {
+        lines.push(format!("problem:  {mismatch}"));
+    }
+    lines
+}
+
+fn java_refusal_json(refusal: &JavaRefusal) -> serde_json::Value {
+    serde_json::json!({
+        "mode": refusal.chosen.as_str(),
+        "attempted": refusal.attempted.as_ref().map(runtime_summary_json),
+        "expected": expected_json(&refusal.expected),
+        "mismatch": refusal.mismatch.as_ref().map(java_mismatch_json),
+    })
+}
+
+/// How a game or server failed because its runtime could not load its code.
+fn java_failure_lines(failure: &JavaRuntimeFailure) -> Vec<String> {
+    let mut lines = vec![match failure.mismatch.runtime_major {
+        Some(runtime) => format!(
+            "java: {} needs java {}, and the runtime only supports up to java {runtime}",
+            failure.mismatch.class, failure.mismatch.class_major
+        ),
+        None => format!(
+            "java: {} needs java {}, newer than the runtime",
+            failure.mismatch.class, failure.mismatch.class_major
+        ),
+    }];
+    if let Some(runtime) = &failure.attempted {
+        lines.push(format!(
+            "tried:    {} at {}",
+            runtime_summary_text(runtime),
+            runtime.path.display()
+        ));
+    }
+    lines.push(format!("expected: {}", expected_text(&failure.expected)));
+    lines
+}
+
+fn java_failure_json(failure: &JavaRuntimeFailure) -> serde_json::Value {
+    serde_json::json!({
+        "class": failure.mismatch.class,
+        "class_major": failure.mismatch.class_major,
+        "runtime_major": failure.mismatch.runtime_major,
+        "attempted": failure.attempted.as_ref().map(runtime_summary_json),
+        "expected": expected_json(&failure.expected),
+    })
+}
+
+fn java_status_json(status: &HostJavaStatus) -> serde_json::Value {
+    serde_json::json!({
+        "status": status.tone().as_str(),
+        "mode": status.mode.as_str(),
+        "pinned_path": status.pinned_path.as_deref().map(json_path),
+        "runtime": status.runtime().map(runtime_summary_json),
+        "downloads_at_launch": matches!(status.check, JavaCheck::DownloadsAtLaunch { .. }),
+        "check_error": match &status.check {
+            JavaCheck::Failed(error) => Some(error.to_string()),
+            _ => None,
+        },
+        "expected": expected_json(&status.expected),
+        "problems": status
+            .findings
+            .iter()
+            .filter(|finding| finding.class() == FindingClass::Problem)
+            .map(|finding| java_finding_json(&finding.kind))
+            .collect::<Vec<_>>(),
+        "install": status.install.map(|offer| serde_json::json!({
+            "major": offer.major,
+            "maximum_update": offer.maximum_update,
+        })),
+    })
+}
+
+fn runtime_summary_json(runtime: &JavaRuntimeSummary) -> serde_json::Value {
+    serde_json::json!({
+        "path": json_path(&runtime.path),
+        "major": runtime.major,
+        "version": runtime.version,
+        "vendor": runtime.vendor,
+        "arch": runtime.arch,
+        "managed": runtime.managed,
+        "source": runtime.source.as_str(),
+    })
+}
+
+fn expected_json(expected: &ExpectedRuntime) -> serde_json::Value {
+    serde_json::json!({
+        "major": expected.major(),
+        "minimum": expected.java.minimum.map(|version| version.to_string()),
+        "maximum": expected.java.maximum.map(|version| version.to_string()),
+        "bounded_by": expected.bounded_by(),
+    })
+}
+
+fn java_mismatch_json(mismatch: &JavaMismatch) -> serde_json::Value {
+    match mismatch {
+        JavaMismatch::Major { required, found } => serde_json::json!({
+            "kind": mismatch.as_str(), "required": required, "found": found,
+        }),
+        JavaMismatch::TooOld { minimum, found } => serde_json::json!({
+            "kind": mismatch.as_str(), "minimum": minimum, "found": found,
+        }),
+        JavaMismatch::TooNew { maximum, found } => serde_json::json!({
+            "kind": mismatch.as_str(), "maximum": maximum, "found": found,
+        }),
+        JavaMismatch::Architecture { expected, found } => serde_json::json!({
+            "kind": mismatch.as_str(), "expected": expected, "found": found,
+        }),
+    }
+}
+
+fn java_finding_json(kind: &FindingKind) -> serde_json::Value {
+    match kind {
+        FindingKind::JavaIncompatible {
+            layer,
+            path,
+            mismatch,
+            ..
+        } => serde_json::json!({
+            "kind": "incompatible",
+            "layer": layer.as_str(),
+            "path": json_path(path),
+            "mismatch": java_mismatch_json(mismatch),
+        }),
+        FindingKind::JavaUnusable { layer, path } => serde_json::json!({
+            "kind": "unusable",
+            "layer": layer.as_str(),
+            "path": json_path(path),
+        }),
+        FindingKind::JavaUnavailable { reason, .. } => serde_json::json!({
+            "kind": "unavailable",
+            "reason": reason.as_str(),
+        }),
+        _ => serde_json::Value::Null,
+    }
+}
+
+fn runtime_pins_json(pins: &JavaRuntimePins) -> serde_json::Value {
+    serde_json::json!({
+        "hosts": pins
+            .hosts
+            .iter()
+            .map(|pin| serde_json::json!({
+                "kind": pin.host.kind(),
+                "id": pin.host.id(),
+                "name": pin.name,
+            }))
+            .collect::<Vec<_>>(),
+        "launcher": pins.launcher,
+    })
 }
 
 fn client_commit_warnings_json(warnings: &[ClientCommitWarning]) -> Vec<serde_json::Value> {
@@ -8140,7 +8706,7 @@ async fn run_server_foreground(
     let mut requests = TerminationRequests::watch()
         .map_err(|error| anyhow::anyhow!("could not watch for termination requests: {error}"))?;
     let outcome = supervise_foreground(
-        Box::pin(app.start_server_until_canceled(id, java, &observer, &cancel)),
+        Box::pin(app.start_server_until_canceled(id, java.clone(), &observer, &cancel)),
         &cancel,
         &mut requests,
         || async {
@@ -8162,8 +8728,27 @@ async fn run_server_foreground(
         }
         Err(error) => return Err(error.into()),
     };
-    if !json {
+    // The explanation is extra: failing to read it never hides how the
+    // server ended.
+    let failure = match app.server_java_failure(id, &exit, java.as_deref()).await {
+        Ok(failure) => failure,
+        Err(error) => {
+            tracing::debug!(%error, "could not read the server's output for a Java failure");
+            None
+        }
+    };
+    if json {
+        if let Some(failure) = &failure {
+            print_json(&serde_json::json!({
+                "event": "java_failure",
+                "java_failure": java_failure_json(failure),
+            }));
+        }
+    } else {
         note(&server_exit_description(&exit));
+        for line in failure.iter().flat_map(java_failure_lines) {
+            note(&line);
+        }
     }
     server_exit_result(&exit).and(stdout_result())
 }
@@ -8770,12 +9355,16 @@ fn report_failure(error: &anyhow::Error, json: bool) {
         localized_failure,
     );
 
+    let refusal = error
+        .downcast_ref::<CoreError>()
+        .and_then(CoreError::java_refusal);
     if json {
         let value = serde_json::json!({
             "message_id": message_id,
             "error": summary,
             "action": action,
             "detail": technical,
+            "java": refusal.map(java_refusal_json),
         });
         if let Ok(text) = serde_json::to_string_pretty(&value) {
             eprintln!("{text}");
@@ -8788,6 +9377,11 @@ fn report_failure(error: &anyhow::Error, json: bool) {
     eprintln!("error: {}", terminal_safe(&summary));
     if let Some(action) = action {
         eprintln!("       {}", terminal_safe(&action));
+    }
+    if let Some(refusal) = refusal {
+        for line in java_refusal_lines(refusal) {
+            eprintln!("  {}", terminal_safe(&line));
+        }
     }
     // A failure that is not a `CoreError` has no localized message, so the
     // summary *is* its first technical line. Printing the chain unfiltered
@@ -8856,6 +9450,45 @@ fn localized_failure(error: &CoreError) -> (String, Option<String>) {
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_runtime_listed_without_its_pins_reports_them_as_unknown_not_as_none() {
+        let runtime = JavaRuntime {
+            executable: PathBuf::from("/opt/jdk-21/bin/java"),
+            home: None,
+            version: ephervex_core::JavaVersion::parse("21.0.8").expect("a version"),
+            version_string: "21.0.8".to_owned(),
+            runtime_version: "21.0.8+9".to_owned(),
+            vendor: "Eclipse Adoptium".to_owned(),
+            arch: "amd64".to_owned(),
+            origins: Vec::new(),
+        };
+        assert_eq!(
+            runtime_pinned_by_json(&runtime, None),
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            runtime_pinned_by_json(&runtime, Some(&JavaPinIndex::default())),
+            serde_json::json!({"hosts": [], "launcher": false})
+        );
+    }
+
+    #[test]
+    fn a_runtime_line_names_a_vendor_or_architecture_the_runtime_did_not_report() {
+        let runtime = JavaRuntimeSummary {
+            version: "1.6.0_45".to_owned(),
+            major: 6,
+            path: PathBuf::from("/opt/jdk6/bin/java"),
+            managed: false,
+            vendor: String::new(),
+            arch: String::new(),
+            source: ephervex_core::JavaSourceKind::UserSupplied,
+        };
+        assert_eq!(
+            runtime_summary_text(&runtime),
+            "java 1.6.0_45 (vendor not reported, architecture not reported)"
+        );
+    }
 
     #[test]
     fn an_address_is_recognized_whatever_the_case_of_its_scheme() {

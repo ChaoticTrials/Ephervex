@@ -111,7 +111,8 @@ pub use manifest::{
 pub use natives::{NativesError, NativesReport};
 pub use platform::Platform;
 pub use process::{
-    GameExit, GameProcess, LaunchEvent, LaunchEvents, LaunchObserver, OutputLine, OutputStream,
+    EARLY_OUTPUT_LINES, GameExit, GameProcess, LaunchEvent, LaunchEvents, LaunchObserver,
+    OutputLine, OutputStream,
 };
 pub use rules::{
     OsCondition, OsName, OsVersionCondition, Rule, RuleAction, RuleContext, rules_allow,

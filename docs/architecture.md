@@ -890,6 +890,44 @@ Authentication and Java failures are classified in `ephervex-core`, so a
 frontend can offer sign-in, session-only login, or managed Java without
 matching on provider-specific error trees.
 
+## Java runtime selection
+
+`ephervex-java` judges a runtime against a host in one evaluation: the
+required major, the loader's update bounds, and the host's processor
+architecture. Automatic selection, the check of a pinned path, and the
+verdicts the picker shows all use it (ADR 0046).
+
+`App::host_java_status` answers which Java a host would run and whether it
+fits, through the classification Diagnostics uses. It reports the runtime's
+path, version, vendor, and architecture, how it was chosen (automatically, by
+the host's own override, or by the launcher preference), whether Ephervex
+manages it, and what the host expects. A pin every rule accepts is valid,
+customized; a rule violation or a pin that cannot be run is a problem. The
+status answers a pinned path from the cached inventory when it holds that
+executable, while a launch always runs it. Nothing a probe learns is written
+to disk.
+
+`App::java_choices` lists every runtime the inventory knows with the host's
+verdict, compatible ones in the order selection prefers them, and what
+automatic selection or the launcher preference resolves to. A path the user
+types is probed and judged by `App::evaluate_java_path` before anything
+changes. Choosing any of them is a `DiagnosticFix`, previewed with the runtime
+before and after and applied like any other Diagnostics fix, so only the
+host's Java override changes. `App::install_java_for_host` installs the
+managed runtime a host expects within its loader's update ceiling, also when
+automatic download is off, and never pins it.
+
+`App::java_pin_index` maps canonical paths to the client and server overrides
+and the launcher preference that name them. Removing a managed runtime lists
+them before the user confirms, and a pin left naming a removed runtime shows
+as an unusable pin with a fix.
+
+A launch or start refused before the JVM runs carries a `JavaRefusal`: the
+runtime tried, how it was chosen, what the host expects, and the mismatch or
+probe failure. A run that ends because a class needs a newer Java carries a
+`JavaRuntimeFailure` read from the client's early output or the end of the
+server run's capture. Both frontends render these through the same core types.
+
 ## Pack-import data flow
 
 An archive reaches this flow from the frontend's file dialog or from a drop onto

@@ -49,6 +49,7 @@ use crate::window_aspect;
 use crate::workspace_layout::{PaneId, Revealed, Surface, WorkspaceLayout};
 
 mod diagnosis_flow;
+mod java_runtime;
 mod log_views;
 mod mod_views;
 mod server_tools;
@@ -1829,6 +1830,17 @@ fn apply_server_tool_event(
     if matches!(event, backend::ServerToolEvent::Started) {
         workspace.forget_last_run(InstalledHost::Server(server));
     }
+    // A start may have installed the managed runtime it planned, whether it
+    // then came up, failed or was abandoned.
+    if matches!(
+        event,
+        backend::ServerToolEvent::Started
+            | backend::ServerToolEvent::StartAbandoned
+            | backend::ServerToolEvent::RestartFailed { .. }
+            | backend::ServerToolEvent::Finished { .. }
+    ) {
+        java_runtime::reload_shown(workspace);
+    }
     if matches!(
         event,
         backend::ServerToolEvent::Started
@@ -2850,6 +2862,7 @@ fn register_callbacks(
     register_snapshot_actions(ui, commands);
     register_isolation_actions(ui, commands, workspace);
     diagnosis_flow::register(ui, commands, workspace);
+    java_runtime::register(ui, commands, workspace);
     register_restart_actions(ui, commands, lifecycle);
     register_disk_usage_actions(ui, commands, disk_usage);
     log_views::register(ui, &workspace.logs);
@@ -3828,12 +3841,6 @@ fn register_favorite_versions(ui: &AppWindow, commands: &Sender<Command>) {
         favorites.retain(|kept| kept.as_str() != version.as_str());
         send(&sender, Command::SetFavoriteMinecraftVersions(favorites));
     });
-}
-
-/// A typed path, or `None` where the field was left to the global setting.
-fn optional_path(value: &str) -> Option<PathBuf> {
-    let trimmed = value.trim();
-    (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
 }
 
 fn favorite_versions(ui: &AppWindow) -> Vec<String> {
@@ -4854,6 +4861,7 @@ impl Workspace {
         for &host in entered {
             mod_views::publish(self, &self.mods.borrow(), host);
             load_host(ui, host);
+            java_runtime::load(&self.commands, host, false);
         }
     }
 
@@ -5474,7 +5482,7 @@ fn register_instance_runtime_actions(
 ) {
     let sender = commands.clone();
     let views = workspace.clone();
-    ui.on_save_instance_runtime(move |id, java, min, max, args| {
+    ui.on_save_instance_runtime(move |id, min, max, args| {
         let Some(instance) = backend::parse_instance_id(&id) else {
             return;
         };
@@ -5483,7 +5491,6 @@ fn register_instance_runtime_actions(
             &sender,
             Command::SaveInstanceRuntime {
                 instance,
-                java: optional_path(&java),
                 min_memory_mib: min.to_string(),
                 max_memory_mib: max.to_string(),
                 jvm_args: args.to_string(),
@@ -5500,7 +5507,6 @@ fn register_instance_runtime_actions(
                 &sender,
                 Command::SaveInstanceRuntime {
                     instance,
-                    java: None,
                     min_memory_mib: String::new(),
                     max_memory_mib: String::new(),
                     jvm_args: String::new(),
@@ -7608,6 +7614,14 @@ fn apply_event(
             let mut drafts = settings_drafts.borrow_mut();
             finish_settings_save(ui, &mut drafts, save, succeeded);
             show_settings_saving(ui, &drafts);
+            drop(drafts);
+            // The launcher-wide Java settings decide every host's Java that
+            // pins none of its own and whether the launcher preference pins a
+            // listed runtime. The list is read again, and with it each shown
+            // host.
+            if succeeded && save == SettingsSave::JavaSettings {
+                send(&workspace.commands, Command::LoadJavaRuntimes);
+            }
         }
         Event::MinecraftPreferencesSaveFinished { .. }
         | Event::MinecraftPreferencePreview { .. }
@@ -7622,7 +7636,6 @@ fn apply_event(
             // its own view and never in the fields of another instance.
             if let Some(instance) = backend::parse_instance_id(&runtime.instance) {
                 workspace.update(InstalledHost::Instance(instance), |view| {
-                    view.runtime_java = runtime.java.into();
                     view.runtime_memory_min = runtime.min_memory.into();
                     view.runtime_memory_max = runtime.max_memory.into();
                     view.runtime_jvm_args = runtime.jvm_args.into();
@@ -7659,7 +7672,11 @@ fn apply_event(
             minecraft,
             message,
         } => apply_loader_versions_failure(ui, instance, loader, &minecraft, message),
-        Event::LoaderChangeFinished { instance } => apply_loader_change_finished(ui, instance),
+        Event::LoaderChangeFinished { instance } => {
+            apply_loader_change_finished(ui, instance);
+            // The loader decides which Java the instance expects.
+            java_runtime::load(&workspace.commands, InstalledHost::Instance(instance), true);
+        }
         Event::LoaderChangeFailed { instance, message } => {
             apply_loader_change_failure(ui, instance, message);
         }
@@ -7814,7 +7831,12 @@ fn apply_event(
                 workspace.reveal_surface(ui, host, Surface::Isolation);
             }
         }
-        Event::JavaRuntimes(rows) => ui.set_java_runtimes(model(java_rows(rows))),
+        Event::JavaRuntimes(rows) => {
+            ui.set_java_runtimes(model(java_rows(rows)));
+            // A runtime that came or went can change what a host resolves to
+            // or whether its pin still runs, so each shown host reads it again.
+            java_runtime::reload_shown(workspace);
+        }
         Event::Activity(activity) => {
             apply_isolation_stage(ui, &workspace.isolation.borrow(), &activity);
             diagnosis_flow::apply_activity(
@@ -7909,13 +7931,26 @@ fn apply_event(
             host,
             request,
             outcome,
-        } => diagnosis_flow::apply_fix_applied(
-            workspace,
-            &mut workspace.diagnosis.borrow_mut(),
-            host,
-            request,
-            outcome,
-        ),
+        } => {
+            diagnosis_flow::apply_fix_applied(
+                workspace,
+                &mut workspace.diagnosis.borrow_mut(),
+                host,
+                request,
+                outcome,
+            );
+            // Any fix can change what the host's Java resolves to, so the
+            // runtime section reads it again rather than showing what was.
+            java_runtime::load(&workspace.commands, host, true);
+        }
+        Event::HostJava(data) => java_runtime::apply_host_java(workspace, &data),
+        Event::HostJavaPathChecked { host, result } => {
+            java_runtime::apply_path_checked(workspace, host, &result);
+        }
+        Event::HostJavaInstalled { host, pin } => {
+            java_runtime::apply_installed(workspace, host, pin);
+        }
+        Event::HostJavaInstallSettled(host) => java_runtime::apply_install_settled(workspace, host),
         Event::DiagnosisSettled { request } => {
             diagnosis_flow::settle(
                 ui,
@@ -7989,7 +8024,10 @@ fn apply_event(
         Event::CreationFinished { request_id } => {
             creations.borrow_mut().finish(&request_id);
             apply_pending_creations(ui, &creations.borrow());
+            // Installing a server can install the managed runtime it needs.
+            java_runtime::reload_shown(workspace);
         }
+        Event::JavaPlanned => java_runtime::reload_shown(workspace),
         // A discarded result belongs to an attempt this flow no longer tracks
         // (superseded, the modal was closed and reopened, or an unrelated
         // submission finished): there is nothing that should touch whatever
@@ -8043,6 +8081,8 @@ fn apply_event(
             creations.borrow_mut().finish(&request_id);
             apply_pending_creations(ui, &creations.borrow());
             apply_import_submission_finished(ui, import_flow, generation, succeeded);
+            // An import can install a linked server, and with it a runtime.
+            java_runtime::reload_shown(workspace);
         }
         Event::StorageRootPicked(path) => {
             ui.set_persistent_root(path.display().to_string().into());
@@ -10064,8 +10104,18 @@ fn java_rows(rows: Vec<JavaData>) -> Vec<JavaRow> {
             path: row.path.into(),
             version: row.version.into(),
             vendor: row.vendor.into(),
+            title: row.title.into(),
             origin: row.origin.into(),
             compatible: row.compatible.into(),
+            pinned_by: match row.pinned_by.as_deref() {
+                Some("") => SharedString::default(),
+                Some(hosts) => {
+                    lookup_args("gui-java-pinned-by", [("hosts", Arg::from(hosts))]).into()
+                }
+                None => lookup("gui-java-pins-unknown").into(),
+            },
+            pins_known: row.pinned_by.is_some(),
+            pinning: row.pinned_by.unwrap_or_default().into(),
         })
         .collect()
 }
@@ -10546,13 +10596,7 @@ mod tests {
             backend::HostErrorSurface::Settings,
             "Not a Java".to_owned(),
         );
-        ui.invoke_save_instance_runtime(
-            id.clone(),
-            "/usr/bin/java".into(),
-            "".into(),
-            "".into(),
-            "".into(),
-        );
+        ui.invoke_save_instance_runtime(id.clone(), "1024".into(), "".into(), "".into());
 
         assert_eq!(first_view(&ui).runtime_error, "");
         assert!(matches!(
@@ -11191,6 +11235,105 @@ mod tests {
                 blocked: String::new(),
             }),
         );
+    }
+
+    #[test]
+    fn choosing_a_java_runtime_opens_its_review_before_diagnostics_was_ever_opened() {
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        java_runtime::register(&ui, &workspace.commands, &workspace);
+        let host = client_host();
+        workspace.open(&ui, host, Surface::Settings);
+        commands.try_iter().for_each(drop);
+
+        ui.invoke_choose_host_java(
+            "client".into(),
+            host.id().into(),
+            "/opt/jdk-21/bin/java".into(),
+        );
+
+        let Ok(Command::PreviewFix { fix, .. }) = commands.try_recv() else {
+            panic!("a preview of the chosen runtime");
+        };
+        assert_eq!(
+            fix,
+            DiagnosticFix::PinJava(PathBuf::from("/opt/jdk-21/bin/java"))
+        );
+        assert_eq!(first_view(&ui).fix_state, "loading");
+        assert!(
+            commands.try_recv().is_err(),
+            "nothing is applied before the preview is reviewed"
+        );
+
+        java_runtime::apply_installed(
+            &workspace,
+            host,
+            Some(PathBuf::from("/data/java/8/jdk8u312/bin/java")),
+        );
+        let previews: Vec<DiagnosticFix> = commands
+            .try_iter()
+            .filter_map(|command| match command {
+                Command::PreviewFix { fix, .. } => Some(fix),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            previews,
+            [DiagnosticFix::PinJava(PathBuf::from(
+                "/data/java/8/jdk8u312/bin/java"
+            ))],
+            "the pin an install offers is put up for review, never applied"
+        );
+    }
+
+    #[test]
+    fn a_failed_java_read_leaves_nothing_of_the_earlier_one_on_screen() {
+        let ui = test_window();
+        let (workspace, _commands) = test_workspace_sending(&ui);
+        let host = client_host();
+        workspace.open(&ui, host, Surface::Settings);
+        let status = crate::java_view::JavaStatusView {
+            tone: "healthy".to_owned(),
+            tone_label: "Healthy".to_owned(),
+            runtime: "Java 21.0.8, Eclipse Adoptium, amd64".to_owned(),
+            summary: "Java 21.0.8 (Eclipse Adoptium)".to_owned(),
+            origin: "chosen automatically".to_owned(),
+            expected: "Java 21".to_owned(),
+            ..crate::java_view::JavaStatusView::default()
+        };
+        java_runtime::apply_host_java(
+            &workspace,
+            &backend::HostJavaData {
+                host,
+                status: Ok(status),
+                choices: None,
+            },
+        );
+        assert_eq!(
+            first_view(&ui).java_summary,
+            "Java 21.0.8 (Eclipse Adoptium)"
+        );
+
+        java_runtime::apply_host_java(
+            &workspace,
+            &backend::HostJavaData {
+                host,
+                status: Err("The Java check could not run".to_owned()),
+                choices: None,
+            },
+        );
+
+        let view = first_view(&ui);
+        assert_eq!(view.java_error, "The Java check could not run");
+        for field in [
+            view.java_summary,
+            view.java_tone,
+            view.java_tone_label,
+            view.java_runtime,
+            view.java_origin,
+        ] {
+            assert_eq!(field, "", "a stale claim stayed on screen");
+        }
     }
 
     #[test]
@@ -12239,6 +12382,61 @@ mod tests {
         test_workspace_sending(ui).0
     }
 
+    /// A start plans its Java before it can fail, and may have installed a
+    /// managed runtime by then, so even an abandoned start re-reads what the
+    /// shown hosts run.
+    #[test]
+    fn an_abandoned_server_start_reads_the_shown_hosts_java_again() {
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        let host = client_host();
+        workspace.open(&ui, host, Surface::Diagnostics);
+        commands.try_iter().for_each(drop);
+
+        apply_server_tool_event(
+            &ui,
+            &workspace,
+            ephervex_model::ServerId::new(),
+            backend::ServerToolEvent::StartAbandoned,
+        );
+
+        assert!(commands.try_iter().any(|command| matches!(
+            command,
+            Command::LoadHostJava { host: loaded, choices: true } if loaded == host
+        )));
+    }
+
+    /// The launcher preference can pin a listed runtime, so a saved Java
+    /// setting reads the list, and its pins, again.
+    #[test]
+    fn a_saved_java_setting_reads_the_runtime_list_again() {
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        apply_event(
+            &ui,
+            Event::SettingsSaveFinished {
+                save: SettingsSave::JavaSettings,
+                succeeded: true,
+            },
+            &Rc::default(),
+            &Rc::default(),
+            &Rc::default(),
+            &Rc::default(),
+            &Rc::default(),
+            &Rc::default(),
+            &Rc::default(),
+            &Rc::default(),
+            &workspace,
+            &workspace.commands,
+        );
+
+        assert!(
+            commands
+                .try_iter()
+                .any(|command| matches!(command, Command::LoadJavaRuntimes))
+        );
+    }
+
     /// A workspace whose commands can be read back.
     fn test_workspace_sending(ui: &AppWindow) -> (Workspace, std::sync::mpsc::Receiver<Command>) {
         let (sender, commands) = std::sync::mpsc::channel();
@@ -12423,7 +12621,11 @@ mod tests {
                 failure: Some("replacement failed".to_owned()),
             },
         );
-        let sent: Vec<_> = commands.try_iter().collect();
+        // The shown hosts also read their Java again; only diagnoses count here.
+        let sent: Vec<_> = commands
+            .try_iter()
+            .filter(|command| !matches!(command, Command::LoadHostJava { .. }))
+            .collect();
         assert!(
             matches!(sent.as_slice(), [Command::ExplainServerFailure { server: id, failure, .. }]
             if *id == server && failure == "replacement failed")
@@ -14788,6 +14990,7 @@ mod tests {
         let rust = [
             include_str!("controller.rs"),
             include_str!("controller/diagnosis_flow.rs"),
+            include_str!("controller/java_runtime.rs"),
             include_str!("controller/log_views.rs"),
             include_str!("controller/workspace.rs"),
             include_str!("main.rs"),

@@ -45,6 +45,10 @@ mod host_recipe_gate;
 pub mod import;
 pub mod instance;
 pub mod isolation;
+pub mod java_choices;
+pub mod java_failure;
+pub mod java_install;
+pub mod java_status;
 pub mod launch;
 pub mod licenses;
 pub mod linked_mods;
@@ -71,6 +75,8 @@ pub mod server_pack;
 pub mod single_instance;
 pub mod snapshot;
 pub mod termination;
+#[cfg(test)]
+mod test_fixtures;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 pub mod url_handler;
@@ -104,9 +110,9 @@ pub use dependencies::{
 };
 pub use diagnosis::{
     DiagnosisRequest, DiagnosticFix, Finding, FindingClass, FindingKind, FixOutcome, FixPreview,
-    HostDiagnosis, IntegrityCheck, JavaCheck, JavaLayer, JavaMismatch, JavaRuntimeSummary,
-    JavaUnavailable, LoaderReportedRequirement, LoaderRequest, ModCounts, ProposedChange,
-    RecommendedJava,
+    HostDiagnosis, IntegrityCheck, JavaChange, JavaCheck, JavaLayer, JavaMismatch,
+    JavaRuntimeSummary, JavaUnavailable, LoaderReportedRequirement, LoaderRequest, ModCounts,
+    ProposedChange,
 };
 pub use diagnostics::{
     ClientLogTail, DEFAULT_DIAGNOSTIC_BYTES, DiagnosticCatalog, DiagnosticRequest, DiagnosticScope,
@@ -133,6 +139,19 @@ pub use isolation::{
     IsolationReconciliation, IsolationReport, IsolationRequest, IsolationResultCandidate,
     IsolationRound, IsolationRoundKind, IsolationRoundRecord, IsolationSession, IsolationStep,
     RoundAnswer, RoundContradiction,
+};
+pub use java_choices::{
+    AutomaticJava, JavaChoice, JavaChoices, JavaPinIndex, JavaRuntimePins, LauncherJavaChoice,
+    PinningHost,
+};
+pub use java_failure::{
+    ClassVersionMismatch, JavaRefusal, JavaRuntimeFailure, RefusedJavaChoice,
+    class_version_mismatch,
+};
+pub use java_install::HostJavaInstall;
+pub use java_status::{
+    ExpectedRuntime, HostJavaStatus, JavaInstallOffer, JavaSelectionMode, JavaSelectionState,
+    JavaStatusTone, ResolvedJava,
 };
 pub use launch::{LaunchOptions, LaunchOutcome};
 pub use licenses::{
@@ -260,10 +279,10 @@ pub use ephervex_download::{
 /// `ephervex-download` to its manifest to show a progress bar.
 pub use ephervex_download::{Freshness, OperationReporter, ProgressSink};
 pub use ephervex_java::{
-    EffectiveJvmSettings, GlobalJavaSettings, JavaError, JavaOrigin, JavaPathChoice, JavaRuntime,
-    JavaSourceKind, JavaVersion, JvmField, ManagedInstallation, ManagedRelease, PinSource,
-    ProbeFailure, RejectedRuntime, RejectionReason, RequiredJava, RequirementBasis, RuleRejection,
-    RuntimeInventory,
+    EffectiveJvmSettings, ExpectedJava, GlobalJavaSettings, JavaError, JavaOrigin, JavaPathChoice,
+    JavaRuntime, JavaSourceKind, JavaVersion, JvmField, ManagedInstallation, ManagedRelease,
+    PinSource, ProbeFailure, RejectedRuntime, RejectionReason, RequiredJava, RequirementBasis,
+    RuleRejection, RuntimeInventory, VersionBound,
 };
 pub use ephervex_loaders::{InstalledServer, LoaderBuild, LoaderVersionListing, ServerLaunch};
 pub use ephervex_minecraft::{

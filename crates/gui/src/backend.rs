@@ -46,6 +46,7 @@ use ephervex_model::{
 };
 
 use crate::diagnosis_view::{self, DiagnosisView, OutcomeView, PreviewView};
+use crate::java_view::{JavaChoiceView, JavaStatusView};
 use crate::presentation::{
     ActivityPresentation, ImportErrorKind, ImportFailure, ImportPresentation, InstancePresentation,
     ModImpactPresentation, ModRequirementPresentation, PairPresentation,
@@ -73,6 +74,19 @@ pub enum ServerPackTarget {
 #[derive(Debug)]
 pub enum Command {
     Refresh,
+    /// Reads which Java a host would run and whether it fits, and, when the
+    /// runtime section asks, every runtime it could switch to.
+    LoadHostJava {
+        host: InstalledHost,
+        choices: bool,
+    },
+    /// Probes an executable the user named and gives a host's verdict on it.
+    CheckHostJavaPath {
+        host: InstalledHost,
+        path: PathBuf,
+    },
+    /// Installs the managed Java a host expects.
+    InstallHostJava(InstalledHost),
     LoadMinecraftReleases,
     WarmLanguageCatalog(String),
     LoadLoaderVersions {
@@ -86,12 +100,12 @@ pub enum Command {
     /// Records the Minecraft releases to offer first, in the order given.
     SetFavoriteMinecraftVersions(Vec<String>),
     CancelOperation(String),
-    /// Replace one instance's own Java and JVM settings. `None` on `java` and
-    /// a blank memory field restore the global setting. `jvm_args` and the
-    /// memory fields are the typed text.
+    /// Replace one instance's own JVM settings. A blank memory field restores
+    /// the global setting. `jvm_args` and the memory fields are the typed text.
+    /// The instance's Java pin is never touched here: choosing a runtime is a
+    /// previewed change of its own.
     SaveInstanceRuntime {
         instance: InstanceId,
-        java: Option<PathBuf>,
         min_memory_mib: String,
         max_memory_mib: String,
         jvm_args: String,
@@ -1225,18 +1239,25 @@ pub struct LinkedResultData {
     pub rows: Vec<LinkedTargetData>,
 }
 
-/// The Managed Mods list plus whatever has to be said about how complete it is.
+/// A host's Java as the window shows it.
+#[derive(Debug, Clone)]
+pub struct HostJavaData {
+    pub host: InstalledHost,
+    /// The status, or why it could not be read.
+    pub status: Result<JavaStatusView, String>,
+    /// The picker's entries, when they were asked for and could be read.
+    pub choices: Option<Vec<JavaChoiceView>>,
+}
+
 /// One instance's own runtime settings, and what it would otherwise inherit.
 #[derive(Debug, Clone)]
 pub struct InstanceRuntimeData {
     pub instance: String,
-    /// Empty where the instance follows the global setting.
-    pub java: String,
     pub min_memory: String,
     pub max_memory: String,
     pub jvm_args: String,
-    /// Whether anything is pinned, which is what makes "follow global" an
-    /// action worth offering.
+    /// Whether a JVM setting is pinned, which is what makes "follow global"
+    /// an action worth offering. The Java pin is the runtime section's.
     pub pinned: bool,
     /// An already-localized sentence naming what the global settings are, so
     /// an empty field reads as a choice rather than as missing information.
@@ -1489,8 +1510,13 @@ pub struct JavaData {
     pub path: String,
     pub version: String,
     pub vendor: String,
+    /// Version, vendor and architecture as one line.
+    pub title: String,
     pub origin: String,
     pub compatible: String,
+    /// The hosts and launcher setting that name this runtime, empty when
+    /// none does, or `None` when they could not be read.
+    pub pinned_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1572,6 +1598,24 @@ pub enum Event {
     },
     Snapshot(Box<Snapshot>),
     InstanceRuntime(InstanceRuntimeData),
+    /// A host's Java, as [`Command::LoadHostJava`] read it.
+    HostJava(Box<HostJavaData>),
+    /// A launch chose its Java runtime or ended, either of which may follow
+    /// the install of a managed one.
+    JavaPlanned,
+    /// The verdict on a path [`Command::CheckHostJavaPath`] probed.
+    HostJavaPathChecked {
+        host: InstalledHost,
+        result: Result<JavaChoiceView, String>,
+    },
+    /// A runtime was installed for a host. `pin` is the previewable change
+    /// that would make the host use it, when it would not on its own.
+    HostJavaInstalled {
+        host: InstalledHost,
+        pin: Option<PathBuf>,
+    },
+    /// An install for a host ended, whichever way.
+    HostJavaInstallSettled(InstalledHost),
     /// How a creation shown as a pending card is getting on.
     CreationProgress {
         request_id: String,
@@ -2880,7 +2924,6 @@ fn run_worker(
             }
             Command::SaveInstanceRuntime {
                 instance,
-                java,
                 min_memory_mib,
                 max_memory_mib,
                 jvm_args,
@@ -2924,11 +2967,8 @@ fn run_worker(
                     max_memory_mib,
                     jvm_args,
                 };
-                let result = app.set_client_runtime_settings(
-                    instance,
-                    java.map(ephervex_model::JavaOverride::new),
-                    (!jvm.pins_nothing()).then_some(jvm),
-                );
+                let result =
+                    app.set_client_jvm_settings(instance, (!jvm.pins_nothing()).then_some(jvm));
                 match result {
                     Ok(committed) => {
                         let _ = events.send(Event::Toast {
@@ -5628,6 +5668,67 @@ fn run_worker(
                     }
                 }
             }
+            Command::LoadHostJava { host, choices } => {
+                let inventory = Arc::clone(&java_inventory);
+                spawn_in_lane(
+                    &java_lane,
+                    app.paths().clone(),
+                    events.clone(),
+                    move |app, events, runtime| {
+                        let data = load_host_java(&app, &runtime, &inventory, host, choices);
+                        let _ = events.send(Event::HostJava(Box::new(data)));
+                    },
+                );
+            }
+            Command::CheckHostJavaPath { host, path } => {
+                let inventory = Arc::clone(&java_inventory);
+                spawn_in_lane(
+                    &java_lane,
+                    app.paths().clone(),
+                    events.clone(),
+                    move |app, events, runtime| {
+                        adopt_known_inventory(&app, &inventory);
+                        let result = runtime
+                            .block_on(app.evaluate_java_path(host, &path))
+                            .map(|choice| crate::java_view::choice_view(&choice))
+                            .map_err(|error| localized_error(&error));
+                        let _ = events.send(Event::HostJavaPathChecked { host, result });
+                    },
+                );
+            }
+            Command::InstallHostJava(host) => {
+                let inventory = Arc::clone(&java_inventory);
+                let reports = events.clone();
+                spawn_async_operation(
+                    app.paths().clone(),
+                    &events,
+                    Arc::clone(&cancellations),
+                    AsyncOperationRequest {
+                        title: "operation-installing-java",
+                        entity: host.id(),
+                        allow_cancel: true,
+                        dialogs: ModalScope::NONE,
+                        finished: Some(Event::HostJavaInstallSettled(host)),
+                    },
+                    move |app, reporter, cancel| async move {
+                        adopt_known_inventory(&app, &inventory);
+                        let installed = app.install_java_for_host(host, &reporter, &cancel).await?;
+                        remember_installed_runtime(&inventory, &installed.installation.runtime);
+                        let pin = match installed.follow_up {
+                            Some(DiagnosticFix::PinJava(path)) => Some(path),
+                            _ => None,
+                        };
+                        let _ = reports.send(Event::HostJavaInstalled { host, pin });
+                        Ok(OperationReport::Toast(lookup_args(
+                            "gui-java-installed",
+                            [(
+                                "version",
+                                Arg::from(installed.installation.runtime.version_string.as_str()),
+                            )],
+                        )))
+                    },
+                );
+            }
             // Opening the page asks for the inventory, which is cached after
             // the first scan; the page's own button is what forces a rescan.
             // Probing forks a JVM per runtime, so a page that rescanned every
@@ -5639,21 +5740,16 @@ fn run_worker(
                 let paths = app.paths().clone();
                 let events = events.clone();
                 java_lane.submit(Box::new(move || {
-                    let known = inventory.lock().ok().and_then(|slot| slot.clone());
-                    if let Some(known) = known {
-                        send_java_inventory(Ok(known), &inventory, &events);
-                        return;
-                    }
                     run_detached(
                         paths,
                         events,
                         |_| {},
                         move |app, events, runtime| {
-                            send_java_inventory(
-                                runtime.block_on(app.java_runtimes()),
-                                &inventory,
-                                &events,
-                            );
+                            // A known inventory is reused, and only caught up
+                            // with the managed store.
+                            adopt_known_inventory(&app, &inventory);
+                            let scanned = runtime.block_on(app.java_runtimes());
+                            send_java_inventory(&app, scanned, &inventory, &events);
                         },
                     );
                 }));
@@ -5666,6 +5762,7 @@ fn run_worker(
                     events.clone(),
                     move |app, events, runtime| {
                         send_java_inventory(
+                            &app,
                             runtime.block_on(app.refresh_java_runtimes()),
                             &inventory,
                             &events,
@@ -5690,6 +5787,7 @@ fn run_worker(
                                 // directory that is gone, so it is read again
                                 // rather than left.
                                 send_java_inventory(
+                                    &app,
                                     runtime.block_on(app.refresh_java_runtimes()),
                                     &inventory,
                                     &events,
@@ -5859,7 +5957,10 @@ fn warm_language_catalog(paths: Paths, minecraft: &str) {
 }
 
 /// One row per runtime an inventory holds, in the order it reports them.
-fn describe_runtimes(inventory: &ephervex_core::RuntimeInventory) -> Vec<JavaData> {
+fn describe_runtimes(
+    inventory: &ephervex_core::RuntimeInventory,
+    pins: Option<&ephervex_core::JavaPinIndex>,
+) -> Vec<JavaData> {
     inventory
         .runtimes
         .iter()
@@ -5867,6 +5968,12 @@ fn describe_runtimes(inventory: &ephervex_core::RuntimeInventory) -> Vec<JavaDat
             path: java.executable.display().to_string(),
             version: java.version_string.clone(),
             vendor: java.vendor.clone(),
+            title: crate::java_view::reported_runtime_line(
+                &java.version_string,
+                &java.vendor,
+                &java.arch,
+            ),
+            pinned_by: pins.map(|pins| crate::java_view::pinning_settings(&pins.pins_for(java))),
             origin: java
                 .origins
                 .first()
@@ -6278,8 +6385,18 @@ async fn explain_failed_run(
 fn server_failure(result: &CoreResult<ephervex_core::ServerExit>) -> Option<String> {
     match result {
         Ok(exit) => server_exit_failure(exit),
-        Err(error) if !error.is_cancellation() => Some(localized_error(error)),
+        Err(error) if !error.is_cancellation() => Some(run_error_text(error)),
         Err(_) => None,
+    }
+}
+
+/// A run's error in the user's words, followed, when it refused its Java, by
+/// the runtime it tried and what the host expected.
+fn run_error_text(error: &CoreError) -> String {
+    let message = localized_error(error);
+    match error.java_refusal() {
+        Some(refusal) => format!("{message} {}", crate::java_view::refusal_text(refusal)),
+        None => message,
     }
 }
 
@@ -6309,9 +6426,18 @@ fn launch_failure(
         return None;
     }
     match result {
-        Ok(outcome) => game_exit_failure(outcome.exit),
+        Ok(outcome) => launch_exit_failure(outcome),
         Err(error) => launch_error_failure(error),
     }
+}
+
+/// Why a game that ran exited as a failure: its runtime could not load its
+/// code, or it simply exited with an error.
+fn launch_exit_failure(outcome: &ephervex_core::LaunchOutcome) -> Option<String> {
+    outcome.java_failure.as_deref().map_or_else(
+        || game_exit_failure(outcome.exit),
+        |failure| Some(crate::java_view::runtime_failure_text(failure)),
+    )
 }
 
 fn game_exit_failure(exit: Option<ephervex_core::GameExit>) -> Option<String> {
@@ -6323,7 +6449,7 @@ fn launch_error_failure(error: &CoreError) -> Option<String> {
     if error.is_cancellation() || error.requires_interactive_login() {
         None
     } else {
-        Some(localized_error(error))
+        Some(run_error_text(error))
     }
 }
 
@@ -6339,7 +6465,7 @@ fn connect_client_failure(
         return None;
     }
     match result {
-        Ok(outcome) => game_exit_failure(outcome.launch.exit),
+        Ok(outcome) => launch_exit_failure(&outcome.launch),
         Err(error) if server_ready => launch_error_failure(error),
         Err(_) => None,
     }
@@ -7961,6 +8087,9 @@ fn spawn_launch(
                 if let Ok(mut app) = App::open_at(paths) {
                     send_snapshot(&mut app, &events);
                 }
+                // A launch that failed or was canceled after its Java install
+                // never reached Starting.
+                let _ = events.send(Event::JavaPlanned);
                 let failure = launch_failure(&result, cancel.is_cancelled());
                 explain_failed_run(
                     &app,
@@ -8385,6 +8514,7 @@ fn forward_launch_event(
             send_operation(events, &operation, entity.to_owned(), true);
         }
         LaunchEvent::Starting(_) => {
+            let _ = events.send(Event::JavaPlanned);
             let _ = events.send(Event::Toast {
                 message: localized_value("gui-starting-minecraft", entity),
                 error: false,
@@ -8502,10 +8632,21 @@ fn spawn_server(
                     send_snapshot(&mut app, &events);
                     send_server_workspace(&app, server, &events);
                 }
+                // A server that stopped because its runtime could not load
+                // its code says so, rather than only that it stopped.
+                let java_failure = match &result {
+                    Ok(exit) if server_exit_failure(exit).is_some() => app
+                        .server_java_failure(server, exit, None)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|failure| crate::java_view::runtime_failure_text(&failure)),
+                    _ => None,
+                };
                 let _ = events.send(Event::ServerTool {
                     server,
                     event: ServerToolEvent::Finished {
-                        failure: server_failure(&result),
+                        failure: java_failure.or_else(|| server_failure(&result)),
                     },
                 });
             });
@@ -8781,7 +8922,7 @@ impl ConnectedServerRow {
         {
             *end = Some(ServerStartEnd {
                 canceled: error.is_cancellation(),
-                detail: localized_error(error),
+                detail: run_error_text(error),
             });
         }
     }
@@ -8872,6 +9013,51 @@ fn forward_connect_server_event(
     server: ServerId,
     event: ServerEvent,
 ) {
+    forward_connect_server_event_explained(events, paths, row, server, event, None);
+}
+
+/// Why a server a Launch & Connect run started stopped, when its runtime could
+/// not load its code. Read only for a failed exit.
+///
+/// The lookup opens an `App`, which a task shared between threads cannot hold,
+/// so it runs on a blocking thread of its own.
+async fn connect_server_java_failure(
+    paths: &Paths,
+    server: ServerId,
+    event: &ServerEvent,
+) -> Option<String> {
+    let ServerEvent::Finished { exit: Some(exit) } = event else {
+        return None;
+    };
+    server_exit_failure(exit)?;
+    let (paths, exit) = (paths.clone(), *exit);
+    tokio::task::spawn_blocking(move || {
+        let app = App::open_at(paths).ok()?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .ok()?;
+        runtime
+            .block_on(app.server_java_failure(server, &exit, None))
+            .ok()
+            .flatten()
+            .map(|failure| crate::java_view::runtime_failure_text(&failure))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// [`forward_connect_server_event`] with the explanation of a runtime that
+/// could not load the server's code, which replaces the plain failure.
+fn forward_connect_server_event_explained(
+    events: &Sender<Event>,
+    paths: &Paths,
+    row: &ConnectedServerRow,
+    server: ServerId,
+    event: ServerEvent,
+    java_failure: Option<String>,
+) {
     match event {
         ServerEvent::Finished { exit } => {
             refresh_snapshot(paths, events);
@@ -8884,10 +9070,12 @@ fn forward_connect_server_event(
                 }
                 None => {}
             }
-            let failure = exit.map_or_else(
-                || Some(lookup("gui-run-server-exited-with-error")),
-                |exit| server_exit_failure(&exit),
-            );
+            let failure = java_failure.or_else(|| {
+                exit.map_or_else(
+                    || Some(lookup("gui-run-server-exited-with-error")),
+                    |exit| server_exit_failure(&exit),
+                )
+            });
             let _ = events.send(Event::ServerTool {
                 server,
                 event: ServerToolEvent::Finished { failure },
@@ -9016,6 +9204,9 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
                     ObservedServerEvents::new(server_events, supervised, server);
                 let server_forward = tokio::spawn(async move {
                     while let Some(event) = server_events.recv().await {
+                        // The end of the run waits until its failure is
+                        // explained; it is the last event a run sends.
+                        let mut finished = Vec::new();
                         if let ServerEvent::Output(line) = event {
                             forward_output_batch(
                                 line,
@@ -9029,22 +9220,32 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
                                     );
                                 },
                                 |other| {
-                                    forward_connect_server_event(
-                                        &server_event_sender,
-                                        &server_paths,
-                                        &forwarded_row,
-                                        server,
-                                        other,
-                                    );
+                                    if matches!(other, ServerEvent::Finished { .. }) {
+                                        finished.push(other);
+                                    } else {
+                                        forward_connect_server_event(
+                                            &server_event_sender,
+                                            &server_paths,
+                                            &forwarded_row,
+                                            server,
+                                            other,
+                                        );
+                                    }
                                 },
                             );
                         } else {
-                            forward_connect_server_event(
+                            finished.push(event);
+                        }
+                        for event in finished {
+                            let java_failure =
+                                connect_server_java_failure(&server_paths, server, &event).await;
+                            forward_connect_server_event_explained(
                                 &server_event_sender,
                                 &server_paths,
                                 &forwarded_row,
                                 server,
                                 event,
+                                java_failure,
                             );
                         }
                     }
@@ -9136,7 +9337,7 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
                         &entity,
                         &server_name,
                     ),
-                    Err(error) => send_error(&events, &error),
+                    Err(error) => send_run_error(&events, &error),
                 }
                 if let Ok(mut settled) = settled.lock() {
                     settled.take();
@@ -9198,7 +9399,7 @@ fn send_pair_start_failure(
             [
                 ("client", Arg::from(client)),
                 ("server", Arg::from(server)),
-                ("error", Arg::from(localized_error(error))),
+                ("error", Arg::from(run_error_text(error))),
             ],
         ),
         error: true,
@@ -9559,17 +9760,12 @@ fn instance_runtime_data(app: &App, instance: InstanceId) -> CoreResult<Instance
     let number = |value: Option<u32>| value.map(|mib| mib.to_string()).unwrap_or_default();
     Ok(InstanceRuntimeData {
         instance: instance.to_string(),
-        java: record
-            .java_override
-            .as_ref()
-            .map(|java| java.path.display().to_string())
-            .unwrap_or_default(),
         min_memory: number(jvm.and_then(|jvm| jvm.min_memory_mib)),
         max_memory: number(jvm.and_then(|jvm| jvm.max_memory_mib)),
         jvm_args: jvm
             .map(|jvm| crate::jvm_arguments::render(&jvm.jvm_args))
             .unwrap_or_default(),
-        pinned: record.java_override.is_some() || jvm.is_some(),
+        pinned: jvm.is_some(),
         global: localized_values(
             "gui-instance-runtime-global",
             &format!("{} - {} MiB", global.min_memory_mib, global.max_memory_mib),
@@ -10362,22 +10558,92 @@ fn spawn_dialog(gate: &DialogGate, open: impl FnOnce() + Send + 'static) {
 /// `App` with an empty inventory of its own.
 type JavaInventorySlot = Arc<Mutex<Option<Arc<ephervex_core::RuntimeInventory>>>>;
 
-/// Remembers a Java inventory and sends it to the page, or reports why there
-/// is none.
+/// Remembers a Java inventory and sends it to the page with what pins each
+/// runtime, or reports why there is none.
 fn send_java_inventory(
+    app: &App,
     inventory: CoreResult<Arc<ephervex_core::RuntimeInventory>>,
     slot: &JavaInventorySlot,
     events: &Sender<Event>,
 ) {
-    match inventory {
-        Ok(inventory) => {
-            let rows = describe_runtimes(&inventory);
-            if let Ok(mut known) = slot.lock() {
-                *known = Some(inventory);
-            }
-            let _ = events.send(Event::JavaRuntimes(rows));
-        }
-        Err(error) => send_error(events, &error),
+    let inventory = match inventory {
+        Ok(inventory) => inventory,
+        Err(error) => return send_error(events, &error),
+    };
+    if let Ok(mut known) = slot.lock() {
+        *known = Some(Arc::clone(&inventory));
+    }
+    // A host record that cannot be read leaves the pins unknown, which the
+    // rows and the removal confirmation say, rather than hiding the list.
+    let pins = app
+        .java_pin_index()
+        .inspect_err(|error| send_error(events, error))
+        .ok();
+    let _ = events.send(Event::JavaRuntimes(describe_runtimes(
+        &inventory,
+        pins.as_ref(),
+    )));
+}
+
+/// Hands an `App` the inventory the session already knows, so a short-lived
+/// one does not scan the machine again.
+fn adopt_known_inventory(app: &App, slot: &JavaInventorySlot) {
+    if let Some(known) = slot.lock().ok().and_then(|known| known.clone()) {
+        app.adopt_java_inventory(known);
+    }
+}
+
+/// Adds a runtime installed while the session's inventory may have been
+/// rescanned meanwhile, so the newer scan is kept and only gains the runtime.
+fn remember_installed_runtime(slot: &JavaInventorySlot, runtime: &ephervex_core::JavaRuntime) {
+    if let Ok(mut known) = slot.lock()
+        && let Some(inventory) = known.as_ref()
+    {
+        let mut updated = ephervex_core::RuntimeInventory::clone(inventory);
+        updated.remember(runtime.clone());
+        *known = Some(Arc::new(updated));
+    }
+}
+
+/// Keeps whatever inventory an `App` ended up holding for the session.
+fn remember_inventory(app: &App, slot: &JavaInventorySlot) {
+    if let (Some(inventory), Ok(mut known)) = (app.known_java_runtimes(), slot.lock()) {
+        *known = Some(inventory);
+    }
+}
+
+/// Reads a host's Java status, and its picker's entries when asked.
+fn load_host_java(
+    app: &App,
+    runtime: &tokio::runtime::Runtime,
+    inventory: &JavaInventorySlot,
+    host: InstalledHost,
+    choices: bool,
+) -> HostJavaData {
+    adopt_known_inventory(app, inventory);
+    let status = runtime
+        .block_on(app.host_java_status(host))
+        .map(|status| {
+            let unchecked = || match &status.check {
+                ephervex_core::JavaCheck::Failed(error) => localized_error(error),
+                _ => String::new(),
+            };
+            crate::java_view::status_view(&status, &unchecked)
+        })
+        .map_err(|error| localized_error(&error));
+    let choices = if choices {
+        runtime
+            .block_on(app.java_choices(host))
+            .ok()
+            .map(|choices| crate::java_view::choice_views(&choices))
+    } else {
+        None
+    };
+    remember_inventory(app, inventory);
+    HostJavaData {
+        host,
+        status,
+        choices,
     }
 }
 
@@ -11764,6 +12030,16 @@ fn default_mod_catalog_events(stored: &Result<(), CoreError>) -> Vec<Event> {
     }
 }
 
+/// A run's failure as a toast, naming the runtime it refused when it refused
+/// its Java.
+fn send_run_error(events: &Sender<Event>, error: &CoreError) {
+    tracing::warn!(message_id = error.message_id(), detail = %ErrorChain(error), "run failed");
+    let _ = events.send(Event::Toast {
+        message: run_error_text(error),
+        error: true,
+    });
+}
+
 fn send_error(events: &Sender<Event>, error: &CoreError) {
     let _ = events.send(error_toast(error));
 }
@@ -12197,11 +12473,46 @@ mod tests {
 
         let runtime = instance_runtime_data(&app, client.id).expect("runtime data");
 
-        assert_eq!(runtime.java, "/opt/jdk-21/bin/java");
         assert_eq!(runtime.min_memory, "2048");
         assert_eq!(runtime.max_memory, "4096");
         assert_eq!(runtime.jvm_args, "");
         assert!(runtime.pinned);
+    }
+
+    #[test]
+    fn a_run_that_refused_its_java_adds_what_it_tried_to_the_error() {
+        let required = ephervex_core::RequiredJava {
+            major: 21,
+            basis: ephervex_core::RequirementBasis::FallbackTable,
+        };
+        let error = ephervex_core::test_support::java_refusal_error(
+            ephervex_core::JavaError::AutoDetectDisabled { required_major: 21 },
+            ephervex_core::JavaSelectionMode::Automatic,
+            None,
+            ephervex_core::ExpectedRuntime {
+                java: ephervex_core::ExpectedJava::new(&required, &[]),
+                loader: ephervex_model::LoaderKind::Vanilla,
+            },
+            None,
+        );
+
+        let text = run_error_text(&error);
+
+        assert!(text.starts_with(&localized_error(&error)), "{text}");
+        assert!(
+            text.contains("No runtime could be chosen automatically.")
+                && text.contains("This host expects Java 21."),
+            "{text}"
+        );
+        assert_eq!(
+            run_error_text(&CoreError::from(
+                ephervex_core::JavaError::AutoDetectDisabled { required_major: 21 }
+            )),
+            localized_error(&CoreError::from(
+                ephervex_core::JavaError::AutoDetectDisabled { required_major: 21 }
+            )),
+            "an error without the context reads as before"
+        );
     }
 
     fn logical(paths: &[&str]) -> Vec<PathBuf> {
@@ -14030,6 +14341,8 @@ mod tests {
 
     #[test]
     fn a_java_inventory_is_remembered_for_the_page_that_asks_again() {
+        let root = tempfile::tempdir().expect("root");
+        let app = App::open_at(Paths::rooted_at(root.path())).expect("app");
         let slot: JavaInventorySlot = Arc::new(Mutex::new(None));
         let (events, received) = mpsc::channel();
         let inventory = Arc::new(ephervex_core::RuntimeInventory {
@@ -14040,13 +14353,127 @@ mod tests {
             scanned_at: Utc::now(),
         });
 
-        send_java_inventory(Ok(inventory), &slot, &events);
+        send_java_inventory(&app, Ok(inventory), &slot, &events);
 
         assert!(matches!(
             received.try_recv().expect("an event"),
             Event::JavaRuntimes(rows) if rows.is_empty()
         ));
         assert!(slot.lock().expect("slot").is_some());
+    }
+
+    #[test]
+    fn a_runtime_row_names_its_architecture_and_every_setting_that_pins_it() {
+        without_desktop_keyring();
+        let root = tempfile::tempdir().expect("root");
+        let mut app = App::open_at(Paths::rooted_at(root.path())).expect("app");
+        let pinned = PathBuf::from("/opt/jdk-17/bin/java");
+        let client = ephervex_core::test_support::create_client_offline(
+            &app,
+            NewClient::new("Survival", "1.20.1", LoaderSelection::vanilla()),
+        )
+        .expect("a client");
+        app.set_client_java_override(client.id, Some(ephervex_model::JavaOverride::new(&pinned)))
+            .expect("pinned");
+        let mut settings = app.java_settings();
+        settings.preferred_path = Some(pinned.clone());
+        app.set_java_settings(&settings)
+            .expect("launcher preference");
+        let runtime = |executable: &str| ephervex_core::JavaRuntime {
+            executable: PathBuf::from(executable),
+            home: None,
+            version: ephervex_core::JavaVersion::parse("17.0.12").expect("a version"),
+            version_string: "17.0.12".to_owned(),
+            runtime_version: "17.0.12+7".to_owned(),
+            vendor: "Eclipse Adoptium".to_owned(),
+            arch: "amd64".to_owned(),
+            origins: vec![ephervex_core::JavaOrigin {
+                kind: ephervex_core::JavaSourceKind::Managed,
+                path: PathBuf::from(executable),
+            }],
+        };
+        let inventory = Arc::new(ephervex_core::RuntimeInventory {
+            runtimes: vec![
+                runtime("/opt/jdk-17/bin/java"),
+                runtime("/opt/jdk-21/bin/java"),
+            ],
+            failures: Vec::new(),
+            probed: 2,
+            candidates: 2,
+            scanned_at: Utc::now(),
+        });
+        let (events, received) = mpsc::channel();
+
+        send_java_inventory(&app, Ok(inventory), &Arc::new(Mutex::new(None)), &events);
+
+        let rows = match received.try_recv().expect("an event") {
+            Event::JavaRuntimes(rows) => rows,
+            _ => Vec::new(),
+        };
+        assert_eq!(rows.len(), 2, "the runtimes are listed");
+        assert_eq!(rows[0].title, "Java 17.0.12, Eclipse Adoptium, amd64");
+        assert_eq!(
+            rows[0].pinned_by.as_deref(),
+            Some("instance Survival, the launcher preference")
+        );
+        assert_eq!(rows[1].pinned_by.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn a_host_record_that_cannot_be_read_still_lists_the_runtimes_with_unknown_pins() {
+        without_desktop_keyring();
+        let root = tempfile::tempdir().expect("root");
+        let app = App::open_at(Paths::rooted_at(root.path())).expect("app");
+        ephervex_core::test_support::create_client_offline(
+            &app,
+            NewClient::new("Damaged", "1.20.1", LoaderSelection::vanilla()),
+        )
+        .expect("a client");
+        let metadata = find_file(root.path(), "instance.json").expect("the client's metadata");
+        std::fs::write(metadata, "{").expect("damaged metadata");
+        let inventory = Arc::new(ephervex_core::RuntimeInventory {
+            runtimes: vec![ephervex_core::JavaRuntime {
+                executable: PathBuf::from("/opt/jdk-17/bin/java"),
+                home: None,
+                version: ephervex_core::JavaVersion::parse("17.0.12").expect("a version"),
+                version_string: "17.0.12".to_owned(),
+                runtime_version: "17.0.12+7".to_owned(),
+                vendor: "Eclipse Adoptium".to_owned(),
+                arch: "amd64".to_owned(),
+                origins: Vec::new(),
+            }],
+            failures: Vec::new(),
+            probed: 1,
+            candidates: 1,
+            scanned_at: Utc::now(),
+        });
+        let (events, received) = mpsc::channel();
+
+        send_java_inventory(&app, Ok(inventory), &Arc::new(Mutex::new(None)), &events);
+
+        let rows: Vec<JavaData> = received
+            .try_iter()
+            .find_map(|event| match event {
+                Event::JavaRuntimes(rows) => Some(rows),
+                _ => None,
+            })
+            .expect("the runtimes are listed");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pinned_by, None);
+    }
+
+    fn find_file(directory: &Path, name: &str) -> Option<PathBuf> {
+        for entry in std::fs::read_dir(directory).ok()?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(found) = find_file(&path, name) {
+                    return Some(found);
+                }
+            } else if path.file_name().is_some_and(|file| file == name) {
+                return Some(path);
+            }
+        }
+        None
     }
 
     /// The worker answers the requests that touch a catalog, a cache or a
