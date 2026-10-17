@@ -384,7 +384,7 @@ impl App {
             InstallationCleanup::new(target.clone(), owns_source.then(|| server_source.clone()));
         let java = self
             .plan_java(
-                &record.minecraft_version,
+                Some(&record.minecraft_version),
                 &JavaPlanRequest {
                     target: JavaTarget::Server(id),
                     explicit_path: options.java_path.clone(),

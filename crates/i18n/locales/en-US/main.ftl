@@ -549,6 +549,12 @@ error-java-pinned-incompatible = The Java runtime chosen for this instance canno
 error-java-explicit-incompatible = The Java runtime given for this run cannot run that Minecraft version.
 .action = Leave out the Java path so Ephervex picks a compatible runtime, or give one that matches.
 
+error-java-plan-version-mismatch = This host runs Minecraft { $version }, not { $requested }.
+.action = Leave out the Minecraft version to plan for { $version }, or leave out the host to plan for { $requested } alone.
+
+error-java-plan-version-missing = No Minecraft version was given to plan Java for.
+.action = Name a Minecraft version, an instance, or a server.
+
 error-java-runtime-unusable = That path is not a usable Java runtime.
 .action = Point Ephervex at the `java` program itself, usually inside a `bin` folder.
 

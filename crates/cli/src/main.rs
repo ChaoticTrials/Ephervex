@@ -951,13 +951,20 @@ enum JavaCommand {
     /// Probe one Java executable and report what it is.
     Test { path: PathBuf },
     /// Show which runtime would run a Minecraft version, and why.
+    ///
+    /// With `--instance` or `--server`, shows the runtime that host would
+    /// launch with, at its own Minecraft version.
     Select {
-        /// Minecraft version id, e.g. `1.12.2`.
-        minecraft: String,
-        /// Apply this instance's Java and JVM overrides.
+        /// Minecraft version id, e.g. `1.12.2`. Optional with `--instance` or
+        /// `--server`; when given, it must be that host's version.
+        #[arg(required_unless_present_any = ["instance", "server"])]
+        minecraft: Option<String>,
+        /// Plan for this instance: its version, loader, and Java and JVM
+        /// overrides.
         #[arg(long)]
         instance: Option<InstanceId>,
-        /// Apply this server's Java and JVM overrides.
+        /// Plan for this server: its version, loader, and Java and JVM
+        /// overrides.
         #[arg(long, conflicts_with = "instance")]
         server: Option<ServerId>,
         /// Use this runtime instead of selecting one. Outranks every setting.
@@ -6447,7 +6454,7 @@ async fn run_java_command(app: &App, command: &JavaCommand, json: bool) -> anyho
             };
             let plan = app
                 .plan_java(
-                    minecraft,
+                    minecraft.as_deref(),
                     &JavaPlanRequest {
                         target,
                         explicit_path: java_path.clone(),

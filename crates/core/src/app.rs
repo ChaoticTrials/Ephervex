@@ -74,6 +74,15 @@ pub struct JavaPlanRequest {
     pub reporter: Option<OperationReporter>,
 }
 
+/// What a [`JavaTarget`] layers over the global settings.
+struct JavaTargetSelection {
+    /// The host's own Minecraft version, `None` for a version-only plan.
+    minecraft_version: Option<String>,
+    loader: ephervex_model::LoaderSelection,
+    java_override: Option<ephervex_model::JavaOverride>,
+    jvm_override: Option<ephervex_model::JvmSettings>,
+}
+
 /// Which runtime would run one Minecraft version, and how that was decided.
 ///
 /// The provenance fields exist because "why did it pick that one" is the
@@ -1262,46 +1271,68 @@ impl App {
     /// selects or checks a runtime, and — when asked and
     /// permitted — install a managed one because nothing suitable exists.
     ///
+    /// A host target is planned at the host's own Minecraft version. A version
+    /// given with one must be that version, and is refused otherwise. Without a
+    /// host the version is required.
+    ///
     /// It fails rather than substituting. A plan that names a runtime which
     /// will crash on launch is worse than no plan, because the crash arrives
     /// much later wearing someone else's stack trace.
     #[instrument(skip(self, request))]
     pub async fn plan_java(
         &self,
-        minecraft_version: &str,
+        minecraft_version: Option<&str>,
         request: &JavaPlanRequest,
     ) -> CoreResult<JavaPlan> {
+        let selection = self.java_target_selection(request.target)?;
+        let minecraft_version = match (selection.minecraft_version.as_deref(), minecraft_version) {
+            (Some(host), Some(requested)) if host != requested => {
+                return Err(CoreError::JavaPlanVersionMismatch {
+                    requested: requested.to_owned(),
+                    host: host.to_owned(),
+                });
+            }
+            (Some(version), _) | (None, Some(version)) => version,
+            (None, None) => return Err(CoreError::JavaPlanVersionMissing),
+        };
         let required = self.required_java(minecraft_version).await?;
-        let (loader, java_override, jvm_override) = self.java_target_selection(request.target)?;
         self.plan_java_for_selection(
             minecraft_version,
             required,
-            &loader,
-            java_override,
-            jvm_override,
+            &selection.loader,
+            selection.java_override,
+            selection.jvm_override,
             request,
         )
         .await
     }
 
-    /// The loader and overrides a Java plan layers over the global settings.
-    fn java_target_selection(
-        &self,
-        target: JavaTarget,
-    ) -> CoreResult<(
-        ephervex_model::LoaderSelection,
-        Option<ephervex_model::JavaOverride>,
-        Option<ephervex_model::JvmSettings>,
-    )> {
+    /// The version, loader and overrides a Java plan target contributes.
+    fn java_target_selection(&self, target: JavaTarget) -> CoreResult<JavaTargetSelection> {
         Ok(match target {
-            JavaTarget::VersionOnly => (ephervex_model::LoaderSelection::vanilla(), None, None),
+            JavaTarget::VersionOnly => JavaTargetSelection {
+                minecraft_version: None,
+                loader: ephervex_model::LoaderSelection::vanilla(),
+                java_override: None,
+                jvm_override: None,
+            },
             JavaTarget::Client(id) => {
                 let record = self.current_client(id)?;
-                (record.loader, record.java_override, record.jvm_override)
+                JavaTargetSelection {
+                    minecraft_version: Some(record.minecraft_version),
+                    loader: record.loader,
+                    java_override: record.java_override,
+                    jvm_override: record.jvm_override,
+                }
             }
             JavaTarget::Server(id) => {
                 let record = self.current_server(id)?;
-                (record.loader, record.java_override, record.jvm_override)
+                JavaTargetSelection {
+                    minecraft_version: Some(record.minecraft_version),
+                    loader: record.loader,
+                    java_override: record.java_override,
+                    jvm_override: record.jvm_override,
+                }
             }
         })
     }
@@ -2453,19 +2484,141 @@ mod tests {
         assert_eq!(current.java_override, committed.java_override);
     }
 
+    /// A 1.21.1 client and a 1.20.1 server, with cached release metadata.
+    async fn java_plan_hosts(base: &std::path::Path) -> (App, InstanceId, ServerId) {
+        let paths = Paths::rooted_at(base);
+        crate::test_fixtures::seed_minecraft(paths.cache_dir()).await;
+        let app = App::open_at(paths).expect("app");
+        let client = app
+            .create_client_for_test(NewClient::new(
+                "client",
+                "1.21.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("client");
+        let server = app
+            .registry()
+            .create_server(ephervex_storage::NewServer::new(
+                "server",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("server");
+        (app, client.id, server.id)
+    }
+
+    /// A runtime under `base` that reports Java `major`.
+    fn fake_jdk(base: &std::path::Path, major: u32) -> PathBuf {
+        crate::test_fixtures::fake_java(&base.join(format!("jdk-{major}")), &format!("{major}.0.4"))
+    }
+
+    #[tokio::test]
+    async fn a_java_plan_for_a_host_without_a_version_uses_the_host_version() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, client, server) = java_plan_hosts(base.path()).await;
+
+        for (target, version, major) in [
+            (JavaTarget::Client(client), "1.21.1", 21),
+            (JavaTarget::Server(server), "1.20.1", 17),
+        ] {
+            let request = JavaPlanRequest {
+                target,
+                explicit_path: Some(fake_jdk(base.path(), major)),
+                ..JavaPlanRequest::default()
+            };
+            let plan = app.plan_java(None, &request).await.expect("plan");
+            assert_eq!(plan.minecraft_version, version);
+            assert_eq!(plan.required.major, major);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_java_plan_for_a_host_accepts_the_host_version_given_explicitly() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, client, _server) = java_plan_hosts(base.path()).await;
+
+        let plan = app
+            .plan_java(
+                Some("1.21.1"),
+                &JavaPlanRequest {
+                    target: JavaTarget::Client(client),
+                    explicit_path: Some(fake_jdk(base.path(), 21)),
+                    ..JavaPlanRequest::default()
+                },
+            )
+            .await
+            .expect("plan");
+
+        assert_eq!(plan.minecraft_version, "1.21.1");
+    }
+
+    #[tokio::test]
+    async fn a_java_plan_for_a_host_refuses_a_version_the_host_does_not_run() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, client, server) = java_plan_hosts(base.path()).await;
+        let java = fake_jdk(base.path(), 21);
+
+        for (target, requested, host) in [
+            (JavaTarget::Client(client), "1.20.1", "1.21.1"),
+            (JavaTarget::Server(server), "1.21.1", "1.20.1"),
+        ] {
+            let error = app
+                .plan_java(
+                    Some(requested),
+                    &JavaPlanRequest {
+                        target,
+                        explicit_path: Some(java.clone()),
+                        ..JavaPlanRequest::default()
+                    },
+                )
+                .await
+                .expect_err("a version the host does not run is refused");
+
+            assert!(
+                matches!(
+                    &error,
+                    CoreError::JavaPlanVersionMismatch { requested: r, host: h }
+                        if r == requested && h == host
+                ),
+                "{error:?}"
+            );
+            assert_eq!(error.message_id(), "error-java-plan-version-mismatch");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_java_plan_without_a_host_needs_a_version() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+
+        let error = app
+            .plan_java(None, &JavaPlanRequest::default())
+            .await
+            .expect_err("nothing names a version");
+
+        assert!(
+            matches!(error, CoreError::JavaPlanVersionMissing),
+            "{error:?}"
+        );
+    }
+
     #[test]
     fn a_java_plan_for_a_client_layers_the_committed_loader_and_overrides() {
         let base = tempfile::tempdir().expect("temp dir");
         let app = app_rooted_at(base.path());
         let (committed, _row) = client_with_lagging_index_row(&app);
 
-        let (loader, java_override, jvm_override) = app
+        let selection = app
             .java_target_selection(JavaTarget::Client(committed.id))
             .expect("selection");
 
-        assert_eq!(loader, committed.loader);
-        assert_eq!(java_override, committed.java_override);
-        assert_eq!(jvm_override, committed.jvm_override);
+        assert_eq!(
+            selection.minecraft_version.as_deref(),
+            Some(committed.minecraft_version.as_str())
+        );
+        assert_eq!(selection.loader, committed.loader);
+        assert_eq!(selection.java_override, committed.java_override);
+        assert_eq!(selection.jvm_override, committed.jvm_override);
     }
 
     #[test]

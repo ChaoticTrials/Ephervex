@@ -483,3 +483,51 @@ fn java_select_takes_a_server_or_an_instance_but_not_both() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn java_select_with_an_instance_plans_at_the_instance_minecraft_version() {
+    let sandbox = Sandbox::new();
+    let id = sandbox.create();
+    let java = sandbox.fake_java("jdk-17", "17.0.12");
+    let java = java.to_str().expect("a UTF-8 path");
+
+    for version in [None, Some("1.20.1")] {
+        let mut args = vec!["--json", "java", "select"];
+        args.extend(version);
+        args.extend(["--instance", &id, "--java-path", java]);
+
+        let plan = sandbox.json(&args);
+
+        assert_eq!(plan["minecraft_version"], "1.20.1", "{plan}");
+        assert_eq!(plan["required_major"], 17, "{plan}");
+    }
+}
+
+#[test]
+fn java_select_refuses_a_minecraft_version_the_instance_does_not_run() {
+    let sandbox = Sandbox::new();
+    let id = sandbox.create();
+
+    let output = sandbox.run_in(
+        sandbox.directory.path(),
+        &["java", "select", "1.12.2", "--instance", &id],
+    );
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("1.20.1") && stderr.contains("1.12.2"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn java_select_without_a_host_needs_a_minecraft_version() {
+    let sandbox = Sandbox::new();
+
+    let output = sandbox.run_in(sandbox.directory.path(), &["java", "select"]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("<MINECRAFT>"), "{stderr}");
+}

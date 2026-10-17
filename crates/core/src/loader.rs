@@ -233,7 +233,7 @@ impl App {
         let metadata = self.minecraft_version(&record.minecraft_version).await?;
         let java = self
             .plan_java(
-                &record.minecraft_version,
+                Some(&record.minecraft_version),
                 &JavaPlanRequest {
                     target: JavaTarget::Client(instance),
                     explicit_path: None,

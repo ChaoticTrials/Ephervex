@@ -98,6 +98,17 @@ pub enum CoreError {
         maximum_layer: ephervex_java::JvmSettingLayer,
     },
 
+    /// A Java plan for a host named a Minecraft version the host does not run.
+    ///
+    /// The host's loader and overrides only describe its own release, so a
+    /// plan for another version would be one no launch of the host makes.
+    #[error("`{requested}` is not the host's Minecraft version `{host}`")]
+    JavaPlanVersionMismatch { requested: String, host: String },
+
+    /// A Java plan for no instance or server was given no Minecraft version.
+    #[error("a Java plan without an instance or server needs a Minecraft version")]
+    JavaPlanVersionMissing,
+
     /// Forge/NeoForge discovery and installation.
     #[error(transparent)]
     Loader(#[from] LoaderError),
@@ -556,6 +567,8 @@ impl CoreError {
             Self::Java(error) => error.message_id(),
             Self::JavaRefused(refusal) => refusal.message_id(),
             Self::JavaSettingsInvalid { .. } => "error-java-settings-invalid",
+            Self::JavaPlanVersionMismatch { .. } => "error-java-plan-version-mismatch",
+            Self::JavaPlanVersionMissing => "error-java-plan-version-missing",
             Self::Loader(error) => error.message_id(),
             // Not `const`: this one chooses between message ids on the HTTP
             // status, so that a temporary outage and a permanent refusal do not
@@ -649,6 +662,10 @@ impl CoreError {
             Self::Connect(error) => text(error.message_args()),
             Self::ArtifactCacheLimitInvalid(error) => text(error.message_args()),
             Self::LoaderFamilyFixed { loader } => vec![("loader", Arg::from(loader.to_string()))],
+            Self::JavaPlanVersionMismatch { requested, host } => vec![
+                ("requested", Arg::from(requested.clone())),
+                ("version", Arg::from(host.clone())),
+            ],
             Self::InstanceRunning { pid, .. } => vec![("pid", Arg::from(pid.to_string()))],
             Self::LinkedServerRunning { name }
             | Self::LinkedServerUnstoppable { name }
@@ -854,6 +871,8 @@ impl CoreError {
             | Self::DiagnosticBundleNotWritten { .. }
             | Self::DiagnosticBundleOverwritesSource { .. }
             | Self::JavaSettingsInvalid { .. }
+            | Self::JavaPlanVersionMismatch { .. }
+            | Self::JavaPlanVersionMissing
             | Self::Minecraft(_)
             | Self::Loader(_)
             | Self::Auth(_)
@@ -977,6 +996,8 @@ impl CoreError {
             Self::Auth(_)
             | Self::ArtifactCacheLimitInvalid(_)
             | Self::JavaSettingsInvalid { .. }
+            | Self::JavaPlanVersionMismatch { .. }
+            | Self::JavaPlanVersionMissing
             | Self::Preference(_)
             | Self::PreferenceValue(_)
             | Self::PreferenceUnrecognized { .. }
