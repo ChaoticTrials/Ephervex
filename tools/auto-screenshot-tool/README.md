@@ -25,14 +25,15 @@ address and by the SHA-256 of the bytes the catalog served, and a logo whose
 bytes differ is refused. Pass `--offline` to fetch nothing and leave logos that
 are not cached empty, or `--artwork-cache DIR` to keep them elsewhere.
 
-The default command writes both Ephervex Light and Dark captures at 1920x1080
-and 2560x1440. Full-window files are stored at
+The default command writes Ephervex Light, Dark, and Halloween captures at
+1920x1080 and 2560x1440. Halloween is the seasonal theme as it stands in for a
+chosen Dark, with its logo and the Seasonal themes note. Full-window files are stored at
 `screenshots/<state>/<theme>-<width>x<height>.png`; crops are stored at
 `screenshots/<state>/<region>/<theme>-<width>x<height>.png`. A full run replaces
 the default screenshot directory, so removed states and old paths do not remain.
 Some states also include a crop around an accessible UI element. A crop is taken
-from the rendered window, not rebuilt separately. Light and Dark use the same
-fixture object.
+from the rendered window, not rebuilt separately. All three themes use the
+same fixture object.
 Native popup menus are cropped from their known window position because they
 do not expose a stable element boundary to the headless renderer. Review those
 crops at both window sizes when changing the related layout.
@@ -65,7 +66,9 @@ component in MDX, for example:
 ```
 
 The component renders the light capture in static HTML, then follows
-Docusaurus's selected color mode after hydration. It reads the manifest and
+Docusaurus's selected color mode after hydration, or shows the Halloween
+capture while the site shows its Halloween season. `theme="halloween"` always
+shows the Halloween capture. It reads the manifest and
 uses responsive sources only for resolutions that were synchronized.
 
 Generate review contact sheets with `cd web && npm run screenshots:contact-sheet`.

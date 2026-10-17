@@ -1,8 +1,7 @@
 import React from 'react';
 import useBaseUrl from '@docusaurus/useBaseUrl';
-import useIsBrowser from '@docusaurus/useIsBrowser';
-import {useColorMode} from '@docusaurus/theme-common';
 import manifest from './screenshot-manifest.json';
+import {useScreenshotMode, type ScreenshotMode} from './screenshot-mode';
 import ScreenshotLightbox from './ScreenshotLightbox';
 import './ThemeScreenshot.css';
 
@@ -13,10 +12,7 @@ type Variant = {
   file: string;
 };
 
-type Capture = {
-  light: Variant[];
-  dark: Variant[];
-};
+type Capture = Record<ScreenshotMode, Variant[]>;
 
 const captures = manifest.captures as Record<string, Capture>;
 
@@ -36,9 +32,11 @@ export type ThemeScreenshotProps = {
   className?: string;
   zoomable?: boolean;
   callouts?: ScreenshotCallout[];
+  /** Always show this theme's capture instead of the one matching the page. */
+  theme?: ScreenshotMode;
 };
 
-/** Displays only the capture for the site's selected color mode. */
+/** Displays only the capture matching the page's color mode or season. */
 export default function ThemeScreenshot({
   state,
   region = 'full',
@@ -46,11 +44,11 @@ export default function ThemeScreenshot({
   className,
   zoomable = true,
   callouts = [],
+  theme,
 }: ThemeScreenshotProps): React.JSX.Element {
   const [viewing, setViewing] = React.useState(false);
   const base = useBaseUrl('/img/ephervex/');
-  const isBrowser = useIsBrowser();
-  const {colorMode} = useColorMode();
+  const pageMode = useScreenshotMode();
   const key = region === 'full' ? state : `${state}/${region}`;
   const capture = captures[key];
   if (!capture) {
@@ -62,8 +60,7 @@ export default function ThemeScreenshot({
     throw new Error(`Missing screenshot sources for ${key}. Run npm run screenshots:sync.`);
   }
 
-  // Render a light capture in static HTML, then follow the selected color mode.
-  const activeTheme = isBrowser && colorMode === 'dark' ? 'dark' : 'light';
+  const activeTheme = theme ?? pageMode;
   const activeVariants = capture[activeTheme];
   const activeFallback = activeVariants[0];
   const fullSize = activeVariants[activeVariants.length - 1];

@@ -11,7 +11,8 @@ const manifestFile = path.join(site, 'src/components/screenshot-manifest.json');
 const review = path.join(source, 'review');
 const encoder = 'sharp-webp-lossless-effort-6';
 const defaultSizes = ['1920x1080'];
-const filenamePattern = /^(light|dark)-(\d+)x(\d+)\.png$/;
+const themes = ['light', 'dark', 'halloween'];
+const filenamePattern = /^(light|dark|halloween)-(\d+)x(\d+)\.png$/;
 const safeName = /^[a-z][a-z0-9-]*$/;
 
 function fail(message) {
@@ -105,7 +106,7 @@ function requiredFiles(files, sizes) {
   const selected = [];
   for (const [key, group] of groups) {
     for (const size of sizes) {
-      for (const theme of ['light', 'dark']) {
+      for (const theme of themes) {
         const file = group.get(`${theme}-${size}`);
         if (!file) fail(`Missing ${theme}-${size}.png for ${key}. Regenerate the screenshot matrix.`);
         selected.push(file);
@@ -164,7 +165,7 @@ async function sync(args) {
       fail(`Incorrect full-window dimensions in ${file.path}`);
     }
     const key = captureKey(file);
-    captures[key] ??= {light: [], dark: []};
+    captures[key] ??= {light: [], dark: [], halloween: []};
     captures[key][file.theme].push({
       window: file.window,
       width: metadata.width,
@@ -178,9 +179,8 @@ async function sync(args) {
     sourceBytes += sourceSize;
     outputBytes += bytes;
   }
-  for (const pair of Object.values(captures)) {
-    pair.light.sort((a, b) => a.width - b.width);
-    pair.dark.sort((a, b) => a.width - b.width);
+  for (const capture of Object.values(captures)) {
+    for (const theme of themes) capture[theme].sort((a, b) => a.width - b.width);
   }
   const manifest = {version: 1, encoder, captures};
   await mkdir(path.dirname(manifestFile), {recursive: true});
@@ -222,13 +222,12 @@ async function check() {
     fail('Screenshot assets are missing. Run npm run screenshots:sync before building.');
   }
   let count = 0;
-  for (const [key, pair] of Object.entries(manifest.captures)) {
-    const light = pair.light.map((variant) => variant.window).sort();
-    const dark = pair.dark.map((variant) => variant.window).sort();
-    if (!light.length || JSON.stringify(light) !== JSON.stringify(dark)) {
+  for (const [key, capture] of Object.entries(manifest.captures)) {
+    const windows = themes.map((theme) => JSON.stringify((capture[theme] ?? []).map((variant) => variant.window).sort()));
+    if (!capture.light.length || windows.some((window) => window !== windows[0])) {
       fail(`Theme variants differ for ${key}`);
     }
-    for (const variant of [...pair.light, ...pair.dark]) {
+    for (const variant of themes.flatMap((theme) => capture[theme])) {
       const expectedPrefix = `${key}/`;
       if (!variant.file.startsWith(expectedPrefix) || !/^[a-z0-9/-]+\.webp$/.test(variant.file)) {
         fail(`Invalid screenshot asset path: ${variant.file}`);
@@ -279,11 +278,11 @@ async function contactSheet() {
       ));
       const cellHeight = imageHeight + 48;
       const gap = 20;
-      const width = cellWidth * 2 + gap * 3;
+      const width = cellWidth * themes.length + gap * (themes.length + 1);
       const height = rows.length * cellHeight + (rows.length + 1) * gap;
       const overlays = [];
       for (const [rowIndex, row] of rows.entries()) {
-        for (const [column, theme] of ['light', 'dark'].entries()) {
+        for (const [column, theme] of themes.entries()) {
           const file = chosen.find((item) => `${item.state}/${item.region}` === row && item.theme === theme);
           if (!file) fail(`Missing ${theme} review capture for ${row} at ${size}`);
           const left = gap + column * (cellWidth + gap);

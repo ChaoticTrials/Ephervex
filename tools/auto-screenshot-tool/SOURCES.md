@@ -133,5 +133,7 @@ and refuses any file that does not match. They are not part of the repository.
 - Which instances are favorites, how they are grouped, and the filter set on
   the Instances page. The two instance icons are the recorded logos of
   UtilitiX and Skyblock Builder.
+- The Halloween captures, which show each state during the Halloween season
+  with Dark chosen.
 - The custom themes and their problems. The theme folder's logo is the
   Ephervex logo with its color channels rotated.

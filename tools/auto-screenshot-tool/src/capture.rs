@@ -8,7 +8,7 @@ use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
 use image::{ImageBuffer, RgbaImage, imageops::FilterType};
 use slint::platform::{PointerEventButton, WindowEvent};
-use slint::{ComponentHandle, LogicalPosition, Model, PhysicalSize};
+use slint::{ComponentHandle, Image, LogicalPosition, Model, PhysicalSize};
 
 use crate::catalog::{Interaction, Region, RegionBounds, State};
 
@@ -16,15 +16,18 @@ use crate::catalog::{Interaction, Region, RegionBounds, State};
 pub(crate) enum ThemeName {
     Light,
     Dark,
+    /// The Halloween season's theme, shown in place of Dark.
+    Halloween,
 }
 
 impl ThemeName {
-    pub(crate) const ALL: [Self; 2] = [Self::Light, Self::Dark];
+    pub(crate) const ALL: [Self; 3] = [Self::Light, Self::Dark, Self::Halloween];
 
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Light => "light",
             Self::Dark => "dark",
+            Self::Halloween => "halloween",
         }
     }
 }
@@ -36,7 +39,10 @@ impl std::str::FromStr for ThemeName {
         match value {
             "light" => Ok(Self::Light),
             "dark" => Ok(Self::Dark),
-            _ => Err(format!("unknown theme {value:?}; use light or dark")),
+            "halloween" => Ok(Self::Halloween),
+            _ => Err(format!(
+                "unknown theme {value:?}; use light, dark, or halloween"
+            )),
         }
     }
 }
@@ -130,15 +136,9 @@ pub(crate) fn generate(options: &CaptureOptions<'_>) -> Result<Vec<PathBuf>> {
                 perform(&ui, interaction)?;
             }
 
+            let state_logo = (ui.get_theme_logo(), ui.get_theme_icon());
             for theme in options.themes {
-                let palettes = ui.global::<BuiltInPalettes>();
-                let palette = match theme {
-                    ThemeName::Light => palettes.get_light(),
-                    ThemeName::Dark => palettes.get_dark(),
-                };
-                ui.global::<Theme>().set_palette(palette);
-                ui.set_application_theme(theme.name().into());
-                ui.set_theme_index(i32::from(*theme == ThemeName::Light));
+                show_theme(&ui, *theme, &state_logo);
                 slint::platform::update_timers_and_animations();
                 let buffer = ui
                     .window()
@@ -184,6 +184,53 @@ pub(crate) fn generate(options: &CaptureOptions<'_>) -> Result<Vec<PathBuf>> {
         }
     }
     Ok(files)
+}
+
+/// Paints `ui` in `theme` the way the launcher does, with the season's note
+/// and logo while the Halloween theme stands in for the chosen Dark. A state
+/// that shows a theme of the user's own keeps it, as no season replaces one.
+fn show_theme(ui: &AppWindow, theme: ThemeName, (logo, icon): &(Image, Image)) {
+    let user_theme = logo.size().width > 0;
+    let seasonal = theme == ThemeName::Halloween && !user_theme;
+    let palettes = ui.global::<BuiltInPalettes>();
+    let (palette, chosen) = match theme {
+        ThemeName::Light => (palettes.get_light(), ThemeName::Light),
+        _ if seasonal => (palettes.get_halloween(), ThemeName::Dark),
+        ThemeName::Dark | ThemeName::Halloween => (palettes.get_dark(), ThemeName::Dark),
+    };
+    ui.global::<Theme>().set_palette(palette);
+    ui.set_application_theme(chosen.name().into());
+    ui.set_theme_index(i32::from(chosen == ThemeName::Light));
+    ui.set_shown_theme(
+        if seasonal {
+            "season:halloween"
+        } else {
+            chosen.name()
+        }
+        .into(),
+    );
+    ui.set_seasonal_theme_note(
+        if seasonal {
+            lookup_args(
+                "gui-seasonal-theme-shown",
+                [
+                    ("season", Arg::from(lookup("gui-seasonal-theme-halloween"))),
+                    ("value", Arg::from(lookup("gui-color-scheme-dark"))),
+                ],
+            )
+        } else {
+            String::new()
+        }
+        .into(),
+    );
+    if seasonal {
+        let mascot = crate::fixtures::branding::halloween_mascot();
+        ui.set_theme_logo(mascot.clone());
+        ui.set_theme_icon(mascot);
+    } else {
+        ui.set_theme_logo(logo.clone());
+        ui.set_theme_icon(icon.clone());
+    }
 }
 
 fn new_window(state: &State) -> Result<AppWindow> {
@@ -509,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn actual_window_captures_both_themes_and_a_ui_region() {
+    fn actual_window_captures_every_theme_and_a_ui_region() {
         let _session = crate::capture::render_session();
         let output = tempfile::tempdir().expect("temporary output");
         let files = generate(&CaptureOptions {
@@ -521,7 +568,7 @@ mod tests {
         })
         .expect("capture the real component");
 
-        assert_eq!(files.len(), 4);
+        assert_eq!(files.len(), 6);
         let full = crate::catalog::STATES[0].regions[0];
         let light = image::open(output_path(
             output.path(),
@@ -541,9 +588,19 @@ mod tests {
         ))
         .expect("dark PNG")
         .into_rgba8();
+        let halloween = image::open(output_path(
+            output.path(),
+            &crate::catalog::STATES[0],
+            &full,
+            ThemeName::Halloween,
+            Dimensions::HD,
+        ))
+        .expect("Halloween PNG")
+        .into_rgba8();
         assert_eq!(light.dimensions(), (1920, 1080));
         assert_eq!(dark.dimensions(), (1920, 1080));
         assert_ne!(light.get_pixel(300, 600), dark.get_pixel(300, 600));
+        assert_ne!(dark.get_pixel(300, 600), halloween.get_pixel(300, 600));
 
         let crop = image::open(output_path(
             output.path(),

@@ -80,8 +80,8 @@ remain gitignored under `tools/auto-screenshot-tool/screenshots/`. Generated
 WebP files under `static/img/ephervex/` are also ignored. A fresh checkout must
 generate and synchronize images before building.
 
-`npm run screenshots:sync` checks that both themes exist for every selected
-state, region, and size. Full-window WebPs live directly under each state;
+`npm run screenshots:sync` checks that all three themes exist for every
+selected state, region, and size. Full-window WebPs live directly under each state;
 named crops have a subdirectory. It hashes the source PNGs and reuses unchanged
 WebPs.
 `npm run screenshots:contact-sheet` writes local review sheets grouped by
