@@ -140,12 +140,15 @@ would select for a Minecraft release:
 ephervex java list
 ephervex java refresh
 ephervex java select 1.21.1
+ephervex java select --instance INSTANCE_ID
 ephervex java install 21
 ```
 
 `java list` also names the settings that pin each runtime.
-`ephervex java select 1.21.1 --instance INSTANCE_ID` also considers that
-instance's Java override; use `--server SERVER_ID` for a server. Add
+`java select --instance INSTANCE_ID` shows the runtime that instance would
+launch with, for its own Minecraft version, loader, and Java override; use
+`--server SERVER_ID` for a server. A version given with a host must be that
+host's version. Add
 `--install` to download a managed runtime if no installed runtime is
 compatible. Without `--install`, `select` only reports the selection.
 `java install --instance INSTANCE_ID` or `--server SERVER_ID` installs the
