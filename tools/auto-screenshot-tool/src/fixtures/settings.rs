@@ -38,7 +38,7 @@ pub(crate) fn general(ui: &AppWindow) {
     ]));
     ui.set_theme_ids(strings(&["dark", "light", "user:midnight-blueprint"]));
     ui.set_themes_folder("/demo/config/ephervex/themes".into());
-    ui.set_theme_problems(SharedString::default());
+    ui.set_theme_problems(strings(&[]));
     ui.set_follow_mod_dependencies(true);
     ui.set_warn_on_dependency_impact(true);
     ui.set_trusted_pack_hosts(strings(&[
@@ -62,7 +62,7 @@ pub(crate) fn theme_load_error(ui: &AppWindow) {
             [("file", Arg::from(file)), ("value", Arg::from(reason))],
         )
     };
-    let problems = [
+    let problems: Vec<SharedString> = [
         skipped(
             "midnight-blueprint-v2.toml",
             lookup_args(
@@ -74,8 +74,10 @@ pub(crate) fn theme_load_error(ui: &AppWindow) {
             ),
         ),
         skipped("Haunted Night.toml", lookup("gui-theme-problem-file-name")),
-    ];
-    ui.set_theme_problems(problems.join("\n").into());
+    ]
+    .map(SharedString::from)
+    .into();
+    ui.set_theme_problems(ModelRc::new(VecModel::from(problems)));
 }
 
 const GENERAL_RELEASES: [&str; 7] = [
