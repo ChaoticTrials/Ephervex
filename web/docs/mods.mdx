@@ -60,9 +60,10 @@ ephervex mod show --instance INSTANCE_ID PROJECT_ID --provider modrinth
 
 Add `--include-incompatible` to `mod search` or `mod show` to also list
 results that do not fit the instance, each with the reason. They still cannot
-be installed. When more results may follow, `mod search` ends with the
-`--offset` that starts the next page. A page can hold fewer results than
-`--limit`, so use that value instead of counting.
+be installed. `--limit` shows 1 to 25 results per page; a larger number
+shows 25. When more results may follow, `mod search` ends with the `--offset`
+that starts the next page. A page can hold fewer results than `--limit`, so
+use that value instead of counting.
 
 Plan and install an exact release, or omit `--version` to choose the newest
 compatible one. Ephervex refuses a named release that does not fit the
@@ -323,10 +324,10 @@ ephervex mod repair --instance INSTANCE_ID
 `mod verify` exits with an error when it finds a fault. `mod repair` requires
 the game to be stopped and no mod isolation session to be active. Re-import
 the pack if a file came only from the original archive and no replacement
-address was recorded. Add `--shared` to `mod verify` to check the Minecraft
-client JAR and shared libraries too; those files must already have cached
-metadata, usually from a previous launch. `mod repair` does not replace shared
-launch files.
+address was recorded. For an instance, add `--shared` to `mod verify` to check
+the Minecraft client JAR and shared libraries too; those files must already
+have cached metadata, usually from a previous launch. `mod repair` does not
+replace shared launch files.
 
 Full recorded-file verification and repair are currently CLI commands. The
 desktop **Diagnostics** surface checks for known problems and offers fixes
