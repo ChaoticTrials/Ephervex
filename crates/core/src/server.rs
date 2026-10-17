@@ -16,10 +16,11 @@ use ephervex_pack::{
 };
 use ephervex_server::{
     CaptureHealth, CaptureRetention, CapturedLine, ControlAction, ControlResponse,
-    EulaConsentRecord, EulaStatus, NetworkProperties, OperatorsDocument, PropertiesDocument,
-    RuntimeClassification, ServerBind, ServerCommand, ServerObserver, ServerSupervisor,
-    ServerWarning, accepted_record, classify_runtime, clear_stale_runtime, materialize_eula_file,
-    revoked_record, send_control,
+    EulaConsentRecord, EulaStatus, NetworkProperties, OperatorsDocument, PendingProperties,
+    PropertiesDocument, PropertiesLock, RuntimeClassification, SERVER_PROPERTIES_FILE, ServerBind,
+    ServerCommand, ServerObserver, ServerSupervisor, ServerWarning, accepted_record,
+    classify_runtime, clear_stale_runtime, materialize_eula_file, read_properties_file,
+    revoked_record, save_while_running, send_control,
 };
 use ephervex_storage::{
     FileDisposition, MetadataError, NetworkAccess, NewServer, RegistryError, ServerCommit,
@@ -37,7 +38,6 @@ use crate::server_pack::{
 };
 use crate::{CoreError, CoreResult};
 
-const SERVER_PROPERTIES_FILE: &str = "server.properties";
 const EULA_FILE: &str = "eula.txt";
 const OPERATORS_FILE: &str = "ops.json";
 const DEFAULT_SERVER_PORT: u16 = 25_565;
@@ -93,6 +93,25 @@ pub struct ServerStatus {
     pub record: ServerRecord,
     pub persistence: ServerPersistenceHealth,
     pub runtime: RuntimeClassification,
+    /// Properties saved while the running process was already up, which it
+    /// reads only once it is restarted. Empty while the server is stopped.
+    pub properties_awaiting_restart: Vec<String>,
+}
+
+/// When saved server properties reach the game.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropertiesTakeEffect {
+    /// The server is stopped and reads them when it next starts.
+    NextStart,
+    /// The server is running and reads them only once it is restarted.
+    Restart,
+}
+
+/// What a save of server properties stored, and when the game reads it.
+#[derive(Debug, Clone)]
+pub struct SavedServerProperties {
+    pub record: ServerRecord,
+    pub takes_effect: PropertiesTakeEffect,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -593,10 +612,16 @@ impl App {
                 child: None,
             },
         };
+        let properties_awaiting_restart = if runtime.is_controlled() {
+            properties_awaiting_restart(&indexed.root)
+        } else {
+            Vec::new()
+        };
         Ok(ServerStatus {
             record: indexed,
             persistence,
             runtime,
+            properties_awaiting_restart,
         })
     }
 
@@ -659,12 +684,31 @@ impl App {
         read_properties(&server_properties_path(&record))
     }
 
-    pub fn set_server_property(&self, id: ServerId, key: &str, value: &str) -> CoreResult<()> {
-        let (_claim, record) = self.claim_stopped_server(id)?;
-        let path = server_properties_path(&record);
-        let mut document = read_properties(&path)?;
-        document.set(key, value)?;
-        atomic_write(&path, document.render().as_bytes())
+    /// The properties the server's next process reads: the file, with the
+    /// values saved while it ran set again where it wrote over them.
+    pub fn server_properties_at_next_start(&self, id: ServerId) -> CoreResult<PropertiesDocument> {
+        let record = self.canonical_server_for_mutation(id)?;
+        let mut document = read_properties(&server_properties_path(&record))?;
+        PendingProperties::read(&record.root)?.apply_to(&mut document)?;
+        Ok(document)
+    }
+
+    /// Sets one general property. A running server reads it once restarted;
+    /// nothing here restarts it.
+    pub fn set_server_property(
+        &self,
+        id: ServerId,
+        key: &str,
+        value: &str,
+    ) -> CoreResult<PropertiesTakeEffect> {
+        let (_claim, record, running) = self.claim_server_for_properties(id)?;
+        let values = [(key.to_owned(), value.to_owned())];
+        if running {
+            save_while_running(&record.root, &server_properties_path(&record), &values)?;
+            return Ok(PropertiesTakeEffect::Restart);
+        }
+        rewrite_stopped_properties(&record, None, &values)?;
+        Ok(PropertiesTakeEffect::NextStart)
     }
 
     pub fn set_server_network(
@@ -672,27 +716,65 @@ impl App {
         id: ServerId,
         network: ServerNetworkSettings,
     ) -> CoreResult<ServerCommit<ServerRecord>> {
-        self.set_server_properties(id, network, &[])
+        let (claim, record) = self.claim_stopped_server(id)?;
+        self.commit_stopped_network(&claim, record, network)
     }
 
     /// Applies the network settings and the given property values as one
     /// change: one claim, one validated write of `server.properties` and one
     /// registry commit. A refused value or a failed commit leaves the file and
     /// the stored network settings as they were.
+    ///
+    /// A running server keeps the network settings it started with, so they
+    /// must be the stored ones; the values are saved for its restart, which
+    /// stays the caller's to ask for.
     pub fn set_server_properties(
         &self,
         id: ServerId,
         network: ServerNetworkSettings,
         values: &[(String, String)],
-    ) -> CoreResult<ServerCommit<ServerRecord>> {
-        let (claim, mut record) = self.claim_stopped_server(id)?;
-        network_properties(&network)?.validate()?;
-        let backup = merge_properties_file(&server_properties_path(&record), &network, values)?;
+    ) -> CoreResult<SavedServerProperties> {
+        let (claim, mut record, running) = self.claim_server_for_properties(id)?;
+        let requested = network_properties(&network)?;
+        requested.validate()?;
+        if running {
+            if requested != network_properties(&record.network)? {
+                return Err(ephervex_server::ServerError::NetworkChangeWhileRunning.into());
+            }
+            save_while_running(&record.root, &server_properties_path(&record), values)?;
+            return Ok(SavedServerProperties {
+                record,
+                takes_effect: PropertiesTakeEffect::Restart,
+            });
+        }
+        let backup = rewrite_stopped_properties(&record, Some(&network), values)?;
         let previous = record.clone();
         record.network = network;
         let committed = self.commit_or_restore_properties(&claim, &mut record, &backup)?;
         self.sync_linked_server_list(&committed.record, Some(&previous));
-        Ok(committed)
+        Ok(SavedServerProperties {
+            record: committed.record,
+            takes_effect: PropertiesTakeEffect::NextStart,
+        })
+    }
+
+    /// Claims a server whose properties can change now: one that is stopped,
+    /// or whose process runs under an Ephervex supervisor, which writes them
+    /// again before it starts the next one. Reports whether it runs.
+    fn claim_server_for_properties(
+        &self,
+        id: ServerId,
+    ) -> CoreResult<(ephervex_storage::HostClaim, ServerRecord, bool)> {
+        let claim = self
+            .registry()
+            .claim_host(ephervex_storage::RecordRef::Server(id))?;
+        let record = self.canonical_server_for_mutation(id)?;
+        let running = match classify_runtime(&record.root)? {
+            RuntimeClassification::Controlled { child: Some(_), .. } => true,
+            runtime if !runtime.may_be_running() => false,
+            _ => return Err(ephervex_server::ServerError::PropertiesChangeUnavailable.into()),
+        };
+        Ok((claim, record, running))
     }
 
     /// Applies only the given network options to the stored settings. Options
@@ -702,13 +784,22 @@ impl App {
         id: ServerId,
         change: &ServerNetworkChange,
     ) -> CoreResult<ServerCommit<ServerRecord>> {
-        let (claim, mut record) = self.claim_stopped_server(id)?;
+        let (claim, record) = self.claim_stopped_server(id)?;
         let network = change.applied_to(&record.network)?;
+        self.commit_stopped_network(&claim, record, network)
+    }
+
+    fn commit_stopped_network(
+        &self,
+        claim: &ephervex_storage::HostClaim,
+        mut record: ServerRecord,
+        network: ServerNetworkSettings,
+    ) -> CoreResult<ServerCommit<ServerRecord>> {
         network_properties(&network)?.validate()?;
-        let backup = merge_network_file(&server_properties_path(&record), &network)?;
+        let backup = rewrite_stopped_properties(&record, Some(&network), &[])?;
         let previous = record.clone();
         record.network = network;
-        let committed = self.commit_or_restore_properties(&claim, &mut record, &backup)?;
+        let committed = self.commit_or_restore_properties(claim, &mut record, &backup)?;
         self.sync_linked_server_list(&committed.record, Some(&previous));
         Ok(committed)
     }
@@ -1481,22 +1572,21 @@ fn select_available_port_with(
     .into())
 }
 
-fn merge_network_file(
-    path: &Path,
-    network: &ServerNetworkSettings,
-) -> CoreResult<PropertiesBackup> {
-    merge_properties_file(path, network, &[])
-}
-
 /// The contents of `server.properties` before a save, kept so a failed save
 /// can put them back.
 struct PropertiesBackup {
     path: PathBuf,
     previous: Option<Vec<u8>>,
+    /// The values a stopped save wrote into the file and stopped keeping, as
+    /// `(server root, kept values)`.
+    pending: Option<(PathBuf, PendingProperties)>,
 }
 
 impl PropertiesBackup {
     fn restore(&self) -> CoreResult<()> {
+        if let Some((root, pending)) = &self.pending {
+            pending.store(root)?;
+        }
         match &self.previous {
             Some(bytes) => atomic_write(&self.path, bytes),
             None => match std::fs::remove_file(&self.path) {
@@ -1513,34 +1603,87 @@ impl PropertiesBackup {
     }
 }
 
-/// Merges the network settings, then sets each value, and writes the file once
-/// only when every one of them is accepted. Returns the previous contents.
-fn merge_properties_file(
+/// Merges the network settings into the file. Returns the previous contents.
+fn merge_network_file(
     path: &Path,
     network: &ServerNetworkSettings,
-    values: &[(String, String)],
 ) -> CoreResult<PropertiesBackup> {
-    let previous = match std::fs::read(path) {
-        Ok(bytes) => Some(bytes),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(source) => {
-            return Err(ephervex_server::ServerError::Io {
-                path: path.to_path_buf(),
-                source,
-            }
-            .into());
-        }
-    };
+    let previous = existing_bytes(path)?;
     let mut document = read_properties(path)?;
     document.merge_network(&network_properties(network)?)?;
-    for (key, value) in values {
-        document.set(key, value)?;
-    }
     atomic_write(path, document.render().as_bytes())?;
     Ok(PropertiesBackup {
         path: path.to_path_buf(),
         previous,
+        pending: None,
     })
+}
+
+/// The file's contents, or `None` when there is no file.
+fn existing_bytes(path: &Path) -> CoreResult<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(ephervex_server::ServerError::Io {
+            path: path.to_path_buf(),
+            source,
+        }
+        .into()),
+    }
+}
+
+/// Rewrites a stopped server's `server.properties`: first the values saved
+/// while it last ran, which its next start would otherwise write over these,
+/// then `network` and `values`. The saved values are no longer kept.
+fn rewrite_stopped_properties(
+    record: &ServerRecord,
+    network: Option<&ServerNetworkSettings>,
+    values: &[(String, String)],
+) -> CoreResult<PropertiesBackup> {
+    let path = server_properties_path(record);
+    let _lock = PropertiesLock::acquire(&record.root)?;
+    let pending = PendingProperties::read(&record.root)?;
+    let previous = existing_bytes(&path)?;
+    let mut document = read_properties(&path)?;
+    pending.apply_to(&mut document)?;
+    if let Some(network) = network {
+        document.merge_network(&network_properties(network)?)?;
+    }
+    for (key, value) in values {
+        document.set(key, value)?;
+    }
+    atomic_write(&path, document.render().as_bytes())?;
+    let backup = PropertiesBackup {
+        path,
+        previous,
+        pending: (!pending.is_empty()).then(|| (record.root.clone(), pending)),
+    };
+    if let Err(error) = PendingProperties::default().store(&record.root) {
+        if let Err(restore) = backup.restore() {
+            tracing::warn!(%restore, "server.properties was not restored");
+        }
+        return Err(error.into());
+    }
+    Ok(backup)
+}
+
+/// Forgets the values kept for a server's next start, for a change that
+/// replaces the files they were saved into.
+pub(crate) fn discard_kept_properties(root: &Path) -> CoreResult<()> {
+    let _lock = PropertiesLock::acquire(root)?;
+    Ok(PendingProperties::default().store(root)?)
+}
+
+/// The keys a controlled server has not read yet. Unreadable kept values are
+/// reported by the start that would apply them, not here.
+fn properties_awaiting_restart(root: &Path) -> Vec<String> {
+    match PendingProperties::read(root) {
+        Ok(pending) => pending.keys().map(str::to_owned).collect(),
+        Err(error) => {
+            tracing::warn!(%error, "kept server properties could not be read");
+            Vec::new()
+        }
+    }
 }
 
 fn emit_network_advisories(
@@ -1628,19 +1771,7 @@ const fn operator_profile_matches_network(
 }
 
 fn read_properties(path: &Path) -> CoreResult<PropertiesDocument> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => {
-            PropertiesDocument::parse(&text).map_err(|malformed| malformed.in_file(path).into())
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(PropertiesDocument::default())
-        }
-        Err(source) => Err(ephervex_server::ServerError::Io {
-            path: path.to_path_buf(),
-            source,
-        }
-        .into()),
-    }
+    Ok(read_properties_file(path)?)
 }
 
 fn atomic_write(path: &Path, body: &[u8]) -> CoreResult<()> {
@@ -2780,7 +2911,7 @@ mod tests {
                 .expect("the runtime lock keeps changes out now, not the claim"),
         );
         let error = app
-            .set_server_property(server.id, "motd", "changed")
+            .set_server_runtime_settings(server.id, None, None)
             .expect_err("a running server is not changed");
         assert_eq!(
             error.message_id(),
@@ -4567,6 +4698,171 @@ mod tests {
             .expect("linked");
 
         assert_eq!(recipe.loader, new);
+    }
+
+    /// Runs a stand-in for `server`'s process that prints the `motd` it read
+    /// at start as `read:<motd>` and stops on `stop`.
+    async fn run_stand_in(
+        server: &ServerRecord,
+    ) -> (
+        ephervex_server::ServerEvents,
+        tokio::task::JoinHandle<CoreResult<ephervex_server::ServerExit>>,
+    ) {
+        let (observer, mut events) = ServerObserver::channel();
+        let prepared = PreparedServerStart {
+            command: ephervex_server::ServerCommand {
+                java: PathBuf::from("/bin/sh"),
+                arguments: vec![
+                    "-c".to_owned(),
+                    "sed -n 's/^motd=/read:/p' server.properties; echo up; \
+                     while read -r line; do [ \"$line\" = stop ] && exit 0; done"
+                        .to_owned(),
+                ],
+                working_directory: ephervex_storage::metadata::server_game_dir(&server.root),
+            },
+            root: server.root.clone(),
+            capture: server.root.join("capture"),
+            operation: OperationReporter::silent("test-server-properties").id(),
+            claim: None,
+        };
+        let run = tokio::spawn(async move { App::run_prepared_server(prepared, &observer).await });
+        wait_for_line(&mut events, "up").await;
+        (events, run)
+    }
+
+    async fn wait_for_line(events: &mut ephervex_server::ServerEvents, text: &str) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while let Some(event) = events.recv().await {
+                if let ephervex_server::ServerEvent::Output(line) = event
+                    && line.text == text
+                {
+                    return;
+                }
+            }
+            panic!("the run ended before printing {text:?}");
+        })
+        .await
+        .unwrap_or_else(|_| panic!("the stand-in printed {text:?}"));
+    }
+
+    #[tokio::test]
+    async fn properties_saved_while_running_wait_for_a_restart_and_never_restart_the_server() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let server = scaffolded_server(&app);
+        let stored = app
+            .set_server_properties(
+                server.id,
+                server.network.clone(),
+                &[("motd".to_owned(), "before".to_owned())],
+            )
+            .expect("stopped save");
+        assert_eq!(stored.takes_effect, PropertiesTakeEffect::NextStart);
+        let (mut events, run) = run_stand_in(&server).await;
+
+        let saved = app
+            .set_server_properties(
+                server.id,
+                server.network.clone(),
+                &[("motd".to_owned(), "after".to_owned())],
+            )
+            .expect("running save");
+
+        assert_eq!(saved.takes_effect, PropertiesTakeEffect::Restart);
+        assert_eq!(
+            app.server_status(server.id)
+                .expect("status")
+                .properties_awaiting_restart,
+            ["motd"]
+        );
+        let file = std::fs::read_to_string(server_properties_path(&server)).expect("file");
+        assert!(file.contains("motd=after"), "{file}");
+        assert!(
+            std::iter::from_fn(|| events.try_recv().ok())
+                .all(|event| !matches!(event, ephervex_server::ServerEvent::Restarting)),
+            "saving did not restart the server"
+        );
+
+        let changed_port = ServerNetworkSettings {
+            port: server.network.port + 1,
+            ..server.network.clone()
+        };
+        let refused = app
+            .set_server_properties(server.id, changed_port, &[])
+            .expect_err("network while running");
+        assert_eq!(
+            refused.message_id(),
+            "error-server-network-change-while-running"
+        );
+        assert_eq!(
+            app.server(server.id).expect("record").network,
+            server.network
+        );
+
+        assert!(matches!(
+            send_control(&server.root, &ControlAction::Restart)
+                .await
+                .expect("restart"),
+            ControlResponse::Restarted { .. }
+        ));
+        wait_for_line(&mut events, "read:after").await;
+        assert!(
+            app.server_status(server.id)
+                .expect("status")
+                .properties_awaiting_restart
+                .is_empty()
+        );
+        assert!(matches!(
+            send_control(&server.root, &ControlAction::Stop)
+                .await
+                .expect("stop"),
+            ControlResponse::Exited(_)
+        ));
+        run.await.expect("join").expect("run");
+    }
+
+    #[test]
+    fn a_stopped_save_keeps_values_saved_while_running_and_wins_where_both_set_one() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let server = scaffolded_server(&app);
+        let path = server_properties_path(&server);
+        ephervex_server::save_while_running(
+            &server.root,
+            &path,
+            &[
+                ("motd".to_owned(), "while running".to_owned()),
+                ("pvp".to_owned(), "false".to_owned()),
+            ],
+        )
+        .expect("running save");
+        // The server wrote its own copy back before it stopped.
+        std::fs::write(&path, "motd=original\npvp=true\n").expect("overwrite");
+        assert_eq!(
+            app.server_properties_at_next_start(server.id)
+                .expect("next start")
+                .get("pvp")
+                .as_deref(),
+            Some("false")
+        );
+
+        let saved = app
+            .set_server_properties(
+                server.id,
+                server.network.clone(),
+                &[("motd".to_owned(), "stopped".to_owned())],
+            )
+            .expect("stopped save");
+
+        assert_eq!(saved.takes_effect, PropertiesTakeEffect::NextStart);
+        let document = app.server_properties(server.id).expect("properties");
+        assert_eq!(document.get("motd").as_deref(), Some("stopped"));
+        assert_eq!(document.get("pvp").as_deref(), Some("false"));
+        assert!(
+            PendingProperties::read(&server.root)
+                .expect("kept")
+                .is_empty()
+        );
     }
 
     fn scaffolded_server(app: &App) -> ServerRecord {

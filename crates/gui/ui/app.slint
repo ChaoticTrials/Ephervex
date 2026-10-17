@@ -1287,6 +1287,8 @@ export component AppWindow inherits Window {
                                 java-tone-label: host.java-tone-label;
                                 java-origin: host.java-origin;
                                 open-java => { root.show-pane-surface(pane.id, "Settings"); }
+                                address: self.is-client ? "" : host.server.address;
+                                restart-required: !self.is-client && host.server.restart-required;
                                 choose-host => { root.pane-host-picker-pane = pane.id; root.pane-host-picker-kind = host.kind; root.pane-host-picker-id = host.id; root.pane-host-query = ""; root.pane-host-query-changed(); root.modal = "pane-host"; }
                                 split-beside => { root.split-pane-beside(pane.id); }
                                 split-below => { root.split-pane-below(pane.id); }
@@ -1552,6 +1554,7 @@ export component AppWindow inherits Window {
                                     }
                                 }
                                 if host.available && host.kind == "server" && pane.surface == "Overview" : ScrollView { viewport-width: self.visible-width; server-overview := VerticalLayout { alignment: start; width: min(parent.width, 980px); spacing: 12px; property <bool> narrow: self.width < 620px; Heading { text: GuiI18n.text("gui-dedicated-server"); overflow: elide; } BodyText { text: host.server.state-detail; wrap: word-wrap; }
+                                    if host.server.restart-required : BodyText { text: GuiI18n.text("gui-server-restart-required-detail"); color: Theme.warning; wrap: word-wrap; }
                                     ServerFiles {
                                         open-location(location) => { root.open-server-location(host.id, location); }
                                         show-surface(surface) => { root.show-pane-surface(pane.id, surface); }
@@ -1562,7 +1565,7 @@ export component AppWindow inherits Window {
                                     }
                                     if host.crash-report != "" : CrashNotice { report: host.crash-report; failure: host.crash-failure; client-code-on-server: host.crash-client-code-on-server; suggested: host.crash-suggested; room: server-overview.width; review => { root.show-pane-surface(pane.id, "Mods"); } routes: host.run-failure-title == "" || host.run-eula-refused; open-diagnostics => { root.show-pane-surface(pane.id, "Diagnostics"); } open-crash-report => { root.show-pane-surface(pane.id, "Logs"); root.log-show(pane.id, "crashes"); root.log-open-file(pane.id, host.crash-report); } open-log => { root.show-pane-surface(pane.id, "Logs"); root.log-show(pane.id, "live"); } } Rectangle { border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; VerticalLayout { padding: 18px; spacing: 7px;
                                     HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-exact-target"); } BodyText { text: GuiI18n.values("gui-target-summary", host.server.minecraft, host.server.loader); overflow: elide; horizontal-stretch: 1; } }
-                                    HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-runtime"); } BodyText { text: host.server.state + " | " + host.server.state-detail; overflow: elide; horizontal-stretch: 1; } }
+                                    HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-runtime"); } BodyText { text: host.server.state + " | " + host.server.state-detail; overflow: elide; horizontal-stretch: 1; } if host.server.restart-required : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-server-restart-required"); tone-color: Theme.warning; } } }
                                     HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-network"); } BodyText { text: host.server.address; overflow: elide; horizontal-stretch: 1; } }
                                     HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-storage"); } BodyText { text: host.server.storage; overflow: elide; horizontal-stretch: 1; } }
                                     HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-relationship"); } BodyText { text: host.server.relationship; overflow: elide; horizontal-stretch: 1; } }

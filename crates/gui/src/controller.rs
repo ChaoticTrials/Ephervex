@@ -6113,16 +6113,57 @@ fn register_server_property_actions(ui: &AppWindow, commands: &Sender<Command>) 
                 }
                 return;
             };
+            let loaded = weak
+                .upgrade()
+                .and_then(|ui| loaded_property_values(&ui, &id));
             send(
                 &sender,
                 Command::SaveServerProperties {
                     server,
                     network,
-                    values,
+                    values: changed_property_values(values, loaded.as_deref()),
                 },
             );
         },
     );
+}
+
+/// What the Properties form of `server` started from, as the values a save
+/// of it unchanged would send. A stored value the form would refuse is part
+/// of it too, so the rest of a save that corrects it is still compared.
+fn loaded_property_values(ui: &AppWindow, server: &str) -> Option<Vec<(String, String)>> {
+    let view = ui
+        .get_host_views()
+        .iter()
+        .find(|view| view.kind == "server" && view.id == server)?;
+    Some(property_pairs(
+        &view.property_motd,
+        &view.property_max_players,
+        &view.property_difficulty,
+        &view.property_gamemode,
+        (
+            view.property_allow_flight,
+            view.property_pvp,
+            view.property_allowlist,
+        ),
+        &view.property_unset,
+    ))
+}
+
+/// Keeps only the values the user changed from what the form started from. A
+/// running server rewrites some of these itself, such as `white-list` for
+/// `/whitelist on`, and a save must not put back what the form showed before.
+fn changed_property_values(
+    values: Vec<(String, String)>,
+    loaded: Option<&[(String, String)]>,
+) -> Vec<(String, String)> {
+    let Some(loaded) = loaded else {
+        return values;
+    };
+    values
+        .into_iter()
+        .filter(|value| !loaded.contains(value))
+        .collect()
 }
 
 // Difficulty and game mode are written as the form holds them: the form
@@ -6145,6 +6186,25 @@ fn server_property_values(
     {
         return None;
     }
+    Some(property_pairs(
+        motd,
+        max_players,
+        difficulty,
+        gamemode,
+        (allow_flight, pvp, allowlist),
+        unset,
+    ))
+}
+
+/// The form's values as a save writes them, whether or not they are valid.
+fn property_pairs(
+    motd: &str,
+    max_players: &str,
+    difficulty: &str,
+    gamemode: &str,
+    (allow_flight, pvp, allowlist): (bool, bool, bool),
+    unset: &str,
+) -> Vec<(String, String)> {
     let mut values = Vec::new();
     for (key, value) in [
         ("motd", motd),
@@ -6165,7 +6225,7 @@ fn server_property_values(
             values.push((key.to_owned(), value.to_string()));
         }
     }
-    Some(values)
+    values
 }
 
 /// An empty count is acceptable only while the file holds no maximum, which
@@ -9713,6 +9773,7 @@ fn server_row(item: crate::presentation::ServerPresentation) -> ServerRow {
         state_kind: item.state_kind.into(),
         state_detail: item.state_detail.into(),
         address: item.address.into(),
+        restart_required: item.restart_required,
         path: item.path.into(),
         installed: item.installed,
         needs_attention: item.needs_attention,
@@ -16069,6 +16130,82 @@ mod tests {
                 ("difficulty".to_owned(), "easy".to_owned()),
                 ("allow-flight".to_owned(), "true".to_owned()),
             ]
+        );
+    }
+
+    /// What a Properties save of a running server sends after the form was
+    /// loaded with `loaded_players` and submitted with `motd` and `players`,
+    /// while the server turned its allowlist on behind the form.
+    fn values_sent_by_a_running_save(
+        loaded_players: &str,
+        motd: &str,
+        players: &str,
+    ) -> Vec<(String, String)> {
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        register_server_actions(&ui, &workspace.commands, &workspace);
+        let server = ephervex_model::ServerId::new();
+        let row = ServerRow {
+            id: server.to_string().into(),
+            state_kind: "running".into(),
+            ..ServerRow::default()
+        };
+        workspace.state.borrow_mut().set_rows(Vec::new(), vec![row]);
+        workspace.open(&ui, InstalledHost::Server(server), Surface::Properties);
+        apply_server_workspace(
+            &workspace,
+            ServerWorkspaceData {
+                server: server.to_string(),
+                motd: "before".to_owned(),
+                max_players: loaded_players.to_owned(),
+                difficulty: "1".to_owned(),
+                gamemode: "survival".to_owned(),
+                allow_flight: false,
+                pvp: true,
+                allowlist: false,
+                unset: Vec::new(),
+                network: ephervex_core::ServerNetworkSettings::default(),
+            },
+        );
+
+        // The form still shows the allowlist off.
+        ui.invoke_save_server_properties(
+            server.to_string().into(),
+            motd.into(),
+            players.into(),
+            "1".into(),
+            "survival".into(),
+            false,
+            true,
+            false,
+            false,
+            "Localhost".into(),
+            SharedString::default(),
+            "25565".into(),
+            SharedString::default(),
+        );
+        commands
+            .try_iter()
+            .find_map(|command| match command {
+                Command::SaveServerProperties { values, .. } => Some(values),
+                _ => None,
+            })
+            .expect("a save")
+    }
+
+    #[test]
+    fn a_save_sends_only_the_properties_changed_since_the_form_was_loaded() {
+        assert_eq!(
+            values_sent_by_a_running_save("20", "after", "20"),
+            [("motd".to_owned(), "after".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_save_that_corrects_a_stored_player_count_sends_only_what_changed() {
+        assert_eq!(
+            values_sent_by_a_running_save("0", "before", "20"),
+            [("max-players".to_owned(), "20".to_owned())]
         );
     }
 

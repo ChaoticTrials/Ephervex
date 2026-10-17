@@ -249,6 +249,10 @@ export component HostWorkspace inherits Rectangle {
     in property <string> java-tone-label;
     in property <string> java-origin;
     callback open-java();
+    // A server's address and port, beside its name; empty for a client.
+    in property <string> address;
+    // Properties were saved that the running server reads once restarted.
+    in property <bool> restart-required;
     property <color> pair-tone: StateTone.of-or(root.pair-state-kind, Theme.accent);
     callback choose-host();
     callback split-beside();
@@ -288,7 +292,9 @@ export component HostWorkspace inherits Rectangle {
                         clicked => { root.choose-host(); }
                     }
                     VerticalLayout { alignment: center; StatePill { state: root.status; state-kind: root.status-kind; restarting: root.restart-stage != ""; } }
+                    if root.restart-required : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-server-restart-required"); tone-color: Theme.warning; } }
                     if root.paired && root.width >= 520px : VerticalLayout { alignment: center; Pill { text: root.pair-label; tone-color: root.pair-tone; } }
+                    if root.address != "" && root.width >= 760px : VerticalLayout { alignment: center; Pill { text: root.address; } }
                     if root.java-summary != "" && root.width >= 640px : VerticalLayout { alignment: center; JavaRuntimePill { summary: root.java-summary; origin: root.java-origin; tone: root.java-tone; tone-label: root.java-tone-label; clicked => { root.open-java(); } } }
                 }
                 actions := HorizontalLayout {
@@ -320,7 +326,9 @@ export component HostWorkspace inherits Rectangle {
             AppButton { text: root.back-label; clicked => { root.back(); } }
             Heading { text: root.title; font-size: Theme.workspace-title-size; overflow: elide; }
             VerticalLayout { alignment: center; StatePill { state: root.status; state-kind: root.status-kind; restarting: root.restart-stage != ""; } }
+            if root.restart-required : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-server-restart-required"); tone-color: Theme.warning; } }
             if root.paired : VerticalLayout { alignment: center; Pill { text: root.pair-label; tone-color: root.pair-tone; } }
+            if root.address != "" : VerticalLayout { alignment: center; Pill { text: root.address; } }
             if root.java-summary != "" : VerticalLayout { alignment: center; JavaRuntimePill { summary: root.java-summary; origin: root.java-origin; tone: root.java-tone; tone-label: root.java-tone-label; clicked => { root.open-java(); } } }
             Rectangle { horizontal-stretch: 1; }
             if root.can-split-beside : IconButton { icon: @image-url("../../../../assets/icons/split-beside.svg"); accessible-name: GuiI18n.text("gui-workspace-split"); clicked => { root.split-beside(); } }

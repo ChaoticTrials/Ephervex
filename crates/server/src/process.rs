@@ -16,6 +16,8 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::capture::{CaptureStream, CapturedLine, OutputCapture, ServerOutputEvent};
+use crate::pending_properties::apply_pending_properties;
+use crate::properties::SERVER_PROPERTIES_FILE;
 use crate::runtime::{
     ProcessEvidence, RuntimeEvidence, RuntimeLock, SERVER_RUN_VARIABLE, active_control_socket_path,
     capture_java_child, prepare_control_socket_path, read_runtime_evidence,
@@ -518,13 +520,20 @@ async fn supervise_commands(
         evidence.child = None;
         evidence.child_pending = true;
         write_runtime_evidence(server_root, evidence)?;
-        let spawned = spawn_child(
-            command,
-            evidence.generation,
-            observer,
-            capture,
-            &finished_starting,
-        );
+        // Values saved while the previous child ran reach this one even if it wrote over them.
+        let spawned = apply_pending_properties(
+            server_root,
+            &command.working_directory.join(SERVER_PROPERTIES_FILE),
+        )
+        .and_then(|()| {
+            spawn_child(
+                command,
+                evidence.generation,
+                observer,
+                capture,
+                &finished_starting,
+            )
+        });
         let (mut child, stdin, readers, pid) = match spawned {
             Ok(spawned) => spawned,
             // The old child is gone, which is what the runtime evidence has to
@@ -1896,6 +1905,60 @@ mod tests {
             send_control(root.path(), &ControlAction::Kill)
                 .await
                 .expect("kill"),
+            ControlResponse::Exited(_)
+        ));
+        task.await.expect("join").expect("supervise");
+    }
+
+    #[tokio::test]
+    async fn a_restart_starts_the_replacement_with_values_saved_while_the_old_child_ran() {
+        let root = tempfile::tempdir().expect("root");
+        let capture = tempfile::tempdir().expect("capture");
+        let properties = root.path().join("server").join(SERVER_PROPERTIES_FILE);
+        std::fs::create_dir_all(properties.parent().expect("game directory")).expect("game");
+        std::fs::write(&properties, "motd=old\n").expect("properties");
+        let command = ServerCommand {
+            java: PathBuf::from("/bin/sh"),
+            arguments: vec![
+                "-c".to_owned(),
+                "sed -n 's/^motd=/read:/p' server.properties; \
+                 while read -r line; do [ \"$line\" = stop ] && exit 0; done"
+                    .to_owned(),
+            ],
+            working_directory: properties.parent().expect("game").to_path_buf(),
+        };
+        let (observer, mut events) = ServerObserver::channel();
+        let (server_root, capture_path) = (root.path().to_path_buf(), capture.path().to_path_buf());
+        let task = tokio::spawn(async move {
+            ServerSupervisor::run(&command, &server_root, &capture_path, &observer).await
+        });
+        wait_for_output(&mut events, "read:old").await;
+
+        crate::save_while_running(
+            root.path(),
+            &properties,
+            &[("motd".to_owned(), "new".to_owned())],
+        )
+        .expect("save");
+        // The running server writes its own copy back, as `/whitelist on` makes it do.
+        std::fs::write(&properties, "motd=old\n").expect("overwrite");
+        assert!(matches!(
+            send_control(root.path(), &ControlAction::Restart)
+                .await
+                .expect("restart"),
+            ControlResponse::Restarted { .. }
+        ));
+
+        wait_for_output(&mut events, "read:new").await;
+        assert!(
+            crate::PendingProperties::read(root.path())
+                .expect("kept")
+                .is_empty()
+        );
+        assert!(matches!(
+            send_control(root.path(), &ControlAction::Stop)
+                .await
+                .expect("stop"),
             ControlResponse::Exited(_)
         ));
         task.await.expect("join").expect("supervise");

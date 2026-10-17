@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::{ServerError, ServerResult};
 
+pub const SERVER_PROPERTIES_FILE: &str = "server.properties";
 pub const ONLINE_MODE_KEY: &str = "online-mode";
 pub const SERVER_IP_KEY: &str = "server-ip";
 pub const SERVER_PORT_KEY: &str = "server-port";

@@ -1750,6 +1750,10 @@ enum ServerPropertiesCommand {
         id: ServerId,
     },
     /// Set an untyped property; managed network and EULA keys are refused.
+    ///
+    /// A stopped server reads the value when it next starts. A server running
+    /// under Ephervex keeps running and reads it once restarted; use
+    /// `ephervex server restart` when you want that.
     Set {
         /// The server whose property to set.
         id: ServerId,
@@ -2867,9 +2871,17 @@ async fn run_server_command(
                 }
             }
             ServerPropertiesCommand::Set { id, key, value } => {
-                app.set_server_property(*id, key, value)?;
+                let takes_effect = app.set_server_property(*id, key, value)?;
+                let restart_required = takes_effect == ephervex_core::PropertiesTakeEffect::Restart;
                 if json {
-                    print_json(&serde_json::json!({ "server_id": id, "key": key, "value": value }));
+                    print_json(&serde_json::json!({
+                        "server_id": id,
+                        "key": key,
+                        "value": value,
+                        "restart_required": restart_required,
+                    }));
+                } else if restart_required {
+                    outln!("set {key}; the running server reads it once restarted");
                 } else {
                     outln!("set {key}");
                 }
@@ -9687,6 +9699,12 @@ fn print_server_status(app: &App, id: ServerId, json: bool) -> anyhow::Result<()
         outln!("persistence: {persistence}");
         outln!("runtime:     {runtime}");
         outln!("capture:     {}", capture_health_name(&capture.health));
+        if !status.properties_awaiting_restart.is_empty() {
+            outln!(
+                "restart:     required for {}, saved while running",
+                status.properties_awaiting_restart.join(", ")
+            );
+        }
         if let RuntimeClassification::Orphaned { child } = &status.runtime {
             outln!("orphan pid:  {}", child.pid);
             outln!("executable:  {}", child.executable.display());
@@ -9740,6 +9758,7 @@ fn server_status_json_from_parts(
         "installation_state": if status.record.installation.is_installed() { "installed" } else { "not_installed" },
         "runtime_classification": runtime_name(&status.runtime),
         "capture_health": capture_health_name(&capture.health),
+        "properties_awaiting_restart": status.properties_awaiting_restart,
         "retention": {
             "removed_segments": capture.retention.removed_segments,
             "removed_bytes": capture.retention.removed_bytes,

@@ -202,8 +202,8 @@ pub use promotion::{
 };
 pub use running::{ProcessMonitor, ProcessUsage, RunningProcess};
 pub use server::{
-    CaptureSnapshot, ServerCreateOptions, ServerNetworkChange, ServerPersistenceHealth,
-    ServerStatus, stoppable_for_deletion,
+    CaptureSnapshot, PropertiesTakeEffect, SavedServerProperties, ServerCreateOptions,
+    ServerNetworkChange, ServerPersistenceHealth, ServerStatus, stoppable_for_deletion,
 };
 pub use server_capture::{CaptureUpdate, ServerCaptureTail};
 pub use server_pack::{

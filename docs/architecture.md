@@ -380,6 +380,15 @@ and crash reports are reported as unavailable; opening them does not create
 empty directories. Arbitrary file editing stays in the user's desktop tools.
 The Properties shortcut opens the existing structured server settings.
 
+The workspace header shows a server's address and port beside its name and
+state. Gameplay properties can be saved while the
+server runs under Ephervex; they are written at once, kept until the next
+process starts, and written again by the supervisor just before it spawns one,
+so a running server that writes its own copy back cannot lose them (ADR 0050).
+Saving never restarts the server. Until a new process has read them, the
+header, Overview, and Properties show Restart required. Network settings stay
+editable only while the server is stopped.
+
 The controller keeps pending starts, stops, console submissions, and observed
 run failures by server ID, alongside the existing host restart state. All views
 of a server share those guards and status. Snapshot values remain the baseline
@@ -929,6 +938,8 @@ a lock file stored outside the host's tree. A change that needs the host stopped
 (promotion, snapshot capture and restore, duplication, deletion, a loader
 change, and settings or property writes) takes the claim first, checks that no
 launch or server run holds the host, and keeps the claim until the change ends.
+Server property writes are the one exception: they may also proceed while an
+Ephervex supervisor runs the server, and wait for its restart (ADR 0050).
 A client launch takes the claim only while it reads the instance record and
 takes the launch lock. A server start takes it before it checks the runtime and
 keeps it through start preparation until the supervisor owns the runtime lock.

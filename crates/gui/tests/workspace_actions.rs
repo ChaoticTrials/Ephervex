@@ -233,6 +233,47 @@ fn the_header_java_pill_opens_the_hosts_runtime_settings() {
     assert_eq!(support::surface(&ui, 0), "Settings");
 }
 
+/// A server's header says where it listens and, once properties were saved
+/// while it ran, that it needs a restart. Both are status, not controls.
+#[test]
+fn the_server_header_shows_its_address_and_a_restart_it_needs() {
+    let ui = window();
+    support::show_server(
+        &ui,
+        ServerRow {
+            id: "repro-server".into(),
+            state_kind: "running".into(),
+            address: "127.0.0.1:25570".into(),
+            ..ServerRow::default()
+        },
+        "Overview",
+    );
+    settle(&ui);
+    let restart_required = lookup("gui-server-restart-required");
+    assert!(
+        header_pill(&ui, &restart_required).is_none(),
+        "nothing waits for a restart yet"
+    );
+    assert!(
+        header_pill(&ui, "127.0.0.1:25570").is_some(),
+        "the header shows the address"
+    );
+
+    support::update_host(&ui, 0, |view| view.server.restart_required = true);
+    settle(&ui);
+    assert!(
+        header_pill(&ui, &restart_required).is_some(),
+        "the header says a restart is needed"
+    );
+}
+
+/// A status pill in a header: text, not a button.
+fn header_pill(ui: &AppWindow, label: &str) -> Option<ElementHandle> {
+    ElementHandle::find_by_accessible_label(ui, label).find(|element| {
+        element.accessible_role() == Some(AccessibleRole::Text) && element.size().width > 0.0
+    })
+}
+
 fn client_workspace(ui: &AppWindow) {
     client_workspace_with(ui, instance());
 }

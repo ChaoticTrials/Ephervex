@@ -870,6 +870,7 @@ fn server() -> ServerRow {
         state_kind: "stopped".into(),
         state_detail: "Not running".into(),
         address: "127.0.0.1:25565".into(),
+        restart_required: false,
         path: "/tmp/ephervex/servers/repro-server".into(),
         installed: true,
         can_start: true,

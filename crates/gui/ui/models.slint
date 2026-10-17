@@ -113,6 +113,8 @@ export struct ServerRow {
     state-kind: string,
     state-detail: string,
     address: string,
+    // Properties were saved that the running process reads only once restarted.
+    restart-required: bool,
     path: string,
     installed: bool,
     needs-attention: bool,

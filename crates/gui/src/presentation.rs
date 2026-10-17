@@ -280,6 +280,9 @@ pub struct ServerPresentation {
     pub state_kind: &'static str,
     pub state_detail: String,
     pub address: String,
+    /// Properties were saved that the running process reads only once it is
+    /// restarted.
+    pub restart_required: bool,
     pub path: String,
     pub installed: bool,
     pub needs_attention: bool,
@@ -371,6 +374,7 @@ impl ServerPresentation {
             state_kind,
             state_detail: lookup(detail_id),
             address: format_connection_target(record),
+            restart_required: !status.properties_awaiting_restart.is_empty(),
             path: record.root.display().to_string(),
             installed,
             needs_attention: record.needs_attention(),
@@ -1576,6 +1580,7 @@ mod tests {
             },
             persistence: ServerPersistenceHealth::Healthy,
             runtime,
+            properties_awaiting_restart: Vec::new(),
         }
     }
 
@@ -1846,6 +1851,21 @@ mod tests {
         }));
         assert_eq!(running.state_kind, "running");
         assert!(running.can_send_command);
+    }
+
+    #[test]
+    fn a_running_server_with_properties_saved_since_it_started_is_marked_for_restart() {
+        let mut child = super::super::test_support::process_evidence();
+        child.role = ephervex_core::ProcessRole::JavaChild;
+        let mut status = server(RuntimeClassification::Controlled {
+            supervisor: super::super::test_support::process_evidence(),
+            child: Some(child),
+        });
+        assert!(!ServerPresentation::from_status(&status).restart_required);
+
+        status.properties_awaiting_restart = vec!["motd".to_owned()];
+
+        assert!(ServerPresentation::from_status(&status).restart_required);
     }
 
     #[test]

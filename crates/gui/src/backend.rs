@@ -41,7 +41,7 @@ use ephervex_core::{
 };
 use ephervex_core::{
     InstalledStandIn, LinkedStandIns, LinkedTargetFailure, LinkedTargetOutcome, PlanWarning,
-    PlannedMod, ProvidedDependency,
+    PlannedMod, PropertiesTakeEffect, ProvidedDependency,
 };
 use ephervex_i18n::{
     Arg, has_attribute, lookup, lookup_args, lookup_attribute, lookup_attribute_args,
@@ -5656,9 +5656,14 @@ fn run_worker(
                     continue;
                 }
                 match app.set_server_properties(server, network, &values) {
-                    Ok(_) => {
+                    Ok(saved) => {
                         let _ = events.send(Event::Toast {
-                            message: lookup("gui-server-properties-saved"),
+                            message: lookup(match saved.takes_effect {
+                                PropertiesTakeEffect::NextStart => "gui-server-properties-saved",
+                                PropertiesTakeEffect::Restart => {
+                                    "gui-server-properties-saved-restart"
+                                }
+                            }),
                             error: false,
                         });
                         send_server_workspace(&app, server, &events);
@@ -7931,7 +7936,7 @@ fn snapshot_deletion_note(app: &App, host: InstalledHost) -> String {
 fn send_server_workspace(app: &App, server: ServerId, events: &Sender<Event>) {
     let result = (|| {
         let record = app.server(server)?;
-        let properties = app.server_properties(server)?;
+        let properties = app.server_properties_at_next_start(server)?;
         let unset: Vec<&'static str> = SERVER_PROPERTY_DEFINITIONS
             .iter()
             .map(|definition| definition.key)

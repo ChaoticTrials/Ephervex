@@ -93,7 +93,7 @@ pub fn materialize_eula_file(path: &Path, status: &EulaStatus) -> ServerResult<(
     atomic_write(path, document.render().as_bytes())
 }
 
-fn atomic_write(path: &Path, contents: &[u8]) -> ServerResult<()> {
+pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> ServerResult<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent).map_err(|source| ServerError::Io {
         path: parent.to_path_buf(),

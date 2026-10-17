@@ -210,15 +210,13 @@ fn a_server_that_cannot_be_started_says_what_stands_in_the_way() {
 fn server_properties_save_says_why_for_each_state_that_blocks_it() {
     let ui = window();
     for (state_kind, message) in [
-        ("running", "gui-hint-save-requires-stopped"),
+        ("starting", "gui-hint-save-server-starting"),
         ("orphaned", "gui-hint-save-server-uncontrolled"),
         ("unknown", "gui-hint-save-server-uncontrolled"),
         ("needs-recovery", "gui-hint-server-needs-recovery"),
         ("stopping", "gui-hint-save-server-stopping"),
     ] {
-        let mut row = server_in_state(state_kind);
-        row.can_stop = state_kind == "running";
-        support::show_server(&ui, row, "Properties");
+        support::show_server(&ui, server_in_state(state_kind), "Properties");
         settle(&ui);
         assert!(!enabled(&ui, "gui-save-changes"), "{state_kind}");
         assert_eq!(
@@ -228,12 +226,90 @@ fn server_properties_save_says_why_for_each_state_that_blocks_it() {
         );
     }
 
-    for state_kind in ["stopped", "failed"] {
+    support::show_server(&ui, restarting_server("stopping"), "Properties");
+    settle(&ui);
+    assert!(!enabled(&ui, "gui-save-changes"));
+    assert_eq!(
+        reason(&ui, "gui-save-changes"),
+        lookup("gui-hint-save-server-restarting")
+    );
+
+    for state_kind in ["stopped", "failed", "running"] {
         support::show_server(&ui, server_in_state(state_kind), "Properties");
         settle(&ui);
         assert!(enabled(&ui, "gui-save-changes"), "{state_kind}");
         assert_eq!(reason(&ui, "gui-save-changes"), "", "{state_kind}");
     }
+}
+
+/// A running server keeps the network settings it started with, so those
+/// wait for a stop, while everything else is saved for its restart and the
+/// form says so.
+#[test]
+fn a_running_servers_properties_keep_its_network_settings_and_say_when_the_rest_applies() {
+    let ui = window();
+    support::show_server(&ui, server(true), "Properties");
+    settle(&ui);
+
+    assert!(enabled(&ui, "gui-save-changes"));
+    assert!(visible(&ui, &lookup("gui-server-properties-running")));
+    assert!(visible(&ui, &lookup("gui-network-detail-running")));
+    for label in ["25565", &lookup("gui-online-mode")] {
+        let control = ElementHandle::find_by_accessible_label(&ui, label)
+            .find(|element| element.accessible_enabled().is_some())
+            .unwrap_or_else(|| panic!("no control labeled {label}"));
+        assert_eq!(control.accessible_enabled(), Some(false), "{label}");
+    }
+    let motd = ElementHandle::find_by_accessible_label(&ui, &lookup("gui-default-motd"))
+        .find(|element| element.accessible_enabled().is_some())
+        .expect("message of the day");
+    assert_eq!(motd.accessible_enabled(), Some(true));
+
+    let mut row = server(true);
+    row.restart_required = true;
+    support::show_server(&ui, row, "Properties");
+    settle(&ui);
+    assert!(visible(&ui, &lookup("gui-server-restart-required-detail")));
+    assert!(!visible(&ui, &lookup("gui-server-properties-running")));
+
+    support::show_server(&ui, server(false), "Properties");
+    settle(&ui);
+    assert!(!visible(&ui, &lookup("gui-server-properties-running")));
+    let port = ElementHandle::find_by_accessible_label(&ui, "25565")
+        .find(|element| element.accessible_enabled().is_some())
+        .expect("port");
+    assert_eq!(port.accessible_enabled(), Some(true));
+}
+
+/// A network edit left unsaved when the server starts would be sent with every
+/// later save and refused, from fields that can no longer be changed back.
+#[test]
+fn a_network_edit_left_unsaved_is_dropped_when_the_server_starts() {
+    let ui = window();
+    support::show_server(&ui, server(false), "Properties");
+    settle(&ui);
+    let port = || {
+        ElementHandle::find_by_element_id(&ui, "ServerPropertiesForm::port-field")
+            .next()
+            .expect("port field")
+            .query_descendants()
+            .match_id("TextField::input")
+            .find_first()
+            .expect("port input")
+    };
+    let stored = port().accessible_value();
+    port().set_accessible_value("25570");
+    settle(&ui);
+    assert_eq!(port().accessible_value().as_deref(), Some("25570"));
+
+    support::update_host(&ui, 0, |view| {
+        view.server.state_kind = "running".into();
+        view.server.can_stop = true;
+    });
+    settle(&ui);
+
+    assert_eq!(port().accessible_value(), stored);
+    assert_eq!(port().accessible_enabled(), Some(false));
 }
 
 #[test]
@@ -354,6 +430,7 @@ fn server(running: bool) -> ServerRow {
         }
         .into(),
         address: "127.0.0.1:25565".into(),
+        restart_required: false,
         path: "/tmp/ephervex/servers/server".into(),
         installed: true,
         can_start: !running,

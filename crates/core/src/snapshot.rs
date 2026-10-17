@@ -562,6 +562,10 @@ impl App {
             None
         };
         check_canceled(cancel)?;
+        if matches!(host, InstalledHost::Server(_)) {
+            // Saved into the files this replaces; the next start would write them over the restore.
+            crate::server::discard_kept_properties(&layout.root).map_err(snapshot_core_error)?;
+        }
 
         let parts = restore_parts(host, &layout.root, &snapshot)?;
         let transaction = ephervex_storage::prepare_restore(&layout.root, id, parts.clone())
@@ -2060,6 +2064,63 @@ mod tests {
         assert_eq!(
             listed_servers(&client.root),
             vec![("Repro Server".to_owned(), "127.0.0.1:25565".to_owned())]
+        );
+    }
+
+    #[test]
+    fn restoring_a_server_snapshot_forgets_properties_kept_for_its_next_start() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let app = App::open_at(Paths::rooted_at(temporary.path())).expect("open app");
+        let server = app
+            .registry_for_services()
+            .create_server(ephervex_storage::NewServer::new(
+                "Repro Server",
+                "1.21.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create server");
+        app.set_server_properties(
+            server.id,
+            server.network.clone(),
+            &[("motd".to_owned(), "captured".to_owned())],
+        )
+        .expect("stopped save");
+        let snapshot = app
+            .create_snapshot(
+                InstalledHost::Server(server.id),
+                "before a running save",
+                SnapshotOrigin::Manual,
+                &CancellationToken::new(),
+            )
+            .expect("create snapshot");
+        // What a save while the server ran leaves behind once it was stopped rather than restarted.
+        ephervex_server::save_while_running(
+            &server.root,
+            &ephervex_storage::metadata::server_game_dir(&server.root)
+                .join(ephervex_server::SERVER_PROPERTIES_FILE),
+            &[("motd".to_owned(), "saved while running".to_owned())],
+        )
+        .expect("running save");
+
+        app.restore_snapshot(
+            InstalledHost::Server(server.id),
+            snapshot.id,
+            SnapshotRestoreOptions::default(),
+            &CancellationToken::new(),
+        )
+        .expect("restore");
+
+        assert!(
+            ephervex_server::PendingProperties::read(&server.root)
+                .expect("kept")
+                .is_empty()
+        );
+        assert_eq!(
+            app.server_properties_at_next_start(server.id)
+                .expect("properties")
+                .get("motd")
+                .as_deref(),
+            Some("captured")
         );
     }
 

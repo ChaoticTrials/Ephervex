@@ -753,6 +753,7 @@ fn server(running: bool) -> ServerRow {
         }
         .into(),
         address: "127.0.0.1:25565".into(),
+        restart_required: false,
         path: "/tmp/ephervex/servers/server".into(),
         installed: true,
         can_start: !running,

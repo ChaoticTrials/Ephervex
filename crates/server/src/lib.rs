@@ -9,6 +9,7 @@ mod connection;
 mod error;
 pub mod eula;
 pub mod operators;
+pub mod pending_properties;
 pub mod process;
 pub mod properties;
 pub mod runtime;
@@ -28,13 +29,17 @@ pub use eula::{
     accepted_record, materialize_eula_file, revoked_record,
 };
 pub use operators::{OperatorEntry, OperatorUpdate, OperatorsDocument, OperatorsDocumentError};
+pub use pending_properties::{
+    PENDING_PROPERTIES_FILE, PENDING_PROPERTIES_FORMAT_VERSION, PendingProperties, PropertiesLock,
+    apply_pending_properties, pending_properties_path, read_properties_file, save_while_running,
+};
 pub use process::{
     ControlAction, ControlResponse, ServerCommand, ServerEvent, ServerEvents, ServerExit,
     ServerObserver, ServerSupervisor, ServerWarning, send_control,
 };
 pub use properties::{
     EULA_KEY, MalformedEscape, NetworkProperties, ONLINE_MODE_KEY, PropertiesDocument,
-    SERVER_IP_KEY, SERVER_PORT_KEY, ServerBind,
+    SERVER_IP_KEY, SERVER_PORT_KEY, SERVER_PROPERTIES_FILE, ServerBind,
 };
 pub use runtime::{
     ProcessEvidence, ProcessRole, RUNTIME_FILE, RUNTIME_LOCK_FILE, RuntimeClassification,

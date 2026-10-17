@@ -10,6 +10,15 @@ pub enum ServerError {
     ProtectedProperty { key: String },
     #[error("{path} has a malformed \\uXXXX escape on line {line}")]
     MalformedPropertiesEscape { path: PathBuf, line: usize },
+    #[error("server properties saved while the server ran could not be read from {path}")]
+    PendingPropertiesUnreadable { path: PathBuf },
+    #[error(
+        "server properties can be changed while the server is stopped or running under \
+         Ephervex, not while it is starting or out of Ephervex's control"
+    )]
+    PropertiesChangeUnavailable,
+    #[error("network settings can be changed only while the server is stopped")]
+    NetworkChangeWhileRunning,
     #[error("global Minecraft EULA consent has not been accepted")]
     EulaNotAccepted,
     #[error("the recorded Minecraft EULA consent is malformed")]
@@ -85,6 +94,11 @@ impl ServerError {
             Self::InvalidProperty { .. } => "error-server-property-invalid",
             Self::ProtectedProperty { .. } => "error-server-property-protected",
             Self::MalformedPropertiesEscape { .. } => "error-server-properties-escape-malformed",
+            Self::PendingPropertiesUnreadable { .. } => {
+                "error-server-pending-properties-unreadable"
+            }
+            Self::PropertiesChangeUnavailable => "error-server-properties-change-unavailable",
+            Self::NetworkChangeWhileRunning => "error-server-network-change-while-running",
             Self::EulaNotAccepted => "error-server-eula-not-accepted",
             Self::EulaConsentMalformed => "error-server-eula-consent-malformed",
             Self::RuntimeState { .. } => "error-server-runtime-state",
@@ -131,6 +145,7 @@ impl ServerError {
             Self::RuntimeState { path, .. }
             | Self::Io { path, .. }
             | Self::MalformedPropertiesEscape { path, .. }
+            | Self::PendingPropertiesUnreadable { path }
             | Self::ControlUnavailable { path, .. } => Some(path.clone()),
             Self::ProcessStart { executable, .. } => Some(executable.clone()),
             Self::RestartReplacementFailed { source } => source.failing_path(),
