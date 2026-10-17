@@ -844,6 +844,13 @@ pub(crate) const STATES: &[State] = &[
         interaction: None,
     },
     State {
+        name: "settings-server-defaults",
+        show: fixtures::settings::settings_server_defaults,
+        regions: SETTINGS_REGIONS,
+        same_layout_at_both_sizes: false,
+        interaction: None,
+    },
+    State {
         name: "theme-selector-open",
         show: fixtures::settings::theme_selector_open,
         regions: SETTINGS_REGIONS,

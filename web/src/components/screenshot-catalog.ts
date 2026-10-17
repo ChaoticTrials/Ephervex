@@ -130,6 +130,7 @@ export const catalogGroups: CatalogGroup[] = [
       {state: 'theme-problems', title: 'Listing theme problems'},
       {state: 'theme-branding', title: 'A theme folder\'s logo'},
       {state: 'settings-minecraft-defaults', title: 'Minecraft defaults'},
+      {state: 'settings-server-defaults', title: 'Server property defaults'},
       {state: 'settings-java', title: 'Java'},
       {state: 'settings-java-remove-pinned', title: 'Removing a pinned Java runtime'},
       {state: 'settings-providers', title: 'Providers and APIs'},

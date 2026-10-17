@@ -119,6 +119,20 @@ pub(crate) fn theme_branding(ui: &AppWindow) {
     ui.set_theme_logo(super::branding::theme_logo());
 }
 
+/// The `server.properties` defaults for new servers, with a few set.
+pub(crate) fn settings_server_defaults(ui: &AppWindow) {
+    open_settings(ui, "Server Properties");
+    ui.set_server_defaults_groups(super::server_properties::default_groups(&[
+        ("spawn-protection", "0"),
+        ("difficulty", "normal"),
+        ("allow-flight", "true"),
+        ("max-players", "8"),
+    ]));
+    ui.set_server_defaults_edits(0);
+    ui.set_server_defaults_invalid(false);
+    ui.set_server_defaults_show_advanced(false);
+}
+
 const GENERAL_RELEASES: [&str; 7] = [
     "26.2", "1.21.1", "1.20.1", "1.19.4", "1.18.2", "1.16.5", "1.12.2",
 ];

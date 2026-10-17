@@ -103,6 +103,34 @@ its value for later. These commands do not change existing instances.
 </TabItem>
 </Tabs>
 
+## Server property defaults
+
+**Server Properties** sets `server.properties` values for new servers. When a
+server is created or first installed, it gets each default its file does not
+already hold. Values from a pack's server files stay, and existing servers are
+not changed. A key without a default is left to Minecraft. Network settings
+and the EULA are not part of these defaults.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Open **Settings > Server Properties**. It has the same cards as a server's
+**Properties**; turn on **Show advanced** for the **Advanced** card. A row
+without a default says what a new server gets. Edit the values you want and
+select **Save Changes**, or **Discard Changes** to drop unsaved edits.
+**Reset** on a row removes its default.
+
+<ThemeScreenshot state="settings-server-defaults" alt="Settings Server Properties page with defaults for new servers, where Spawn protection has a default and a Reset button" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+Defaults are set in the desktop app. `ephervex config show` lists saved
+defaults under `server_defaults.properties`.
+
+</TabItem>
+</Tabs>
+
 ## Java
 
 Ephervex can detect installed Java runtimes and download a managed Temurin
