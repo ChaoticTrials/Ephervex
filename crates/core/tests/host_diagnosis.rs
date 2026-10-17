@@ -15,7 +15,7 @@ use ephervex_download::{
 };
 use ephervex_minecraft::{VERSION_MANIFEST_CACHE_KEY, VERSION_MANIFEST_URL, VersionManifest};
 use ephervex_model::{InstanceId, JavaOverride, JvmSettings, LoaderSelection};
-use ephervex_storage::{LaunchLock, NewClient, Registry};
+use ephervex_storage::{LaunchLock, NewClient, NewServer, Registry};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
@@ -207,6 +207,61 @@ fn kinds(diagnosis: &HostDiagnosis, class: FindingClass) -> Vec<&FindingKind> {
         .filter(|finding| finding.class() == class)
         .map(|finding| &finding.kind)
         .collect()
+}
+
+#[tokio::test]
+async fn a_server_without_eula_consent_leads_with_the_refusal_until_consent_is_accepted() {
+    let fixture = Fixture::with_mods(&[]).await;
+    let server = Registry::open(fixture.paths.clone())
+        .unwrap()
+        .create_server(NewServer::new(
+            "Diagnosis server",
+            "1.21.1",
+            LoaderSelection::vanilla(),
+        ))
+        .unwrap();
+    let diagnose = |app: App| async move {
+        app.diagnose_host(
+            InstalledHost::Server(server.id),
+            DiagnosisRequest::default(),
+            &OperationReporter::silent("diagnosing"),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+    };
+
+    let refused = diagnose(fixture.app()).await;
+    assert!(!refused.is_healthy());
+    assert_eq!(
+        refused.findings.first().map(|finding| &finding.kind),
+        Some(&FindingKind::EulaNotAccepted { malformed: false })
+    );
+    assert!(
+        refused
+            .technical_report()
+            .contains("Minecraft EULA consent not accepted")
+    );
+    let client = fixture.diagnose(false).await;
+    assert!(
+        !client
+            .findings
+            .iter()
+            .any(|finding| matches!(finding.kind, FindingKind::EulaNotAccepted { .. })),
+        "a client never needs server consent"
+    );
+
+    let mut app = fixture.app();
+    app.accept_server_eula().unwrap();
+    let accepted = diagnose(app).await;
+    assert!(
+        !accepted
+            .findings
+            .iter()
+            .any(|finding| matches!(finding.kind, FindingKind::EulaNotAccepted { .. })),
+        "{:?}",
+        accepted.findings
+    );
 }
 
 #[tokio::test]

@@ -50,6 +50,8 @@ export component ServerFiles inherits Rectangle {
 export component ServerCommandInput inherits HorizontalLayout {
     in property <string> server-id;
     in property <bool> available;
+    // Why console input is unavailable, for the Send button's hint.
+    in property <string> unavailable-reason;
     in property <int> completion;
     in property <bool> delivered;
     property <string> pending-command;
@@ -79,7 +81,7 @@ export component ServerCommandInput inherits HorizontalLayout {
     AppButton {
         text: GuiI18n.text("gui-send");
         tone: "primary";
-        enabled: root.available && command-field.text != ""; hint: !root.available ? GuiI18n.text("gui-server-console-unavailable") : GuiI18n.text("gui-hint-enter-command");
+        enabled: root.available && command-field.text != ""; hint: !root.available ? root.unavailable-reason : GuiI18n.text("gui-hint-enter-command");
         clicked => { root.submit(); }
     }
 }

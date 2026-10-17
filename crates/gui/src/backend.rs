@@ -43,7 +43,9 @@ use ephervex_core::{
     InstalledStandIn, LinkedStandIns, LinkedTargetFailure, LinkedTargetOutcome, PlanWarning,
     PlannedMod, ProvidedDependency,
 };
-use ephervex_i18n::{Arg, lookup, lookup_args, lookup_attribute, lookup_attribute_args};
+use ephervex_i18n::{
+    Arg, has_attribute, lookup, lookup_args, lookup_attribute, lookup_attribute_args,
+};
 use ephervex_model::GroupId;
 use ephervex_model::{
     AbsentModPolicy, InstanceId, LoaderKind, LoaderSelection, ModOrigin, ModProvider, Operation,
@@ -1616,11 +1618,24 @@ pub enum ConsoleOutcome {
 #[derive(Debug, Clone)]
 pub enum ServerToolEvent {
     Started,
-    Finished { failure: Option<String> },
-    RestartFailed { failure: String },
+    Finished {
+        failure: Option<String>,
+    },
+    /// The start was refused before any process existed because Minecraft
+    /// EULA consent is missing. Nothing ran, so nothing failed.
+    EulaRefused {
+        message: String,
+    },
+    RestartFailed {
+        failure: String,
+    },
     StartAbandoned,
-    StopFinished { succeeded: bool },
-    ConsoleFinished { outcome: ConsoleOutcome },
+    StopFinished {
+        succeeded: bool,
+    },
+    ConsoleFinished {
+        outcome: ConsoleOutcome,
+    },
 }
 
 /// The dialogs one operation's outcome is about.
@@ -9054,12 +9069,15 @@ fn spawn_server(
                         .map(|failure| crate::java_view::runtime_failure_text(&failure)),
                     _ => None,
                 };
-                let _ = events.send(Event::ServerTool {
-                    server,
-                    event: ServerToolEvent::Finished {
+                let event = match &result {
+                    Err(error) if error.needs_eula_consent() => ServerToolEvent::EulaRefused {
+                        message: localized_error(error),
+                    },
+                    _ => ServerToolEvent::Finished {
                         failure: java_failure.or_else(|| server_failure(&result)),
                     },
-                });
+                };
+                let _ = events.send(Event::ServerTool { server, event });
             });
         },
     );
@@ -9296,6 +9314,7 @@ fn forward_server_event(
 /// How a server start that never ran ended, known once the run's result is.
 struct ServerStartEnd {
     canceled: bool,
+    eula_refused: bool,
     detail: String,
 }
 
@@ -9311,6 +9330,9 @@ struct ConnectedServerRow {
     /// The preparation's operation id until the row reaches a terminal state.
     operation: Mutex<Option<String>>,
     started: AtomicBool,
+    /// The server's events ended before it started, which only the run's
+    /// result can explain.
+    ended_unstarted: AtomicBool,
     start_end: Mutex<Option<ServerStartEnd>>,
 }
 
@@ -9322,6 +9344,7 @@ impl ConnectedServerRow {
             cancel,
             operation: Mutex::new(None),
             started: AtomicBool::new(false),
+            ended_unstarted: AtomicBool::new(false),
             start_end: Mutex::new(None),
         }
     }
@@ -9333,9 +9356,28 @@ impl ConnectedServerRow {
         {
             *end = Some(ServerStartEnd {
                 canceled: error.is_cancellation(),
+                eula_refused: error.needs_eula_consent(),
                 detail: run_error_text(error),
             });
         }
+    }
+
+    /// What a server whose events ended before it started reports to its
+    /// tools, once the run's result is recorded. `None` when it started or its
+    /// events have not ended.
+    fn unstarted_completion(&self) -> Option<ServerToolEvent> {
+        if !self.ended_unstarted.load(Ordering::SeqCst) {
+            return None;
+        }
+        let end = self.start_end.lock().ok();
+        Some(match end.as_ref().and_then(|end| end.as_ref()) {
+            Some(end) if end.eula_refused => ServerToolEvent::EulaRefused {
+                message: end.detail.clone(),
+            },
+            _ => ServerToolEvent::Finished {
+                failure: Some(lookup("gui-run-server-exited-with-error")),
+            },
+        })
     }
 
     /// Moves the row to its terminal state and drops the token filed under it.
@@ -9408,11 +9450,19 @@ enum ConnectedServerEnd<'a> {
 
 /// Reports the end of a connected server's events: a start that never ran gets
 /// the run's outcome, and a server that did run is settled by its exit.
-fn finish_connected_server_events(events: &Sender<Event>, row: &ConnectedServerRow) {
+fn finish_connected_server_events(
+    events: &Sender<Event>,
+    row: &ConnectedServerRow,
+    server: ServerId,
+) {
     if row.started.load(Ordering::SeqCst) {
         row.finish(events, ConnectedServerEnd::Exited(None));
     } else {
+        let completion = row.unstarted_completion();
         row.finish(events, ConnectedServerEnd::NotStarted);
+        if let Some(event) = completion {
+            let _ = events.send(Event::ServerTool { server, event });
+        }
     }
 }
 
@@ -9479,7 +9529,10 @@ fn forward_connect_server_event_explained(
                 None if row.started.load(Ordering::SeqCst) => {
                     row.finish(events, ConnectedServerEnd::SupervisionLost);
                 }
-                None => {}
+                None => {
+                    row.ended_unstarted.store(true, Ordering::SeqCst);
+                    return;
+                }
             }
             let failure = java_failure.or_else(|| {
                 exit.map_or_else(
@@ -9660,7 +9713,7 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
                             );
                         }
                     }
-                    finish_connected_server_events(&server_event_sender, &forwarded_row);
+                    finish_connected_server_events(&server_event_sender, &forwarded_row, server);
                 });
                 let launch_paths = paths.clone();
                 let launch_event_sender = events.clone();
@@ -12017,10 +12070,17 @@ pub(crate) fn localized_error(error: &CoreError) -> String {
     // placeholder after every known argument was supplied means this message
     // needs one this function does not yet know about, and a raw `{$…}` in
     // the user's face is worse than no action line at all.
-    let action = if args.is_empty() {
-        lookup_attribute(error.message_id(), "action")
+    // A `desktop-action` names the desktop app's way to the next step where the
+    // shared `action` names a command.
+    let attribute = if has_attribute(error.message_id(), "desktop-action") {
+        "desktop-action"
     } else {
-        lookup_attribute_args(error.message_id(), "action", args)
+        "action"
+    };
+    let action = if args.is_empty() {
+        lookup_attribute(error.message_id(), attribute)
+    } else {
+        lookup_attribute_args(error.message_id(), attribute, args)
     }
     .filter(|action| !action.contains("{$") && !action.contains("{ $"));
     if let Some(action) = action {
@@ -16086,7 +16146,7 @@ mod tests {
         assert_eq!(finished[0].entity, "server");
         assert!(!finished[0].item.failed);
 
-        finish_connected_server_events(&events, &row);
+        finish_connected_server_events(&events, &row, server);
         assert!(
             activities(&received).is_empty(),
             "a settled row is not reported again"
@@ -16143,7 +16203,7 @@ mod tests {
         ] {
             forward_connect_server_event(&events, &paths, &row, server, event);
         }
-        finish_connected_server_events(&events, &row);
+        finish_connected_server_events(&events, &row, server);
 
         let ended: Vec<_> = activities(&received)
             .into_iter()
@@ -16198,7 +16258,7 @@ mod tests {
                 "the row waits for the run's outcome"
             );
             row.record_run_end(&Err(error));
-            finish_connected_server_events(&events, &row);
+            finish_connected_server_events(&events, &row, server);
             let ended = activities(&received);
             assert_eq!(ended.len(), 1);
             assert_eq!(ended[0].item.id, key);
@@ -16224,10 +16284,70 @@ mod tests {
         row.record_run_end(&Err(CoreError::from(
             ephervex_server::ServerError::EulaNotAccepted,
         )));
-        finish_connected_server_events(&events, &row);
+        finish_connected_server_events(&events, &row, server);
         let failed = activities(&received).pop().expect("a final activity");
         assert_eq!(failed.item.status_kind, "failed");
         assert!(failed.item.failed);
+    }
+
+    #[test]
+    fn a_pair_start_refused_for_missing_eula_consent_tells_the_server_tools_nothing_failed() {
+        without_desktop_keyring();
+        let root = tempfile::tempdir().expect("root");
+        let paths = Paths::rooted_at(root.path());
+        let server = ServerId::new();
+        let operation = OperationReporter::silent("test-server-start").id();
+        let tool_events = |received: &std::sync::mpsc::Receiver<Event>| {
+            received
+                .try_iter()
+                .filter_map(|event| match event {
+                    Event::ServerTool {
+                        server: target,
+                        event,
+                    } if target == server => Some(event),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        for (error, refused) in [
+            (ephervex_server::ServerError::EulaNotAccepted, true),
+            (ephervex_server::ServerError::EulaConsentMalformed, true),
+            (ephervex_server::ServerError::NotInstalled, false),
+        ] {
+            let error = CoreError::from(error);
+            let (events, received) = std::sync::mpsc::channel();
+            let cancellations: CancellationRegistry = Arc::new(Mutex::new(HashMap::new()));
+            let row = connected_row(&cancellations, &CancellationToken::new());
+            for event in [
+                ServerEvent::Preparing { operation },
+                ServerEvent::Finished { exit: None },
+            ] {
+                forward_connect_server_event(&events, &paths, &row, server, event);
+            }
+            assert!(
+                tool_events(&received).is_empty(),
+                "a start that never ran waits for the run's result"
+            );
+            let message = localized_error(&error);
+            row.record_run_end(&Err(error));
+            finish_connected_server_events(&events, &row, server);
+            let tools = tool_events(&received);
+            if refused {
+                assert!(
+                    matches!(tools.as_slice(), [ServerToolEvent::EulaRefused { message: shown }] if *shown == message),
+                    "{tools:?}"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        tools.as_slice(),
+                        [ServerToolEvent::Finished { failure: Some(_) }]
+                    ),
+                    "{tools:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -16239,7 +16359,7 @@ mod tests {
         row.record_run_end(&Err(CoreError::from(
             ephervex_server::ServerError::ReadinessCanceled,
         )));
-        finish_connected_server_events(&events, &row);
+        finish_connected_server_events(&events, &row, ServerId::new());
 
         assert!(activities(&received).is_empty());
         assert!(cancellations.lock().expect("registry").is_empty());

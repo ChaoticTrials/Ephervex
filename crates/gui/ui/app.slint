@@ -1334,9 +1334,11 @@ export component AppWindow inherits Window {
                                 surface-selected(surface) => { root.show-pane-surface(pane.id, surface); }
                                 workflow-action(workflow, action) => { root.workflow-action(pane.id, host.kind, host.id, workflow, action); }
                                 // Above every surface but Diagnostics, which already leads
-                                // with the failure. Any of its actions retires it.
-                                if host.available && host.run-failure-title != "" && pane.surface != "Diagnostics" : RunFailureNotice {
+                                // with a failure; a refused start has none to lead with.
+                                // Any of its actions retires it.
+                                if host.available && host.run-failure-title != "" && (pane.surface != "Diagnostics" || host.run-eula-refused) : RunFailureNotice {
                                     host: host;
+                                    review-eula => { root.modal = "eula"; root.dismiss-run-failure(host.kind, host.id); }
                                     open-diagnostics => { root.show-pane-surface(pane.id, "Diagnostics"); root.dismiss-run-failure(host.kind, host.id); }
                                     open-crash-report => { root.show-pane-surface(pane.id, "Logs"); root.log-show(pane.id, "crashes"); root.log-open-file(pane.id, host.run-crash-report); root.dismiss-run-failure(host.kind, host.id); }
                                     open-log => { root.show-pane-surface(pane.id, "Logs"); root.log-show(pane.id, "live"); root.dismiss-run-failure(host.kind, host.id); }
@@ -1500,6 +1502,7 @@ export component AppWindow inherits Window {
                                         if route == "java-settings" { root.page = 4; root.settings-tab = "Java"; root.load-java-runtimes(); root.close-workspace(); }
                                         if route == "log" { root.show-pane-surface(pane.id, "Logs"); root.log-show(pane.id, "live"); }
                                         if route == "crash-report" { root.show-pane-surface(pane.id, "Logs"); root.log-show(pane.id, "crashes"); root.log-open-file(pane.id, host.diagnosis-crash-report); }
+                                        if route == "eula" { root.modal = "eula"; }
                                     }
                                     toggle-bundle-part(name, value) => { root.toggle-bundle-part(host.kind, host.id, name, value); }
                                     select-all-bundle-parts(value) => { root.select-all-bundle-parts(host.kind, host.id, value); }
@@ -1583,6 +1586,7 @@ export component AppWindow inherits Window {
                                     ServerCommandInput {
                                         server-id: host.id;
                                         available: host.server.can-send-command;
+                                        unavailable-reason: host.server.console-status;
                                         completion: host.server.console-completion;
                                         delivered: host.server.console-delivered;
                                         send(command) => { root.server-console(host.id, command); }

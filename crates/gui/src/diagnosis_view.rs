@@ -21,6 +21,8 @@ pub enum FindingRoute {
     /// The host's live or latest log.
     Log,
     CrashReport,
+    /// The Minecraft EULA review.
+    Eula,
 }
 
 impl FindingRoute {
@@ -33,6 +35,7 @@ impl FindingRoute {
             Self::JavaSettings => "java-settings",
             Self::Log => "log",
             Self::CrashReport => "crash-report",
+            Self::Eula => "eula",
         }
     }
 
@@ -45,6 +48,7 @@ impl FindingRoute {
             Self::JavaSettings => "gui-diagnosis-open-java-settings",
             Self::Log => "gui-diagnosis-open-log",
             Self::CrashReport => "gui-diagnosis-open-crash-report",
+            Self::Eula => "gui-diagnosis-open-eula",
         }
     }
 }
@@ -540,6 +544,15 @@ fn mod_card(kind: &FindingKind) -> Card {
 
 fn other_card(kind: &FindingKind, on_server: bool) -> Card {
     match kind {
+        FindingKind::EulaNotAccepted { malformed } => Card::new(
+            lookup(if *malformed {
+                "gui-diagnosis-eula-malformed"
+            } else {
+                "gui-diagnosis-eula-not-accepted"
+            }),
+            vec![lookup("gui-diagnosis-eula-detail")],
+            Some(FindingRoute::Eula),
+        ),
         FindingKind::RecentCrash {
             report,
             failure,
@@ -660,7 +673,21 @@ fn checks(diagnosis: &HostDiagnosis, localized: &dyn Fn(&CoreError) -> String) -
     let has = |test: fn(&FindingKind) -> bool| {
         diagnosis.findings.iter().any(|finding| test(&finding.kind))
     };
-    let mut checks = vec![java_check(&diagnosis.java, localized)];
+    let mut checks = Vec::new();
+    // A server start is refused before anything else here matters.
+    if matches!(diagnosis.host, InstalledHost::Server(_)) {
+        let refused = has(|kind| matches!(kind, FindingKind::EulaNotAccepted { .. }));
+        checks.push(CheckView {
+            label: lookup("gui-diagnosis-check-eula"),
+            value: lookup(if refused {
+                "gui-diagnosis-check-eula-refused"
+            } else {
+                "gui-diagnosis-check-eula-accepted"
+            }),
+            state: if refused { "problem" } else { "ok" },
+        });
+    }
+    checks.push(java_check(&diagnosis.java, localized));
     let mods_problem = has(|kind| {
         matches!(
             kind,
@@ -1101,6 +1128,41 @@ mod tests {
             view.fix_label.is_empty(),
             "installing is never offered here"
         );
+    }
+
+    #[test]
+    fn a_server_without_eula_consent_leads_with_a_refused_check_and_offers_the_eula_review() {
+        let diagnosis = |findings: Vec<Finding>| HostDiagnosis {
+            host: InstalledHost::Server(ephervex_model::ServerId::new()),
+            minecraft_version: "1.21.1".to_owned(),
+            loader: ephervex_model::LoaderSelection::vanilla(),
+            java: JavaCheck::DownloadsAtLaunch { required_major: 21 },
+            mods: ephervex_core::ModCounts::default(),
+            integrity: None,
+            loader_log_read: false,
+            recent_crash: None,
+            findings,
+        };
+        let refused = diagnosis_view(
+            &diagnosis(vec![Finding {
+                kind: FindingKind::EulaNotAccepted { malformed: false },
+                fix: None,
+            }]),
+            &|_| String::new(),
+        );
+
+        assert!(!refused.healthy);
+        assert_eq!(refused.problems.len(), 1, "{:?}", refused.problems);
+        let problem = &refused.problems[0];
+        assert_eq!(problem.title, lookup("gui-diagnosis-eula-not-accepted"));
+        assert_eq!(problem.route, Some(FindingRoute::Eula));
+        assert_eq!(FindingRoute::Eula.label(), "gui-diagnosis-open-eula");
+        assert_eq!(refused.checks[0].label, lookup("gui-diagnosis-check-eula"));
+        assert_eq!(refused.checks[0].state, "problem");
+
+        let accepted = diagnosis_view(&diagnosis(Vec::new()), &|_| String::new());
+        assert_eq!(accepted.checks[0].label, lookup("gui-diagnosis-check-eula"));
+        assert_eq!(accepted.checks[0].state, "ok");
     }
 
     /// The loader's own words, kept as its own finding: its exact mod id, the

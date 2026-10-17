@@ -95,6 +95,9 @@ struct RunNotice {
     failure: String,
     likely: String,
     report: Option<String>,
+    /// A start refused for missing Minecraft EULA consent, which offers the
+    /// EULA review rather than Diagnostics.
+    eula_refused: bool,
 }
 
 /// What the Diagnostics surface is choosing to put in a bundle for its host.
@@ -490,6 +493,7 @@ fn render(workspace: &Workspace, state: &DiagnosisFlowState, host: InstalledHost
             .and_then(|run| run.report.clone())
             .unwrap_or_default()
             .into();
+        view.run_eula_refused = run.is_some_and(|run| run.eula_refused);
         write_bundle(view, bundle);
     });
 }
@@ -699,6 +703,7 @@ pub(super) fn apply_run_failed(
         failure: failure.clone(),
         likely,
         report: view.as_ref().and_then(|view| view.crash_report.clone()),
+        eula_refused: false,
     });
     // Work the user started is newer than anything this pass could say.
     if let Some(view) = view
@@ -714,6 +719,31 @@ pub(super) fn apply_run_failed(
         surface.review = None;
         surface.outcome = None;
     }
+    render(workspace, state, host);
+}
+
+/// Shows beside a shown server that its start was refused for missing
+/// Minecraft EULA consent. Nothing ran, so there is no run to diagnose.
+pub(super) fn apply_start_refused(
+    workspace: &Workspace,
+    state: &mut DiagnosisFlowState,
+    host: InstalledHost,
+    message: String,
+) {
+    if !workspace.state.borrow().shown().contains(&host) {
+        return;
+    }
+    state.open(host);
+    let Some(surface) = state.host_mut(host) else {
+        return;
+    };
+    surface.run = Some(RunNotice {
+        title: lookup("gui-run-refused-server"),
+        failure: message,
+        likely: String::new(),
+        report: None,
+        eula_refused: true,
+    });
     render(workspace, state, host);
 }
 

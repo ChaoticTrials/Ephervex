@@ -21,6 +21,7 @@ use ephervex_java::{
     RejectionReason,
 };
 use ephervex_model::LoaderSelection;
+use ephervex_server::EulaStatus;
 use ephervex_storage::diagnostics::{MAX_VIEW_BYTES, TextAnchor};
 use ephervex_storage::{ClientCommitWarning, DiagnosticKind, ServerCommitWarning};
 use tokio_util::sync::CancellationToken;
@@ -188,6 +189,12 @@ impl JavaRuntimeSummary {
 /// One thing a diagnosis found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FindingKind {
+    /// Minecraft EULA consent is missing, so every server start is refused
+    /// before a process exists.
+    EulaNotAccepted {
+        /// The recorded consent exists and cannot be read as valid.
+        malformed: bool,
+    },
     /// The newest crash report was written after the last start.
     RecentCrash {
         report: String,
@@ -260,7 +267,8 @@ impl FindingKind {
     #[must_use]
     pub const fn class(&self) -> FindingClass {
         match self {
-            Self::RecentCrash { .. }
+            Self::EulaNotAccepted { .. }
+            | Self::RecentCrash { .. }
             | Self::LoaderReportedDependency(_)
             | Self::JavaIncompatible { .. }
             | Self::JavaUnusable { .. }
@@ -666,17 +674,20 @@ impl App {
         // directly than the crash report it wrote, so it leads. It stays its own
         // evidence: a loader mod id is not a catalog project, however alike
         // their names are.
+        // Missing consent refuses every start before anything runs, so it
+        // leads over what an earlier run left behind.
+        let mut findings: Vec<Finding> = eula_finding(self, host).into_iter().collect();
         let log = self.start_log(host);
-        let mut findings: Vec<Finding> = log
-            .as_deref()
-            .map(|log| LoaderReportedRequirement::grouped(loader_dependency_failures(log)))
-            .unwrap_or_default()
-            .into_iter()
-            .map(|requirement| Finding {
-                kind: FindingKind::LoaderReportedDependency(requirement),
-                fix: None,
-            })
-            .collect();
+        findings.extend(
+            log.as_deref()
+                .map(|log| LoaderReportedRequirement::grouped(loader_dependency_failures(log)))
+                .unwrap_or_default()
+                .into_iter()
+                .map(|requirement| Finding {
+                    kind: FindingKind::LoaderReportedDependency(requirement),
+                    fix: None,
+                }),
+        );
         let recent_crash = self.recent_crash(host, &mut findings);
         findings.extend(java_problems);
         findings.extend(self.relation_findings(host, requirements.unmet));
@@ -1388,6 +1399,22 @@ fn java_refusal(
     }
 }
 
+/// A server without valid Minecraft EULA consent, which no start gets past.
+fn eula_finding(app: &App, host: InstalledHost) -> Option<Finding> {
+    let InstalledHost::Server(_) = host else {
+        return None;
+    };
+    let malformed = match app.server_eula_status() {
+        EulaStatus::Accepted { .. } => return None,
+        EulaStatus::NotAccepted => false,
+        EulaStatus::Malformed => true,
+    };
+    Some(Finding {
+        kind: FindingKind::EulaNotAccepted { malformed },
+        fix: None,
+    })
+}
+
 /// Jars in `mods/` that nothing recorded, as one customization.
 fn hand_placed_finding(snapshot: &crate::mods::ManagedModSnapshot) -> Option<Finding> {
     let names: Vec<String> = snapshot
@@ -1721,6 +1748,12 @@ fn report_line(kind: &FindingKind, path: &dyn Fn(&Path) -> String) -> String {
             .join(" -> ")
     };
     match kind {
+        FindingKind::EulaNotAccepted { malformed: false } => {
+            "Minecraft EULA consent not accepted; server starts are refused".to_owned()
+        }
+        FindingKind::EulaNotAccepted { malformed: true } => {
+            "Recorded Minecraft EULA consent is invalid; server starts are refused".to_owned()
+        }
         FindingKind::RecentCrash {
             report,
             failure,

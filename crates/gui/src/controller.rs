@@ -1844,6 +1844,7 @@ fn apply_server_tool_event(
             | backend::ServerToolEvent::StartAbandoned
             | backend::ServerToolEvent::RestartFailed { .. }
             | backend::ServerToolEvent::Finished { .. }
+            | backend::ServerToolEvent::EulaRefused { .. }
     ) {
         java_runtime::reload_shown(workspace);
     }
@@ -1853,11 +1854,20 @@ fn apply_server_tool_event(
             | backend::ServerToolEvent::StartAbandoned
             | backend::ServerToolEvent::RestartFailed { .. }
             | backend::ServerToolEvent::Finished { .. }
+            | backend::ServerToolEvent::EulaRefused { .. }
     ) {
         workspace
             .logs
             .borrow_mut()
             .settle_start(&LiveLogSource::Server(server));
+    }
+    if let backend::ServerToolEvent::EulaRefused { message } = &event {
+        diagnosis_flow::apply_start_refused(
+            workspace,
+            &mut workspace.diagnosis.borrow_mut(),
+            InstalledHost::Server(server),
+            message.clone(),
+        );
     }
     {
         let mut lifecycle = workspace.lifecycle.borrow_mut();
@@ -9716,7 +9726,7 @@ fn server_row(item: crate::presentation::ServerPresentation) -> ServerRow {
         console_status: if item.can_send_command {
             String::new()
         } else {
-            lookup("gui-server-console-unavailable")
+            server_tools::console_unavailable(item.state_kind)
         }
         .into(),
         can_connect: item.can_connect,
@@ -13320,6 +13330,63 @@ mod tests {
         assert!(!run_notices(&ui)[0].is_empty());
         assert_eq!(shown(&workspace), [(host, Surface::Console)]);
         apply_server_tool_event(&ui, &workspace, server, backend::ServerToolEvent::Started);
+        assert!(run_notices(&ui).iter().all(String::is_empty));
+    }
+
+    #[test]
+    fn a_start_refused_for_missing_eula_consent_offers_the_eula_review_instead_of_a_failed_run() {
+        let ui = test_window();
+        let (workspace, commands, _, host) = paired_workspace(&ui);
+        diagnosis_flow::register(&ui, &workspace.commands, &workspace);
+        let InstalledHost::Server(server) = host else {
+            unreachable!()
+        };
+        workspace.open(&ui, host, Surface::Console);
+        ui.invoke_server_start(server.to_string().into());
+        assert_eq!(view_of(&ui, host).server.state_kind, "starting");
+        commands.try_iter().for_each(drop);
+        let message = backend::localized_error(&ephervex_core::CoreError::from(
+            ephervex_server::ServerError::EulaNotAccepted,
+        ));
+        apply_server_tool_event(
+            &ui,
+            &workspace,
+            server,
+            backend::ServerToolEvent::EulaRefused {
+                message: message.clone(),
+            },
+        );
+
+        assert!(
+            commands
+                .try_iter()
+                .all(|command| !matches!(command, Command::ExplainServerFailure { .. })),
+            "nothing ran, so nothing is diagnosed"
+        );
+        let view = view_of(&ui, host);
+        assert_eq!(view.server.state_kind, "stopped");
+        assert!(view.server.can_start);
+        assert_eq!(view.run_failure_title, lookup("gui-run-refused-server"));
+        assert!(view.run_eula_refused);
+        assert!(view.run_likely_cause.is_empty());
+        assert!(view.run_crash_report.is_empty());
+        assert_eq!(view.run_failure, message);
+        assert_eq!(
+            message,
+            format!(
+                "{}\n{}",
+                lookup("error-server-eula-not-accepted"),
+                ephervex_i18n::lookup_attribute("error-server-eula-not-accepted", "desktop-action")
+                    .expect("a desktop next step")
+            ),
+            "the desktop app names its own way to accept, not the CLI command"
+        );
+        assert_eq!(
+            view.server.console_status,
+            lookup("gui-server-console-stopped")
+        );
+
+        ui.invoke_dismiss_run_failure("server".into(), server.to_string().into());
         assert!(run_notices(&ui).iter().all(String::is_empty));
     }
 

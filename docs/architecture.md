@@ -384,11 +384,17 @@ control request fails. Failed status describes a run observed by this desktop
 session; retained output and Minecraft crash reports remain available after
 reopening Ephervex. Starting and Running describe process preparation and a
 spawned Java child, respectively, not whether Minecraft accepts connections.
+A start refused before any process exists because Minecraft EULA consent is
+missing is not a failed run: the server keeps its previous state, no diagnosis
+runs, and the notice offers the EULA review instead of Diagnostics. Diagnostics
+reports missing consent for every server.
 
 Console uses the existing supervisor control channel (ADR 0014). Only a
 confirmed write of a single nonempty command reports delivery. Stopping and
 restarting reject input, and a failed or timed-out stdin write disables further
 input for that child without abandoning process supervision or output capture.
+When input is unavailable, Console says whether the server is not running, still
+starting, or a process Ephervex does not supervise.
 The same classified failure feeds the existing quick Diagnostics path. Control
 completion and final run completion can arrive in either order; only a genuine
 failure triggers diagnosis. A run the user did not stop, kill, or restart fails

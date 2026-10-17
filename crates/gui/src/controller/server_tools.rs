@@ -235,6 +235,16 @@ impl ServerTools {
                     self.phases.remove(&id);
                 }
             }
+            // Nothing ran, so the server is as it was before the start, not
+            // failed.
+            ServerToolEvent::EulaRefused { .. } => {
+                self.active_runs.remove(&id);
+                self.observed_runs.remove(&id);
+                self.intentional_stops.remove(&id);
+                if self.phases.get(&id) == Some(&Phase::Starting) {
+                    self.phases.remove(&id);
+                }
+            }
             ServerToolEvent::StopFinished { succeeded } => {
                 if let Some(stop) = self.stops.get_mut(&id) {
                     stop.pending = stop.pending.saturating_sub(1);
@@ -366,12 +376,21 @@ impl ServerTools {
         } else if busy || restarting || self.commands.contains(&id) {
             lookup("gui-server-console-busy")
         } else if !row.can_send_command {
-            lookup("gui-server-console-unavailable")
+            console_unavailable(&row.state_kind)
         } else {
             String::new()
         }
         .into();
     }
+}
+
+/// Why a server in `state_kind` cannot take console input.
+pub(super) fn console_unavailable(state_kind: &str) -> String {
+    lookup(match state_kind {
+        "orphaned" | "unknown" => "gui-server-console-unsupervised",
+        "starting" => "gui-server-console-starting",
+        _ => "gui-server-console-stopped",
+    })
 }
 
 #[cfg(test)]
@@ -758,6 +777,57 @@ mod tests {
             tools.stamp(id, &mut shown, false);
             assert_eq!(shown.state_kind, "failed");
             assert!(shown.can_start);
+        }
+    }
+    #[test]
+    fn a_start_refused_for_missing_eula_consent_is_neither_failed_nor_diagnosed() {
+        let id = ServerId::new();
+        let mut tools = ServerTools::default();
+        tools.observe(&[row(id, false)]);
+        assert!(tools.request(id, ServerAction::Start, false));
+        assert_eq!(
+            tools.apply(
+                id,
+                ServerToolEvent::EulaRefused {
+                    message: "consent missing".to_owned(),
+                },
+            ),
+            None,
+            "nothing ran, so there is no run to diagnose"
+        );
+        assert_eq!(tools.failure_revision(id), None);
+        let mut shown = row(id, false);
+        tools.stamp(id, &mut shown, false);
+        assert_eq!(shown.state_kind, "stopped");
+        assert_eq!(shown.state, "Stopped");
+        assert!(shown.can_start);
+        assert!(!tools.busy(id));
+        assert!(tools.request(id, ServerAction::Start, false));
+    }
+
+    #[test]
+    fn console_input_says_a_stopped_server_is_not_running_rather_than_orphaned() {
+        let id = ServerId::new();
+        let mut tools = ServerTools::default();
+        tools.observe(&[row(id, false)]);
+        let mut shown = row(id, false);
+        tools.stamp(id, &mut shown, false);
+        assert_eq!(shown.console_status, lookup("gui-server-console-stopped"));
+
+        for kind in ["orphaned", "unknown"] {
+            let uncontrolled = ServerRow {
+                state_kind: kind.into(),
+                can_start: false,
+                ..row(id, false)
+            };
+            tools.observe(std::slice::from_ref(&uncontrolled));
+            let mut shown = uncontrolled.clone();
+            tools.stamp(id, &mut shown, false);
+            assert_eq!(
+                shown.console_status,
+                lookup("gui-server-console-unsupervised"),
+                "{kind}"
+            );
         }
     }
 }

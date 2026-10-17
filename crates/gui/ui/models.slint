@@ -221,7 +221,7 @@ export struct DiagnosticFindingRow {
     more-files: string,
     // Empty when no safe fix can be determined.
     fix-label: string,
-    // "mods", "settings", "java-settings", "log", "crash-report", or empty.
+    // "mods", "settings", "java-settings", "log", "crash-report", "eula", or empty.
     route: string,
     route-label: string,
     // A catalog project to install through the install confirmation, or empty.
@@ -795,6 +795,9 @@ export struct HostView {
     run-failure-title: string,
     run-likely-cause: string,
     run-crash-report: string,
+    // The notice is a start refused for missing Minecraft EULA consent, not a
+    // failed run.
+    run-eula-refused: bool,
     // The diagnostic bundle being chosen for the host.
     bundle-parts: [BundlePartRow],
     bundle-selection: string,

@@ -855,6 +855,16 @@ impl CoreError {
         )
     }
 
+    /// Whether a server start was refused before any process existed because
+    /// Minecraft EULA consent is missing or unreadable.
+    #[must_use]
+    pub const fn needs_eula_consent(&self) -> bool {
+        matches!(
+            self,
+            Self::Server(ServerError::EulaNotAccepted | ServerError::EulaConsentMalformed)
+        )
+    }
+
     /// Whether this installation cannot authenticate until its Azure
     /// application registration is approved for the Minecraft Services API.
     ///

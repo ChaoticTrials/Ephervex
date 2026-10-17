@@ -253,28 +253,38 @@ export component FixPanel inherits Rectangle {
 }
 
 // Beside a host whose run just failed: what failed, what a quick diagnosis
-// thinks caused it, and where to look next. It never opens anything by itself.
+// thinks caused it, and where to look next. A server start refused for
+// missing EULA consent never ran, so it offers the EULA review instead. It
+// never opens anything by itself.
 export component RunFailureNotice inherits Rectangle {
     in property <HostView> host;
     callback open-diagnostics();
     callback open-crash-report();
     callback open-log();
+    callback review-eula();
     callback dismiss();
     property <bool> narrow: self.width < 560px;
+    property <color> tone: root.host.run-eula-refused ? Theme.warning : Theme.danger;
     height: content.preferred-height;
     border-radius: 8px;
     border-width: 1px;
-    border-color: Theme.danger.with-alpha(0.6);
-    background: Theme.danger.with-alpha(0.08);
+    border-color: root.tone.with-alpha(0.6);
+    background: root.tone.with-alpha(0.08);
     accessible-role: groupbox;
     accessible-label: root.host.run-failure-title;
     content := VerticalLayout {
         padding: 12px;
         spacing: 6px;
-        Text { text: root.host.run-failure-title; color: Theme.danger; font-size: Theme.row-heading-size; font-weight: 600; wrap: word-wrap; }
+        Text { text: root.host.run-failure-title; color: root.tone; font-size: Theme.row-heading-size; font-weight: 600; wrap: word-wrap; }
         BodyText { text: root.host.run-failure; wrap: word-wrap; }
         if root.host.run-likely-cause != "" : BodyText { text: root.host.run-likely-cause; color: Theme.text; wrap: word-wrap; }
-        if !root.narrow : HorizontalLayout {
+        if root.host.run-eula-refused : HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            AppButton { text: GuiI18n.text("gui-diagnosis-open-eula"); tone: "primary"; clicked => { root.review-eula(); } }
+            AppButton { text: GuiI18n.text("gui-run-dismiss"); clicked => { root.dismiss(); } }
+        }
+        if !root.host.run-eula-refused && !root.narrow : HorizontalLayout {
             spacing: 8px;
             alignment: start;
             AppButton { text: GuiI18n.text("gui-run-open-diagnostics"); tone: "primary"; clicked => { root.open-diagnostics(); } }
@@ -282,7 +292,7 @@ export component RunFailureNotice inherits Rectangle {
             AppButton { text: GuiI18n.text("gui-diagnosis-open-log"); clicked => { root.open-log(); } }
             AppButton { text: GuiI18n.text("gui-run-dismiss"); clicked => { root.dismiss(); } }
         }
-        if root.narrow : VerticalLayout {
+        if !root.host.run-eula-refused && root.narrow : VerticalLayout {
             spacing: 8px;
             HorizontalLayout {
                 spacing: 8px;
