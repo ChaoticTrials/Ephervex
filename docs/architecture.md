@@ -1168,7 +1168,10 @@ Debian package ships the desktop entry that claims it, the AppImage is
 registered from the command line, and the desktop application offers no control
 over either (ADR 0028). A desktop scheme handler starts a fresh process for every
 link, so the launcher claims one name per user through a Unix socket under
-`$XDG_RUNTIME_DIR`. When that is unusable the socket moves to a
+`$XDG_RUNTIME_DIR`. The name carries a digest of the configuration and data
+directories, with symlinks resolved, so a launcher over other directories (a
+second profile or a test sandbox) claims its own name instead of handing its link
+to a launcher that serves other data. When that is unusable the socket moves to a
 `run-<hostname>` directory in the state directory, which only the account can
 write to and which is named for the machine because a home can be shared between
 machines, and then to `/tmp/evx-<uid>`. That `/tmp` name is predictable, so

@@ -7,6 +7,15 @@
 //! link opens a second launcher, and two launchers sharing one set of instances
 //! is a worse problem than a wasted window.
 //!
+//! # One name per set of directories
+//!
+//! The name carries a digest of the configuration and data directories the
+//! launcher serves. A launcher started over other directories, such as a second
+//! profile or a test sandbox, claims a name of its own rather than handing its
+//! link to a launcher that would act on the wrong data. Symlinks in the existing
+//! part of each directory are resolved first, so two spellings of the same
+//! directories still reach the same launcher.
+//!
 //! # Why a Unix socket
 //!
 //! The only place two Ephervex processes already meet is the artifact cache
@@ -64,7 +73,9 @@ use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt}
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
+use ephervex_storage::Paths;
 use rustix::fs::{FlockOperation, Mode, OFlags, flock};
+use sha2::{Digest as _, Sha256};
 use tracing::{debug, info, warn};
 
 use crate::error::{CoreError, CoreResult};
@@ -381,8 +392,48 @@ fn read_handover(stream: UnixStream) -> Option<Handover> {
 
 /// Where the launcher socket lives.
 fn socket_path() -> CoreResult<PathBuf> {
-    let name = format!("ephervex-{}.sock", uid()?);
-    SocketDirectories::from_environment().socket(&name)
+    let paths =
+        Paths::from_environment().map_err(|error| CoreError::SingleInstanceUnavailable {
+            detail: format!("the launcher's directories could not be resolved: {error}"),
+        })?;
+    SocketDirectories::from_environment(&paths).socket(&socket_name(uid()?, &paths))
+}
+
+/// `ephervex-<uid>-<digest>.sock`, the digest naming the configuration and data
+/// directories this launcher serves.
+fn socket_name(uid: u32, paths: &Paths) -> String {
+    let mut digest = Sha256::new();
+    for directory in [paths.config_dir(), paths.data_dir()] {
+        digest.update(resolved(directory).as_os_str().as_encoded_bytes());
+        // No path contains a NUL, so the two cannot run into each other.
+        digest.update([0]);
+    }
+    let digest = digest.finalize();
+    let mut tag = [0; 8];
+    tag.copy_from_slice(&digest[..8]);
+    format!("ephervex-{uid}-{:016x}.sock", u64::from_be_bytes(tag))
+}
+
+/// `directory` with the symlinks in its existing part resolved, so it names the
+/// same launcher before and after the missing rest is created.
+fn resolved(directory: &Path) -> PathBuf {
+    let mut existing = directory;
+    let mut missing = Vec::new();
+    loop {
+        if let Ok(canonical) = std::fs::canonicalize(existing) {
+            return missing
+                .iter()
+                .rev()
+                .fold(canonical, |path, name| path.join(name));
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name);
+                existing = parent;
+            }
+            _ => return directory.to_owned(),
+        }
+    }
 }
 
 /// Makes a fallback socket directory usable, or says why it is not.
@@ -407,11 +458,11 @@ struct SocketDirectories {
 }
 
 impl SocketDirectories {
-    fn from_environment() -> Self {
+    fn from_environment(paths: &Paths) -> Self {
         Self {
             runtime: std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
             temporary: PathBuf::from("/tmp"),
-            state: host_local_state_directory(),
+            state: host_local_state_directory(paths),
         }
     }
 
@@ -483,9 +534,8 @@ fn socket_in(directory: &Path, name: &str) -> Result<PathBuf, String> {
 /// file is visible to all of them but only listens on the one that bound it. A
 /// launcher on another machine would then take the name for stale and remove
 /// it. Naming the directory for the machine gives each its own socket.
-fn host_local_state_directory() -> Option<PathBuf> {
+fn host_local_state_directory(paths: &Paths) -> Option<PathBuf> {
     let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname").ok()?;
-    let paths = ephervex_storage::Paths::from_environment().ok()?;
     Some(paths.state_dir().join(host_directory_name(&hostname)?))
 }
 
@@ -1162,6 +1212,98 @@ mod tests {
                 .recv_timeout(Duration::from_secs(5))
                 .expect("handed over"),
             Handover::Link("link".to_owned())
+        );
+    }
+
+    #[test]
+    fn launchers_over_other_directories_claim_names_of_their_own() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let profile = Paths::rooted_at(base.path().join("profile"));
+        let with = |config: &Path, data: &Path| {
+            Paths::from_roots(
+                config,
+                data,
+                profile.cache_dir(),
+                profile.state_dir(),
+                profile.temp_dir(),
+            )
+        };
+        let name = socket_name(1000, &profile);
+
+        assert_eq!(
+            socket_name(1000, &Paths::rooted_at(base.path().join("profile"))),
+            name,
+            "launchers over the same directories must find each other"
+        );
+        assert_ne!(
+            socket_name(
+                1000,
+                &with(profile.config_dir(), &base.path().join("other-data"))
+            ),
+            name
+        );
+        assert_ne!(
+            socket_name(
+                1000,
+                &with(&base.path().join("other-config"), profile.data_dir())
+            ),
+            name
+        );
+        assert_ne!(socket_name(1001, &profile), name);
+    }
+
+    /// A launcher over other data, such as a test sandbox, opens on its own data
+    /// rather than handing its link to the one already running.
+    #[test]
+    fn a_launch_over_other_directories_does_not_hand_over_to_the_running_launcher() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let directories = SocketDirectories {
+            runtime: Some(private_directory(&base.path().join("runtime"))),
+            temporary: base.path().to_owned(),
+            state: None,
+        };
+        let uid = uid().expect("uid");
+        let socket = |root: &str| {
+            directories
+                .socket(&socket_name(uid, &Paths::rooted_at(base.path().join(root))))
+                .expect("socket path")
+        };
+        let Startup::Primary(running) = start_at(&socket("profile"), None).expect("first") else {
+            panic!("the first launch owns its name");
+        };
+        let _listening = running.listen(|_| {});
+
+        assert!(
+            matches!(
+                start_at(&socket("sandbox"), Some("link")).expect("sandbox"),
+                Startup::Primary(_)
+            ),
+            "a launcher over other data must not be handed the link"
+        );
+        assert!(matches!(
+            start_at(&socket("profile"), Some("link")).expect("same profile"),
+            Startup::HandedOff
+        ));
+    }
+
+    #[test]
+    fn a_symlinked_spelling_of_the_same_directories_names_the_same_launcher() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let real = base.path().join("real");
+        std::fs::create_dir(&real).expect("mkdir");
+        let link = base.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        // Neither directory exists yet, as on a first launch.
+        let name = socket_name(1000, &Paths::rooted_at(&real));
+        assert_eq!(socket_name(1000, &Paths::rooted_at(&link)), name);
+
+        std::fs::create_dir_all(real.join("config")).expect("mkdir");
+        std::fs::create_dir_all(real.join("data")).expect("mkdir");
+        assert_eq!(
+            socket_name(1000, &Paths::rooted_at(&link)),
+            name,
+            "also once they have been created"
         );
     }
 }

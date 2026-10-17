@@ -220,7 +220,9 @@ rather than starting another launcher. The running one is found through a socket
 in `$XDG_RUNTIME_DIR`, or in a private directory under the state directory (or
 `/tmp`) when that is unusable. A socket left behind by a crash or a reboot is
 taken over rather than reported. If it cannot be reached at all, the link still
-opens, in a second window.
+opens, in a second window. A launcher started with other configuration or data
+directories (`XDG_CONFIG_HOME`, `XDG_DATA_HOME`) does not hand over to one that
+serves different directories, and opens on its own.
 
 The same thing works without a browser:
 
