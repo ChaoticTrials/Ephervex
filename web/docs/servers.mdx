@@ -123,7 +123,7 @@ before recording consent. Use `ephervex server eula revoke` to revoke it.
 </TabItem>
 </Tabs>
 
-## Set network and gameplay options
+## Change server properties
 
 **Localhost** limits the server to this computer. Choose **LAN** for other
 devices on the local network, or **Custom** to bind to a specific IP address.
@@ -137,11 +137,21 @@ flags an exposed offline-mode server as unsafe.
 <Tabs groupId="interface" queryString="interface">
 <TabItem value="gui" label="Desktop" default>
 
-Stop the server, open **Properties**, and edit **Access**, **Port**, and
-**Online mode**. The same page has message of the day, maximum players,
-difficulty, game mode, flight, PvP, and allowlist controls. Select **Save
-Changes** to apply them. **Save Changes** is available while the server is
-stopped or after a run failed.
+Open **Properties**. The **Network** card holds **Access**, **Port**, and
+**Online mode**. Under **Server settings**, the **World**, **Gameplay**,
+**Players**, and **Performance** cards list most other `server.properties`
+keys, each with a short description; turn on **Show advanced** for the
+**Advanced** card. A key the file does not hold shows the value the server
+uses instead. Once the server has written its full file, keys its release
+does not read are hidden. Keys without a row, such as remote administration
+settings, keep what the file holds.
+
+An edited row shows **Changed**, and a value the server would not accept
+shows why. The bar at the bottom counts unsaved changes. Select **Save
+Changes** to save them or **Discard Changes** to drop them. **Save Changes**
+is available while the server is stopped or after a run failed.
+
+<ThemeScreenshot state="server-properties" alt="A server's Properties page with the Network and Minecraft Server EULA cards above the grouped World settings" />
 
 **1** marks **Access**, where you choose who can connect.
 
@@ -166,8 +176,9 @@ ephervex server properties set SERVER_ID motd "Bug reproduction"
 
 For a custom bind, add `--access custom --address 192.0.2.10`. The `network`
 command also accepts `--online-mode=false`, but use it only for a localhost
-server. Managed network and EULA keys cannot be changed through `properties
-set`.
+server. `properties set` refuses the managed network and EULA keys, and a
+value its key does not accept, such as a `view-distance` outside 2 to 32.
+Other keys are stored as written.
 
 </TabItem>
 </Tabs>
