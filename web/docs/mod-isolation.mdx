@@ -30,7 +30,9 @@ tested for removal, so the final result cannot rule them out.
 Dependency information may be incomplete, especially for mods imported from
 a Modrinth pack or JARs added by hand. [Refresh dependency information](./mods.mdx#review-dependency-information)
 before starting when Ephervex can identify the mods. Continuing with unknown
-relations or missing required mods reduces confidence in the result.
+relations or missing required mods reduces confidence in the result. Starting
+is refused when a disabled JAR the session would turn on provides the same mod
+id as another JAR it would load.
 
 <Tabs groupId="interface" queryString="interface">
 <TabItem value="gui" label="Desktop" default>

@@ -25,6 +25,13 @@ An install includes required dependencies. Optional dependencies are left out
 unless you choose them. Review the plan before installing when you need to
 know exactly what will be added.
 
+The game does not start with two copies of one mod. Ephervex reads the mod id
+in each JAR and refuses an install or version change that would leave a
+second enabled JAR with the same id, for example another release of the mod
+from the other catalog. The refusal names the JAR already there, and nothing
+is changed. If the other catalog's file is identical, the mod counts as
+installed and is not downloaded again.
+
 <Tabs groupId="interface" queryString="interface">
 <TabItem value="gui" label="Desktop" default>
 
@@ -172,7 +179,9 @@ be restored by Ephervex after deletion.
 
 Dependencies matter: turning off a mod may also require turning off mods that
 need it; turning one on may require other mods first. Ephervex shows the impact
-before a desktop change.
+before a desktop change. Turning a mod on or restoring it is refused when
+another enabled JAR already provides the same mod id, and a repair skips such
+a file and names the JAR in the way.
 
 <Tabs groupId="interface" queryString="interface">
 <TabItem value="gui" label="Desktop" default>
