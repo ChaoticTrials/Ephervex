@@ -773,6 +773,20 @@ pub(crate) const STATES: &[State] = &[
         same_layout_at_both_sizes: false,
         interaction: None,
     },
+    State {
+        name: "theme-problems",
+        show: fixtures::settings::theme_problems,
+        regions: SETTINGS_REGIONS,
+        same_layout_at_both_sizes: false,
+        interaction: None,
+    },
+    State {
+        name: "theme-branding",
+        show: fixtures::settings::theme_branding,
+        regions: SETTINGS_REGIONS,
+        same_layout_at_both_sizes: false,
+        interaction: None,
+    },
 ];
 
 #[cfg(test)]

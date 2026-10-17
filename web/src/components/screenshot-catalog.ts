@@ -119,6 +119,8 @@ export const catalogGroups: CatalogGroup[] = [
       {state: 'settings-general', title: 'General'},
       {state: 'theme-selector-open', title: 'Choosing a theme'},
       {state: 'theme-load-error', title: 'Theme file problems'},
+      {state: 'theme-problems', title: 'Listing theme problems'},
+      {state: 'theme-branding', title: 'A theme folder\'s logo'},
       {state: 'settings-minecraft-defaults', title: 'Minecraft defaults'},
       {state: 'settings-java', title: 'Java'},
       {state: 'settings-java-remove-pinned', title: 'Removing a pinned Java runtime'},

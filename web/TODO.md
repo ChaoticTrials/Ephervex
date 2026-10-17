@@ -118,6 +118,8 @@ Hosts:
 
 Settings:
 - [x] `settings-general` (theme, text sizes, trusted hosts)
+- [x] `theme-selector-open`, `theme-load-error`, `theme-problems`,
+      `theme-branding`
 - [x] `settings-minecraft-defaults`
 - [x] `settings-java`, `settings-java-remove-pinned`
 - [x] `settings-providers` (catalog, CurseForge key states)

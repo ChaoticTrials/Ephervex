@@ -53,31 +53,70 @@ pub(crate) fn theme_selector_open(ui: &AppWindow) {
     general(ui);
 }
 
-/// A theme file that was skipped, with the reason shown under the theme setting.
+/// The themes folder with problems: skipped files, and themes used without
+/// the branding they name.
 pub(crate) fn theme_load_error(ui: &AppWindow) {
     general(ui);
-    let skipped = |file: &str, reason: String| {
-        lookup_args(
+    ui.set_theme_labels(strings(&[
+        &lookup("gui-color-scheme-dark"),
+        &lookup("gui-color-scheme-light"),
+        "Forest",
+        "Midnight Blueprint",
+        "Sunset",
+    ]));
+    ui.set_theme_ids(strings(&[
+        "dark",
+        "light",
+        "user:forest",
+        "user:midnight-blueprint",
+        "user:sunset",
+    ]));
+    let problem = |file: &str, reason: String| {
+        SharedString::from(lookup_args(
             "gui-theme-problem",
             [("file", Arg::from(file)), ("value", Arg::from(reason))],
-        )
+        ))
     };
-    let problems: Vec<SharedString> = [
-        skipped(
-            "midnight-blueprint-v2.toml",
+    // In the order the themes folder is read, by file or folder name.
+    let problems = vec![
+        problem("Haunted Night.toml", lookup("gui-theme-problem-file-name")),
+        problem(
+            "forest/theme.toml",
             lookup_args(
-                "gui-theme-problem-syntax",
-                [
-                    ("line", Arg::Count(7)),
-                    ("value", Arg::from("expected a string, found a number")),
-                ],
+                "gui-theme-problem-branding-outside",
+                [("value", Arg::from("../shared/logo.png"))],
             ),
         ),
-        skipped("Haunted Night.toml", lookup("gui-theme-problem-file-name")),
-    ]
-    .map(SharedString::from)
-    .into();
+        problem(
+            "midnight-blueprint-v2.toml",
+            lookup_args(
+                "gui-theme-problem-invalid-field",
+                [("value", Arg::from("parent"))],
+            ),
+        ),
+        problem(
+            "midnight-blueprint.toml",
+            lookup("gui-theme-problem-shadowed"),
+        ),
+        problem(
+            "sunset.toml",
+            lookup("gui-theme-problem-branding-without-folder"),
+        ),
+    ];
     ui.set_theme_problems(ModelRc::new(VecModel::from(problems)));
+}
+
+/// The list of theme problems, opened from the theme setting.
+pub(crate) fn theme_problems(ui: &AppWindow) {
+    theme_load_error(ui);
+    ui.set_modal("theme-problems".into());
+}
+
+/// The About page while a theme folder replaces the logo.
+pub(crate) fn theme_branding(ui: &AppWindow) {
+    general(ui);
+    open_settings(ui, "About & Licenses");
+    ui.set_theme_logo(super::branding::theme_logo());
 }
 
 const GENERAL_RELEASES: [&str; 7] = [

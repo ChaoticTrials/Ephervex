@@ -10,6 +10,7 @@ use slint::{Model, ModelRc, SharedString, VecModel};
 
 use crate::artwork;
 
+pub(crate) mod branding;
 pub(crate) mod client_hosts;
 pub(crate) mod diagnostics_servers;
 pub(crate) mod getting_started;
