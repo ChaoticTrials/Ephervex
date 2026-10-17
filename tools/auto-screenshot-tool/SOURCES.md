@@ -65,12 +65,35 @@ declares Oculus, a client-side mod, as required on servers. Utility Mods stopped
 because Just Enough Advancements needs Just Enough Items, which is client-only
 and was left off the server.
 
+## Server mods
+
+`data/server_mods.json` was not recorded from a launcher run. It was put
+together from Modrinth's answers, read the way the launcher reads them:
+
+- The CaveStone Server mod list is the recorded CaveStone list without the mods
+  added after the import, without the files the CaveStone 1.1.0
+  `modrinth.index.json` marks `server: unsupported` or ships under
+  `client-overrides/`, and with the one file it marks `client: unsupported`.
+- The search for `golem` is a Modrinth search for Minecraft 1.20.1 and Forge
+  that leaves out client-only projects. Each result's server side is taken from
+  its newest fitting release, or from the project when the release does not
+  state one.
+- The CurseForge search shows MelanX's eight most-downloaded mods for 1.20.1 and
+  Forge, using Modrinth's project ids, titles, descriptions, logos, and release
+  sides. All of them are also on CurseForge. A result is installed when the
+  server list holds its project.
+- The install plan is Golem Magicka 0.2.1 with its required dependencies on
+  Modrinth.
+- The missing dependency is the one the Utility Mods server crash names: Just
+  Enough Advancements needs Just Enough Items 19.25.0.322 or above.
+
 ## Files
 
 | File | What it holds | How it was produced |
 | --- | --- | --- |
 | `data/hosts.json` | Instances, servers, the CaveStone mod rows, one mod search, and the snapshots | `instances list`, `instance show`, `servers list`, `mod list`, `mod search`, `snapshot list`, plus Modrinth project and release records for titles, versions, compatibility, and logo addresses |
 | `data/dialogs.json` | Release lists, relations, impact list, and install plan for the mod dialogs | `mod show`, `mod dependencies`, `mod plan` |
+| `data/server_mods.json` | The CaveStone Server mod list, two server searches, a server install plan, and a missing server dependency | Modrinth project, release, and search records and the CaveStone pack index, as described under Server mods |
 | `data/diagnostics.json` | File verification, mod counts, bundle parts, and crash analyses | `mod verify`, `mod dependencies`, `logs bundle --list`, `server crash` |
 | `data/logs/client.log` | 130 records of the CaveStone client | The client's `latest.log`: the first 30 records, 20 spread through the middle without the repeated first-run configuration notices, and the last 80 |
 | `data/logs/crash-client.txt` | The report of a debug crash (F3 + C held for ten seconds) | Copied unchanged apart from the rewrites above. It keeps the report's system details, including the processor and graphics card of the recording machine |
@@ -99,5 +122,7 @@ and refuses any file that does not match. They are not part of the repository.
   They use a made-up export named Creeper Containment Lab and made-up optional
   file names, with blocked-file links on the reserved `example.invalid` host.
 - The sign-in address, which is the public Microsoft device-login page.
+- The Java runtime and mod counts in the Utility Mods server diagnosis, and the
+  CaveStone Server shown running behind its install confirmation.
 - Snapshot restore and create dialogs reuse the recorded snapshots, and the
   suggested snapshot label is a placeholder in the launcher's own format.

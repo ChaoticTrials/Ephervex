@@ -9,10 +9,10 @@ use ephervex_gui::workspace_layout::Surface;
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use slint::{Model, ModelRc, SharedString, VecModel};
 
-use super::recorded::{self, Diagnostics};
+use super::recorded::{self, Diagnostics, Search};
 use super::{
-    client_mod_results, client_mod_rows, expand_tabs, log_level, rows, running_instance,
-    running_server, size_text,
+    cavestone_server_mod_rows, client_mod_results, client_mod_rows, expand_tabs, log_level, rows,
+    running_instance, running_server, server_mod_results, size_text,
 };
 
 fn strings(values: &[&str]) -> ModelRc<SharedString> {
@@ -527,6 +527,242 @@ pub(crate) fn server_needs_recovery(ui: &AppWindow) {
         ..named_server(ui, "cavestone-server")
     };
     open_server(ui, server_view(server), "Overview", None);
+}
+
+/// The CaveStone Server's Mods surface with `search` from `provider` beside its list.
+fn cavestone_server_mods(
+    server: ServerRow,
+    provider: &str,
+    search: &Search,
+    include_incompatible: bool,
+) -> HostView {
+    HostView {
+        mods: rows(cavestone_server_mod_rows()),
+        browser_provider: provider.into(),
+        browser_submitted: search.query.clone().into(),
+        browser_ran: true,
+        browser_results: rows(server_mod_results(search)),
+        browser_next_offset: -1,
+        browser_include_incompatible: include_incompatible,
+        ..server_view(server)
+    }
+}
+
+/// A server's Modrinth search, where one result does not state server support.
+pub(crate) fn server_mods(ui: &AppWindow) {
+    let server = named_server(ui, "cavestone-server");
+    let search = &recorded::server_mods().modrinth_search;
+    let view = cavestone_server_mods(server, "modrinth", search, false);
+    open_server(ui, view, "Mods", None);
+}
+
+/// A server's CurseForge search that also lists the mods a server cannot take.
+pub(crate) fn server_mods_curseforge(ui: &AppWindow) {
+    let server = named_server(ui, "cavestone-server");
+    let search = &recorded::server_mods().curseforge_search;
+    let view = cavestone_server_mods(server, "curseforge", search, true);
+    open_server(ui, view, "Mods", None);
+}
+
+/// The confirmation a running server's install opens for a mod that does not
+/// state server support.
+pub(crate) fn server_mod_install_confirm(ui: &AppWindow) {
+    let server = running_server(named_server(ui, "cavestone-server"));
+    let recorded = recorded::server_mods();
+    let view = cavestone_server_mods(server, "modrinth", &recorded.modrinth_search, false);
+    open_server(ui, view, "Mods", None);
+    let server_plan = &recorded.plan;
+    let plan = &server_plan.plan;
+    let installs = 1 + plan.dependencies.saturating_sub(plan.existing);
+    let count = |value: usize| i32::try_from(value).unwrap_or_default();
+    ui.set_mod_plan_instance("cavestone-server".into());
+    ui.set_mod_plan_kind("server".into());
+    ui.set_mod_plan_provider("modrinth".into());
+    ui.set_mod_plan_project(plan.project.clone().into());
+    ui.set_mod_plan_version_id(plan.version_id.clone().into());
+    ui.set_mod_plan_title(plan.title.clone().into());
+    ui.set_mod_plan_version(plan.version.clone().into());
+    ui.set_mod_plan_install_count(count(installs));
+    ui.set_mod_plan_dependency_count(count(plan.dependencies));
+    ui.set_mod_plan_existing_count(count(plan.existing));
+    ui.set_mod_plan_optional_count(count(plan.optional));
+    ui.set_mod_plan_warning_count(count(plan.warnings));
+    let unstated = server_plan
+        .unstated
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    ui.set_mod_plan_unstated(strings(&unstated));
+    ui.set_mod_plan_unstated_ids(strings(&[plan.project.as_str()]));
+    ui.set_mod_plan_client_only(strings(&[]));
+    ui.set_mod_plan_restart_note(lookup("gui-server-mod-plan-restart").into());
+    ui.set_mod_action_pending(false);
+    ui.set_linked_targets(rows(Vec::new()));
+    ui.set_modal_error(SharedString::default());
+    ui.set_modal("mod-plan".into());
+}
+
+/// What the Utility Mods Server's failed start shows: the loader's refusal, the
+/// crash it wrote, and the missing dependency the catalog can install, in the
+/// order the launcher lists them.
+fn utility_mods_problems() -> Vec<DiagnosticFindingRow> {
+    let missing = &recorded::server_mods().missing_dependency;
+    let crash = &recorded::diagnostics().server_crashes.utility_mods;
+    let suspects = crash
+        .suspects
+        .iter()
+        .map(|suspect| suspect.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let loader = with_route(
+        finding(
+            "p0",
+            true,
+            &lookup_args(
+                "gui-diagnosis-loader-missing",
+                [("dependency", Arg::from(missing.loader_id.as_str()))],
+            ),
+            &[
+                lookup_args(
+                    "gui-diagnosis-loader-range",
+                    [("range", Arg::from(missing.loader_range.as_str()))],
+                ),
+                lookup_args(
+                    "gui-diagnosis-loader-asked-by",
+                    [("mods", Arg::from(suspects.as_str()))],
+                ),
+                lookup("gui-diagnosis-loader-detail"),
+            ]
+            .join("\n"),
+            &[],
+            &[],
+        ),
+        "log",
+        "gui-diagnosis-open-log",
+    );
+    let crashed = with_route(
+        finding(
+            "p1",
+            true,
+            &lookup("gui-diagnosis-crash"),
+            &[
+                crash.failure.clone(),
+                lookup_args(
+                    "gui-diagnosis-crash-names",
+                    [("names", Arg::from(suspects.as_str()))],
+                ),
+            ]
+            .join("\n"),
+            &[],
+            &[],
+        ),
+        "crash-report",
+        "gui-diagnosis-open-crash-report",
+    );
+    let dependency = DiagnosticFindingRow {
+        install_label: lookup("gui-diagnosis-install-latest").into(),
+        install_provider: "modrinth".into(),
+        install_project: missing.project.clone().into(),
+        ..with_route(
+            finding(
+                "p2",
+                true,
+                &lookup_args(
+                    "gui-diagnosis-dependency-missing",
+                    [("name", Arg::from(missing.name.as_str()))],
+                ),
+                &[
+                    lookup_args(
+                        "gui-diagnosis-required-by",
+                        [("name", Arg::from(missing.required_by.as_str()))],
+                    ),
+                    lookup("gui-diagnosis-dependency-install-detail"),
+                ]
+                .join("\n"),
+                &[missing.required_by.as_str(), missing.name.as_str()],
+                &[],
+            ),
+            "mods",
+            "gui-diagnosis-open-mods",
+        )
+    };
+    vec![loader, crashed, dependency]
+}
+
+fn utility_mods_checks() -> Vec<DiagnosticCheckRow> {
+    let crash = &recorded::diagnostics().server_crashes.utility_mods;
+    vec![
+        check(
+            &lookup("gui-diagnosis-check-java"),
+            lookup_args(
+                "gui-diagnosis-check-java-managed",
+                [("version", Arg::from("21.0.5")), ("major", Arg::from("21"))],
+            ),
+            "ok",
+            "gui-diagnosis-check-ok",
+        ),
+        check(
+            &lookup("gui-diagnosis-check-mods"),
+            lookup_args(
+                "gui-diagnosis-check-mods-value",
+                [
+                    ("enabled", Arg::from(7)),
+                    ("disabled", Arg::from(0)),
+                    ("answered", Arg::from(7)),
+                    ("unanswered", Arg::from(0)),
+                ],
+            ),
+            "problem",
+            "gui-diagnosis-check-problem",
+        ),
+        check(
+            &lookup("gui-diagnosis-check-log"),
+            lookup("gui-diagnosis-check-log-refused"),
+            "problem",
+            "gui-diagnosis-check-problem",
+        ),
+        check(
+            &lookup("gui-diagnosis-check-crash"),
+            lookup_args(
+                "gui-diagnosis-check-crash-found",
+                [("report", Arg::from(crash.report.as_str()))],
+            ),
+            "problem",
+            "gui-diagnosis-check-problem",
+        ),
+        check(
+            &lookup("gui-diagnosis-check-files"),
+            lookup("gui-diagnosis-check-files-skipped"),
+            "skipped",
+            "gui-diagnosis-check-skipped",
+        ),
+    ]
+}
+
+/// The quick diagnosis of the Utility Mods Server after its failed start.
+pub(crate) fn server_diagnostics_install(ui: &AppWindow) {
+    let missing = &recorded::server_mods().missing_dependency;
+    let crash = &recorded::diagnostics().server_crashes.utility_mods;
+    let problems = utility_mods_problems();
+    let view = HostView {
+        diagnosis_state: "result".into(),
+        diagnosis_summary: lookup_args(
+            "gui-diagnosis-problems",
+            [("count", Arg::from(problems.len()))],
+        )
+        .into(),
+        diagnosis_detail: lookup_args(
+            "gui-diagnosis-summary-quick",
+            [("time", Arg::from("19:18"))],
+        )
+        .into(),
+        diagnosis_failure: lookup("gui-run-exited-with-error").into(),
+        diagnosis_crash_report: crash.report.clone().into(),
+        diagnosis_problems: rows(problems),
+        diagnosis_checks: rows(utility_mods_checks()),
+        ..server_view(named_server(ui, &missing.server))
+    };
+    open_server(ui, view, "Diagnostics", None);
 }
 
 fn bundle_part(name: &str, kind: &str, size: &str, selected: bool) -> BundlePartRow {

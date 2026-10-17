@@ -1,0 +1,274 @@
+{
+ "cavestone_server": {
+  "left_off": [
+   "JustEnoughResources-1.20.1-1.4.0.247.jar",
+   "lighty-forge-2.1.3+1.20.1.jar",
+   "oauth-1.1.15-1.20.jar",
+   "PackMenu-1.20.1-6.1.1.jar",
+   "Placebo-1.20.1-8.6.2.jar"
+  ],
+  "server_only": [
+   {
+    "project_id": "Fnrzx9Jl",
+    "title": "Default Server Properties",
+    "version": "81.1.0",
+    "file_name": "default-server-properties-forge-81.1.0.jar",
+    "origin": "pack",
+    "enabled": true,
+    "deleted": false,
+    "compatibility": "Minecraft 1.20.1 | forge",
+    "icon": {
+     "url": "https://cdn.modrinth.com/data/Fnrzx9Jl/9599d48f7571f4f34af2cb7ed6e3e08ceda9a471_96.webp",
+     "sha256": "e3925e943085c4b3e6156b0fd4bdc2c45a1eb46f6bebaa4dd1351d92f8ed196a"
+    }
+   }
+  ]
+ },
+ "modrinth_search": {
+  "query": "golem",
+  "results": [
+   {
+    "project_id": "gtGDlsAD",
+    "title": "Modular Golems",
+    "description": "Tinker style modularized metal golems",
+    "author": "lcy0x1",
+    "installed": false,
+    "server_support": "",
+    "icon": {
+     "url": "https://cdn.modrinth.com/data/gtGDlsAD/b51f8177bb4a8d27851fb1b7ed80f909d0aa8169_96.webp",
+     "sha256": "c23382fd78cc653afa2baef462fa30258855d3ee183902ba754fd0e978d71ad5"
+    }
+   },
+   {
+    "project_id": "dcZM5qnj",
+    "title": "Golem Magicka",
+    "description": "Integration between ModularGolems and Iron Spells",
+    "author": "lcy0x1",
+    "installed": false,
+    "server_support": "unknown",
+    "icon": {
+     "url": "https://cdn.modrinth.com/data/dcZM5qnj/b4a18467055b77ae2d733768dc10901a6d24c228_96.webp",
+     "sha256": "af2d9e4d8cf7abb89467572fe878d195f310a1515143518f6aeddf04b1ef94eb"
+    }
+   },
+   {
+    "project_id": "dYvFPEKH",
+    "title": "Golem Spawn Fix",
+    "description": "A fix for the Iron Golem spawn",
+    "author": "bo_bo",
+    "installed": false,
+    "server_support": "",
+    "icon": {
+     "url": "https://cdn.modrinth.com/data/dYvFPEKH/097c576d62e7cccb94fb4f967eb95bb89578857d_96.webp",
+     "sha256": "a416eefbf4f9879f105e720a46ba8351aa956c403167221fa2e8ac0bdc9a429d"
+    }
+   },
+   {
+    "project_id": "qEYs2G9A",
+    "title": "Golem Overhaul",
+    "description": "Golem Overhaul adds 9 new golem types, all with their own unique mechanics!",
+    "author": "Joo5h",
+    "installed": false,
+    "server_support": "",
+    "icon": {
+     "url": "https://cdn.modrinth.com/data/qEYs2G9A/1605d7017252f228883a4011763b9e30f57176cf_96.webp",
+     "sha256": "0ccfa88d8fef1e4b204bcae22828e5b17354fc37858c3da31188d3a822f05819"
+    }
+   },
+   {
+    "project_id": "5OrL8C4a",
+    "title": "Golem Dungeons",
+    "description": "Structures with trials spawning hostile golems",
+    "author": "lcy0x1",
+    "installed": false,
+    "server_support": "",
+    "icon": {
+     "url": "https://cdn.modrinth.com/data/5OrL8C4a/626872360c80bc07c7a7db32ef945aee0ae9dfe0_96.webp",
+     "sha256": "da942532f0a7debfb5323202aebc31f9d8b09fdfe588eff3b4d438134e53e0bb"
+    }
+   },
+   {
+    "project_id": "gajeT6A2",
+    "title": "Infinity Golem Boss Fight",
+    "description": "This mod adds NEW BOSS INFINITY GOLEM. You can't find it in survival.",
+    "author": "Medovibee",
+    "installed": false,
+    "server_support": "",
+    "icon": {
+     "url": "https://cdn.modrinth.com/data/gajeT6A2/1b1c1a0c09ac26c36bed7c01a3bf0c134bef34e4_96.webp",
+     "sha256": "014fe0435edacf30e7443f42911cc9c11fc0f264a446f0750b8beb06e516870b"
+    }
+   },
+   {
+    "project_id": "1FoZ14MZ",
+    "title": "Golem Spawn Animation",
+    "description": "An animation that plays when an Iron Golem or Snow Golem is spawning",
+    "author": "bo_bo",
+    "installed": false,
+    "server_support": "",
+    "icon": {
+     "url": "https://cdn.modrinth.com/data/1FoZ14MZ/4a339689ca929702c323f85e63ed4ecb6547366b_96.webp",
+     "sha256": "8ffa4ac4ab4038bc1b5fceba9b5d3be9ab1e968e69c02d81bcc94e57f2845a6d"
+    }
+   },
+   {
+    "project_id": "BjqYsnBQ",
+    "title": "Golems Are Friends Not Fodder",
+    "description": "This mod makes Armorer, Toolsmith and Weaponsmith villagers attempt to repair damaged golems in their village during daytime.",
+    "author": "LobsterJonn",
+    "installed": false,
+    "server_support": "",
+    "icon": {
+     "url": "https://cdn.modrinth.com/data/BjqYsnBQ/37b576fcf56d14adf18e9034db7caf6fb45f785c_96.webp",
+     "sha256": "6581f70952250d7bb64b5bf94ce9a2d19418b150b9f8cb5966a6388fd4464cc4"
+    }
+   },
+   {
+    "project_id": "mKTLIOjN",
+    "title": "Villager Golem Healer",
+    "description": "A new type of villager that will defend against Iron Golems in villages",
+    "author": "soyherios",
+    "installed": false,
+    "server_support": "",
+    "icon": {
+     "url": "https://cdn.modrinth.com/data/mKTLIOjN/e719c1ca41ba74cda9337b9302b7471d68c850ea_96.webp",
+     "sha256": "f4c45095954a8acf918c9835a07f72fc83e7101d9ec1c27a996017dc7a49dd4f"
+    }
+   },
+   {
+    "project_id": "hI3Tmydh",
+    "title": "Muffin's Slime Golem",
+    "description": "Add Slime Golem to Minecraft. A good ally for finding Slime Chunks!",
+    "author": "firemuffin303",
+    "installed": false,
+    "server_support": "",
+    "icon": {
+     "url": "https://cdn.modrinth.com/data/hI3Tmydh/b65ad0437d3768c76c33f8b5eea3e0d69cd5d044.png",
+     "sha256": "67fca5cc06a5dbae4428e486b1b10aff69c7da4c0e5a0091868c2f307dc31b09"
+    }
+   }
+  ]
+ },
+ "curseforge_search": {
+  "query": "MelanX",
+  "results": [
+   {
+    "project_id": "por2AZc5",
+    "title": "Skyblock Builder",
+    "description": "Let you create a custom skyblock island via config",
+    "author": "MelanX",
+    "installed": true,
+    "server_support": "",
+    "icon": {
+     "url": "https://cdn.modrinth.com/data/por2AZc5/89644ef50021efa23db52f574f514c0ebce7df07_96.webp",
+     "sha256": "d592a6533ca8feb8ddebf126aa347c908db06a4c2e8fae6e0e2fb7d658ebd4df"
+    }
+   },
+   {
+    "project_id": "fzSKSXVK",
+    "title": "Simple Backups",
+    "description": "A simple mod to create scheduled backups",
+    "author": "MelanX",
+    "installed": true,
+    "server_support": "",
+    "icon": {
+     "url": "https://cdn.modrinth.com/data/fzSKSXVK/d50c9ce03f47f141941339cf4d54f8cb6d81b6cf_96.webp",
+     "sha256": "28d74eb280a45de0e83a1cbd6700235dddf68f10e35d1114c5c4885d42436e6a"
+    }
+   },
+   {
+    "project_id": "kZvO1mDq",
+    "title": "Default World Type",
+    "description": "Change the default world type for creating a new world in Create World screen",
+    "author": "MelanX",
+    "installed": true,
+    "server_support": "client-only",
+    "icon": {
+     "url": "https://cdn.modrinth.com/data/kZvO1mDq/e0f0a629898daf2b079f91d32b4f978a7d642462_96.webp",
+     "sha256": "ac971c9cf20478d3bb1da15dba2d1a554817f1e2f89b9b91809ab573a151a6a0"
+    }
+   },
+   {
+    "project_id": "Tlo2tahX",
+    "title": "Extra Disks",
+    "description": "Extra Disks adds bigger disks to Refined Storage 1.14+",
+    "author": "MelanX",
+    "installed": false,
+    "server_support": "",
+    "icon": {
+     "url": "https://cdn.modrinth.com/data/Tlo2tahX/c58745398bbf2adcab0413cb06d89b6dd1193b9c_96.webp",
+     "sha256": "f125fe2f958afdbef9bf782ba7eb3f6a73f423ef566293e523ccd79dd0affc2a"
+    }
+   },
+   {
+    "project_id": "3Gdi7Qgq",
+    "title": "Sky GUIs",
+    "description": "An addon for Skyblock Builder which provides GUIs to easily modify and view teams",
+    "author": "MelanX",
+    "installed": true,
+    "server_support": "",
+    "icon": {
+     "url": "https://cdn.modrinth.com/data/3Gdi7Qgq/8e8cd5272905cad666577501f9044a5f866cfab7.png",
+     "sha256": "43bb88bc4b0ca29e6852a3b0f9342a73b54787bb7d9c49cb2010658f2acdc981"
+    }
+   },
+   {
+    "project_id": "5JY3QNIB",
+    "title": "Just Enough Advancements (JEA)",
+    "description": "An addon for JEI which let you search for advancements. This is pronounced like \"yeah\".",
+    "author": "MelanX",
+    "installed": false,
+    "server_support": "",
+    "icon": {
+     "url": "https://cdn.modrinth.com/data/5JY3QNIB/a4978f1936e6cb44f95b59391f83f5f4fa61f951.png",
+     "sha256": "e6318c352a18d4e0e3545112edf245b432a88095086287cec8d3b8a3529ef73e"
+    }
+   },
+   {
+    "project_id": "L9JLNLqk",
+    "title": "Automatic Tool Swap",
+    "description": "Swaps the tools to the effective one if it's in hotbar",
+    "author": "MelanX",
+    "installed": false,
+    "server_support": "client-only",
+    "icon": {
+     "url": "https://cdn.modrinth.com/data/L9JLNLqk/8645f29d7afbf4e19c82a45ca3163b6f49b3c9e1_96.webp",
+     "sha256": "83e662d2167bf3cfbb5cee1a1ee0d6ca496c8a6d57929cf25b45ba0297820441"
+    }
+   },
+   {
+    "project_id": "TFFWPTSD",
+    "title": "AIOT Botania",
+    "description": "This mod adds AIOTs to Botania.",
+    "author": "MelanX",
+    "installed": false,
+    "server_support": "",
+    "icon": {
+     "url": "https://cdn.modrinth.com/data/TFFWPTSD/e6028ad41970b20d08d9eac75ce277c43d957a39_96.webp",
+     "sha256": "93f7ecd751ae7e3aa7f50ac5c1ee3ad513ad5dd052befe7725f1dd79e2e408ea"
+    }
+   }
+  ]
+ },
+ "plan": {
+  "project": "dcZM5qnj",
+  "title": "Golem Magicka",
+  "version_id": "dgiayLA0",
+  "version": "0.2.1",
+  "dependencies": 3,
+  "existing": 0,
+  "optional": 0,
+  "warnings": 0,
+  "unstated": [
+   "Golem Magicka"
+  ]
+ },
+ "missing_dependency": {
+  "server": "utility-mods-server",
+  "name": "Just Enough Items (JEI)",
+  "project": "u6dRKJwZ",
+  "required_by": "Just Enough Advancements (JEA)",
+  "loader_id": "jei",
+  "loader_range": "[19.25.0.322,)"
+ }
+}

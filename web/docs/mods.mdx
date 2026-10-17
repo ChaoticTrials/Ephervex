@@ -92,12 +92,20 @@ hold fewer results than the page size.
 <TabItem value="gui" label="Desktop" default>
 
 Open the server workspace, select **Mods**, and search in **Add Mods**. A
-**?** marks a result that does not state server support. Turn on **Show
-incompatible mods** to also list client-only mods, marked **Client only**; they
-cannot be installed. **Install** opens a confirmation only when the install
-includes a mod with unstated server support or a client-only dependency. **Add
-Mods** is hidden for a Vanilla server and for a server whose installation has
-not finished.
+**?** marks a result that does not state server support. **Add Mods** is hidden
+for a Vanilla server and for a server whose installation has not finished.
+
+<ThemeScreenshot state="server-mods" alt="Server Mods surface with a Modrinth search where Golem Magicka is marked with a question mark" />
+
+Turn on **Show incompatible mods** to also list client-only mods, marked
+**Client only**; they cannot be installed.
+
+<ThemeScreenshot state="server-mods-curseforge" alt="Server CurseForge search with Show incompatible mods on, where Default World Type is marked Client only" />
+
+**Install** opens a confirmation only when the install includes a mod with
+unstated server support or a client-only dependency.
+
+<ThemeScreenshot state="server-mod-install-confirm" alt="Install confirmation for a running server naming a mod whose server support is not stated" />
 
 </TabItem>
 <TabItem value="cli" label="CLI">

@@ -60,6 +60,10 @@ pub(crate) struct SearchHit {
     pub(crate) description: String,
     pub(crate) author: String,
     pub(crate) installed: bool,
+    /// For a server's search: `unknown` when the catalog does not state server
+    /// support, `client-only` when it says the mod does not run on one.
+    #[serde(default)]
+    pub(crate) server_support: String,
     pub(crate) icon: Logo,
 }
 
@@ -122,6 +126,44 @@ pub(crate) struct Manage {
     pub(crate) versions: Vec<Release>,
     pub(crate) requires: Vec<Relation>,
     pub(crate) required_by: Vec<Relation>,
+}
+
+/// What the CaveStone Server holds of the pack its client recorded.
+#[derive(Deserialize)]
+pub(crate) struct CaveStoneServer {
+    /// Jars the pack keeps off a server, by file name.
+    pub(crate) left_off: Vec<String>,
+    /// Pack mods that run only on a server, so the client list never shows them.
+    pub(crate) server_only: Vec<Mod>,
+}
+
+/// A server install plan and the mods in it whose server support is unstated.
+#[derive(Deserialize)]
+pub(crate) struct ServerPlan {
+    #[serde(flatten)]
+    pub(crate) plan: Plan,
+    pub(crate) unstated: Vec<String>,
+}
+
+/// A dependency a server's mod needs that the server does not hold.
+#[derive(Deserialize)]
+pub(crate) struct MissingDependency {
+    pub(crate) server: String,
+    pub(crate) name: String,
+    pub(crate) project: String,
+    pub(crate) required_by: String,
+    /// The loader's own id for the missing mod, and the range it asked for.
+    pub(crate) loader_id: String,
+    pub(crate) loader_range: String,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ServerMods {
+    pub(crate) cavestone_server: CaveStoneServer,
+    pub(crate) modrinth_search: Search,
+    pub(crate) curseforge_search: Search,
+    pub(crate) plan: ServerPlan,
+    pub(crate) missing_dependency: MissingDependency,
 }
 
 /// A mod that stops working when another is turned off.
@@ -205,6 +247,13 @@ pub(crate) struct ServerCrash {
     pub(crate) failure: String,
     pub(crate) client_code_on_server: bool,
     pub(crate) suggested: usize,
+    pub(crate) suspects: Vec<Suspect>,
+}
+
+/// A mod a crash report names.
+#[derive(Deserialize)]
+pub(crate) struct Suspect {
+    pub(crate) name: String,
 }
 
 #[derive(Deserialize)]
@@ -255,6 +304,12 @@ static DIALOGS: LazyLock<Dialogs> = LazyLock::new(|| {
     serde_json::from_str(include_str!("../../data/dialogs.json")).expect("recorded dialogs parse")
 });
 
+#[allow(clippy::expect_used)]
+static SERVER_MODS: LazyLock<ServerMods> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("../../data/server_mods.json"))
+        .expect("recorded server mods parse")
+});
+
 pub(crate) fn data() -> &'static Recorded {
     &DATA
 }
@@ -265,6 +320,10 @@ pub(crate) fn dialogs() -> &'static Dialogs {
 
 pub(crate) fn diagnostics() -> &'static Diagnostics {
     &DIAGNOSTICS
+}
+
+pub(crate) fn server_mods() -> &'static ServerMods {
+    &SERVER_MODS
 }
 
 /// The recorded CaveStone mod titled `title`.
@@ -295,8 +354,20 @@ pub(crate) fn server(key: &str) -> &'static Server {
 /// Every logo address with the digest its bytes must have, once each.
 pub(crate) fn logo_sources() -> BTreeMap<String, String> {
     let recorded = data();
-    let mods = recorded.cavestone_mods.iter().map(|row| &row.icon);
-    let hits = recorded.mod_search.results.iter().map(|hit| &hit.icon);
+    let server = server_mods();
+    let mods = recorded
+        .cavestone_mods
+        .iter()
+        .chain(&server.cavestone_server.server_only)
+        .map(|row| &row.icon);
+    let hits = [
+        &recorded.mod_search,
+        &server.modrinth_search,
+        &server.curseforge_search,
+    ]
+    .into_iter()
+    .flat_map(|search| &search.results)
+    .map(|hit| &hit.icon);
     mods.chain(hits)
         .filter(|logo| !logo.url.is_empty())
         .map(|logo| (logo.url.clone(), logo.sha256.clone()))
@@ -318,6 +389,37 @@ mod tests {
                 .all(|row| row.icon.url.is_empty() == row.icon.sha256.is_empty())
         );
         assert!(logo_sources().values().all(|digest| digest.len() == 64));
+    }
+
+    #[test]
+    fn the_server_searches_mark_only_what_their_catalog_left_unstated_or_client_only() {
+        let server = server_mods();
+        let hits = || {
+            server
+                .modrinth_search
+                .results
+                .iter()
+                .chain(&server.curseforge_search.results)
+        };
+        assert!(
+            hits().all(|hit| ["", "unknown", "client-only"].contains(&hit.server_support.as_str()))
+        );
+        assert!(hits().any(|hit| hit.server_support == "unknown"));
+        assert!(
+            !server
+                .modrinth_search
+                .results
+                .iter()
+                .any(|hit| hit.server_support == "client-only"),
+            "a server search without incompatible results leaves client-only mods out"
+        );
+        assert!(
+            server
+                .curseforge_search
+                .results
+                .iter()
+                .any(|hit| hit.server_support == "client-only")
+        );
     }
 
     #[test]

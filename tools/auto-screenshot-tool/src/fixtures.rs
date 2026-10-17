@@ -440,6 +440,60 @@ pub(crate) fn client_mod_results() -> Vec<ModSearchRow> {
         .collect()
 }
 
+/// The CaveStone Server's mods: the pack's own, without the jars it keeps off a
+/// server and with the ones only a server runs. Changes made on the client
+/// after the import stay on the client.
+pub(crate) fn cavestone_server_mod_rows() -> Vec<ModRow> {
+    let server = &recorded::server_mods().cavestone_server;
+    let mut mods = recorded::data()
+        .cavestone_mods
+        .iter()
+        .filter(|record| {
+            matches!(record.origin.as_str(), "pack" | "override")
+                && !server.left_off.contains(&record.file_name)
+        })
+        .chain(&server.server_only)
+        .map(|record| ModRow {
+            enabled: true,
+            deleted: false,
+            ..recorded_mod_row(record)
+        })
+        .collect::<Vec<_>>();
+    mods.sort_by_key(|row| row.title.to_lowercase());
+    mods
+}
+
+/// A recorded server search as the mod browser shows it, with the mark a
+/// result carries when the catalog leaves server support unstated or rules it
+/// out. A result is installed when the server's list holds its project.
+pub(crate) fn server_mod_results(search: &recorded::Search) -> Vec<ModSearchRow> {
+    let note = lookup("gui-compatible");
+    let held = cavestone_server_mod_rows()
+        .into_iter()
+        .map(|row| row.project_id)
+        .collect::<Vec<_>>();
+    search
+        .results
+        .iter()
+        .map(|hit| ModSearchRow {
+            project_id: hit.project_id.clone().into(),
+            title: hit.title.clone().into(),
+            description: hit.description.clone().into(),
+            author: hit.author.clone().into(),
+            icon: artwork::logo(&hit.icon.url),
+            note: note.clone().into(),
+            installed: held.iter().any(|id| id == hit.project_id.as_str()),
+            server_support: hit.server_support.clone().into(),
+            blocked_reason: if hit.server_support == "client-only" {
+                lookup("gui-hint-mod-client-only").into()
+            } else {
+                SharedString::default()
+            },
+            ..ModSearchRow::default()
+        })
+        .collect()
+}
+
 pub(crate) fn client_mods(ui: &AppWindow) {
     let client = ui.get_instances().row_data(0).unwrap_or_default();
     let surfaces = Surface::client()
@@ -583,6 +637,44 @@ mod tests {
         let mut sorted = titles.clone();
         sorted.sort();
         assert_eq!(titles, sorted);
+    }
+
+    #[test]
+    fn the_server_mod_list_holds_only_what_the_pack_puts_on_a_server() {
+        let server = &recorded::server_mods().cavestone_server;
+        let mods = cavestone_server_mod_rows();
+        assert!(mods.iter().all(|row| {
+            let file = row.logical_path.trim_start_matches("mods/");
+            !server.left_off.iter().any(|left_off| left_off == file)
+                && row.origin_kind == "pack"
+                && row.enabled
+                && !row.deleted
+        }));
+        assert!(
+            server
+                .server_only
+                .iter()
+                .all(|only| mods.iter().any(|row| row.title == only.title.as_str()))
+        );
+        let titles = mods
+            .iter()
+            .map(|row| row.title.to_lowercase())
+            .collect::<Vec<_>>();
+        assert!(titles.is_sorted());
+    }
+
+    #[test]
+    fn a_server_search_marks_installed_what_the_server_list_holds() {
+        let server = recorded::server_mods();
+        let held = cavestone_server_mod_rows();
+        for search in [&server.modrinth_search, &server.curseforge_search] {
+            for hit in &search.results {
+                let listed = held
+                    .iter()
+                    .any(|row| row.project_id == hit.project_id.as_str());
+                assert_eq!(hit.installed, listed, "{} is recorded wrongly", hit.title);
+            }
+        }
     }
 
     #[test]

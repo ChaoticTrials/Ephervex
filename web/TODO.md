@@ -102,6 +102,8 @@ Mods:
 - [x] `mod-impact` (breaks, needs, cascade)
 - [x] `mod-install-plan` (with linked servers)
 - [x] `mod-isolation-setup`, `mod-isolation-round`
+- [x] `server-mods`, `server-mods-curseforge`, `server-mod-install-confirm`
+- [x] `server-diagnostics-install`
 
 Hosts:
 - [x] `client-overview-linked-server` (Paired pill, Start together)
