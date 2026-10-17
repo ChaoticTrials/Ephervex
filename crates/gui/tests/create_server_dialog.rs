@@ -387,40 +387,59 @@ fn a_long_import_error_stays_clear_of_the_buttons() {
     );
 }
 
-/// A pack summary that wraps keeps the rows after it below its card.
+/// A pack summary that wraps keeps the rows after it below its card, and keeps
+/// the card's own padding below its last line, whatever the font's metrics.
 #[test]
 fn a_long_pack_summary_stays_clear_of_the_rows_below_it() {
     let ui = window();
     ui.window().set_size(PhysicalSize::new(560, 900));
     open_import(&ui, false);
+    ui.set_import_pack_header("Pack".into());
+    ui.set_import_minecraft_line("Minecraft 1.20.1".into());
+    ui.set_import_loader_line("NeoForge 47.1.106".into());
+    ui.set_import_required_line("Required files: 412".into());
+    ui.set_import_optional_line("Optional files: 37".into());
+    settle(&ui);
+    let (short_bottom, short_next) =
+        summary_and_next_row(&ui, "Required files: 412 | Optional files: 37");
+
     let counts = "Required files: 412 | Optional files: 37, none of them selected yet, \
                   and each one can be chosen below before the pack is imported";
     ui.set_import_pack_header("A Very Long Modpack Name For Testing Wrapping 1.2.3".into());
     ui.set_import_author_line("by Someone, Someone Else, A Third Author and Their Team".into());
-    ui.set_import_minecraft_line("Minecraft 1.20.1".into());
-    ui.set_import_loader_line("NeoForge 47.1.106".into());
-    ui.set_import_required_line("Required files: 412".into());
     ui.set_import_optional_line(
         "Optional files: 37, none of them selected yet, and each one can be chosen below \
          before the pack is imported"
             .into(),
     );
     settle(&ui);
+    let (summary_bottom, next_row) = summary_and_next_row(&ui, counts);
 
-    let summary = ElementHandle::find_by_accessible_label(&ui, counts)
+    assert!(
+        summary_bottom <= next_row,
+        "the pack summary ends at {summary_bottom}, below the next row at {next_row}"
+    );
+    assert!(
+        next_row - summary_bottom >= short_next - short_bottom,
+        "the wrapped summary leaves {} below its last line, less than the {} a one-line summary leaves",
+        next_row - summary_bottom,
+        short_next - short_bottom
+    );
+}
+
+/// Where the summary's counts line ends, and where the instance name row starts.
+fn summary_and_next_row(ui: &AppWindow, counts: &str) -> (f32, f32) {
+    let summary = ElementHandle::find_by_accessible_label(ui, counts)
         .find(|element| element.size().width > 0.0)
         .expect("the dialog summarizes the pack");
     let name_label =
-        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-instance-name-optional"))
+        ElementHandle::find_by_accessible_label(ui, &lookup("gui-instance-name-optional"))
             .find(|element| element.size().width > 0.0)
             .expect("the dialog asks for an instance name");
-
-    let summary_bottom = summary.absolute_position().y + summary.size().height;
-    assert!(
-        summary_bottom <= name_label.absolute_position().y,
-        "the pack summary ends at {summary_bottom}, below the next row at {}",
-        name_label.absolute_position().y
-    );
+    (
+        summary.absolute_position().y + summary.size().height,
+        name_label.absolute_position().y,
+    )
 }
 
 fn open_import(ui: &AppWindow, create_server: bool) {

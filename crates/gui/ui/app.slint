@@ -2274,7 +2274,9 @@ export component AppWindow inherits Window {
                             border-width: 1px;
                             border-color: root.import-status-kind == "ready" || root.import-status-kind == "submitting" ? Theme.success : Theme.border;
                             background: Theme.surface;
-                            VerticalLayout {
+                            // Left to itself, the card measures its wrapped lines unwrapped.
+                            height: pack-summary.preferred-height;
+                            pack-summary := VerticalLayout {
                                 padding: 12px;
                                 spacing: 4px;
                                 Heading { text: root.import-pack-header; font-size: Theme.row-heading-size; wrap: word-wrap; }
