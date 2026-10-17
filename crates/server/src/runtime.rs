@@ -1087,11 +1087,38 @@ fn control_socket_responds(server_root: &Path, evidence: &RuntimeEvidence) -> bo
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    use std::time::{Duration, Instant};
+
+    use uuid::Uuid;
+
+    use super::environment_carries_run;
+
+    /// Above the kernel's pid limit, so no process leads a session with this id.
+    pub(crate) const NO_SUCH_SESSION: u32 = u32::MAX;
+
+    /// Returns once `pid`'s environment shows the run's tag, which can lag the spawn while the
+    /// new program image is still being installed.
+    pub(crate) fn wait_for_run_tag(pid: u32, run: Uuid) {
+        let environment = format!("/proc/{pid}/environ");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !std::fs::read(&environment).is_ok_and(|bytes| environment_carries_run(&bytes, run)) {
+            assert!(
+                Instant::now() < deadline,
+                "the run tag never became visible in the child's environment"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use std::os::unix::net::UnixListener;
 
+    use super::test_support::{NO_SUCH_SESSION, wait_for_run_tag};
     use super::*;
 
     fn private_directory(parent: &Path, name: &str) -> PathBuf {
@@ -1539,9 +1566,6 @@ mod tests {
         );
     }
 
-    /// Above the kernel's pid limit, so no process leads a session with this id.
-    const NO_SUCH_SESSION: u32 = u32::MAX;
-
     /// A pending start whose supervisor is already gone and whose session holds no process, so a
     /// newly exec'd process elsewhere on the machine cannot make the scan unverifiable.
     fn write_dead_pending_start(root: &Path) -> RuntimeEvidence {
@@ -1553,8 +1577,7 @@ mod tests {
         evidence
     }
 
-    /// Spawns a tagged process and returns once its environment shows the tag, which can lag the
-    /// spawn while the new program image is still being installed.
+    /// Spawns a tagged process and returns once its environment shows the tag.
     fn spawn_tagged(run: Uuid) -> KillOnDrop {
         let child = KillOnDrop(
             std::process::Command::new("/bin/sleep")
@@ -1563,15 +1586,7 @@ mod tests {
                 .spawn()
                 .expect("spawn"),
         );
-        let environment = format!("/proc/{}/environ", child.0.id());
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        while !std::fs::read(&environment).is_ok_and(|bytes| environment_carries_run(&bytes, run)) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the run tag never became visible in the child's environment"
-            );
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        wait_for_run_tag(child.0.id(), run);
         child
     }
 

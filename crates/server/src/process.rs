@@ -1364,6 +1364,7 @@ mod tests {
     use std::os::unix::fs::MetadataExt as _;
 
     use super::*;
+    use crate::runtime::test_support::{NO_SUCH_SESSION, wait_for_run_tag};
     use crate::runtime::{RuntimeClassification, classify_runtime, control_socket_file_name};
 
     /// The process group a process belongs to, from `/proc/<pid>/stat`.
@@ -1377,14 +1378,17 @@ mod tests {
     #[tokio::test]
     async fn a_supervisor_that_died_while_starting_is_resolved_through_the_child_it_tagged() {
         let directory = tempfile::tempdir().expect("directory");
+        // One exec, so the tag stays visible once it appears.
         let command = ServerCommand {
-            java: PathBuf::from("/bin/sh"),
-            arguments: vec!["-c".to_owned(), "exec sleep 30".to_owned()],
+            java: PathBuf::from("/bin/sleep"),
+            arguments: vec!["30".to_owned()],
             working_directory: directory.path().join("server"),
         };
         let capture = Arc::new(Mutex::new(OutputCapture::new(directory.path())));
         let mut evidence = RuntimeEvidence::for_current_supervisor().expect("capture");
         evidence.supervisor.start_ticks = 0;
+        // No process leads this session, so one being exec'd elsewhere cannot make the scan unverifiable.
+        evidence.supervisor_session = Some(NO_SUCH_SESSION);
         evidence.child_pending = true;
         write_runtime_evidence(directory.path(), &evidence).expect("write");
         let (mut child, _stdin, readers, pid) = spawn_child(
@@ -1395,6 +1399,7 @@ mod tests {
             &Arc::new(AtomicBool::new(false)),
         )
         .expect("spawn");
+        wait_for_run_tag(pid, evidence.generation);
 
         let running = classify_runtime(directory.path()).expect("classify");
         child.kill().await.expect("kill");
