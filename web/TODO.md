@@ -137,9 +137,8 @@ Limits of the captured states (the tool renders one frame and cannot scroll, and
 interacts only to open a menu or dropdown):
 - Tall dialogs and pages show only their top: `import-modpack-duplicates` and the lower part of
   `client-diagnostics-result` at 1080p (all of it fits at 1440p).
-- `mod-impact` shows only the breaks group, and `mod-manager` shows Reset to
-  pack version but no Update button, because the app's dialog layout cannot
-  hold the other variants.
+- `mod-impact` shows only the breaks group, because the app's dialog layout
+  cannot hold the other variants.
 - `settings-general` lists one favorite version, and `settings-minecraft-defaults`
   shows four rows on the Video tab, so they fit at 1080p.
 - The live log follows its newest line through a one-shot timer, so it holds
