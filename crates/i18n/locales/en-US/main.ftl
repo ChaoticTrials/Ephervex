@@ -1763,6 +1763,14 @@ error-pack-canceled = The import was canceled.
 error-mod-destination-occupied = A file Ephervex did not install is already in the way.
 .action = { $path } was not installed by Ephervex, so it was left alone. Move or rename it if you want this mod installed there.
 
+# The file in the way is a different mod Ephervex installed, most often the same
+# jar installed from the other catalog.
+error-mod-destination-recorded = A mod Ephervex installed from { $provider } is already in the way.
+.action = { $path } is recorded as a different mod from { $provider }, so it was left alone. Remove that mod first if you want this one installed in its place.
+
+error-mod-destination-recorded-by-pack = A mod Ephervex installed is already in the way.
+.action = { $path } is recorded as a different mod of this pack, so it was left alone. Remove that mod first if you want this one installed in its place.
+
 error-mod-path-unsafe = That mod would be written outside its place in the game directory.
 .action = { $path } is not a valid location for a mod file, so nothing was written.
 

@@ -50,8 +50,8 @@ use ephervex_model::{
 };
 use ephervex_pack::{
     ArtifactFetch, MODS_DIR, ManagedMod, ManagedModInstall, ManagedModInstallation, ModIdentity,
-    PackError, PackFileRecipe, PackRecipe, PackSide, ProviderFileIdentity, RecipeRelation,
-    RecordedMod, RelationTarget, SideRequirement, SourceStore,
+    OptionalSelection, PackError, PackFileRecipe, PackRecipe, PackSide, ProviderFileIdentity,
+    RecipeRelation, RecordedMod, RelationTarget, SideRequirement, SourceStore,
 };
 /// Where a disabled jar sits, and the suffix that puts it there.
 ///
@@ -1397,11 +1397,16 @@ impl App {
         // repair, or already present — and would lose the "already present"
         // half of its report, leaving a caller unable to tell "nothing to do"
         // from "nothing was requested".
-        let additions: Vec<PackFileRecipe> = plan
-            .all_mods()
-            .into_iter()
-            .map(|planned| recipe_entry_for(planned, plan.provider, host.side()))
-            .collect::<Result<_, _>>()?;
+        let mut additions: Vec<PackFileRecipe> = Vec::new();
+        for planned in plan.all_mods() {
+            let addition = addition_for(&recipe, &plan, planned, host.side())?;
+            // Two planned mods can be the same reused jar; it is handed over
+            // once. Two different files at one path still reach the installer,
+            // which refuses them.
+            if !additions.contains(&addition) {
+                additions.push(addition);
+            }
+        }
 
         let manager = self.artifact_manager()?;
 
@@ -2094,7 +2099,8 @@ impl App {
     }
 
     /// Resolves a plan against one host's exact versions and its own installed
-    /// set, which is read from that host's recipe and no other.
+    /// set, which is read from that host's recipe and no other, and from the
+    /// entries that recipe installs on the host's own side.
     pub(crate) async fn plan_for_host(
         &self,
         host: &CatalogHost,
@@ -2108,11 +2114,11 @@ impl App {
         } else {
             None
         };
-        let installed = installed_projects_of(recipe.as_ref(), request.provider);
         let mut plan = self
-            .resolve_against(
+            .resolve_for_recipe(
                 &host.target(),
-                &installed,
+                recipe.as_ref(),
+                host.side(),
                 request,
                 policy,
                 reporter,
@@ -2121,6 +2127,29 @@ impl App {
             .await?;
         if host.side() == PackSide::Server {
             settle_plan_for_server(&mut plan)?;
+        }
+        Ok(plan)
+    }
+
+    /// Resolves a request against what one desired state installs on `side`,
+    /// reusing what that side already has from the other catalog.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn resolve_for_recipe(
+        &self,
+        target: &InstanceTarget,
+        recipe: Option<&PackRecipe>,
+        side: PackSide,
+        request: &ModInstallRequest,
+        policy: InstalledPolicy,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> CoreResult<ModInstallPlan> {
+        let installed = installed_projects_of(recipe, request.provider, side);
+        let mut plan = self
+            .resolve_against(target, &installed, request, policy, reporter, cancel)
+            .await?;
+        if let Some(recipe) = recipe {
+            reuse_identical_files(&mut plan, recipe, side, policy);
         }
         Ok(plan)
     }
@@ -2169,7 +2198,7 @@ impl App {
     pub(crate) async fn resolve_against(
         &self,
         target: &InstanceTarget,
-        installed: &[InstalledProject],
+        installed: &InstalledSet,
         request: &ModInstallRequest,
         policy: InstalledPolicy,
         reporter: &OperationReporter,
@@ -2194,7 +2223,8 @@ impl App {
                 target,
                 loader_name: loader,
                 selection: &selection,
-                installed,
+                installed: &installed.present,
+                recorded_elsewhere: &installed.elsewhere,
                 installed_policy: policy,
                 reporter,
                 cancel,
@@ -2270,6 +2300,18 @@ impl App {
     }
 }
 
+/// One catalog's projects a desired state records, split by whether they are
+/// installed on the host's side.
+#[derive(Debug, Default)]
+pub(crate) struct InstalledSet {
+    /// Installed on the host's side, so a plan reuses them.
+    pub(crate) present: Vec<InstalledProject>,
+    /// Recorded only for the other side of the game. A linked server's recipe
+    /// mirrors its client's, so a client-only entry there has no jar on the
+    /// server, and a plan for the server installs it rather than reusing it.
+    pub(crate) elsewhere: Vec<InstalledProject>,
+}
+
 /// The provider projects one desired state already records, for resolution.
 ///
 /// Takes the recipe rather than an instance id so that a client and a linked
@@ -2277,21 +2319,129 @@ impl App {
 pub(crate) fn installed_projects_of(
     recipe: Option<&PackRecipe>,
     provider: ModProvider,
-) -> Vec<InstalledProject> {
-    recipe
-        .map(PackRecipe::managed_mods)
-        .unwrap_or_default()
-        .into_iter()
+    side: PackSide,
+) -> InstalledSet {
+    let none = OptionalSelection::none();
+    let mut set = InstalledSet::default();
+    for file in recipe.map_or(&[][..], |recipe| recipe.files.as_slice()) {
         // Only this catalog's mods. Project ids are the provider's own and two
         // catalogs can spell different projects the same way, so mixing them
         // would let one provider's install believe another's mod was already
-        // there.
-        .filter(|managed| managed.provider == provider)
-        .map(|managed| InstalledProject {
+        // there. A byte-identical file is matched separately, by
+        // `reuse_identical_files`.
+        let Some(managed) = file
+            .managed_mod()
+            .filter(|managed| managed.provider == provider)
+        else {
+            continue;
+        };
+        let project = InstalledProject {
             project_id: managed.project_id,
             version_id: managed.version_id,
+        };
+        if file.is_installed_on(side, &none) {
+            set.present.push(project);
+        } else {
+            set.elsewhere.push(project);
+        }
+    }
+    set
+}
+
+/// Counts as already installed every planned mod the host already has as
+/// another catalog's byte-identical file.
+///
+/// The same jar is often published on both catalogs, and a dependency named
+/// in one is satisfied by the copy installed from the other. Installing it
+/// again would put a second copy of one mod in `mods/`, or be refused because
+/// the recorded copy is in the way.
+///
+/// Under [`InstalledPolicy::Replace`] the root is the mod being changed, and
+/// its own entry is what moves, so it is never matched. A project the plan
+/// moves is not matched either.
+fn reuse_identical_files(
+    plan: &mut ModInstallPlan,
+    recipe: &PackRecipe,
+    side: PackSide,
+    policy: InstalledPolicy,
+) {
+    let reused: Vec<InstalledProject> = plan
+        .to_install()
+        .into_iter()
+        .filter(|planned| {
+            policy == InstalledPolicy::Preserve
+                || planned.version.project_id != plan.root.version.project_id
         })
-        .collect()
+        .filter(|planned| {
+            !plan
+                .replacements
+                .iter()
+                .any(|replacement| replacement.project_id == planned.version.project_id)
+        })
+        .filter(|planned| identical_recorded(recipe, planned, plan.provider, side).is_some())
+        .map(|planned| InstalledProject {
+            project_id: planned.version.project_id.clone(),
+            version_id: planned.version.id.clone(),
+        })
+        .collect();
+    plan.already_installed.extend(reused);
+}
+
+/// The entry another catalog recorded, installed on `side`, whose file is the
+/// planned release's file.
+///
+/// Matched on the SHA-1 both catalogs publish, never on a file name or a
+/// project id. A hand-placed jar is never matched: it is the user's, and
+/// nothing may come to depend on it being kept.
+pub(crate) fn identical_recorded<'a>(
+    recipe: &'a PackRecipe,
+    planned: &PlannedMod,
+    provider: ModProvider,
+    side: PackSide,
+) -> Option<&'a PackFileRecipe> {
+    let sha1 = planned
+        .version
+        .file
+        .hashes
+        .iter()
+        .find(|hash| hash.algorithm == HashAlgorithm::Sha1)?;
+    let none = OptionalSelection::none();
+    recipe.files.iter().find(|file| {
+        file.is_mod_file()
+            && file.origin != ModOrigin::HandPlaced
+            && file
+                .identity
+                .as_ref()
+                .and_then(|identity| identity.provider)
+                .is_some_and(|other| other != provider)
+            && file.is_installed_on(side, &none)
+            && file.hashes.contains(sha1)
+    })
+}
+
+/// What the installer is handed for one planned mod.
+///
+/// A mod the plan reuses from another catalog is handed over as that
+/// catalog's recorded entry, so the installer reports it present, or restores
+/// its jar if it has gone, rather than writing a second copy.
+fn addition_for(
+    recipe: &PackRecipe,
+    plan: &ModInstallPlan,
+    planned: &PlannedMod,
+    side: PackSide,
+) -> CoreResult<PackFileRecipe> {
+    let project = planned.version.project_id.as_str();
+    let reused = plan
+        .already_installed
+        .iter()
+        .any(|installed| installed.project_id == project)
+        && !recipe
+            .managed_project(plan.provider, project)
+            .is_some_and(|entry| entry.is_installed_on(side, &OptionalSelection::none()));
+    if reused && let Some(entry) = identical_recorded(recipe, planned, plan.provider, side) {
+        return Ok(entry.clone());
+    }
+    recipe_entry_for(planned, plan.provider, side)
 }
 
 /// The host a catalog operation is for: a client instance or a server.

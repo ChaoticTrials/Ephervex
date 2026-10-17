@@ -905,6 +905,9 @@ impl App {
         if candidates.is_empty() {
             return (Vec::new(), false);
         }
+        if may_be_met_across_catalogs(&recorded, scope.provider) {
+            return (Vec::new(), true);
+        }
 
         let required = match self
             .required_projects(scope, &recorded, moving, dropping, reporter, cancel)
@@ -989,7 +992,8 @@ impl App {
             roots.insert(project.to_owned(), Some(version.to_owned()));
         }
 
-        let installed = crate::mods::installed_projects_of(Some(scope.recipe), scope.provider);
+        let installed =
+            crate::mods::installed_projects_of(Some(scope.recipe), scope.provider, scope.side);
         let mut required = BTreeSet::new();
         for (project, version) in roots {
             let mut request =
@@ -1171,11 +1175,18 @@ fn refuse_unconfirmed_server_support(
     let projects: Vec<String> = resolved
         .undeclared_server_support()
         .into_iter()
+        // A mod the server already has was confirmed when it was installed. A
+        // record the server does not take was never asked about for it.
         .filter(|planned| {
-            context
+            !context
                 .recipe
                 .managed_project(resolved.provider, &planned.project.id)
-                .is_none()
+                .is_some_and(|entry| {
+                    entry.is_installed_on(
+                        ephervex_pack::PackSide::Server,
+                        &ephervex_pack::OptionalSelection::none(),
+                    )
+                })
         })
         .map(|planned| {
             if planned.project.title.is_empty() {
@@ -1190,6 +1201,34 @@ fn refuse_unconfirmed_server_support(
     } else {
         Err(CoreError::ModChangeServerSupportUnconfirmed { projects })
     }
+}
+
+/// Whether a mod from another catalog requires a project that catalog has no
+/// entry for on this side.
+///
+/// The same jar is often published on both catalogs, and an install reuses
+/// the copy one catalog put here for a dependency the other names. Nothing
+/// recorded says which jar that is, so while such a requirement stands, none of
+/// this catalog's dependencies is proven unnecessary.
+fn may_be_met_across_catalogs(recorded: &[RecordedMod], provider: ModProvider) -> bool {
+    let has = |catalog: ModProvider, project: &str| {
+        recorded.iter().any(|entry| {
+            entry.identity.provider() == Some(catalog)
+                && entry.identity.project_id() == Some(project)
+        })
+    };
+    recorded.iter().any(|entry| {
+        let Some(catalog) = entry.identity.provider().filter(|other| *other != provider) else {
+            return false;
+        };
+        entry.relations.iter().flatten().any(|relation| {
+            relation.kind == ModRelationKind::Required
+                && relation
+                    .target
+                    .project_id()
+                    .is_some_and(|project| !has(catalog, project))
+        })
+    })
 }
 
 /// The entry at one logical path, or a refusal naming it.

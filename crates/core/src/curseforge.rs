@@ -1079,13 +1079,16 @@ mod browsing {
         .expect("an install");
 
         let recipe = app.pack_recipe(instance).expect("a recipe");
-        assert!(
-            crate::mods::installed_projects_of(recipe.as_ref(), ModProvider::Modrinth).is_empty()
-        );
-        assert_eq!(
-            crate::mods::installed_projects_of(recipe.as_ref(), ModProvider::CurseForge).len(),
-            2
-        );
+        let installed = |provider| {
+            crate::mods::installed_projects_of(
+                recipe.as_ref(),
+                provider,
+                ephervex_pack::PackSide::Client,
+            )
+            .present
+        };
+        assert!(installed(ModProvider::Modrinth).is_empty());
+        assert_eq!(installed(ModProvider::CurseForge).len(), 2);
     }
 
     #[tokio::test]

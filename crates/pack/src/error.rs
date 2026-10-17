@@ -332,6 +332,19 @@ pub enum PackError {
     #[error("`{path}` already exists and was not installed by Ephervex")]
     DestinationOccupied { path: PathBuf },
 
+    /// Something is already at a planned destination, and the recipe records it
+    /// as a different mod Ephervex installed.
+    ///
+    /// Most often the same jar installed from the other catalog with different
+    /// published bytes. It is not overwritten either, but it is named for what
+    /// it is. `provider` is the catalog it was installed from, when the recipe
+    /// names one.
+    #[error("`{path}` already exists and is recorded as a different mod")]
+    DestinationRecorded {
+        path: PathBuf,
+        provider: Option<ephervex_model::ModProvider>,
+    },
+
     /// A managed mod's logical path is not a safe location inside the game
     /// directory: it is absolute, climbs out with `..`, or is launcher-owned.
     #[error("`{path}` is not a location inside the game directory that a mod can be written to")]
@@ -432,6 +445,12 @@ impl PackError {
             Self::HandPlacedNotMutable { .. } => "error-mod-hand-placed-not-mutable",
             Self::ManagedVersionConflict { .. } => "error-mod-already-installed",
             Self::DestinationOccupied { .. } => "error-mod-destination-occupied",
+            Self::DestinationRecorded {
+                provider: Some(_), ..
+            } => "error-mod-destination-recorded",
+            Self::DestinationRecorded { provider: None, .. } => {
+                "error-mod-destination-recorded-by-pack"
+            }
             Self::DestinationCollision { .. } => "error-mod-destination-collision",
             Self::DuplicateManagedProject { .. } => "error-mod-duplicate-project",
             Self::ManagedPathUnsafe { .. } => "error-mod-path-unsafe",
@@ -465,6 +484,7 @@ impl PackError {
             | Self::OverrideLayersDisagree { path }
             | Self::RecipeDestinationOccupied { path }
             | Self::DestinationOccupied { path }
+            | Self::DestinationRecorded { path, .. }
             | Self::ManagedPathUnsafe { path }
             | Self::ManagedDestinationLinked { path }
             | Self::HandPlacedNotMutable { path }
@@ -573,6 +593,10 @@ impl PackError {
                 ("requested", requested.clone()),
             ],
             Self::DestinationCollision { name } => vec![("name", name.clone())],
+            Self::DestinationRecorded {
+                provider: Some(provider),
+                ..
+            } => vec![("provider", provider.to_string())],
             Self::DuplicateManagedProject {
                 provider,
                 project_id,
@@ -806,6 +830,14 @@ mod tests {
             },
             PackError::DestinationOccupied {
                 path: PathBuf::from("/instance/minecraft/mods/theirs.jar"),
+            },
+            PackError::DestinationRecorded {
+                path: PathBuf::from("/instance/minecraft/mods/lib.jar"),
+                provider: Some(ephervex_model::ModProvider::Modrinth),
+            },
+            PackError::DestinationRecorded {
+                path: PathBuf::from("/instance/minecraft/mods/lib.jar"),
+                provider: None,
             },
             PackError::DestinationCollision {
                 name: "mods/a.jar".to_owned(),

@@ -55,8 +55,8 @@ use tracing::{info, instrument, warn};
 use crate::error::{PackError, PackResult};
 use crate::install::{ArtifactFetch, copy_into_instance, fetch_all};
 use crate::managed::{
-    ManagedDestinations, RecordedJar, disabled_path, occupant, recorded_jar, recording_side,
-    require_one_entry_per_project, settle_recorded_paths,
+    ManagedDestinations, RecordedJar, disabled_path, occupant, occupied, recorded_jar,
+    recording_side, require_one_entry_per_project, settle_recorded_paths,
 };
 use crate::recipe::{PackFileRecipe, PackRecipe, PackSide, ProviderFileIdentity};
 use crate::store::SourceStore;
@@ -466,7 +466,7 @@ async fn action_for(
             if let Some(path) = occupant(&destination)
                 && !freed.contains(&file.logical_path)
             {
-                return Err(PackError::DestinationOccupied { path });
+                return Err(occupied(recipe, &file.logical_path, path));
             }
             Ok(Action::Replace(Box::new(entry)))
         }
@@ -475,9 +475,9 @@ async fn action_for(
             if let Some(path) = occupant(&destination)
                 && !freed.contains(&file.logical_path)
             {
-                // A jar Ephervex did not put there. Almost always the local
-                // build the instance exists to test.
-                return Err(PackError::DestinationOccupied { path });
+                // A jar Ephervex did not put there, almost always the local
+                // build the instance exists to test, or another recorded mod.
+                return Err(occupied(recipe, &file.logical_path, path));
             }
             Ok(Action::Install)
         }

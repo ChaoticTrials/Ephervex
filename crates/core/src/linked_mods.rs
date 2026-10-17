@@ -929,7 +929,11 @@ impl App {
             if entry.origin.is_pack_owned() && !opted_in {
                 return Some(blocked(&record, root, LinkedTargetBlock::PackOwned));
             }
-            if entry.origin.is_dependency() {
+            // Only a dependency the server has can be something another of its
+            // mods needs. A record the server does not take has no jar there.
+            if entry.origin.is_dependency()
+                && entry.is_installed_on(PackSide::Server, &OptionalSelection::none())
+            {
                 return Some(blocked(&record, root, LinkedTargetBlock::ServerDependency));
             }
         }
@@ -990,14 +994,14 @@ impl App {
             return blocked(record, root, incompatibility(&reasons, release));
         }
 
-        let installed = crate::mods::installed_projects_of(Some(&recipe), root.provider);
         let request = ModInstallRequest::new(root.project_id.clone())
             .from_provider(root.provider)
             .at_version(root.version_id.clone().unwrap_or_default());
         let resolved = match self
-            .resolve_against(
+            .resolve_for_recipe(
                 target,
-                &installed,
+                Some(&recipe),
+                PackSide::Server,
                 &request,
                 InstalledPolicy::Replace,
                 reporter,
@@ -3319,6 +3323,38 @@ Details:\n\
         ] {
             assert!(!default_selection(&state, SideRequirement::Required));
         }
+    }
+
+    #[tokio::test]
+    async fn a_dependency_a_linked_server_records_only_for_its_client_is_not_blocked_as_needed_there()
+     {
+        let world = world().await;
+        world
+            .app
+            .install_mods(
+                world.client,
+                &ModInstallRequest::new("NEEDSUNK"),
+                &silent(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("installs on the client");
+        let server = world.link_server("Linked Server", MINECRAFT);
+        let library = world
+            .server_recipe(server)
+            .managed_project(ModProvider::Modrinth, "UNKPROJ")
+            .cloned()
+            .expect("copied from the client");
+        assert_eq!(library.origin, ModOrigin::RequiredDependency);
+        assert!(!library.is_installed_on(PackSide::Server, &OptionalSelection::none()));
+
+        let plan = plan(&world, &pinned("UNKPROJ", "UNKV1")).await;
+
+        assert_eq!(
+            target(&plan, server).state,
+            LinkedTargetState::WillInstall,
+            "nothing on the server needs a mod it does not have"
+        );
     }
 
     #[test]

@@ -27,8 +27,12 @@ verification, repair, and dependency graph ignore a file that is in `mods/`.
 
 **A server is its own install target.** Searching, planning, and installing take
 a host that is either a client or a server. For a server the target is the
-server's own Minecraft version and loader, the installed set is the server's own
-recipe, and both are read from that server alone. A linked client's recipe,
+server's own Minecraft version and loader, the installed set is what the
+server's own recipe installs on the server, and both are read from that server
+alone. A linked server's recipe starts as a copy of its client's, so an entry
+it records only for the client has no jar on the server: a plan installs it
+there rather than counting it as present, and a confirmation the server never
+gave is still asked for. A linked client's recipe,
 `mods/`, and records are never read or written. A server with no recipe gets one
 describing what it already is, the same as a hand-made client.
 

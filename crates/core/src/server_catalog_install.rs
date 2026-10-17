@@ -800,3 +800,357 @@ async fn a_server_version_change_that_adds_an_undeclared_mod_is_refused_until_it
         ["laterunk-LATERUNKV2.jar", "unkproj-UNKV1.jar"]
     );
 }
+
+/// Installs a mod on the linked client.
+async fn install_on_client(world: &World, request: &ModInstallRequest) {
+    world
+        .app
+        .install_mods(
+            InstalledHost::Instance(world.client),
+            request,
+            &silent(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("installs on the client");
+}
+
+#[tokio::test]
+async fn a_dependency_a_linked_server_records_only_for_its_client_is_installed_on_the_server() {
+    let world = world().await;
+    install_on_client(&world, &ModInstallRequest::new("CLIENTLIB")).await;
+    let server = world.link_server("Linked Server", MINECRAFT);
+    let recipe = world.server_recipe(server);
+    assert!(
+        !recipe
+            .managed_project(ModProvider::Modrinth, "CLIENTLIB")
+            .expect("copied from the client")
+            .is_installed_on(PackSide::Server, &OptionalSelection::none())
+    );
+    let request = ModInstallRequest::new("ROOTPROJ").at_version("ROOTV1");
+
+    let planned = plan(&world, server, &request).await.expect("plans");
+    assert!(
+        planned.already_installed.is_empty(),
+        "a record the server does not take puts no jar on it: {:?}",
+        planned.already_installed
+    );
+    assert!(
+        planned
+            .to_install()
+            .iter()
+            .any(|planned| planned.version.project_id == "CLIENTLIB")
+    );
+
+    install(&world, server, &request).await.expect("installs");
+    assert_eq!(
+        world.server_jars(server),
+        ["clientlib-CLIENTLIBV1.jar", "rootproj-ROOTV1.jar"]
+    );
+    assert!(installed_on_server(
+        &world.server_recipe(server),
+        "CLIENTLIB"
+    ));
+}
+
+#[tokio::test]
+async fn a_linked_server_version_change_needing_a_mod_only_its_client_has_is_refused_until_installed()
+ {
+    let world = world().await;
+    install_on_client(&world, &ModInstallRequest::new("UNKPROJ")).await;
+    let server = world.link_server("Linked Server", MINECRAFT);
+    install(
+        &world,
+        server,
+        &ModInstallRequest::new("LATERUNK").at_version("LATERUNKV1"),
+    )
+    .await
+    .expect("installs");
+    let target = std::path::Path::new("mods/laterunk-LATERUNKV1.jar");
+    let to_v2 = crate::ModVersionChoice::Exact("LATERUNKV2".to_owned());
+
+    let refused = world
+        .app
+        .change_managed_mod_version(
+            host(server),
+            target,
+            &to_v2,
+            &silent(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("the server does not have the client's copy");
+    assert!(
+        matches!(&refused, CoreError::ModChangeServerSupportUnconfirmed { projects } if projects == &["Undeclared Mod"]),
+        "{refused:?}"
+    );
+    assert_eq!(world.server_jars(server), ["laterunk-LATERUNKV1.jar"]);
+
+    install(
+        &world,
+        server,
+        &ModInstallRequest::new("UNKPROJ").confirming_server_support(vec!["UNKPROJ".to_owned()]),
+    )
+    .await
+    .expect("installs once confirmed");
+    world
+        .app
+        .change_managed_mod_version(
+            host(server),
+            target,
+            &to_v2,
+            &silent(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("changes once the mod is on the server");
+    assert_eq!(
+        world.server_jars(server),
+        ["laterunk-LATERUNKV2.jar", "unkproj-UNKV1.jar"]
+    );
+}
+
+/// The CurseForge ids a rewritten entry is given.
+const OTHER_PROJECT: &str = "238222";
+const OTHER_FILE: &str = "5000001";
+
+/// Rewrites a host's Modrinth entry for `project` as one installed from
+/// CurseForge, as though the same jar had come from there.
+///
+/// `file_name` moves the jar and its record to another name, and `bytes`
+/// replaces the recorded digests, so the record no longer describes the
+/// Modrinth release's file.
+fn as_installed_from_curseforge(
+    game_dir: &std::path::Path,
+    store: &SourceStore,
+    project: &str,
+    file_name: Option<&str>,
+    bytes: Option<&[u8]>,
+) {
+    let mut recipe = store.read_recipe().expect("recipe");
+    let entry = recipe
+        .files
+        .iter_mut()
+        .find(|file| {
+            file.identity
+                .as_ref()
+                .and_then(|identity| identity.project_id.as_deref())
+                == Some(project)
+        })
+        .expect("recorded");
+    entry.identity = Some(ephervex_pack::ProviderFileIdentity {
+        provider: Some(ModProvider::CurseForge),
+        project_id: Some(OTHER_PROJECT.to_owned()),
+        version_id: Some(OTHER_FILE.to_owned()),
+        file_id: Some(OTHER_FILE.to_owned()),
+    });
+    entry.downloads.clear();
+    entry.relations = Some(Vec::new());
+    if let Some(name) = file_name {
+        let renamed = PathBuf::from("mods").join(name);
+        std::fs::rename(game_dir.join(&entry.logical_path), game_dir.join(&renamed))
+            .expect("rename");
+        entry.logical_path = renamed;
+    }
+    if let Some(bytes) = bytes {
+        use sha1::Digest as _;
+        let digest = hex::encode(sha1::Sha1::digest(bytes));
+        entry.hashes = vec![
+            ephervex_model::Hash::new(ephervex_model::HashAlgorithm::Sha1, &digest)
+                .expect("a SHA-1"),
+        ];
+    }
+    store.write_recipe(&recipe).expect("write");
+}
+
+fn server_store(world: &World, server: ServerId) -> SourceStore {
+    SourceStore::new(ephervex_storage::metadata::source_dir(
+        &world.server_root(server),
+    ))
+}
+
+fn server_game_dir(world: &World, server: ServerId) -> PathBuf {
+    ephervex_storage::metadata::server_game_dir(&world.server_root(server))
+}
+
+#[tokio::test]
+async fn a_dependency_installed_from_the_other_catalog_as_the_same_file_is_reused() {
+    let world = world().await;
+    let server = plain_server(&world);
+    install(&world, server, &ModInstallRequest::new("LIBPROJ"))
+        .await
+        .expect("installs the library");
+    as_installed_from_curseforge(
+        &server_game_dir(&world, server),
+        &server_store(&world, server),
+        "LIBPROJ",
+        None,
+        None,
+    );
+
+    let installed = install(&world, server, &ModInstallRequest::new("SECONDPROJ"))
+        .await
+        .expect("the library that is there is the one required");
+
+    assert!(
+        installed
+            .plan
+            .already_installed
+            .iter()
+            .any(|present| present.project_id == "LIBPROJ")
+    );
+    assert_eq!(
+        installed.installation.already_present,
+        [PathBuf::from("mods/libproj-LIBV1.jar")]
+    );
+    assert_eq!(
+        world.server_jars(server),
+        ["libproj-LIBV1.jar", "secondproj-SECONDV1.jar"]
+    );
+    let recipe = world.server_recipe(server);
+    assert!(
+        recipe
+            .managed_project(ModProvider::Modrinth, "LIBPROJ")
+            .is_none(),
+        "the library stays recorded as the other catalog's"
+    );
+    assert!(
+        recipe
+            .managed_project(ModProvider::CurseForge, OTHER_PROJECT)
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn the_same_file_from_the_other_catalog_under_another_name_is_not_installed_twice() {
+    let world = world().await;
+    let server = plain_server(&world);
+    install(&world, server, &ModInstallRequest::new("LIBPROJ"))
+        .await
+        .expect("installs the library");
+    as_installed_from_curseforge(
+        &server_game_dir(&world, server),
+        &server_store(&world, server),
+        "LIBPROJ",
+        Some("LibProj-curseforge.jar"),
+        None,
+    );
+
+    install(&world, server, &ModInstallRequest::new("SECONDPROJ"))
+        .await
+        .expect("installs");
+
+    assert_eq!(
+        world.server_jars(server),
+        ["LibProj-curseforge.jar", "secondproj-SECONDV1.jar"]
+    );
+}
+
+#[tokio::test]
+async fn a_client_reuses_the_same_file_installed_from_the_other_catalog() {
+    let world = world().await;
+    install_on_client(&world, &ModInstallRequest::new("LIBPROJ")).await;
+    let root = world.app.client(world.client).expect("client").root;
+    as_installed_from_curseforge(
+        &ephervex_storage::metadata::client_game_dir(&root),
+        &SourceStore::new(ephervex_storage::metadata::source_dir(&root)),
+        "LIBPROJ",
+        None,
+        None,
+    );
+
+    install_on_client(&world, &ModInstallRequest::new("SECONDPROJ")).await;
+
+    assert_eq!(
+        world.client_jars(),
+        ["libproj-LIBV1.jar", "secondproj-SECONDV1.jar"]
+    );
+}
+
+#[tokio::test]
+async fn a_different_file_the_other_catalog_installed_in_the_way_is_named_as_its_mod() {
+    let world = world().await;
+    let server = plain_server(&world);
+    install(&world, server, &ModInstallRequest::new("LIBPROJ"))
+        .await
+        .expect("installs the library");
+    as_installed_from_curseforge(
+        &server_game_dir(&world, server),
+        &server_store(&world, server),
+        "LIBPROJ",
+        None,
+        Some(b"another build"),
+    );
+
+    let refused = install(&world, server, &ModInstallRequest::new("SECONDPROJ"))
+        .await
+        .expect_err("a different file is in the way");
+
+    assert!(
+        matches!(
+            &refused,
+            CoreError::Pack(ephervex_pack::PackError::DestinationRecorded {
+                provider: Some(ModProvider::CurseForge),
+                ..
+            })
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(world.server_jars(server), ["libproj-LIBV1.jar"]);
+}
+
+#[tokio::test]
+async fn a_dependency_another_catalogs_mod_may_need_is_kept_when_its_dependent_goes() {
+    let world = world().await;
+    let server = plain_server(&world);
+    install(&world, server, &ModInstallRequest::new("SECONDPROJ"))
+        .await
+        .expect("installs");
+    install(&world, server, &ModInstallRequest::new("MOVEPROJ"))
+        .await
+        .expect("installs");
+    // A mod from the other catalog that needs a project its catalog has no
+    // entry for here: the library above may be that project's file.
+    let store = server_store(&world, server);
+    let mut recipe = store.read_recipe().expect("recipe");
+    let dependent = recipe
+        .files
+        .iter_mut()
+        .find(|file| {
+            file.identity
+                .as_ref()
+                .and_then(|identity| identity.project_id.as_deref())
+                == Some("MOVEPROJ")
+        })
+        .expect("recorded");
+    dependent.identity = Some(ephervex_pack::ProviderFileIdentity {
+        provider: Some(ModProvider::CurseForge),
+        project_id: Some("410811".to_owned()),
+        version_id: Some("5000002".to_owned()),
+        file_id: Some("5000002".to_owned()),
+    });
+    dependent.relations = Some(vec![ephervex_pack::RecipeRelation {
+        kind: ephervex_model::ModRelationKind::Required,
+        target: ephervex_pack::RelationTarget::Project {
+            project_id: OTHER_PROJECT.to_owned(),
+            version_id: None,
+        },
+    }]);
+    store.write_recipe(&recipe).expect("write");
+    let target = PathBuf::from("mods/secondproj-SECONDV1.jar");
+
+    let plan = world
+        .app
+        .plan_mod_removal(host(server), &target, &silent(), &CancellationToken::new())
+        .await
+        .expect("plans");
+
+    assert_eq!(
+        plan.removes
+            .iter()
+            .map(|file| file.project_id.as_deref().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        ["SECONDPROJ"]
+    );
+    assert!(plan.orphans_unprovable);
+}

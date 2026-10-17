@@ -1083,8 +1083,9 @@ incompatible results widens the query instead: client-only mods are returned and
 marked, and are not installable on a server.
 
 A server is an install target in its own right (ADR 0045). Its target is the
-server's own Minecraft version and loader, its installed set is its own recipe,
-and nothing about a linked client is read or written, so the flow works with no
+server's own Minecraft version and loader, its installed set is what its own
+recipe installs on the server, and nothing about a linked client is read or
+written, so the flow works with no
 client at all and a linked client's files and records are left exactly as they
 were. Installing onto a server needs a confirmation naming every mod, the root or
 a dependency, whose server support the catalog never stated, and records it as an
@@ -1106,6 +1107,11 @@ different versions is a conflict rather than an arbitration, and a required
 dependency naming only a file fails rather than being skipped or given an
 invented project identity. The instance's Minecraft version and loader are
 inputs throughout; no graph is satisfied by changing them.
+
+A planned file the host already has from the other catalog, matched by the
+SHA-1 both publish, counts as already installed and is not written again
+(ADR 0022). A recorded mod that stands where a different file would go is
+refused by name, as the other mod it is.
 
 Mods installed through a provider are entries in the same recipe (ADR 0013), so
 a server built later contains them. No automatic operation overwrites or deletes

@@ -537,6 +537,13 @@ pub struct ResolveRequest<'a> {
     /// What the instance already has, so an install can be idempotent rather
     /// than a duplicate.
     pub installed: &'a [InstalledProject],
+    /// Projects the desired state records only for the other side of the game.
+    ///
+    /// The recipe still holds its one entry for each, so moving one to another
+    /// release is a replacement and an unpinned one keeps its release. None of
+    /// them is present, though: a planned one is installed rather than reused,
+    /// and nothing conflicts with it.
+    pub recorded_elsewhere: &'a [InstalledProject],
     /// What to do about an installed project this resolution moves.
     pub installed_policy: InstalledPolicy,
     pub reporter: &'a OperationReporter,
@@ -995,12 +1002,7 @@ impl<'a> Resolver<'a> {
         {
             return Ok(None);
         }
-        let Some(installed) = self
-            .request
-            .installed
-            .iter()
-            .find(|entry| entry.project_id == project_id)
-        else {
+        let Some((installed, _)) = self.recorded(project_id) else {
             return Ok(None);
         };
         let release = match versions
@@ -1618,6 +1620,17 @@ impl<'a> Resolver<'a> {
         }
     }
 
+    /// The desired state's entry for a project, and whether it is on this
+    /// instance's side.
+    fn recorded(&self, project_id: &str) -> Option<(&InstalledProject, bool)> {
+        let find = |entries: &'a [InstalledProject]| {
+            entries.iter().find(|entry| entry.project_id == project_id)
+        };
+        find(self.request.installed)
+            .map(|entry| (entry, true))
+            .or_else(|| find(self.request.recorded_elsewhere).map(|entry| (entry, false)))
+    }
+
     /// Splits the resolved set into "already there" and "would be installed",
     /// refusing a version change.
     fn already_installed(
@@ -1626,16 +1639,15 @@ impl<'a> Resolver<'a> {
         let mut present = Vec::new();
         let mut replacements = Vec::new();
         for (project_id, resolution) in &self.resolved {
-            let Some(installed) = self
-                .request
-                .installed
-                .iter()
-                .find(|entry| &entry.project_id == project_id)
-            else {
+            let Some((installed, here)) = self.recorded(project_id) else {
                 continue;
             };
             if installed.version_id == resolution.version.id {
-                present.push(installed.clone());
+                // Recorded only for the other side, the release is the right
+                // one but its jar is not here, so it is installed.
+                if here {
+                    present.push(installed.clone());
+                }
                 continue;
             }
             match self.request.installed_policy {
@@ -2006,12 +2018,23 @@ mod tests {
         installed: &[InstalledProject],
         installed_policy: InstalledPolicy,
     ) -> ModPlatformResult<ModInstallPlan> {
+        plan_recording(catalog, selection, installed, &[], installed_policy).await
+    }
+
+    async fn plan_recording(
+        catalog: &Catalog,
+        selection: InstallSelection,
+        installed: &[InstalledProject],
+        recorded_elsewhere: &[InstalledProject],
+        installed_policy: InstalledPolicy,
+    ) -> ModPlatformResult<ModInstallPlan> {
         resolve(ResolveRequest {
             provider: catalog,
             target: &target(),
             loader_name: "neoforge",
             selection: &selection,
             installed,
+            recorded_elsewhere,
             installed_policy,
             reporter: &OperationReporter::silent("resolving-mods"),
             cancel: &CancellationToken::new(),
@@ -2491,6 +2514,7 @@ mod tests {
             loader_name: "neoforge",
             selection: &InstallSelection::new("ROOT"),
             installed: &[],
+            recorded_elsewhere: &[],
             installed_policy: InstalledPolicy::Preserve,
             reporter: &OperationReporter::silent("resolving-mods"),
             cancel: &token,
@@ -2713,6 +2737,7 @@ mod tests {
             loader_name: "neoforge",
             selection: &InstallSelection::new("ROOT"),
             installed: &[],
+            recorded_elsewhere: &[],
             installed_policy: InstalledPolicy::Preserve,
             reporter: &OperationReporter::silent("resolving-mods"),
             cancel: &token,
@@ -5085,6 +5110,100 @@ mod tests {
                 ],
             )
             .with("LIBPROJ", vec![at(compatible("LIBV1", "LIBPROJ"), 0)])
+    }
+
+    #[tokio::test]
+    async fn a_dependency_recorded_only_for_the_other_side_is_installed_rather_than_reused() {
+        let plan = plan_recording(
+            &upgradeable(),
+            InstallSelection::new("ROOTPROJ").at_version("ROOTV2"),
+            &[],
+            &[installed("LIBPROJ", "LIBV1")],
+            InstalledPolicy::Preserve,
+        )
+        .await
+        .expect("a plan");
+
+        assert!(plan.already_installed.is_empty());
+        assert_eq!(
+            ids(plan.to_install()),
+            vec!["ROOTPROJ".to_owned(), "LIBPROJ".to_owned()],
+            "the other side's record puts no jar on this one"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_release_change_of_a_mod_recorded_for_the_other_side_is_still_refused_by_an_install()
+    {
+        let error = plan_recording(
+            &upgradeable(),
+            InstallSelection::new("ROOTPROJ").at_version("ROOTV2"),
+            &[],
+            &[installed("ROOTPROJ", "ROOTV1")],
+            InstalledPolicy::Preserve,
+        )
+        .await
+        .expect_err("the recipe holds one entry per project");
+        assert!(matches!(
+            error,
+            ModPlatformError::ProjectAlreadyInstalled { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_unpinned_dependency_recorded_for_the_other_side_keeps_its_release() {
+        let catalog = upgradeable().with(
+            "LIBPROJ",
+            vec![
+                at(compatible("LIBV1", "LIBPROJ"), 0),
+                at(compatible("LIBV2", "LIBPROJ"), 30),
+            ],
+        );
+        let plan = plan_recording(
+            &catalog,
+            InstallSelection::new("ROOTPROJ").at_version("ROOTV2"),
+            &[installed("ROOTPROJ", "ROOTV1")],
+            &[installed("LIBPROJ", "LIBV1")],
+            InstalledPolicy::Replace,
+        )
+        .await
+        .expect("a plan");
+
+        let library = plan
+            .dependencies
+            .iter()
+            .find(|planned| planned.version.project_id == "LIBPROJ")
+            .expect("planned");
+        assert_eq!(library.version.id, "LIBV1");
+        assert!(
+            plan.to_install()
+                .iter()
+                .any(|planned| planned.version.project_id == "LIBPROJ"),
+            "kept at its release, and still written on this side"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_mod_recorded_for_the_other_side_conflicts_with_nothing_here() {
+        let catalog = Catalog::default().with(
+            "ROOT",
+            vec![needs(
+                compatible("v1", "ROOT"),
+                ModRelationKind::Incompatible,
+                "ELSEWHERE",
+            )],
+        );
+
+        let plan = plan_recording(
+            &catalog,
+            InstallSelection::new("ROOT"),
+            &[],
+            &[installed("ELSEWHERE", "whatever")],
+            InstalledPolicy::Preserve,
+        )
+        .await
+        .expect("a mod this side does not have is not in the way");
+        assert_eq!(plan.root.version.id, "v1");
     }
 
     #[tokio::test]

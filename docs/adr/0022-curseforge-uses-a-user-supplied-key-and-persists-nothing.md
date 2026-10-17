@@ -114,7 +114,13 @@ with the catalog it was read from, so the provider travels with every search,
 review, install, dependency question, and version change rather than being an
 application-wide setting. An instance can hold mods from both catalogs, and each
 is asked only about its own: a Modrinth install never sees a CurseForge project
-as already present, and a dependency graph never crosses catalogs.
+as already present by its id, and a dependency graph never crosses catalogs.
+Bytes are the one exception. A planned file whose published SHA-1 matches a
+file the host already has from the other catalog counts as present, so the
+jar is not written a second time and stays recorded under the catalog that
+installed it. A hand-placed jar is never matched this way. While a mod requires
+a project its own catalog has no entry for on the host, the other catalog's
+dependencies are not proven unnecessary, because one of them may be that jar.
 
 **Only Minecraft's Mods class is browsable.** A search carries the Mods class id
 discovered from `GET /v1/categories` for this operation, never a hard-coded

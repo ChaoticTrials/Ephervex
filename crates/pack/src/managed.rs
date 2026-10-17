@@ -33,7 +33,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use ephervex_download::stored_file_matches;
-use ephervex_model::ModProvider;
+use ephervex_model::{ModOrigin, ModProvider};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
 
@@ -439,9 +439,31 @@ async fn disposition_for(
     // is not ours to overwrite, and it is not ours to claim.
     let destination = destinations.writable(&file.logical_path)?;
     if let Some(path) = occupant(&destination) {
-        return Err(PackError::DestinationOccupied { path });
+        return Err(occupied(recipe, &file.logical_path, path));
     }
     Ok(Disposition::Install)
+}
+
+/// The refusal for a destination something already stands at.
+///
+/// A jar the recipe records as another mod is named as one. Calling it a file
+/// Ephervex did not install would send the user looking for something they
+/// never placed. A hand-placed jar's record does not make it Ephervex's.
+pub(crate) fn occupied(recipe: &PackRecipe, logical: &Path, path: PathBuf) -> PackError {
+    match recipe
+        .files
+        .iter()
+        .find(|entry| entry.logical_path == logical && entry.origin != ModOrigin::HandPlaced)
+    {
+        Some(entry) => PackError::DestinationRecorded {
+            path,
+            provider: entry
+                .identity
+                .as_ref()
+                .and_then(|identity| identity.provider),
+        },
+        None => PackError::DestinationOccupied { path },
+    }
 }
 
 /// The recipe entry a request for `file` refers to: the same project at the
