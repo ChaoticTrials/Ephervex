@@ -207,7 +207,7 @@ features show one tab or a short note.
       Docusaurus reads them.
 - [x] CLI-only features that need a mention on their own pages: `server
       recover`, `java select`, `instance recipe`, `url-handler`, `doctor`,
-      `completions`.
+      `completions`, `server runtime` memory and JVM arguments.
 
 ## 7. Known stale sources
 
@@ -225,7 +225,6 @@ These change screens that exist today. Write the surrounding pages so they are
 easy to update, and capture screenshots late.
 
 - #9 instance search, filters, sort and favorites
-- #11 Java runtime visibility and compatibility checks
 - #12 server status and configuration shortcuts
 - #13 navigation and active-state polish
 - #378 sandboxed branding assets and theme packages, #379 the Haunted Pumpkin

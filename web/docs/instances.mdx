@@ -78,8 +78,10 @@ ephervex instance create "Mod Test" --minecraft VERSION --loader neoforge --load
 ## Find and launch an instance
 
 You need an [account](./accounts.mdx) before launching. The first launch
-downloads missing game files. Ephervex selects a compatible Java runtime from
-your settings; it can report that a runtime is needed.
+downloads missing game files. Ephervex picks a compatible Java runtime unless
+one is [pinned](#set-java-and-memory-for-one-instance). The workspace header
+shows that runtime and its status. A launch Ephervex refuses names the runtime
+it tried, how it was chosen, and the Java the instance expects.
 
 <Tabs groupId="interface" queryString="interface">
 <TabItem value="gui" label="Desktop" default>
@@ -149,22 +151,46 @@ specific servers.
 
 An instance normally follows the global Java, memory, and JVM settings. Pin
 values here only when this instance needs different ones. Memory values are
-in MiB.
+in MiB. Stop the instance before changing these settings.
+
+The runtime's status is **Healthy** when Ephervex picks a runtime that fits or
+will download one at launch, **Valid, customized** when a pinned runtime fits,
+**Problem** when it cannot run this instance, or **Not checked** when the check
+could not run. The expected Java comes from the Minecraft release and loader,
+such as `Java 21` or `Java 8, update 320 or older (Forge)`.
 
 <Tabs groupId="interface" queryString="interface">
 <TabItem value="gui" label="Desktop" default>
 
-Open the instance workspace, then **Settings**. Under **Java and memory**,
-enter the values to override and select **Save Runtime Settings**. Empty
-fields follow the global settings. **Follow Global Settings** appears while any
-value is overridden and removes all instance-specific values.
+Open the instance workspace, then **Settings**, or select the Java pill in the
+workspace header. The **Java runtime** card shows the runtime in use, its
+path, how it is chosen, the Java the instance expects, and the status.
 
-<ThemeScreenshot state="client-settings" alt="Instance Settings with Java path, memory, and JVM argument overrides" />
+Under **Available runtimes**, select **Use** on a runtime, or on **Automatic**
+to let Ephervex choose. When Settings > Java names a preferred executable, that
+entry is **Launcher preference** instead. Runtimes that do not fit are
+disabled and say why. To use a runtime Ephervex has not found, enter its path
+under **Another Java executable**, select **Check**, then **Use**. Each choice
+opens a review of the current and new runtime; nothing changes until you
+select **Apply**.
+
+If no installed runtime fits, **Install Java N** installs the Temurin build the
+instance expects, even when automatic downloads are off. It does not change the
+instance's Java setting. If the instance would not use the new runtime on its
+own, a review offers to pin it.
+
+Under **Java and memory**, enter the memory or JVM argument values to override
+and select **Save Runtime Settings**. Empty fields follow the global settings.
+**Follow Global Settings** removes these overrides; it does not change the Java
+runtime choice.
+
+<ThemeScreenshot state="client-settings" alt="Instance Settings with memory and JVM argument overrides" />
 
 </TabItem>
 <TabItem value="cli" label="CLI">
 
-View the current overrides, set the ones you need, or clear them:
+View the current overrides and Java status, set the ones you need, or clear
+them:
 
 ```bash
 ephervex instance runtime INSTANCE_ID
@@ -172,9 +198,21 @@ ephervex instance runtime INSTANCE_ID --java /path/to/java --min-memory 1024 --m
 ephervex instance runtime INSTANCE_ID --clear
 ```
 
-Each option changes only its own override and keeps the other pinned values.
-If you specify `--jvm-arg ARG`, that option replaces the pinned JVM argument
-list; repeat it for every argument you want in the list.
+Without options, `runtime` also prints the runtime the instance would use, the
+Java it expects, the status, and any problem. Each option changes only its own
+override and keeps the other pinned values. If you specify `--jvm-arg ARG`,
+that option replaces the pinned JVM argument list; repeat it for every argument
+you want in the list. `--clear` removes every override, including the Java
+path.
+
+Install the Java the instance expects without pinning it:
+
+```bash
+ephervex java install --instance INSTANCE_ID
+```
+
+If the instance would not use the new runtime on its own, the command prints
+the `instance runtime` command that pins it.
 
 </TabItem>
 </Tabs>

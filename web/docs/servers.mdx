@@ -159,6 +159,34 @@ set`.
 </TabItem>
 </Tabs>
 
+## Choose the server's Java
+
+A server picks its Java the same way an instance does; see
+[Set Java and memory for one instance](./instances.mdx#set-java-and-memory-for-one-instance).
+Stop the server before changing its Java, memory, or JVM arguments.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Open the server's **Properties** tab. The **Java runtime** card works as it
+does in an instance's **Settings**. Server memory and JVM arguments can be set
+only from the CLI.
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+```bash
+ephervex server runtime SERVER_ID
+ephervex server runtime SERVER_ID --java /path/to/java --min-memory 2048 --max-memory 4096
+ephervex java install --server SERVER_ID
+```
+
+`server runtime` takes the same options as `instance runtime`, including
+repeated `--jvm-arg ARG` and `--clear`.
+
+</TabItem>
+</Tabs>
+
 ## Run the server and use its console
 
 <Tabs groupId="interface" queryString="interface">

@@ -9,8 +9,9 @@ import ThemeScreenshot from '@site/src/components/ThemeScreenshot';
 
 # Settings
 
-Open **Settings** to change Ephervex-wide behavior. A client instance's own
-Java and memory overrides live in its [workspace Settings](./instances.mdx#set-java-and-memory-for-one-instance).
+Open **Settings** to change Ephervex-wide behavior. An instance's own Java and
+memory overrides live in its [workspace Settings](./instances.mdx#set-java-and-memory-for-one-instance),
+a server's Java in its [Properties](./servers.mdx#choose-the-servers-java).
 Account management has its [own guide](./accounts.mdx). The sections below
 cover the remaining settings pages, including **About & Licenses**, and the
 CLI commands available for them.
@@ -103,9 +104,11 @@ its value for later. These commands do not change existing instances.
 
 Ephervex can detect installed Java runtimes and download a managed Temurin
 runtime when a compatible version is missing. **Preferred Java executable**
-overrides automatic selection for instances without their own runtime choice.
-The minimum and maximum memory values are defaults per client instance; an
-instance can [override them](./instances.mdx#set-java-and-memory-for-one-instance).
+applies to every instance and server without its own runtime choice; they show
+it as pinned by the launcher preference. The minimum and maximum memory values
+are defaults for every instance and server; each can
+[override them](./instances.mdx#set-java-and-memory-for-one-instance), a
+server only from the CLI.
 
 <Tabs groupId="interface" queryString="interface">
 <TabItem value="gui" label="Desktop" default>
@@ -114,10 +117,13 @@ Open **Settings > Java**. Set runtime detection, managed downloads, memory,
 and an optional preferred Java path, then select **Save Java Settings**.
 Memory values are in MiB, digits only, and must be greater than zero; the
 minimum cannot exceed the maximum, and Ephervex refuses to save other values.
-**Refresh Runtimes** rescans installed runtimes. The list shows each path,
-version, and origin; only runtimes Ephervex downloaded offer a remove action.
+**Refresh Runtimes** rescans installed runtimes. The list shows each
+runtime's version, vendor, architecture, path, and origin, and which instances,
+servers, or the launcher preference pin it. Only runtimes Ephervex downloaded
+offer a remove action. Removing one that is still pinned lists those settings
+first; afterwards Diagnostics reports a Java problem for each host that pins it.
 
-<ThemeScreenshot state="settings-java" alt="Java settings with detection, memory defaults, preferred runtime, and discovered runtimes" />
+<ThemeScreenshot state="settings-java" alt="Java settings with detection, memory defaults, and discovered runtimes with the settings that pin them" />
 
 </TabItem>
 <TabItem value="cli" label="CLI">
@@ -129,13 +135,17 @@ would select for a Minecraft release:
 ephervex java list
 ephervex java refresh
 ephervex java select 1.21.1
+ephervex java install 21
 ```
 
+`java list` also names the settings that pin each runtime.
 `ephervex java select 1.21.1 --instance INSTANCE_ID` also considers that
-instance's Java override. Add `--install` to download a managed runtime if no
-installed runtime is compatible. Without `--install`, `select` only reports
-the selection. Global detection, download, memory, and preferred path settings
-are edited in the desktop app.
+instance's Java override; use `--server SERVER_ID` for a server. Add
+`--install` to download a managed runtime if no installed runtime is
+compatible. Without `--install`, `select` only reports the selection.
+`java install --instance INSTANCE_ID` or `--server SERVER_ID` installs the
+Java that host expects instead of a named major. Global detection, download,
+memory, and preferred path settings are edited in the desktop app.
 
 </TabItem>
 </Tabs>
