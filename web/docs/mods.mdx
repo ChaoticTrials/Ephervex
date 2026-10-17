@@ -173,8 +173,8 @@ hand. Use the desktop mods list or inspect the folder to see those files.
 
 Disabling a mod leaves its JAR and record in place, but keeps the loader from
 loading it. While **Independent mod changes** is off, deleting a recorded mod's
-JAR puts it aside while retaining the record, so **Restore** or repair can
-fetch it again. A hand-placed JAR cannot
+JAR puts it aside: Ephervex keeps a copy and the record, so **Restore** brings
+it back without a download while that copy is intact. A hand-placed JAR cannot
 be restored by Ephervex after deletion.
 
 Dependencies matter: turning off a mod may also require turning off mods that
@@ -221,7 +221,9 @@ with `--with-dependents` for `disable` or `delete`, or
 `--with-dependencies` for `enable`, to apply the related changes. Use
 `--only-this` when you intentionally want to change only the named mod; this
 may leave other mods unable to load. `mod delete` keeps the recorded mod and
-does not permanently remove it from the instance's recipe.
+does not permanently remove it from the instance's recipe. Restore a
+put-aside mod from the desktop **Mods** list or **Diagnostics**; `mod repair`
+leaves it aside.
 
 </TabItem>
 </Tabs>
@@ -307,7 +309,8 @@ catalogs that responded, then exits with an error naming the ones that did not.
 
 Verification checks whether recorded files are present and match their saved
 checksums. It changes nothing and uses no network. A file with no recorded
-checksum is reported as unproven, rather than healthy or damaged. Repair
+checksum is reported as unproven, rather than healthy or damaged, and a mod
+you put aside is reported as put aside, not missing. Repair
 checks first, then replaces missing or damaged files it can download. It
 leaves sound files alone and cannot recreate files that have no recorded
 download address.
