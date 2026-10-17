@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+ephervex-core.workspace = true
 ephervex-gui = { path = "../../crates/gui" }
 ephervex-i18n.workspace = true
 hex.workspace = true

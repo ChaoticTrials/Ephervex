@@ -450,16 +450,21 @@ pub(crate) fn server_console(ui: &AppWindow) {
     );
 }
 
+/// What the CaveStone Server's file holds before its first start.
+const CAVESTONE_PROPERTIES: &[(&str, &str)] = &[
+    ("motd", "CaveStone reproduction server"),
+    ("max-players", "8"),
+    ("difficulty", "normal"),
+    ("gamemode", "survival"),
+    ("allow-flight", "false"),
+    ("pvp", "true"),
+    ("white-list", "false"),
+];
+
 /// The Properties surface of a stopped server with LAN access awaiting EULA consent.
 pub(crate) fn server_properties(ui: &AppWindow) {
     let view = HostView {
-        property_motd: "CaveStone reproduction server".into(),
-        property_max_players: "8".into(),
-        property_difficulty: "normal".into(),
-        property_gamemode: "survival".into(),
-        property_allow_flight: false,
-        property_pvp: true,
-        property_allowlist: false,
+        property_groups: super::server_properties::property_groups(CAVESTONE_PROPERTIES),
         property_online_mode: false,
         property_access: "LAN".into(),
         property_address: SharedString::default(),
@@ -525,11 +530,7 @@ pub(crate) fn create_server_linked(ui: &AppWindow) {
 /// The EULA review a server needs before its first start.
 pub(crate) fn server_eula_review(ui: &AppWindow) {
     let view = HostView {
-        property_motd: "CaveStone reproduction server".into(),
-        property_max_players: "8".into(),
-        property_difficulty: "normal".into(),
-        property_gamemode: "survival".into(),
-        property_pvp: true,
+        property_groups: super::server_properties::property_groups(CAVESTONE_PROPERTIES),
         property_access: "LAN".into(),
         property_port: "25565".into(),
         properties_revision: 1,

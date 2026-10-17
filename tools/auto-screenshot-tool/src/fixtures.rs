@@ -21,6 +21,7 @@ pub(crate) mod mods;
 pub(crate) mod notices;
 pub(crate) mod organization;
 pub(crate) mod recorded;
+pub(crate) mod server_properties;
 pub(crate) mod settings;
 
 /// A byte count the way the launcher prints sizes: KiB below a MiB, then MiB or GiB
