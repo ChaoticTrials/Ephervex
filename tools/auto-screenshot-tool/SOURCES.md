@@ -128,6 +128,7 @@ and refuses any file that does not match. They are not part of the repository.
   CaveStone Server shown running behind its install confirmation.
 - Independent mod changes turned on for the CaveStone Server, and its memory
   settings.
+- The hand-placed Puzzles Lib jar the Use an Installed Jar question names.
 - Snapshot restore and create dialogs reuse the recorded snapshots, and the
   suggested snapshot label is a placeholder in the launcher's own format.
 - Which instances are favorites, how they are grouped, and the filter set on

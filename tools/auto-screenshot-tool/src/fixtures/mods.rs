@@ -198,6 +198,33 @@ pub(crate) fn mod_missing_file(ui: &AppWindow) {
     });
 }
 
+/// The question asked when an install needs a dependency that a jar already
+/// in the mods folder provides: here a Puzzles Lib jar placed by hand.
+pub(crate) fn mod_stand_in(ui: &AppWindow) {
+    cavestone_workspace(ui, Surface::Mods, |_| {});
+    let path = "mods/PuzzlesLib-v8.1.25-1.20.1-Forge.jar";
+    let dependency = "Puzzles Lib";
+    ui.set_mod_stand_in_id("puzzles-lib".into());
+    ui.set_mod_stand_in_detail(
+        lookup_args(
+            "gui-mod-stand-in-detail",
+            [
+                ("path", Arg::from(path)),
+                ("dependency", Arg::from(dependency)),
+            ],
+        )
+        .into(),
+    );
+    ui.set_mod_stand_in_note(
+        lookup_args(
+            "gui-mod-stand-in-note",
+            [("dependency", Arg::from(dependency))],
+        )
+        .into(),
+    );
+    ui.set_modal("mod-stand-in".into());
+}
+
 /// The confirmation shown before turning off a mod other mods need.
 pub(crate) fn mod_impact(ui: &AppWindow) {
     mods_surface(ui);

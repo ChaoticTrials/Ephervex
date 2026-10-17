@@ -61,6 +61,7 @@ export const catalogGroups: CatalogGroup[] = [
       {state: 'mod-update-available', title: 'Mod with an update available'},
       {state: 'mod-missing-file', title: 'Mod with a missing file'},
       {state: 'mod-impact', title: 'What turning a mod off affects'},
+      {state: 'mod-stand-in', title: 'Using an installed JAR for a dependency'},
       {state: 'mod-install-plan', title: 'Install confirmation'},
       {state: 'server-mods', title: 'Server mods and catalog'},
       {state: 'server-mods-curseforge', title: 'Server catalog with client-only mods'},

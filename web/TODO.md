@@ -100,6 +100,7 @@ Mods:
 - [x] `mod-manager` (versions with Installed and Newest pills, Requires and
       Required by)
 - [x] `mod-impact` (breaks, needs, cascade)
+- [x] `mod-stand-in` (an installed JAR standing in for a dependency)
 - [x] `mod-install-plan` (with linked servers)
 - [x] `mod-isolation-setup`, `mod-isolation-round`
 - [x] `server-mods`, `server-mods-curseforge`, `server-mod-install-confirm`

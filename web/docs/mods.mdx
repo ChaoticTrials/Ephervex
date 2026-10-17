@@ -141,6 +141,41 @@ mod with unstated server support and names it; repeat the command with
 </TabItem>
 </Tabs>
 
+## Use an installed JAR for a dependency
+
+A JAR already in the mods folder, such as your own build of a library or its
+release from the other catalog, can stand in for a dependency that provides
+the same mod. Ephervex still downloads and checks the dependency first. The
+JAR stands in only if it declares every mod id the dependency does, and never
+for the mod you chose. A dependency it stands in for is not installed or
+recorded.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+When an install, update, or version change needs a dependency an installed JAR
+provides, Ephervex asks **Use an Installed Jar?** Select **Use Installed Jar**
+to continue without that dependency, or **Cancel** to change nothing. For
+linked servers, it asks again for each selected server with such a JAR.
+
+<ThemeScreenshot state="mod-stand-in" alt="Use an Installed Jar? dialog naming a hand-placed Puzzles Lib JAR that already provides a dependency" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+`mod install` refuses such an install and names the option to repeat it with:
+
+```bash
+ephervex mod install --instance INSTANCE_ID PROJECT_ID --use-installed DEPENDENCY_ID
+```
+
+Repeat `--use-installed` for each dependency. The result names each JAR used
+in place of a dependency. On a server, such a dependency needs no
+`--accept-unknown-server-support`.
+
+</TabItem>
+</Tabs>
+
 ## Add a JAR yourself
 
 A JAR placed by hand has no verified provider release for Ephervex to restore.

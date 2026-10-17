@@ -557,6 +557,13 @@ pub(crate) const STATES: &[State] = &[
         interaction: None,
     },
     State {
+        name: "mod-stand-in",
+        show: fixtures::mods::mod_stand_in,
+        regions: MODS_FULL_WINDOW_REGIONS,
+        same_layout_at_both_sizes: false,
+        interaction: None,
+    },
+    State {
         name: "mod-impact",
         show: fixtures::mods::mod_impact,
         regions: MODS_FULL_WINDOW_REGIONS,
