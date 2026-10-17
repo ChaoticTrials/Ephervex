@@ -147,7 +147,21 @@ async fn install_letting_stand_in(
     additions: &[PackFileRecipe],
     may_stand_in: &[&str],
 ) -> Result<ephervex_pack::ManagedModInstallation, PackError> {
+    install_with_stand_ins(instance, recipe, additions, may_stand_in, &[]).await
+}
+
+/// Installs `additions`, letting a jar already in `mods/` stand in for the
+/// ones named in `may_stand_in`, and for those in `must_stand_in` only that
+/// way.
+async fn install_with_stand_ins(
+    instance: &Instance,
+    recipe: &mut PackRecipe,
+    additions: &[PackFileRecipe],
+    may_stand_in: &[&str],
+    must_stand_in: &[&str],
+) -> Result<ephervex_pack::ManagedModInstallation, PackError> {
     let may_stand_in: BTreeSet<PathBuf> = may_stand_in.iter().map(PathBuf::from).collect();
+    let must_stand_in: BTreeSet<PathBuf> = must_stand_in.iter().map(PathBuf::from).collect();
     install_managed(ManagedModInstall {
         recipe,
         additions,
@@ -155,6 +169,7 @@ async fn install_letting_stand_in(
         game_dir: &instance.game_dir,
         store: &instance.store,
         installed_may_stand_in: &may_stand_in,
+        installed_must_stand_in: &must_stand_in,
         fetch: ArtifactFetch {
             manager: &manager(),
             cache: &instance.cache,
@@ -1608,4 +1623,56 @@ async fn a_jar_providing_only_some_of_a_dependencys_mod_ids_does_not_stand_in_fo
         "{error:?}"
     );
     assert_eq!(mod_jars(&instance), ["libx-dev.jar"]);
+}
+
+#[tokio::test]
+async fn a_dependency_that_may_only_be_stood_in_for_is_left_out_when_a_jar_does() {
+    let server = MockServer::start().await;
+    let (instance, requested) = a_mod_needing_a_library_the_developer_built(&server).await;
+    let mut recipe = recipe();
+
+    let report = install_with_stand_ins(
+        &instance,
+        &mut recipe,
+        &requested,
+        &["mods/libx-7.0.4.jar"],
+        &["mods/libx-7.0.4.jar"],
+    )
+    .await
+    .expect("the developer's build stands in for the library");
+
+    assert_eq!(report.stood_in.len(), 1, "{report:?}");
+    assert_eq!(mod_jars(&instance), ["libx-dev.jar", "root-1.0.jar"]);
+}
+
+#[tokio::test]
+async fn a_dependency_that_may_only_be_stood_in_for_is_refused_when_nothing_does() {
+    let server = MockServer::start().await;
+    let (instance, requested) = a_mod_needing_a_library_the_developer_built(&server).await;
+    std::fs::rename(
+        instance.jar("libx-dev.jar"),
+        instance.jar("libx-dev.jar.disabled"),
+    )
+    .expect("disable the build");
+    let mut recipe = recipe();
+
+    let error = install_with_stand_ins(
+        &instance,
+        &mut recipe,
+        &requested,
+        &["mods/libx-7.0.4.jar"],
+        &["mods/libx-7.0.4.jar"],
+    )
+    .await
+    .expect_err("the library may not be installed");
+
+    assert!(
+        matches!(
+            &error,
+            PackError::StandInUnavailable { incoming } if incoming == "mods/libx-7.0.4.jar"
+        ),
+        "{error:?}"
+    );
+    assert_eq!(mod_jars(&instance), ["libx-dev.jar.disabled"]);
+    assert!(!instance.store.has_recipe());
 }

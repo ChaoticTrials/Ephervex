@@ -398,6 +398,11 @@ pub enum PackError {
         second: String,
     },
 
+    /// A file this change may leave out only for a jar already in the folder
+    /// that provides the same mod, and no jar there does.
+    #[error("no jar already installed stands in for `{incoming}`")]
+    StandInUnavailable { incoming: String },
+
     /// The original failure was followed by a rollback failure.
     ///
     /// The paths in `issues` remain in launcher-owned recovery storage. They
@@ -484,6 +489,7 @@ impl PackError {
             } => "error-mod-duplicate-mod-id-recorded",
             Self::DuplicateModId { provider: None, .. } => "error-mod-duplicate-mod-id",
             Self::DuplicateModIdInChange { .. } => "error-mod-duplicate-mod-id-in-change",
+            Self::StandInUnavailable { .. } => "error-mod-stand-in-unavailable",
             Self::ManagedPathUnsafe { .. } => "error-mod-path-unsafe",
             Self::ManagedDestinationLinked { .. } => "error-mod-destination-linked",
             Self::RollbackIncomplete { .. } => "error-mod-rollback-incomplete",
@@ -657,6 +663,7 @@ impl PackError {
                 ("first", first.clone()),
                 ("second", second.clone()),
             ],
+            Self::StandInUnavailable { incoming } => vec![("incoming", incoming.clone())],
             Self::FileHashesMissing { path }
             | Self::FileDownloadsMissing { path }
             | Self::DownloadUrlRejected { path, .. }
@@ -779,6 +786,9 @@ mod tests {
                 mod_id: "libx".to_owned(),
                 first: "mods/libx-a.jar".to_owned(),
                 second: "mods/libx-b.jar".to_owned(),
+            },
+            PackError::StandInUnavailable {
+                incoming: "mods/libx-7.0.4.jar".to_owned(),
             },
         ]
     }

@@ -55,10 +55,11 @@ use tracing::{info, instrument, warn};
 use crate::error::{PackError, PackResult};
 use crate::install::{ArtifactFetch, copy_into_instance, fetch_all};
 use crate::managed::{
-    ManagedDestinations, RecordedJar, disabled_path, occupant, occupied, recorded_jar,
-    recording_side, require_one_entry_per_project, settle_recorded_paths,
+    InstalledStandIn, ManagedDestinations, RecordedJar, disabled_path, occupant, occupied,
+    recorded_jar, recording_side, require_one_entry_per_project, settle_recorded_paths,
+    settled_paths,
 };
-use crate::mod_ids::{IncomingJar, require_distinct_mod_ids};
+use crate::mod_ids::{IncomingJar, StandIns, settle_mod_ids};
 use crate::recipe::{PackFileRecipe, PackRecipe, PackSide, ProviderFileIdentity};
 use crate::store::SourceStore;
 
@@ -107,6 +108,19 @@ pub struct ManagedMutation<'a> {
     /// wait until the recipe is published.
     pub retired_dir: &'a Path,
     pub store: &'a SourceStore,
+    /// Logical paths, as `upserts` names them, of mods the recipe does not
+    /// record yet that an enabled jar already in the folder may stand in for.
+    ///
+    /// Such a mod is downloaded and verified like any other. When one jar
+    /// beside it declares every mod id its file does, it is neither written
+    /// nor recorded, and the report names that jar. Otherwise it is installed,
+    /// or refused as a second copy, exactly as if it were not named here.
+    pub installed_may_stand_in: &'a BTreeSet<PathBuf>,
+    /// Logical paths of mods the recipe does not record yet that are never
+    /// written. One is left out when `installed_may_stand_in` names it too and
+    /// a jar stands in for it, and otherwise the mutation is refused and
+    /// nothing is changed.
+    pub installed_must_stand_in: &'a BTreeSet<PathBuf>,
     pub fetch: ArtifactFetch<'a>,
 }
 
@@ -134,6 +148,10 @@ pub struct ManagedMutationReport {
     /// Requested mods whose recorded jar was already in place but whose record
     /// did not take this side. The record now does; no file was written.
     pub recorded: Vec<PathBuf>,
+    /// Requested mods left unwritten and unrecorded because a jar already in
+    /// the folder declares every mod id they do, and the request allowed that
+    /// jar to stand in for them.
+    pub stood_in: Vec<InstalledStandIn>,
     pub reused_from_cache: usize,
     pub bytes: u64,
     /// Cleanup that could not finish after the new recipe was published.
@@ -222,10 +240,16 @@ pub async fn mutate_managed(request: ManagedMutation<'_>) -> PackResult<ManagedM
         game_dir,
         retired_dir,
         store,
+        installed_may_stand_in,
+        installed_must_stand_in,
         fetch,
     } = request;
     let cancel = fetch.cancel;
     let settled = settle_recorded_paths(recipe, upserts, Some(side));
+    let stand_ins = StandIns {
+        allowed: settled_paths(upserts, &settled, installed_may_stand_in),
+        required: settled_paths(upserts, &settled, installed_must_stand_in),
+    };
     let upserts = settled.as_slice();
 
     // Nothing below this line runs until the whole desired state is known to be
@@ -233,37 +257,10 @@ pub async fn mutate_managed(request: ManagedMutation<'_>) -> PackResult<ManagedM
     // actually installed.
     let actions = plan(recipe, upserts, removals, side, game_dir).await?;
     let retirements = retirements(recipe, upserts, &actions, removals, game_dir);
-    // The replacements whose predecessor was turned off, so the new build can
-    // be written the same way round.
-    let stay_disabled: BTreeSet<PathBuf> = retirements
-        .iter()
-        .filter(|retirement| retirement.disabled)
-        .filter_map(|retirement| match &retirement.reason {
-            RetirementReason::Replaced { new_path, .. } => Some(new_path.clone()),
-            RetirementReason::Removed => None,
-        })
-        .collect();
+    let stay_disabled = staying_disabled(&retirements);
 
     let mut report = ManagedMutationReport::default();
-    let pending: Vec<(&PackFileRecipe, &Action)> = upserts
-        .iter()
-        .zip(&actions)
-        .filter(|(file, action)| match action {
-            Action::Unchanged => {
-                report.unchanged.push(file.logical_path.clone());
-                false
-            }
-            Action::Altered => {
-                report.modified.push(file.logical_path.clone());
-                false
-            }
-            Action::Record => {
-                report.recorded.push(file.logical_path.clone());
-                false
-            }
-            _ => true,
-        })
-        .collect();
+    let pending = pending_writes(upserts, &actions, &mut report);
 
     if pending.is_empty() && retirements.is_empty() && report.recorded.is_empty() {
         info!("the instance already matches the requested mod state");
@@ -277,15 +274,17 @@ pub async fn mutate_managed(request: ManagedMutation<'_>) -> PackResult<ManagedM
         fetch_all(&wanted, fetch).await?
     };
     // Verified and not yet written, so a refusal leaves the folder untouched.
-    refuse_second_copies(
+    report.stood_in = settle_second_copies(
         recipe,
         &pending,
         &fetched,
         &stay_disabled,
         &retirements,
         game_dir,
+        stand_ins,
     )
     .await?;
+    let (stood_in, pending, fetched) = leave_out_stood_in(&report.stood_in, pending, fetched);
 
     // Everything from here on can leave the instance changed, so each step
     // records exactly what it did and the whole lot is undone on failure.
@@ -302,7 +301,19 @@ pub async fn mutate_managed(request: ManagedMutation<'_>) -> PackResult<ManagedM
                 &mut report,
             )
         })
-        .and_then(|()| publish(recipe, upserts, &actions, removals, side, store));
+        .and_then(|()| {
+            publish(
+                recipe,
+                Requested {
+                    upserts,
+                    actions: &actions,
+                    stood_in: &stood_in,
+                },
+                removals,
+                side,
+                store,
+            )
+        });
 
     if let Err(error) = outcome {
         return Err(error.with_recovery_issues(journal.undo()));
@@ -327,24 +338,92 @@ pub async fn mutate_managed(request: ManagedMutation<'_>) -> PackResult<ManagedM
         unchanged = report.unchanged.len(),
         recorded = report.recorded.len(),
         modified = report.modified.len(),
+        stood_in = report.stood_in.len(),
         "mutated managed mods"
     );
     Ok(report)
 }
 
+/// The requested mods that need a file written, after reporting the ones that
+/// need none.
+fn pending_writes<'a>(
+    upserts: &'a [PackFileRecipe],
+    actions: &'a [Action],
+    report: &mut ManagedMutationReport,
+) -> Vec<(&'a PackFileRecipe, &'a Action)> {
+    upserts
+        .iter()
+        .zip(actions)
+        .filter(|(file, action)| match action {
+            Action::Unchanged => {
+                report.unchanged.push(file.logical_path.clone());
+                false
+            }
+            Action::Altered => {
+                report.modified.push(file.logical_path.clone());
+                false
+            }
+            Action::Record => {
+                report.recorded.push(file.logical_path.clone());
+                false
+            }
+            _ => true,
+        })
+        .collect()
+}
+
+/// The requested mods a jar already in the folder stands in for, by logical
+/// path, and the pending mods and fetched artifacts without them.
+#[allow(clippy::type_complexity)]
+fn leave_out_stood_in<'a>(
+    stand_ins: &[InstalledStandIn],
+    pending: Vec<(&'a PackFileRecipe, &'a Action)>,
+    fetched: Vec<ephervex_download::DownloadOutcome>,
+) -> (
+    BTreeSet<PathBuf>,
+    Vec<(&'a PackFileRecipe, &'a Action)>,
+    Vec<ephervex_download::DownloadOutcome>,
+) {
+    let stood_in: BTreeSet<PathBuf> = stand_ins
+        .iter()
+        .map(|stand_in| stand_in.planned.clone())
+        .collect();
+    let (pending, fetched) = pending
+        .into_iter()
+        .zip(fetched)
+        .filter(|((file, _), _)| !stood_in.contains(&file.logical_path))
+        .unzip();
+    (stood_in, pending, fetched)
+}
+
 /// Refuses writing a jar that declares the mod id of a jar the loader would
-/// still read beside it.
+/// still read beside it, unless that jar may stand in for it. Returns the
+/// requested mods that are left out because a jar stands in for them.
 ///
 /// A replacement written disabled is invisible to the loader, and a jar this
 /// mutation retires is gone before anything is written, so neither counts.
-async fn refuse_second_copies(
+/// Only a mod the recipe does not record yet can be stood in for: a recorded
+/// one already has its own jar in the folder.
+async fn settle_second_copies(
     recipe: &PackRecipe,
     pending: &[(&PackFileRecipe, &Action)],
     fetched: &[ephervex_download::DownloadOutcome],
     stay_disabled: &BTreeSet<PathBuf>,
     retirements: &[Retirement],
     game_dir: &Path,
-) -> PackResult<()> {
+    mut stand_ins: StandIns,
+) -> PackResult<Vec<InstalledStandIn>> {
+    let installs: BTreeSet<&Path> = pending
+        .iter()
+        .filter(|(_, action)| matches!(action, Action::Install))
+        .map(|(file, _)| file.logical_path.as_path())
+        .collect();
+    stand_ins
+        .allowed
+        .retain(|path| installs.contains(path.as_path()));
+    stand_ins
+        .required
+        .retain(|path| installs.contains(path.as_path()));
     let incoming = pending
         .iter()
         .zip(fetched)
@@ -358,7 +437,7 @@ async fn refuse_second_copies(
         .iter()
         .map(|retirement| retirement.logical_path.clone())
         .collect();
-    require_distinct_mod_ids(recipe, incoming, game_dir, leaving).await
+    settle_mod_ids(recipe, incoming, game_dir, leaving, stand_ins).await
 }
 
 /// Decides what to do with every requested mod, and refuses the whole mutation
@@ -581,6 +660,19 @@ fn retirements(
     retirements
 }
 
+/// The replacements whose predecessor was turned off, so the new build can be
+/// written the same way round.
+fn staying_disabled(retirements: &[Retirement]) -> BTreeSet<PathBuf> {
+    retirements
+        .iter()
+        .filter(|retirement| retirement.disabled)
+        .filter_map(|retirement| match &retirement.reason {
+            RetirementReason::Replaced { new_path, .. } => Some(new_path.clone()),
+            RetirementReason::Removed => None,
+        })
+        .collect()
+}
+
 /// Everything this mutation has done that can still be undone.
 #[derive(Debug, Default)]
 struct Journal {
@@ -763,18 +855,31 @@ pub fn unique_retired_path(retired_dir: &Path, path: &Path) -> PathBuf {
     candidate
 }
 
+/// The requested mods, what the pre-flight decided for each, and which of them
+/// a jar already in the folder stands in for.
+#[derive(Clone, Copy)]
+struct Requested<'a> {
+    upserts: &'a [PackFileRecipe],
+    actions: &'a [Action],
+    stood_in: &'a BTreeSet<PathBuf>,
+}
+
 /// Builds the new desired state and writes it.
 ///
 /// Written last and only once every jar is where the new recipe says it is, so
 /// a recipe on disk never names a mod that is not there.
 fn publish(
     recipe: &mut PackRecipe,
-    upserts: &[PackFileRecipe],
-    actions: &[Action],
+    requested: Requested<'_>,
     removals: &[ManagedProject],
     side: PackSide,
     store: &SourceStore,
 ) -> PackResult<()> {
+    let Requested {
+        upserts,
+        actions,
+        stood_in,
+    } = requested;
     let mut updated = recipe.clone();
 
     let dropped: BTreeSet<(ModProvider, &str)> = removals
@@ -791,6 +896,9 @@ fn publish(
     // with two entries.
     let mut additions: Vec<PackFileRecipe> = Vec::new();
     for (file, action) in upserts.iter().zip(actions) {
+        if stood_in.contains(&file.logical_path) {
+            continue;
+        }
         match action {
             Action::Install => additions.push(file.clone()),
             Action::Replace(_) => {

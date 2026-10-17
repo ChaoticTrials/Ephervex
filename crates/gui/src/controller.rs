@@ -2478,6 +2478,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         isolation: Rc::clone(&isolation_flow),
         diagnosis: Rc::clone(&diagnosis_flow),
         acquisition_prompts: Rc::default(),
+        stand_in_prompts: Rc::default(),
         plan_requests: Rc::default(),
         commands: backend.commands.clone(),
     };
@@ -3860,6 +3861,7 @@ fn register_client_actions(
 
 fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>, workspace: &Workspace) {
     register_mod_mutations(ui, commands, workspace);
+    register_stand_in_answers(ui, commands, workspace);
     register_mod_browser(ui, commands, workspace);
     register_browser_install(ui, commands, workspace);
     register_favorite_versions(ui, commands);
@@ -4414,6 +4416,27 @@ fn register_mod_mutations(ui: &AppWindow, commands: &Sender<Command>, workspace:
         ) {
             send(&sender, command);
         }
+    });
+}
+
+/// Answers to the question whether an installed jar may stand in for a
+/// dependency.
+fn register_stand_in_answers(ui: &AppWindow, commands: &Sender<Command>, workspace: &Workspace) {
+    let sender = commands.clone();
+    let handle = ui.as_weak();
+    let acquisitions = Rc::clone(&workspace.acquisition_prompts);
+    let stand_ins = Rc::clone(&workspace.stand_in_prompts);
+    ui.on_answer_mod_stand_in(move |id, accepted| {
+        let Some(ui) = handle.upgrade() else { return };
+        if let Ok(id) = id.parse() {
+            send(&sender, Command::AnswerModStandIn { id, accepted });
+        }
+        ui.set_mod_stand_in_id(SharedString::default());
+        if ui.get_modal() == "mod-stand-in" {
+            ui.set_modal(SharedString::default());
+            ui.set_modal_error(SharedString::default());
+        }
+        show_next_prompt(&ui, &acquisitions, &stand_ins);
     });
 }
 
@@ -5076,6 +5099,9 @@ struct Workspace {
     diagnosis: Rc<RefCell<DiagnosisFlowState>>,
     /// Manual-download prompts waiting behind the one on screen.
     acquisition_prompts: Rc<RefCell<std::collections::VecDeque<backend::ModAcquisitionData>>>,
+    /// Questions whether an installed jar may stand in for a dependency,
+    /// waiting behind the prompt on screen.
+    stand_in_prompts: Rc<RefCell<std::collections::VecDeque<backend::ModStandInData>>>,
     /// The mod plans asked for and not yet shown.
     plan_requests: Rc<ModPlanRequests>,
     /// What a surface asks the worker for when a pane opens it.
@@ -8092,6 +8118,8 @@ fn apply_event(
         Event::ModVersions(data) => apply_mod_versions(ui, data),
         Event::ModAcquisitionRequired(data) => apply_mod_acquisition(ui, data, workspace),
         Event::ModAcquisitionEnded { id } => end_mod_acquisition(ui, id, workspace),
+        Event::ModStandInOffered(data) => apply_mod_stand_in(ui, data, workspace),
+        Event::ModStandInEnded { id } => end_mod_stand_in(ui, id, workspace),
         Event::ModRelations(data) => apply_mod_relations(ui, &data),
         Event::ModRemovalPlan(data) => apply_mod_removal_plan(ui, data, workspace),
         Event::ModResults(results) => apply_mod_results(workspace, results, commands),
@@ -9841,12 +9869,80 @@ fn apply_mod_versions(ui: &AppWindow, data: backend::ModVersionsData) {
 /// instead of replacing it, since replacing would leave its wait with no
 /// dialog to cancel it from.
 fn apply_mod_acquisition(ui: &AppWindow, data: backend::ModAcquisitionData, workspace: &Workspace) {
-    let on_screen = ui.get_modal() == "mod-acquire" && !ui.get_mod_acquisition_id().is_empty();
-    if on_screen && ui.get_mod_acquisition_id() != data.id.to_string() {
+    let showing_this =
+        ui.get_modal() == "mod-acquire" && ui.get_mod_acquisition_id() == data.id.to_string();
+    if prompt_on_screen(ui) && !showing_this {
         workspace.acquisition_prompts.borrow_mut().push_back(data);
         return;
     }
     show_mod_acquisition(ui, &data);
+}
+
+/// Whether a prompt an operation is waiting on is on screen. Another prompt
+/// waits behind it rather than taking its place unanswered.
+fn prompt_on_screen(ui: &AppWindow) -> bool {
+    (ui.get_modal() == "mod-acquire" && !ui.get_mod_acquisition_id().is_empty())
+        || (ui.get_modal() == "mod-stand-in" && !ui.get_mod_stand_in_id().is_empty())
+}
+
+/// Shows the next prompt an operation is waiting on, if none is on screen.
+fn show_next_prompt(
+    ui: &AppWindow,
+    acquisitions: &RefCell<std::collections::VecDeque<backend::ModAcquisitionData>>,
+    stand_ins: &RefCell<std::collections::VecDeque<backend::ModStandInData>>,
+) {
+    if prompt_on_screen(ui) {
+        return;
+    }
+    let acquisition = acquisitions.borrow_mut().pop_front();
+    if let Some(next) = acquisition {
+        show_mod_acquisition(ui, &next);
+        return;
+    }
+    let stand_in = stand_ins.borrow_mut().pop_front();
+    if let Some(next) = stand_in {
+        show_mod_stand_in(ui, &next);
+    }
+}
+
+fn apply_mod_stand_in(ui: &AppWindow, data: backend::ModStandInData, workspace: &Workspace) {
+    if prompt_on_screen(ui) {
+        workspace.stand_in_prompts.borrow_mut().push_back(data);
+        return;
+    }
+    show_mod_stand_in(ui, &data);
+}
+
+fn show_mod_stand_in(ui: &AppWindow, data: &backend::ModStandInData) {
+    leave_modal(ui);
+    ui.set_mod_action_pending(false);
+    ui.set_modal_error(SharedString::default());
+    ui.set_mod_stand_in_id(data.id.to_string().into());
+    ui.set_mod_stand_in_detail(data.detail.as_str().into());
+    ui.set_mod_stand_in_note(data.note.as_str().into());
+    ui.set_modal("mod-stand-in".into());
+}
+
+/// Takes a stand-in question off screen and out of the queue once its
+/// operation stopped waiting for the answer.
+fn end_mod_stand_in(ui: &AppWindow, id: u64, workspace: &Workspace) {
+    workspace
+        .stand_in_prompts
+        .borrow_mut()
+        .retain(|queued| queued.id != id);
+    if ui.get_mod_stand_in_id() != id.to_string() {
+        return;
+    }
+    ui.set_mod_stand_in_id(SharedString::default());
+    if ui.get_modal() == "mod-stand-in" {
+        ui.set_modal(SharedString::default());
+        ui.set_modal_error(SharedString::default());
+    }
+    show_next_prompt(
+        ui,
+        &workspace.acquisition_prompts,
+        &workspace.stand_in_prompts,
+    );
 }
 
 fn show_mod_acquisition(ui: &AppWindow, data: &backend::ModAcquisitionData) {
@@ -9996,7 +10092,7 @@ fn discard_pack_archive(archive: &Path) {
 /// for again once the prompt is gone. Anything else on screen is let go of the
 /// way its own close button would.
 fn make_room_for_dialog(ui: &AppWindow) -> bool {
-    if ui.get_modal() == "mod-acquire" {
+    if ui.get_modal() == "mod-acquire" || ui.get_modal() == "mod-stand-in" {
         ui.invoke_present_toast(lookup("gui-dialog-not-shown").into(), true);
         return false;
     }
@@ -10075,10 +10171,11 @@ fn end_mod_acquisition(ui: &AppWindow, id: u64, workspace: &Workspace) {
         ui.set_modal_error(SharedString::default());
         ui.set_mod_action_pending(false);
     }
-    let next = workspace.acquisition_prompts.borrow_mut().pop_front();
-    if let Some(next) = next {
-        show_mod_acquisition(ui, &next);
-    }
+    show_next_prompt(
+        ui,
+        &workspace.acquisition_prompts,
+        &workspace.stand_in_prompts,
+    );
 }
 
 /// Fills in what the open mod declares and what declares it.
@@ -13037,6 +13134,7 @@ mod tests {
             isolation: Rc::default(),
             diagnosis: Rc::default(),
             acquisition_prompts: Rc::default(),
+            stand_in_prompts: Rc::default(),
             plan_requests: Rc::default(),
             commands: sender,
         };
@@ -16004,6 +16102,36 @@ mod tests {
         assert!(source.contains("ListView, Palette, ScrollView"));
     }
 
+    /// Closing a stand-in question answers it and nothing more. The answer
+    /// already shows whichever prompt waited behind it, so a close that went on
+    /// to clear the dialog would hide that prompt while its operation waits.
+    #[test]
+    fn closing_a_stand_in_question_leaves_the_prompt_behind_it_on_screen() {
+        let markup = ui_markup();
+        assert!(
+            markup.contains(
+                "else if root.modal == \"mod-stand-in\" { root.answer-mod-stand-in(root.mod-stand-in-id, false); } else {"
+            ),
+            "the close button answers the question without clearing the dialog"
+        );
+    }
+
+    #[test]
+    fn declining_a_stand_in_question_shows_the_manual_download_prompt_behind_it() {
+        let ui = test_window();
+        let (workspace, _commands) = test_workspace_sending(&ui);
+        register_stand_in_answers(&ui, &workspace.commands, &workspace);
+        let host = ephervex_model::InstanceId::new().to_string();
+        apply_mod_stand_in(&ui, stand_in_prompt(1), &workspace);
+        apply_mod_acquisition(&ui, acquisition_prompt(2, &host), &workspace);
+
+        ui.invoke_answer_mod_stand_in("1".into(), false);
+        end_mod_stand_in(&ui, 1, &workspace);
+
+        assert_eq!(ui.get_modal(), "mod-acquire");
+        assert_eq!(ui.get_mod_acquisition_id(), "2");
+    }
+
     /// The message ids the markup passes to one `GuiI18n` callback by literal.
     fn markup_message_ids(callback: &str) -> Vec<&'static str> {
         let markup = ui_markup();
@@ -17491,6 +17619,80 @@ mod tests {
 
         end_mod_acquisition(&ui, 2, &workspace);
         assert_eq!(ui.get_modal(), "");
+    }
+
+    fn stand_in_prompt(id: u64) -> backend::ModStandInData {
+        backend::ModStandInData {
+            id,
+            detail: "mods/libx-dev.jar already provides LibX, which this mod needs.".to_owned(),
+            note: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_stand_in_question_waits_behind_a_manual_download_prompt_and_follows_it() {
+        let ui = test_window();
+        let (workspace, _commands) = test_workspace_sending(&ui);
+        let host = ephervex_model::InstanceId::new().to_string();
+        apply_mod_acquisition(&ui, acquisition_prompt(1, &host), &workspace);
+
+        apply_mod_stand_in(&ui, stand_in_prompt(2), &workspace);
+        assert_eq!(ui.get_modal(), "mod-acquire");
+
+        end_mod_acquisition(&ui, 1, &workspace);
+        assert_eq!(ui.get_modal(), "mod-stand-in");
+        assert_eq!(ui.get_mod_stand_in_id(), "2");
+        assert!(ui.get_mod_stand_in_detail().contains("libx-dev.jar"));
+    }
+
+    #[test]
+    fn a_manual_download_prompt_waits_behind_a_stand_in_question() {
+        let ui = test_window();
+        let (workspace, _commands) = test_workspace_sending(&ui);
+        let host = ephervex_model::InstanceId::new().to_string();
+        apply_mod_stand_in(&ui, stand_in_prompt(1), &workspace);
+
+        apply_mod_acquisition(&ui, acquisition_prompt(2, &host), &workspace);
+        assert_eq!(
+            ui.get_modal(),
+            "mod-stand-in",
+            "the question on screen keeps the buttons its operation waits on"
+        );
+
+        end_mod_stand_in(&ui, 1, &workspace);
+        assert_eq!(ui.get_modal(), "mod-acquire");
+        assert_eq!(ui.get_mod_acquisition_id(), "2");
+    }
+
+    #[test]
+    fn answering_a_stand_in_question_sends_the_answer_and_closes_it() {
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        register_stand_in_answers(&ui, &workspace.commands, &workspace);
+        apply_mod_stand_in(&ui, stand_in_prompt(7), &workspace);
+        apply_mod_stand_in(&ui, stand_in_prompt(8), &workspace);
+
+        ui.invoke_answer_mod_stand_in("7".into(), true);
+
+        assert!(
+            commands.try_iter().any(|command| matches!(
+                command,
+                Command::AnswerModStandIn {
+                    id: 7,
+                    accepted: true
+                }
+            )),
+            "the answer reaches the operation"
+        );
+        assert_eq!(ui.get_modal(), "mod-stand-in", "the next question follows");
+        assert_eq!(ui.get_mod_stand_in_id(), "8");
+
+        end_mod_stand_in(&ui, 7, &workspace);
+        assert_eq!(
+            ui.get_mod_stand_in_id(),
+            "8",
+            "a late end leaves the next question"
+        );
     }
 
     #[test]

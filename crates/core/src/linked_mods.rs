@@ -43,7 +43,7 @@
 //! working state to make a report look tidier. The outcome is per target and
 //! says which ones succeeded.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use ephervex_download::{CacheLayout, OperationReporter};
@@ -61,7 +61,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
 
 use crate::app::App;
-use crate::error::{CoreError, CoreResult};
+use crate::error::{CoreError, CoreResult, ProvidedDependency};
 use crate::mods::{InstalledHost, InstalledMods, ModInstallRequest, side_requirement};
 use crate::mutation::{
     DependencyScope, ModMutation, ModMutationPlan, ModVersionChoice, PlannedFile,
@@ -426,6 +426,10 @@ pub struct LinkedTargetFailure {
     /// The failure's own words, kept exact. Technical values such as paths,
     /// versions, and hashes are not translated.
     pub detail: String,
+    /// The dependency a jar already on this server provides, when that is
+    /// what stopped it. Applying again with that dependency allowed to be
+    /// stood in for can then succeed.
+    pub provided_dependency: Option<ProvidedDependency>,
 }
 
 impl From<&CoreError> for LinkedTargetFailure {
@@ -433,7 +437,27 @@ impl From<&CoreError> for LinkedTargetFailure {
         Self {
             message_id: error.message_id(),
             detail: error.to_string(),
+            provided_dependency: error.provided_dependency(),
         }
+    }
+}
+
+/// Which dependencies, by project id, a jar already on each host of a linked
+/// operation may stand in for.
+///
+/// Each host has its own set: letting a jar on the client stand in for a
+/// dependency says nothing about a jar on one of its servers.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LinkedStandIns {
+    pub client: BTreeSet<String>,
+    pub servers: BTreeMap<ServerId, BTreeSet<String>>,
+}
+
+impl LinkedStandIns {
+    /// The set for one server, empty when it has none.
+    #[must_use]
+    pub fn on_server(&self, server: ServerId) -> BTreeSet<String> {
+        self.servers.get(&server).cloned().unwrap_or_default()
     }
 }
 
@@ -553,6 +577,8 @@ struct TargetMutation {
     recipe: PackRecipe,
     upserts: Vec<PackFileRecipe>,
     removals: Vec<ManagedProject>,
+    /// The dependencies among `upserts`, by logical path.
+    dependencies: BTreeMap<PathBuf, PlannedMod>,
 }
 
 /// A planned target, plus what carrying it out would take.
@@ -611,10 +637,6 @@ impl App {
     /// After that, each server is revalidated from scratch and mutated in its
     /// own transaction. A target that has become ineligible is skipped and one
     /// whose mutation fails keeps its previous state; neither stops the rest.
-    #[instrument(
-        skip(self, request, servers, reporter, cancel),
-        fields(client = %client, operation = request.as_str(), targets = servers.len())
-    )]
     pub async fn apply_linked_mod_operation(
         &self,
         client: InstanceId,
@@ -623,8 +645,45 @@ impl App {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<LinkedModOutcome> {
+        self.apply_linked_mod_operation_using_installed(
+            client,
+            request,
+            servers,
+            &LinkedStandIns::default(),
+            reporter,
+            cancel,
+        )
+        .await
+    }
+
+    /// [`Self::apply_linked_mod_operation`], letting a jar already on the
+    /// client or on a server stand in there for the dependencies
+    /// `installed_may_stand_in` names for that host.
+    ///
+    /// A dependency is left out on a host only where that host does not record
+    /// it yet and one enabled jar there declares every mod id its file does,
+    /// and each report names the jar that stands in. Nothing stands in for the
+    /// mod the operation is about.
+    #[instrument(
+        skip(self, request, servers, installed_may_stand_in, reporter, cancel),
+        fields(client = %client, operation = request.as_str(), targets = servers.len())
+    )]
+    pub async fn apply_linked_mod_operation_using_installed(
+        &self,
+        client: InstanceId,
+        request: &LinkedModRequest,
+        servers: &[ServerId],
+        installed_may_stand_in: &LinkedStandIns,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> CoreResult<LinkedModOutcome> {
         self.with_artifact_cache(Box::pin(self.apply_linked_mod_operation_holding_the_cache(
-            client, request, servers, reporter, cancel,
+            client,
+            request,
+            servers,
+            installed_may_stand_in,
+            reporter,
+            cancel,
         )))
         .await
     }
@@ -634,11 +693,18 @@ impl App {
         client: InstanceId,
         request: &LinkedModRequest,
         servers: &[ServerId],
+        installed_may_stand_in: &LinkedStandIns,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<LinkedModOutcome> {
         let (outcome, root, release) = self
-            .apply_client_half(client, request, reporter, cancel)
+            .apply_client_half(
+                client,
+                request,
+                &installed_may_stand_in.client,
+                reporter,
+                cancel,
+            )
             .await?;
 
         // Deduplicated so a frontend that sends the same server twice cannot
@@ -648,8 +714,16 @@ impl App {
         let mut targets = Vec::new();
         for server in servers.iter().copied().filter(|id| seen.insert(*id)) {
             targets.push(
-                self.apply_target(client, server, &root, release.as_ref(), reporter, cancel)
-                    .await,
+                self.apply_target(
+                    client,
+                    server,
+                    &root,
+                    release.as_ref(),
+                    &installed_may_stand_in.on_server(server),
+                    reporter,
+                    cancel,
+                )
+                .await,
             );
         }
 
@@ -775,6 +849,7 @@ impl App {
         &self,
         client: InstanceId,
         request: &LinkedModRequest,
+        installed_may_stand_in: &BTreeSet<String>,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<(ClientModOutcome, LinkedModRoot, Option<ModVersionInfo>)> {
@@ -791,7 +866,8 @@ impl App {
                 let installed = self
                     .install_mods(
                         client,
-                        &install_request(*provider, project, version.as_deref()),
+                        &install_request(*provider, project, version.as_deref())
+                            .letting_installed_stand_in_for(installed_may_stand_in.iter().cloned()),
                         reporter,
                         cancel,
                     )
@@ -806,10 +882,11 @@ impl App {
             }
             LinkedModRequest::ChangeVersion { target, version } => {
                 let mutation = self
-                    .change_managed_mod_version(
+                    .change_managed_mod_version_using_installed(
                         client,
                         target,
                         &ModVersionChoice::Exact(version.clone()),
+                        installed_may_stand_in,
                         reporter,
                         cancel,
                     )
@@ -820,10 +897,11 @@ impl App {
                 // The same pin ChangeVersion applies: a release that was
                 // withdrawn or no longer fits fails the operation.
                 let mutation = self
-                    .change_managed_mod_version(
+                    .change_managed_mod_version_using_installed(
                         client,
                         target,
                         &update_choice(version.as_deref()),
+                        installed_may_stand_in,
                         reporter,
                         cancel,
                     )
@@ -1020,17 +1098,11 @@ impl App {
         let game_dir = ephervex_storage::metadata::server_game_dir(&record.root);
         let state = installing_state(existing.as_ref(), root, &game_dir);
 
-        let mut upserts = Vec::new();
-        for planned in server_applicable(&resolved) {
-            match crate::mods::recipe_entry_for(planned, resolved.provider, PackSide::Server) {
-                Ok(entry) => upserts.push(entry),
-                // A provider file name that cannot safely name a destination is
-                // refused rather than sanitized into one that writes somewhere.
-                Err(_) => {
-                    return blocked(record, root, LinkedTargetBlock::ExactReleaseUnavailable);
-                }
-            }
-        }
+        // A provider file name that cannot safely name a destination is refused
+        // rather than sanitized into one that writes somewhere.
+        let Some((upserts, dependencies)) = server_upserts(&resolved, &root.project_id) else {
+            return blocked(record, root, LinkedTargetBlock::ExactReleaseUnavailable);
+        };
 
         // Orphans are only collected when something actually leaves the graph.
         // An install adds; making it also sweep an unrelated dependency the
@@ -1080,6 +1152,7 @@ impl App {
             recipe,
             upserts,
             removals,
+            dependencies,
         });
         ResolvedTarget { plan, mutation }
     }
@@ -1148,17 +1221,20 @@ impl App {
                 recipe,
                 upserts: Vec::new(),
                 removals,
+                dependencies: BTreeMap::new(),
             }),
         }
     }
 
     /// Revalidates one target and, if it still holds, mutates it.
+    #[allow(clippy::too_many_arguments)]
     async fn apply_target(
         &self,
         client: InstanceId,
         server: ServerId,
         root: &LinkedModRoot,
         release: Option<&ModVersionInfo>,
+        installed_may_stand_in: &BTreeSet<String>,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> LinkedTargetOutcome {
@@ -1208,7 +1284,10 @@ impl App {
             };
         };
 
-        let result = match self.commit_target(server, mutation, reporter, cancel).await {
+        let result = match self
+            .commit_target(server, mutation, installed_may_stand_in, reporter, cancel)
+            .await
+        {
             Ok(report) => LinkedTargetResult::Applied(Box::new(report)),
             Err(error) => {
                 warn!(%server, %error, "a linked server kept its previous mods after a failed mutation");
@@ -1232,6 +1311,7 @@ impl App {
         &self,
         server: ServerId,
         mutation: TargetMutation,
+        installed_may_stand_in: &BTreeSet<String>,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<ManagedMutationReport> {
@@ -1242,7 +1322,13 @@ impl App {
             mut recipe,
             upserts,
             removals,
+            dependencies,
         } = mutation;
+        let may_stand_in: BTreeSet<PathBuf> = dependencies
+            .iter()
+            .filter(|(_, planned)| installed_may_stand_in.contains(&planned.project.id))
+            .map(|(path, _)| path.clone())
+            .collect();
 
         let manager = self.artifact_manager()?;
         let result = ephervex_pack::mutate_managed(ManagedMutation {
@@ -1253,6 +1339,8 @@ impl App {
             game_dir: &game_dir,
             retired_dir: &retired_dir,
             store: &store,
+            installed_may_stand_in: &may_stand_in,
+            installed_must_stand_in: &BTreeSet::new(),
             fetch: ArtifactFetch {
                 manager: &manager,
                 cache: &CacheLayout::new(self.paths().cache_dir()),
@@ -1278,7 +1366,15 @@ impl App {
             }
         }
 
-        Ok(result?)
+        result.map_err(|error| {
+            let dependencies = dependencies
+                .iter()
+                .map(|(path, planned)| (path.clone(), planned))
+                .collect();
+            crate::mods::dependency_refusal(CoreError::from(error), &dependencies, |projects| {
+                CoreError::ModChangeServerSupportUnconfirmed { projects }
+            })
+        })
     }
 }
 
@@ -1348,6 +1444,37 @@ fn installing_state(
         // not a change: nothing about what the server records moves.
         LinkedTargetState::WillRepair
     }
+}
+
+/// The recipe entries a server takes from a resolved plan, and the dependencies
+/// among them by logical path. `None` when a provider file name cannot safely
+/// name a destination.
+fn server_upserts(
+    resolved: &ModInstallPlan,
+    root_project: &str,
+) -> Option<(Vec<PackFileRecipe>, BTreeMap<PathBuf, PlannedMod>)> {
+    let mut upserts = Vec::new();
+    let mut dependencies = BTreeMap::new();
+    for planned in server_applicable(resolved) {
+        let entry =
+            crate::mods::recipe_entry_for(planned, resolved.provider, PackSide::Server).ok()?;
+        if planned.project.id != root_project {
+            dependencies.insert(entry.logical_path.clone(), planned.clone());
+        }
+        upserts.push(entry);
+    }
+    // Nothing stands in for the mod being synced, even where a dependency
+    // shares its file.
+    for entry in upserts.iter().filter(|entry| {
+        entry
+            .identity
+            .as_ref()
+            .and_then(|identity| identity.project_id.as_deref())
+            == Some(root_project)
+    }) {
+        dependencies.remove(&entry.logical_path);
+    }
+    Some((upserts, dependencies))
 }
 
 /// The planned mods a server may actually take.
@@ -1660,7 +1787,8 @@ pub(crate) mod tests {
     /// them all, which is what makes "the server picked its own newest" a
     /// visible mistake rather than an indistinguishable coincidence.
     fn fixtures(base: &str) -> (Vec<Value>, Vec<Value>) {
-        let projects = vec![
+        let (duplicated_projects, duplicated_versions) = duplicated_fixtures(base);
+        let mut projects = vec![
             project_json("ROOTPROJ", "Root Mod", "required", "required"),
             project_json("LIBPROJ", "Server Library", "required", "required"),
             project_json("CLIENTLIB", "Client Library", "required", "unsupported"),
@@ -1675,15 +1803,8 @@ pub(crate) mod tests {
             project_json("NEEDSUNK", "Needs Undeclared", "required", "required"),
             project_json("SERVERONLY", "Server Only", "unsupported", "required"),
             project_json("LATERUNK", "Later Undeclared", "required", "required"),
-            project_json("DUPLIB", "Duplicated Library", "required", "required"),
-            project_json(
-                "DUPROOT",
-                "Needs Duplicated Library",
-                "required",
-                "required",
-            ),
         ];
-        let versions = vec![
+        let mut versions = vec![
             version_json(base, "ROOTV1", "ROOTPROJ", &[MINECRAFT], &["CLIENTLIB"], 0),
             version_json(
                 base,
@@ -1736,14 +1857,56 @@ pub(crate) mod tests {
                 "NEWLIB",
                 "NEWV2",
             ),
-            version_json(base, "DUPLIBV1", "DUPLIB", &[MINECRAFT], &[], 0),
-            version_json(base, "DUPROOTV1", "DUPROOT", &[MINECRAFT], &["DUPLIB"], 0),
             version_json(base, "NEWV1", "NEWLIB", &[MINECRAFT], &[], 0),
             version_json(base, "NEWV2", "NEWLIB", &[MINECRAFT], &[], 20),
             pinning(
                 version_json(base, "PINNERV1", "PINNER", &[MINECRAFT], &[], 0),
                 "NEWLIB",
                 "NEWV1",
+            ),
+        ];
+        projects.extend(duplicated_projects);
+        versions.extend(duplicated_versions);
+        (projects, versions)
+    }
+
+    /// The `DUP` projects, whose releases are jars declaring a mod id, so that
+    /// a second copy of one is recognizable.
+    fn duplicated_fixtures(base: &str) -> (Vec<Value>, Vec<Value>) {
+        let projects = vec![
+            project_json("DUPLIB", "Duplicated Library", "required", "required"),
+            project_json(
+                "DUPROOT",
+                "Needs Duplicated Library",
+                "required",
+                "required",
+            ),
+            project_json(
+                "DUPUNK",
+                "Undeclared Duplicated Library",
+                "required",
+                "unknown",
+            ),
+            project_json(
+                "DUPUNKROOT",
+                "Needs Undeclared Duplicated Library",
+                "required",
+                "required",
+            ),
+        ];
+        let versions = vec![
+            version_json(base, "DUPLIBV1", "DUPLIB", &[MINECRAFT], &[], 0),
+            version_json(base, "DUPROOTV0", "DUPROOT", &[MINECRAFT], &[], 0),
+            version_json(base, "DUPROOTV1", "DUPROOT", &[MINECRAFT], &["DUPLIB"], 5),
+            version_json(base, "DUPUNKV1", "DUPUNK", &[MINECRAFT], &[], 0),
+            version_json(base, "DUPUNKROOTV0", "DUPUNKROOT", &[MINECRAFT], &[], 0),
+            version_json(
+                base,
+                "DUPUNKROOTV1",
+                "DUPUNKROOT",
+                &[MINECRAFT],
+                &["DUPUNK"],
+                5,
             ),
         ];
         (projects, versions)

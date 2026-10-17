@@ -1440,9 +1440,11 @@ impl App {
         let plan = self
             .plan_for_host(&host, request, InstalledPolicy::Preserve, reporter)
             .await?;
-        if host.side() == PackSide::Server {
-            require_confirmed_server_support(&plan, request)?;
-        }
+        let stand_in_only = if host.side() == PackSide::Server {
+            require_confirmed_server_support(&plan, request)?
+        } else {
+            BTreeSet::new()
+        };
 
         // From reading the recipe to the install writing it back, so the
         // background enrichment of this host cannot write in between.
@@ -1487,11 +1489,15 @@ impl App {
         if let Some(root) = additions.first() {
             dependencies.remove(&root.logical_path);
         }
-        let installed_may_stand_in: BTreeSet<PathBuf> = dependencies
-            .iter()
-            .filter(|(_, planned)| request.installed_may_stand_in.contains(&planned.project.id))
-            .map(|(path, _)| path.clone())
-            .collect();
+        let paths_of = |projects: &BTreeSet<String>| -> BTreeSet<PathBuf> {
+            dependencies
+                .iter()
+                .filter(|(_, planned)| projects.contains(&planned.project.id))
+                .map(|(path, _)| path.clone())
+                .collect()
+        };
+        let installed_may_stand_in = paths_of(&request.installed_may_stand_in);
+        let installed_must_stand_in = paths_of(&stand_in_only);
 
         let manager = self.artifact_manager()?;
 
@@ -1503,6 +1509,7 @@ impl App {
             game_dir: &game_dir,
             store: &store,
             installed_may_stand_in: &installed_may_stand_in,
+            installed_must_stand_in: &installed_must_stand_in,
             fetch: ArtifactFetch {
                 manager: &manager,
                 cache: &CacheLayout::new(self.paths().cache_dir()),
@@ -1528,7 +1535,9 @@ impl App {
                 );
                 return Err(self
                     .as_manual_acquisition(
-                        dependency_refusal(error, &dependencies),
+                        dependency_refusal(CoreError::from(error), &dependencies, |projects| {
+                            CoreError::ModServerSupportUnconfirmed { projects }
+                        }),
                         &destination,
                         &plan,
                         &game_dir,
@@ -2644,41 +2653,65 @@ fn settle_plan_for_server(plan: &mut ModInstallPlan) -> CoreResult<()> {
     Ok(())
 }
 
-/// A refusal of a second copy of a dependency, named as that dependency when a
-/// jar already on the host could stand in for it.
-fn dependency_refusal(
-    error: PackError,
+/// A refusal about one dependency, named as that dependency.
+///
+/// A second copy that a jar already on the host could stand in for names the
+/// dependency and that jar. A dependency that was allowed onto the host only in
+/// place of such a jar, and that nothing stands in for, is refused as
+/// `unconfirmed` says.
+pub(crate) fn dependency_refusal(
+    error: CoreError,
     dependencies: &BTreeMap<PathBuf, &PlannedMod>,
+    unconfirmed: impl FnOnce(Vec<String>) -> CoreError,
 ) -> CoreError {
-    if let PackError::DuplicateModId {
-        mod_id,
-        incoming,
-        path,
-        could_stand_in: true,
-        ..
-    } = &error
-        && let Some(planned) = dependencies.get(Path::new(incoming))
-    {
-        return CoreError::ModDependencyAlreadyProvided {
-            dependency: if planned.project.title.is_empty() {
-                planned.project.id.clone()
-            } else {
-                planned.project.title.clone()
-            },
-            project_id: planned.project.id.clone(),
-            mod_id: mod_id.clone(),
-            path: path.clone(),
-        };
+    match &error {
+        CoreError::Pack(PackError::DuplicateModId {
+            mod_id,
+            incoming,
+            path,
+            could_stand_in: true,
+            ..
+        }) => {
+            if let Some(planned) = dependencies.get(Path::new(incoming)) {
+                return CoreError::ModDependencyAlreadyProvided {
+                    dependency: planned_name(planned),
+                    project_id: planned.project.id.clone(),
+                    mod_id: mod_id.clone(),
+                    path: path.clone(),
+                };
+            }
+        }
+        CoreError::Pack(PackError::StandInUnavailable { incoming }) => {
+            if let Some(planned) = dependencies.get(Path::new(incoming)) {
+                return unconfirmed(vec![planned_name(planned)]);
+            }
+        }
+        _ => {}
     }
-    CoreError::from(error)
+    error
+}
+
+/// A planned mod's title, or its project id when the catalog gave none.
+fn planned_name(planned: &PlannedMod) -> String {
+    if planned.project.title.is_empty() {
+        planned.project.id.clone()
+    } else {
+        planned.project.title.clone()
+    }
 }
 
 /// Refuses a server install that would put a mod on the server whose catalog
 /// never stated server support, unless the request named it.
+///
+/// A dependency the request lets a jar already on the server stand in for is
+/// not refused here, because a jar that stands in for it puts nothing new on
+/// the server. Its project id is returned instead, and it may then only be
+/// left out for such a jar.
 fn require_confirmed_server_support(
     plan: &ModInstallPlan,
     request: &ModInstallRequest,
-) -> CoreResult<()> {
+) -> CoreResult<BTreeSet<String>> {
+    let mut stand_in_only = BTreeSet::new();
     let unconfirmed: Vec<String> = plan
         .undeclared_server_support()
         .into_iter()
@@ -2687,16 +2720,18 @@ fn require_confirmed_server_support(
                 .confirmed_server_support
                 .contains(&planned.project.id)
         })
-        .map(|planned| {
-            if planned.project.title.is_empty() {
-                planned.project.id.clone()
-            } else {
-                planned.project.title.clone()
+        .filter(|planned| {
+            let may_stand_in = planned.project.id != plan.root.project.id
+                && request.installed_may_stand_in.contains(&planned.project.id);
+            if may_stand_in {
+                stand_in_only.insert(planned.project.id.clone());
             }
+            !may_stand_in
         })
+        .map(planned_name)
         .collect();
     if unconfirmed.is_empty() {
-        Ok(())
+        Ok(stand_in_only)
     } else {
         Err(CoreError::ModServerSupportUnconfirmed {
             projects: unconfirmed,

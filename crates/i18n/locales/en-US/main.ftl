@@ -1818,6 +1818,9 @@ error-mod-duplicate-mod-id = { $incoming } is another copy of a mod already in t
 error-mod-duplicate-mod-id-in-change = Two of these mods are copies of the same mod.
 .action = { $first } and { $second } both provide mod id { $mod_id }, and the game does not start with two copies of one mod, so nothing was written.
 
+error-mod-stand-in-unavailable = No installed jar provides { $incoming }, so it would have to be installed.
+.action = It was allowed only in place of a jar already there, so nothing was written.
+
 # A dependency of the chosen mod is already provided by a jar on the host, such
 # as a local build or the same mod from the other catalog. Mod ids and paths are
 # technical values.
@@ -2433,6 +2436,14 @@ gui-mod-newest-version = Newest
 gui-mod-browser-download = Browser download
 gui-mod-acquire-detail = The author of { $value } does not allow other launchers to download this release. Open it in your browser and save it to a watched folder.
 gui-mod-acquire-watching = Ephervex is watching those folders. As soon as the file's contents match, it verifies the copy and continues the operation for you.
+# Asked when a dependency of the chosen mod is already provided by a jar on the
+# host, such as a local build or the same mod from the other catalog. Paths are
+# technical values.
+gui-modal-mod-stand-in = Use an Installed Jar?
+gui-mod-stand-in-detail = { $path } already provides { $dependency }, which this mod needs.
+gui-mod-stand-in-detail-on-server = On { $server }, { $path } already provides { $dependency }, which this mod needs.
+gui-mod-stand-in-note = If you use that jar, { $dependency } is not installed or recorded here. Otherwise nothing is written, because the game does not start with two copies of one mod. To install this release of { $dependency } instead, remove or disable that file first.
+gui-mod-stand-in-accept = Use Installed Jar
 gui-mod-up-to-date = Up to date
 gui-mod-change-version = Change Version
 gui-mod-update = Update
@@ -3326,6 +3337,9 @@ gui-mod-kept-modified = { $count ->
     [one] Kept { $names }: its contents differ from the recorded file, so it was left as it is.
    *[other] Kept { $names }: their contents differ from the recorded files, so they were left as they are.
 }
+# A dependency left out because a jar already on the host provides it. Paths
+# are technical values.
+gui-mod-stood-in = { $installed } is used in place of { $planned }.
 gui-stop-requested = Stop requested.
 gui-state-restarting = Restarting
 gui-settings-disk-usage = Disk usage
@@ -3496,6 +3510,7 @@ gui-linked-kept-modified = { $count ->
     [one] 1 changed jar kept
    *[other] { $count } changed jars kept
 }
+gui-linked-stood-in = { $installed } used in place of { $planned }
 gui-linked-nothing-changed = Nothing needed changing.
 gui-linked-dependencies-unprovable = Dependencies could not be confirmed, so none will be collected.
 # One word for every reason a server cannot take part. The reason itself is the

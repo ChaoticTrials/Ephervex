@@ -10,6 +10,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use ephervex_download::{
@@ -170,6 +171,22 @@ async fn mutate_on(
     upserts: &[PackFileRecipe],
     removals: &[ManagedProject],
 ) -> Result<ManagedMutationReport, PackError> {
+    mutate_letting_stand_in(side, instance, recipe, upserts, removals, &[], &[]).await
+}
+
+/// Mutates, letting a jar already in `mods/` stand in for the upserts named in
+/// `may_stand_in`, and writing none of those in `must_stand_in`.
+async fn mutate_letting_stand_in(
+    side: PackSide,
+    instance: &Instance,
+    recipe: &mut PackRecipe,
+    upserts: &[PackFileRecipe],
+    removals: &[ManagedProject],
+    may_stand_in: &[&str],
+    must_stand_in: &[&str],
+) -> Result<ManagedMutationReport, PackError> {
+    let may_stand_in: BTreeSet<PathBuf> = may_stand_in.iter().map(PathBuf::from).collect();
+    let must_stand_in: BTreeSet<PathBuf> = must_stand_in.iter().map(PathBuf::from).collect();
     mutate_managed(ManagedMutation {
         recipe,
         upserts,
@@ -178,6 +195,8 @@ async fn mutate_on(
         game_dir: &instance.game_dir,
         retired_dir: &instance.retired_dir(),
         store: &instance.store,
+        installed_may_stand_in: &may_stand_in,
+        installed_must_stand_in: &must_stand_in,
         fetch: ArtifactFetch {
             manager: &manager(),
             cache: &instance.cache,
@@ -2205,4 +2224,221 @@ async fn a_change_whose_new_dependency_is_another_catalogs_installed_mod_changes
     );
     assert_eq!(instance.store.read_recipe().expect("recipe"), before);
     assert_eq!(version_of(&recipe, "ROOTPROJ").as_deref(), Some("ROOTV1"));
+}
+
+/// An instance holding version one of a mod, plus the other catalog's release
+/// of a library that version two of the mod needs from this catalog.
+async fn a_change_needing_a_library_the_other_catalog_installed(
+    server: &MockServer,
+    instance: &Instance,
+) -> (PackRecipe, [PackFileRecipe; 2]) {
+    let mut recipe = installed(server, instance).await;
+    let installed_copy = neoforge_jar("libx", "7.0.3");
+    let other_release = neoforge_jar("libx", "7.0.4");
+    serve(server, "/libx-7.0.3.jar", installed_copy).await;
+    serve(server, "/libx-7.0.4.jar", other_release).await;
+    serve(server, "/root-2.jar", ROOT_V2).await;
+    let mut from_curseforge = entry(
+        server,
+        "/libx-7.0.3.jar",
+        "libx-7.0.3.jar",
+        installed_copy,
+        "238222",
+        "5000001",
+        ModOrigin::UserSelected,
+    );
+    from_curseforge
+        .identity
+        .as_mut()
+        .expect("identity")
+        .provider = Some(ModProvider::CurseForge);
+    mutate(instance, &mut recipe, &[from_curseforge], &[])
+        .await
+        .expect("installs the other catalog's copy");
+    let upserts = [
+        entry(
+            server,
+            "/root-2.jar",
+            "root-2.0.jar",
+            ROOT_V2,
+            "ROOTPROJ",
+            "ROOTV2",
+            ModOrigin::UserSelected,
+        ),
+        entry(
+            server,
+            "/libx-7.0.4.jar",
+            "libx-7.0.4.jar",
+            other_release,
+            "LIBX",
+            "LIBXV2",
+            ModOrigin::RequiredDependency,
+        ),
+    ];
+    (recipe, upserts)
+}
+
+#[tokio::test]
+async fn a_change_lets_the_other_catalogs_mod_stand_in_for_its_new_dependency_when_allowed() {
+    let server = MockServer::start().await;
+    let instance = Instance::new();
+    let (mut recipe, upserts) =
+        a_change_needing_a_library_the_other_catalog_installed(&server, &instance).await;
+
+    let report = mutate_letting_stand_in(
+        PackSide::Client,
+        &instance,
+        &mut recipe,
+        &upserts,
+        &[],
+        &["mods/libx-7.0.4.jar"],
+        &[],
+    )
+    .await
+    .expect("the installed copy stands in for the library");
+
+    assert_eq!(
+        report.stood_in,
+        [ephervex_pack::InstalledStandIn {
+            planned: PathBuf::from("mods/libx-7.0.4.jar"),
+            installed: PathBuf::from("mods/libx-7.0.3.jar"),
+            mod_ids: vec!["libx".to_owned()],
+        }]
+    );
+    assert_eq!(
+        instance.jars(),
+        ["library-2.0.jar", "libx-7.0.3.jar", "root-2.0.jar"]
+    );
+    let recorded = instance.store.read_recipe().expect("recipe");
+    assert_eq!(version_of(&recorded, "ROOTPROJ").as_deref(), Some("ROOTV2"));
+    assert!(
+        recorded
+            .managed_project(ModProvider::Modrinth, "LIBX")
+            .is_none(),
+        "the library that was not written is not recorded"
+    );
+    assert_eq!(recipe, recorded);
+}
+
+#[tokio::test]
+async fn a_jar_never_stands_in_for_a_mod_the_recipe_already_records() {
+    let older = neoforge_jar("libx", "1");
+    let newer = neoforge_jar("libx", "2");
+    let server = MockServer::start().await;
+    serve(&server, "/libx-1.jar", older).await;
+    serve(&server, "/libx-2.jar", newer).await;
+    let instance = Instance::new();
+    let mut recipe = recipe();
+    let release = |route, name, body, version| {
+        entry(
+            &server,
+            route,
+            name,
+            body,
+            "LIBX",
+            version,
+            ModOrigin::UserSelected,
+        )
+    };
+    mutate(
+        &instance,
+        &mut recipe,
+        &[release("/libx-1.jar", "libx-1.jar", older, "LIBXV1")],
+        &[],
+    )
+    .await
+    .expect("installs");
+    std::fs::write(
+        instance.mods_dir().join("libx-dev.jar"),
+        neoforge_jar("libx", "the developer's build"),
+    )
+    .expect("write");
+
+    let error = mutate_letting_stand_in(
+        PackSide::Client,
+        &instance,
+        &mut recipe,
+        &[release("/libx-2.jar", "libx-2.jar", newer, "LIBXV2")],
+        &[],
+        &["mods/libx-2.jar"],
+        &[],
+    )
+    .await
+    .expect_err("the developer's build is a second copy of the new release");
+
+    assert!(
+        matches!(&error, PackError::DuplicateModId { .. }),
+        "{error:?}"
+    );
+    assert_eq!(instance.jars(), ["libx-1.jar", "libx-dev.jar"]);
+}
+
+#[tokio::test]
+async fn a_change_whose_dependency_is_never_written_is_refused_when_nothing_stands_in() {
+    let server = MockServer::start().await;
+    let instance = Instance::new();
+    let (mut recipe, upserts) =
+        a_change_needing_a_library_the_other_catalog_installed(&server, &instance).await;
+    std::fs::rename(
+        instance.mods_dir().join("libx-7.0.3.jar"),
+        instance.mods_dir().join("libx-7.0.3.jar.disabled"),
+    )
+    .expect("turn the other copy off");
+    let before = instance.store.read_recipe().expect("recipe");
+
+    let error = mutate_letting_stand_in(
+        PackSide::Client,
+        &instance,
+        &mut recipe,
+        &upserts,
+        &[],
+        &["mods/libx-7.0.4.jar"],
+        &["mods/libx-7.0.4.jar"],
+    )
+    .await
+    .expect_err("the library may not be written");
+
+    assert!(
+        matches!(
+            &error,
+            PackError::StandInUnavailable { incoming } if incoming == "mods/libx-7.0.4.jar"
+        ),
+        "{error:?}"
+    );
+    assert_eq!(
+        instance.jars(),
+        ["library-2.0.jar", "libx-7.0.3.jar.disabled", "root-1.0.jar"]
+    );
+    assert_eq!(instance.store.read_recipe().expect("recipe"), before);
+}
+
+#[tokio::test]
+async fn a_dependency_that_is_never_written_is_still_not_stood_in_for_unasked() {
+    let server = MockServer::start().await;
+    let instance = Instance::new();
+    let (mut recipe, upserts) =
+        a_change_needing_a_library_the_other_catalog_installed(&server, &instance).await;
+
+    let error = mutate_letting_stand_in(
+        PackSide::Client,
+        &instance,
+        &mut recipe,
+        &upserts,
+        &[],
+        &[],
+        &["mods/libx-7.0.4.jar"],
+    )
+    .await
+    .expect_err("the installed copy is not used unasked");
+
+    assert!(
+        matches!(
+            &error,
+            PackError::DuplicateModId {
+                could_stand_in: true,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
 }

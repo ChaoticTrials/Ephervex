@@ -127,7 +127,7 @@ pub use disk_usage::{
     CategoryUsage, DiskUsageReport, RetentionUsage, StorageCategory, StorageRetention,
 };
 pub use download_watch::{DownloadWatcher, RESCAN_INTERVAL, WatchTarget};
-pub use error::{CoreError, CoreResult, ErrorChain};
+pub use error::{CoreError, CoreResult, ErrorChain, ProvidedDependency};
 pub use health::{
     ApplicationIdentity, ArtifactCacheHealth, BundledDataHealth, BundledDocumentHealth,
     ConfigurationHealth, CredentialBackendHealth, DirectoryHealth, DirectoryState,
@@ -169,8 +169,8 @@ pub use licenses::{
 };
 pub use linked_mods::{
     ClientModOutcome, ClientModPlan, LinkedModOutcome, LinkedModPlan, LinkedModRequest,
-    LinkedModRoot, LinkedTargetBlock, LinkedTargetFailure, LinkedTargetOutcome, LinkedTargetPlan,
-    LinkedTargetResult, LinkedTargetState,
+    LinkedModRoot, LinkedStandIns, LinkedTargetBlock, LinkedTargetFailure, LinkedTargetOutcome,
+    LinkedTargetPlan, LinkedTargetResult, LinkedTargetState,
 };
 pub use linked_pair::{LinkedPair, LinkedStart, LinkingState};
 pub use loader::{IncompatibleMod, LoaderVersionChange, LoaderVersionPlan};

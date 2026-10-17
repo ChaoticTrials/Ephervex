@@ -1327,6 +1327,12 @@ async fn the_other_catalogs_release_stands_in_for_a_dependency_once_the_request_
 
 /// Writes a developer's own build of the duplicated library into `mods/`.
 fn place_library_build(game_dir: &std::path::Path) {
+    place_build(game_dir, "duplib");
+}
+
+/// Writes a developer's own build declaring `mod_id` into `mods/`, named
+/// `<mod_id>-dev.jar`.
+fn place_build(game_dir: &std::path::Path, mod_id: &str) {
     use std::io::Write as _;
     let mut bytes = Vec::new();
     let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
@@ -1335,11 +1341,10 @@ fn place_library_build(game_dir: &std::path::Path) {
         zip::write::SimpleFileOptions::default(),
     )
     .expect("entry");
-    zip.write_all(b"[[mods]]\nmodId=\"duplib\"\nversion=\"dev\"\n")
-        .expect("write");
+    write!(zip, "[[mods]]\nmodId=\"{mod_id}\"\nversion=\"dev\"\n").expect("write");
     zip.finish().expect("finish");
     std::fs::create_dir_all(game_dir.join("mods")).expect("mods dir");
-    std::fs::write(game_dir.join("mods/duplib-dev.jar"), bytes).expect("write");
+    std::fs::write(game_dir.join(format!("mods/{mod_id}-dev.jar")), bytes).expect("write");
 }
 
 #[tokio::test]
@@ -1417,4 +1422,384 @@ async fn nothing_stands_in_for_the_mod_asked_for() {
         "{refused:?}"
     );
     assert_eq!(world.server_jars(server), ["duplib-dev.jar"]);
+}
+
+#[tokio::test]
+async fn a_dependency_with_no_stated_server_side_needs_no_confirmation_when_a_jar_stands_in() {
+    let world = world().await;
+    let server = plain_server(&world);
+    place_build(&server_game_dir(&world, server), "dupunk");
+
+    let installed = install(
+        &world,
+        server,
+        &ModInstallRequest::new("DUPUNKROOT").letting_installed_stand_in_for(["DUPUNK"]),
+    )
+    .await
+    .expect("the build stands in, so nothing undeclared reaches the server");
+
+    assert_eq!(
+        installed
+            .installation
+            .stood_in
+            .iter()
+            .map(|stand_in| stand_in.installed.clone())
+            .collect::<Vec<_>>(),
+        [PathBuf::from("mods/dupunk-dev.jar")]
+    );
+    assert_eq!(
+        world.server_jars(server),
+        ["dupunk-dev.jar", "dupunkroot-DUPUNKROOTV1.jar"]
+    );
+}
+
+#[tokio::test]
+async fn a_dependency_with_no_stated_server_side_that_nothing_stands_in_for_still_needs_confirmation()
+ {
+    let world = world().await;
+    let server = plain_server(&world);
+
+    let refused = install(
+        &world,
+        server,
+        &ModInstallRequest::new("DUPUNKROOT").letting_installed_stand_in_for(["DUPUNK"]),
+    )
+    .await
+    .expect_err("the library would be installed unconfirmed");
+
+    assert!(
+        matches!(
+            &refused,
+            CoreError::ModServerSupportUnconfirmed { projects }
+                if projects == &["Undeclared Duplicated Library".to_owned()]
+        ),
+        "{refused:?}"
+    );
+    assert!(world.server_jars(server).is_empty());
+    assert!(!has_recipe(&world, server));
+}
+
+#[tokio::test]
+async fn a_version_change_lets_a_hand_placed_build_stand_in_for_its_new_dependency_once_allowed() {
+    let world = world().await;
+    let client = InstalledHost::Instance(world.client);
+    let root = world.app.client(world.client).expect("client").root;
+    install_on_client(
+        &world,
+        &ModInstallRequest::new("DUPROOT").at_version("DUPROOTV0"),
+    )
+    .await;
+    place_library_build(&ephervex_storage::metadata::client_game_dir(&root));
+    let target = std::path::Path::new("mods/duproot-DUPROOTV0.jar");
+    let newer = crate::mutation::ModVersionChoice::Exact("DUPROOTV1".to_owned());
+
+    let refused = world
+        .app
+        .change_managed_mod_version(client, target, &newer, &silent(), &CancellationToken::new())
+        .await
+        .expect_err("the build is not used unasked");
+    assert!(
+        matches!(
+            &refused,
+            CoreError::ModDependencyAlreadyProvided { project_id, path, .. }
+                if project_id == "DUPLIB" && path.ends_with("mods/duplib-dev.jar")
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(
+        world.client_jars(),
+        ["duplib-dev.jar", "duproot-DUPROOTV0.jar"]
+    );
+
+    let changed = world
+        .app
+        .change_managed_mod_version_using_installed(
+            client,
+            target,
+            &newer,
+            &std::collections::BTreeSet::from(["DUPLIB".to_owned()]),
+            &silent(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("the build stands in for the library");
+
+    assert_eq!(
+        changed
+            .report
+            .stood_in
+            .iter()
+            .map(|stand_in| stand_in.installed.clone())
+            .collect::<Vec<_>>(),
+        [PathBuf::from("mods/duplib-dev.jar")]
+    );
+    assert_eq!(
+        world.client_jars(),
+        ["duplib-dev.jar", "duproot-DUPROOTV1.jar"]
+    );
+    let recipe = world
+        .app
+        .pack_recipe(world.client)
+        .expect("recipe")
+        .expect("recipe");
+    assert!(
+        recipe
+            .managed_project(ModProvider::Modrinth, "DUPLIB")
+            .is_none(),
+        "the library that was not written is not recorded"
+    );
+}
+
+#[tokio::test]
+async fn a_linked_server_whose_build_provides_a_dependency_fails_alone_and_takes_it_once_allowed() {
+    let world = world().await;
+    let server = world.link_server("Linked", MINECRAFT);
+    place_library_build(&server_game_dir(&world, server));
+    let request = crate::linked_mods::LinkedModRequest::Install {
+        provider: ModProvider::Modrinth,
+        project: "DUPROOT".to_owned(),
+        version: Some("DUPROOTV1".to_owned()),
+    };
+
+    let outcome = world
+        .app
+        .apply_linked_mod_operation(
+            world.client,
+            &request,
+            &[server],
+            &silent(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("the client installs");
+    assert_eq!(
+        world.client_jars(),
+        ["duplib-DUPLIBV1.jar", "duproot-DUPROOTV1.jar"]
+    );
+    match &outcome.targets[0].result {
+        crate::linked_mods::LinkedTargetResult::Failed(failure) => assert_eq!(
+            failure
+                .provided_dependency
+                .as_ref()
+                .map(|provided| provided.project_id.as_str()),
+            Some("DUPLIB"),
+            "{failure:?}"
+        ),
+        other => panic!("expected the server to refuse a second copy, got {other:?}"),
+    }
+    assert_eq!(world.server_jars(server), ["duplib-dev.jar"]);
+
+    let again = world
+        .app
+        .apply_linked_mod_operation_using_installed(
+            world.client,
+            &request,
+            &[server],
+            &crate::linked_mods::LinkedStandIns {
+                client: std::collections::BTreeSet::new(),
+                servers: std::collections::BTreeMap::from([(
+                    server,
+                    std::collections::BTreeSet::from(["DUPLIB".to_owned()]),
+                )]),
+            },
+            &silent(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("applies again");
+
+    match &again.targets[0].result {
+        crate::linked_mods::LinkedTargetResult::Applied(report) => assert_eq!(
+            report
+                .stood_in
+                .iter()
+                .map(|stand_in| stand_in.installed.clone())
+                .collect::<Vec<_>>(),
+            [PathBuf::from("mods/duplib-dev.jar")]
+        ),
+        other => panic!("expected the build to stand in, got {other:?}"),
+    }
+    assert_eq!(
+        world.server_jars(server),
+        ["duplib-dev.jar", "duproot-DUPROOTV1.jar"]
+    );
+    assert_eq!(
+        world.client_jars(),
+        ["duplib-DUPLIBV1.jar", "duproot-DUPROOTV1.jar"],
+        "the client keeps what it installed"
+    );
+}
+
+#[tokio::test]
+async fn letting_the_clients_jar_stand_in_does_not_let_a_servers_jar_stand_in() {
+    let world = world().await;
+    let server = world.link_server("Linked", MINECRAFT);
+    let root = world.app.client(world.client).expect("client").root;
+    place_library_build(&ephervex_storage::metadata::client_game_dir(&root));
+    place_library_build(&server_game_dir(&world, server));
+    let request = crate::linked_mods::LinkedModRequest::Install {
+        provider: ModProvider::Modrinth,
+        project: "DUPROOT".to_owned(),
+        version: Some("DUPROOTV1".to_owned()),
+    };
+
+    let outcome = world
+        .app
+        .apply_linked_mod_operation_using_installed(
+            world.client,
+            &request,
+            &[server],
+            &crate::linked_mods::LinkedStandIns {
+                client: std::collections::BTreeSet::from(["DUPLIB".to_owned()]),
+                servers: std::collections::BTreeMap::new(),
+            },
+            &silent(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("the client installs");
+
+    assert_eq!(
+        world.client_jars(),
+        ["duplib-dev.jar", "duproot-DUPROOTV1.jar"]
+    );
+    assert!(
+        matches!(
+            &outcome.targets[0].result,
+            crate::linked_mods::LinkedTargetResult::Failed(failure)
+                if failure.provided_dependency.is_some()
+        ),
+        "{:?}",
+        outcome.targets[0].result
+    );
+    assert_eq!(world.server_jars(server), ["duplib-dev.jar"]);
+}
+
+/// Changes a server's `DUPUNKROOT` to the release that needs `DUPUNK`, whose
+/// catalog never stated server support.
+async fn change_to_the_release_needing_an_undeclared_library(
+    world: &World,
+    server: ServerId,
+    stand_ins: &[&str],
+) -> Result<crate::mutation::ModMutation, CoreError> {
+    world
+        .app
+        .change_managed_mod_version_using_installed(
+            host(server),
+            std::path::Path::new("mods/dupunkroot-DUPUNKROOTV0.jar"),
+            &crate::mutation::ModVersionChoice::Exact("DUPUNKROOTV1".to_owned()),
+            &stand_ins.iter().map(|id| (*id).to_owned()).collect(),
+            &silent(),
+            &CancellationToken::new(),
+        )
+        .await
+}
+
+#[tokio::test]
+async fn a_server_version_change_lets_a_jar_stand_in_for_a_new_dependency_with_no_stated_server_side()
+ {
+    let world = world().await;
+    let server = plain_server(&world);
+    install(
+        &world,
+        server,
+        &ModInstallRequest::new("DUPUNKROOT").at_version("DUPUNKROOTV0"),
+    )
+    .await
+    .expect("installs the release needing nothing");
+    place_build(&server_game_dir(&world, server), "dupunk");
+
+    let refused = change_to_the_release_needing_an_undeclared_library(&world, server, &[])
+        .await
+        .expect_err("the build is not used unasked");
+    assert!(
+        matches!(
+            &refused,
+            CoreError::ModDependencyAlreadyProvided { project_id, .. } if project_id == "DUPUNK"
+        ),
+        "{refused:?}"
+    );
+
+    let changed = change_to_the_release_needing_an_undeclared_library(&world, server, &["DUPUNK"])
+        .await
+        .expect("the build stands in for the library");
+
+    assert_eq!(changed.report.stood_in.len(), 1, "{:?}", changed.report);
+    assert_eq!(
+        world.server_jars(server),
+        ["dupunk-dev.jar", "dupunkroot-DUPUNKROOTV1.jar"]
+    );
+}
+
+#[tokio::test]
+async fn a_server_version_change_never_writes_a_new_dependency_with_no_stated_server_side() {
+    let world = world().await;
+    let server = plain_server(&world);
+    install(
+        &world,
+        server,
+        &ModInstallRequest::new("DUPUNKROOT").at_version("DUPUNKROOTV0"),
+    )
+    .await
+    .expect("installs the release needing nothing");
+    let before = world.server_recipe(server);
+
+    let refused = change_to_the_release_needing_an_undeclared_library(&world, server, &["DUPUNK"])
+        .await
+        .expect_err("nothing stands in, and the library is unconfirmed");
+
+    assert!(
+        matches!(
+            &refused,
+            CoreError::ModChangeServerSupportUnconfirmed { .. }
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(world.server_jars(server), ["dupunkroot-DUPUNKROOTV0.jar"]);
+    assert_eq!(world.server_recipe(server), before);
+}
+
+#[tokio::test]
+async fn a_server_version_change_never_records_for_the_server_a_dependency_recorded_only_for_its_client()
+ {
+    let world = world().await;
+    install_on_client(&world, &ModInstallRequest::new("UNKPROJ")).await;
+    let server = world.link_server("Linked Server", MINECRAFT);
+    install(
+        &world,
+        server,
+        &ModInstallRequest::new("LATERUNK").at_version("LATERUNKV1"),
+    )
+    .await
+    .expect("installs");
+    let client_root = world.app.client(world.client).expect("client").root;
+    std::fs::copy(
+        ephervex_storage::metadata::client_game_dir(&client_root).join("mods/unkproj-UNKV1.jar"),
+        server_game_dir(&world, server).join("mods/unkproj-UNKV1.jar"),
+    )
+    .expect("the client's jar, put on the server by hand");
+    let before = world.server_recipe(server);
+
+    let refused = world
+        .app
+        .change_managed_mod_version_using_installed(
+            host(server),
+            std::path::Path::new("mods/laterunk-LATERUNKV1.jar"),
+            &crate::ModVersionChoice::Exact("LATERUNKV2".to_owned()),
+            &std::collections::BTreeSet::from(["UNKPROJ".to_owned()]),
+            &silent(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("the record does not take the server, and nothing confirmed it");
+
+    assert!(
+        matches!(&refused, CoreError::ModChangeServerSupportUnconfirmed { projects } if projects == &["Undeclared Mod"]),
+        "{refused:?}"
+    );
+    assert_eq!(world.server_recipe(server), before);
+    assert_eq!(
+        world.server_jars(server),
+        ["laterunk-LATERUNKV1.jar", "unkproj-UNKV1.jar"]
+    );
 }

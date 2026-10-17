@@ -39,7 +39,7 @@ use tracing::{info, instrument, warn};
 
 use crate::error::{PackError, PackResult};
 use crate::install::{ArtifactFetch, copy_into_instance, fetch_all};
-use crate::mod_ids::{IncomingJar, settle_mod_ids};
+use crate::mod_ids::{IncomingJar, StandIns, settle_mod_ids};
 use crate::mutate::{MutationRecoveryAction, MutationRecoveryIssue};
 use crate::path::{DestinationLinks, contained_join, is_reserved, safe_relative_path};
 use crate::recipe::{
@@ -163,6 +163,10 @@ pub struct ManagedModInstall<'a> {
     /// refused as a second copy, exactly as if it were not named here. Empty
     /// means a second copy of a mod is always refused.
     pub installed_may_stand_in: &'a BTreeSet<PathBuf>,
+    /// Logical paths of files that are never written. One is left out when
+    /// `installed_may_stand_in` names it too and a jar stands in for it, and
+    /// otherwise the install is refused and nothing is written.
+    pub installed_must_stand_in: &'a BTreeSet<PathBuf>,
     pub fetch: ArtifactFetch<'a>,
 }
 
@@ -304,17 +308,15 @@ pub async fn install_managed(request: ManagedModInstall<'_>) -> PackResult<Manag
         game_dir,
         store,
         installed_may_stand_in,
+        installed_must_stand_in,
         fetch,
     } = request;
     let cancel = fetch.cancel;
     let settled = settle_recorded_paths(recipe, additions, Some(side));
-    // Named as the request named them, wherever the recipe has them.
-    let may_stand_in: BTreeSet<PathBuf> = additions
-        .iter()
-        .zip(&settled)
-        .filter(|(requested, _)| installed_may_stand_in.contains(&requested.logical_path))
-        .map(|(_, settled)| settled.logical_path.clone())
-        .collect();
+    let stand_ins = StandIns {
+        allowed: settled_paths(additions, &settled, installed_may_stand_in),
+        required: settled_paths(additions, &settled, installed_must_stand_in),
+    };
     let additions = settled.as_slice();
 
     // Nothing below this line runs until every destination is known to be safe.
@@ -355,7 +357,7 @@ pub async fn install_managed(request: ManagedModInstall<'_>) -> PackResult<Manag
         })
         .collect();
     report.stood_in =
-        settle_mod_ids(recipe, incoming, game_dir, BTreeSet::new(), may_stand_in).await?;
+        settle_mod_ids(recipe, incoming, game_dir, BTreeSet::new(), stand_ins).await?;
     let stood_in: BTreeSet<&Path> = report
         .stood_in
         .iter()
@@ -399,6 +401,21 @@ pub async fn install_managed(request: ManagedModInstall<'_>) -> PackResult<Manag
         "installed managed mods"
     );
     Ok(report)
+}
+
+/// The paths in `named`, as the request named them, where the recipe has
+/// them.
+pub(crate) fn settled_paths(
+    requested: &[PackFileRecipe],
+    settled: &[PackFileRecipe],
+    named: &BTreeSet<PathBuf>,
+) -> BTreeSet<PathBuf> {
+    requested
+        .iter()
+        .zip(settled)
+        .filter(|(requested, _)| named.contains(&requested.logical_path))
+        .map(|(_, settled)| settled.logical_path.clone())
+        .collect()
 }
 
 /// Decides what to do with every planned file, and refuses the whole operation

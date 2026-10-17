@@ -549,7 +549,7 @@ impl App {
         cancel: &CancellationToken,
     ) -> CoreResult<ModMutationPlan> {
         let context = self.mutation_context(host.into(), target)?;
-        self.version_change_plan(&context, choice, reporter, cancel)
+        self.version_change_plan(&context, choice, Unconfirmed::Refused, reporter, cancel)
             .await
     }
 
@@ -559,7 +559,6 @@ impl App {
     /// that has been withdrawn or that no longer fits between planning and
     /// applying must fail the operation, and the only way to notice is to ask
     /// again with the same exact pin.
-    #[instrument(skip_all, fields(target = %target.display()))]
     pub async fn change_managed_mod_version(
         &self,
         host: impl Into<InstalledHost>,
@@ -568,10 +567,51 @@ impl App {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<ModMutation> {
+        self.change_managed_mod_version_using_installed(
+            host,
+            target,
+            choice,
+            &BTreeSet::new(),
+            reporter,
+            cancel,
+        )
+        .await
+    }
+
+    /// [`Self::change_managed_mod_version`], letting a jar already on the host
+    /// stand in for the new release's dependencies named, by project id, in
+    /// `installed_may_stand_in`.
+    ///
+    /// Such a dependency is downloaded and verified like any other. It is left
+    /// out only when the host does not record it yet and one enabled jar beside
+    /// it declares every mod id its file does; the report then names that jar.
+    /// A dependency not named that another jar provides is refused with
+    /// [`CoreError::ModDependencyAlreadyProvided`], and nothing stands in for
+    /// the mod being changed.
+    ///
+    /// On a server, a new dependency whose catalog never stated server support
+    /// is never written: it is left out for a jar that may stand in for it,
+    /// refused as a second copy when a jar could, and refused with
+    /// [`CoreError::ModChangeServerSupportUnconfirmed`] otherwise.
+    #[instrument(skip_all, fields(target = %target.display()))]
+    pub async fn change_managed_mod_version_using_installed(
+        &self,
+        host: impl Into<InstalledHost>,
+        target: &Path,
+        choice: &ModVersionChoice,
+        installed_may_stand_in: &BTreeSet<String>,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> CoreResult<ModMutation> {
         let host = host.into();
         self.refuse_mod_change_during_isolation(host)?;
         self.with_artifact_cache(Box::pin(self.change_managed_mod_version_holding_the_cache(
-            host, target, choice, reporter, cancel,
+            host,
+            target,
+            choice,
+            installed_may_stand_in,
+            reporter,
+            cancel,
         )))
         .await
     }
@@ -581,6 +621,7 @@ impl App {
         host: InstalledHost,
         target: &Path,
         choice: &ModVersionChoice,
+        installed_may_stand_in: &BTreeSet<String>,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<ModMutation> {
@@ -589,7 +630,13 @@ impl App {
         let _gate = self.hold_mod_change(host, cancel).await?;
         let mut context = self.mutation_context(host, target)?;
         let plan = self
-            .version_change_plan(&context, choice, reporter, cancel)
+            .version_change_plan(
+                &context,
+                choice,
+                Unconfirmed::NeverWritten,
+                reporter,
+                cancel,
+            )
             .await?;
 
         if !plan.changes_anything() {
@@ -602,12 +649,49 @@ impl App {
         }
 
         let (upserts, resolved) = self.upserts_for(&context, &plan, reporter).await?;
+        let dependencies = resolved
+            .as_ref()
+            .map(|resolved| written_dependencies(resolved, &upserts))
+            .unwrap_or_default();
+        let paths_of = |projects: &BTreeSet<&str>| -> BTreeSet<PathBuf> {
+            dependencies
+                .iter()
+                .filter(|(_, planned)| projects.contains(planned.project.id.as_str()))
+                .map(|(path, _)| path.clone())
+                .collect()
+        };
+        let may_stand_in = paths_of(&installed_may_stand_in.iter().map(String::as_str).collect());
+        let must_stand_in = paths_of(
+            &resolved
+                .as_ref()
+                .map(|resolved| {
+                    undeclared_on_server(&context, resolved)
+                        .into_iter()
+                        .filter(|planned| deferrable(&context, resolved, planned))
+                        .map(|planned| planned.project.id.as_str())
+                        .collect()
+                })
+                .unwrap_or_default(),
+        );
         let removals = removals_for(&plan);
         let game_dir = context.host.game_dir();
         if let Err(error) = self
-            .commit(&mut context, &upserts, &removals, reporter, cancel)
+            .commit(
+                &mut context,
+                Changes {
+                    upserts: &upserts,
+                    removals: &removals,
+                    may_stand_in: &may_stand_in,
+                    must_stand_in: &must_stand_in,
+                },
+                reporter,
+                cancel,
+            )
             .await
         {
+            let error = crate::mods::dependency_refusal(error, &dependencies, |projects| {
+                CoreError::ModChangeServerSupportUnconfirmed { projects }
+            });
             return Err(match &resolved {
                 Some(resolved) => {
                     self.as_manual_acquisition(error, target, resolved, &game_dir, host.side())
@@ -677,8 +761,18 @@ impl App {
         let mut context = self.mutation_context(host, target)?;
         let plan = self.removal_plan(&context, reporter, cancel).await?;
         let removals = removals_for(&plan);
-        self.commit(&mut context, &[], &removals, reporter, cancel)
-            .await?;
+        self.commit(
+            &mut context,
+            Changes {
+                upserts: &[],
+                removals: &removals,
+                may_stand_in: &BTreeSet::new(),
+                must_stand_in: &BTreeSet::new(),
+            },
+            reporter,
+            cancel,
+        )
+        .await?;
 
         Ok(ModMutation {
             report: context.report,
@@ -723,6 +817,7 @@ impl App {
         &self,
         context: &MutationContext,
         choice: &ModVersionChoice,
+        unconfirmed: Unconfirmed,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<ModMutationPlan> {
@@ -764,7 +859,7 @@ impl App {
             .await?;
 
         refuse_to_move_other_mods(context, &resolved)?;
-        refuse_unconfirmed_server_support(context, &resolved)?;
+        refuse_unconfirmed_server_support(context, &resolved, unconfirmed)?;
 
         let candidate = resolved.root.version.id.clone();
         let outcome = if candidate == installed_version {
@@ -1063,8 +1158,7 @@ impl App {
     async fn commit(
         &self,
         context: &mut MutationContext,
-        upserts: &[PackFileRecipe],
-        removals: &[ManagedProject],
+        changes: Changes<'_>,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<()> {
@@ -1073,12 +1167,14 @@ impl App {
         let retired = ephervex_storage::metadata::retired_dir(&context.host.root);
         let result = ephervex_pack::mutate_managed(ManagedMutation {
             recipe: &mut context.recipe,
-            upserts,
-            removals,
+            upserts: changes.upserts,
+            removals: changes.removals,
             side: context.host.side(),
             game_dir: &context.host.game_dir(),
             retired_dir: &retired,
             store: &context.store,
+            installed_may_stand_in: changes.may_stand_in,
+            installed_must_stand_in: changes.must_stand_in,
             fetch: ArtifactFetch {
                 manager: &manager,
                 cache: &CacheLayout::new(self.paths().cache_dir()),
@@ -1119,6 +1215,17 @@ impl App {
         );
         Ok(())
     }
+}
+
+/// What one mutation writes and takes away.
+struct Changes<'a> {
+    upserts: &'a [PackFileRecipe],
+    removals: &'a [ManagedProject],
+    /// Logical paths of upserts a jar already on the host may stand in for.
+    may_stand_in: &'a BTreeSet<PathBuf>,
+    /// Logical paths of upserts never written: left out only for a jar that
+    /// may stand in for them, and otherwise refused.
+    must_stand_in: &'a BTreeSet<PathBuf>,
 }
 
 /// Everything one mutation reads and writes.
@@ -1178,21 +1285,45 @@ pub(crate) struct DependencyScope<'a> {
     pub provider: ModProvider,
 }
 
-/// Refuses a server version change that would add a mod whose catalog never
-/// stated server support. Installing one asks for that confirmation; a mod the
-/// server already records was confirmed when it was installed.
-fn refuse_unconfirmed_server_support(
+/// What a server version change does with a mod it would add whose catalog
+/// never stated server support.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unconfirmed {
+    /// Refused before anything is fetched.
+    Refused,
+    /// A dependency the server's recipe does not record is fetched but never
+    /// written: it is left out when a jar already on the server may stand in
+    /// for it, and refused as unconfirmed otherwise. Nothing new without
+    /// stated server support reaches the server either way. The mod being
+    /// changed, and a dependency recorded only for the other side, are still
+    /// refused before anything is fetched.
+    NeverWritten,
+}
+
+/// Whether an unconfirmed mod of a server version change can be left to a jar
+/// standing in for it. Only a dependency the recipe does not record can be:
+/// a recorded one would be repaired or recorded for the server instead.
+fn deferrable(context: &MutationContext, resolved: &ModInstallPlan, planned: &PlannedMod) -> bool {
+    planned.project.id != resolved.root.project.id
+        && context
+            .recipe
+            .managed_project(resolved.provider, &planned.project.id)
+            .is_none()
+}
+
+/// The mods a server version change would add whose catalog never stated
+/// server support. A mod the server already has was confirmed when it was
+/// installed. A record the server does not take was never asked about for it.
+fn undeclared_on_server<'a>(
     context: &MutationContext,
-    resolved: &ModInstallPlan,
-) -> CoreResult<()> {
+    resolved: &'a ModInstallPlan,
+) -> Vec<&'a PlannedMod> {
     if context.host.side() != ephervex_pack::PackSide::Server {
-        return Ok(());
+        return Vec::new();
     }
-    let projects: Vec<String> = resolved
+    resolved
         .undeclared_server_support()
         .into_iter()
-        // A mod the server already has was confirmed when it was installed. A
-        // record the server does not take was never asked about for it.
         .filter(|planned| {
             !context
                 .recipe
@@ -1203,6 +1334,22 @@ fn refuse_unconfirmed_server_support(
                         &ephervex_pack::OptionalSelection::none(),
                     )
                 })
+        })
+        .collect()
+}
+
+/// Refuses a server version change that would add a mod whose catalog never
+/// stated server support, as `unconfirmed` says. Installing one asks for that
+/// confirmation.
+fn refuse_unconfirmed_server_support(
+    context: &MutationContext,
+    resolved: &ModInstallPlan,
+    unconfirmed: Unconfirmed,
+) -> CoreResult<()> {
+    let projects: Vec<String> = undeclared_on_server(context, resolved)
+        .into_iter()
+        .filter(|planned| {
+            unconfirmed == Unconfirmed::Refused || !deferrable(context, resolved, planned)
         })
         .map(|planned| {
             if planned.project.title.is_empty() {
@@ -1272,6 +1419,28 @@ fn removals_for(plan: &ModMutationPlan) -> Vec<ManagedProject> {
         .iter()
         .filter_map(|file| Some(ManagedProject::new(provider, file.project_id.clone()?)))
         .collect()
+}
+
+/// The dependencies among `upserts`, by logical path, each with the planned mod
+/// it was made from.
+///
+/// `upserts` are made from [`written_mods`] in order, so the first is the mod
+/// acted on and nothing stands in for it, even where a dependency shares its
+/// file.
+pub(crate) fn written_dependencies<'a>(
+    plan: &'a ModInstallPlan,
+    upserts: &[PackFileRecipe],
+) -> BTreeMap<PathBuf, &'a PlannedMod> {
+    let mut dependencies: BTreeMap<PathBuf, &PlannedMod> = upserts
+        .iter()
+        .zip(written_mods(plan))
+        .skip(1)
+        .map(|(entry, planned)| (entry.logical_path.clone(), planned))
+        .collect();
+    if let Some(root) = upserts.first() {
+        dependencies.remove(&root.logical_path);
+    }
+    dependencies
 }
 
 /// The mods a version change writes: the one being changed, which is also

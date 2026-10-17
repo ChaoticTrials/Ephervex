@@ -489,6 +489,19 @@ pub enum CoreError {
     },
 }
 
+/// A dependency that a jar already on a host provides, as a refusal names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvidedDependency {
+    /// The dependency's title, or its project id when the catalog gave none.
+    pub dependency: String,
+    /// The project id that lets the jar stand in for it.
+    pub project_id: String,
+    /// One mod id both declare.
+    pub mod_id: String,
+    /// The jar that provides it.
+    pub path: PathBuf,
+}
+
 /// Lifts a pack failure into the error frontends see.
 ///
 /// One case is not a pack failure at all. Materializing retained desired state
@@ -562,6 +575,26 @@ impl From<ephervex_java::MemoryRangeViolation> for CoreError {
 }
 
 impl CoreError {
+    /// The dependency this refuses because a jar already on the host provides
+    /// it, when that is the refusal.
+    #[must_use]
+    pub fn provided_dependency(&self) -> Option<ProvidedDependency> {
+        match self {
+            Self::ModDependencyAlreadyProvided {
+                dependency,
+                project_id,
+                mod_id,
+                path,
+            } => Some(ProvidedDependency {
+                dependency: dependency.clone(),
+                project_id: project_id.clone(),
+                mod_id: mod_id.clone(),
+                path: path.clone(),
+            }),
+            _ => None,
+        }
+    }
+
     /// Whether the metadata at an indexed instance or server root names a
     /// different record, so the host can be forgotten but not changed.
     #[must_use]

@@ -1,6 +1,6 @@
 //! Non-blocking bridge from Slint callbacks to `ephervex-core` services.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::str::FromStr as _;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -39,7 +39,10 @@ use ephervex_core::{
     ConfiguredPreferences, LanguageAvailability, LanguageEntry, MinecraftPreferencePreview,
     MinecraftPreferenceSnapshot, PreferenceEdit,
 };
-use ephervex_core::{PlanWarning, PlannedMod};
+use ephervex_core::{
+    InstalledStandIn, LinkedStandIns, LinkedTargetFailure, LinkedTargetOutcome, PlanWarning,
+    PlannedMod, ProvidedDependency,
+};
 use ephervex_i18n::{Arg, lookup, lookup_args, lookup_attribute, lookup_attribute_args};
 use ephervex_model::GroupId;
 use ephervex_model::{
@@ -438,6 +441,13 @@ pub enum Command {
     /// never ends another operation's wait.
     CancelModAcquisition {
         id: u64,
+    },
+    /// Answers whether a jar already on a host may stand in for a dependency
+    /// an operation would otherwise install a second copy of. `id` is the one
+    /// the prompt carried.
+    AnswerModStandIn {
+        id: u64,
+        accepted: bool,
     },
     /// Works out what removing one mod would take with it. `request` names the
     /// ask, and the plan that answers it carries the same number back.
@@ -1190,6 +1200,17 @@ pub struct ModAcquisitionData {
     /// The mod the user acted on, by name.
     pub name: String,
     pub items: Vec<crate::presentation::BlockedFilePresentation>,
+}
+
+/// A question whether a jar already on a host may stand in for a dependency.
+#[derive(Debug, Clone, Default)]
+pub struct ModStandInData {
+    /// Names this question, so the prompt answers it and nothing else.
+    pub id: u64,
+    /// Which jar provides which dependency, and on which host.
+    pub detail: String,
+    /// What standing in means for the dependency.
+    pub note: String,
 }
 
 /// Everything the manage-a-mod view needs.
@@ -2057,6 +2078,14 @@ pub enum Event {
     ModAcquisitionEnded {
         id: u64,
     },
+    /// An operation stopped before writing anything because a dependency it
+    /// needs is another copy of a mod a jar already on the host provides, and
+    /// asks whether that jar may stand in for it.
+    ModStandInOffered(ModStandInData),
+    /// The question behind a stand-in prompt is over, answered or not.
+    ModStandInEnded {
+        id: u64,
+    },
     /// A folder watcher found and verified a hand-placed copy of one blocked
     /// file's bytes while the import modal was open on it.
     ///
@@ -2852,9 +2881,9 @@ fn run_worker(
     let launches: RunningLaunches = Arc::new(Mutex::new(HashMap::new()));
     // Kept between polls, because CPU is a rate rather than a reading.
     let mut process_monitor = ProcessMonitor::new();
-    // Every wait on a release the user has to fetch, so closing its dialog
-    // stops the folder watcher it left running and nothing else.
-    let acquisition_waits = AcquisitionWaits::default();
+    // Every wait on a release the user has to fetch or on a question they were
+    // asked, so closing its dialog ends that wait and nothing else.
+    let prompt_waits = PromptWaits::default();
     // The still-running resolution's own cancellation, so a superseding pick
     // or a closed modal can stop wasting a network request on an answer
     // nothing will read. The attempt identity itself belongs to the
@@ -3775,7 +3804,7 @@ fn run_worker(
             } => apply_server_mod_change(
                 app.paths().clone(),
                 &events,
-                &acquisition_waits,
+                &prompt_waits,
                 &changing,
                 server,
                 ServerModChange::Version { path, version },
@@ -3800,6 +3829,7 @@ fn run_worker(
                     continue;
                 };
                 let paths = app.paths().clone();
+                let waits = prompt_waits.clone();
                 spawn_detached(paths, events.clone(), move |mut app, events, runtime| {
                     let request = version_change_request(&path, &version);
                     let reporter = OperationReporter::silent("planning-mod-change");
@@ -3811,20 +3841,28 @@ fn run_worker(
                         // either way, so an empty confirmation would be a click
                         // for its own sake.
                         Ok(plan) if !plan.has_relevant_targets() => {
-                            let result = runtime.block_on(app.apply_linked_mod_operation(
-                                instance,
-                                &planned_request(&plan),
-                                &[],
+                            let request = planned_request(&plan);
+                            let result = runtime.block_on(apply_linked_answering(
+                                &app,
+                                &events,
+                                &waits,
+                                LinkedApply {
+                                    client: instance,
+                                    request: &request,
+                                    servers: &[],
+                                },
                                 &reporter,
                                 &cancel,
                             ));
-                            finish_linked(
-                                &mut app,
-                                &events,
-                                instance,
-                                ModalScope::MOD_MANAGE,
-                                result,
-                            );
+                            if let Some(result) = result {
+                                finish_linked(
+                                    &mut app,
+                                    &events,
+                                    instance,
+                                    ModalScope::MOD_MANAGE,
+                                    result,
+                                );
+                            }
                             drop(in_flight);
                         }
                         Ok(plan) => {
@@ -3848,7 +3886,7 @@ fn run_worker(
             } => apply_server_mod_change(
                 app.paths().clone(),
                 &events,
-                &acquisition_waits,
+                &prompt_waits,
                 &changing,
                 server,
                 ServerModChange::Version { path, version },
@@ -3863,7 +3901,7 @@ fn run_worker(
                 apply_mod_operation(
                     app.paths().clone(),
                     &events,
-                    &acquisition_waits,
+                    &prompt_waits,
                     &changing,
                     ModOperation {
                         instance,
@@ -3874,7 +3912,8 @@ fn run_worker(
                     },
                 );
             }
-            Command::CancelModAcquisition { id } => acquisition_waits.cancel(id),
+            Command::CancelModAcquisition { id } => prompt_waits.cancel(id),
+            Command::AnswerModStandIn { id, accepted } => prompt_waits.answer(id, accepted),
             Command::PlanModRemoval {
                 request,
                 host: InstalledHost::Server(server),
@@ -3935,7 +3974,7 @@ fn run_worker(
             } => apply_server_mod_change(
                 app.paths().clone(),
                 &events,
-                &acquisition_waits,
+                &prompt_waits,
                 &changing,
                 server,
                 ServerModChange::Remove { path },
@@ -4738,7 +4777,7 @@ fn run_worker(
                 let paths = app.paths().clone();
                 let reports = events.clone();
                 let acquisition_events = events.clone();
-                let waits = acquisition_waits.clone();
+                let waits = prompt_waits.clone();
                 let refreshed = Arc::clone(&refreshed_mods);
                 spawn_async_operation(
                     paths,
@@ -4761,24 +4800,24 @@ fn run_worker(
                             // published since cannot take its place.
                             request = request.at_version(version);
                         }
-                        let mut result = app.install_mods(host, &request, &reporter, &cancel).await;
-                        match await_manual_acquisition(
+                        let answered = run_answering(
                             &app,
                             &acquisition_events,
                             &waits,
                             &server.to_string(),
-                            &result,
                             &cancel,
+                            async |stand_ins: &BTreeSet<String>| {
+                                let request = request
+                                    .clone()
+                                    .letting_installed_stand_in_for(stand_ins.iter().cloned());
+                                app.install_mods(host, &request, &reporter, &cancel).await
+                            },
                         )
-                        .await
-                        {
-                            Acquisition::Acquired => {
-                                result = app.install_mods(host, &request, &reporter, &cancel).await;
-                            }
-                            Acquisition::NotNeeded => {}
-                            Acquisition::Abandoned => return Ok(OperationReport::Reported),
-                        }
-                        let installed = result?;
+                        .await;
+                        let installed = match answered {
+                            Answered::Finished(result, _) => result?,
+                            Answered::Abandoned => return Ok(OperationReport::Reported),
+                        };
                         let mut message = installed_message(
                             &installed.installation,
                             installed.plan.all_mods().len(),
@@ -4828,7 +4867,7 @@ fn run_worker(
                 let paths = app.paths().clone();
                 let reports = events.clone();
                 let acquisition_events = events.clone();
-                let waits = acquisition_waits.clone();
+                let waits = prompt_waits.clone();
                 spawn_async_operation(
                     paths,
                     &events,
@@ -4855,34 +4894,25 @@ fn run_worker(
                             // place here or on any selected server.
                             version: (!version.is_empty()).then_some(version),
                         };
-                        let mut result = app
-                            .apply_linked_mod_operation(
-                                instance, &request, &servers, &reporter, &cancel,
-                            )
-                            .await;
-                        match await_manual_acquisition(
+                        let applied = apply_linked_answering(
                             &app,
                             &acquisition_events,
                             &waits,
-                            &instance.to_string(),
-                            &result,
+                            LinkedApply {
+                                client: instance,
+                                request: &request,
+                                servers: &servers,
+                            },
+                            &reporter,
                             &cancel,
                         )
-                        .await
-                        {
-                            Acquisition::Acquired => {
-                                result = app
-                                    .apply_linked_mod_operation(
-                                        instance, &request, &servers, &reporter, &cancel,
-                                    )
-                                    .await;
-                            }
-                            Acquisition::NotNeeded => {}
-                            // The user decided against fetching the release
-                            // themselves. Nothing was installed and nothing
-                            // went wrong, so there is nothing to report.
-                            Acquisition::Abandoned => return Ok(OperationReport::Reported),
-                        }
+                        .await;
+                        // The user decided against something the install
+                        // needed. Nothing was installed and nothing went wrong,
+                        // so there is nothing to report.
+                        let Some(result) = applied else {
+                            return Ok(OperationReport::Reported);
+                        };
                         let outcome = result?;
                         let message = client_outcome_message(&outcome);
                         // The Managed Mods panel may already be open on this
@@ -4953,7 +4983,7 @@ fn run_worker(
                         }
                         let paths = app.paths().clone();
                         let acquisition_events = events.clone();
-                        let waits = acquisition_waits.clone();
+                        let waits = prompt_waits.clone();
                         spawn_creation_operation(
                             paths,
                             &events,
@@ -5218,7 +5248,7 @@ fn run_worker(
                 ) else {
                     continue;
                 };
-                let waits = acquisition_waits.clone();
+                let waits = prompt_waits.clone();
                 let refreshed = Arc::clone(&refreshed_mods);
                 spawn_detached(
                     app.paths().clone(),
@@ -10351,7 +10381,7 @@ struct RestoreRequest {
 fn restore_after_acquisition(
     paths: Paths,
     events: &Sender<Event>,
-    waits: &AcquisitionWaits,
+    waits: &PromptWaits,
     request: RestoreRequest,
 ) {
     let waits = waits.clone();
@@ -10409,10 +10439,13 @@ impl ServerModChange {
         }
     }
 
+    /// Carries the change out, letting a jar already on the server stand in
+    /// for the dependencies named in `stand_ins`.
     async fn run(
         &self,
         app: &App,
         server: ServerId,
+        stand_ins: &BTreeSet<String>,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<ModMutation> {
@@ -10423,8 +10456,10 @@ impl ServerModChange {
                 } else {
                     ModVersionChoice::Exact(version.clone())
                 };
-                app.change_managed_mod_version(server, path, &choice, reporter, cancel)
-                    .await
+                app.change_managed_mod_version_using_installed(
+                    server, path, &choice, stand_ins, reporter, cancel,
+                )
+                .await
             }
             Self::Remove { path } => app.remove_managed_mod(server, path, reporter, cancel).await,
         }
@@ -10471,7 +10506,7 @@ fn client_only_dependencies(plan: &ModMutationPlan) -> Vec<String> {
 fn apply_server_mod_change(
     paths: Paths,
     events: &Sender<Event>,
-    waits: &AcquisitionWaits,
+    waits: &PromptWaits,
     changing: &ChangingHosts,
     server: ServerId,
     change: ServerModChange,
@@ -10493,18 +10528,22 @@ fn apply_server_mod_change(
         let reporter = OperationReporter::silent(change.operation());
         runtime.block_on(async {
             let cancel = CancellationToken::new();
-            let mut result = change.run(&app, server, &reporter, &cancel).await;
-            match await_manual_acquisition(&app, &events, &waits, &host.id(), &result, &cancel)
-                .await
-            {
-                Acquisition::Acquired => {
-                    result = change
-                        .run(&app, server, &reporter, &CancellationToken::new())
-                        .await;
-                }
-                Acquisition::NotNeeded => {}
-                Acquisition::Abandoned => return,
-            }
+            let answered = run_answering(
+                &app,
+                &events,
+                &waits,
+                &host.id(),
+                &cancel,
+                async |stand_ins: &BTreeSet<String>| {
+                    change
+                        .run(&app, server, stand_ins, &reporter, &cancel)
+                        .await
+                },
+            )
+            .await;
+            let Answered::Finished(result, _) = answered else {
+                return;
+            };
             match result {
                 Ok(mutation) => {
                     let _ = events.send(Event::CloseModal(dialogs));
@@ -10534,7 +10573,9 @@ fn apply_server_mod_change(
 }
 
 /// Carries out one mod operation, offering the user-assisted acquisition path
-/// when a release's provider does not permit this launcher to download it.
+/// when a release's provider does not permit this launcher to download it, and
+/// asking whether a jar already on a host may stand in for a dependency it
+/// provides.
 ///
 /// The second attempt is the same operation rather than a second install
 /// path: once the folder watcher has adopted the copy the user fetched, the
@@ -10543,7 +10584,7 @@ fn apply_server_mod_change(
 fn apply_mod_operation(
     paths: Paths,
     events: &Sender<Event>,
-    waits: &AcquisitionWaits,
+    waits: &PromptWaits,
     changing: &ChangingHosts,
     operation: ModOperation,
 ) {
@@ -10563,46 +10604,23 @@ fn apply_mod_operation(
         let instance = operation.instance;
         runtime.block_on(async {
             let cancel = CancellationToken::new();
-            let result = app
-                .apply_linked_mod_operation(
-                    instance,
-                    &operation.request(),
-                    &operation.servers,
-                    &reporter,
-                    &cancel,
-                )
-                .await;
-            match await_manual_acquisition(
+            let request = operation.request();
+            let result = apply_linked_answering(
                 &app,
                 &events,
                 &waits,
-                &instance.to_string(),
-                &result,
+                LinkedApply {
+                    client: instance,
+                    request: &request,
+                    servers: &operation.servers,
+                },
+                &reporter,
                 &cancel,
             )
-            .await
-            {
-                Acquisition::Acquired => {}
-                Acquisition::NotNeeded => {
-                    finish_linked(&mut app, &events, instance, ModalScope::NONE, result);
-                    return;
-                }
-                Acquisition::Abandoned => return,
+            .await;
+            if let Some(result) = result {
+                finish_linked(&mut app, &events, instance, ModalScope::NONE, result);
             }
-            // Everything the user was asked for is now a verified copy in the
-            // shared cache, so the requested change goes through the ordinary
-            // path - including its own re-resolution, which is what catches a
-            // release withdrawn in the meantime.
-            let result = app
-                .apply_linked_mod_operation(
-                    instance,
-                    &operation.request(),
-                    &operation.servers,
-                    &reporter,
-                    &CancellationToken::new(),
-                )
-                .await;
-            finish_linked(&mut app, &events, instance, ModalScope::NONE, result);
         });
     });
 }
@@ -10618,7 +10636,7 @@ fn apply_mod_operation(
 async fn await_manual_acquisition(
     app: &App,
     events: &Sender<Event>,
-    waits: &AcquisitionWaits,
+    waits: &PromptWaits,
     host: &str,
     result: &Result<impl Sized, CoreError>,
     operation_cancel: &CancellationToken,
@@ -10664,14 +10682,16 @@ async fn await_manual_acquisition(
     }
 }
 
-/// The waits on releases the user has to fetch, by the id each prompt carries.
+/// The waits on the user, by the id each prompt carries: a release they have
+/// to fetch, or a question about an operation they started.
 #[derive(Clone, Default)]
-struct AcquisitionWaits {
+struct PromptWaits {
     next: Arc<AtomicU64>,
     running: Arc<Mutex<HashMap<u64, CancellationToken>>>,
+    questions: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<bool>>>>,
 }
 
-impl AcquisitionWaits {
+impl PromptWaits {
     /// Registers a wait that also ends when `operation` is canceled.
     fn begin(&self, operation: &CancellationToken) -> AcquisitionWait {
         let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
@@ -10683,6 +10703,37 @@ impl AcquisitionWaits {
             id,
             token,
             waits: self.clone(),
+        }
+    }
+
+    /// Registers a yes-or-no question. The receiver hears the answer, or is
+    /// dropped unanswered when the question is withdrawn.
+    fn ask(&self) -> (u64, tokio::sync::oneshot::Receiver<bool>) {
+        let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        if let Ok(mut questions) = self.questions.lock() {
+            questions.insert(id, sender);
+        }
+        (id, receiver)
+    }
+
+    /// Answers the one question the prompt named. An id that is already over
+    /// is ignored.
+    fn answer(&self, id: u64, accepted: bool) {
+        let sender = self
+            .questions
+            .lock()
+            .ok()
+            .and_then(|mut questions| questions.remove(&id));
+        if let Some(sender) = sender {
+            let _ = sender.send(accepted);
+        }
+    }
+
+    /// Withdraws a question nobody answered.
+    fn withdraw(&self, id: u64) {
+        if let Ok(mut questions) = self.questions.lock() {
+            questions.remove(&id);
         }
     }
 
@@ -10704,7 +10755,7 @@ impl AcquisitionWaits {
 struct AcquisitionWait {
     id: u64,
     token: CancellationToken,
-    waits: AcquisitionWaits,
+    waits: PromptWaits,
 }
 
 impl AcquisitionWait {
@@ -10721,6 +10772,258 @@ impl Drop for AcquisitionWait {
     fn drop(&mut self) {
         if let Ok(mut running) = self.waits.running.lock() {
             running.remove(&self.id);
+        }
+    }
+}
+
+/// Asks whether the jar a refusal names may stand in for the dependency it
+/// provides. `server` names the linked server the refusal came from, when it
+/// was not the host the user acted on.
+///
+/// An operation that ends while the question is open withdraws it, which is a
+/// no.
+async fn offer_stand_in(
+    events: &Sender<Event>,
+    waits: &PromptWaits,
+    server: Option<&str>,
+    provided: &ProvidedDependency,
+    operation_cancel: &CancellationToken,
+) -> bool {
+    let (id, answer) = waits.ask();
+    let path = provided.path.display().to_string();
+    let detail = match server {
+        Some(server) => lookup_args(
+            "gui-mod-stand-in-detail-on-server",
+            [
+                ("server", Arg::from(server)),
+                ("path", Arg::from(path.as_str())),
+                ("dependency", Arg::from(provided.dependency.as_str())),
+            ],
+        ),
+        None => lookup_args(
+            "gui-mod-stand-in-detail",
+            [
+                ("path", Arg::from(path.as_str())),
+                ("dependency", Arg::from(provided.dependency.as_str())),
+            ],
+        ),
+    };
+    let _ = events.send(Event::ModStandInOffered(ModStandInData {
+        id,
+        detail,
+        note: lookup_args(
+            "gui-mod-stand-in-note",
+            [("dependency", Arg::from(provided.dependency.as_str()))],
+        ),
+    }));
+    let accepted = tokio::select! {
+        answer = answer => answer.unwrap_or(false),
+        () = operation_cancel.cancelled() => false,
+    };
+    waits.withdraw(id);
+    let _ = events.send(Event::ModStandInEnded { id });
+    accepted
+}
+
+/// What a mod operation came to once the user answered what it asked.
+enum Answered<T> {
+    /// The last attempt's result, and the dependencies the user let a jar
+    /// already there stand in for.
+    Finished(CoreResult<T>, BTreeSet<String>),
+    /// The user decided against something the operation needed. Nothing was
+    /// written and nothing went wrong, so there is nothing to report.
+    Abandoned,
+}
+
+/// Runs a mod operation, and again after each part of its failure the user
+/// settles: fetching a release by hand, or letting a jar already on the host
+/// stand in for a dependency it provides.
+///
+/// `attempt` takes the dependencies, by project id, a jar there may stand in
+/// for. Each attempt is the whole ordinary operation, so whatever changed in
+/// between, such as a withdrawn release, is noticed the ordinary way.
+async fn run_answering<T>(
+    app: &App,
+    events: &Sender<Event>,
+    waits: &PromptWaits,
+    host: &str,
+    cancel: &CancellationToken,
+    mut attempt: impl AsyncFnMut(&BTreeSet<String>) -> CoreResult<T>,
+) -> Answered<T> {
+    let mut stand_ins = BTreeSet::new();
+    let mut fetched = false;
+    loop {
+        let result = attempt(&stand_ins).await;
+        if !fetched {
+            match await_manual_acquisition(app, events, waits, host, &result, cancel).await {
+                Acquisition::Acquired => {
+                    fetched = true;
+                    continue;
+                }
+                Acquisition::Abandoned => return Answered::Abandoned,
+                Acquisition::NotNeeded => {}
+            }
+        }
+        let provided = result
+            .as_ref()
+            .err()
+            .and_then(CoreError::provided_dependency)
+            .filter(|provided| !stand_ins.contains(&provided.project_id));
+        let Some(provided) = provided else {
+            return Answered::Finished(result, stand_ins);
+        };
+        if !offer_stand_in(events, waits, None, &provided, cancel).await {
+            return Answered::Abandoned;
+        }
+        stand_ins.insert(provided.project_id);
+    }
+}
+
+/// One linked operation and the servers it is carried to.
+#[derive(Clone, Copy)]
+struct LinkedApply<'a> {
+    client: InstanceId,
+    request: &'a LinkedModRequest,
+    servers: &'a [ServerId],
+}
+
+/// Applies a linked operation, answering what the client half asks the way
+/// [`run_answering`] does and then what each server asks. `None` when the user
+/// decided against something the client half needed.
+///
+/// An answer holds for the host it was asked about only: a jar on the client
+/// standing in for a dependency says nothing about a jar on a server.
+async fn apply_linked_answering(
+    app: &App,
+    events: &Sender<Event>,
+    waits: &PromptWaits,
+    apply: LinkedApply<'_>,
+    reporter: &OperationReporter,
+    cancel: &CancellationToken,
+) -> Option<CoreResult<LinkedModOutcome>> {
+    let LinkedApply {
+        client,
+        request,
+        servers,
+    } = apply;
+    let answered = run_answering(
+        app,
+        events,
+        waits,
+        &client.to_string(),
+        cancel,
+        async |stand_ins: &BTreeSet<String>| {
+            let stand_ins = LinkedStandIns {
+                client: stand_ins.clone(),
+                servers: BTreeMap::new(),
+            };
+            app.apply_linked_mod_operation_using_installed(
+                client, request, servers, &stand_ins, reporter, cancel,
+            )
+            .await
+        },
+    )
+    .await;
+    let Answered::Finished(result, client_stand_ins) = answered else {
+        return None;
+    };
+    let stand_ins = LinkedStandIns {
+        client: client_stand_ins,
+        servers: BTreeMap::new(),
+    };
+    Some(match result {
+        Ok(outcome) => Ok(settle_linked_stand_ins(
+            app, events, waits, apply, outcome, stand_ins, reporter, cancel,
+        )
+        .await),
+        Err(error) => Err(error),
+    })
+}
+
+/// Offers each linked server that refused a dependency a jar there already
+/// provides, and applies the operation again to the servers whose jar the user
+/// lets stand in.
+///
+/// Each server's answer holds for that server only. The client already has its
+/// result, and applying again leaves it as it is, so only the asked servers'
+/// results are replaced.
+#[allow(clippy::too_many_arguments)]
+async fn settle_linked_stand_ins(
+    app: &App,
+    events: &Sender<Event>,
+    waits: &PromptWaits,
+    apply: LinkedApply<'_>,
+    mut outcome: LinkedModOutcome,
+    mut stand_ins: LinkedStandIns,
+    reporter: &OperationReporter,
+    cancel: &CancellationToken,
+) -> LinkedModOutcome {
+    let mut asked: BTreeSet<(ServerId, String)> = BTreeSet::new();
+    loop {
+        let mut again = Vec::new();
+        for target in &outcome.targets {
+            let LinkedTargetResult::Failed(failure) = &target.result else {
+                continue;
+            };
+            let Some(provided) = &failure.provided_dependency else {
+                continue;
+            };
+            if !asked.insert((target.server, provided.project_id.clone())) {
+                continue;
+            }
+            if offer_stand_in(events, waits, Some(&target.name), provided, cancel).await {
+                stand_ins
+                    .servers
+                    .entry(target.server)
+                    .or_default()
+                    .insert(provided.project_id.clone());
+                again.push(target.server);
+            }
+        }
+        if again.is_empty() {
+            return outcome;
+        }
+        let retried = app
+            .apply_linked_mod_operation_using_installed(
+                apply.client,
+                apply.request,
+                &again,
+                &stand_ins,
+                reporter,
+                cancel,
+            )
+            .await;
+        replace_retried(
+            &mut outcome.targets,
+            &again,
+            &retried.map(|retried| retried.targets),
+        );
+    }
+}
+
+/// Replaces the results of the servers in `again` with what applying to them
+/// again did. A failure of the whole attempt is each of those servers' failure.
+fn replace_retried(
+    targets: &mut [LinkedTargetOutcome],
+    again: &[ServerId],
+    retried: &CoreResult<Vec<LinkedTargetOutcome>>,
+) {
+    for target in targets
+        .iter_mut()
+        .filter(|target| again.contains(&target.server))
+    {
+        match retried {
+            Ok(retried) => {
+                if let Some(result) = retried
+                    .iter()
+                    .find(|retried| retried.server == target.server)
+                {
+                    *target = result.clone();
+                }
+            }
+            Err(error) => {
+                target.result = LinkedTargetResult::Failed(LinkedTargetFailure::from(error));
+            }
         }
     }
 }
@@ -11862,7 +12165,7 @@ async fn mod_versions(app: &App, host: InstalledHost, path: &Path) -> ModVersion
 
 /// What to tell the user one finished mutation did.
 fn mutation_message(mutation: &ModMutation) -> String {
-    match &mutation.plan.outcome {
+    let outcome = match &mutation.plan.outcome {
         PlannedOutcome::AlreadyCurrent => {
             localized_value("gui-mod-already-current", &mutation.plan.name)
         }
@@ -11873,7 +12176,34 @@ fn mutation_message(mutation: &ModMutation) -> String {
         PlannedOutcome::Remove => {
             localized_count("gui-mod-removed", mutation.plan.removes.len().max(1))
         }
-    }
+    };
+    std::iter::once(outcome)
+        .chain(stood_in_lines(
+            "gui-mod-stood-in",
+            &mutation.report.stood_in,
+        ))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// One line per dependency a jar already on the host stands in for, naming
+/// that jar.
+fn stood_in_lines<'a>(
+    message_id: &'a str,
+    stood_in: &'a [InstalledStandIn],
+) -> impl Iterator<Item = String> + 'a {
+    stood_in.iter().map(move |stand_in| {
+        lookup_args(
+            message_id,
+            [
+                (
+                    "installed",
+                    Arg::from(stand_in.installed.display().to_string()),
+                ),
+                ("planned", Arg::from(stand_in.planned.display().to_string())),
+            ],
+        )
+    })
 }
 
 fn removal_plan_data(linked: &LinkedModPlan) -> ModRemovalPlanData {
@@ -12207,7 +12537,10 @@ fn kept_modified_message(paths: &[PathBuf]) -> String {
 fn installed_message(installation: &ManagedModInstallation, planned: usize) -> String {
     let mut parts = Vec::new();
     if !installation.installed.is_empty() || !installation.repaired.is_empty() {
-        parts.push(localized_count("gui-installed-managed-mods", planned));
+        parts.push(localized_count(
+            "gui-installed-managed-mods",
+            planned.saturating_sub(installation.stood_in.len()),
+        ));
     }
     if !installation.recorded.is_empty() {
         parts.push(localized_count(
@@ -12218,6 +12551,7 @@ fn installed_message(installation: &ManagedModInstallation, planned: usize) -> S
     if !installation.modified.is_empty() {
         parts.push(kept_modified_message(&installation.modified));
     }
+    parts.extend(stood_in_lines("gui-mod-stood-in", &installation.stood_in));
     if parts.is_empty() {
         return lookup("mod-install-nothing-to-do");
     }
@@ -12299,6 +12633,7 @@ fn applied_summary(report: &ManagedMutationReport) -> String {
             report.modified.len(),
         ));
     }
+    parts.extend(stood_in_lines("gui-linked-stood-in", &report.stood_in));
     if parts.is_empty() {
         return lookup("gui-linked-nothing-changed");
     }
@@ -13119,6 +13454,263 @@ mod tests {
         );
     }
 
+    fn libx_stand_in() -> InstalledStandIn {
+        InstalledStandIn {
+            planned: PathBuf::from("mods/libx-7.0.4.jar"),
+            installed: PathBuf::from("mods/libx-dev.jar"),
+            mod_ids: vec!["libx".to_owned()],
+        }
+    }
+
+    #[test]
+    fn a_linked_target_names_the_jar_standing_in_for_a_dependency() {
+        let report = ManagedMutationReport {
+            installed: logical(&["mods/root.jar"]),
+            stood_in: vec![libx_stand_in()],
+            ..ManagedMutationReport::default()
+        };
+
+        assert_eq!(
+            applied_summary(&report),
+            "1 mod, mods/libx-dev.jar used in place of mods/libx-7.0.4.jar"
+        );
+    }
+
+    #[test]
+    fn an_install_names_the_jar_standing_in_and_does_not_count_the_dependency_installed() {
+        let installation = ManagedModInstallation {
+            installed: logical(&["mods/root.jar"]),
+            stood_in: vec![libx_stand_in()],
+            ..ManagedModInstallation::default()
+        };
+
+        let message = installed_message(&installation, 2);
+
+        assert!(message.starts_with("Installed 1 managed mod"), "{message}");
+        assert!(
+            message.contains("mods/libx-dev.jar is used in place of mods/libx-7.0.4.jar."),
+            "{message}"
+        );
+    }
+
+    fn libx_already_provided() -> CoreError {
+        CoreError::ModDependencyAlreadyProvided {
+            dependency: "LibX".to_owned(),
+            project_id: "LIBX".to_owned(),
+            mod_id: "libx".to_owned(),
+            path: PathBuf::from("/instance/minecraft/mods/libx-dev.jar"),
+        }
+    }
+
+    /// Answers the first stand-in question the events carry, and returns
+    /// every event that arrived up to the end of that question.
+    fn answer_stand_in(
+        events: Receiver<Event>,
+        waits: PromptWaits,
+        accepted: bool,
+    ) -> thread::JoinHandle<Vec<Event>> {
+        thread::spawn(move || {
+            let mut seen = Vec::new();
+            while let Ok(event) = events.recv_timeout(Duration::from_secs(10)) {
+                let ended = matches!(event, Event::ModStandInEnded { .. });
+                if let Event::ModStandInOffered(data) = &event {
+                    waits.answer(data.id, accepted);
+                }
+                seen.push(event);
+                if ended {
+                    break;
+                }
+            }
+            seen
+        })
+    }
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime")
+            .block_on(future)
+    }
+
+    #[test]
+    fn a_stand_in_question_names_the_jar_and_the_dependency_and_hears_the_answer() {
+        let (events, received) = mpsc::channel();
+        let waits = PromptWaits::default();
+        let answering = answer_stand_in(received, waits.clone(), true);
+        let provided = libx_already_provided()
+            .provided_dependency()
+            .expect("a provided dependency");
+
+        let accepted = block_on(offer_stand_in(
+            &events,
+            &waits,
+            Some("Test Server"),
+            &provided,
+            &CancellationToken::new(),
+        ));
+
+        assert!(accepted);
+        let seen = answering.join().expect("the answering thread");
+        let data = seen
+            .iter()
+            .find_map(|event| match event {
+                Event::ModStandInOffered(data) => Some(data),
+                _ => None,
+            })
+            .expect("the question");
+        assert!(data.detail.contains("Test Server"), "{}", data.detail);
+        assert!(
+            data.detail
+                .contains("/instance/minecraft/mods/libx-dev.jar"),
+            "{}",
+            data.detail
+        );
+        assert!(data.detail.contains("LibX"), "{}", data.detail);
+        assert!(matches!(seen.last(), Some(Event::ModStandInEnded { id }) if *id == data.id));
+    }
+
+    fn target_outcome(server: ServerId, result: LinkedTargetResult) -> LinkedTargetOutcome {
+        LinkedTargetOutcome {
+            server,
+            name: server.to_string(),
+            result,
+        }
+    }
+
+    #[test]
+    fn applying_again_replaces_only_the_results_of_the_servers_asked_again() {
+        let asked = ServerId::new();
+        let other = ServerId::new();
+        let refused =
+            LinkedTargetResult::Failed(LinkedTargetFailure::from(&libx_already_provided()));
+        let mut targets = vec![
+            target_outcome(asked, refused.clone()),
+            target_outcome(other, refused),
+        ];
+
+        replace_retried(
+            &mut targets,
+            &[asked],
+            &Ok(vec![target_outcome(
+                asked,
+                LinkedTargetResult::Applied(Box::default()),
+            )]),
+        );
+
+        assert!(targets[0].result.succeeded());
+        assert!(
+            matches!(&targets[1].result, LinkedTargetResult::Failed(failure) if failure.provided_dependency.is_some()),
+            "a server not asked again keeps its refusal"
+        );
+    }
+
+    #[test]
+    fn a_failed_attempt_to_apply_again_is_each_asked_servers_failure() {
+        let asked = ServerId::new();
+        let mut targets = vec![target_outcome(
+            asked,
+            LinkedTargetResult::Failed(LinkedTargetFailure::from(&libx_already_provided())),
+        )];
+
+        replace_retried(
+            &mut targets,
+            &[asked],
+            &Err(CoreError::ModServerSupportUnconfirmed {
+                projects: vec!["LibX".to_owned()],
+            }),
+        );
+
+        assert!(
+            matches!(&targets[0].result, LinkedTargetResult::Failed(failure) if failure.provided_dependency.is_none()),
+            "{:?}",
+            targets[0].result
+        );
+    }
+
+    #[test]
+    fn a_stand_in_question_is_a_no_once_its_operation_is_canceled() {
+        let (events, _received) = mpsc::channel();
+        let waits = PromptWaits::default();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let provided = libx_already_provided()
+            .provided_dependency()
+            .expect("a provided dependency");
+
+        let accepted = block_on(offer_stand_in(&events, &waits, None, &provided, &cancel));
+
+        assert!(!accepted);
+        assert!(
+            waits.questions.lock().expect("questions").is_empty(),
+            "the withdrawn question is forgotten"
+        );
+    }
+
+    #[test]
+    fn an_operation_runs_again_with_the_dependency_the_user_lets_an_installed_jar_stand_in_for() {
+        without_desktop_keyring();
+        let base = tempfile::tempdir().expect("a disposable root");
+        let app = App::open_at(ephervex_core::Paths::rooted_at(base.path())).expect("an app");
+        let (events, received) = mpsc::channel();
+        let waits = PromptWaits::default();
+        let answering = answer_stand_in(received, waits.clone(), true);
+        let mut attempts = Vec::new();
+
+        let answered = block_on(run_answering(
+            &app,
+            &events,
+            &waits,
+            "instance",
+            &CancellationToken::new(),
+            async |stand_ins: &BTreeSet<String>| {
+                attempts.push(stand_ins.clone());
+                if stand_ins.is_empty() {
+                    Err(libx_already_provided())
+                } else {
+                    Ok(())
+                }
+            },
+        ));
+
+        answering.join().expect("the answering thread");
+        let (result, stand_ins) = match answered {
+            Answered::Finished(result, stand_ins) => Some((result, stand_ins)),
+            Answered::Abandoned => None,
+        }
+        .expect("the operation finishes");
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(stand_ins, BTreeSet::from(["LIBX".to_owned()]));
+        assert_eq!(attempts, [BTreeSet::new(), stand_ins]);
+    }
+
+    #[test]
+    fn an_operation_whose_stand_in_is_declined_is_not_applied_again() {
+        without_desktop_keyring();
+        let base = tempfile::tempdir().expect("a disposable root");
+        let app = App::open_at(ephervex_core::Paths::rooted_at(base.path())).expect("an app");
+        let (events, received) = mpsc::channel();
+        let waits = PromptWaits::default();
+        let answering = answer_stand_in(received, waits.clone(), false);
+        let mut attempts = 0;
+
+        let answered = block_on(run_answering(
+            &app,
+            &events,
+            &waits,
+            "instance",
+            &CancellationToken::new(),
+            async |_: &BTreeSet<String>| -> CoreResult<()> {
+                attempts += 1;
+                Err(libx_already_provided())
+            },
+        ));
+
+        answering.join().expect("the answering thread");
+        assert!(matches!(answered, Answered::Abandoned));
+        assert_eq!(attempts, 1);
+    }
+
     #[test]
     fn an_install_that_kept_a_changed_jar_does_not_claim_it_installed_the_mod() {
         let installation = ManagedModInstallation {
@@ -13260,7 +13852,7 @@ mod tests {
 
     #[test]
     fn canceling_one_manual_download_wait_leaves_every_other_operation_running() {
-        let waits = AcquisitionWaits::default();
+        let waits = PromptWaits::default();
         let (first_operation, second_operation) =
             (CancellationToken::new(), CancellationToken::new());
         let first = waits.begin(&first_operation);
@@ -13280,7 +13872,7 @@ mod tests {
 
     #[test]
     fn stopping_an_operation_ends_its_manual_download_wait() {
-        let waits = AcquisitionWaits::default();
+        let waits = PromptWaits::default();
         let operation = CancellationToken::new();
         let wait = waits.begin(&operation);
 
@@ -13291,7 +13883,7 @@ mod tests {
 
     #[test]
     fn canceling_a_manual_download_wait_that_is_over_is_ignored() {
-        let waits = AcquisitionWaits::default();
+        let waits = PromptWaits::default();
         let operation = CancellationToken::new();
         let finished = waits.begin(&operation);
         let id = finished.id();

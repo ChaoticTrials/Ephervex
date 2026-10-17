@@ -1147,6 +1147,19 @@ not name is refused, with the refusal naming that dependency and the jar that
 provides it. No release is substituted without that explicit choice. The
 command line's form of it is `--use-installed <PROJECT>` on `mod install`.
 
+A version change or update takes the same choice for the new release's
+dependencies, and only a dependency the host does not record yet can be stood
+in for. A linked operation carries it to the client and to every selected
+server, and a server whose own jar provides a dependency fails alone with a
+refusal that names that jar. When installing onto a server, a dependency whose
+catalog never stated server support needs no confirmation when a jar stands in
+for it, because nothing new reaches the server; if nothing does, the install is
+refused as unconfirmed. The desktop app asks the question when an install or version
+change is refused this way, for the client and for each selected linked server
+in turn, and applies the operation again to the hosts where the user lets the
+jar stand in. Declining leaves the refusal as it was, and the result names
+every jar that stands in.
+
 Mods installed through a provider are entries in the same recipe (ADR 0013), so
 a server built later contains them. No automatic operation overwrites or deletes
 a jar the launcher did not install. Installation writes the recipe last; any failure -

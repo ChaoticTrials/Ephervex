@@ -791,9 +791,10 @@ struct InstallConsentArgs {
     /// this project id, when that jar provides the same mod.
     ///
     /// Repeatable. The dependency is still downloaded and checked, and is left
-    /// out only if one jar already there declares every mod id it does.
-    /// Without it, a dependency that another jar already provides is refused,
-    /// because the game does not start with two copies of one mod.
+    /// out only if one jar already there declares every mod id it does. On a
+    /// server it then needs no --accept-unknown-server-support. Without it, a
+    /// dependency that another jar already provides is refused, because the
+    /// game does not start with two copies of one mod.
     #[arg(long = "use-installed", value_name = "PROJECT")]
     use_installed: Vec<String>,
 }
@@ -5570,18 +5571,7 @@ async fn run_mod_install(
         .letting_installed_stand_in_for(consent.use_installed.iter().cloned());
     if matches!(host, InstalledHost::Server(_)) {
         let plan = app.plan_mod_installation(host, &request).await?;
-        let unconfirmed = plan.undeclared_server_support();
-        if !unconfirmed.is_empty() {
-            if !consent.accept_unknown_server_support {
-                return Err(unconfirmed_server_support(&mod_names(&unconfirmed)));
-            }
-            request = request.confirming_server_support(
-                unconfirmed
-                    .iter()
-                    .map(|planned| planned.project.id.clone())
-                    .collect::<Vec<_>>(),
-            );
-        }
+        request = request.confirming_server_support(server_support_confirmed(&plan, consent)?);
     }
     let reporter = OperationReporter::silent("installing-mods");
     let installed = match app
@@ -5594,10 +5584,44 @@ async fn run_mod_install(
             path,
             ..
         }) => return Err(dependency_already_provided(&dependency, &project_id, &path)),
+        Err(CoreError::ModServerSupportUnconfirmed { projects }) => {
+            return Err(unconfirmed_server_support(&projects));
+        }
         installed => installed?,
     };
     print_installed_mods(&installed, host, json);
     Ok(())
+}
+
+/// The projects with no stated server side a server install confirms, or the
+/// refusal naming the ones it would need confirmed.
+///
+/// `--accept-unknown-server-support` confirms every one of them. Without it, a
+/// dependency a jar already on the server may stand in for is left to the
+/// install, which refuses it only when nothing stands in for it.
+fn server_support_confirmed(
+    plan: &ModInstallPlan,
+    consent: &InstallConsentArgs,
+) -> anyhow::Result<Vec<String>> {
+    let undeclared = plan.undeclared_server_support();
+    if consent.accept_unknown_server_support {
+        return Ok(undeclared
+            .iter()
+            .map(|planned| planned.project.id.clone())
+            .collect());
+    }
+    let unconfirmed: Vec<&PlannedMod> = undeclared
+        .into_iter()
+        .filter(|planned| {
+            planned.project.id == plan.root.project.id
+                || !consent.use_installed.contains(&planned.project.id)
+        })
+        .collect();
+    if unconfirmed.is_empty() {
+        Ok(Vec::new())
+    } else {
+        Err(unconfirmed_server_support(&mod_names(&unconfirmed)))
+    }
 }
 
 /// Refuses an install whose dependency a jar already installed provides,
@@ -10749,6 +10773,76 @@ mod tests {
         let expected: Vec<String> = warnings.iter().map(warning_text).collect();
         assert_eq!(expected.len(), 3);
         assert_eq!(reported["plan"]["warnings"], serde_json::json!(expected));
+    }
+
+    /// A plan whose dependencies leave their server side unstated, and whose
+    /// root does too when `root_undeclared` says so.
+    fn undeclared_plan(root_undeclared: bool, dependencies: &[&str]) -> ModInstallPlan {
+        let undeclared = |project_id: &str| {
+            let mut planned = planned_mod(project_id);
+            planned.project.server_side = ephervex_core::SideSupport::Unknown;
+            planned
+        };
+        ModInstallPlan {
+            provider: ModProvider::Modrinth,
+            root: if root_undeclared {
+                undeclared("ROOT")
+            } else {
+                planned_mod("ROOT")
+            },
+            dependencies: dependencies.iter().map(|id| undeclared(id)).collect(),
+            optional: Vec::new(),
+            external: Vec::new(),
+            embedded: Vec::new(),
+            already_installed: Vec::new(),
+            replacements: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    fn consent(accept: bool, use_installed: &[&str]) -> InstallConsentArgs {
+        InstallConsentArgs {
+            accept_unknown_server_support: accept,
+            use_installed: use_installed.iter().map(|id| (*id).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn a_server_install_leaves_a_dependency_an_installed_jar_may_stand_in_for_to_the_install() {
+        let confirmed = server_support_confirmed(
+            &undeclared_plan(false, &["LIBX"]),
+            &consent(false, &["LIBX"]),
+        )
+        .expect("the install decides about LIBX");
+
+        assert!(confirmed.is_empty(), "{confirmed:?}");
+    }
+
+    #[test]
+    fn a_server_install_still_needs_confirmation_for_what_no_jar_may_stand_in_for() {
+        assert!(
+            server_support_confirmed(
+                &undeclared_plan(false, &["LIBX", "LIBY"]),
+                &consent(false, &["LIBX"]),
+            )
+            .is_err()
+        );
+        assert!(
+            server_support_confirmed(&undeclared_plan(true, &[]), &consent(false, &["ROOT"]))
+                .is_err(),
+            "nothing stands in for the mod asked for"
+        );
+    }
+
+    #[test]
+    fn accepting_unknown_server_support_confirms_dependencies_an_installed_jar_may_stand_in_for() {
+        let confirmed = server_support_confirmed(
+            &undeclared_plan(false, &["LIBX"]),
+            &consent(true, &["LIBX"]),
+        )
+        .expect("accepted");
+
+        assert_eq!(confirmed, ["LIBX"]);
     }
 
     #[test]

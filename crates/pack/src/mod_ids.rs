@@ -62,6 +62,17 @@ pub(crate) struct IncomingJar {
     pub(crate) staged: PathBuf,
 }
 
+/// The incoming jars, by logical path, that a jar already beside them may
+/// stand in for.
+#[derive(Debug, Default)]
+pub(crate) struct StandIns {
+    /// Left out when one jar stands in, and otherwise written as usual.
+    pub(crate) allowed: BTreeSet<PathBuf>,
+    /// Never written: left out when it is allowed and one jar stands in, and
+    /// otherwise refused.
+    pub(crate) required: BTreeSet<PathBuf>,
+}
+
 /// Refuses a change that would leave the loader two jars declaring one mod id.
 ///
 /// `incoming` are the jars about to be written enabled. `leaving` are the
@@ -75,13 +86,13 @@ pub(crate) async fn require_distinct_mod_ids(
     game_dir: &Path,
     leaving: BTreeSet<PathBuf>,
 ) -> PackResult<()> {
-    settle_mod_ids(recipe, incoming, game_dir, leaving, BTreeSet::new())
+    settle_mod_ids(recipe, incoming, game_dir, leaving, StandIns::default())
         .await
         .map(|_| ())
 }
 
 /// [`require_distinct_mod_ids`], except that an incoming jar named in
-/// `may_stand_in` is left out rather than refused when one enabled jar already
+/// `stand_ins` is left out rather than refused when one enabled jar already
 /// beside it declares every mod id it does.
 ///
 /// Every id, from one jar: a jar declaring only some of them would leave the
@@ -91,15 +102,29 @@ pub(crate) async fn settle_mod_ids(
     incoming: Vec<IncomingJar>,
     game_dir: &Path,
     leaving: BTreeSet<PathBuf>,
-    may_stand_in: BTreeSet<PathBuf>,
+    stand_ins: StandIns,
 ) -> PackResult<Vec<InstalledStandIn>> {
     if incoming.is_empty() {
         return Ok(Vec::new());
     }
+    let StandIns { allowed, required } = stand_ins;
+    let unsettled: Vec<PathBuf> = incoming
+        .iter()
+        .filter(|jar| required.contains(&jar.logical_path))
+        .map(|jar| jar.logical_path.clone())
+        .collect();
     let game_dir = game_dir.to_path_buf();
-    let judged =
-        off_runtime(move || Ok(judge(&incoming, &game_dir, &leaving, &may_stand_in))).await?;
-    judged.map_err(|clash| refusal(Some(recipe), clash))
+    let judged = off_runtime(move || Ok(judge(&incoming, &game_dir, &leaving, &allowed))).await?;
+    let stood_in = judged.map_err(|clash| refusal(Some(recipe), clash))?;
+    if let Some(missing) = unsettled
+        .iter()
+        .find(|path| !stood_in.iter().any(|stand_in| &stand_in.planned == *path))
+    {
+        return Err(PackError::StandInUnavailable {
+            incoming: missing.to_string_lossy().into_owned(),
+        });
+    }
+    Ok(stood_in)
 }
 
 /// Refuses letting the loader read every jar in `jars` when two of them, or
