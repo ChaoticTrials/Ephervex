@@ -2292,85 +2292,80 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
-                        if root.import-blocked-items.length > 0 : VerticalLayout {
-                            spacing: 6px;
-                            BodyText { text: GuiI18n.text("gui-import-blocked-detail"); color: Theme.warning; wrap: word-wrap; }
-                            HorizontalLayout {
-                                Rectangle { horizontal-stretch: 1; }
-                                AppButton {
-                                    text: GuiI18n.text("gui-import-open-watched-folders");
-                                    clicked => { root.close-import-modal(); root.close-workspace(); root.page = 4; root.settings-tab = "Storage"; }
-                                }
+                        // Wrapped text stays a direct child: a conditional layout here measures it unwrapped.
+                        if root.import-blocked-items.length > 0 : BodyText { text: GuiI18n.text("gui-import-blocked-detail"); color: Theme.warning; wrap: word-wrap; }
+                        if root.import-blocked-items.length > 0 : HorizontalLayout {
+                            Rectangle { horizontal-stretch: 1; }
+                            AppButton {
+                                text: GuiI18n.text("gui-import-open-watched-folders");
+                                clicked => { root.close-import-modal(); root.close-workspace(); root.page = 4; root.settings-tab = "Storage"; }
                             }
-                            ScrollView {
-                                viewport-width: self.width;
-                                height: min(root.import-blocked-items.length * 64px, 220px);
-                                VerticalLayout {
-                                    spacing: 6px;
-                                    for item in root.import-blocked-items : Rectangle {
-                                        height: 58px;
-                                        border-radius: 6px;
-                                        border-width: 1px;
-                                        border-color: Theme.border;
-                                        background: Theme.surface;
-                                        HorizontalLayout {
-                                            padding: 8px;
-                                            spacing: 8px;
-                                            VerticalLayout {
-                                                alignment: center;
-                                                BodyText { text: item.project-line; overflow: elide; }
-                                                BodyText { text: item.file-line; color: Theme.text-muted; overflow: elide; }
-                                            }
-                                            Rectangle { horizontal-stretch: 1; }
-                                            AppButton {
-                                                text: GuiI18n.text("gui-open-in-browser");
-                                                enabled: item.browser-url != ""; hint: GuiI18n.text("gui-hint-no-project-page");
-                                                clicked => { root.open-blocked-file(item.browser-url); }
-                                            }
-                                            AppButton {
-                                                text: GuiI18n.text("gui-skip");
-                                                tone: "danger";
-                                                clicked => { root.skip-blocked-file(item.identity); }
-                                            }
+                        }
+                        if root.import-blocked-items.length > 0 : ScrollView {
+                            viewport-width: self.width;
+                            height: min(root.import-blocked-items.length * 64px, 220px);
+                            VerticalLayout {
+                                spacing: 6px;
+                                for item in root.import-blocked-items : Rectangle {
+                                    height: 58px;
+                                    border-radius: 6px;
+                                    border-width: 1px;
+                                    border-color: Theme.border;
+                                    background: Theme.surface;
+                                    HorizontalLayout {
+                                        padding: 8px;
+                                        spacing: 8px;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            BodyText { text: item.project-line; overflow: elide; }
+                                            BodyText { text: item.file-line; color: Theme.text-muted; overflow: elide; }
+                                        }
+                                        Rectangle { horizontal-stretch: 1; }
+                                        AppButton {
+                                            text: GuiI18n.text("gui-open-in-browser");
+                                            enabled: item.browser-url != ""; hint: GuiI18n.text("gui-hint-no-project-page");
+                                            clicked => { root.open-blocked-file(item.browser-url); }
+                                        }
+                                        AppButton {
+                                            text: GuiI18n.text("gui-skip");
+                                            tone: "danger";
+                                            clicked => { root.skip-blocked-file(item.identity); }
                                         }
                                     }
                                 }
                             }
                         }
-                        if root.import-duplicate-items.length > 0 : VerticalLayout {
-                            spacing: 6px;
-                            BodyText { text: GuiI18n.text("gui-import-duplicate-detail"); color: Theme.text-secondary; wrap: word-wrap; }
-                            ScrollView {
-                                viewport-width: self.width;
-                                height: min(root.import-duplicate-items.length * 100px, 260px);
-                                VerticalLayout {
-                                    spacing: 6px;
-                                    for item in root.import-duplicate-items : Rectangle {
-                                        height: max(
-                                            58px,
-                                            project-text.preferred-height
-                                                + kept-text.preferred-height
-                                                + reason-text.preferred-height
-                                                + 22px);
-                                        border-radius: 6px;
-                                        border-width: 1px;
-                                        border-color: Theme.border;
-                                        background: Theme.surface;
-                                        VerticalLayout {
-                                            padding: 8px;
-                                            spacing: 2px;
-                                            project-text := BodyText { text: item.project-line; wrap: word-wrap; }
-                                            kept-text := BodyText {
-                                                text: GuiI18n.values("gui-import-duplicate-kept", item.kept-line, item.discarded-line);
-                                                color: Theme.text-muted;
-                                                wrap: word-wrap;
-                                            }
-                                            reason-text := BodyText {
-                                                text: item.matched-minecraft-version ? GuiI18n.text("gui-import-duplicate-matches-version") : GuiI18n.text("gui-import-duplicate-newer");
-                                                color: Theme.text-muted;
-                                                font-size: Theme.caption-size;
-                                                wrap: word-wrap;
-                                            }
+                        if root.import-duplicate-items.length > 0 : BodyText { text: GuiI18n.text("gui-import-duplicate-detail"); color: Theme.text-secondary; wrap: word-wrap; }
+                        if root.import-duplicate-items.length > 0 : ScrollView {
+                            viewport-width: self.width;
+                            height: min(root.import-duplicate-items.length * 100px, 260px);
+                            VerticalLayout {
+                                spacing: 6px;
+                                for item in root.import-duplicate-items : Rectangle {
+                                    height: max(
+                                        58px,
+                                        project-text.preferred-height
+                                            + kept-text.preferred-height
+                                            + reason-text.preferred-height
+                                            + 22px);
+                                    border-radius: 6px;
+                                    border-width: 1px;
+                                    border-color: Theme.border;
+                                    background: Theme.surface;
+                                    VerticalLayout {
+                                        padding: 8px;
+                                        spacing: 2px;
+                                        project-text := BodyText { text: item.project-line; wrap: word-wrap; }
+                                        kept-text := BodyText {
+                                            text: GuiI18n.values("gui-import-duplicate-kept", item.kept-line, item.discarded-line);
+                                            color: Theme.text-muted;
+                                            wrap: word-wrap;
+                                        }
+                                        reason-text := BodyText {
+                                            text: item.matched-minecraft-version ? GuiI18n.text("gui-import-duplicate-matches-version") : GuiI18n.text("gui-import-duplicate-newer");
+                                            color: Theme.text-muted;
+                                            font-size: Theme.caption-size;
+                                            wrap: word-wrap;
                                         }
                                     }
                                 }
@@ -2385,38 +2380,37 @@ export component AppWindow inherits Window {
                         }
                         HorizontalLayout { BodyText { text: GuiI18n.text("gui-store-persistently"); } Toggle { checked <=> root.create-persistent; } }
                         HorizontalLayout { spacing: 10px; cross-axis-alignment: center; VerticalLayout { horizontal-stretch: 1; spacing: 2px; BodyText { text: GuiI18n.text("gui-import-create-server"); } BodyText { text: GuiI18n.text("gui-import-create-server-detail"); color: Theme.text-muted; wrap: word-wrap; } } Toggle { checked <=> root.import-create-server; accessible-name: GuiI18n.text("gui-import-create-server"); } }
-                            if root.import-create-server : VerticalLayout { spacing: 6px;
-                                Text { text: GuiI18n.text("gui-server-pack"); color: Theme.text-secondary; font-size: Theme.label-size; }
-                                BodyText { text: GuiI18n.text("gui-server-pack-detail"); color: Theme.text-muted; wrap: word-wrap; }
-                                HorizontalLayout { spacing: 8px; alignment: start;
-                                    AppButton { text: GuiI18n.text("gui-browse"); accessible-name: GuiI18n.text("gui-choose-server-pack"); clicked => { root.choose-import-server-pack(); } }
-                                    if root.import-server-pack != "" : AppButton { text: GuiI18n.text("gui-clear"); accessible-name: GuiI18n.text("gui-clear-server-pack"); clicked => { root.clear-import-server-pack(); } }
-                                    if root.import-server-pack != "" : VerticalLayout { alignment: center; horizontal-stretch: 1; BodyText { text: root.import-server-pack-name; overflow: elide; } }
-                                }
-                            }
-                        if root.modal-error != "" : VerticalLayout {
-                            spacing: 6px;
-                            BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; }
-                            if root.import-error-kind == "missing-credential" || root.import-error-kind == "rejected-credential" : AppButton {
-                                text: GuiI18n.text("gui-import-open-providers");
-                                clicked => { root.close-import-modal(); root.close-workspace(); root.page = 4; root.settings-tab = "Providers & APIs"; }
-                            }
-                        }
-                        ActionRow {
-                            Rectangle { horizontal-stretch: 1; }
-                            AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.close-import-modal(); } }
-                            AppButton {
-                                text: GuiI18n.text("gui-import-modpack");
-                                tone: "primary";
-                                enabled: root.import-ready; hint: root.import-status-kind == "idle" ? GuiI18n.text("gui-hint-import-choose") : root.import-status-kind == "analyzing" || root.import-status-kind == "resolving" ? GuiI18n.text("gui-hint-import-reading") : root.import-status-kind == "submitting" ? GuiI18n.text("gui-hint-import-running") : root.import-status-kind == "failed" ? GuiI18n.text("gui-hint-import-failed") : GuiI18n.text("gui-hint-import-blocked");
-                                clicked => { root.submit-import(root.import-name, root.create-persistent, root.import-create-server, root.import-server-pack); }
-                            }
+                        if root.import-create-server : Text { text: GuiI18n.text("gui-server-pack"); color: Theme.text-secondary; font-size: Theme.label-size; }
+                        if root.import-create-server : BodyText { text: GuiI18n.text("gui-server-pack-detail"); color: Theme.text-muted; wrap: word-wrap; }
+                        if root.import-create-server : HorizontalLayout { spacing: 8px; alignment: start;
+                            AppButton { text: GuiI18n.text("gui-browse"); accessible-name: GuiI18n.text("gui-choose-server-pack"); clicked => { root.choose-import-server-pack(); } }
+                            if root.import-server-pack != "" : AppButton { text: GuiI18n.text("gui-clear"); accessible-name: GuiI18n.text("gui-clear-server-pack"); clicked => { root.clear-import-server-pack(); } }
+                            if root.import-server-pack != "" : VerticalLayout { alignment: center; horizontal-stretch: 1; BodyText { text: root.import-server-pack-name; overflow: elide; } }
                         }
                         // Absorbs whatever space the content above did not
-                        // need, so sparse content (an idle picker, a short
-                        // error) keeps its rows tight instead of spreading
-                        // them across the scroll viewport.
+                        // need, so sparse content (an idle picker) keeps its
+                        // rows tight instead of spreading them across the
+                        // scroll viewport.
                         Rectangle { vertical-stretch: 1; }
+                    }
+                }
+                // Outside the scroll view, so the error and buttons are always in view.
+                if root.modal == "import" && root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; }
+                if root.modal == "import" && root.modal-error != "" && (root.import-error-kind == "missing-credential" || root.import-error-kind == "rejected-credential") : HorizontalLayout {
+                    alignment: start;
+                    AppButton {
+                        text: GuiI18n.text("gui-import-open-providers");
+                        clicked => { root.close-import-modal(); root.close-workspace(); root.page = 4; root.settings-tab = "Providers & APIs"; }
+                    }
+                }
+                if root.modal == "import" : ActionRow {
+                    Rectangle { horizontal-stretch: 1; }
+                    AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.close-import-modal(); } }
+                    AppButton {
+                        text: GuiI18n.text("gui-import-modpack");
+                        tone: "primary";
+                        enabled: root.import-ready; hint: root.import-status-kind == "idle" ? GuiI18n.text("gui-hint-import-choose") : root.import-status-kind == "analyzing" || root.import-status-kind == "resolving" ? GuiI18n.text("gui-hint-import-reading") : root.import-status-kind == "submitting" ? GuiI18n.text("gui-hint-import-running") : root.import-status-kind == "failed" ? GuiI18n.text("gui-hint-import-failed") : GuiI18n.text("gui-hint-import-blocked");
+                        clicked => { root.submit-import(root.import-name, root.create-persistent, root.import-create-server, root.import-server-pack); }
                     }
                 }
                 if root.modal == "create-server" : ScrollView { VerticalLayout { spacing: 10px; alignment: start; BodyText { text: root.create-server-client-id != "" ? GuiI18n.text("gui-create-linked-server-detail") : GuiI18n.text("gui-create-standalone-server-detail"); wrap: word-wrap; } Text { text: GuiI18n.text("gui-name"); color: Theme.text-secondary; font-size: Theme.label-size; } TextField { text <=> root.create-server-name; placeholder: root.create-server-name-suggestion; accessible-name: GuiI18n.text("gui-name"); } if root.create-server-client-id == "" : Text { text: GuiI18n.text("gui-minecraft-release"); color: Theme.text-secondary; font-size: Theme.label-size; } if root.create-server-client-id == "" : ValueComboBox { label: GuiI18n.text("gui-minecraft-release"); model: root.minecraft-releases; value: root.create-server-minecraft; selected(value) => { root.create-server-minecraft = value; root.create-server-loader-version = ""; root.create-server-loader-versions = []; root.minecraft-selection-changed("server", value); if root.create-server-loader != "Vanilla" { root.request-loader-catalog("server", root.create-server-loader, value); } root.recompute-create-server-name(); } } if root.create-server-client-id == "" : Text { text: GuiI18n.text("gui-loader"); color: Theme.text-secondary; font-size: Theme.label-size; } if root.create-server-client-id == "" : ValueComboBox { label: GuiI18n.text("gui-loader"); model: root.create-server-loaders; value: root.create-server-loader; selected(value) => { root.create-server-loader = value; root.create-server-loader-version = ""; root.create-server-loader-versions = []; if value != "Vanilla" { root.request-loader-catalog("server", value, root.create-server-minecraft); } root.recompute-create-server-name(); } } if root.create-server-client-id == "" && root.create-server-loader != "Vanilla" : ValueComboBox { label: GuiI18n.text("gui-loader-version-placeholder"); model: root.create-server-loader-versions; value: root.create-server-loader-version; selected(value) => { root.create-server-loader-version = value; } changed value => { root.recompute-create-server-name(); } } HorizontalLayout { BodyText { text: GuiI18n.text("gui-store-persistently"); } Toggle { checked <=> root.create-server-persistent; } } HorizontalLayout { BodyText { text: GuiI18n.text("gui-port-automatic"); } Toggle { checked <=> root.create-server-automatic-port; accessible-name: GuiI18n.text("gui-port-automatic"); } } if root.create-server-automatic-port : BodyText { text: GuiI18n.text("gui-port-automatic-detail"); color: Theme.text-muted; wrap: word-wrap; } if !root.create-server-automatic-port : HorizontalLayout { FieldLabel { text: GuiI18n.text("gui-port-custom"); } TextField { accessible-label: GuiI18n.text("gui-port-custom"); text <=> root.create-server-port; input-type: InputType.number; width: 150px; } } Text { text: GuiI18n.text("gui-server-pack"); color: Theme.text-secondary; font-size: Theme.label-size; } BodyText { text: GuiI18n.text("gui-server-pack-detail"); color: Theme.text-muted; wrap: word-wrap; } HorizontalLayout { spacing: 8px; alignment: start; AppButton { text: GuiI18n.text("gui-browse"); accessible-name: GuiI18n.text("gui-choose-server-pack"); clicked => { root.choose-server-pack(); } } if root.create-server-pack != "" : AppButton { text: GuiI18n.text("gui-clear"); accessible-name: GuiI18n.text("gui-clear-server-pack"); clicked => { root.clear-server-pack(); } } if root.create-server-pack != "" : VerticalLayout { alignment: center; horizontal-stretch: 1; BodyText { text: root.create-server-pack-name; overflow: elide; } } } if root.create-server-pack != "" && root.create-server-pack-note != "" : BodyText { text: root.create-server-pack-note; color: Theme.text-muted; wrap: word-wrap; } BodyText { text: GuiI18n.text("gui-eula-create-warning"); color: Theme.warning; wrap: word-wrap; } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-create-server"); tone: "primary"; enabled: (root.create-server-name != "" || root.create-server-name-suggestion != "") && (root.create-server-client-id != "" || (root.minecraft-releases.length > 0 && root.create-server-minecraft != "" && (root.create-server-loader == "Vanilla" || root.create-server-loader-version != ""))) && root.create-server-pack-conflict == ""; hint: root.create-server-name == "" && root.create-server-name-suggestion == "" ? GuiI18n.text("gui-hint-enter-name") : root.create-server-pack-conflict != "" ? root.create-server-pack-conflict : root.create-server-client-id == "" && root.minecraft-releases.length == 0 ? GuiI18n.text("gui-hint-minecraft-list-unavailable") : root.create-server-client-id == "" && root.create-server-minecraft == "" ? GuiI18n.text("gui-hint-choose-minecraft-release") : GuiI18n.text("gui-hint-choose-loader-version"); clicked => { root.submit-create-server(root.create-server-name != "" ? root.create-server-name : root.create-server-name-suggestion, root.create-server-client-id, root.create-server-minecraft, root.create-server-loader, root.create-server-loader-version, root.create-server-persistent, root.create-server-automatic-port, root.create-server-port, root.create-server-pack); } } } } }

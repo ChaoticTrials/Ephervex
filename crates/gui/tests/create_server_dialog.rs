@@ -13,7 +13,8 @@ use std::rc::Rc;
 use ephervex_gui::ui::{AppWindow, GuiI18n, ServerPackRules};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
-use slint::{ComponentHandle, ModelRc, PhysicalSize, SharedString, VecModel};
+use slint::platform::WindowEvent;
+use slint::{ComponentHandle, LogicalPosition, ModelRc, PhysicalSize, SharedString, VecModel};
 
 /// A standalone server can be built from an archive, so the dialog offers the
 /// choice with no client selected.
@@ -312,6 +313,114 @@ fn open_standalone_with_server_files(ui: &AppWindow) {
     ui.set_create_server_pack_loader("NeoForge".into());
     ui.set_create_server_pack_loader_version("21.1.77".into());
     settle(ui);
+}
+
+/// With a linked server wanted and its archive chosen, the server files row
+/// sits above the dialog's buttons rather than drawn over them, whether the
+/// window leaves the dialog its full height or makes it scroll.
+#[test]
+fn the_import_dialog_keeps_its_server_files_row_above_its_buttons() {
+    let ui = window();
+    for height in [900_u16, 560] {
+        ui.window()
+            .set_size(PhysicalSize::new(1480, u32::from(height)));
+        open_import(&ui, true);
+        ui.set_import_server_pack("/tmp/Repro_server_pack_1.2.3.zip".into());
+        ui.set_import_server_pack_name("Repro_server_pack_1.2.3.zip".into());
+        settle(&ui);
+        // Scrolled to its end, so a short window shows the row at all.
+        let detail = widest(&ui, &lookup("gui-import-detail")).expect("the dialog explains itself");
+        ui.window().dispatch_event(WindowEvent::PointerScrolled {
+            position: LogicalPosition::new(
+                detail.absolute_position().x + detail.size().width / 2.0,
+                detail.absolute_position().y + detail.size().height / 2.0,
+            ),
+            delta_x: 0.0,
+            delta_y: -2000.0,
+        });
+        settle(&ui);
+
+        let browse = widest(&ui, &lookup("gui-choose-server-pack"))
+            .expect("the dialog offers a file chooser");
+        let cancel = button(&ui, &lookup("gui-cancel")).expect("the dialog can be canceled");
+        let import =
+            button(&ui, &lookup("gui-import-modpack")).expect("the dialog can be submitted");
+
+        let browse_bottom = browse.absolute_position().y + browse.size().height;
+        assert!(
+            browse_bottom <= cancel.absolute_position().y,
+            "at window height {height} the server files row ends at {browse_bottom}, below the \
+             top of Cancel at {}",
+            cancel.absolute_position().y
+        );
+        for action in [&cancel, &import] {
+            let bottom = action.absolute_position().y + action.size().height;
+            assert!(
+                bottom <= f32::from(height),
+                "at window height {height} a dialog button ends at {bottom}, off the window"
+            );
+        }
+    }
+}
+
+/// A long error wraps onto several lines without reaching the buttons below it.
+#[test]
+fn a_long_import_error_stays_clear_of_the_buttons() {
+    let ui = window();
+    ui.window().set_size(PhysicalSize::new(560, 900));
+    open_import(&ui, true);
+    let error = "The pack could not be read because one of the files it lists is missing \
+                 from the archive and no provider offers a download for it either";
+    ui.set_modal_error(error.into());
+    settle(&ui);
+
+    let message = ElementHandle::find_by_accessible_label(&ui, error)
+        .find(|element| element.size().width > 0.0)
+        .expect("the dialog shows the error");
+    let cancel = button(&ui, &lookup("gui-cancel")).expect("the dialog can be canceled");
+
+    let message_bottom = message.absolute_position().y + message.size().height;
+    assert!(
+        message_bottom <= cancel.absolute_position().y,
+        "the error ends at {message_bottom}, below the top of Cancel at {}",
+        cancel.absolute_position().y
+    );
+}
+
+/// A pack summary that wraps keeps the rows after it below its card.
+#[test]
+fn a_long_pack_summary_stays_clear_of_the_rows_below_it() {
+    let ui = window();
+    ui.window().set_size(PhysicalSize::new(560, 900));
+    open_import(&ui, false);
+    let counts = "Required files: 412 | Optional files: 37, none of them selected yet, \
+                  and each one can be chosen below before the pack is imported";
+    ui.set_import_pack_header("A Very Long Modpack Name For Testing Wrapping 1.2.3".into());
+    ui.set_import_author_line("by Someone, Someone Else, A Third Author and Their Team".into());
+    ui.set_import_minecraft_line("Minecraft 1.20.1".into());
+    ui.set_import_loader_line("NeoForge 47.1.106".into());
+    ui.set_import_required_line("Required files: 412".into());
+    ui.set_import_optional_line(
+        "Optional files: 37, none of them selected yet, and each one can be chosen below \
+         before the pack is imported"
+            .into(),
+    );
+    settle(&ui);
+
+    let summary = ElementHandle::find_by_accessible_label(&ui, counts)
+        .find(|element| element.size().width > 0.0)
+        .expect("the dialog summarizes the pack");
+    let name_label =
+        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-instance-name-optional"))
+            .find(|element| element.size().width > 0.0)
+            .expect("the dialog asks for an instance name");
+
+    let summary_bottom = summary.absolute_position().y + summary.size().height;
+    assert!(
+        summary_bottom <= name_label.absolute_position().y,
+        "the pack summary ends at {summary_bottom}, below the next row at {}",
+        name_label.absolute_position().y
+    );
 }
 
 fn open_import(ui: &AppWindow, create_server: bool) {
