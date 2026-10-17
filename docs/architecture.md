@@ -321,7 +321,9 @@ of a split can be closed, and closing settles on the next smaller shape in
 reading order, down to the single pane. A new pane shows the same host's
 Overview. Each pane of a split carries a compact header: the host, its state,
 its Restart and primary action on one row, and the surface tabs and layout
-controls on the next. The host opens a picker of cards like the home screen:
+controls on the next. A pane too narrow for the host and its actions on one
+row moves the actions to a row of their own under the host.
+The host opens a picker of cards like the home screen:
 every client, with its linked servers on its card, and the servers the Servers
 page lists, running hosts first. Clients rank by what runs on their card: the
 client and a linked server, the client alone, a linked server alone, nothing. Surface tabs that do not fit wait under More,

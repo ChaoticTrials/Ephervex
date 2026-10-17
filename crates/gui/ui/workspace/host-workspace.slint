@@ -264,20 +264,39 @@ export component HostWorkspace inherits Rectangle {
         // The view below: which surface, and the layout controls.
         if root.compact : VerticalLayout {
             spacing: 8px;
-            HorizontalLayout {
-                spacing: 8px;
-                PaneHostButton {
-                    name: root.title;
-                    kind: root.host-kind-label;
-                    accessible-name: GuiI18n.value("gui-pane-host", root.pane-label);
-                    clicked => { root.choose-host(); }
+            // Placed by hand rather than laid out: the actions move under
+            // the host when one row cannot hold both, and a layout would
+            // take that row's width from the actions it decides about.
+            Rectangle {
+                property <length> gap: 8px;
+                property <bool> one-row: host-row.min-width + self.gap + actions.min-width <= self.width;
+                height: self.one-row ? Theme.control-height : 2 * Theme.control-height + self.gap;
+                host-row := HorizontalLayout {
+                    x: 0px;
+                    y: 0px;
+                    width: parent.one-row ? parent.width - actions.width - parent.gap : parent.width;
+                    height: Theme.control-height;
+                    spacing: parent.gap;
+                    PaneHostButton {
+                        name: root.title;
+                        kind: root.host-kind-label;
+                        accessible-name: GuiI18n.value("gui-pane-host", root.pane-label);
+                        clicked => { root.choose-host(); }
+                    }
+                    VerticalLayout { alignment: center; Pill { text: root.restart-stage != "" ? GuiI18n.text("gui-state-restarting") : root.status; tone-color: root.restart-stage != "" || root.status-kind == "starting" ? Theme.warning : root.status-kind == "running" ? Theme.success : Theme.text-secondary; } }
+                    if root.paired && root.width >= 520px : VerticalLayout { alignment: center; Pill { text: root.pair-label; tone-color: root.pair-tone; } }
+                    if root.java-summary != "" && root.width >= 640px : VerticalLayout { alignment: center; JavaRuntimePill { summary: root.java-summary; origin: root.java-origin; tone: root.java-tone; tone-label: root.java-tone-label; clicked => { root.open-java(); } } }
                 }
-                VerticalLayout { alignment: center; Pill { text: root.restart-stage != "" ? GuiI18n.text("gui-state-restarting") : root.status; tone-color: root.restart-stage != "" || root.status-kind == "starting" ? Theme.warning : root.status-kind == "running" ? Theme.success : Theme.text-secondary; } }
-                if root.paired && root.width >= 520px : VerticalLayout { alignment: center; Pill { text: root.pair-label; tone-color: root.pair-tone; } }
-                if root.java-summary != "" && root.width >= 640px : VerticalLayout { alignment: center; JavaRuntimePill { summary: root.java-summary; origin: root.java-origin; tone: root.java-tone; tone-label: root.java-tone-label; clicked => { root.open-java(); } } }
-                if root.kill-visible : AppButton { text: GuiI18n.text("gui-kill"); accessible-name: GuiI18n.values("gui-pane-action", GuiI18n.text("gui-kill"), root.pane-label); tone: "danger"; enabled: root.kill-enabled; hint: root.kill-hint; clicked => { root.kill(); } }
-                if root.restart-visible : AppButton { text: GuiI18n.text("gui-restart"); accessible-name: GuiI18n.values("gui-pane-action", GuiI18n.text("gui-restart"), root.pane-label); enabled: root.restart-enabled && !root.occupied; hint: root.restart-reason; clicked => { root.restart(); } }
-                AppButton { text: root.primary-label; accessible-name: GuiI18n.values("gui-pane-action", root.primary-label, root.pane-label); tone: root.primary-tone; enabled: root.primary-enabled && !root.primary-waits; hint: root.primary-reason; clicked => { root.primary(); } }
+                actions := HorizontalLayout {
+                    x: parent.width - self.width;
+                    y: parent.one-row ? 0px : Theme.control-height + parent.gap;
+                    width: self.min-width;
+                    height: Theme.control-height;
+                    spacing: parent.gap;
+                    if root.kill-visible : AppButton { text: GuiI18n.text("gui-kill"); accessible-name: GuiI18n.values("gui-pane-action", GuiI18n.text("gui-kill"), root.pane-label); tone: "danger"; enabled: root.kill-enabled; hint: root.kill-hint; clicked => { root.kill(); } }
+                    if root.restart-visible : AppButton { text: GuiI18n.text("gui-restart"); accessible-name: GuiI18n.values("gui-pane-action", GuiI18n.text("gui-restart"), root.pane-label); enabled: root.restart-enabled && !root.occupied; hint: root.restart-reason; clicked => { root.restart(); } }
+                    AppButton { text: root.primary-label; accessible-name: GuiI18n.values("gui-pane-action", root.primary-label, root.pane-label); tone: root.primary-tone; enabled: root.primary-enabled && !root.primary-waits; hint: root.primary-reason; clicked => { root.primary(); } }
+                }
             }
             HorizontalLayout {
                 spacing: 8px;

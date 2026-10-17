@@ -1081,6 +1081,92 @@ fn header_actions_act_on_their_panes_host() {
     assert_eq!(restarted.borrow().as_slice(), ["server"]);
 }
 
+/// A pane's host button and its actions stay inside the pane and clear of one
+/// another at every window and text size, whether the host is stopped or
+/// running. A pane wide enough keeps them on one row.
+#[test]
+fn a_panes_host_and_actions_stay_inside_the_pane_and_apart() {
+    let ui = window();
+    for (width, height) in [(1480_u32, 900_u32), (980, 680)] {
+        ui.window().set_size(PhysicalSize::new(width, height));
+        // The default text size, then the largest one offered.
+        for (scale, default_text) in [(1.0, true), (1.25, false)] {
+            ui.global::<Theme>().set_text_scale(scale);
+            for running in [false, true] {
+                for (shape, panes) in shapes() {
+                    let ids: Vec<(i32, i32)> =
+                        panes.iter().map(|pane| (pane.id, pane.host)).collect();
+                    support::show(
+                        &ui,
+                        0,
+                        vec![
+                            support::client_view(instance(running)),
+                            support::server_view(server(running)),
+                        ],
+                        panes,
+                    );
+                    settle(&ui);
+                    let context = format!("{shape} at {width}x{height}, text {scale}");
+                    let one_row = width == 1480 && default_text;
+                    for (id, host) in ids {
+                        assert_host_row_fits(&ui, &context, (id, host), running, one_row);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn assert_host_row_fits(
+    ui: &AppWindow,
+    context: &str,
+    (id, host): (i32, i32),
+    running: bool,
+    one_row: bool,
+) {
+    let pane = pane_area(ui, id);
+    let host_button = host_button(ui, id);
+    let primary = match (host == CLIENT, running) {
+        (true, false) => "gui-launch",
+        (true, true) => "gui-stop-game",
+        (false, false) => "gui-start",
+        (false, true) => "gui-stop",
+    };
+    let mut actions = vec![
+        button(ui, &pane_action("gui-restart", id)),
+        button(ui, &pane_action(primary, id)),
+    ];
+    if host == SERVER {
+        actions.push(button(ui, &pane_action("gui-kill", id)));
+    }
+    for control in actions.iter().chain([&host_button]) {
+        assert!(
+            pane.contains(Area::of(control)),
+            "{context}: {:?} of pane {id} is outside it",
+            control.accessible_label()
+        );
+    }
+    for (index, action) in actions.iter().enumerate() {
+        for other in actions.iter().skip(index + 1).chain([&host_button]) {
+            assert!(
+                !Area::of(action).overlaps(Area::of(other)),
+                "{context}: {:?} and {:?} of pane {id} overlap",
+                action.accessible_label(),
+                other.accessible_label()
+            );
+        }
+    }
+    if one_row {
+        let row = Area::of(&host_button).position.y;
+        assert!(
+            actions
+                .iter()
+                .all(|action| (Area::of(action).position.y - row).abs() < 0.5),
+            "{context}: the actions of pane {id} left the host's row"
+        );
+    }
+}
+
 /// A workflow's banner is left to the pane that shows the workflow's own
 /// surface, and every pane on the host carries it when none does.
 #[test]
