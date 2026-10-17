@@ -1423,6 +1423,7 @@ operation-stage-asking-catalogs = Asking mod catalogs about requirements
 gui-integrity-open-logs = Open logs
 gui-integrity-nothing-recorded = Nothing is recorded for this host, so there is nothing to check.
 gui-integrity-absent = Missing
+gui-integrity-put-aside = Put aside
 gui-integrity-corrupt = Damaged
 gui-integrity-unreadable = Unreadable
 gui-integrity-unverifiable = No checksum
@@ -1588,6 +1589,11 @@ gui-diagnosis-hand-placed = { $count ->
    *[other] { $count } hand-placed mods
 }
 gui-diagnosis-hand-placed-detail = Jars in the mods folder that Ephervex did not install.
+gui-diagnosis-put-aside = { $count ->
+    [one] 1 mod put aside
+   *[other] { $count } mods put aside
+}
+gui-diagnosis-put-aside-detail = Taken out of the mods folder on purpose. Ephervex keeps a copy of each so it can be restored.
 gui-diagnosis-crash = The last run crashed
 gui-diagnosis-crash-names = The crash report names: { $names }
 gui-diagnosis-files-damaged = { $count ->
@@ -1601,6 +1607,10 @@ gui-diagnosis-files-restorable = { $count ->
 gui-diagnosis-files-unrestorable = { $count ->
     [one] 1 has no recorded source. Import the pack again to restore it.
    *[other] { $count } have no recorded source. Import the pack again to restore them.
+}
+gui-diagnosis-files-unrestorable-server = { $count ->
+    [one] 1 has no recorded source. Put the file back in the server folder by hand to restore it.
+   *[other] { $count } have no recorded source. Put the files back in the server folder by hand to restore them.
 }
 gui-diagnosis-shared-damaged = { $count ->
     [one] 1 shared launch file is damaged
@@ -1703,7 +1713,7 @@ gui-diagnosis-check-crash-none = No crash since the last start.
 gui-diagnosis-check-crash-found = Crashed after the last start: { $report }
 gui-diagnosis-check-files = Recorded files
 gui-diagnosis-check-files-skipped = Not checked in this pass. Diagnose hashes them.
-gui-diagnosis-check-files-value = { $count } checked: { $intact } intact, { $problems } missing or damaged, { $unverifiable } without a checksum.
+gui-diagnosis-check-files-value = { $count } checked: { $intact } intact, { $aside } put aside, { $problems } missing or damaged, { $unverifiable } without a checksum.
 gui-fix-title = Proposed changes
 gui-fix-loading = Working out what would change...
 gui-fix-cancel = Cancel
@@ -1719,6 +1729,16 @@ gui-fix-java-expected = This host expects { $expected }.
 gui-fix-enable-note = No files will be removed.
 gui-fix-java-note = This changes only this host's Java selection. Its memory and JVM arguments stay as they are.
 gui-fix-restore-note = Each file is fetched from its recorded source and checked before it replaces the broken copy. No other files change.
+gui-fix-restore-put-aside-note = Each mod comes back from the copy Ephervex kept when it was put aside. No other files change.
+gui-fix-restored-put-aside = { $count ->
+    [0] Nothing needed restoring.
+    [one] Restored one mod.
+   *[other] Restored { $count } mods.
+}
+gui-fix-restore-put-aside-failed = { $count ->
+    [one] One mod could not be restored, because its kept copy no longer holds the recorded file and nothing records where to download it.
+   *[other] { $count } mods could not be restored, because their kept copies no longer hold the recorded files and nothing records where to download them.
+}
 gui-fix-nothing-left = Nothing needs to change anymore. Diagnose again to see the current state.
 gui-fix-blocked-running = Stop this host to apply this change.
 gui-fix-blocked-isolation = Finish or cancel mod isolation to apply this change.

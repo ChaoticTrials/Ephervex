@@ -39,7 +39,7 @@ use ephervex_model::Progress;
 use ephervex_pack::PackError;
 use ephervex_storage::Paths;
 use ephervex_storage::metadata::{
-    CLIENT_GAME_DIR, RETIRED_DIR, SERVER_GAME_DIR, SNAPSHOTS_DIR, STAGING_DIR,
+    CLIENT_GAME_DIR, PUT_ASIDE_DIR, RETIRED_DIR, SERVER_GAME_DIR, SNAPSHOTS_DIR, STAGING_DIR,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
@@ -330,6 +330,7 @@ fn classify_host(
         [".launcher", name, ..] if name.starts_with("restore-") => {
             (StorageCategory::Recovery, StorageRetention::Recovery)
         }
+        [".launcher", PUT_ASIDE_DIR, ..] => (StorageCategory::Mods, retention),
         [dir, "mods", ..] if *dir == game_dir => (StorageCategory::Mods, retention),
         [dir, "logs" | "crash-reports", ..] if *dir == game_dir => {
             (StorageCategory::Logs, retention)

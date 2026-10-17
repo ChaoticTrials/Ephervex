@@ -21,6 +21,9 @@ pub enum RestorePart {
     Source,
     ClientMetadata,
     ServerMetadata,
+    /// The pack files the user put aside, which are what makes their records
+    /// restorable.
+    PutAside,
 }
 
 impl RestorePart {
@@ -31,6 +34,7 @@ impl RestorePart {
             Self::Source => Path::new(".launcher/source"),
             Self::ClientMetadata => Path::new(".launcher/instance.json"),
             Self::ServerMetadata => Path::new(".launcher/server.json"),
+            Self::PutAside => Path::new(".launcher/put-aside"),
         }
     }
 }

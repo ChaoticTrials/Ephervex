@@ -268,8 +268,9 @@ entry in place. A later operation must not silently erase that evidence.
 ## Local safety snapshots
 
 Clients and local servers expose the same snapshot service through core. A
-snapshot captures the complete game directory, retained source state, and
-canonical host metadata under `.launcher/snapshots/`. It prefers reflinks,
+snapshot captures the complete game directory, retained source state, the
+copies of mods the user put aside, and canonical host metadata under
+`.launcher/snapshots/`. It prefers reflinks,
 falls back to independent byte copies, preserves symlinks, and never uses hard
 links for mutable Minecraft data. Snapshot history and transaction state are
 not captured. See ADR 0035.
@@ -605,7 +606,8 @@ which owner is asked first.
 Each file is counted once. It belongs to one category by where it sits, the
 most specific rule winning: inside a host, `.launcher/snapshots` is Snapshots,
 `.launcher/retired`, `.launcher/staging`, and `restore-*` journals are Recovery,
-and the game directory's `mods`, `logs`, and `crash-reports` are Mods and Logs;
+`.launcher/put-aside` and the game directory's `mods` are Mods, and its `logs`
+and `crash-reports` are Logs;
 the rest of a host is its client or server. The cache root splits into the
 download cache and shared game files, the data root into Java runtimes, icons,
 and the rest, and the state root into logs and the index database. A file with
@@ -1377,8 +1379,12 @@ disk, or left half written by a machine that lost power, exists. Verification
 answers the question presence cannot, from the digests the recipe already
 records, so it reaches no network and writes nothing.
 
-Each recorded file comes back intact, absent, corrupt, unreadable, or
-unverifiable. The last is not a fault: a mod a pack shipped inside its own
+Each recorded file comes back intact, absent, put aside, corrupt, unreadable,
+or unverifiable. A file put aside is one the user took out of `mods/` through
+the mod list, whose jar is kept in `.launcher/put-aside/` under its logical path
+until it is restored (ADR 0019). It is a deliberate state, not a fault, and a
+restore takes the kept copy back with no network, verified against the recorded
+digests when there are any. The last is not a fault: a mod a pack shipped inside its own
 override tree has no published hash and never will, so nothing about it is
 proven either way, and it is reported as unproven rather than counted sound or
 broken. A disabled jar is checked under the name it actually has, because
@@ -1396,7 +1402,8 @@ where it was: losing a file to a failed repair is worse than keeping a
 wrong one, because a wrong one can still be looked at. One file's failure does
 not abandon the rest, and the report separates what nothing could have fixed
 from what a repair tried and failed at - the first says re-import the pack, the
-second says try again.
+second says try again. A repair of the whole host leaves a put-aside file aside;
+only a restore that names it, such as the Diagnostics fix, brings it back.
 
 The shared stores an instance launches from are checked separately, and only on
 request. Libraries and the client JAR sit on Maven-style paths rather than under

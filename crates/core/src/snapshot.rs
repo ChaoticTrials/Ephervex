@@ -864,9 +864,22 @@ fn capture_files(
     absorb_report(&mut method, &mut apparent_bytes, &game_report);
     check_canceled(cancel)?;
 
-    let source = ephervex_storage::metadata::source_dir(&capture.layout.root);
-    if source.is_dir() {
-        let destination = capture.staging.join(".launcher/source");
+    // The put-aside copies travel with the recipe whose records they keep
+    // restorable.
+    for (source, relative) in [
+        (
+            ephervex_storage::metadata::source_dir(&capture.layout.root),
+            ".launcher/source",
+        ),
+        (
+            ephervex_storage::metadata::put_aside_dir(&capture.layout.root),
+            ".launcher/put-aside",
+        ),
+    ] {
+        if !source.is_dir() {
+            continue;
+        }
+        let destination = capture.staging.join(relative);
         std::fs::create_dir_all(destination.parent().unwrap_or(capture.staging)).map_err(
             |source| SnapshotError::Unwritable {
                 path: destination.clone(),
@@ -875,6 +888,7 @@ fn capture_files(
         )?;
         let report = clone_snapshot_tree(&source, &destination, cancel)?;
         absorb_report(&mut method, &mut apparent_bytes, &report);
+        check_canceled(cancel)?;
     }
     check_canceled(cancel)?;
 
@@ -946,11 +960,13 @@ fn restore_parts(
             RestorePart::ClientGame,
             RestorePart::Source,
             RestorePart::ClientMetadata,
+            RestorePart::PutAside,
         ],
         InstalledHost::Server(_) => [
             RestorePart::ServerGame,
             RestorePart::Source,
             RestorePart::ServerMetadata,
+            RestorePart::PutAside,
         ],
     };
     let states = parts
@@ -1019,6 +1035,7 @@ fn part_path(root: &Path, part: ephervex_storage::RestorePart) -> Option<PathBuf
         RestorePart::Source => root.join(".launcher/source"),
         RestorePart::ClientMetadata => root.join(".launcher/instance.json"),
         RestorePart::ServerMetadata => root.join(".launcher/server.json"),
+        RestorePart::PutAside => root.join(".launcher/put-aside"),
     };
     std::fs::symlink_metadata(&path).ok().map(|_| path)
 }

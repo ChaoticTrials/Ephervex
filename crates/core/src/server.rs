@@ -533,6 +533,7 @@ impl App {
             unknown_server_files: &options.unknown_server_files,
             game_dir: target,
             client_game_dir: &ephervex_storage::metadata::client_game_dir(client_root),
+            client_put_aside_dir: &ephervex_storage::metadata::put_aside_dir(client_root),
             client_source_dir: &ephervex_storage::metadata::source_dir(client_root),
             server_source_dir: server_source,
             reserved: &reserved,

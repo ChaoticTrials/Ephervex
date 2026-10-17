@@ -249,6 +249,11 @@ pub enum FindingKind {
     HandPlacedMods {
         names: Vec<String>,
     },
+    /// Recorded mods the user took out of `mods/`, each kept so it can be
+    /// restored.
+    ModsPutAside {
+        files: Vec<PathBuf>,
+    },
 }
 
 impl FindingKind {
@@ -268,7 +273,8 @@ impl FindingKind {
             Self::JavaCustomized { .. }
             | Self::JvmArgumentsCustomized { .. }
             | Self::MemoryCustomized { .. }
-            | Self::HandPlacedMods { .. } => FindingClass::Customized,
+            | Self::HandPlacedMods { .. }
+            | Self::ModsPutAside { .. } => FindingClass::Customized,
         }
     }
 }
@@ -382,13 +388,19 @@ pub enum DiagnosticFix {
     PinJava(PathBuf),
     /// Fetch these recorded files again from their recorded sources.
     RestoreFiles(Vec<PathBuf>),
+    /// Bring back these files the user put aside, from the copies kept of
+    /// them.
+    RestorePutAside(Vec<PathBuf>),
 }
 
 impl DiagnosticFix {
     /// Whether this fix changes which mods load, which an isolation session
     /// owns while it runs.
     const fn touches_mods(&self) -> bool {
-        matches!(self, Self::EnableMods(_) | Self::RestoreFiles(_))
+        matches!(
+            self,
+            Self::EnableMods(_) | Self::RestoreFiles(_) | Self::RestorePutAside(_)
+        )
     }
 }
 
@@ -777,7 +789,7 @@ impl App {
                     vec![self.java_change(host, &facts, Some(path.clone())).await?]
                 }
             }
-            DiagnosticFix::RestoreFiles(paths) => paths
+            DiagnosticFix::RestoreFiles(paths) | DiagnosticFix::RestorePutAside(paths) => paths
                 .iter()
                 .map(|path| ProposedChange::Restore {
                     logical_path: path.clone(),
@@ -851,7 +863,9 @@ impl App {
                     &mut outcome,
                 );
             }
-            DiagnosticFix::RestoreFiles(paths) => {
+            // A put-aside file comes back through the same restore, which
+            // takes its kept copy first.
+            DiagnosticFix::RestoreFiles(paths) | DiagnosticFix::RestorePutAside(paths) => {
                 let report = self
                     .repair_host_files(host, Some(paths), reporter, cancel)
                     .await?;
@@ -1175,14 +1189,22 @@ impl App {
     /// Unmet relations as findings, in their own order.
     fn relation_findings(&self, host: InstalledHost, unmet: Vec<UnmetRequirement>) -> Vec<Finding> {
         // A recorded mod whose jar is gone comes back at the recorded release,
-        // when the recipe says where to fetch it.
-        let recipe = self.host_layout(host).ok().and_then(|layout| layout.recipe);
+        // when a put-aside copy is kept or the recipe says where to fetch it.
+        let layout = self.host_layout(host).ok();
         let restore = |path: &Path| {
-            recipe
+            let layout = layout.as_ref()?;
+            let put_aside_dir = ephervex_storage::metadata::put_aside_dir(&layout.root);
+            let file = layout
+                .recipe
                 .iter()
                 .flat_map(|recipe| &recipe.files)
-                .any(|file| file.logical_path == path && !file.downloads.is_empty())
-                .then(|| DiagnosticFix::RestoreFiles(vec![path.to_path_buf()]))
+                .find(|file| file.logical_path == path)?;
+            let paths = vec![path.to_path_buf()];
+            if crate::verify::kept_copy_restores(&put_aside_dir, file) {
+                Some(DiagnosticFix::RestorePutAside(paths))
+            } else {
+                (!file.downloads.is_empty()).then_some(DiagnosticFix::RestoreFiles(paths))
+            }
         };
         unmet
             .into_iter()
@@ -1404,6 +1426,17 @@ fn integrity_findings(check: &IntegrityCheck) -> Vec<Finding> {
                 repairable,
                 unrepairable,
             },
+        });
+    }
+    let put_aside: Vec<PathBuf> = check
+        .files
+        .put_aside()
+        .map(|file| file.logical_path.clone())
+        .collect();
+    if !put_aside.is_empty() {
+        findings.push(Finding {
+            fix: Some(DiagnosticFix::RestorePutAside(put_aside.clone())),
+            kind: FindingKind::ModsPutAside { files: put_aside },
         });
     }
     if let Some(Ok(shared)) = &check.shared {
@@ -1633,9 +1666,10 @@ fn write_integrity(out: &mut String, integrity: Option<&IntegrityCheck>, home: O
             let files = &check.files;
             let _ = writeln!(
                 *out,
-                "- {} recorded files: {} intact, {} missing, {} damaged, {} unreadable, {} without a checksum",
+                "- {} recorded files: {} intact, {} put aside, {} missing, {} damaged, {} unreadable, {} without a checksum",
                 files.files.len(),
                 files.count(&Integrity::Intact),
+                files.count(&Integrity::PutAside),
                 files.count(&Integrity::Absent),
                 files.count(&Integrity::Corrupt),
                 files.count(&Integrity::Unreadable),
@@ -1763,7 +1797,8 @@ fn report_line(kind: &FindingKind, path: &dyn Fn(&Path) -> String) -> String {
         FindingKind::JavaCustomized { .. }
         | FindingKind::JvmArgumentsCustomized { .. }
         | FindingKind::MemoryCustomized { .. }
-        | FindingKind::HandPlacedMods { .. } => customization_line(kind, path),
+        | FindingKind::HandPlacedMods { .. }
+        | FindingKind::ModsPutAside { .. } => customization_line(kind, path),
     }
 }
 
@@ -1794,6 +1829,14 @@ fn customization_line(kind: &FindingKind, path: &dyn Fn(&Path) -> String) -> Str
         FindingKind::HandPlacedMods { names } => {
             format!("Hand-placed mods: {}", names.join(", "))
         }
+        FindingKind::ModsPutAside { files } => format!(
+            "Mods put aside, each can be restored: {}",
+            files
+                .iter()
+                .map(|file| file.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         _ => String::new(),
     }
 }

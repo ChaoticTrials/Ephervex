@@ -326,3 +326,45 @@ file applies to is refused for the same reason as above.
   to refuse. Those instances keep reading their shipped jars as hand-placed
   until the pack is imported again, which is cheap in a launcher built around
   disposable environments.
+
+## Amendment: a put-aside file is kept until it comes back
+
+Keeping the record was not enough to make a deletion reversible. Restoring
+fetched the file from the address the recipe records or found it in the shared
+download cache, and many pack files have neither: a server built from published
+server files records no address for any jar, and a pack's shipped jar has none
+either. The jar was moved aside only for the length of the batch and then
+deleted, so putting one of those aside lost it.
+
+So a jar whose record stays is kept in the host's `.launcher/put-aside/`
+directory, under its logical path, until it is restored or its record goes
+away. Restoring takes the kept copy first, verified against the recorded
+digests when there are any, and only falls back to the recorded address when
+the copy no longer holds the recorded bytes. A record that goes away or
+changes, because a jar the user supplied replaced it or a mutation changed the
+file, takes the kept copy with it. Putting the same mod aside again replaces the
+kept copy, unless the kept copy holds the recorded bytes and the new jar does
+not: the recorded release is the one the record promises. A hand-placed jar is
+still deleted outright, because nothing promises it back.
+
+A snapshot captures the kept copies with the recipe, and restoring one brings
+them back together, so a snapshot taken while a mod was put aside can still
+bring that mod back after the copy was restored or dropped.
+
+The shared download cache is not the place for these copies. Its contract is
+that everything in it can be fetched again and nothing installed depends on an
+entry staying there, so collecting the cache would delete the only copy.
+
+A kept copy is also what makes a put-aside mod a deliberate state rather than a
+fault. Verification reports it as put aside and sound, Diagnostics lists it as a
+change the user made with a way back, and a repair of the whole host leaves it
+aside: putting a mod back is a request that names it, not something a repair of
+some other file should do. A put-aside mod another enabled mod still requires
+remains a missing dependency, offered back from its kept copy. A kept copy that
+no longer holds the recorded bytes is no way back, and its file reads as
+missing. Building a linked
+server from a client takes a kept copy as it takes the client's installed jar,
+so the server is still complete.
+
+A jar put aside by an earlier build was deleted, so nothing is kept for it. It
+reads as missing, and it comes back only from a recorded address.

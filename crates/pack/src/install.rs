@@ -149,6 +149,9 @@ pub struct ServerMaterializeRequest<'a> {
     /// The client's own game directory, which is where a file the recipe
     /// records no address for has to come from.
     pub client_game_dir: &'a Path,
+    /// Where the client keeps the pack files its user put aside, the other
+    /// place such a file can come from.
+    pub client_put_aside_dir: &'a Path,
     pub client_source_dir: &'a Path,
     pub server_source_dir: &'a Path,
     /// Paths, relative to `game_dir`, that the loader installation produced and
@@ -196,11 +199,16 @@ pub async fn install_files(request: FileInstall<'_>) -> PackResult<MaterializedF
 /// contain and needs a provider identity to resolve; this needs neither,
 /// which is what makes it work for a pack file served from a mirror that no
 /// catalog can name.
+///
+/// A copy kept in `put_aside_dir` comes back first, with no network, when it
+/// still holds the recorded bytes. A file the recipe records no address for
+/// has no other way back.
 #[instrument(skip_all, fields(path = %logical_path.display()))]
 pub async fn restore_file(
     recipe: &PackRecipe,
     logical_path: &Path,
     game_dir: &Path,
+    put_aside_dir: &Path,
     fetch: ArtifactFetch<'_>,
 ) -> PackResult<MaterializedFiles> {
     let wanted = recipe
@@ -210,7 +218,112 @@ pub async fn restore_file(
         .ok_or_else(|| PackError::ManagedIdentityMissing {
             path: logical_path.display().to_string(),
         })?;
-    install_selected_files(&recipe.files, &[wanted], game_dir, None, fetch).await
+    let kept = put_aside_path(put_aside_dir, logical_path)?;
+    let has_kept = is_kept_copy(&kept)?;
+    if has_kept {
+        if let Some(restored) =
+            restore_put_aside(&recipe.files, wanted, &kept, game_dir, fetch.cancel).await?
+        {
+            return Ok(restored);
+        }
+    }
+    let restored = install_selected_files(&recipe.files, &[wanted], game_dir, None, fetch).await?;
+    if has_kept {
+        // It no longer held the recorded bytes, and the recorded ones are back.
+        discard_put_aside(&kept);
+    }
+    Ok(restored)
+}
+
+/// Where a pack file the user put aside is kept until it is restored.
+///
+/// A launcher-owned directory of the host rather than the shared download
+/// cache: collecting that cache may drop anything that can be fetched again,
+/// and a file the recipe records no address for cannot be.
+///
+/// # Errors
+///
+/// [`PackError::EntryPathUnsafe`] for a logical path that is not a plain
+/// relative path, which would otherwise name a place outside the directory.
+pub fn put_aside_path(put_aside_dir: &Path, logical_path: &Path) -> PackResult<PathBuf> {
+    let unsafe_path = || PackError::EntryPathUnsafe {
+        entry: logical_path.display().to_string(),
+    };
+    let raw = logical_path.to_str().ok_or_else(unsafe_path)?;
+    let safe = safe_relative_path(raw.as_bytes(), 0)
+        .filter(|path| !path.as_os_str().is_empty() && path == logical_path)
+        .ok_or_else(unsafe_path)?;
+    contained_join(put_aside_dir, &safe).ok_or_else(unsafe_path)
+}
+
+/// Whether a put-aside copy is waiting at `kept`. Only a regular file counts,
+/// so nothing else found there is ever followed.
+fn is_kept_copy(kept: &Path) -> PackResult<bool> {
+    match std::fs::symlink_metadata(kept) {
+        Ok(metadata) => Ok(metadata.is_file()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(PackError::Unwritable {
+            path: kept.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+/// Puts a kept copy back into the game directory.
+///
+/// `None` when the copy no longer holds the bytes the recipe records, so the
+/// caller can fetch them instead. A file the recipe records no digest for is
+/// taken back as it was put aside: nothing vouched for it before either.
+async fn restore_put_aside(
+    all: &[PackFileRecipe],
+    wanted: &PackFileRecipe,
+    kept: &Path,
+    game_dir: &Path,
+    cancel: &CancellationToken,
+) -> PackResult<Option<MaterializedFiles>> {
+    preflight_destinations(&[wanted], game_dir)?;
+    check_not_canceled(Some(cancel))?;
+    let destination = game_dir.join(&wanted.logical_path);
+    copy_into_instance(kept, &destination)?;
+    // The installed copy is hashed, so the bytes checked are the bytes loaded.
+    let matches = if wanted.hashes.is_empty() {
+        Ok(true)
+    } else {
+        staged_copy_matches(wanted, &destination).await
+    };
+    if !matches!(matches, Ok(true)) {
+        std::fs::remove_file(&destination).map_err(|source| PackError::Unwritable {
+            path: destination.clone(),
+            source,
+        })?;
+        matches?;
+        return Ok(None);
+    }
+    discard_put_aside(kept);
+    Ok(Some(MaterializedFiles {
+        installed: vec![wanted.logical_path.clone()],
+        skipped: all
+            .iter()
+            .filter(|file| !std::ptr::eq(*file, wanted))
+            .map(|file| file.logical_path.clone())
+            .collect(),
+        reused_from_cache: 0,
+        bytes: std::fs::metadata(&destination).map_or(0, |data| data.len()),
+    }))
+}
+
+/// Drops a kept copy whose file is back. Best effort: a leftover only costs
+/// space until the same file is put aside again.
+fn discard_put_aside(kept: &Path) {
+    match std::fs::remove_file(kept) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => warn!(
+            %error,
+            path = %kept.display(),
+            "a restored file's put-aside copy could not be removed"
+        ),
+    }
 }
 
 /// Reconstructs server-applicable content without reading the source archive.
@@ -230,6 +343,7 @@ pub async fn materialize_server_recipe(
         unknown_server_files,
         game_dir,
         client_game_dir,
+        client_put_aside_dir,
         client_source_dir,
         server_source_dir,
         reserved,
@@ -254,7 +368,10 @@ pub async fn materialize_server_recipe(
         &recipe.files,
         &plan.files,
         game_dir,
-        Some(client_game_dir),
+        Some(ClientCopies {
+            game_dir: client_game_dir,
+            put_aside_dir: client_put_aside_dir,
+        }),
         fetch,
     )
     .await?;
@@ -367,6 +484,27 @@ fn remove_retained_eula(game_dir: &Path) -> PackResult<()> {
     }
 }
 
+/// Where a linked server's reconstruction may copy a file the recipe records
+/// no address for from.
+#[derive(Debug, Clone, Copy)]
+struct ClientCopies<'a> {
+    game_dir: &'a Path,
+    put_aside_dir: &'a Path,
+}
+
+impl ClientCopies<'_> {
+    /// The client's copy of `file`: the installed jar, or the one put aside.
+    fn of(self, file: &PackFileRecipe) -> Option<PathBuf> {
+        let installed = self.game_dir.join(&file.logical_path);
+        if installed.is_file() {
+            return Some(installed);
+        }
+        put_aside_path(self.put_aside_dir, &file.logical_path)
+            .ok()
+            .filter(|kept| is_kept_copy(kept).unwrap_or(false))
+    }
+}
+
 async fn install_selected_files(
     all: &[PackFileRecipe],
     wanted: &[&PackFileRecipe],
@@ -375,7 +513,7 @@ async fn install_selected_files(
     // the one caller that has such a place: reconstructing a linked server
     // from a client. `None` everywhere else, where a recipe entry with no
     // address is a recipe that cannot be installed.
-    client_game_dir: Option<&Path>,
+    client: Option<ClientCopies<'_>>,
     fetch: ArtifactFetch<'_>,
 ) -> PackResult<MaterializedFiles> {
     let cancel = fetch.cancel;
@@ -402,10 +540,9 @@ async fn install_selected_files(
     // only when neither copy exists.
     let mut downloadable: Vec<&PackFileRecipe> = Vec::new();
     for file in wanted.iter().copied() {
-        let source = client_game_dir
+        let source = client
             .filter(|_| file.downloads.is_empty())
-            .map(|dir| dir.join(&file.logical_path))
-            .filter(|source| source.is_file());
+            .and_then(|client| client.of(file));
         let Some(source) = source else {
             downloadable.push(file);
             continue;
@@ -1856,7 +1993,10 @@ mod tests {
             std::slice::from_ref(&entry),
             &[&entry],
             &server_game,
-            Some(&client_game),
+            Some(ClientCopies {
+                game_dir: &client_game,
+                put_aside_dir: &dir.path().join("put-aside"),
+            }),
             offline_fetch(&manager, &cache, &reporter, &cancel),
         )
         .await
@@ -1868,6 +2008,58 @@ mod tests {
             !client_game.join("mods/a.jar").exists(),
             "the test must not pass by copying the client's jar"
         );
+    }
+
+    #[tokio::test]
+    async fn a_linked_server_takes_a_downloadless_file_the_client_put_aside() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = CacheLayout::new(dir.path().join("cache"));
+        let manager =
+            DownloadManager::new(ephervex_download::DownloaderConfig::default()).expect("manager");
+        let reporter = OperationReporter::silent("test");
+        let cancel = CancellationToken::new();
+        let entry = downloadless_file("mods/a.jar");
+        let put_aside = dir.path().join("put-aside");
+        let server_game = dir.path().join("server");
+        // `file()`'s hashes are the empty body's.
+        let kept = put_aside_path(&put_aside, &entry.logical_path).expect("kept path");
+        std::fs::create_dir_all(kept.parent().expect("parent")).expect("parent");
+        std::fs::write(&kept, []).expect("kept copy");
+
+        let installed = install_selected_files(
+            std::slice::from_ref(&entry),
+            &[&entry],
+            &server_game,
+            Some(ClientCopies {
+                game_dir: &dir.path().join("client"),
+                put_aside_dir: &put_aside,
+            }),
+            offline_fetch(&manager, &cache, &reporter, &cancel),
+        )
+        .await
+        .expect("the client's kept copy supplies the linked server");
+
+        assert_eq!(installed.installed, [PathBuf::from("mods/a.jar")]);
+        assert!(server_game.join("mods/a.jar").is_file());
+        assert!(kept.is_file(), "the client keeps its own copy");
+    }
+
+    #[test]
+    fn a_put_aside_path_never_leaves_its_directory() {
+        let dir = Path::new("/instance/.launcher/put-aside");
+        assert_eq!(
+            put_aside_path(dir, Path::new("mods/a.jar")).expect("plain"),
+            dir.join("mods/a.jar")
+        );
+        for hostile in ["../a.jar", "/etc/a.jar", "mods/../../a.jar", ""] {
+            assert!(
+                matches!(
+                    put_aside_path(dir, Path::new(hostile)),
+                    Err(PackError::EntryPathUnsafe { .. })
+                ),
+                "{hostile:?} must be refused"
+            );
+        }
     }
 
     #[test]

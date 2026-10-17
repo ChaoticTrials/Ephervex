@@ -1629,6 +1629,13 @@ mod browsing {
         );
     }
 
+    /// Removes the copy putting a jar aside keeps, leaving no bytes anywhere.
+    fn drop_kept_copy(app: &App, instance: ephervex_model::InstanceId, logical: &std::path::Path) {
+        let record = app.client(instance).expect("the instance");
+        std::fs::remove_file(ephervex_storage::metadata::put_aside_dir(&record.root).join(logical))
+            .expect("the kept copy");
+    }
+
     /// Putting a deleted jar back needs its bytes just as an install does.
     /// The launcher may not fetch them, so it asks - and once the user has
     /// supplied them, the ordinary restore finishes.
@@ -1643,8 +1650,10 @@ mod browsing {
             .join(file_name(RESTRICTED_PROJECT, RESTRICTED_INSTALLED));
 
         // The jar is put aside to find out which mod crashes, and the cached
-        // copy is gone too - a pruned cache, or another machine.
+        // copy is gone too - a pruned cache, or another machine. Nothing is
+        // kept either, as for a jar put aside by an earlier build.
         app.delete_mod_file(host, &logical).expect("the jar goes");
+        drop_kept_copy(&app, instance, &logical);
         std::fs::remove_file(cache_path(&app, RESTRICTED_PROJECT, RESTRICTED_INSTALLED))
             .expect("empty the cache");
 
@@ -1706,6 +1715,7 @@ mod browsing {
         store.write_recipe(&recipe).expect("rewrite");
 
         app.delete_mod_file(host, &logical).expect("the jar goes");
+        drop_kept_copy(&app, instance, &logical);
         std::fs::remove_file(cache_path(&app, RESTRICTED_PROJECT, RESTRICTED_INSTALLED))
             .expect("empty the cache");
 

@@ -36,7 +36,7 @@
 use std::path::{Path, PathBuf};
 
 use ephervex_download::{CacheLayout, OperationReporter};
-use ephervex_model::ModOrigin;
+use ephervex_model::{Hash, ModOrigin};
 use ephervex_pack::{
     ArtifactFetch, ExtractionLimits, MODS_DIR, PackArchive, PackRecipe, PackSide, SourceStore,
     safe_file_name,
@@ -419,10 +419,12 @@ impl App {
     ///   remember what a digest lookup found out about a jar, so once the jar
     ///   is gone it describes nothing.
     /// * **a file the imported pack declares.** The declaration stays exactly
-    ///   as imported, so the mod is restorable rather than gone
-    ///   ([`Self::restore_mod_file`]) and a server built from the recipe still
-    ///   contains it. Putting a pack's mod aside to find which one crashes is
-    ///   the workflow this launcher exists for (ADR 0019).
+    ///   as imported and the jar is kept in the host's put-aside directory, so
+    ///   the mod is restorable rather than gone ([`Self::restore_mod_file`]),
+    ///   even when the recipe records no address to fetch it from, and a server
+    ///   built from the recipe still contains it. Putting a pack's mod aside to
+    ///   find which one crashes is the workflow this launcher exists for
+    ///   (ADR 0019).
     ///
     /// Refuses everything else. Taking a mod the launcher chose out of an
     /// instance is a removal, which resolves what its dependencies leave
@@ -437,11 +439,12 @@ impl App {
     /// Deletes several mods' jars as one change that either happens whole or
     /// not at all.
     ///
-    /// Every path is checked before any file moves. The jars are then set
-    /// aside in the host's retired directory rather than removed, so a failure
+    /// Every path is checked before any file moves. A pack file's jar moves
+    /// into the put-aside directory, where it stays until it is restored; a
+    /// hand-placed one moves into the retired directory. Either way a failure
     /// partway through puts every one back, and only a batch that moved
-    /// everything forgets the adopted records and drops the set-aside copies.
-    /// A jar that cannot be put back stays in the retired directory, which
+    /// everything forgets the adopted records and drops the retired copies.
+    /// A jar that cannot be put back stays where it was moved, which
     /// reconciliation reports.
     pub(crate) fn delete_mod_files_together(
         &self,
@@ -453,6 +456,7 @@ impl App {
         let _gate = self.hold_mod_change_blocking(host)?;
         let snapshot = self.host_mod_snapshot(host)?;
         let mut origins = Vec::with_capacity(paths.len());
+        let mut hashes = Vec::with_capacity(paths.len());
         for logical_path in paths {
             let entry = snapshot
                 .mods
@@ -467,13 +471,23 @@ impl App {
                 });
             }
             origins.push(entry.origin);
+            hashes.push(entry.hashes.clone());
         }
 
         let layout = self.host_layout(host)?;
         let retired_dir = ephervex_storage::metadata::retired_dir(&layout.root);
+        let put_aside_dir = ephervex_storage::metadata::put_aside_dir(&layout.root);
         let mut set_aside = Vec::new();
-        for logical_path in paths {
-            if let Err(error) = set_aside_jar(&layout, &retired_dir, logical_path, &mut set_aside) {
+        for ((logical_path, origin), hashes) in paths.iter().zip(&origins).zip(&hashes) {
+            // Kept whenever its record stays: that record promises the file can
+            // come back.
+            let keep_in = (*origin != ModOrigin::HandPlaced).then_some(KeepIn {
+                dir: put_aside_dir.as_path(),
+                hashes,
+            });
+            if let Err(error) =
+                set_aside_jar(&layout, &retired_dir, keep_in, logical_path, &mut set_aside)
+            {
                 put_back(&mut set_aside);
                 return Err(error);
             }
@@ -489,7 +503,7 @@ impl App {
             .map(|(path, _)| *path)
             .collect();
         forget_adopted_records(&layout, &forgotten);
-        for moved in &set_aside {
+        for moved in set_aside.iter().filter(|moved| !moved.kept) {
             if let Err(error) = std::fs::remove_file(&moved.to) {
                 warn!(
                     %error,
@@ -560,6 +574,7 @@ impl App {
                     recipe,
                     logical_path,
                     &layout.game_dir,
+                    &ephervex_storage::metadata::put_aside_dir(&layout.root),
                     ArtifactFetch {
                         manager: &manager,
                         cache: &cache,
@@ -618,21 +633,30 @@ fn forget_adopted_records(layout: &crate::mods::HostLayout, logical_paths: &[&Pa
     }
 }
 
-/// A jar moved into the retired directory, and where it came from.
+/// A jar moved out of the way, and where it came from.
 struct SetAside {
     from: PathBuf,
     to: PathBuf,
+    /// Moved into the put-aside directory to stay, rather than into the
+    /// retired directory to be dropped once the batch succeeds.
+    kept: bool,
 }
 
-/// Moves both spellings of a mod's jar into the retired directory.
+/// Moves both spellings of a mod's jar out of `mods/`.
 ///
 /// Both, because a jar the user turned off is still their jar and a deletion
 /// that left the disabled twin behind would put the row straight back on the
 /// next refresh. A spelling that is not there is skipped; one that is not a
 /// file is a refusal rather than something to move.
+///
+/// With `keep_in`, the first spelling found is kept there under the logical
+/// path and any other goes to the retired directory, as does a copy already
+/// kept there. The one exception keeps the recorded release: a kept copy that
+/// holds the recorded bytes stays when the jar being put aside does not.
 fn set_aside_jar(
     layout: &crate::mods::HostLayout,
     retired_dir: &Path,
+    keep_in: Option<KeepIn<'_>>,
     logical_path: &Path,
     set_aside: &mut Vec<SetAside>,
 ) -> CoreResult<()> {
@@ -640,6 +664,10 @@ fn set_aside_jar(
         path: logical_path.to_path_buf(),
         source,
     };
+    let hashes = keep_in.map_or(&[][..], |keep| keep.hashes);
+    let mut keep_at = keep_in
+        .map(|keep| ephervex_pack::put_aside_path(keep.dir, logical_path))
+        .transpose()?;
     let installed = layout.game_dir.join(logical_path);
     let disabled = disabled_path(&installed);
     for from in [installed, disabled] {
@@ -654,14 +682,59 @@ fn set_aside_jar(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(failed(error)),
         }
-        std::fs::create_dir_all(retired_dir).map_err(failed)?;
-        // A leftover from an interrupted change can sit under the same name,
-        // and is retained evidence that a deletion must neither replace nor
-        // delete.
-        let to = ephervex_pack::unique_retired_path(retired_dir, &from);
-        std::fs::rename(&from, &to).map_err(failed)?;
-        set_aside.push(SetAside { from, to });
+        if let Some(to) = keep_at.take() {
+            if std::fs::symlink_metadata(&to).is_ok() {
+                if keeps_the_recorded_release(&to, &from, hashes) {
+                    retire(&from, retired_dir, set_aside).map_err(failed)?;
+                    continue;
+                }
+                retire(&to, retired_dir, set_aside).map_err(failed)?;
+            }
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent).map_err(failed)?;
+            }
+            std::fs::rename(&from, &to).map_err(failed)?;
+            set_aside.push(SetAside {
+                from,
+                to,
+                kept: true,
+            });
+        } else {
+            retire(&from, retired_dir, set_aside).map_err(failed)?;
+        }
     }
+    Ok(())
+}
+
+/// Where a jar whose record stays is kept, and the digests its record holds.
+#[derive(Clone, Copy)]
+struct KeepIn<'a> {
+    dir: &'a Path,
+    hashes: &'a [Hash],
+}
+
+/// Whether the copy already kept holds the recorded bytes and the incoming
+/// jar does not, so keeping the incoming one would lose the recorded release.
+fn keeps_the_recorded_release(kept: &Path, incoming: &Path, hashes: &[Hash]) -> bool {
+    !hashes.is_empty()
+        && std::fs::symlink_metadata(kept).is_ok_and(|metadata| metadata.is_file())
+        && crate::verify::holds_bytes(kept, hashes)
+        && !crate::verify::holds_bytes(incoming, hashes)
+}
+
+/// Moves one file into the retired directory, to be dropped once the batch
+/// succeeds or put back if it fails.
+fn retire(from: &Path, retired_dir: &Path, set_aside: &mut Vec<SetAside>) -> std::io::Result<()> {
+    std::fs::create_dir_all(retired_dir)?;
+    // A leftover from an interrupted change can sit under the same name, and
+    // is retained evidence that a deletion must neither replace nor delete.
+    let to = ephervex_pack::unique_retired_path(retired_dir, from);
+    std::fs::rename(from, &to)?;
+    set_aside.push(SetAside {
+        from: from.to_path_buf(),
+        to,
+        kept: false,
+    });
     Ok(())
 }
 
@@ -715,12 +788,40 @@ fn forget_replaced_record(
     recipe: &mut PackRecipe,
     file_name: &str,
 ) -> CoreResult<()> {
-    if !recipe.forget_replaced_records(&Path::new(MODS_DIR).join(file_name)) {
+    let logical_path = Path::new(MODS_DIR).join(file_name);
+    if !recipe.forget_replaced_records(&logical_path) {
         return Ok(());
     }
     let store = SourceStore::new(ephervex_storage::metadata::source_dir(&layout.root));
     store.write_recipe(recipe)?;
+    drop_put_aside_copies(&layout.root, [logical_path.as_path()]);
     Ok(())
+}
+
+/// Drops the put-aside copies kept for these logical paths.
+///
+/// For files whose record changed or went away, so a copy is kept exactly as
+/// long as the record that promises it can come back. Best effort: a leftover
+/// only costs space, and putting the same file aside again replaces it.
+pub(crate) fn drop_put_aside_copies<'a>(
+    root: &Path,
+    logical_paths: impl IntoIterator<Item = &'a Path>,
+) {
+    let put_aside_dir = ephervex_storage::metadata::put_aside_dir(root);
+    for logical_path in logical_paths {
+        let Ok(kept) = ephervex_pack::put_aside_path(&put_aside_dir, logical_path) else {
+            continue;
+        };
+        match std::fs::remove_file(&kept) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => warn!(
+                %error,
+                path = %kept.display(),
+                "a put-aside copy whose record changed could not be removed"
+            ),
+        }
+    }
 }
 
 /// Copies one file through staging and renames it into `mods/`.
@@ -1175,6 +1276,11 @@ mod tests {
             .expect("a pack's mod may be put aside");
 
         assert!(names_in(&host.mods_dir).is_empty(), "the jar is gone");
+        assert_eq!(
+            std::fs::read(kept_copy(&host, "from-pack.jar")).expect("kept"),
+            b"jar",
+            "and kept, so it can come back with no address to fetch it from"
+        );
         let layout = host.app.host_layout(host.host).expect("layout");
         assert!(
             layout
@@ -1211,6 +1317,10 @@ mod tests {
                 .recorded_mods()
                 .is_empty(),
             "the record goes with the file"
+        );
+        assert!(
+            !kept_copy(&host, "identified.jar").exists(),
+            "nothing promises a hand-placed jar back"
         );
         assert!(
             host.app
@@ -1284,6 +1394,70 @@ mod tests {
             layout.recipe.expect("recipe").recorded_mods().len(),
             2,
             "no record is forgotten for a batch that did not finish"
+        );
+    }
+
+    fn kept_copy(host: &Fixture, name: &str) -> PathBuf {
+        ephervex_storage::metadata::put_aside_dir(&host.root)
+            .join(MODS_DIR)
+            .join(name)
+    }
+
+    #[test]
+    fn a_failed_batch_put_aside_puts_every_pack_jar_back() {
+        let host = fixture();
+        for name in ["first.jar", "second.jar"] {
+            std::fs::write(host.mods_dir.join(name), name).expect("jar");
+            record_mod_appending(&host, name, ModOrigin::PackDeclared);
+        }
+        std::fs::create_dir(host.mods_dir.join("second.jar.disabled")).expect("directory");
+
+        let result = host.app.delete_mod_files(
+            host.host,
+            &[
+                PathBuf::from("mods/first.jar"),
+                PathBuf::from("mods/second.jar"),
+            ],
+        );
+
+        assert!(
+            matches!(result, Err(CoreError::ModFileNotDeleted { .. })),
+            "{result:?}"
+        );
+        for name in ["first.jar", "second.jar"] {
+            assert_eq!(
+                std::fs::read(host.mods_dir.join(name)).expect("back in place"),
+                name.as_bytes()
+            );
+            assert!(!kept_copy(&host, name).exists(), "{name} is not also kept");
+        }
+    }
+
+    #[test]
+    fn putting_a_pack_jar_aside_again_keeps_the_jar_it_was_given_last() {
+        // A snapshot restore can bring the jar back while an older copy is
+        // still kept. The jar the user puts aside now is the one to keep.
+        let host = fixture();
+        record_mod(&host, "from-pack.jar", ModOrigin::PackDeclared);
+        let path = Path::new("mods/from-pack.jar");
+        std::fs::write(host.mods_dir.join("from-pack.jar"), b"older").expect("jar");
+        host.app
+            .delete_mod_file(host.host, path)
+            .expect("put aside");
+        std::fs::write(host.mods_dir.join("from-pack.jar"), b"newer").expect("jar");
+
+        host.app
+            .delete_mod_file(host.host, path)
+            .expect("put aside again");
+
+        assert_eq!(
+            std::fs::read(kept_copy(&host, "from-pack.jar")).expect("kept"),
+            b"newer"
+        );
+        let retired = ephervex_storage::metadata::retired_dir(&host.root);
+        assert!(
+            !retired.exists() || names_in(&retired).is_empty(),
+            "the older copy is dropped, not left as a leftover"
         );
     }
 
@@ -1386,6 +1560,11 @@ mod tests {
         // would be the same loss as replacing a present one.
         let host = fixture();
         record_mod(&host, "put-aside.jar", ModOrigin::UserSelected);
+        std::fs::write(host.mods_dir.join("put-aside.jar"), b"recorded").expect("jar");
+        host.app
+            .delete_mod_file(host.host, Path::new("mods/put-aside.jar"))
+            .expect("put aside");
+        assert!(kept_copy(&host, "put-aside.jar").is_file());
         let chosen = tempfile::tempdir().expect("temp dir");
         let source = jar_at(chosen.path(), "put-aside.jar");
 
@@ -1402,6 +1581,10 @@ mod tests {
 
         assert!(recorded_paths(&host).is_empty());
         assert_eq!(names_in(&host.mods_dir), vec!["put-aside.jar"]);
+        assert!(
+            !kept_copy(&host, "put-aside.jar").exists(),
+            "the copy goes with the record that promised it back"
+        );
     }
 
     #[test]

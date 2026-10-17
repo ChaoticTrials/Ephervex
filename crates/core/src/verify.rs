@@ -42,6 +42,9 @@ pub enum Integrity {
     Intact,
     /// The recipe wants it and there is no file.
     Absent,
+    /// The user took the file out of `mods/` on purpose, and a kept copy is
+    /// waiting to be restored. A deliberate change, not a fault.
+    PutAside,
     /// The file is there and its bytes are not the ones recorded. The one
     /// answer presence alone can never give.
     Corrupt,
@@ -63,6 +66,7 @@ impl Integrity {
         match self {
             Self::Intact => "intact",
             Self::Absent => "absent",
+            Self::PutAside => "put-aside",
             Self::Corrupt => "corrupt",
             Self::Unverifiable => "unverifiable",
             Self::Unreadable => "unreadable",
@@ -72,13 +76,14 @@ impl Integrity {
     /// Whether this file needs attention.
     #[must_use]
     pub const fn is_sound(&self) -> bool {
-        matches!(self, Self::Intact | Self::Unverifiable)
+        matches!(self, Self::Intact | Self::Unverifiable | Self::PutAside)
     }
 
     /// Whether replacing the file from its recorded source would help.
     ///
     /// A file with no recorded digest is excluded: there would be no way to
-    /// tell afterwards whether the replacement was any better.
+    /// tell afterwards whether the replacement was any better. So is a file
+    /// put aside, which only a request naming it brings back.
     #[must_use]
     pub const fn is_repairable(&self) -> bool {
         matches!(self, Self::Absent | Self::Corrupt | Self::Unreadable)
@@ -91,7 +96,8 @@ pub struct VerifiedFile {
     pub logical_path: PathBuf,
     pub integrity: Integrity,
     /// Whether the recipe records an address this file could be fetched from
-    /// again. A pack's shipped jar does not.
+    /// again, or a put-aside copy of it is kept. A pack's shipped jar has
+    /// neither.
     pub has_source: bool,
 }
 
@@ -114,6 +120,13 @@ impl VerificationReport {
         self.files
             .iter()
             .filter(|file| file.integrity.is_repairable() && file.has_source)
+    }
+
+    /// The files the user put aside, each of which can be restored.
+    pub fn put_aside(&self) -> impl Iterator<Item = &VerifiedFile> {
+        self.files
+            .iter()
+            .filter(|file| file.integrity == Integrity::PutAside)
     }
 
     /// The files something is wrong with that a repair cannot fix.
@@ -305,15 +318,23 @@ impl App {
             total: Some(total),
         });
 
+        let put_aside_dir = ephervex_storage::metadata::put_aside_dir(&layout.root);
         let mut files = Vec::with_capacity(expected.len());
         for (index, file) in expected.into_iter().enumerate() {
             if cancel.is_cancelled() {
                 return Err(PackError::Canceled.into());
             }
+            let mut integrity =
+                check(&layout.game_dir.join(&file.logical_path), &file.hashes).await;
+            let kept =
+                integrity == Integrity::Absent && keeps_restorable(&put_aside_dir, file).await;
+            if kept {
+                integrity = Integrity::PutAside;
+            }
             files.push(VerifiedFile {
                 logical_path: file.logical_path.clone(),
-                integrity: check(&layout.game_dir.join(&file.logical_path), &file.hashes).await,
-                has_source: !file.downloads.is_empty(),
+                integrity,
+                has_source: kept || !file.downloads.is_empty(),
             });
             reporter.set_items_at(
                 Progress {
@@ -328,6 +349,7 @@ impl App {
         info!(
             intact = report.count(&Integrity::Intact),
             absent = report.count(&Integrity::Absent),
+            put_aside = report.count(&Integrity::PutAside),
             corrupt = report.count(&Integrity::Corrupt),
             unverifiable = report.count(&Integrity::Unverifiable),
             "checked what this host holds against what it recorded"
@@ -478,8 +500,10 @@ impl App {
             ..RepairReport::default()
         };
 
+        // A file put aside comes back only when the request names it.
         let wanted: Vec<PathBuf> = found
             .repairable()
+            .chain(found.put_aside().filter(|_| only.is_some()))
             .filter(asked)
             .map(|file| file.logical_path.clone())
             .collect();
@@ -726,6 +750,65 @@ fn restore_retired(retired: &Path, destination: &Path) -> Option<MutationRecover
         });
     }
     None
+}
+
+/// Whether the copy kept for `file` can restore it: there is one, and it holds
+/// the recorded bytes when the recipe records any. A copy that does not is no
+/// way back, and the file reads as absent.
+async fn keeps_restorable(put_aside_dir: &Path, file: &ephervex_pack::PackFileRecipe) -> bool {
+    if !is_put_aside(put_aside_dir, file) {
+        return false;
+    }
+    if file.hashes.is_empty() {
+        return true;
+    }
+    let Ok(kept) = ephervex_pack::put_aside_path(put_aside_dir, &file.logical_path) else {
+        return false;
+    };
+    matches!(file_matches_hashes(&kept, &file.hashes).await, Ok(true))
+}
+
+/// [`keeps_restorable`] for a caller that cannot wait, such as a diagnosis
+/// deciding which fix to offer.
+pub(crate) fn kept_copy_restores(
+    put_aside_dir: &Path,
+    file: &ephervex_pack::PackFileRecipe,
+) -> bool {
+    is_put_aside(put_aside_dir, file)
+        && (file.hashes.is_empty()
+            || ephervex_pack::put_aside_path(put_aside_dir, &file.logical_path)
+                .is_ok_and(|kept| holds_bytes(&kept, &file.hashes)))
+}
+
+/// Whether the regular file at `path` matches every recorded digest. Anything
+/// else, or a file that cannot be read, holds nothing that can be vouched for.
+pub(crate) fn holds_bytes(path: &Path, hashes: &[Hash]) -> bool {
+    use std::io::Read as _;
+
+    if !std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file()) {
+        return false;
+    }
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut verifier = ephervex_download::HashVerifier::new(hashes);
+    let mut buffer = vec![0u8; 64 * 1024];
+    loop {
+        match file.read(&mut buffer) {
+            Ok(0) => return verifier.finish().is_ok(),
+            Ok(read) => verifier.update(&buffer[..read]),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return false,
+        }
+    }
+}
+
+/// Whether a copy of `file` the user put aside is kept for it.
+pub(crate) fn is_put_aside(put_aside_dir: &Path, file: &ephervex_pack::PackFileRecipe) -> bool {
+    ephervex_pack::put_aside_path(put_aside_dir, &file.logical_path)
+        .ok()
+        .and_then(|kept| std::fs::symlink_metadata(kept).ok())
+        .is_some_and(|metadata| metadata.is_file())
 }
 
 /// What one file on disk is, against the digests recorded for it.
@@ -1455,6 +1538,221 @@ mod tests {
         assert!(
             !broken.is_sound(),
             "wrong bytes are what nothing else notices"
+        );
+    }
+
+    /// An instance whose pack declares two files no address can bring back:
+    /// one measured from server files, with a digest, and one shipped inside
+    /// the pack, with none. The shared cache holds neither.
+    fn pack_instance(base: &Path) -> (App, InstanceId, PathBuf) {
+        let app = App::open_at(Paths::rooted_at(base)).expect("app opens");
+        let record = app
+            .create_client_for_test(NewClient::new(
+                "Put Aside Example",
+                "1.21.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        // No catalog identity either, so nothing can turn a failed restore
+        // into a catalog lookup.
+        let declared = |name: &str, hashes: Vec<Hash>| PackFileRecipe {
+            origin: ModOrigin::PackDeclared,
+            identity: None,
+            ..recorded(name, hashes, Vec::new())
+        };
+        let mut recipe =
+            PackRecipe::for_manual_instance("Put Aside Example", "1.21.1", record.loader.clone());
+        recipe.files = vec![
+            declared("from-server-files.jar", vec![digest_of(BODY)]),
+            declared("shipped.jar", Vec::new()),
+        ];
+        SourceStore::new(ephervex_storage::metadata::source_dir(&record.root))
+            .write_recipe(&recipe)
+            .expect("write recipe");
+        let mods = ephervex_storage::metadata::client_game_dir(&record.root).join("mods");
+        std::fs::create_dir_all(&mods).expect("mods dir");
+        std::fs::write(mods.join("from-server-files.jar"), BODY).expect("write");
+        std::fs::write(mods.join("shipped.jar"), BODY).expect("write");
+        (app, record.id, record.root)
+    }
+
+    async fn restore(app: &App, instance: InstanceId, name: &str) -> CoreResult<()> {
+        app.restore_mod_file(
+            InstalledHost::Instance(instance),
+            &Path::new("mods").join(name),
+            &OperationReporter::silent("test-restore"),
+            &CancellationToken::new(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_pack_file_with_no_recorded_address_comes_back_after_being_put_aside() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, id, root) = pack_instance(base.path());
+        let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+        let put_aside = ephervex_storage::metadata::put_aside_dir(&root).join("mods");
+
+        for (name, restored) in [
+            ("from-server-files.jar", Integrity::Intact),
+            ("shipped.jar", Integrity::Unverifiable),
+        ] {
+            app.delete_mod_file(InstalledHost::Instance(id), &Path::new("mods").join(name))
+                .expect("a pack's mod may be put aside");
+            assert!(!mods.join(name).exists(), "{name} leaves the mods folder");
+
+            let report = verify(&app, id).await;
+            assert_eq!(integrity(&report, name), Integrity::PutAside);
+            assert!(report.is_sound(), "putting {name} aside is not a fault");
+            assert_eq!(report.repairable().count(), 0);
+            assert_eq!(report.unrepairable().count(), 0);
+
+            restore(&app, id, name)
+                .await
+                .expect("the kept copy needs no address and no network");
+            assert_eq!(std::fs::read(mods.join(name)).expect("restored"), BODY);
+            assert_eq!(integrity(&verify(&app, id).await, name), restored);
+            assert!(
+                !put_aside.join(name).exists(),
+                "the kept copy of {name} is not left behind"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn repairing_a_host_leaves_a_put_aside_mod_aside_until_a_fix_names_it() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, id, root) = pack_instance(base.path());
+        let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+        let host = InstalledHost::Instance(id);
+        let path = PathBuf::from("mods/from-server-files.jar");
+        app.delete_mod_file(host, &path).expect("put aside");
+
+        let everything = app
+            .repair_host(
+                host,
+                &OperationReporter::silent("test-repair"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("repair");
+        assert!(everything.is_complete(), "{everything:?}");
+        assert!(everything.repaired.is_empty());
+        assert!(!mods.join("from-server-files.jar").exists());
+
+        let named = app
+            .repair_host_files(
+                host,
+                Some(std::slice::from_ref(&path)),
+                &OperationReporter::silent("test-repair"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("repair");
+        assert_eq!(named.repaired, [path]);
+        assert_eq!(
+            std::fs::read(mods.join("from-server-files.jar")).expect("restored"),
+            BODY
+        );
+    }
+
+    #[tokio::test]
+    async fn a_kept_copy_without_the_recorded_bytes_is_kept_rather_than_restored() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, id, root) = pack_instance(base.path());
+        let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+        let kept =
+            ephervex_storage::metadata::put_aside_dir(&root).join("mods/from-server-files.jar");
+        app.delete_mod_file(
+            InstalledHost::Instance(id),
+            Path::new("mods/from-server-files.jar"),
+        )
+        .expect("put aside");
+        std::fs::write(&kept, b"other bytes").expect("damage the kept copy");
+        assert_eq!(
+            integrity(&verify(&app, id).await, "from-server-files.jar"),
+            Integrity::Absent,
+            "a copy that cannot restore the file is no way back"
+        );
+
+        restore(&app, id, "from-server-files.jar")
+            .await
+            .expect_err("nothing else can supply the recorded bytes");
+
+        assert!(
+            !mods.join("from-server-files.jar").exists(),
+            "bytes that are not the recorded ones are not installed"
+        );
+        assert_eq!(
+            std::fs::read(&kept).expect("the kept copy is still there"),
+            b"other bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_taken_while_a_mod_is_put_aside_can_restore_it_again() {
+        use crate::snapshot::{SnapshotOrigin, SnapshotRestoreOptions};
+
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, id, root) = pack_instance(base.path());
+        let host = InstalledHost::Instance(id);
+        let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+        app.delete_mod_file(host, Path::new("mods/from-server-files.jar"))
+            .expect("put aside");
+        let snapshot = app
+            .create_snapshot(
+                host,
+                "while put aside",
+                SnapshotOrigin::Manual,
+                &CancellationToken::new(),
+            )
+            .expect("snapshot");
+        restore(&app, id, "from-server-files.jar")
+            .await
+            .expect("restored, which drops the kept copy");
+
+        app.restore_snapshot(
+            host,
+            snapshot.id,
+            SnapshotRestoreOptions::default(),
+            &CancellationToken::new(),
+        )
+        .expect("restore the snapshot");
+
+        assert!(!mods.join("from-server-files.jar").exists());
+        assert_eq!(
+            integrity(&verify(&app, id).await, "from-server-files.jar"),
+            Integrity::PutAside,
+            "the snapshot brings the kept copy back with the record"
+        );
+        restore(&app, id, "from-server-files.jar")
+            .await
+            .expect("the mod comes back again");
+        assert_eq!(
+            std::fs::read(mods.join("from-server-files.jar")).expect("restored"),
+            BODY
+        );
+    }
+
+    #[tokio::test]
+    async fn putting_a_mod_aside_again_keeps_the_copy_that_holds_the_recorded_bytes() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, id, root) = pack_instance(base.path());
+        let host = InstalledHost::Instance(id);
+        let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+        let path = Path::new("mods/from-server-files.jar");
+        app.delete_mod_file(host, path).expect("put aside");
+        // Another jar under the same name, copied in by hand.
+        std::fs::write(mods.join("from-server-files.jar"), b"a different jar").expect("write");
+
+        app.delete_mod_file(host, path).expect("put aside again");
+
+        restore(&app, id, "from-server-files.jar")
+            .await
+            .expect("the recorded release is still kept");
+        assert_eq!(
+            std::fs::read(mods.join("from-server-files.jar")).expect("restored"),
+            BODY
         );
     }
 

@@ -19,7 +19,8 @@ link would copy shared storage and omitting it would restore an unusable server.
 
 A snapshot is a whole local safety copy stored at
 `<host>/.launcher/snapshots/<snapshot-id>/`. It captures the game directory,
-retained source recipe, and canonical host metadata. Symlinks are recreated
+retained source recipe, the kept copies of put-aside mods that recipe promises
+back (ADR 0019), and canonical host metadata. Symlinks are recreated
 with their original target text and never followed.
 
 Regular files use the Linux `FICLONE` operation when the filesystem supports

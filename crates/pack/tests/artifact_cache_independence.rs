@@ -157,6 +157,7 @@ async fn a_reconstructed_server_survives_a_full_clear_of_the_reusable_cache() {
         unknown_server_files: &UnknownServerFiles::default(),
         game_dir: &server_game,
         client_game_dir: &client_game,
+        client_put_aside_dir: &client_source.with_file_name("put-aside"),
         client_source_dir: &client_source,
         server_source_dir: &server_source,
         reserved: &[],

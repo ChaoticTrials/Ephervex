@@ -74,6 +74,12 @@ pub const RETIRED_DIR: &str = "retired";
 pub const STAGING_DIR: &str = "staging";
 /// `.launcher/snapshots/`, containing user-managed local safety copies.
 pub const SNAPSHOTS_DIR: &str = "snapshots";
+/// `.launcher/put-aside/`, where a pack file the user took out of `mods/` waits
+/// to be restored, under its logical path.
+///
+/// Durable content rather than transaction state: for a file the recipe
+/// records no address for, this copy is the only way back.
+pub const PUT_ASIDE_DIR: &str = "put-aside";
 /// `.launcher/isolation.json`, the active mod isolation session of a host.
 ///
 /// The session names the host it began on and the safety snapshot it will
@@ -217,6 +223,12 @@ pub fn retired_dir(root: &Path) -> PathBuf {
 #[must_use]
 pub fn staging_dir(root: &Path) -> PathBuf {
     metadata_dir(root).join(STAGING_DIR)
+}
+
+/// `<root>/.launcher/put-aside/`.
+#[must_use]
+pub fn put_aside_dir(root: &Path) -> PathBuf {
+    metadata_dir(root).join(PUT_ASIDE_DIR)
 }
 
 /// `<root>/.launcher/instance.json`.

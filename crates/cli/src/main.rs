@@ -5696,15 +5696,25 @@ fn print_verification(
         }
     }
     if report.is_sound() {
+        use std::fmt::Write as _;
+
         let unproven = report.count(&Integrity::Unverifiable);
-        if unproven == 0 {
-            outln!("{} files, all intact", report.files.len());
+        let aside = report.count(&Integrity::PutAside);
+        let mut summary = if unproven == 0 && aside == 0 {
+            format!("{} files, all intact", report.files.len())
         } else {
-            outln!(
-                "{} files intact, {unproven} unproven: no digest is recorded to check them against",
-                report.files.len() - unproven
+            format!("{} files intact", report.files.len() - unproven - aside)
+        };
+        if unproven > 0 {
+            let _ = write!(
+                summary,
+                ", {unproven} unproven: no digest is recorded to check them against"
             );
         }
+        if aside > 0 {
+            let _ = write!(summary, ", {aside} put aside and kept to restore");
+        }
+        outln!("{summary}");
     }
     if let Some(shared) = shared {
         print_shared_artifacts(shared);

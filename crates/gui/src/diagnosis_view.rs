@@ -236,6 +236,7 @@ fn chain_with(requirement: &UnmetRequirement, last: &str) -> Vec<String> {
 fn integrity_word(integrity: &Integrity) -> String {
     lookup(match integrity {
         Integrity::Absent => "gui-integrity-absent",
+        Integrity::PutAside => "gui-integrity-put-aside",
         Integrity::Corrupt => "gui-integrity-corrupt",
         Integrity::Unreadable => "gui-integrity-unreadable",
         Integrity::Intact | Integrity::Unverifiable => "gui-integrity-unverifiable",
@@ -273,8 +274,9 @@ pub fn finding_view(finding: &Finding, mc: &str, on_server: bool) -> FindingView
         | FindingKind::DependencyMissing(_)
         | FindingKind::DeclaredConflict(_)
         | FindingKind::LoaderReportedDependency(_)
-        | FindingKind::HandPlacedMods { .. } => mod_card(&finding.kind),
-        _ => other_card(&finding.kind),
+        | FindingKind::HandPlacedMods { .. }
+        | FindingKind::ModsPutAside { .. } => mod_card(&finding.kind),
+        _ => other_card(&finding.kind, on_server),
     };
     let missing = missing_dependency(&finding.kind);
     // A server is not offered a mod the catalog says never runs on one: the
@@ -314,12 +316,13 @@ pub fn finding_view(finding: &Finding, mc: &str, on_server: bool) -> FindingView
         }));
     }
     let fix_label = match (&finding.fix, missing) {
-        (Some(DiagnosticFix::RestoreFiles(_)), Some(UnmetDependency::Missing { name, .. })) => {
-            lookup_args(
-                "gui-diagnosis-restore-mod",
-                [("name", Arg::from(name.as_str()))],
-            )
-        }
+        (
+            Some(DiagnosticFix::RestoreFiles(_) | DiagnosticFix::RestorePutAside(_)),
+            Some(UnmetDependency::Missing { name, .. }),
+        ) => lookup_args(
+            "gui-diagnosis-restore-mod",
+            [("name", Arg::from(name.as_str()))],
+        ),
         _ => String::new(),
     };
     let fix_label = match &finding.fix {
@@ -519,11 +522,23 @@ fn mod_card(kind: &FindingKind) -> Card {
             card.files.clone_from(names);
             card
         }
+        FindingKind::ModsPutAside { files } => {
+            let mut card = Card::new(
+                count("gui-diagnosis-put-aside", files.len()),
+                vec![lookup("gui-diagnosis-put-aside-detail")],
+                Some(FindingRoute::Mods),
+            );
+            card.files = files
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect();
+            card
+        }
         _ => Card::new(String::new(), Vec::new(), None),
     }
 }
 
-fn other_card(kind: &FindingKind) -> Card {
+fn other_card(kind: &FindingKind, on_server: bool) -> Card {
     match kind {
         FindingKind::RecentCrash {
             report,
@@ -548,7 +563,7 @@ fn other_card(kind: &FindingKind) -> Card {
             )
         }
         FindingKind::ManagedFilesDamaged { .. } | FindingKind::SharedFilesDamaged { .. } => {
-            files_card(kind)
+            files_card(kind, on_server)
         }
         FindingKind::JvmArgumentsCustomized { layer, count: args } => Card::new(
             lookup(match layer {
@@ -587,7 +602,7 @@ fn other_card(kind: &FindingKind) -> Card {
     }
 }
 
-fn files_card(kind: &FindingKind) -> Card {
+fn files_card(kind: &FindingKind, on_server: bool) -> Card {
     match kind {
         FindingKind::ManagedFilesDamaged {
             repairable,
@@ -598,8 +613,13 @@ fn files_card(kind: &FindingKind) -> Card {
                 detail.push(count("gui-diagnosis-files-restorable", repairable.len()));
             }
             if !unrepairable.is_empty() {
+                // A server has no pack of its own to import again.
                 detail.push(count(
-                    "gui-diagnosis-files-unrestorable",
+                    if on_server {
+                        "gui-diagnosis-files-unrestorable-server"
+                    } else {
+                        "gui-diagnosis-files-unrestorable"
+                    },
                     unrepairable.len(),
                 ));
             }
@@ -809,6 +829,7 @@ fn integrity_checks(
                 [
                     ("count", Arg::from(files.files.len())),
                     ("intact", Arg::from(files.count(&Integrity::Intact))),
+                    ("aside", Arg::from(files.count(&Integrity::PutAside))),
                     ("problems", Arg::from(unsound)),
                     (
                         "unverifiable",
@@ -902,6 +923,7 @@ pub fn preview_view(preview: &FixPreview) -> PreviewView {
         DiagnosticFix::EnableMods(_) => "gui-fix-enable-note",
         DiagnosticFix::UseAutomaticJava | DiagnosticFix::PinJava(_) => "gui-fix-java-note",
         DiagnosticFix::RestoreFiles(_) => "gui-fix-restore-note",
+        DiagnosticFix::RestorePutAside(_) => "gui-fix-restore-put-aside-note",
     }));
     if preview.is_empty() {
         notes = vec![lookup("gui-fix-nothing-left")];
@@ -966,19 +988,26 @@ pub fn outcome_view(
         DiagnosticFix::UseAutomaticJava | DiagnosticFix::PinJava(_) => {
             lookup("gui-fix-java-not-applied")
         }
-        DiagnosticFix::RestoreFiles(_) => {
+        DiagnosticFix::RestoreFiles(_) | DiagnosticFix::RestorePutAside(_) => {
             let repair = outcome.repair.clone().unwrap_or_default();
             let mut message = count(
-                if stopped {
-                    "gui-integrity-repair-stopped"
-                } else {
-                    "gui-integrity-repaired"
+                match fix {
+                    _ if stopped => "gui-integrity-repair-stopped",
+                    DiagnosticFix::RestorePutAside(_) => "gui-fix-restored-put-aside",
+                    _ => "gui-integrity-repaired",
                 },
                 repair.repaired.len(),
             );
             if !repair.failed.is_empty() {
                 message.push(' ');
-                message.push_str(&count("gui-integrity-repair-failed", repair.failed.len()));
+                message.push_str(&count(
+                    if matches!(fix, DiagnosticFix::RestorePutAside(_)) {
+                        "gui-fix-restore-put-aside-failed"
+                    } else {
+                        "gui-integrity-repair-failed"
+                    },
+                    repair.failed.len(),
+                ));
             }
             lines.extend(repair.failed.iter().map(|path| path.display().to_string()));
             lines.extend(repair.skipped.iter().map(|path| path.display().to_string()));
@@ -1166,6 +1195,54 @@ mod tests {
     }
 
     #[test]
+    fn a_server_file_with_no_source_is_not_told_to_import_a_pack_again() {
+        let finding = Finding {
+            kind: FindingKind::ManagedFilesDamaged {
+                repairable: Vec::new(),
+                unrepairable: vec![(PathBuf::from("mods/miner.jar"), Integrity::Absent)],
+            },
+            fix: None,
+        };
+
+        let server = finding_view(&finding, "1.21.1", true);
+        assert!(
+            server
+                .detail
+                .contains(&count("gui-diagnosis-files-unrestorable-server", 1))
+        );
+        assert!(
+            !server
+                .detail
+                .contains(&count("gui-diagnosis-files-unrestorable", 1))
+        );
+
+        let client = finding_view(&finding, "1.21.1", false);
+        assert!(
+            client
+                .detail
+                .contains(&count("gui-diagnosis-files-unrestorable", 1))
+        );
+    }
+
+    #[test]
+    fn a_put_aside_mod_is_a_deliberate_change_that_offers_a_restore() {
+        let path = PathBuf::from("mods/miner.jar");
+        let finding = Finding {
+            kind: FindingKind::ModsPutAside {
+                files: vec![path.clone()],
+            },
+            fix: Some(DiagnosticFix::RestorePutAside(vec![path])),
+        };
+
+        let view = finding_view(&finding, "1.21.1", true);
+        assert_eq!(view.class, FindingClass::Customized);
+        assert_eq!(view.title, count("gui-diagnosis-put-aside", 1));
+        assert_eq!(view.files, ["mods/miner.jar"]);
+        assert!(view.fix.is_some());
+        assert_eq!(view.route, Some(FindingRoute::Mods));
+    }
+
+    #[test]
     fn an_unrecorded_missing_mod_is_installed_from_a_catalog_on_either_host() {
         let finding = missing_libx(None, None);
 
@@ -1347,6 +1424,39 @@ mod tests {
         assert!(view.changed);
         assert_eq!(view.lines, ["mods/b.jar"]);
         assert_eq!(view.message, count("gui-integrity-repair-stopped", 1));
+    }
+
+    #[test]
+    fn restoring_a_put_aside_mod_says_it_comes_back_from_the_kept_copy() {
+        let path = PathBuf::from("mods/miner.jar");
+        let fix = DiagnosticFix::RestorePutAside(vec![path.clone()]);
+        let preview = preview_view(&FixPreview {
+            fix: fix.clone(),
+            changes: vec![ProposedChange::Restore {
+                logical_path: path.clone(),
+            }],
+            blocked: None,
+        });
+        assert!(
+            preview
+                .notes
+                .contains(&lookup("gui-fix-restore-put-aside-note"))
+        );
+        assert!(!preview.notes.contains(&lookup("gui-fix-restore-note")));
+
+        let outcome = FixOutcome {
+            applied: vec!["mods/miner.jar".to_owned()],
+            failed: Vec::new(),
+            skipped: Vec::new(),
+            client_warnings: Vec::new(),
+            server_warnings: Vec::new(),
+            repair: Some(RepairReport {
+                repaired: vec![path],
+                ..RepairReport::default()
+            }),
+        };
+        let view = outcome_view(&fix, &outcome, &|_| String::new());
+        assert_eq!(view.message, count("gui-fix-restored-put-aside", 1));
     }
 
     fn shared_row(files: Vec<(&str, Integrity)>, loader_libraries_uncovered: bool) -> CheckView {

@@ -211,6 +211,7 @@ async fn reconstruct_reserving(
             .and_then(Path::parent)
             .unwrap_or(client_source)
             .join("minecraft"),
+        client_put_aside_dir: &client_source.with_file_name("put-aside"),
         client_source_dir: client_source,
         server_source_dir: server_source,
         reserved,

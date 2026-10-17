@@ -82,7 +82,7 @@ pub use import::{
 pub use install::{
     AppliedLayer, ArtifactFetch, FileInstall, MaterializedFiles, MaterializedServerRecipe,
     ServerMaterializeRequest, apply_overrides, apply_retained_overrides, install_files,
-    materialize_server_recipe, restore_file,
+    materialize_server_recipe, put_aside_path, restore_file,
 };
 pub use managed::{
     DISABLED_SUFFIX, MODS_DIR, ManagedModInstall, ManagedModInstallation, RESOURCEPACKS_DIR,

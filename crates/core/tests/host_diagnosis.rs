@@ -869,6 +869,146 @@ async fn a_recorded_dependency_whose_jar_is_gone_is_offered_back() {
     );
 }
 
+/// A pack mod put aside on purpose is a deliberate change with a way back, not
+/// a missing file, even when the recipe records no address for it.
+#[tokio::test]
+async fn a_pack_mod_put_aside_is_reported_as_deliberate_and_offered_back() {
+    let fixture = Fixture::with_mods(&[]).await;
+    fixture.pin_java("21.0.8", None);
+    fixture.write("minecraft/mods/miner.jar", b"miner");
+    fixture.write_recipe(&[json!({
+        "logical_path": "mods/miner.jar", "hashes": [], "downloads": [], "size": 5,
+        "client": "required", "server": "required", "origin": "pack_declared",
+    })]);
+    let app = fixture.app();
+    app.delete_mod_file(fixture.host(), Path::new("mods/miner.jar"))
+        .unwrap();
+
+    let diagnosis = fixture.diagnose(true).await;
+
+    assert!(
+        !diagnosis
+            .findings
+            .iter()
+            .any(|finding| matches!(finding.kind, FindingKind::ManagedFilesDamaged { .. })),
+        "{:?}",
+        diagnosis.findings
+    );
+    let put_aside = diagnosis
+        .findings
+        .iter()
+        .find(|finding| matches!(finding.kind, FindingKind::ModsPutAside { .. }))
+        .expect("the put-aside mod is reported");
+    assert_eq!(put_aside.class(), FindingClass::Customized);
+    let restore = DiagnosticFix::RestorePutAside(vec![PathBuf::from("mods/miner.jar")]);
+    assert_eq!(put_aside.fix.as_ref(), Some(&restore));
+    assert!(diagnosis.is_healthy(), "{:?}", diagnosis.findings);
+
+    let outcome = app
+        .apply_fix(
+            fixture.host(),
+            &restore,
+            &OperationReporter::silent("fixing"),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome.applied, ["mods/miner.jar"]);
+    assert!(fixture.enabled("miner"));
+}
+
+/// A put-aside mod another enabled mod requires is still a missing
+/// dependency, and its kept copy is what offers it back.
+#[tokio::test]
+async fn a_put_aside_dependency_with_no_recorded_address_is_offered_back() {
+    let fixture = Fixture::with_mods(&[("datatrader", &["libx"]), ("libx", &[])]).await;
+    fixture.pin_java("21.0.8", None);
+    fixture.write_recipe(&[
+        json!({
+            "logical_path": "mods/datatrader.jar", "hashes": [], "downloads": [], "size": 10,
+            "client": "required", "server": "required", "origin": "pack_declared",
+            "identity": {"provider": "modrinth", "project_id": "datatrader", "version_id": "datatrader1"},
+            "relations": [{"kind":"required","target":{"project":{"project_id":"libx"}}}],
+        }),
+        json!({
+            "logical_path": "mods/libx.jar", "hashes": [], "downloads": [], "size": 4,
+            "client": "required", "server": "required", "origin": "pack_declared",
+            "identity": {"provider": "modrinth", "project_id": "libx", "version_id": "libx1"},
+        }),
+    ]);
+    fixture
+        .app()
+        .delete_mod_file(fixture.host(), Path::new("mods/libx.jar"))
+        .unwrap();
+
+    let diagnosis = fixture.diagnose(false).await;
+
+    let restore = diagnosis
+        .findings
+        .iter()
+        .find_map(|finding| match &finding.kind {
+            FindingKind::DependencyMissing { .. } => Some(finding.fix.clone()),
+            _ => None,
+        });
+    assert_eq!(
+        restore,
+        Some(Some(DiagnosticFix::RestorePutAside(vec![PathBuf::from(
+            "mods/libx.jar"
+        )]))),
+        "{:?}",
+        diagnosis.findings
+    );
+}
+
+/// A kept copy that does not hold the recorded bytes cannot bring a required
+/// mod back, so only a recorded address is offered, and without one nothing is.
+#[tokio::test]
+async fn a_put_aside_dependency_whose_kept_copy_is_wrong_is_offered_only_its_address() {
+    for (downloads, expected) in [
+        (
+            json!(["https://cdn.modrinth.com/data/x/libx.jar"]),
+            Some(DiagnosticFix::RestoreFiles(vec![PathBuf::from(
+                "mods/libx.jar",
+            )])),
+        ),
+        (json!([]), None),
+    ] {
+        let fixture = Fixture::with_mods(&[("datatrader", &["libx"]), ("libx", &[])]).await;
+        fixture.pin_java("21.0.8", None);
+        // The recorded digest is the empty file's, which the jar's bytes are not.
+        fixture.write_recipe(&[
+            json!({
+                "logical_path": "mods/datatrader.jar", "hashes": [], "downloads": [], "size": 10,
+                "client": "required", "server": "required", "origin": "pack_declared",
+                "identity": {"provider": "modrinth", "project_id": "datatrader", "version_id": "datatrader1"},
+                "relations": [{"kind":"required","target":{"project":{"project_id":"libx"}}}],
+            }),
+            json!({
+                "logical_path": "mods/libx.jar",
+                "hashes": [{"algorithm": "sha1", "digest": "da39a3ee5e6b4b0d3255bfef95601890afd80709"}],
+                "downloads": downloads, "size": 4,
+                "client": "required", "server": "required", "origin": "pack_declared",
+                "identity": {"provider": "modrinth", "project_id": "libx", "version_id": "libx1"},
+            }),
+        ]);
+        fixture
+            .app()
+            .delete_mod_file(fixture.host(), Path::new("mods/libx.jar"))
+            .unwrap();
+
+        let diagnosis = fixture.diagnose(false).await;
+
+        let restore = diagnosis
+            .findings
+            .iter()
+            .find_map(|finding| match &finding.kind {
+                FindingKind::DependencyMissing { .. } => Some(finding.fix.clone()),
+                _ => None,
+            });
+        assert_eq!(restore, Some(expected), "{:?}", diagnosis.findings);
+    }
+}
+
 #[tokio::test]
 async fn recorded_files_are_hashed_only_when_asked() {
     let fixture = Fixture::with_mods(&[]).await;

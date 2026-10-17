@@ -5,7 +5,7 @@
 //! downloaded was not checked, and `--json` is one document a script can parse.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Output;
 
 use tempfile::TempDir;
@@ -48,6 +48,11 @@ impl Sandbox {
     /// Creates a vanilla instance holding one jar the recipe records a digest
     /// for, which matches, and one it records none for.
     fn instance_with_an_unproven_jar(&self) -> String {
+        self.instance_with_an_unproven_jar_at().0
+    }
+
+    /// [`Self::instance_with_an_unproven_jar`], with the instance's root.
+    fn instance_with_an_unproven_jar_at(&self) -> (String, PathBuf) {
         let created = self.run(&[
             "--json",
             "instance",
@@ -91,7 +96,7 @@ impl Sandbox {
         std::fs::create_dir_all(&mods).expect("mods dir");
         std::fs::write(mods.join("proven.jar"), b"").expect("write jar");
         std::fs::write(mods.join("shipped.jar"), b"jar").expect("write jar");
-        id
+        (id, root)
     }
 }
 
@@ -132,6 +137,38 @@ fn a_file_with_no_recorded_digest_is_named_and_not_called_intact() {
     );
     assert!(
         stdout.contains("1 files intact, 1 unproven"),
+        "the summary does not separate them: {stdout}"
+    );
+}
+
+#[test]
+fn a_put_aside_file_is_named_and_not_called_intact() {
+    let sandbox = Sandbox::new();
+    let (id, root) = sandbox.instance_with_an_unproven_jar_at();
+    // What the mod list leaves when it puts a pack's jar aside.
+    let kept = root.join(".launcher/put-aside/mods");
+    std::fs::create_dir_all(&kept).expect("put-aside dir");
+    std::fs::rename(
+        root.join("minecraft/mods/proven.jar"),
+        kept.join("proven.jar"),
+    )
+    .expect("put aside");
+
+    let output = sandbox.run(&["mod", "verify", "--instance", &id]);
+    assert!(
+        output.status.success(),
+        "a put-aside file is not a fault: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("put-aside  mods/proven.jar"),
+        "the put-aside file is not named in: {stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "0 files intact, 1 unproven: no digest is recorded to check them against, 1 put aside"
+        ),
         "the summary does not separate them: {stdout}"
     );
 }

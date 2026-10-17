@@ -1101,6 +1101,22 @@ impl App {
         }
 
         context.report = result?;
+        let report = &context.report;
+        crate::local_mods::drop_put_aside_copies(
+            &context.host.root,
+            report
+                .installed
+                .iter()
+                .chain(&report.removed)
+                .chain(&report.repaired)
+                .map(PathBuf::as_path)
+                .chain(report.replaced.iter().flat_map(|replaced| {
+                    [
+                        replaced.logical_path.as_path(),
+                        replaced.previous_path.as_path(),
+                    ]
+                })),
+        );
         Ok(())
     }
 }

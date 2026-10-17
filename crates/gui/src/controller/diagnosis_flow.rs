@@ -1064,11 +1064,13 @@ fn register_apply(ui: &AppWindow, commands: &Sender<Command>, workspace: &Worksp
         if refuse_while_host_changes(&weak) {
             return;
         }
-        let integrity = matches!(fix, DiagnosticFix::RestoreFiles(_))
-            || state
-                .host(host)
-                .and_then(|surface| surface.shown.as_ref())
-                .is_some_and(|shown| shown.view.integrity_checked);
+        let integrity = matches!(
+            fix,
+            DiagnosticFix::RestoreFiles(_) | DiagnosticFix::RestorePutAside(_)
+        ) || state
+            .host(host)
+            .and_then(|surface| surface.shown.as_ref())
+            .is_some_and(|shown| shown.view.integrity_checked);
         let Some(request) = state.dispatch(host, Work::Apply) else {
             return;
         };
