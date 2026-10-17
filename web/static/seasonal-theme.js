@@ -30,7 +30,7 @@
   const scheduled = now.getMonth() === 3 && now.getDate() === 1 ? 'april-fools'
     : now.getMonth() === 11 && now.getDate() >= 24 && now.getDate() <= 26 ? 'christmas'
     : now.getMonth() === 5 ? 'pride'
-    : now.getMonth() === 9 && now.getDate() === 31 ? 'halloween' : null;
+    : now.getMonth() === 9 && now.getDate() >= 25 ? 'halloween' : null;
   const availableSeason = preview === 'off' ? null : seasons.includes(preview) ? preview : scheduled;
   globalThis.ephervexSeasonalTheme = {
     enabled,
