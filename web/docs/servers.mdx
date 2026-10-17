@@ -28,8 +28,13 @@ Linked Server**. It inherits the client's Minecraft and loader versions.
 Choose **Store persistently** if needed. **Automatic port** starts at 25565
 and picks the next locally available port when necessary; turn it off to enter
 a port yourself. If a modpack publishes separate server files, choose its
-archive under **Server files**. Select **Create Server** and wait for the
-installation to finish.
+archive under **Server files (optional)**. For a standalone server, the
+dialog fills in the Minecraft release, loader, and build the archive's file
+names state, and **Create Server** stays unavailable while the selection
+disagrees with the archive, for example Vanilla for an archive that carries
+mods. A linked server keeps its client's versions, and server files that do
+not fit them are refused when you create it. Select **Create Server** and wait
+for the installation to finish.
 
 <ThemeScreenshot state="servers-overview" alt="Server list with a standalone server and a New Server action" />
 
@@ -62,7 +67,9 @@ ephervex servers list
 Omit `--persistent` to use temporary storage. Both forms accept
 `--server-pack FILE` when the pack author publishes a server archive. Ephervex
 uses that archive's content and installs the loader and its libraries; it does
-not run the archive's installer or start script.
+not run the archive's installer or start script. The archive must fit the
+server's selection: one that carries mods needs a loader, and one that names a
+Minecraft release, loader, or build is refused for any other.
 
 </TabItem>
 </Tabs>
