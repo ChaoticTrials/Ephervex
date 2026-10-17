@@ -230,7 +230,7 @@ pub enum CoreError {
 
     /// The mod declares that it does not run on a server, so it is never
     /// installed on one.
-    #[error("`{project}` is declared client-only, so it cannot be installed on a server")]
+    #[error("`{project}` is declared client-only, so it is not installed on a server")]
     ModClientOnly { project: String },
 
     /// The install would put mods on a server whose catalog never stated server

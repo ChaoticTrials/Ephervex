@@ -10987,6 +10987,7 @@ fn incompatibility_text(reason: &IncompatibilityReason) -> String {
             reason.message_id(),
             [("required", Arg::from(required.to_string()))],
         ),
+        IncompatibilityReason::ClientOnly => lookup(reason.message_id()),
     }
 }
 

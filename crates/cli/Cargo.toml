@@ -38,11 +38,13 @@ zip.workspace = true
 # about what the shipped binary reaches through, and nothing here is compiled
 # into it. These let the test harness seed a sandbox's cache using the same
 # layout and envelope the launcher writes, rather than restating that layout in
-# a test where it could drift. See `tests/support`.
+# a test where it could drift. See `tests/support`. The registry seeds a
+# server record the same way.
 ephervex-download.workspace = true
 ephervex-loaders.workspace = true
 ephervex-minecraft.workspace = true
 ephervex-mod-platform.workspace = true
+ephervex-storage.workspace = true
 chrono.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

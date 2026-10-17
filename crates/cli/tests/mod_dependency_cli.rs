@@ -717,7 +717,7 @@ fn the_refusal_advice_carries_only_the_mods_that_need_the_target() {
         let output = sandbox.run(&["mod", verb, "--instance", &id, "mods/LibX.jar"]);
         assert!(!output.status.success());
         let stderr = stderr_of(&output);
-        assert!(stderr.contains("Mods that need this one: 3."), "{stderr}");
+        assert!(stderr.contains("3 mods need this one."), "{stderr}");
         assert!(stderr.contains("no recorded requirements"), "{stderr}");
         assert!(
             stderr.contains("the mods that need it too"),

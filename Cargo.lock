@@ -1688,6 +1688,7 @@ dependencies = [
  "ephervex-minecraft",
  "ephervex-mod-platform",
  "ephervex-model",
+ "ephervex-storage",
  "serde_json",
  "tempfile",
  "tokio",

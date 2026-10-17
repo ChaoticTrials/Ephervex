@@ -1833,10 +1833,10 @@ error-mod-duplicate-project = A mod is listed more than once.
 error-mod-rollback-incomplete = The mod change failed and the previous files could not be fully restored.
 .action = Review the recovery files at { $path } before changing this instance again.
 
-# Changing an installed mod's version is a mod update, which this build does not
-# implement. Replacing the file would delete a jar the user did not ask about.
+# An install never moves a mod that is already there: replacing the file would
+# delete a jar the user did not ask about. Changing its version is its own action.
 error-mod-already-installed = That mod is already installed at a different version.
-.action = { $project } is installed from { $provider } at { $installed }, not { $requested }. Changing an installed mod's version is not supported yet.
+.action = { $project } is installed from { $provider } at { $installed }, not { $requested }. Installing does not move a mod that is already there; change that mod's version instead.
 
 error-mod-managed-identity-missing = That file cannot be recorded as an installed mod.
 .action = Ephervex only records mods it can look up again by project and version, so nothing was invented for { $path }.
@@ -1861,6 +1861,11 @@ mod-installed-count = { $count ->
         [one] { $count } installed mod
        *[other] { $count } installed mods
     }
+# A host's whole mod list, hand-placed jars included, counted by whether each
+# jar loads, is turned off, or is not there.
+mod-host-list-empty = This instance has no mods.
+mod-host-list-empty-server = This server has no mods.
+mod-host-count = { $installed } installed, { $disabled } disabled, { $missing } missing
 mod-install-completed = Installed { $name }.
 
 # What a crash report says about which mods to try without. "Confidence" is the
@@ -1917,6 +1922,7 @@ mod-install-record-updated = Updated the record for { $path }. No file was writt
 # why the mod they are looking at is not offered.
 mod-incompatible-minecraft-version = Does not support Minecraft { $required }.
 mod-incompatible-loader = Does not support { $required }.
+mod-incompatible-client-only = Declared client-only, so it does not run on a server.
 
 mod-warning-client-side-unsupported = { $project } says it does not run on the client.
 .action = It was installed because you asked for it by name. Remove it if this instance is not meant to have it.

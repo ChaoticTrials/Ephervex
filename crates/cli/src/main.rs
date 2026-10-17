@@ -363,6 +363,9 @@ fn catalog_or_preference(app: &App, named: Option<CatalogArg>) -> anyhow::Result
     }
 }
 
+// `mod search --limit` names this ceiling in its help.
+const _: () = assert!(ephervex_core::MAX_SEARCH_LIMIT == 25);
+
 /// Mods are searched for, inspected, and installed against one instance,
 /// because whether a mod fits depends entirely on that instance's exact
 /// Minecraft version and mod loader.
@@ -381,8 +384,13 @@ enum ModCommand {
         /// Which catalog to search. Defaults to your preferred catalog.
         #[arg(long, value_enum)]
         provider: Option<CatalogArg>,
-        /// Show at most this many results.
-        #[arg(long, default_value_t = DEFAULT_SEARCH_LIMIT)]
+        /// Show at most this many results, from 1 to 25. A larger number
+        /// shows 25.
+        #[arg(
+            long,
+            default_value_t = DEFAULT_SEARCH_LIMIT,
+            value_parser = parse_search_limit
+        )]
         limit: u8,
         /// Skip this many results, to page further into a long list.
         #[arg(long, default_value_t = 0)]
@@ -464,8 +472,8 @@ enum ModCommand {
         /// The client instance to list.
         instance: InstanceId,
     },
-    /// Check that every file this instance records is there, with the right
-    /// bytes.
+    /// Check that every file a client or server records is there, with the
+    /// right bytes.
     ///
     /// The recipe already carries the digest each provider published, so this
     /// reaches no network and changes nothing. It answers the question looking
@@ -490,15 +498,17 @@ enum ModCommand {
         #[arg(long, requires = "instance", conflicts_with = "server")]
         shared: bool,
     },
-    /// Replace every file this instance is missing or holding wrongly.
+    /// Replace every file a client or server is missing or holding wrongly.
     ///
     /// Checks first, so nothing sound is rewritten, and fetches each
     /// replacement before touching anything on disk, so a file that cannot be
     /// obtained is left exactly where it is rather than removed.
     ///
-    /// A file the pack shipped inside itself has no address to go back to.
-    /// Those are named separately, because re-importing the pack is the way
-    /// out for them and trying again is not.
+    /// A file the pack shipped inside itself has no address to go back to, and
+    /// a server built from published server files records none for its jars.
+    /// Those are named separately, because trying again does not bring them
+    /// back: re-import the pack for a client, or put the file back in the
+    /// server folder by hand.
     ///
     /// Refused while the host is running or an isolation session is active.
     Repair {
@@ -523,7 +533,8 @@ enum ModCommand {
         #[arg(long, value_name = "PATH")]
         of: Option<PathBuf>,
     },
-    /// Ask each catalog what this instance's mods need, and record the answers.
+    /// Ask each catalog what a client's or server's mods need, and record the
+    /// answers.
     ///
     /// Ephervex records what a mod requires when it installs it, and when it
     /// imports a CurseForge pack. Anything else starts out with nothing
@@ -685,15 +696,14 @@ impl IsolationAnswerArg {
 }
 
 /// Which installed local host an operation targets.
+///
+/// One required group rather than a requirement on `--instance` alone, so the
+/// usage line offers `--server` as well.
 #[derive(Debug, Args)]
+#[group(required = true, multiple = false)]
 struct HostArgs {
     /// The client instance to operate on.
-    #[arg(
-        long,
-        value_name = "INSTANCE",
-        conflicts_with = "server",
-        required_unless_present = "server"
-    )]
+    #[arg(long, value_name = "INSTANCE")]
     instance: Option<InstanceId>,
     /// The dedicated server to operate on.
     #[arg(long, value_name = "SERVER")]
@@ -1467,6 +1477,7 @@ enum ServerCommand {
     Create(CreateServerArgs),
     /// Install the exact base for an existing uninstalled server record.
     Install {
+        /// The server to install.
         id: ServerId,
         #[arg(long)]
         java: Option<PathBuf>,
@@ -1478,7 +1489,10 @@ enum ServerCommand {
         server_pack: Option<PathBuf>,
     },
     /// Show canonical server metadata.
-    Show { id: ServerId },
+    Show {
+        /// The server to show.
+        id: ServerId,
+    },
     /// Show or change this server's own Java and JVM settings.
     ///
     /// Each value falls back to the global setting until it is pinned here.
@@ -1487,6 +1501,7 @@ enum ServerCommand {
     /// would run with, the Java its Minecraft and loader expect, and whether
     /// the two fit. A change needs the server to be stopped.
     Runtime {
+        /// The server to show or change.
         id: ServerId,
         /// Use this Java executable instead of the selected one.
         #[arg(long, value_name = "PATH")]
@@ -1509,15 +1524,22 @@ enum ServerCommand {
         clear: bool,
     },
     /// Mark a server as a favorite so it lists first in the interface.
-    Favorite { id: ServerId },
+    Favorite {
+        /// The server to mark as a favorite.
+        id: ServerId,
+    },
     /// Remove a server's favorite mark.
-    Unfavorite { id: ServerId },
+    Unfavorite {
+        /// The server to remove the mark from.
+        id: ServerId,
+    },
     /// Set a server's icon from a PNG or JPEG file, or remove it with
     /// `--clear`.
     ///
     /// The image is checked, scaled down to at most 256 pixels and stored by
     /// content. `--json` reports the stored file as `icon`.
     Icon {
+        /// The server whose icon to set.
         id: ServerId,
         /// The image file to use.
         #[arg(required_unless_present = "clear")]
@@ -1531,15 +1553,24 @@ enum ServerCommand {
     /// A server reconstructed from a client pack carries whatever the pack
     /// declared, including mods that only ever run on a client. Use
     /// `ephervex mod disable --server` to leave one out without removing it.
-    Mods { id: ServerId },
+    Mods {
+        /// The server whose mods to list.
+        id: ServerId,
+    },
     /// Explain the newest crash and name the mods it points at.
     ///
     /// Reads the server's most recent crash report, and the tail of its log,
     /// and lists the mods they attribute the failure to, most confident first.
     /// Nothing is changed: use `ephervex mod disable --server` to act on it.
-    Crash { id: ServerId },
+    Crash {
+        /// The server whose newest crash to explain.
+        id: ServerId,
+    },
     /// Show persistence, installation, runtime, and capture status.
-    Status { id: ServerId },
+    Status {
+        /// The server to show.
+        id: ServerId,
+    },
     /// Read or change `server.properties` through managed services.
     Properties {
         #[command(subcommand)]
@@ -1559,6 +1590,7 @@ enum ServerCommand {
     /// kills the server. Exits with a non-zero status when the server exits before it finished
     /// starting or ends with an error without having been asked to stop.
     Start {
+        /// The server to start.
         id: ServerId,
         #[arg(long)]
         java: Option<PathBuf>,
@@ -1566,22 +1598,37 @@ enum ServerCommand {
     /// Request a graceful stop and wait up to 30 seconds.
     ///
     /// Exits with a non-zero status when the running server refused the request.
-    Stop { id: ServerId },
+    Stop {
+        /// The server to stop.
+        id: ServerId,
+    },
     /// Gracefully stop and respawn through the live supervisor.
     ///
     /// Exits with a non-zero status when the request was refused or the server
     /// stopped but could not be started again.
-    Restart { id: ServerId },
+    Restart {
+        /// The server to restart.
+        id: ServerId,
+    },
     /// Force termination through the live owner channel.
     ///
     /// Exits with a non-zero status when the running server refused the request.
-    Kill { id: ServerId },
+    Kill {
+        /// The server to kill.
+        id: ServerId,
+    },
     /// Send one line to the live server console.
     ///
     /// Exits with a non-zero status when the server did not accept the line.
-    Console { id: ServerId, command: String },
+    Console {
+        /// The server to send the line to.
+        id: ServerId,
+        /// The console line, as typed into the server console.
+        command: String,
+    },
     /// Show retained combined launcher output.
     Output {
+        /// The server whose output to show.
         id: ServerId,
         #[arg(long, default_value_t = 200)]
         lines: usize,
@@ -1593,6 +1640,7 @@ enum ServerCommand {
     },
     /// Open one of a server's folders in the desktop's file manager.
     Open {
+        /// The server whose folder to open.
         id: ServerId,
         /// Which folder: root, server, mods, config, logs, crash-reports, or
         /// world.
@@ -1604,6 +1652,7 @@ enum ServerCommand {
     },
     /// Delete a server and, unless requested, its files.
     Delete {
+        /// The server to delete.
         id: ServerId,
         /// Leave the server directory on disk.
         #[arg(long)]
@@ -1695,11 +1744,17 @@ struct CreateServerArgs {
 #[derive(Debug, Subcommand)]
 enum ServerPropertiesCommand {
     /// Show the line-preserving properties document.
-    Show { id: ServerId },
+    Show {
+        /// The server whose properties to show.
+        id: ServerId,
+    },
     /// Set an untyped property; managed network and EULA keys are refused.
     Set {
+        /// The server whose property to set.
         id: ServerId,
+        /// The property key, as written in `server.properties`.
         key: String,
+        /// The value to store.
         value: String,
     },
 }
@@ -1719,6 +1774,7 @@ enum NetworkAccessArg {
         .args(["online_mode", "access", "port", "address"])
 ))]
 struct ServerNetworkArgs {
+    /// The server to change.
     id: ServerId,
     /// Require authenticated Minecraft accounts. Pass `--online-mode=false` to turn it off.
     #[arg(
@@ -1753,9 +1809,15 @@ enum ServerEulaCommand {
 #[derive(Debug, Subcommand)]
 enum ServerRecoverCommand {
     /// Classify recorded supervisor and Java-child identities.
-    Status { id: ServerId },
+    Status {
+        /// The server to inspect.
+        id: ServerId,
+    },
     /// Clear runtime evidence only after every recorded process is proven dead.
-    Clear { id: ServerId },
+    Clear {
+        /// The server whose runtime evidence to clear.
+        id: ServerId,
+    },
 }
 
 /// Temporary versus persistent, expressed as two mutually exclusive flags.
@@ -1821,6 +1883,16 @@ fn parse_client_folder(name: &str) -> Result<ClientFolder, String> {
             join_names(ClientFolder::ALL.iter().map(|folder| folder.as_str()))
         )
     })
+}
+
+/// A page size for `mod search`: zero is refused, and anything above the
+/// catalog page size is left for the search to cap.
+fn parse_search_limit(text: &str) -> Result<u8, String> {
+    match text.parse::<u8>() {
+        Ok(0) => Err("expected at least 1".to_owned()),
+        Ok(limit) => Ok(limit),
+        Err(_) => Err("expected a whole number from 1 to 255".to_owned()),
+    }
 }
 
 fn parse_server_folder(name: &str) -> Result<ServerFolder, String> {
@@ -5173,19 +5245,25 @@ fn run_mod_enable(
 fn impact_refusal(impact: &DependentMods, with_dependents: &str, only_this: &str) -> String {
     let mut sentences: Vec<String> = Vec::new();
     if !impact.breaks.is_empty() {
-        sentences.push(format!("Mods that need this one: {}.", impact.breaks.len()));
+        sentences.push(counted(
+            impact.breaks.len(),
+            "1 mod needs this one.",
+            "mods need this one.",
+        ));
     }
     if !impact.degrades.is_empty() {
-        sentences.push(format!(
-            "Mods that use it optionally: {}.",
-            impact.degrades.len()
+        sentences.push(counted(
+            impact.degrades.len(),
+            "1 mod uses it optionally.",
+            "mods use it optionally.",
         ));
     }
     let unanswered = impact.unknown.len() + impact.unidentifiable.len();
     if unanswered > 0 {
-        sentences.push(format!(
-            "Mods with no recorded requirements, so it is not known whether they need it: \
-             {unanswered}."
+        sentences.push(counted(
+            unanswered,
+            "1 mod has no recorded requirements, so it is not known whether it needs this one.",
+            "mods have no recorded requirements, so it is not known whether they need this one.",
         ));
     }
     sentences.push(
@@ -5203,22 +5281,24 @@ fn impact_refusal(impact: &DependentMods, with_dependents: &str, only_this: &str
 fn requirement_refusal(needs: &RequiredMods) -> String {
     let mut sentences: Vec<String> = Vec::new();
     if !needs.disabled.is_empty() {
-        sentences.push(format!(
-            "Required mods that are turned off: {}.",
-            needs.disabled.len()
+        sentences.push(counted(
+            needs.disabled.len(),
+            "1 required mod is turned off.",
+            "required mods are turned off.",
         ));
     }
     if !needs.absent.is_empty() {
-        sentences.push(format!(
-            "Required mods that are not installed here: {}.",
-            needs.absent.len()
+        sentences.push(counted(
+            needs.absent.len(),
+            "1 required mod is not installed here.",
+            "required mods are not installed here.",
         ));
     }
     if !needs.incompatible.is_empty() {
-        sentences.push(format!(
-            "Installed mods it is declared incompatible with: {}.",
-            needs.incompatible.len()
-        ));
+        sentences.push(match needs.incompatible.len() {
+            1 => "It is declared incompatible with 1 installed mod.".to_owned(),
+            count => format!("It is declared incompatible with {count} installed mods."),
+        });
     }
     sentences.push(if needs.disabled.is_empty() {
         "Pass --only-this to turn on this mod.".to_owned()
@@ -5228,6 +5308,16 @@ fn requirement_refusal(needs: &RequiredMods) -> String {
             .to_owned()
     });
     sentences.join(" ")
+}
+
+/// A sentence about how many mods something holds for: `one` as written for
+/// a single mod, otherwise the count followed by `many`.
+fn counted(count: usize, one: &str, many: &str) -> String {
+    if count == 1 {
+        one.to_owned()
+    } else {
+        format!("{count} {many}")
+    }
 }
 
 /// What turning one mod off would do to the rest.
@@ -5576,10 +5666,10 @@ async fn run_mod_show(
     Ok(())
 }
 
-/// Checks an instance's recorded files and reports what it found.
+/// Checks a host's recorded files and reports what it found.
 ///
-/// A fault sets the exit status, so a script asking whether an instance is
-/// sound gets its answer without parsing prose.
+/// A fault sets the exit status, so a script asking whether a host is sound
+/// gets its answer without parsing prose.
 async fn run_mod_verify(
     app: &App,
     host: &HostArgs,
@@ -5623,10 +5713,18 @@ async fn run_mod_verify(
              Ephervex can do"
         );
     }
-    anyhow::bail!("this instance does not hold what it recorded")
+    anyhow::bail!("this {} does not hold what it recorded", host_noun(host))
 }
 
-/// Replaces what an instance is missing or holding wrongly.
+/// The word a message uses for the kind of host it is about.
+const fn host_noun(host: InstalledHost) -> &'static str {
+    match host {
+        InstalledHost::Instance(_) => "instance",
+        InstalledHost::Server(_) => "server",
+    }
+}
+
+/// Replaces what a host is missing or holding wrongly.
 async fn run_mod_repair(app: &App, host: InstalledHost, json: bool) -> anyhow::Result<()> {
     let report = app
         .repair_host(
@@ -5656,11 +5754,14 @@ async fn run_mod_repair(app: &App, host: InstalledHost, json: bool) -> anyhow::R
     if report.is_complete() {
         return Ok(());
     }
+    // A server has no pack to import again, and one built from published
+    // server files records no address for any of its jars.
+    let way_back = match host {
+        InstalledHost::Instance(_) => "re-import the pack to get it back",
+        InstalledHost::Server(_) => "put the file back in the server folder by hand",
+    };
     for path in &report.unrepairable {
-        eprintln!(
-            "no address recorded: {} - re-import the pack to get it back",
-            path.display()
-        );
+        eprintln!("no address recorded: {} - {way_back}", path.display());
     }
     for path in &report.failed {
         eprintln!("could not be replaced: {}", path.display());
@@ -5668,7 +5769,10 @@ async fn run_mod_repair(app: &App, host: InstalledHost, json: bool) -> anyhow::R
     for path in &report.skipped {
         eprintln!("not reached: {}", path.display());
     }
-    anyhow::bail!("this instance still does not hold what it recorded")
+    anyhow::bail!(
+        "this {} still does not hold what it recorded",
+        host_noun(host)
+    )
 }
 
 /// The shared-store report as JSON.
@@ -5862,6 +5966,7 @@ fn incompatibility_text(reason: &IncompatibilityReason) -> String {
             reason.message_id(),
             [("required", MessageArg::from(required.to_string()))],
         ),
+        IncompatibilityReason::ClientOnly => ephervex_i18n::lookup(reason.message_id()),
     }
 }
 
@@ -5883,6 +5988,7 @@ fn incompatibility_json(reason: &IncompatibilityReason) -> serde_json::Value {
             "required": required.to_string(),
             "supported": supported,
         }),
+        IncompatibilityReason::ClientOnly => serde_json::json!({ "reason": reason.as_str() }),
     }
 }
 
@@ -5966,7 +6072,13 @@ fn print_mod_search(results: &ModSearchResults, host: InstalledHost, json: bool)
         match &hit.best_version {
             Some(version) => outln!("  version: {} ({})", version.version_number, version.id),
             None => {
-                for reason in hit.compatibility.reasons() {
+                // The server note above already says a mod is client-only.
+                for reason in hit
+                    .compatibility
+                    .reasons()
+                    .iter()
+                    .filter(|reason| **reason != IncompatibilityReason::ClientOnly)
+                {
                     outln!("  {}", incompatibility_text(reason));
                 }
             }
@@ -6143,6 +6255,7 @@ fn print_mod_plan(plan: &ModInstallPlan, host: InstalledHost, json: bool) {
             "dependencies": plan.dependencies.iter().map(planned_json).collect::<Vec<_>>(),
             "optional": plan.optional.iter().map(|candidate| serde_json::json!({
                 "project_id": candidate.project_id,
+                "title": candidate.title,
                 "pinned_version_id": candidate.pinned_version_id,
                 "declared_by": candidate.declared_by,
                 "selected": false,
@@ -6162,6 +6275,7 @@ fn print_mod_plan(plan: &ModInstallPlan, host: InstalledHost, json: bool) {
             })).collect::<Vec<_>>(),
             "already_installed": plan.already_installed.iter().map(|installed| serde_json::json!({
                 "project_id": installed.project_id,
+                "title": planned_title(plan, &installed.project_id),
                 "version_id": installed.version_id,
             })).collect::<Vec<_>>(),
             "unconfirmed_server_support": plan
@@ -6174,55 +6288,91 @@ fn print_mod_plan(plan: &ModInstallPlan, host: InstalledHost, json: bool) {
         return;
     }
 
+    for line in plan_lines(plan, host) {
+        outln!("{line}");
+    }
+    for warning in &plan.warnings {
+        eprintln!("{}", warning_text(warning));
+    }
+}
+
+/// What a plan prints to standard output, one line each.
+fn plan_lines(plan: &ModInstallPlan, host: InstalledHost) -> Vec<String> {
+    let mut lines = Vec::new();
     let server = matches!(host, InstalledHost::Server(_));
-    outln!(
+    lines.push(format!(
         "{}  {}  ({}){}",
         plan.root.version.project_id,
         plan.root.project.title,
         plan.root.version.version_number,
         server_side_suffix(&plan.root, server)
-    );
-    for planned in &plan.dependencies {
-        outln!(
+    ));
+    // A dependency already present at the planned release is listed under
+    // `=` below, and nothing is fetched for it.
+    let to_install = plan.to_install();
+    for planned in plan
+        .dependencies
+        .iter()
+        .filter(|planned| to_install.contains(planned))
+    {
+        lines.push(format!(
             "  + {}  {}  ({}){}",
             planned.version.project_id,
             planned.project.title,
             planned.version.version_number,
             server_side_suffix(planned, server)
-        );
+        ));
     }
     if server {
         for name in mod_names(&plan.undeclared_server_support()) {
-            outln!(
+            lines.push(format!(
                 "  ? {}",
                 ephervex_i18n::lookup_args(
                     "mod-plan-server-support-unstated",
                     [("name", MessageArg::from(name.as_str()))]
                 )
-            );
+            ));
         }
     }
     for candidate in &plan.optional {
         // Unchecked by default, and shown as such rather than hidden.
         let name = candidate
-            .project_id
+            .title
             .as_deref()
+            .or(candidate.project_id.as_deref())
             .or(candidate.pinned_version_id.as_deref())
             .unwrap_or_default();
         match optional_unverified_text(candidate) {
-            Some(note) => outln!("  [ ] {name} (optional): {note}"),
-            None => outln!("  [ ] {name} (optional)"),
+            Some(note) => lines.push(format!("  [ ] {name} (optional): {note}")),
+            None => lines.push(format!("  [ ] {name} (optional)")),
         }
     }
     for external in &plan.external {
-        outln!("  ? {} ({})", external.file_name, external.kind.as_str());
+        lines.push(format!(
+            "  ? {} ({})",
+            external.file_name,
+            external.kind.as_str()
+        ));
     }
     for installed in &plan.already_installed {
-        outln!("  = {} (already installed)", installed.project_id);
+        match planned_title(plan, &installed.project_id) {
+            Some(title) => lines.push(format!(
+                "  = {}  {title}  (already installed)",
+                installed.project_id
+            )),
+            None => lines.push(format!("  = {}  (already installed)", installed.project_id)),
+        }
     }
-    for warning in &plan.warnings {
-        eprintln!("{}", warning_text(warning));
-    }
+    lines
+}
+
+/// The title of the planned mod for `project_id`, when the catalog gave one.
+fn planned_title<'a>(plan: &'a ModInstallPlan, project_id: &str) -> Option<&'a str> {
+    plan.all_mods()
+        .into_iter()
+        .find(|planned| planned.version.project_id == project_id)
+        .map(|planned| planned.project.title.as_str())
+        .filter(|title| !title.is_empty())
 }
 
 /// The server side a planned mod's catalog declared, for a server's output.
@@ -6347,8 +6497,13 @@ fn print_host_mods(snapshot: &ManagedModSnapshot, json: bool) {
             "mods": snapshot.mods.iter().map(|entry| serde_json::json!({
                 "path": json_path(&entry.logical_path),
                 "file_name": entry.file_name,
-                "name": entry.display_name(),
+                // Null rather than the file name, which is no evidence of
+                // what the mod is.
+                "name": entry.title(),
                 "version": entry.installed_version(),
+                "provider": entry.identity.provider().map(ModProvider::as_str),
+                "project_id": entry.identity.project_id(),
+                "version_id": entry.identity.version_id(),
                 "origin": entry.origin.as_str(),
                 "presence": entry.presence.as_str(),
                 "enabled": entry.presence.is_enabled(),
@@ -6358,7 +6513,13 @@ fn print_host_mods(snapshot: &ManagedModSnapshot, json: bool) {
     }
 
     if snapshot.is_empty() {
-        outln!("{}", ephervex_i18n::lookup("mod-list-empty"));
+        outln!(
+            "{}",
+            ephervex_i18n::lookup(match snapshot.host {
+                InstalledHost::Instance(_) => "mod-host-list-empty",
+                InstalledHost::Server(_) => "mod-host-list-empty-server",
+            })
+        );
         return;
     }
     for entry in &snapshot.mods {
@@ -6369,11 +6530,22 @@ fn print_host_mods(snapshot: &ManagedModSnapshot, json: bool) {
             entry.logical_path.display()
         );
     }
+    let count = |presence: ModPresence| {
+        snapshot
+            .mods
+            .iter()
+            .filter(|entry| entry.presence == presence)
+            .count()
+    };
     outln!(
         "{}",
         ephervex_i18n::lookup_args(
-            "mod-installed-count",
-            [("count", MessageArg::from(snapshot.len()))]
+            "mod-host-count",
+            [
+                ("installed", MessageArg::from(count(ModPresence::Installed))),
+                ("disabled", MessageArg::from(count(ModPresence::Disabled))),
+                ("missing", MessageArg::from(count(ModPresence::Missing))),
+            ]
         )
     );
 }
@@ -10008,11 +10180,30 @@ fn report_failure(error: &anyhow::Error, json: bool) {
         }
     }
     // A failure that is not a `CoreError` has no localized message, so the
-    // summary *is* its first technical line. Printing the chain unfiltered
-    // would then say the same sentence twice.
-    for line in technical.iter().filter(|line| **line != summary) {
+    // summary *is* its first technical line, and a technical line can also be
+    // the localized sentence in its own quoting and capitalization. Printing
+    // either would say the same sentence twice.
+    let restated = sentence_words(&summary);
+    for line in technical
+        .iter()
+        .filter(|line| sentence_words(line) != restated)
+    {
         eprintln!("  {}", terminal_safe(line));
     }
+}
+
+/// A sentence's words, ignoring case, quoting, and final punctuation, so two
+/// renderings of one sentence compare equal while any differing word does not.
+fn sentence_words(text: &str) -> Vec<String> {
+    text.trim_end_matches(['.', '!'])
+        .split_whitespace()
+        .map(|word| {
+            word.chars()
+                .filter(|character| !matches!(character, '`' | '"'))
+                .flat_map(char::to_lowercase)
+                .collect()
+        })
+        .collect()
 }
 
 /// Turns a typed storage error into user-facing text.
@@ -10330,6 +10521,7 @@ mod tests {
     fn an_unverified_optional_release_with_no_known_project_names_the_release() {
         let candidate = OptionalCandidate {
             project_id: None,
+            title: None,
             pinned_version_id: Some("extra-v1".to_owned()),
             declared_by: "ROOT".to_owned(),
             version: None,
@@ -10563,6 +10755,95 @@ mod tests {
             installed_mods_json(&installed)["plan"]["warnings"],
             serde_json::json!([])
         );
+    }
+
+    #[test]
+    fn a_plan_lists_a_dependency_already_installed_once_and_by_title() {
+        use ephervex_mod_platform::InstalledProject;
+        let mut library = planned_mod("LIBPROJ");
+        library.project.title = "Library".to_owned();
+        let mut fresh = planned_mod("NEWPROJ");
+        fresh.project.title = "Fresh".to_owned();
+        let plan = ModInstallPlan {
+            provider: ModProvider::Modrinth,
+            root: planned_mod("AANobbMI"),
+            dependencies: vec![library, fresh],
+            optional: vec![OptionalCandidate {
+                project_id: Some("OPTPROJ".to_owned()),
+                title: Some("Optional Extra".to_owned()),
+                pinned_version_id: None,
+                declared_by: "AANobbMI".to_owned(),
+                version: None,
+                status: OptionalStatus::Compatible,
+            }],
+            external: Vec::new(),
+            embedded: Vec::new(),
+            already_installed: vec![InstalledProject {
+                project_id: "LIBPROJ".to_owned(),
+                version_id: "version".to_owned(),
+            }],
+            replacements: Vec::new(),
+            warnings: Vec::new(),
+        };
+
+        let lines = plan_lines(&plan, InstalledHost::Instance(InstanceId::new()));
+
+        let mentioning =
+            |id: &str| -> Vec<&String> { lines.iter().filter(|line| line.contains(id)).collect() };
+        assert_eq!(
+            mentioning("LIBPROJ"),
+            ["  = LIBPROJ  Library  (already installed)"],
+            "{lines:#?}"
+        );
+        assert_eq!(
+            mentioning("NEWPROJ"),
+            ["  + NEWPROJ  Fresh  (1.0)"],
+            "{lines:#?}"
+        );
+        assert!(
+            lines.contains(&"  [ ] Optional Extra (optional)".to_owned()),
+            "{lines:#?}"
+        );
+    }
+
+    #[test]
+    fn a_technical_line_restating_the_localized_failure_is_recognized_as_the_same_sentence() {
+        let error = CoreError::ModClientOnly {
+            project: "Sodium".to_owned(),
+        };
+        let (summary, _) = localized_failure(&error);
+        assert_eq!(
+            sentence_words(&summary),
+            sentence_words(&error.to_string()),
+            "{summary:?} and {:?} say the same thing",
+            error.to_string()
+        );
+        assert_ne!(
+            sentence_words("Sodium is declared client-only."),
+            sentence_words("Sodium is declared client-only: version 0.5.8."),
+            "a line carrying more detail is not a restatement"
+        );
+    }
+
+    #[test]
+    fn refusals_count_mods_in_a_sentence() {
+        assert_eq!(
+            counted(1, "1 mod needs this one.", "mods need this one."),
+            "1 mod needs this one."
+        );
+        assert_eq!(
+            counted(3, "1 mod needs this one.", "mods need this one."),
+            "3 mods need this one."
+        );
+    }
+
+    #[test]
+    fn a_client_only_search_result_is_reported_incompatible_with_its_reason() {
+        let value = compatibility_json(&Compatibility::Incompatible(vec![
+            IncompatibilityReason::ClientOnly,
+        ]));
+        assert_eq!(value["compatible"], false);
+        assert_eq!(value["reasons"][0]["reason"], "client_only");
     }
 
     #[test]

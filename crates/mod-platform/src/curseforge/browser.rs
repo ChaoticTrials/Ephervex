@@ -292,17 +292,10 @@ impl ModProviderApi for CurseForgeProvider {
                 Some(_) => Compatibility::Compatible,
                 None => search_incompatibility(target, loader, &declared),
             };
-            if !query.include_incompatible && !compatibility.is_compatible() {
-                continue;
-            }
-            let hit = ModSearchHit {
-                project,
-                best_version: best,
-                compatibility,
-            };
+            let hit = ModSearchHit::judged(project, best, compatibility, query.side);
             // CurseForge has no environment filter, so a server's page can come
             // back short; the next offset still follows the raw page.
-            if query.excludes_client_only() && hit.is_client_only() {
+            if !query.include_incompatible && !hit.compatibility.is_compatible() {
                 continue;
             }
             hits.push(hit);

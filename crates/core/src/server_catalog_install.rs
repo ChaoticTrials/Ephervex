@@ -106,6 +106,26 @@ fn installed_on_server(recipe: &PackRecipe, project: &str) -> bool {
 }
 
 #[tokio::test]
+async fn a_server_lists_an_installed_mod_offline_by_its_catalog_title_and_release() {
+    let world = world().await;
+    let server = plain_server(&world);
+
+    install(&world, server, &ModInstallRequest::new("SECONDPROJ"))
+        .await
+        .expect("installs");
+
+    // The offline listing, with nothing fetched for it.
+    let snapshot = world.app.server_mod_snapshot(server).expect("snapshot");
+    let root = snapshot
+        .mods
+        .iter()
+        .find(|entry| entry.identity.project_id() == Some("SECONDPROJ"))
+        .expect("the installed mod is listed");
+    assert_eq!(root.title(), Some("Second Root"));
+    assert_eq!(root.installed_version(), Some("SECONDV1"));
+}
+
+#[tokio::test]
 async fn a_server_with_no_linked_client_and_no_recipe_installs_a_mod_and_its_dependency() {
     let world = world().await;
     let server = plain_server(&world);

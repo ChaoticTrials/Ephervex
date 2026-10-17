@@ -15,8 +15,9 @@ use ephervex_download::{
     CacheLayout, DownloadManager, DownloaderConfig, HttpConfig, OperationReporter, RetryPolicy,
 };
 use ephervex_mod_platform::{
-    HostSide, InstallSelection, InstanceTarget, ModDependency, ModPlatformError, ModProviderApi,
-    ModSearchQuery, ModrinthProvider, ResolveRequest, SideSupport, resolve,
+    HostSide, IncompatibilityReason, InstallSelection, InstanceTarget, ModDependency,
+    ModPlatformError, ModProviderApi, ModSearchQuery, ModrinthProvider, ResolveRequest,
+    SideSupport, resolve,
 };
 use ephervex_model::{Hash, HashAlgorithm, LoaderKind, ModProvider, ModRelationKind};
 use tempfile::TempDir;
@@ -538,6 +539,54 @@ async fn resolving_from_the_catalog_installs_the_mod_and_its_required_library() 
             .all(|planned| planned.version.project_id != "EXTRAPROJ"),
         "an unselected optional installs nothing"
     );
+    assert_eq!(
+        plan.optional[0].title, None,
+        "a project the catalog does not describe keeps its id and does not fail the plan"
+    );
+}
+
+#[tokio::test]
+async fn an_optional_dependency_is_offered_under_its_project_title() {
+    let catalog = Catalog::full().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/projects"))
+        .and(query_param("ids", r#"["FITSPROJ","LIBPROJ"]"#))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"[{"id":"FITSPROJ","title":"Fits","description":"","project_type":"mod",
+                 "client_side":"required","server_side":"required"},
+                {"id":"LIBPROJ","title":"Library","description":"","project_type":"mod",
+                 "client_side":"required","server_side":"unknown"}]"#,
+            "application/json",
+        ))
+        .mount(&catalog.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/projects"))
+        .and(query_param("ids", r#"["EXTRAPROJ"]"#))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"[{"id":"EXTRAPROJ","title":"Extra Things","description":"","project_type":"mod",
+                 "client_side":"required","server_side":"required"}]"#,
+            "application/json",
+        ))
+        .mount(&catalog.server)
+        .await;
+
+    let plan = resolve(ResolveRequest {
+        provider: &catalog.provider,
+        target: &target(),
+        loader_name: "neoforge",
+        selection: &InstallSelection::new("FITSPROJ"),
+        installed: &[],
+        recorded_elsewhere: &[],
+        installed_policy: ephervex_mod_platform::InstalledPolicy::Preserve,
+        reporter: &reporter(),
+        cancel: &CancellationToken::new(),
+    })
+    .await
+    .expect("a plan");
+
+    assert_eq!(plan.optional.len(), 1);
+    assert_eq!(plan.optional[0].title.as_deref(), Some("Extra Things"));
 }
 
 /// One version document of a single-project catalog, declaring `environment`.
@@ -1884,6 +1933,16 @@ async fn showing_incompatible_results_for_a_server_keeps_client_only_mods_and_se
         .collect();
     assert_eq!(client_only, ["PROJECTCLIENT", "RELEASECLIENT"]);
     assert_eq!(results.hits.len(), 4);
+    for hit in &results.hits {
+        assert_eq!(
+            hit.compatibility
+                .reasons()
+                .contains(&IncompatibilityReason::ClientOnly),
+            hit.is_client_only(),
+            "a client-only result does not fit a server, and only those carry the reason: {hit:?}"
+        );
+        assert_eq!(hit.compatibility.is_compatible(), !hit.is_client_only());
+    }
 }
 
 #[tokio::test]

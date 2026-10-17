@@ -167,6 +167,8 @@ pub struct OptionalCandidate {
     /// provider could not say which project owns that release. Such an offer
     /// cannot be selected, because a selection names projects.
     pub project_id: Option<String>,
+    /// The project's title, when the catalog described the project.
+    pub title: Option<String>,
     /// The release the relation pins, when it pins one.
     pub pinned_version_id: Option<String>,
     /// The mod that offers it.
@@ -1264,6 +1266,7 @@ impl<'a> Resolver<'a> {
         }
 
         let projects = self.fetch_projects().await?;
+        self.name_optional().await?;
         let mut root = None;
         let mut dependencies = Vec::new();
         for (project_id, resolution) in &self.resolved {
@@ -1367,6 +1370,7 @@ impl<'a> Resolver<'a> {
                             .entry(version_id.clone())
                             .or_insert_with(|| OptionalCandidate {
                                 project_id: None,
+                                title: None,
                                 pinned_version_id: Some(version_id),
                                 declared_by: source.clone(),
                                 version: None,
@@ -1485,6 +1489,7 @@ impl<'a> Resolver<'a> {
             project_id.clone(),
             OptionalCandidate {
                 project_id: Some(project_id),
+                title: None,
                 pinned_version_id: pinned_version,
                 declared_by: source.to_owned(),
                 version: resolved.filter(|_| status.is_compatible()),
@@ -1672,6 +1677,38 @@ impl<'a> Resolver<'a> {
             }
         }
         Ok((present, replacements))
+    }
+
+    /// Gives each optional offer its project's title.
+    ///
+    /// A lenient lookup of its own rather than part of the resolved projects'
+    /// strict one: an offer is not installed, so a project the catalog does not
+    /// describe keeps its id instead of failing the plan. Only canceling stops
+    /// it.
+    async fn name_optional(&mut self) -> ModPlatformResult<()> {
+        let ids: Vec<String> = self.optional.keys().cloned().collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        match self
+            .request
+            .provider
+            .project_batch_by_id(&ids, self.request.reporter, self.request.cancel)
+            .await
+        {
+            Ok(batch) => {
+                for project in batch.mods {
+                    if let Some(candidate) = self.optional.get_mut(&project.id) {
+                        candidate.title = Some(project.title).filter(|title| !title.is_empty());
+                    }
+                }
+            }
+            Err(error) if error.is_cancellation() || self.request.cancel.is_cancelled() => {
+                return Err(ModPlatformError::Canceled);
+            }
+            Err(error) => debug!(%error, "optional dependencies keep their ids"),
+        }
+        Ok(())
     }
 
     async fn fetch_projects(&self) -> ModPlatformResult<BTreeMap<String, ModProject>> {

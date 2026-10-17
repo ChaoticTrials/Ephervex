@@ -11,7 +11,8 @@
 //!
 //! Nothing about a mod's name changes often enough to justify asking again
 //! before showing anything. So the last answer is kept and the panel opens with
-//! it.
+//! it. An answer is kept whenever a provider gives one: when the list is
+//! enriched, and when a mod is installed from a catalog.
 //!
 //! # What it is keyed by
 //!
@@ -132,6 +133,12 @@ impl RememberedDisplay {
     /// Records what a provider answered for one release.
     pub(crate) fn remember_version(&mut self, version_id: String, version: VersionDisplay) {
         self.versions.insert(version_id, version);
+    }
+
+    /// The artwork remembered for one project, when there is any.
+    #[must_use]
+    pub(crate) fn icon(&self, project_id: &str) -> Option<&PathBuf> {
+        self.projects.get(project_id)?.icon.as_ref()
     }
 
     #[must_use]

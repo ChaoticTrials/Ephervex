@@ -1639,6 +1639,15 @@ async fn showing_incompatible_results_for_a_server_keeps_client_only_files_marke
         .collect();
     assert_eq!(client_only, ["client-only", "release-client"]);
     assert_eq!(results.hits.len(), 4);
+    for hit in &results.hits {
+        assert_eq!(
+            hit.compatibility
+                .reasons()
+                .contains(&IncompatibilityReason::ClientOnly),
+            hit.is_client_only(),
+            "a client-only result does not fit a server, and only those carry the reason: {hit:?}"
+        );
+    }
 }
 
 #[tokio::test]

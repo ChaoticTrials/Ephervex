@@ -740,12 +740,17 @@ impl ManagedModEntry {
     /// seen, or the file's own name.
     #[must_use]
     pub fn display_name(&self) -> &str {
+        self.title().unwrap_or(self.file_name.as_str())
+    }
+
+    /// The title this session fetched or the one last seen, and `None` when
+    /// no provider has named this mod.
+    #[must_use]
+    pub fn title(&self) -> Option<&str> {
         if let Some(details) = self.details.as_ref() {
-            return details.title.as_str();
+            return Some(details.title.as_str());
         }
-        self.cached
-            .as_ref()
-            .map_or(self.file_name.as_str(), |cached| cached.title.as_str())
+        self.cached.as_ref().map(|cached| cached.title.as_str())
     }
 
     /// The installed version as something to show, or `None` when the launcher
@@ -1167,6 +1172,36 @@ fn remembered_display(snapshot: &ManagedModSnapshot) -> BTreeMap<ModProvider, Re
     per_provider
 }
 
+/// Remembers what the catalog said about every mod a plan installed, so a list
+/// read offline afterwards names each one and its release rather than its jar.
+///
+/// The plan carries no artwork, so an icon already remembered is kept.
+fn remember_planned_display(cache: &CacheLayout, plan: &ModInstallPlan) {
+    let known = mod_display_cache::read(cache, plan.provider.as_str());
+    let mut answers = RememberedDisplay::default();
+    for planned in plan.all_mods() {
+        let project_id = &planned.version.project_id;
+        answers.remember_project(
+            project_id.clone(),
+            ProjectDisplay {
+                title: planned.project.title.clone(),
+                author: planned.project.author.clone(),
+                icon: known.icon(project_id).cloned(),
+            },
+        );
+        answers.remember_version(
+            planned.version.id.clone(),
+            VersionDisplay {
+                version: Some(planned.version.version_number.clone())
+                    .filter(|version| !version.is_empty()),
+                game_versions: planned.version.game_versions.clone(),
+                loaders: planned.version.loaders.clone(),
+            },
+        );
+    }
+    mod_display_cache::write(cache, plan.provider.as_str(), &answers);
+}
+
 /// What one enrichment pass fetched, keyed for assembly.
 #[derive(Debug, Default)]
 struct ModDetailIndex {
@@ -1499,6 +1534,7 @@ impl App {
             already_present = installation.already_present.len(),
             "installed mods"
         );
+        remember_planned_display(&CacheLayout::new(self.paths().cache_dir()), &plan);
         Ok(InstalledMods { plan, installation })
     }
 

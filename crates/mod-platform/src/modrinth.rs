@@ -269,16 +269,9 @@ impl ModProviderApi for ModrinthProvider {
                 Some(_) => Compatibility::Compatible,
                 None => project_incompatibility(&versions, target, loader),
             };
-            if !query.include_incompatible && !compatibility.is_compatible() {
+            let hit = ModSearchHit::judged(project, best, compatibility, query.side);
+            if !query.include_incompatible && !hit.compatibility.is_compatible() {
                 // The facets promised more than they can deliver.
-                continue;
-            }
-            let hit = ModSearchHit {
-                project,
-                best_version: best,
-                compatibility,
-            };
-            if query.excludes_client_only() && hit.is_client_only() {
                 continue;
             }
             hits.push(hit);

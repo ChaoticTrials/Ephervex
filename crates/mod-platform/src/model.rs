@@ -328,6 +328,8 @@ pub enum IncompatibilityReason {
         required: LoaderKind,
         supported: Vec<String>,
     },
+    /// Declared not to run on a server, for a search on behalf of one.
+    ClientOnly,
 }
 
 impl IncompatibilityReason {
@@ -337,6 +339,7 @@ impl IncompatibilityReason {
         match self {
             Self::MinecraftVersion { .. } => "mod-incompatible-minecraft-version",
             Self::Loader { .. } => "mod-incompatible-loader",
+            Self::ClientOnly => "mod-incompatible-client-only",
         }
     }
 
@@ -346,6 +349,7 @@ impl IncompatibilityReason {
         match self {
             Self::MinecraftVersion { .. } => "minecraft_version",
             Self::Loader { .. } => "loader",
+            Self::ClientOnly => "client_only",
         }
     }
 }
@@ -468,6 +472,30 @@ pub struct ModSearchHit {
 }
 
 impl ModSearchHit {
+    /// A hit judged for the side it would be installed on.
+    ///
+    /// A mod declared client-only fits no server, however well its releases
+    /// match the Minecraft version and loader, so for a server it is
+    /// incompatible for that reason as well.
+    pub(crate) fn judged(
+        project: ModProject,
+        best_version: Option<ModVersionInfo>,
+        compatibility: Compatibility,
+        side: HostSide,
+    ) -> Self {
+        let mut hit = Self {
+            project,
+            best_version,
+            compatibility,
+        };
+        if side == HostSide::Server && hit.is_client_only() {
+            let mut reasons = hit.compatibility.reasons().to_vec();
+            reasons.push(IncompatibilityReason::ClientOnly);
+            hit.compatibility = Compatibility::Incompatible(reasons);
+        }
+        hit
+    }
+
     /// The client and server support of the release an install would default
     /// to, or of the project where no release fits.
     #[must_use]
