@@ -402,6 +402,12 @@ choice is written as its position, which every release reads, while servers
 before Minecraft 1.14 replace a name with their own default; a choice the file
 already stores as a name stays a name.
 
+Settings has a Server Properties page with the same controls, for defaults: a
+sparse set of catalog values written into a new server's `server.properties`
+for every key it does not already hold, at creation or first installation.
+Existing servers and values a pack's server files set are left alone (ADR
+0051).
+
 The controller keeps pending starts, stops, console submissions, and observed
 run failures by server ID, alongside the existing host restart state. All views
 of a server share those guards and status. Snapshot values remain the baseline

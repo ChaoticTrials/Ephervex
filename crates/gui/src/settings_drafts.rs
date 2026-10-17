@@ -78,6 +78,8 @@ pub struct SettingsDrafts {
     pub artifact_cache_limit_index: DraftField<i32>,
     pub artifact_cache_custom_value: DraftField<String>,
     pub artifact_cache_custom_unit: DraftField<String>,
+    /// The `server.properties` defaults page, with its unsaved edits.
+    pub(crate) server_defaults: crate::server_property_form::ServerDefaultsForm,
 }
 
 impl SettingsDrafts {

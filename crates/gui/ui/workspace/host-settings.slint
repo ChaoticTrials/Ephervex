@@ -245,6 +245,7 @@ export component ServerPropertyRowView inherits Rectangle {
     in property <bool> separated;
     callback edited(string);
     callback chosen(int);
+    callback reset();
     // Left to itself, the row measures its wrapped lines unwrapped.
     height: body.preferred-height;
     accessible-role: AccessibleRole.groupbox;
@@ -271,6 +272,10 @@ export component ServerPropertyRowView inherits Rectangle {
             if root.item.note != "" : BodyText { text: root.item.note; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
             if root.item.error != "" : BodyText { text: root.item.error; color: Theme.danger; font-size: Theme.caption-size; wrap: word-wrap; }
         }
+        if root.item.can-reset : VerticalLayout {
+            alignment: center;
+            AppButton { text: GuiI18n.text("gui-property-reset"); accessible-name: GuiI18n.value("gui-property-reset-named", root.item.label); clicked => { root.reset(); } }
+        }
         VerticalLayout {
             alignment: center;
             width: 240px;
@@ -295,12 +300,14 @@ export component ServerPropertyRowView inherits Rectangle {
     }
 }
 
-// One group of a server's settings as a card: its heading, then its rows.
-component ServerPropertyGroupCard inherits Rectangle {
+// One group of server.properties settings as a card: its heading, then its
+// rows. A server's Properties and the defaults in Settings both use it.
+export component ServerPropertyGroupCard inherits Rectangle {
     in property <ServerPropertyGroup> group;
     in property <bool> restart-pending;
     callback edited(string, string);
     callback chosen(string, int);
+    callback reset(string);
     border-radius: 8px;
     border-width: 1px;
     border-color: Theme.border;
@@ -319,6 +326,7 @@ component ServerPropertyGroupCard inherits Rectangle {
             restart-pending: root.restart-pending;
             edited(value) => { root.edited(row.key, value); }
             chosen(position) => { root.chosen(row.key, position); }
+            reset => { root.reset(row.key); }
         }
     }
 }

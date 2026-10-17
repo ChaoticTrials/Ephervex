@@ -1,5 +1,6 @@
 //! Dedicated-server application services composed through `ephervex-server`.
 
+use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
@@ -351,6 +352,10 @@ impl App {
                 .await?;
             add_unknown_attention(&mut record, unconfirmed_unknown);
         }
+        fill_property_defaults(
+            &target.join(SERVER_PROPERTIES_FILE),
+            self.server_property_defaults(),
+        )?;
         merge_network_file(&target.join(SERVER_PROPERTIES_FILE), &record.network)?;
         materialize_operator_setup(&target, &record.network, record.operator_setup.as_ref())?;
         let committed = self
@@ -454,6 +459,10 @@ impl App {
                 .await?;
             add_unknown_attention(&mut record, unconfirmed_unknown);
         }
+        fill_property_defaults(
+            &target.join(SERVER_PROPERTIES_FILE),
+            self.server_property_defaults(),
+        )?;
         merge_network_file(&target.join(SERVER_PROPERTIES_FILE), &record.network)?;
         let committed = self
             .registry_for_services()
@@ -1604,6 +1613,56 @@ impl PropertiesBackup {
                 _ => Ok(()),
             },
         }
+    }
+}
+
+/// Gives a new server's file each default for a key it does not hold. A value
+/// the file already has, such as one a pack's server files set, stays. A
+/// default this build cannot vouch for, such as one a newer build stored or a
+/// hand-edited one its key refuses, is left out rather than failing creation.
+fn fill_property_defaults(path: &Path, defaults: &BTreeMap<String, String>) -> CoreResult<()> {
+    let mut document = read_properties(path)?;
+    let mut filled = false;
+    for (key, value) in defaults {
+        if document.get(key).is_some() {
+            continue;
+        }
+        let Some(definition) = ephervex_server::property_definition(key) else {
+            tracing::warn!(
+                key,
+                "a server.properties default for an unknown key was left out"
+            );
+            continue;
+        };
+        if definition.kind.check(value).is_err() {
+            tracing::warn!(
+                key,
+                "a server.properties default its key refuses was left out"
+            );
+            continue;
+        }
+        if let Err(error) = document.set(key, &release_neutral_value(definition, value)) {
+            tracing::warn!(key, %error, "a server.properties default was left out");
+            continue;
+        }
+        filled = true;
+    }
+    if filled {
+        atomic_write(path, document.render().as_bytes())?;
+    }
+    Ok(())
+}
+
+/// The value as every release reads it: a choice as its position, because
+/// servers before Minecraft 1.14 read these keys only as numbers and replace
+/// a name with their own default, while newer ones read both.
+fn release_neutral_value(definition: &ephervex_server::PropertyDefinition, value: &str) -> String {
+    match definition.kind {
+        ephervex_server::PropertyValueKind::Choice(names) => names
+            .iter()
+            .position(|name| *name == value)
+            .map_or_else(|| value.to_owned(), |position| position.to_string()),
+        _ => value.to_owned(),
     }
 }
 
@@ -4857,6 +4916,66 @@ mod tests {
         assert_eq!(std::fs::read(&path).ok(), before);
         app.set_server_property(server.id, "some-mod-key", "anything")
             .expect("a key outside the catalog is not interpreted");
+    }
+
+    #[test]
+    fn defaults_fill_only_the_keys_a_new_servers_file_does_not_hold() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join(SERVER_PROPERTIES_FILE);
+        std::fs::write(&path, "# from the pack\nmotd=Pack server\n").expect("pack file");
+        let defaults = BTreeMap::from([
+            ("motd".to_owned(), "Default server".to_owned()),
+            ("view-distance".to_owned(), "16".to_owned()),
+            ("difficulty".to_owned(), "peaceful".to_owned()),
+            ("server-port".to_owned(), "25570".to_owned()),
+            ("key-from-a-newer-build".to_owned(), "x".to_owned()),
+        ]);
+
+        fill_property_defaults(&path, &defaults).expect("fill");
+
+        let document = read_properties(&path).expect("properties");
+        assert_eq!(document.get("motd").as_deref(), Some("Pack server"));
+        assert_eq!(document.get("view-distance").as_deref(), Some("16"));
+        assert_eq!(document.get("difficulty").as_deref(), Some("0"));
+        assert_eq!(document.get("server-port"), None);
+        assert_eq!(document.get("key-from-a-newer-build"), None);
+        assert!(
+            std::fs::read_to_string(&path)
+                .expect("file")
+                .starts_with("# from the pack\n")
+        );
+    }
+
+    #[test]
+    fn property_defaults_take_only_catalog_keys_with_values_they_accept() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let mut app = test_app(directory.path());
+        for (key, value) in [("server-port", "25570"), ("view-distance", "99")] {
+            let error = app
+                .set_server_property_defaults(BTreeMap::from([(key.to_owned(), value.to_owned())]))
+                .expect_err("refused");
+            assert_eq!(error.message_id(), "error-server-property-invalid", "{key}");
+        }
+        assert!(app.server_property_defaults().is_empty());
+
+        let defaults = BTreeMap::from([("level-type".to_owned(), "minecraft:flat".to_owned())]);
+        app.set_server_property_defaults(defaults.clone())
+            .expect("stored");
+        assert_eq!(app.server_property_defaults(), &defaults);
+
+        // As a newer build would have stored it, for a key this one does not know.
+        app.mutate_config(|config| {
+            config
+                .server_defaults
+                .properties
+                .insert("key-from-a-newer-build".to_owned(), "x".to_owned());
+        })
+        .expect("newer default");
+        let mut edited = app.server_property_defaults().clone();
+        edited.insert("view-distance".to_owned(), "16".to_owned());
+        app.set_server_property_defaults(edited.clone())
+            .expect("a kept default does not block the others");
+        assert_eq!(app.server_property_defaults(), &edited);
     }
 
     #[test]

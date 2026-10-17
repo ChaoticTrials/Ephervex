@@ -6136,15 +6136,7 @@ fn publish_property_form(workspace: &Workspace, server: &str, fresh: bool) {
     let Some(id) = backend::parse_server_id(server) else {
         return;
     };
-    let mut groups: Vec<(SharedString, Vec<ServerPropertyRow>)> = Vec::new();
-    for row in form.rows {
-        if !row.heading.is_empty() || groups.is_empty() {
-            groups.push((row.heading.as_str().into(), Vec::new()));
-        }
-        if let Some((_, rows)) = groups.last_mut() {
-            rows.push(server_property_row(row));
-        }
-    }
+    let groups = property_groups(form.rows);
     workspace.update(InstalledHost::Server(id), |view| {
         view.property_groups = if fresh {
             property_groups_model(groups)
@@ -6154,6 +6146,100 @@ fn publish_property_form(workspace: &Workspace, server: &str, fresh: bool) {
         view.property_edits = i32::try_from(form.edits).unwrap_or(i32::MAX);
         view.property_edits_invalid = !form.edits_valid;
         view.property_show_advanced = form.show_advanced;
+    });
+}
+
+/// Rows as the cards that show them, split where a group's heading starts.
+fn property_groups(
+    rows: Vec<server_property_form::PropertyRow>,
+) -> Vec<(SharedString, Vec<ServerPropertyRow>)> {
+    let mut groups: Vec<(SharedString, Vec<ServerPropertyRow>)> = Vec::new();
+    for row in rows {
+        if !row.heading.is_empty() || groups.is_empty() {
+            groups.push((row.heading.as_str().into(), Vec::new()));
+        }
+        if let Some((_, rows)) = groups.last_mut() {
+            rows.push(server_property_row(row));
+        }
+    }
+    groups
+}
+
+/// Shows the `server.properties` defaults page. A `fresh` page starts its
+/// rows over, which is how a field the user typed in takes the stored value
+/// again.
+fn publish_server_defaults(
+    ui: &AppWindow,
+    form: &server_property_form::ServerDefaultsForm,
+    fresh: bool,
+) {
+    let view = form.view();
+    let groups = property_groups(view.rows);
+    ui.set_server_defaults_groups(if fresh {
+        property_groups_model(groups)
+    } else {
+        reuse_property_groups(&ui.get_server_defaults_groups(), groups)
+    });
+    ui.set_server_defaults_edits(i32::try_from(view.edits).unwrap_or(i32::MAX));
+    ui.set_server_defaults_invalid(!view.edits_valid);
+    ui.set_server_defaults_show_advanced(view.show_advanced);
+}
+
+fn register_server_defaults(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    drafts: &Rc<RefCell<SettingsDrafts>>,
+) {
+    let change = |ui: &AppWindow,
+                  drafts: &Rc<RefCell<SettingsDrafts>>,
+                  fresh: bool,
+                  edit: &dyn Fn(&mut server_property_form::ServerDefaultsForm)| {
+        let mut drafts = drafts.borrow_mut();
+        edit(&mut drafts.server_defaults);
+        publish_server_defaults(ui, &drafts.server_defaults, fresh);
+    };
+    let (weak, shared) = (ui.as_weak(), Rc::clone(drafts));
+    ui.on_edit_server_default(move |key, value| {
+        if let Some(ui) = weak.upgrade() {
+            change(&ui, &shared, false, &|form| form.edit(&key, &value));
+        }
+    });
+    let (weak, shared) = (ui.as_weak(), Rc::clone(drafts));
+    ui.on_choose_server_default(move |key, index| {
+        let (Some(ui), Ok(index)) = (weak.upgrade(), usize::try_from(index)) else {
+            return;
+        };
+        change(&ui, &shared, false, &|form| form.choose(&key, index));
+    });
+    let (weak, shared) = (ui.as_weak(), Rc::clone(drafts));
+    ui.on_reset_server_default(move |key| {
+        if let Some(ui) = weak.upgrade() {
+            change(&ui, &shared, true, &|form| form.reset(&key));
+        }
+    });
+    let (weak, shared) = (ui.as_weak(), Rc::clone(drafts));
+    ui.on_show_advanced_server_defaults(move |show| {
+        if let Some(ui) = weak.upgrade() {
+            change(&ui, &shared, true, &|form| form.show_advanced(show));
+        }
+    });
+    let (weak, shared) = (ui.as_weak(), Rc::clone(drafts));
+    ui.on_discard_server_defaults(move || {
+        if let Some(ui) = weak.upgrade() {
+            change(&ui, &shared, true, &|form| form.discard());
+        }
+    });
+    let (weak, shared, sender) = (ui.as_weak(), Rc::clone(drafts), commands.clone());
+    ui.on_save_server_defaults(move || {
+        let values = shared.borrow().server_defaults.values();
+        match values {
+            Some(values) => send(&sender, Command::SaveServerPropertyDefaults(values)),
+            None => {
+                if let Some(ui) = weak.upgrade() {
+                    ui.invoke_present_toast(lookup("gui-hint-fix-property-values").into(), true);
+                }
+            }
+        }
     });
 }
 
@@ -6214,6 +6300,7 @@ fn server_property_row(row: server_property_form::PropertyRow) -> ServerProperty
         changed: row.changed,
         awaiting_restart: row.awaiting_restart,
         error: row.error.into(),
+        can_reset: row.can_reset,
     }
 }
 
@@ -6223,6 +6310,7 @@ fn register_settings(
     drafts: &Rc<RefCell<SettingsDrafts>>,
 ) {
     register_general_settings(ui, commands);
+    register_server_defaults(ui, commands, drafts);
 
     let sender = commands.clone();
     ui.on_add_offline_account(move |name| {
@@ -9432,6 +9520,10 @@ fn finish_draft<T: PartialEq + Clone>(
 /// stored value only while it holds no unsaved edit.
 fn apply_settings_fields(ui: &AppWindow, settings: &SettingsData, drafts: &mut SettingsDrafts) {
     apply_artifact_cache_settings(ui, settings, drafts);
+    let reloaded = drafts
+        .server_defaults
+        .load(settings.server_property_defaults.clone());
+    publish_server_defaults(ui, &drafts.server_defaults, reloaded);
     fold_draft(
         &mut drafts.persistent_root,
         &ui.get_persistent_root().to_string(),
@@ -16103,6 +16195,43 @@ mod tests {
                 _ => None,
             })
             .expect("a save")
+    }
+
+    #[test]
+    fn the_defaults_page_saves_the_stored_defaults_with_its_edits() {
+        let ui = test_window();
+        let (sender, commands) = std::sync::mpsc::channel();
+        let drafts = Rc::new(RefCell::new(SettingsDrafts::default()));
+        register_server_defaults(&ui, &sender, &drafts);
+        drafts.borrow_mut().server_defaults.load(
+            [("motd", "Repro"), ("pvp", "false")]
+                .into_iter()
+                .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                .collect(),
+        );
+
+        ui.invoke_edit_server_default("view-distance".into(), "16".into());
+        ui.invoke_reset_server_default("motd".into());
+        ui.invoke_choose_server_default("difficulty".into(), 1);
+        assert_eq!(ui.get_server_defaults_edits(), 3);
+        ui.invoke_save_server_defaults();
+
+        let saved = commands
+            .try_iter()
+            .find_map(|command| match command {
+                Command::SaveServerPropertyDefaults(values) => Some(values),
+                _ => None,
+            })
+            .expect("a save");
+        let expected: std::collections::BTreeMap<String, String> = [
+            ("difficulty", "peaceful"),
+            ("pvp", "false"),
+            ("view-distance", "16"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect();
+        assert_eq!(saved, expected);
     }
 
     #[test]

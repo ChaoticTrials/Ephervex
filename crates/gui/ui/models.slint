@@ -565,6 +565,8 @@ export struct ServerPropertyRow {
     // Saved while the running server was already up.
     awaiting-restart: bool,
     error: string,
+    // The row offers to go back to having no value of its own.
+    can-reset: bool,
 }
 
 // One card of a server's Properties form.

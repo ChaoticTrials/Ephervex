@@ -12,6 +12,7 @@
 //! in their manifests, so a shortcut is a manifest change someone has to
 //! justify rather than an import someone can add absent-mindedly.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -479,6 +480,38 @@ impl App {
                 .server_defaults
                 .operator_permission_level,
         }
+    }
+
+    /// The `server.properties` values new servers start with, by key.
+    #[must_use]
+    pub const fn server_property_defaults(&self) -> &BTreeMap<String, String> {
+        &self.storage.config.server_defaults.properties
+    }
+
+    /// Replaces the `server.properties` values new servers start with. A
+    /// default that is added or changed must be a typed catalog key with a
+    /// value its key accepts; one kept as stored stays as it is, even when a
+    /// newer build wrote it for a key this one does not know. Servers that
+    /// exist keep their files.
+    pub fn set_server_property_defaults(
+        &mut self,
+        defaults: BTreeMap<String, String>,
+    ) -> CoreResult<()> {
+        let stored = &self.storage.config.server_defaults.properties;
+        for (key, value) in &defaults {
+            if stored.get(key) == Some(value) {
+                continue;
+            }
+            if ephervex_server::property_definition(key).is_none() {
+                return Err(ephervex_server::ServerError::InvalidProperty {
+                    key: key.clone(),
+                    reason: "the key has no typed setting to take a default",
+                }
+                .into());
+            }
+            ephervex_server::check_property_value(key, value)?;
+        }
+        self.mutate_config(|config| config.server_defaults.properties = defaults)
     }
 
     /// Persists defaults for future server operator setup.

@@ -69,6 +69,7 @@ import {
     PromoteServerRow,
     RelationRow,
     RunningRow,
+    ServerPropertyGroup,
     ServerRow,
     ToastRow,
     WorkspaceHostChoice,
@@ -76,6 +77,7 @@ import {
 } from "models.slint";
 import { DiskUsagePanel, OverrideCard } from "settings/application.slint";
 import { MinecraftPreferenceRowCard } from "settings/minecraft-defaults.slint";
+import { ServerDefaultsPanel } from "settings/server-defaults.slint";
 import { Theme } from "theme.slint";
 import { DiagnosticsSurface, RunFailureNotice } from "workspace/diagnostics.slint";
 import { HostRuntimeForm, ServerPropertiesForm } from "workspace/host-settings.slint";
@@ -850,6 +852,20 @@ export component AppWindow inherits Window {
     callback choose-server-property(string, string, int);
     callback show-advanced-server-properties(string, bool);
     callback discard-server-properties(string);
+    // The server.properties values new servers start with, as the Settings
+    // page shows them, unsaved edits included.
+    in property <[ServerPropertyGroup]> server-defaults-groups;
+    in property <int> server-defaults-edits;
+    in property <bool> server-defaults-invalid;
+    in property <bool> server-defaults-show-advanced;
+    // (key, value) and (key, entry index); empty text or the first entry
+    // takes a default away.
+    callback edit-server-default(string, string);
+    callback choose-server-default(string, int);
+    callback reset-server-default(string);
+    callback show-advanced-server-defaults(bool);
+    callback discard-server-defaults();
+    callback save-server-defaults();
     callback accept-eula();
     callback revoke-eula();
     callback open-eula-reference();
@@ -1685,6 +1701,7 @@ export component AppWindow inherits Window {
                         Rectangle { height: 5px; }
                         SettingsNavItem { label: GuiI18n.text("gui-settings-general"); selected: root.settings-tab == "General"; clicked => { root.settings-tab = "General"; } }
                         SettingsNavItem { label: GuiI18n.text("gui-settings-minecraft"); selected: root.settings-tab == "Minecraft"; clicked => { root.settings-tab = "Minecraft"; root.request-version-catalog(); } }
+                        SettingsNavItem { label: GuiI18n.text("gui-settings-server-properties"); selected: root.settings-tab == "Server Properties"; clicked => { root.settings-tab = "Server Properties"; } }
                         SettingsNavItem { label: GuiI18n.text("gui-settings-java"); selected: root.settings-tab == "Java"; clicked => { root.settings-tab = "Java"; root.load-java-runtimes(); } }
                         SettingsNavItem { label: GuiI18n.text("gui-settings-accounts"); selected: root.settings-tab == "Accounts"; clicked => { root.settings-tab = "Accounts"; } }
                         SettingsNavItem { label: GuiI18n.text("gui-settings-providers"); selected: root.settings-tab == "Providers & APIs"; clicked => { root.settings-tab = "Providers & APIs"; } }
@@ -1701,8 +1718,8 @@ export component AppWindow inherits Window {
                     } }
                     Rectangle { horizontal-stretch: 1; background: Theme.background; ScrollView { viewport-width: self.visible-width; VerticalLayout { x: max(0px, (parent.width - self.width) / 2); alignment: start; width: min(parent.width, root.settings-two-columns ? 1500px : 1100px); padding: 30px; spacing: 20px;
                         PageIntro {
-                            title: root.settings-tab == "General" ? GuiI18n.text("gui-settings-general") : root.settings-tab == "Minecraft" ? GuiI18n.text("gui-settings-minecraft") : root.settings-tab == "Java" ? GuiI18n.text("gui-settings-java") : root.settings-tab == "Accounts" ? GuiI18n.text("gui-settings-accounts") : root.settings-tab == "Providers & APIs" ? GuiI18n.text("gui-settings-providers") : root.settings-tab == "Storage" ? GuiI18n.text("gui-settings-storage") : root.settings-tab == "Disk Usage" ? GuiI18n.text("gui-settings-disk-usage") : GuiI18n.text("gui-settings-about");
-                            subtitle: root.settings-tab == "Minecraft" ? GuiI18n.text("gui-minecraft-defaults-detail") : root.settings-tab == "Java" ? GuiI18n.text("gui-java-detail") : root.settings-tab == "Accounts" ? GuiI18n.text("gui-accounts-detail") : root.settings-tab == "Providers & APIs" ? GuiI18n.text("gui-provider-detail") : root.settings-tab == "Storage" ? GuiI18n.text("gui-storage-detail") : root.settings-tab == "Disk Usage" ? GuiI18n.text("gui-disk-usage-page-detail") : root.settings-tab == "About & Licenses" ? GuiI18n.text("gui-tagline") : GuiI18n.text("gui-settings-detail");
+                            title: root.settings-tab == "General" ? GuiI18n.text("gui-settings-general") : root.settings-tab == "Minecraft" ? GuiI18n.text("gui-settings-minecraft") : root.settings-tab == "Server Properties" ? GuiI18n.text("gui-settings-server-properties") : root.settings-tab == "Java" ? GuiI18n.text("gui-settings-java") : root.settings-tab == "Accounts" ? GuiI18n.text("gui-settings-accounts") : root.settings-tab == "Providers & APIs" ? GuiI18n.text("gui-settings-providers") : root.settings-tab == "Storage" ? GuiI18n.text("gui-settings-storage") : root.settings-tab == "Disk Usage" ? GuiI18n.text("gui-settings-disk-usage") : GuiI18n.text("gui-settings-about");
+                            subtitle: root.settings-tab == "Minecraft" ? GuiI18n.text("gui-minecraft-defaults-detail") : root.settings-tab == "Server Properties" ? GuiI18n.text("gui-server-defaults-intro") : root.settings-tab == "Java" ? GuiI18n.text("gui-java-detail") : root.settings-tab == "Accounts" ? GuiI18n.text("gui-accounts-detail") : root.settings-tab == "Providers & APIs" ? GuiI18n.text("gui-provider-detail") : root.settings-tab == "Storage" ? GuiI18n.text("gui-storage-detail") : root.settings-tab == "Disk Usage" ? GuiI18n.text("gui-disk-usage-page-detail") : root.settings-tab == "About & Licenses" ? GuiI18n.text("gui-tagline") : GuiI18n.text("gui-settings-detail");
                         }
                         if root.settings-tab == "General" : VerticalLayout { alignment: start; spacing: 14px;
                             // Side by side where the window is wide enough for two
@@ -1958,6 +1975,19 @@ export component AppWindow inherits Window {
                                 AppButton { text: GuiI18n.text("gui-discard-changes"); enabled: root.minecraft-dirty && !root.minecraft-saving; hint: root.minecraft-saving ? GuiI18n.text("gui-save-in-progress-hint") : GuiI18n.text("gui-hint-no-unsaved-changes"); clicked => { root.minecraft-discard-defaults(); } }
                                 AppButton { text: GuiI18n.text("gui-save-changes"); tone: "primary"; enabled: root.minecraft-can-save && !root.minecraft-saving; hint: root.minecraft-saving ? GuiI18n.text("gui-save-in-progress-hint") : GuiI18n.text("gui-hint-nothing-to-save"); clicked => { root.minecraft-save-defaults(); } }
                             }
+                        }
+                        if root.settings-tab == "Server Properties" : ServerDefaultsPanel {
+                            height: max(360px, root.height - 258px);
+                            groups: root.server-defaults-groups;
+                            edits: root.server-defaults-edits;
+                            invalid: root.server-defaults-invalid;
+                            show-advanced: root.server-defaults-show-advanced;
+                            edit(key, value) => { root.edit-server-default(key, value); }
+                            choose(key, index) => { root.choose-server-default(key, index); }
+                            reset(key) => { root.reset-server-default(key); }
+                            advanced(show) => { root.show-advanced-server-defaults(show); }
+                            discard => { root.discard-server-defaults(); }
+                            save => { root.save-server-defaults(); }
                         }
                         if root.settings-tab == "Java" : VerticalLayout { spacing: 14px;
                             // The same cards the General page uses, two to a row

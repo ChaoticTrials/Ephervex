@@ -60,6 +60,10 @@ pub(crate) const UI_SOURCES: &[(&str, &str)] = &[
         "settings/minecraft-defaults.slint",
         include_str!("../ui/settings/minecraft-defaults.slint"),
     ),
+    (
+        "settings/server-defaults.slint",
+        include_str!("../ui/settings/server-defaults.slint"),
+    ),
     ("theme.slint", include_str!("../ui/theme.slint")),
     (
         "workspace/diagnostics.slint",

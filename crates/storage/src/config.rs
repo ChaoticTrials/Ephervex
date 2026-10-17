@@ -683,6 +683,11 @@ pub struct ServerDefaults {
     pub make_default_account_operator: bool,
     /// Permission level written to the new server's individual operator entry.
     pub operator_permission_level: OperatorPermissionLevel,
+    /// `server.properties` values a new server's file gets for every key it
+    /// does not already hold, by key. Sparse: an absent key leaves the server
+    /// to its own default.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub properties: BTreeMap<String, String>,
     /// Keys this build does not know about. See [`Config::unknown`].
     #[serde(flatten)]
     pub unknown: toml::Table,
@@ -696,6 +701,7 @@ impl Default for ServerDefaults {
             port: 25565,
             make_default_account_operator: true,
             operator_permission_level: OperatorPermissionLevel::default(),
+            properties: BTreeMap::new(),
             unknown: toml::Table::new(),
         }
     }

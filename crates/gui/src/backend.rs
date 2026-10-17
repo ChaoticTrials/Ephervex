@@ -680,6 +680,8 @@ pub enum Command {
         network: ServerNetworkSettings,
         values: Vec<(String, String)>,
     },
+    /// Replaces the `server.properties` values new servers start with.
+    SaveServerPropertyDefaults(std::collections::BTreeMap<String, String>),
     AcceptEula,
     RevokeEula,
     OpenEulaReference,
@@ -969,6 +971,8 @@ pub struct SettingsData {
     pub favorite_minecraft_versions: Vec<String>,
     pub make_default_account_operator: bool,
     pub operator_permission_level: u8,
+    /// The `server.properties` values new servers start with, by key.
+    pub server_property_defaults: std::collections::BTreeMap<String, String>,
     pub java_auto_detect: bool,
     pub java_auto_download: bool,
     pub java_memory_min: u32,
@@ -5669,6 +5673,18 @@ fn run_worker(
                     Err(error) => send_error(&events, &error),
                 }
             }
+            Command::SaveServerPropertyDefaults(defaults) => {
+                match app.set_server_property_defaults(defaults) {
+                    Ok(()) => {
+                        let _ = events.send(Event::Toast {
+                            message: lookup("gui-server-defaults-saved"),
+                            error: false,
+                        });
+                        send_snapshot(&mut app, &events);
+                    }
+                    Err(error) => send_error(&events, &error),
+                }
+            }
             Command::AcceptEula => match app.accept_server_eula() {
                 Ok(_) => {
                     let _ = events.send(Event::CloseModal(ModalScope::EULA));
@@ -6587,6 +6603,7 @@ fn application_settings_on(app: &App, today: chrono::NaiveDate) -> Result<Settin
         favorite_minecraft_versions: app.favorite_minecraft_versions().to_vec(),
         make_default_account_operator: server.make_default_account_operator,
         operator_permission_level: server.operator_permission_level.value(),
+        server_property_defaults: app.server_property_defaults().clone(),
         java_auto_detect: java.auto_detect,
         java_auto_download: java.auto_download,
         java_memory_min: java.min_memory_mib,

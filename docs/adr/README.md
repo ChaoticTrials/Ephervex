@@ -56,3 +56,4 @@ so the reasoning trail survives.
 | [0048](0048-instance-organization-is-presentation-state-outside-host-metadata.md) | Instance organization is presentation state outside host metadata | Accepted |
 | [0049](0049-a-seasonal-theme-stands-in-for-a-built-in-theme-during-its-season.md) | A seasonal theme stands in for a built-in theme during its season | Accepted |
 | [0050](0050-server-properties-saved-while-running-wait-for-its-restart.md) | Server properties saved while running wait for its restart | Accepted |
+| [0051](0051-server-property-defaults-fill-a-new-servers-file.md) | Server property defaults fill a new server's file | Accepted |

@@ -190,6 +190,168 @@ impl ServerPropertyForms {
     }
 }
 
+/// The Settings form for the `server.properties` values new servers start
+/// with: what is stored, the unsaved edits, and whether advanced keys are
+/// listed. Unlike a server's file, a default can be taken away again.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ServerDefaultsForm {
+    stored: BTreeMap<String, String>,
+    /// `None` takes the stored default away.
+    edits: BTreeMap<String, Option<String>>,
+    show_advanced: bool,
+}
+
+impl ServerDefaultsForm {
+    /// Takes the stored defaults. Unsaved edits stay until what is stored
+    /// changes, which a save does. Returns whether it changed.
+    pub(crate) fn load(&mut self, stored: BTreeMap<String, String>) -> bool {
+        if self.stored == stored {
+            return false;
+        }
+        self.stored = stored;
+        self.edits.clear();
+        true
+    }
+
+    /// Sets `key`'s default; empty text takes it away.
+    pub(crate) fn edit(&mut self, key: &str, value: &str) {
+        let wanted = (!value.is_empty()).then(|| value.to_owned());
+        if self.stored.get(key) == wanted.as_ref() {
+            self.edits.remove(key);
+        } else {
+            self.edits.insert(key.to_owned(), wanted);
+        }
+    }
+
+    /// Picks entry `index` of a choice list, whose first entry is no default.
+    pub(crate) fn choose(&mut self, key: &str, index: usize) {
+        let Some(definition) = ephervex_core::property_definition(key) else {
+            return;
+        };
+        let names = choice_names(definition);
+        match index.checked_sub(1) {
+            None => self.edit(key, ""),
+            Some(position) if position < names.len() => self.edit(key, names[position]),
+            Some(_) => {}
+        }
+    }
+
+    pub(crate) fn reset(&mut self, key: &str) {
+        self.edit(key, "");
+    }
+
+    pub(crate) fn discard(&mut self) {
+        self.edits.clear();
+    }
+
+    pub(crate) fn show_advanced(&mut self, show: bool) {
+        self.show_advanced = show;
+    }
+
+    /// The defaults to store, or `None` while an edit is a value its key does
+    /// not accept.
+    #[must_use]
+    pub(crate) fn values(&self) -> Option<BTreeMap<String, String>> {
+        let mut values = self.stored.clone();
+        for (key, edit) in &self.edits {
+            match edit {
+                Some(value) => {
+                    ephervex_core::check_property_value(key, value).ok()?;
+                    values.insert(key.clone(), value.clone());
+                }
+                None => {
+                    values.remove(key);
+                }
+            }
+        }
+        Some(values)
+    }
+
+    #[must_use]
+    pub(crate) fn view(&self) -> PropertyFormView {
+        let mut rows = Vec::new();
+        let mut last_group = None;
+        for definition in SERVER_PROPERTY_CATALOG {
+            if definition.group == PropertyGroup::Advanced && !self.show_advanced {
+                continue;
+            }
+            let heading = if last_group == Some(definition.group) {
+                String::new()
+            } else {
+                group_heading(definition.group)
+            };
+            last_group = Some(definition.group);
+            rows.push(self.row(definition, heading));
+        }
+        PropertyFormView {
+            rows,
+            edits: self.edits.len(),
+            edits_valid: self.values().is_some(),
+            show_advanced: self.show_advanced,
+        }
+    }
+
+    fn row(&self, definition: &'static PropertyDefinition, heading: String) -> PropertyRow {
+        let edit = self.edits.get(definition.key);
+        let shown = match edit {
+            Some(edit) => edit.as_deref(),
+            None => self.stored.get(definition.key).map(String::as_str),
+        };
+        let vanilla = definition.vanilla_default;
+        let error = edit
+            .and_then(Option::as_deref)
+            .and_then(|value| definition.kind.check(value).err())
+            .map_or_else(String::new, problem_message);
+        let note = match shown {
+            Some(_) => String::new(),
+            None if vanilla.is_empty() => lookup("gui-property-default-unset-empty"),
+            None => lookup_args(
+                "gui-property-default-unset",
+                [("value", Arg::from(vanilla))],
+            ),
+        };
+        let mut row = PropertyRow {
+            key: definition.key,
+            heading,
+            label: lookup(&format!("gui-property-{}", definition.key)),
+            detail: lookup(&format!("gui-property-{}-detail", definition.key)),
+            kind: "text",
+            text: shown.unwrap_or_default().to_owned(),
+            placeholder: vanilla.to_owned(),
+            checked: false,
+            choices: Vec::new(),
+            choice_index: 0,
+            note,
+            changed: edit.is_some(),
+            awaiting_restart: false,
+            error,
+            can_reset: shown.is_some(),
+        };
+        match definition.kind {
+            PropertyValueKind::Toggle => {
+                row.kind = "toggle";
+                row.checked = shown.unwrap_or(vanilla).eq_ignore_ascii_case("true");
+            }
+            PropertyValueKind::Integer { .. } => row.kind = "integer",
+            PropertyValueKind::Choice(names) => {
+                row.kind = "choice";
+                row.choices = std::iter::once(lookup_args(
+                    "gui-property-unset-choice",
+                    [("value", Arg::from(vanilla))],
+                ))
+                .chain(names.iter().map(|name| (*name).to_owned()))
+                .collect();
+                row.choice_index = shown
+                    .and_then(|value| name_position(definition, value))
+                    .and_then(|position| i32::try_from(position + 1).ok())
+                    .unwrap_or(0);
+            }
+            PropertyValueKind::Text => {}
+        }
+        row
+    }
+}
+
 /// One entry of a choice list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ChoiceEntry {
@@ -234,7 +396,9 @@ fn choice_entries(definition: &PropertyDefinition, stored: Option<&str>) -> Vec<
     }
 }
 
-/// One row as the form shows it.
+/// One row as the form shows it. Its flags mirror the row the markup draws,
+/// which is a plain record rather than a state to encode.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PropertyRow {
     pub(crate) key: &'static str,
@@ -255,6 +419,8 @@ pub(crate) struct PropertyRow {
     pub(crate) changed: bool,
     pub(crate) awaiting_restart: bool,
     pub(crate) error: String,
+    /// Whether the row offers to go back to having no value of its own.
+    pub(crate) can_reset: bool,
 }
 
 fn group_heading(group: PropertyGroup) -> String {
@@ -347,6 +513,7 @@ fn property_row(
         changed: draft.is_some(),
         awaiting_restart: stored.awaiting_restart.contains(definition.key),
         error,
+        can_reset: false,
     };
     match definition.kind {
         PropertyValueKind::Toggle => {
@@ -544,6 +711,64 @@ mod tests {
         let rows = property_rows(&properties, &PropertyDrafts::default(), false);
         assert!(row(&rows, "motd").awaiting_restart);
         assert!(!row(&rows, "pvp").awaiting_restart);
+    }
+
+    fn defaults(values: &[(&str, &str)]) -> BTreeMap<String, String> {
+        values
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn a_default_can_be_set_changed_and_taken_away() {
+        let mut form = ServerDefaultsForm::default();
+        form.load(defaults(&[("motd", "Repro"), ("pvp", "false")]));
+
+        form.edit("view-distance", "16");
+        form.reset("motd");
+        form.choose("difficulty", 4);
+        assert_eq!(
+            form.values().expect("valid"),
+            defaults(&[
+                ("difficulty", "hard"),
+                ("pvp", "false"),
+                ("view-distance", "16")
+            ])
+        );
+        let view = form.view();
+        assert_eq!(view.edits, 3);
+        let motd = view
+            .rows
+            .iter()
+            .find(|row| row.key == "motd")
+            .expect("motd");
+        assert!(!motd.can_reset);
+        assert!(motd.changed);
+
+        form.choose("difficulty", 0);
+        form.edit("view-distance", "");
+        form.edit("motd", "Repro");
+        assert_eq!(form.view().edits, 0);
+    }
+
+    #[test]
+    fn unsaved_defaults_survive_a_reload_of_what_is_stored_until_it_changes() {
+        let mut form = ServerDefaultsForm::default();
+        assert!(form.load(defaults(&[("motd", "Repro")])));
+        form.edit("pvp", "false");
+        assert!(!form.load(defaults(&[("motd", "Repro")])));
+        assert_eq!(form.view().edits, 1);
+        assert!(form.load(defaults(&[("motd", "Repro"), ("pvp", "false")])));
+        assert_eq!(form.view().edits, 0);
+    }
+
+    #[test]
+    fn a_default_its_key_refuses_blocks_the_save() {
+        let mut form = ServerDefaultsForm::default();
+        form.edit("view-distance", "64");
+        assert!(form.values().is_none());
+        assert!(!form.view().edits_valid);
     }
 
     #[test]

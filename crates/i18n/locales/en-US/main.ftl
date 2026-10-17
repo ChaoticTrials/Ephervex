@@ -2617,9 +2617,19 @@ gui-property-group-advanced = Advanced
 gui-server-settings = Server settings
 gui-server-settings-detail = Typed settings from server.properties. Other entries in the file are kept as they are. Open Server Folder to edit the rest.
 gui-server-settings-advanced = Show advanced
+gui-settings-server-properties = Server Properties
+gui-server-defaults-intro = Defaults for the server.properties of new servers.
+gui-server-defaults-detail = A value set here is written into every new server's server.properties that does not already have one, including servers built from a pack's server files. Servers that exist are not changed. Without a value, a new server uses Minecraft's own default.
+gui-server-defaults-saved = Saved the server.properties defaults.
 # $value is the value the server uses instead.
 gui-property-not-set = Not in server.properties. The server uses { $value }.
 gui-property-not-set-empty = Not in server.properties. The server leaves it empty.
+# $value is the value a new server gets without a default.
+gui-property-default-unset = No default. A new server gets { $value }.
+gui-property-default-unset-empty = No default. A new server leaves it empty.
+gui-property-reset = Reset
+# $value names the setting.
+gui-property-reset-named = Reset { $value }
 # $value is the value the server uses instead.
 gui-property-unset-choice = Not set ({ $value })
 gui-property-changed = Changed
