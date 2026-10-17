@@ -2431,6 +2431,7 @@ gui-instance-settings-unavailable = Instance-owned Minecraft settings
 gui-instance-settings-unavailable-detail = The current core safely applies known Vanilla defaults when an instance is created, but does not expose a typed editor for an existing instance. Unknown and mod-added options remain untouched.
 gui-open-global-defaults = Open Global Defaults
 gui-filter-servers = Filter servers...
+gui-loading-servers = Loading servers...
 gui-no-servers = No servers yet
 gui-no-servers-detail = Create a standalone exact server or create one linked to a client reproduction environment.
 gui-no-standalone-servers-detail = No standalone servers are shown. Linked servers remain available from their client workspaces.

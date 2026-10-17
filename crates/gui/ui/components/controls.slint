@@ -862,6 +862,17 @@ export component EmptyState inherits VerticalLayout {
     }
 }
 
+// A list that has not arrived yet, in the space the list will take. The
+// spinner is a fixed size, which a vertical layout leaves at its left edge,
+// so it is centered by a row of its own.
+export component LoadingState inherits VerticalLayout {
+    in property <string> text;
+    alignment: center;
+    spacing: 10px;
+    HorizontalLayout { alignment: center; BusySpinner { width: 38px; height: 38px; } }
+    BodyText { text: root.text; horizontal-alignment: center; }
+}
+
 export component ToastPanel inherits Rectangle {
     in property <string> message;
     in property <bool> error;

@@ -14,6 +14,7 @@ import {
     IconButton,
     InlineToggle,
     LabeledToggle,
+    LoadingState,
     NavItem,
     Pill,
     SettingCard,
@@ -1035,7 +1036,10 @@ export component AppWindow inherits Window {
                             padding: 24px; spacing: 18px;
                             HorizontalLayout {
                                 PageIntro { title: GuiI18n.text("gui-instances"); subtitle: GuiI18n.text("gui-instances-detail"); }
-                                BodyText { text: root.instance-filters-active > 0 ? GuiI18n.values("gui-instances-shown-of-total", "" + root.instances.length, "" + root.instance-total) : GuiI18n.count("gui-client-instances-count", root.instances.length); color: Theme.text-muted; }
+                                // No count until there is a list to count. A
+                                // list that loaded before the service went
+                                // away still has one.
+                                if !root.loading && (root.startup-error == "" || root.instance-total > 0) : BodyText { text: root.instance-filters-active > 0 ? GuiI18n.values("gui-instances-shown-of-total", "" + root.instances.length, "" + root.instance-total) : GuiI18n.count("gui-client-instances-count", root.instances.length); color: Theme.text-muted; }
                             }
                             // The layout's own padding is its inset, so the
                             // card is exactly as tall as what it holds.
@@ -1076,7 +1080,11 @@ export component AppWindow inherits Window {
                                     }
                                 }
                             }
-                            if root.loading && root.startup-error == "" : VerticalLayout { alignment: center; BusySpinner { width: 38px; height: 38px; } BodyText { text: GuiI18n.text("gui-loading-instances"); horizontal-alignment: center; } }
+                            if root.loading && root.startup-error == "" : LoadingState { text: GuiI18n.text("gui-loading-instances"); }
+                            // With the service down nothing else takes the
+                            // page's height, and the header and filter bar
+                            // would be spread down it.
+                            if root.startup-error != "" && (root.loading || (root.instances.length == 0 && root.pending-instances.length == 0)) : Rectangle { vertical-stretch: 1; }
                             if !root.loading && root.startup-error == "" && root.instance-total == 0 && root.instances.length == 0 && root.pending-instances.length == 0 : EmptyState {
                                 title: GuiI18n.text("gui-no-client-instances");
                                 message: GuiI18n.text("gui-no-client-instances-detail");
@@ -1167,8 +1175,10 @@ export component AppWindow inherits Window {
                                 PageIntro { title: GuiI18n.text("gui-servers"); subtitle: GuiI18n.text("gui-servers-detail"); }
                                 TextField { text <=> root.server-query; placeholder: GuiI18n.text("gui-filter-servers"); input-type: InputType.search; width: 290px; accepted => { root.refresh(); } }
                             }
-                            if root.global-servers.length == 0 && root.pending-servers.length == 0 : EmptyState { icon: @image-url("../../../assets/icons/nav-servers.svg"); title: GuiI18n.text("gui-no-servers"); message: GuiI18n.text("gui-no-standalone-servers-detail"); primary-text: GuiI18n.text("gui-modal-new-server"); primary => { root.create-server-client-id = ""; root.create-server-name = ""; root.recompute-create-server-name(); root.modal-error = ""; root.request-version-catalog(); root.warm-language-catalog(root.create-server-minecraft); root.create-server-pack = ""; root.create-server-pack-name = ""; root.modal = "create-server"; } }
-                            if root.global-servers.length > 0 || root.pending-servers.length > 0 : ScrollView { viewport-width: self.width; VerticalLayout { spacing: 12px; for pending in root.pending-servers : PendingCard { item: pending; } for item[index] in root.global-servers : ServerCard { item: item; toggle-favorite(id, favorite) => { root.set-favorite("server", id, favorite); } pick-icon(id) => { root.pick-host-icon("server", id); } clear-icon(id) => { root.clear-host-icon("server", id); } selected: item.id == root.selected-global-server-id; choose(id) => { root.selected-global-server-id = id; root.selected-global-server-index = index; root.select-server(id); } primary(id) => { if item.can-start { root.server-start(id); } else { root.server-stop(id); } } open-workspace(id) => { root.selected-global-server-id = id; root.selected-global-server-index = index; root.select-server(id); root.open-workspace("server", id, "Overview"); } open-folder(id) => { root.open-server-folder(id); } restart(id) => { root.server-restart(id); } kill(id, name) => { root.pending-action-id = id; root.pending-action-name = name; root.modal = "kill"; } rename(id, name) => { root.pending-action-kind = "server"; root.pending-action-id = id; root.pending-rename-text = name; root.modal-error = ""; root.modal = "rename"; } delete(id, name) => { root.pending-action-id = id; root.pending-action-name = name; root.pending-snapshot-deletion-note = item.snapshot-deletion-note; root.modal-error = ""; root.modal = "delete-server"; } } } }
+                            if root.loading && root.startup-error == "" : LoadingState { text: GuiI18n.text("gui-loading-servers"); }
+                            if root.startup-error != "" && (root.loading || (root.global-servers.length == 0 && root.pending-servers.length == 0)) : Rectangle { vertical-stretch: 1; }
+                            if !root.loading && root.startup-error == "" && root.global-servers.length == 0 && root.pending-servers.length == 0 : EmptyState { icon: @image-url("../../../assets/icons/nav-servers.svg"); title: GuiI18n.text("gui-no-servers"); message: GuiI18n.text("gui-no-standalone-servers-detail"); primary-text: GuiI18n.text("gui-modal-new-server"); primary => { root.create-server-client-id = ""; root.create-server-name = ""; root.recompute-create-server-name(); root.modal-error = ""; root.request-version-catalog(); root.warm-language-catalog(root.create-server-minecraft); root.create-server-pack = ""; root.create-server-pack-name = ""; root.modal = "create-server"; } }
+                            if !root.loading && (root.global-servers.length > 0 || root.pending-servers.length > 0) : ScrollView { viewport-width: self.width; VerticalLayout { spacing: 12px; for pending in root.pending-servers : PendingCard { item: pending; } for item[index] in root.global-servers : ServerCard { item: item; toggle-favorite(id, favorite) => { root.set-favorite("server", id, favorite); } pick-icon(id) => { root.pick-host-icon("server", id); } clear-icon(id) => { root.clear-host-icon("server", id); } selected: item.id == root.selected-global-server-id; choose(id) => { root.selected-global-server-id = id; root.selected-global-server-index = index; root.select-server(id); } primary(id) => { if item.can-start { root.server-start(id); } else { root.server-stop(id); } } open-workspace(id) => { root.selected-global-server-id = id; root.selected-global-server-index = index; root.select-server(id); root.open-workspace("server", id, "Overview"); } open-folder(id) => { root.open-server-folder(id); } restart(id) => { root.server-restart(id); } kill(id, name) => { root.pending-action-id = id; root.pending-action-name = name; root.modal = "kill"; } rename(id, name) => { root.pending-action-kind = "server"; root.pending-action-id = id; root.pending-rename-text = name; root.modal-error = ""; root.modal = "rename"; } delete(id, name) => { root.pending-action-id = id; root.pending-action-name = name; root.pending-snapshot-deletion-note = item.snapshot-deletion-note; root.modal-error = ""; root.modal = "delete-server"; } } } }
                         }
                     }
                     if root.show-inspector && root.selected-global-server-index >= 0 : Rectangle { width: 360px; background: Theme.surface; border-width: 1px; border-color: Theme.border;
