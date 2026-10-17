@@ -37,14 +37,15 @@ use crate::presentation::{
     ModRequirementPresentation, ThirdPartyLicenses, ToastStack, parse_network, validate_ip,
     validate_port,
 };
+use crate::server_property_form;
 use crate::settings_drafts::{DraftField, SettingsDrafts, SettingsSave};
 use crate::ui::{
     AccountRow, ActivityRow, AppWindow, BlockedFileRow, DiagnosticRow, DiskUsageRow, GuiI18n,
     HostView, ImpactRow, ImportDuplicateRow, ImportOptionRow, InstanceRow, IsolationCandidateRow,
     JavaRow, LicenseRow, LinkedTargetRow, LocalModClashRow, LogChunk, ModRow, ModSearchRow,
     ModVersionRow, NameRules, PendingEntityRow, PromoteServerRow, PropertyRules, RelationRow,
-    RunningRow, ServerPackRules, ServerRow, SnapshotRow, Theme, WindowSizePreview,
-    WorkflowActionRow,
+    RunningRow, ServerPackRules, ServerPropertyGroup, ServerPropertyRow, ServerRow, SnapshotRow,
+    Theme, WindowSizePreview, WorkflowActionRow,
 };
 use crate::window_aspect;
 use crate::workspace_layout::{PaneId, Revealed, Surface, WorkspaceLayout};
@@ -2490,6 +2491,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         acquisition_prompts: Rc::default(),
         stand_in_prompts: Rc::default(),
         plan_requests: Rc::default(),
+        properties: Rc::default(),
         commands: backend.commands.clone(),
     };
     register_i18n(ui);
@@ -5114,6 +5116,8 @@ struct Workspace {
     stand_in_prompts: Rc<RefCell<std::collections::VecDeque<backend::ModStandInData>>>,
     /// The mod plans asked for and not yet shown.
     plan_requests: Rc<ModPlanRequests>,
+    /// Each shown server's Properties form, with its unsaved edits.
+    properties: Rc<RefCell<server_property_form::ServerPropertyForms>>,
     /// What a surface asks the worker for when a pane opens it.
     commands: Sender<Command>,
 }
@@ -5873,7 +5877,7 @@ fn register_server_actions(ui: &AppWindow, commands: &Sender<Command>, workspace
 
     register_name_rules(ui);
     register_server_pack_rules(ui);
-    register_server_property_actions(ui, commands);
+    register_server_property_actions(ui, commands, workspace);
 
     let sender = commands.clone();
     ui.on_open_server_folder(move |id| {
@@ -6052,195 +6056,164 @@ fn server_pack_conflict(
         .unwrap_or_default()
 }
 
-fn register_server_property_actions(ui: &AppWindow, commands: &Sender<Command>) {
+fn register_server_property_actions(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    workspace: &Workspace,
+) {
     let rules = ui.global::<PropertyRules>();
     rules.on_port_error(|port| validate_port(&port).message.into());
     rules.on_address_error(|address, custom| validate_ip(&address, custom).message.into());
-    rules.on_players_error(|players, unset| validate_player_count(&players, unset).into());
-    rules.on_is_unset(|unset, key| presentation::property_is_unset(&unset, &key));
-    rules.on_without_unset(|unset, key| presentation::property_without_unset(&unset, &key).into());
-    rules.on_choice_model(|key, stored, unset| {
-        let entries: Vec<SharedString> = presentation::property_choice_model(&key, &stored, unset)
-            .into_iter()
-            .map(Into::into)
-            .collect();
-        ModelRc::new(VecModel::from(entries))
+
+    let forms = Rc::clone(&workspace.properties);
+    let shown = workspace.clone();
+    ui.on_edit_server_property(move |id, key, value| {
+        if forms.borrow_mut().edit(&id, &key, &value) {
+            publish_property_form(&shown, &id, false);
+        }
     });
-    rules.on_choice_index(|key, stored, unset| {
-        presentation::property_choice_index(&key, &stored, unset)
+    let forms = Rc::clone(&workspace.properties);
+    let shown = workspace.clone();
+    ui.on_choose_server_property(move |id, key, index| {
+        let Ok(index) = usize::try_from(index) else {
+            return;
+        };
+        if forms.borrow_mut().choose(&id, &key, index) {
+            publish_property_form(&shown, &id, false);
+        }
     });
-    rules.on_choice_value(|key, stored, picked, unset| {
-        presentation::property_choice_value(&key, &stored, &picked, unset).into()
+    let forms = Rc::clone(&workspace.properties);
+    let shown = workspace.clone();
+    ui.on_show_advanced_server_properties(move |id, show| {
+        if forms.borrow_mut().show_advanced(&id, show) {
+            publish_property_form(&shown, &id, true);
+        }
+    });
+    let forms = Rc::clone(&workspace.properties);
+    let shown = workspace.clone();
+    ui.on_discard_server_properties(move |id| {
+        if forms.borrow_mut().discard(&id) {
+            publish_property_form(&shown, &id, true);
+        }
     });
 
     let sender = commands.clone();
+    let forms = Rc::clone(&workspace.properties);
     let weak = ui.as_weak();
-    ui.on_save_server_properties(
-        move |id,
-              motd,
-              max_players,
-              difficulty,
-              gamemode,
-              allow_flight,
-              pvp,
-              allowlist,
-              online_mode,
-              access,
-              address,
-              port,
-              unset| {
-            let Some(server) = backend::parse_server_id(&id) else {
-                return;
-            };
-            // The form shows each field's problem as it is typed; a save with
-            // one left is refused here all the same.
-            let Ok(network) = parse_network(&access, &address, online_mode, &port) else {
-                return;
-            };
-            let Some(values) = server_property_values(
-                &motd,
-                &max_players,
-                &difficulty,
-                &gamemode,
-                (allow_flight, pvp, allowlist),
-                &unset,
-            ) else {
-                if let Some(ui) = weak.upgrade() {
-                    ui.invoke_present_toast(
-                        lookup("gui-server-property-values-invalid").into(),
-                        true,
-                    );
-                }
-                return;
-            };
-            let loaded = weak
-                .upgrade()
-                .and_then(|ui| loaded_property_values(&ui, &id));
-            send(
-                &sender,
-                Command::SaveServerProperties {
-                    server,
-                    network,
-                    values: changed_property_values(values, loaded.as_deref()),
-                },
-            );
-        },
-    );
+    ui.on_save_server_properties(move |id, online_mode, access, address, port| {
+        let Some(server) = backend::parse_server_id(&id) else {
+            return;
+        };
+        // The form shows each field's problem as it is typed; a save with
+        // one left is refused here all the same.
+        let Ok(network) = parse_network(&access, &address, online_mode, &port) else {
+            return;
+        };
+        let Some(values) = forms.borrow().values(&id) else {
+            if let Some(ui) = weak.upgrade() {
+                ui.invoke_present_toast(lookup("gui-hint-fix-property-values").into(), true);
+            }
+            return;
+        };
+        send(
+            &sender,
+            Command::SaveServerProperties {
+                server,
+                network,
+                values,
+            },
+        );
+    });
 }
 
-/// What the Properties form of `server` started from, as the values a save
-/// of it unchanged would send. A stored value the form would refuse is part
-/// of it too, so the rest of a save that corrects it is still compared.
-fn loaded_property_values(ui: &AppWindow, server: &str) -> Option<Vec<(String, String)>> {
-    let view = ui
-        .get_host_views()
-        .iter()
-        .find(|view| view.kind == "server" && view.id == server)?;
-    Some(property_pairs(
-        &view.property_motd,
-        &view.property_max_players,
-        &view.property_difficulty,
-        &view.property_gamemode,
-        (
-            view.property_allow_flight,
-            view.property_pvp,
-            view.property_allowlist,
-        ),
-        &view.property_unset,
-    ))
-}
-
-/// Keeps only the values the user changed from what the form started from. A
-/// running server rewrites some of these itself, such as `white-list` for
-/// `/whitelist on`, and a save must not put back what the form showed before.
-fn changed_property_values(
-    values: Vec<(String, String)>,
-    loaded: Option<&[(String, String)]>,
-) -> Vec<(String, String)> {
-    let Some(loaded) = loaded else {
-        return values;
+/// Shows `server`'s Properties form in every pane showing the server. A
+/// `fresh` form starts its rows over, which is how a field the user typed in
+/// takes the stored value again.
+fn publish_property_form(workspace: &Workspace, server: &str, fresh: bool) {
+    let Some(form) = workspace.properties.borrow().view(server) else {
+        return;
     };
-    values
-        .into_iter()
-        .filter(|value| !loaded.contains(value))
-        .collect()
+    let Some(id) = backend::parse_server_id(server) else {
+        return;
+    };
+    let mut groups: Vec<(SharedString, Vec<ServerPropertyRow>)> = Vec::new();
+    for row in form.rows {
+        if !row.heading.is_empty() || groups.is_empty() {
+            groups.push((row.heading.as_str().into(), Vec::new()));
+        }
+        if let Some((_, rows)) = groups.last_mut() {
+            rows.push(server_property_row(row));
+        }
+    }
+    workspace.update(InstalledHost::Server(id), |view| {
+        view.property_groups = if fresh {
+            property_groups_model(groups)
+        } else {
+            reuse_property_groups(&view.property_groups, groups)
+        };
+        view.property_edits = i32::try_from(form.edits).unwrap_or(i32::MAX);
+        view.property_edits_invalid = !form.edits_valid;
+        view.property_show_advanced = form.show_advanced;
+    });
 }
 
-// Difficulty and game mode are written as the form holds them: the form
-// itself keeps a stored value it has no name for, and no choice here refuses it.
-// A property the file does not hold stays out of the file until it is set: an
-// empty field, or a toggle the user has not touched, is left alone.
-fn server_property_values(
-    motd: &str,
-    max_players: &str,
-    difficulty: &str,
-    gamemode: &str,
-    (allow_flight, pvp, allowlist): (bool, bool, bool),
-    unset: &str,
-) -> Option<Vec<(String, String)>> {
-    if !validate_player_count(
-        max_players,
-        presentation::property_is_unset(unset, "max-players"),
-    )
-    .is_empty()
-    {
-        return None;
-    }
-    Some(property_pairs(
-        motd,
-        max_players,
-        difficulty,
-        gamemode,
-        (allow_flight, pvp, allowlist),
-        unset,
+fn property_groups_model(
+    groups: Vec<(SharedString, Vec<ServerPropertyRow>)>,
+) -> ModelRc<ServerPropertyGroup> {
+    ModelRc::new(VecModel::from(
+        groups
+            .into_iter()
+            .map(|(heading, rows)| ServerPropertyGroup {
+                heading,
+                rows: ModelRc::new(VecModel::from(rows)),
+            })
+            .collect::<Vec<_>>(),
     ))
 }
 
-/// The form's values as a save writes them, whether or not they are valid.
-fn property_pairs(
-    motd: &str,
-    max_players: &str,
-    difficulty: &str,
-    gamemode: &str,
-    (allow_flight, pvp, allowlist): (bool, bool, bool),
-    unset: &str,
-) -> Vec<(String, String)> {
-    let mut values = Vec::new();
-    for (key, value) in [
-        ("motd", motd),
-        ("max-players", max_players),
-        ("difficulty", difficulty),
-        ("gamemode", gamemode),
-    ] {
-        if !(value.is_empty() && presentation::property_is_unset(unset, key)) {
-            values.push((key.to_owned(), value.to_owned()));
+/// Writes `groups` into the cards already shown, row by row, so a field the
+/// user is typing in keeps its place. Cards that come or go start over.
+fn reuse_property_groups(
+    model: &ModelRc<ServerPropertyGroup>,
+    groups: Vec<(SharedString, Vec<ServerPropertyRow>)>,
+) -> ModelRc<ServerPropertyGroup> {
+    let same_cards = model.row_count() == groups.len()
+        && groups.iter().enumerate().all(|(index, (heading, _))| {
+            model
+                .row_data(index)
+                .is_some_and(|group| group.heading == *heading)
+        });
+    if !same_cards {
+        return property_groups_model(groups);
+    }
+    for (index, (_, rows)) in groups.into_iter().enumerate() {
+        if let Some(group) = model.row_data(index) {
+            let _ = workspace::reuse(&group.rows, rows);
         }
     }
-    for (key, value) in [
-        ("allow-flight", allow_flight),
-        ("pvp", pvp),
-        ("white-list", allowlist),
-    ] {
-        if !presentation::property_is_unset(unset, key) {
-            values.push((key.to_owned(), value.to_string()));
-        }
-    }
-    values
+    model.clone()
 }
 
-/// An empty count is acceptable only while the file holds no maximum, which
-/// then stays unset.
-fn validate_player_count(value: &str, unset: bool) -> String {
-    if value.is_empty() && unset {
-        return String::new();
-    }
-    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return lookup("gui-digits-only");
-    }
-    if value.parse::<u32>().is_ok_and(|players| players > 0) {
-        String::new()
-    } else {
-        lookup("gui-player-count-minimum")
+fn server_property_row(row: server_property_form::PropertyRow) -> ServerPropertyRow {
+    ServerPropertyRow {
+        key: row.key.into(),
+        label: row.label.into(),
+        detail: row.detail.into(),
+        kind: row.kind.into(),
+        text: row.text.into(),
+        placeholder: row.placeholder.into(),
+        checked: row.checked,
+        choices: ModelRc::new(VecModel::from(
+            row.choices
+                .into_iter()
+                .map(SharedString::from)
+                .collect::<Vec<_>>(),
+        )),
+        choice_index: row.choice_index,
+        note: row.note.into(),
+        changed: row.changed,
+        awaiting_restart: row.awaiting_restart,
+        error: row.error.into(),
     }
 }
 
@@ -9813,15 +9786,16 @@ fn apply_server_workspace(workspace: &Workspace, data: ServerWorkspaceData) {
     let Some(server) = backend::parse_server_id(&data.server) else {
         return;
     };
+    workspace.properties.borrow_mut().load(
+        &data.server,
+        server_property_form::StoredProperties {
+            values: data.values,
+            awaiting_restart: data.awaiting_restart,
+            lists_every_key: data.lists_every_key,
+        },
+    );
+    publish_property_form(workspace, &data.server, true);
     workspace.update(InstalledHost::Server(server), |view| {
-        view.property_motd = data.motd.into();
-        view.property_max_players = data.max_players.into();
-        view.property_difficulty = data.difficulty.into();
-        view.property_gamemode = data.gamemode.into();
-        view.property_allow_flight = data.allow_flight;
-        view.property_pvp = data.pvp;
-        view.property_allowlist = data.allowlist;
-        view.property_unset = data.unset.join(",").into();
         view.property_online_mode = data.network.online_mode;
         view.property_access = match data.network.access {
             ephervex_core::NetworkAccess::Localhost => "Localhost",
@@ -13207,6 +13181,7 @@ mod tests {
             acquisition_prompts: Rc::default(),
             stand_in_prompts: Rc::default(),
             plan_requests: Rc::default(),
+            properties: Rc::default(),
             commands: sender,
         };
         register_workspace(ui, &workspace);
@@ -16075,71 +16050,12 @@ mod tests {
         assert!(!source.contains("root.server-query)"));
     }
 
-    #[test]
-    fn player_count_accepts_positive_digits_only() {
-        assert!(validate_player_count("20", false).is_empty());
-        assert!(!validate_player_count("0", false).is_empty());
-        assert!(!validate_player_count("2.5", false).is_empty());
-        assert!(!validate_player_count("many", false).is_empty());
-        assert!(!validate_player_count("", false).is_empty());
-        assert!(!validate_player_count("many", true).is_empty());
-    }
-
-    #[test]
-    fn an_empty_player_count_is_accepted_only_while_the_file_holds_none() {
-        assert!(validate_player_count("", true).is_empty());
-        assert!(!validate_player_count("", false).is_empty());
-    }
-
-    #[test]
-    fn saving_keeps_a_difficulty_and_game_mode_the_form_has_no_name_for() {
-        for (difficulty, gamemode) in [("1", "0"), ("hardcore", "7"), ("normal", "survival")] {
-            let values =
-                server_property_values("A", "20", difficulty, gamemode, (false, true, false), "")
-                    .expect("a port-only save is not refused");
-            assert!(values.contains(&("difficulty".to_owned(), difficulty.to_owned())));
-            assert!(values.contains(&("gamemode".to_owned(), gamemode.to_owned())));
-        }
-        assert!(server_property_values("A", "many", "1", "0", (false, true, false), "").is_none());
-    }
-
-    #[test]
-    fn saving_writes_no_value_for_a_property_the_file_does_not_hold() {
-        let every_key = "motd,max-players,difficulty,gamemode,allow-flight,pvp,white-list";
-        let values = server_property_values("", "", "", "", (false, true, false), every_key)
-            .expect("empty unset fields are not refused");
-        assert!(values.is_empty());
-    }
-
-    #[test]
-    fn saving_writes_an_unset_property_once_the_user_sets_it() {
-        let values = server_property_values(
-            "Hello",
-            "8",
-            "easy",
-            "",
-            (true, true, false),
-            "motd,max-players,difficulty,gamemode,pvp,white-list",
-        )
-        .expect("set values are accepted");
-        assert_eq!(
-            values,
-            [
-                ("motd".to_owned(), "Hello".to_owned()),
-                ("max-players".to_owned(), "8".to_owned()),
-                ("difficulty".to_owned(), "easy".to_owned()),
-                ("allow-flight".to_owned(), "true".to_owned()),
-            ]
-        );
-    }
-
     /// What a Properties save of a running server sends after the form was
-    /// loaded with `loaded_players` and submitted with `motd` and `players`,
-    /// while the server turned its allowlist on behind the form.
+    /// loaded with `stored` and the user made `edits`, while the server turned
+    /// its allowlist on behind the form.
     fn values_sent_by_a_running_save(
-        loaded_players: &str,
-        motd: &str,
-        players: &str,
+        stored: &[(&str, &str)],
+        edits: &[(&str, &str)],
     ) -> Vec<(String, String)> {
         let ui = test_window();
         let (workspace, commands) = test_workspace_sending(&ui);
@@ -16156,33 +16072,29 @@ mod tests {
             &workspace,
             ServerWorkspaceData {
                 server: server.to_string(),
-                motd: "before".to_owned(),
-                max_players: loaded_players.to_owned(),
-                difficulty: "1".to_owned(),
-                gamemode: "survival".to_owned(),
-                allow_flight: false,
-                pvp: true,
-                allowlist: false,
-                unset: Vec::new(),
+                values: stored
+                    .iter()
+                    .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                    .collect(),
+                awaiting_restart: std::collections::BTreeSet::new(),
+                lists_every_key: true,
                 network: ephervex_core::ServerNetworkSettings::default(),
             },
         );
+        for (key, value) in edits {
+            ui.invoke_edit_server_property(
+                server.to_string().into(),
+                (*key).into(),
+                (*value).into(),
+            );
+        }
 
-        // The form still shows the allowlist off.
         ui.invoke_save_server_properties(
             server.to_string().into(),
-            motd.into(),
-            players.into(),
-            "1".into(),
-            "survival".into(),
-            false,
-            true,
-            false,
             false,
             "Localhost".into(),
             SharedString::default(),
             "25565".into(),
-            SharedString::default(),
         );
         commands
             .try_iter()
@@ -16195,26 +16107,67 @@ mod tests {
 
     #[test]
     fn a_save_sends_only_the_properties_changed_since_the_form_was_loaded() {
+        let stored = [
+            ("motd", "before"),
+            ("max-players", "20"),
+            ("white-list", "false"),
+        ];
         assert_eq!(
-            values_sent_by_a_running_save("20", "after", "20"),
+            values_sent_by_a_running_save(&stored, &[("motd", "after")]),
             [("motd".to_owned(), "after".to_owned())]
         );
     }
 
     #[test]
     fn a_save_that_corrects_a_stored_player_count_sends_only_what_changed() {
+        let stored = [("max-players", "0"), ("white-list", "false")];
         assert_eq!(
-            values_sent_by_a_running_save("0", "before", "20"),
+            values_sent_by_a_running_save(&stored, &[("max-players", "20")]),
             [("max-players".to_owned(), "20".to_owned())]
         );
     }
 
     #[test]
-    fn saving_writes_an_empty_value_the_file_holds() {
-        let values =
-            server_property_values("", "20", "normal", "survival", (false, true, false), "")
-                .expect("a stored empty message of the day is kept");
-        assert!(values.contains(&("motd".to_owned(), String::new())));
+    fn a_save_with_a_value_its_key_refuses_sends_nothing() {
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        register_server_actions(&ui, &workspace.commands, &workspace);
+        let server = ephervex_model::ServerId::new();
+        workspace.state.borrow_mut().set_rows(
+            Vec::new(),
+            vec![ServerRow {
+                id: server.to_string().into(),
+                ..ServerRow::default()
+            }],
+        );
+        workspace.open(&ui, InstalledHost::Server(server), Surface::Properties);
+        apply_server_workspace(
+            &workspace,
+            ServerWorkspaceData {
+                server: server.to_string(),
+                values: std::collections::BTreeMap::new(),
+                awaiting_restart: std::collections::BTreeSet::new(),
+                lists_every_key: false,
+                network: ephervex_core::ServerNetworkSettings::default(),
+            },
+        );
+        ui.invoke_edit_server_property(
+            server.to_string().into(),
+            "view-distance".into(),
+            "99".into(),
+        );
+        ui.invoke_save_server_properties(
+            server.to_string().into(),
+            false,
+            "Localhost".into(),
+            SharedString::default(),
+            "25565".into(),
+        );
+        assert!(
+            commands
+                .try_iter()
+                .all(|command| !matches!(command, Command::SaveServerProperties { .. }))
+        );
     }
 
     #[test]

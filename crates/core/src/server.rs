@@ -701,6 +701,7 @@ impl App {
         key: &str,
         value: &str,
     ) -> CoreResult<PropertiesTakeEffect> {
+        ephervex_server::check_property_value(key, value)?;
         let (_claim, record, running) = self.claim_server_for_properties(id)?;
         let values = [(key.to_owned(), value.to_owned())];
         if running {
@@ -734,6 +735,9 @@ impl App {
         network: ServerNetworkSettings,
         values: &[(String, String)],
     ) -> CoreResult<SavedServerProperties> {
+        for (key, value) in values {
+            ephervex_server::check_property_value(key, value)?;
+        }
         let (claim, mut record, running) = self.claim_server_for_properties(id)?;
         let requested = network_properties(&network)?;
         requested.validate()?;
@@ -4819,6 +4823,40 @@ mod tests {
             ControlResponse::Exited(_)
         ));
         run.await.expect("join").expect("run");
+    }
+
+    #[test]
+    fn a_value_its_catalog_key_does_not_accept_is_refused_before_anything_is_written() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let server = scaffolded_server(&app);
+        let path = server_properties_path(&server);
+        let before = std::fs::read(&path).ok();
+
+        let single = app
+            .set_server_property(server.id, "view-distance", "64")
+            .expect_err("out of range");
+        let grouped = app
+            .set_server_properties(
+                server.id,
+                server.network.clone(),
+                &[
+                    ("motd".to_owned(), "fine".to_owned()),
+                    ("pvp".to_owned(), "maybe".to_owned()),
+                ],
+            )
+            .expect_err("not a toggle");
+
+        for error in [single, grouped] {
+            assert_eq!(
+                error.message_id(),
+                "error-server-property-invalid",
+                "{error}"
+            );
+        }
+        assert_eq!(std::fs::read(&path).ok(), before);
+        app.set_server_property(server.id, "some-mod-key", "anything")
+            .expect("a key outside the catalog is not interpreted");
     }
 
     #[test]

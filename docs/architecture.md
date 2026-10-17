@@ -389,6 +389,19 @@ Saving never restarts the server. Until a new process has read them, the
 header, Overview, and Properties show Restart required. Network settings stay
 editable only while the server is stopped.
 
+The Properties form edits the keys of a typed catalog in `ephervex-server`
+(`property_catalog.rs`): each key's group, value kind, accepted range or
+choices, and vanilla default. Core refuses a value a catalog key does not
+accept, from the form and the CLI alike. Keys outside the catalog, including
+remote administration such as RCON and query, are never interpreted and keep
+what the file holds. A server writes every key its release knows on its first
+start, so once a server has run the form lists only the keys its file holds;
+before that it lists the whole catalog. A key the file does not hold shows the
+value the server falls back to and is written only once the user sets it. A
+choice is written as its position, which every release reads, while servers
+before Minecraft 1.14 replace a name with their own default; a choice the file
+already stores as a name stays a name.
+
 The controller keeps pending starts, stops, console submissions, and observed
 run failures by server ID, alongside the existing host restart state. All views
 of a server share those guards and status. Snapshot values remain the baseline

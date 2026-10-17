@@ -260,10 +260,11 @@ fn a_running_servers_properties_keep_its_network_settings_and_say_when_the_rest_
             .unwrap_or_else(|| panic!("no control labeled {label}"));
         assert_eq!(control.accessible_enabled(), Some(false), "{label}");
     }
-    let motd = ElementHandle::find_by_accessible_label(&ui, &lookup("gui-default-motd"))
-        .find(|element| element.accessible_enabled().is_some())
-        .expect("message of the day");
-    assert_eq!(motd.accessible_enabled(), Some(true));
+    let advanced =
+        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-server-settings-advanced"))
+            .find(|element| element.accessible_enabled().is_some())
+            .expect("the switch for advanced settings");
+    assert_eq!(advanced.accessible_enabled(), Some(true));
 
     let mut row = server(true);
     row.restart_required = true;

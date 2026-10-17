@@ -9,10 +9,9 @@ mod support;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ephervex_gui::presentation;
 use ephervex_gui::ui::{
-    AppWindow, GuiI18n, HostView, InstanceRow, PropertyRules, ServerRow, Theme,
-    WorkspaceHostChoice, WorkspaceLinkedChoice, WorkspacePaneRow,
+    AppWindow, GuiI18n, HostView, InstanceRow, ServerPropertyGroup, ServerPropertyRow, ServerRow,
+    Theme, WorkspaceHostChoice, WorkspaceLinkedChoice, WorkspacePaneRow,
 };
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{
@@ -697,6 +696,22 @@ fn runtime_host(id: &str, min_memory: &str) -> HostView {
     view
 }
 
+/// One row of a server's Properties form, as the controller builds it.
+fn property_row(key: &str, kind: &str, text: &str) -> ServerPropertyRow {
+    ServerPropertyRow {
+        key: key.into(),
+        label: key.into(),
+        kind: kind.into(),
+        text: text.into(),
+        checked: text == "true",
+        choices: ModelRc::new(VecModel::from(vec![
+            slint::SharedString::from("peaceful"),
+            slint::SharedString::from("easy"),
+        ])),
+        ..ServerPropertyRow::default()
+    }
+}
+
 /// A server host whose stored properties differ from the other's, with the
 /// same revision every host has after its first load.
 fn properties_host(id: &str, motd: &str, port: &str, online_mode: bool) -> HostView {
@@ -704,10 +719,14 @@ fn properties_host(id: &str, motd: &str, port: &str, online_mode: bool) -> HostV
         id: id.into(),
         ..server(false)
     });
-    view.property_motd = motd.into();
-    view.property_max_players = "20".into();
-    view.property_difficulty = "normal".into();
-    view.property_gamemode = "survival".into();
+    view.property_groups = ModelRc::new(VecModel::from(vec![ServerPropertyGroup {
+        heading: "Gameplay".into(),
+        rows: ModelRc::new(VecModel::from(vec![
+            property_row("motd", "text", motd),
+            property_row("pvp", "toggle", "true"),
+            property_row("difficulty", "choice", "easy"),
+        ])),
+    }]));
     view.property_online_mode = online_mode;
     view.property_access = "Localhost".into();
     view.property_port = port.into();
@@ -764,12 +783,13 @@ fn save_host_runtime(ui: &AppWindow, pane: i32) -> (String, String, String) {
     saved.take().expect("Save reported the form")
 }
 
-/// What a pane's Properties form saves when Save is pressed.
-fn save_properties(ui: &AppWindow, pane: i32) -> (String, String, String, bool) {
+/// What a pane's Properties form saves when Save is pressed: the host's id,
+/// port and online mode.
+fn save_properties(ui: &AppWindow, pane: i32) -> (String, String, bool) {
     let saved = Rc::new(RefCell::new(None));
     let sink = Rc::clone(&saved);
-    ui.on_save_server_properties(move |id, motd, _, _, _, _, _, _, online, _, _, port, _| {
-        *sink.borrow_mut() = Some((id.to_string(), motd.to_string(), port.to_string(), online));
+    ui.on_save_server_properties(move |id, online, _, _, port| {
+        *sink.borrow_mut() = Some((id.to_string(), port.to_string(), online));
     });
     in_pane(
         ui,
@@ -783,222 +803,72 @@ fn save_properties(ui: &AppWindow, pane: i32) -> (String, String, String, bool) 
     saved.take().expect("Save reported the form")
 }
 
-/// Answers the Properties form's choice rules the way the controller does.
-fn install_choice_rules(ui: &AppWindow) {
-    let rules = ui.global::<PropertyRules>();
-    rules.on_choice_model(|key, stored, unset| {
-        let entries: Vec<slint::SharedString> =
-            presentation::property_choice_model(&key, &stored, unset)
-                .into_iter()
-                .map(Into::into)
-                .collect();
-        ModelRc::new(VecModel::from(entries))
-    });
-    rules.on_choice_index(|key, stored, unset| {
-        presentation::property_choice_index(&key, &stored, unset)
-    });
-    rules.on_choice_value(|key, stored, picked, unset| {
-        presentation::property_choice_value(&key, &stored, &picked, unset).into()
-    });
-    rules.on_is_unset(|unset, key| presentation::property_is_unset(&unset, &key));
-    rules.on_without_unset(|unset, key| presentation::property_without_unset(&unset, &key).into());
-}
-
-/// A window showing one server's Properties form, whose stored difficulty and
-/// game mode are the given text.
-fn properties_form(difficulty: &str, gamemode: &str) -> AppWindow {
+/// Each kind of row in a pane's Properties form reports its edit for the host
+/// the pane shows and the key it stands for.
+#[test]
+fn properties_rows_report_their_edits_for_the_panes_host() {
     let ui = window();
-    install_choice_rules(&ui);
-    let mut host = properties_host("aaaa", "A", "25565", true);
-    host.property_difficulty = difficulty.into();
-    host.property_gamemode = gamemode.into();
+    ui.window().set_size(PhysicalSize::new(2400, 2400));
     support::show(
         &ui,
         0,
-        vec![host],
-        vec![placed(1, 0, "Properties", 0, 0, false)],
+        vec![
+            properties_host("aaaa", "Server A", "25565", true),
+            properties_host("bbbb", "Server B", "25570", false),
+        ],
+        vec![
+            placed(1, 0, "Properties", 0, 0, false),
+            placed(2, 1, "Properties", 1, 0, false),
+        ],
     );
     settle(&ui);
-    ui
-}
-
-/// The difficulty and game mode combo boxes, in the order the form lays them out.
-fn choice_boxes(ui: &AppWindow) -> Vec<ElementHandle> {
-    let mut boxes: Vec<ElementHandle> = ElementHandle::find_by_element_type_name(ui, "ChoiceBox")
-        .filter(|element| element.accessible_role() == Some(AccessibleRole::Combobox))
-        .collect();
-    boxes.sort_by(|a, b| {
-        let (a, b) = (a.absolute_position(), b.absolute_position());
-        (a.y, a.x)
-            .partial_cmp(&(b.y, b.x))
-            .expect("finite positions")
+    let edits = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&edits);
+    ui.on_edit_server_property(move |id, key, value| {
+        sink.borrow_mut().push(format!("{id} {key}={value}"));
     });
-    // The network row's access box comes first.
-    boxes.split_off(boxes.len().saturating_sub(2))
-}
+    let sink = Rc::clone(&edits);
+    ui.on_choose_server_property(move |id, key, index| {
+        sink.borrow_mut().push(format!("{id} {key}#{index}"));
+    });
 
-fn shown_choices(ui: &AppWindow) -> Vec<String> {
-    choice_boxes(ui)
-        .iter()
-        .map(|element| element.accessible_value().expect("a value").to_string())
-        .collect()
-}
-
-/// Moves a combo box's selection down by the given number of entries from its
-/// open popup, the way the arrow keys do, and closes the popup.
-fn pick_choice_down(ui: &AppWindow, which: usize, steps: usize) {
-    choice_boxes(ui)[which].invoke_accessible_expand_action();
-    settle(ui);
-    for key in std::iter::repeat_n(Key::DownArrow, steps).chain([Key::Return]) {
+    in_pane(&ui, 2, "motd", AccessibleRole::TextInput)
+        .first()
+        .expect("the message row's field")
+        .query_descendants()
+        .match_id("TextField::input")
+        .find_first()
+        .expect("the field's input")
+        .set_accessible_value("Changed");
+    in_pane(&ui, 2, "pvp", AccessibleRole::Checkbox)
+        .first()
+        .expect("the pvp switch")
+        .invoke_accessible_default_action();
+    in_pane(&ui, 2, "difficulty", AccessibleRole::Combobox)
+        .first()
+        .expect("the difficulty choice")
+        .invoke_accessible_expand_action();
+    settle(&ui);
+    for key in [Key::DownArrow, Key::Return] {
         ui.window()
             .dispatch_event(WindowEvent::KeyPressed { text: key.into() });
         ui.window()
             .dispatch_event(WindowEvent::KeyReleased { text: key.into() });
     }
-    settle(ui);
-}
-
-/// The difficulty and game mode a pane's Properties form saves when Save is pressed.
-fn save_choices(ui: &AppWindow, pane: i32) -> (String, String) {
-    let saved = Rc::new(RefCell::new(None));
-    let sink = Rc::clone(&saved);
-    ui.on_save_server_properties(
-        move |_, _, _, difficulty, gamemode, _, _, _, _, _, _, _, _| {
-            *sink.borrow_mut() = Some((difficulty.to_string(), gamemode.to_string()));
-        },
-    );
-    in_pane(
-        ui,
-        pane,
-        &lookup("gui-save-changes"),
-        AccessibleRole::Button,
-    )
-    .first()
-    .expect("the pane's Save button")
-    .invoke_accessible_default_action();
-    saved.take().expect("Save reported the form")
-}
-
-/// A window showing one server's Properties form for a file that holds none of
-/// the gameplay keys.
-fn unset_properties_form() -> AppWindow {
-    let ui = window();
-    install_choice_rules(&ui);
-    let mut host = properties_host("aaaa", "", "25565", true);
-    host.property_max_players = "".into();
-    host.property_difficulty = "".into();
-    host.property_gamemode = "".into();
-    host.property_unset = "motd,max-players,difficulty,gamemode,allow-flight,pvp,white-list".into();
-    support::show(
-        &ui,
-        0,
-        vec![host],
-        vec![placed(1, 0, "Properties", 0, 0, false)],
-    );
     settle(&ui);
-    ui
-}
 
-/// The values a pane's Properties form saves when Save is pressed: the
-/// difficulty, the game mode and the keys still unset.
-fn save_unset(ui: &AppWindow, pane: i32) -> (String, String, String) {
-    let saved = Rc::new(RefCell::new(None));
-    let sink = Rc::clone(&saved);
-    ui.on_save_server_properties(
-        move |_, _, _, difficulty, gamemode, _, _, _, _, _, _, _, unset| {
-            *sink.borrow_mut() = Some((
-                difficulty.to_string(),
-                gamemode.to_string(),
-                unset.to_string(),
-            ));
-        },
-    );
-    in_pane(
-        ui,
-        pane,
-        &lookup("gui-save-changes"),
-        AccessibleRole::Button,
-    )
-    .first()
-    .expect("the pane's Save button")
-    .invoke_accessible_default_action();
-    saved.take().expect("Save reported the form")
-}
-
-/// A property the file does not hold is shown as not set and saved as not
-/// set, until the user sets it.
-#[test]
-fn the_properties_form_leaves_a_property_the_file_does_not_hold_unset_until_it_is_set() {
-    let ui = unset_properties_form();
-    let not_set = lookup("gui-property-unset");
-    assert_eq!(shown_choices(&ui), [not_set.as_str(), not_set.as_str()]);
-    let (difficulty, gamemode, unset) = save_unset(&ui, 1);
-    assert_eq!((difficulty.as_str(), gamemode.as_str()), ("", ""));
-    assert_eq!(
-        unset,
-        "motd,max-players,difficulty,gamemode,allow-flight,pvp,white-list"
-    );
-
-    pick_choice_down(&ui, 0, 2);
-    assert_eq!(shown_choices(&ui)[0], "easy");
-    let (difficulty, _, unset) = save_unset(&ui, 1);
-    assert_eq!(difficulty, "easy");
+    let edits = edits.borrow();
+    assert!(edits.contains(&"bbbb motd=Changed".to_owned()), "{edits:?}");
+    assert!(edits.contains(&"bbbb pvp=false".to_owned()), "{edits:?}");
     assert!(
-        unset.contains("difficulty"),
-        "a picked value leaves the key unset until it is saved"
+        edits
+            .iter()
+            .any(|edit| edit.starts_with("bbbb difficulty#")),
+        "{edits:?}"
     );
-
-    in_pane(&ui, 1, &lookup("gui-pvp"), AccessibleRole::Checkbox)
-        .first()
-        .expect("the pvp switch")
-        .invoke_accessible_default_action();
-    settle(&ui);
-    let (_, _, unset) = save_unset(&ui, 1);
-    assert_eq!(
-        unset,
-        "motd,max-players,difficulty,gamemode,allow-flight,white-list"
-    );
-}
-
-/// A server that stores difficulty and game mode as numbers has them shown as
-/// the names they stand for, saves the numbers unchanged, and keeps them
-/// numbers when another name is picked.
-#[test]
-fn the_properties_form_shows_and_saves_numeric_choice_values_as_numbers() {
-    let ui = properties_form("1", "0");
-    assert_eq!(shown_choices(&ui), ["easy", "survival"]);
-    assert_eq!(save_choices(&ui, 1), ("1".to_owned(), "0".to_owned()));
-
-    pick_choice_down(&ui, 0, 2);
-    pick_choice_down(&ui, 1, 1);
-    assert_eq!(shown_choices(&ui), ["hard", "creative"]);
-    assert_eq!(save_choices(&ui, 1), ("3".to_owned(), "1".to_owned()));
-}
-
-/// A stored value no name stands for is shown as it is and saved as it is,
-/// until another entry is picked.
-#[test]
-fn the_properties_form_shows_and_saves_an_unrepresentable_choice_value_as_it_is() {
-    let ui = properties_form("hardcore", "7");
-    assert_eq!(shown_choices(&ui), ["hardcore", "7"]);
-    assert_eq!(
-        save_choices(&ui, 1),
-        ("hardcore".to_owned(), "7".to_owned())
-    );
-
-    pick_choice_down(&ui, 0, 2);
-    assert_eq!(shown_choices(&ui)[0], "easy");
-    assert_eq!(save_choices(&ui, 1).0, "easy");
-}
-
-#[test]
-fn the_properties_form_saves_named_choice_values_as_names() {
-    let ui = properties_form("normal", "survival");
-    assert_eq!(shown_choices(&ui), ["normal", "survival"]);
-    pick_choice_down(&ui, 1, 3);
-    assert_eq!(
-        save_choices(&ui, 1),
-        ("normal".to_owned(), "spectator".to_owned())
+    assert!(
+        edits.iter().all(|edit| edit.starts_with("bbbb ")),
+        "{edits:?}"
     );
 }
 
@@ -1147,12 +1017,7 @@ fn a_panes_properties_form_follows_the_host_the_pane_shows() {
     settle(&ui);
     assert_eq!(
         save_properties(&ui, 1),
-        (
-            "aaaa".to_owned(),
-            "Server A".to_owned(),
-            "25565".to_owned(),
-            true
-        )
+        ("aaaa".to_owned(), "25565".to_owned(), true)
     );
 
     close_first_pane(
@@ -1162,12 +1027,7 @@ fn a_panes_properties_form_follows_the_host_the_pane_shows() {
     );
     assert_eq!(
         save_properties(&ui, 2),
-        (
-            "bbbb".to_owned(),
-            "Server B".to_owned(),
-            "25570".to_owned(),
-            false
-        )
+        ("bbbb".to_owned(), "25570".to_owned(), false)
     );
 }
 

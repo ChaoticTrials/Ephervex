@@ -2,7 +2,7 @@
 
 import { ScrollView } from "std-widgets.slint";
 import { ChoiceBox } from "../components/selection.slint";
-import { AppButton, BusySpinner, LabeledToggle, Pill, TextField } from "../components/controls.slint";
+import { AppButton, BusySpinner, LabeledToggle, Pill, TextField, Toggle } from "../components/controls.slint";
 import {
     ActionRow,
     BodyText,
@@ -12,7 +12,7 @@ import {
     SectionTitle
 } from "../components/text.slint";
 import { GuiI18n, PropertyRules, ServerHints } from "../globals.slint";
-import { HostView, JavaChoiceRow } from "../models.slint";
+import { HostView, JavaChoiceRow, ServerPropertyGroup, ServerPropertyRow } from "../models.slint";
 import { Theme } from "../theme.slint";
 import { FixPanel } from "diagnostics.slint";
 
@@ -235,41 +235,136 @@ export component HostRuntimeForm inherits ScrollView {
     }
 }
 
-// A server's properties, edited here and saved together. Like the client
-// form, it starts from what is stored and starts over when that is read again
-// or the pane shows another host.
-export component ServerPropertiesForm inherits ScrollView {
+// One server.properties key: what it does, its value, and whether the
+// running server still has to read it.
+export component ServerPropertyRowView inherits Rectangle {
+    in property <ServerPropertyRow> item;
+    // Whether the server still runs the process that predates the save.
+    in property <bool> restart-pending;
+    // Draws the line that separates it from the row above.
+    in property <bool> separated;
+    callback edited(string);
+    callback chosen(int);
+    // Left to itself, the row measures its wrapped lines unwrapped.
+    height: body.preferred-height;
+    accessible-role: AccessibleRole.groupbox;
+    accessible-label: root.item.label;
+    if root.separated : Rectangle { x: 0px; y: 0px; width: parent.width; height: 1px; background: Theme.border; }
+    body := HorizontalLayout {
+        padding-top: 12px;
+        padding-bottom: 12px;
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 24px;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 3px;
+            HorizontalLayout {
+                spacing: 8px;
+                BodyText { text: root.item.label; color: Theme.text; vertical-alignment: center; horizontal-stretch: 0; }
+                if root.item.changed : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-property-changed"); tone-color: Theme.accent; content-height: 20px; } }
+                if root.item.awaiting-restart && root.restart-pending : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-property-restart"); tone-color: Theme.warning; content-height: 20px; } }
+                Rectangle { horizontal-stretch: 1; }
+            }
+            BodyText { text: root.item.detail; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
+            if root.item.note != "" : BodyText { text: root.item.note; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
+            if root.item.error != "" : BodyText { text: root.item.error; color: Theme.danger; font-size: Theme.caption-size; wrap: word-wrap; }
+        }
+        VerticalLayout {
+            alignment: center;
+            width: 240px;
+            if root.item.kind == "toggle" : HorizontalLayout {
+                alignment: end;
+                Toggle { accessible-name: root.item.label; checked: root.item.checked; sets-its-own-position: false; toggled(value) => { root.edited(value ? "true" : "false"); } }
+            }
+            if root.item.kind == "choice" : ChoiceBox {
+                accessible-label: root.item.label;
+                model: root.item.choices;
+                current-index: root.item.choice-index;
+                selected(value) => { root.chosen(self.current-index); }
+            }
+            if root.item.kind == "integer" || root.item.kind == "text" : TextField {
+                accessible-name: root.item.label;
+                text: root.item.text;
+                placeholder: root.item.placeholder;
+                invalid: root.item.error != "";
+                edited(value) => { root.edited(value); }
+            }
+        }
+    }
+}
+
+// One group of a server's settings as a card: its heading, then its rows.
+component ServerPropertyGroupCard inherits Rectangle {
+    in property <ServerPropertyGroup> group;
+    in property <bool> restart-pending;
+    callback edited(string, string);
+    callback chosen(string, int);
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.surface;
+    // Left to itself, the card measures its wrapped lines unwrapped.
+    height: card.preferred-height;
+    accessible-role: AccessibleRole.groupbox;
+    accessible-label: root.group.heading;
+    card := VerticalLayout {
+        padding-top: 12px;
+        padding-bottom: 4px;
+        HorizontalLayout { padding-left: 16px; padding-right: 16px; padding-bottom: 4px; Heading { text: root.group.heading; font-size: Theme.row-heading-size; } }
+        for row[index] in root.group.rows : ServerPropertyRowView {
+            item: row;
+            separated: index > 0;
+            restart-pending: root.restart-pending;
+            edited(value) => { root.edited(row.key, value); }
+            chosen(position) => { root.chosen(row.key, position); }
+        }
+    }
+}
+
+// A server's properties, edited here and saved together. The network fields
+// start from what is stored and start over when it is read again or the pane
+// shows another host; the other settings are rows the controller keeps,
+// edits included.
+export component ServerPropertiesForm inherits VerticalLayout {
     in property <HostView> host;
     in property <bool> eula-accepted;
     in property <string> eula-status;
-    // (server, motd, max players, difficulty, game mode, allow flight, pvp,
-    // allowlist, online mode, access, address, port, unset keys)
-    callback save(string, string, string, string, string, bool, bool, bool, bool, string, string, string, string);
+    // (server, online mode, access, address, port)
+    callback save(string, bool, string, string, string);
+    callback edit(string, string, string);
+    callback choose(string, string, int);
+    callback show-advanced(string, bool);
+    callback discard(string);
     callback review-eula();
     property <string> access;
-    property <string> difficulty;
-    property <string> gamemode;
     property <bool> online-mode;
-    property <bool> allow-flight;
-    property <bool> pvp;
-    property <bool> allowlist;
-    // The keys the file does not hold that the user has not set; a toggle
-    // leaves it when touched, and an empty field or the no-value choice stays.
-    property <string> unset;
     property <string> port-error: PropertyRules.port-error(port-field.text);
     property <string> address-error: PropertyRules.address-error(address-field.text, root.access == "Custom");
-    property <string> players-error: PropertyRules.players-error(players-field.text, PropertyRules.is-unset(root.unset, "max-players"));
     property <int> revision: root.host.properties-revision;
     property <string> host-id: root.host.id;
     // The process keeps the network settings it started with, so they wait
     // for a stop; everything else is saved for its restart.
-    property <bool> running: root.host.server.state-kind == "running";
+    property <string> state-kind: root.host.server.state-kind;
+    property <bool> running: root.state-kind == "running";
+    // Apart, because one expression calling both moves the state twice in
+    // the generated code.
+    property <bool> state-allows-save: ServerHints.can-save(root.state-kind);
+    property <string> state-save-hint: ServerHints.save(root.state-kind);
     property <bool> restarting: root.host.server.restart-stage != "";
-    changed revision => { root.reset(); }
-    changed host-id => { root.reset(); }
+    property <bool> network-valid: root.port-error == "" && root.address-error == "";
+    // The network fields differ from what is stored.
+    property <bool> network-edited: root.access != root.host.property-access
+        || root.online-mode != root.host.property-online-mode
+        || port-field.text != root.host.property-port
+        || (root.access == "Custom" && address-field.text != root.host.property-address);
+    property <int> unsaved: root.host.property-edits + (root.network-edited ? 1 : 0);
+    changed revision => { root.reset-network(); }
+    changed host-id => { root.reset-network(); }
     // A network edit left unsaved cannot be saved or undone in disabled fields.
     changed running => { if root.running { root.reset-network(); } }
-    init => { root.reset(); }
+    init => { root.reset-network(); }
     function reset-network() {
         root.access = root.host.property-access;
         root.online-mode = root.host.property-online-mode;
@@ -277,32 +372,47 @@ export component ServerPropertiesForm inherits ScrollView {
         address-field.text = root.host.property-address;
         access-box.current-index = root.access == "LAN" ? 1 : root.access == "Custom" ? 2 : 0;
     }
-    function reset() {
-        root.reset-network();
-        root.difficulty = root.host.property-difficulty;
-        root.gamemode = root.host.property-gamemode;
-        root.allow-flight = root.host.property-allow-flight;
-        root.pvp = root.host.property-pvp;
-        root.allowlist = root.host.property-allowlist;
-        root.unset = root.host.property-unset;
-        motd-field.text = root.host.property-motd;
-        players-field.text = root.host.property-max-players;
-        difficulty-box.current-index = PropertyRules.choice-index("difficulty", root.host.property-difficulty, PropertyRules.is-unset(root.host.property-unset, "difficulty"));
-        gamemode-box.current-index = PropertyRules.choice-index("gamemode", root.host.property-gamemode, PropertyRules.is-unset(root.host.property-unset, "gamemode"));
+    spacing: 0px;
+    ScrollView {
+        vertical-stretch: 1;
+        viewport-width: self.visible-width;
+        VerticalLayout { alignment: start; width: min(parent.width, 1100px); spacing: 14px; padding-right: 12px; padding-bottom: 12px;
+            if root.running && !root.host.server.restart-required : BodyText { text: GuiI18n.text("gui-server-properties-running"); color: Theme.text-secondary; wrap: word-wrap; }
+            if root.host.server.restart-required : HorizontalLayout { alignment: start; Pill { text: GuiI18n.text("gui-server-restart-required"); tone-color: Theme.warning; } }
+            if root.host.server.restart-required : BodyText { text: GuiI18n.text("gui-server-restart-required-detail"); color: Theme.warning; wrap: word-wrap; }
+            Rectangle { border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
+                // Left to itself, the card measures its wrapped lines unwrapped.
+                height: network-card.preferred-height;
+                network-card := VerticalLayout { padding: 16px; spacing: 10px;
+            Heading { text: GuiI18n.text("gui-network"); font-size: Theme.row-heading-size; } BodyText { text: root.running ? GuiI18n.text("gui-network-detail-running") : GuiI18n.text("gui-network-detail"); color: Theme.text-muted; wrap: word-wrap; }
+            HorizontalLayout { spacing: 12px; VerticalLayout { FieldLabel { text: GuiI18n.text("gui-access"); } access-box := ChoiceBox { enabled: !root.running; model: [GuiI18n.text("gui-access-localhost"), GuiI18n.text("gui-access-lan"), GuiI18n.text("gui-access-custom")]; selected(value) => { root.access = value == GuiI18n.text("gui-access-lan") ? "LAN" : value == GuiI18n.text("gui-access-custom") ? "Custom" : "Localhost"; } width: 190px; } Rectangle { height: 14px; } } VerticalLayout { FieldLabel { text: GuiI18n.text("gui-port"); } port-field := TextField { placeholder: "25565"; enabled: !root.running; input-type: InputType.number; invalid: root.port-error != ""; width: 150px; } Rectangle { height: 14px; Text { text: root.port-error; visible: root.port-error != ""; color: Theme.danger; font-size: Theme.caption-size; } } } VerticalLayout { horizontal-stretch: 1; FieldLabel { text: GuiI18n.text("gui-custom-bind-address"); } address-field := TextField { placeholder: "127.0.0.1 or ::1"; enabled: root.access == "Custom" && !root.running; invalid: root.address-error != ""; } Rectangle { height: 14px; Text { text: root.address-error; visible: root.address-error != ""; color: Theme.danger; font-size: Theme.caption-size; } } } }
+            Rectangle { height: 32px; HorizontalLayout { spacing: 10px; LabeledToggle { label: GuiI18n.text("gui-online-mode"); enabled: !root.running; checked <=> root.online-mode; } BodyText { visible: !root.online-mode && root.access != "Localhost"; text: GuiI18n.text("gui-network-warning"); color: Theme.warning; } } }
+                }
+            }
+            Rectangle { height: eula-card.preferred-height; border-radius: 8px; border-width: 1px; border-color: root.eula-accepted ? Theme.success : Theme.warning; background: Theme.surface;
+                eula-card := HorizontalLayout { padding: 14px; spacing: 14px;
+                    VerticalLayout { horizontal-stretch: 1; spacing: 2px; Heading { text: GuiI18n.text("gui-server-eula"); font-size: Theme.row-heading-size; } BodyText { text: root.eula-status; wrap: word-wrap; } }
+                    VerticalLayout { alignment: center; AppButton { text: root.eula-accepted ? GuiI18n.text("gui-eula-review") : GuiI18n.text("gui-eula-review-accept"); clicked => { root.review-eula(); } } }
+                }
+            }
+            HorizontalLayout { spacing: 12px; padding-top: 8px;
+                VerticalLayout { horizontal-stretch: 1; spacing: 2px; Heading { text: GuiI18n.text("gui-server-settings"); } BodyText { text: GuiI18n.text("gui-server-settings-detail"); color: Theme.text-muted; wrap: word-wrap; } }
+                VerticalLayout { alignment: center; LabeledToggle { label: GuiI18n.text("gui-server-settings-advanced"); checked: root.host.property-show-advanced; sets-its-own-position: false; toggled(value) => { root.show-advanced(root.host.id, value); } } }
+            }
+            for group in root.host.property-groups : ServerPropertyGroupCard {
+                group: group;
+                restart-pending: root.host.server.restart-required;
+                edited(key, value) => { root.edit(root.host.id, key, value); }
+                chosen(key, index) => { root.choose(root.host.id, key, index); }
+            }
+        }
     }
-    VerticalLayout { alignment: start; width: min(parent.width, 1100px); spacing: 14px;
-        if root.running && !root.host.server.restart-required : BodyText { text: GuiI18n.text("gui-server-properties-running"); color: Theme.text-secondary; wrap: word-wrap; }
-        if root.host.server.restart-required : HorizontalLayout { alignment: start; Pill { text: GuiI18n.text("gui-server-restart-required"); tone-color: Theme.warning; } }
-        if root.host.server.restart-required : BodyText { text: GuiI18n.text("gui-server-restart-required-detail"); color: Theme.warning; wrap: word-wrap; }
-        Heading { text: GuiI18n.text("gui-network"); } BodyText { text: root.running ? GuiI18n.text("gui-network-detail-running") : GuiI18n.text("gui-network-detail"); wrap: word-wrap; }
-        HorizontalLayout { spacing: 12px; VerticalLayout { FieldLabel { text: GuiI18n.text("gui-access"); } access-box := ChoiceBox { enabled: !root.running; model: [GuiI18n.text("gui-access-localhost"), GuiI18n.text("gui-access-lan"), GuiI18n.text("gui-access-custom")]; selected(value) => { root.access = value == GuiI18n.text("gui-access-lan") ? "LAN" : value == GuiI18n.text("gui-access-custom") ? "Custom" : "Localhost"; } width: 190px; } Rectangle { height: 14px; } } VerticalLayout { FieldLabel { text: GuiI18n.text("gui-port"); } port-field := TextField { placeholder: "25565"; enabled: !root.running; input-type: InputType.number; invalid: root.port-error != ""; width: 150px; } Rectangle { height: 14px; Text { text: root.port-error; visible: root.port-error != ""; color: Theme.danger; font-size: Theme.caption-size; } } } VerticalLayout { horizontal-stretch: 1; FieldLabel { text: GuiI18n.text("gui-custom-bind-address"); } address-field := TextField { placeholder: "127.0.0.1 or ::1"; enabled: root.access == "Custom" && !root.running; invalid: root.address-error != ""; } Rectangle { height: 14px; Text { text: root.address-error; visible: root.address-error != ""; color: Theme.danger; font-size: Theme.caption-size; } } } }
-        Rectangle { height: 32px; HorizontalLayout { spacing: 10px; LabeledToggle { label: GuiI18n.text("gui-online-mode"); enabled: !root.running; checked <=> root.online-mode; } BodyText { visible: !root.online-mode && root.access != "Localhost"; text: GuiI18n.text("gui-network-warning"); color: Theme.warning; } } }
-        Divider { } Heading { text: GuiI18n.text("gui-gameplay"); }
-        HorizontalLayout { spacing: 12px; VerticalLayout { horizontal-stretch: 1; FieldLabel { text: GuiI18n.text("gui-message-of-the-day"); } motd-field := TextField { placeholder: GuiI18n.text("gui-default-motd"); } } VerticalLayout { width: 190px; FieldLabel { text: GuiI18n.text("gui-maximum-players"); } players-field := TextField { placeholder: "20"; input-type: InputType.number; invalid: root.players-error != ""; } if root.players-error != "" : Text { text: root.players-error; color: Theme.danger; font-size: Theme.caption-size; } } }
-        HorizontalLayout { spacing: 12px; VerticalLayout { Text { text: GuiI18n.text("gui-difficulty"); color: Theme.text-secondary; font-size: Theme.label-size; } difficulty-box := ChoiceBox { model: PropertyRules.choice-model("difficulty", root.host.property-difficulty, PropertyRules.is-unset(root.host.property-unset, "difficulty")); selected(value) => { root.difficulty = PropertyRules.choice-value("difficulty", root.host.property-difficulty, value, PropertyRules.is-unset(root.host.property-unset, "difficulty")); } width: 240px; } } VerticalLayout { Text { text: GuiI18n.text("gui-game-mode"); color: Theme.text-secondary; font-size: Theme.label-size; } gamemode-box := ChoiceBox { model: PropertyRules.choice-model("gamemode", root.host.property-gamemode, PropertyRules.is-unset(root.host.property-unset, "gamemode")); selected(value) => { root.gamemode = PropertyRules.choice-value("gamemode", root.host.property-gamemode, value, PropertyRules.is-unset(root.host.property-unset, "gamemode")); } width: 270px; } } }
-        HorizontalLayout { spacing: 14px; LabeledToggle { label: GuiI18n.text("gui-allow-flight"); checked <=> root.allow-flight; toggled(value) => { root.unset = PropertyRules.without-unset(root.unset, "allow-flight"); } } LabeledToggle { label: GuiI18n.text("gui-pvp"); checked <=> root.pvp; toggled(value) => { root.unset = PropertyRules.without-unset(root.unset, "pvp"); } } LabeledToggle { label: GuiI18n.text("gui-allowlist"); checked <=> root.allowlist; toggled(value) => { root.unset = PropertyRules.without-unset(root.unset, "white-list"); } } Rectangle { horizontal-stretch: 1; } }
-        if PropertyRules.is-unset(root.unset, "allow-flight") || PropertyRules.is-unset(root.unset, "pvp") || PropertyRules.is-unset(root.unset, "white-list") : BodyText { text: GuiI18n.text("gui-property-toggles-unset-detail"); wrap: word-wrap; }
-        Rectangle { height: 84px; border-radius: 8px; border-width: 1px; border-color: root.eula-accepted ? Theme.success : Theme.warning; background: Theme.surface; HorizontalLayout { padding: 14px; VerticalLayout { Heading { text: GuiI18n.text("gui-server-eula"); font-size: Theme.row-heading-size; } BodyText { text: root.eula-status; wrap: word-wrap; } } AppButton { text: root.eula-accepted ? GuiI18n.text("gui-eula-review") : GuiI18n.text("gui-eula-review-accept"); clicked => { root.review-eula(); } } } }
-        ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-changes"); tone: "primary"; enabled: ServerHints.can-save(root.host.server.state-kind) && !root.restarting; hint: root.restarting ? GuiI18n.text("gui-hint-save-server-restarting") : ServerHints.save(root.host.server.state-kind); clicked => { root.save(root.host.id, motd-field.text, players-field.text, root.difficulty, root.gamemode, root.allow-flight, root.pvp, root.allowlist, root.online-mode, root.access, address-field.text, port-field.text, root.unset); } } }
+    Divider { }
+    ActionRow {
+        padding-top: 10px;
+        BodyText { text: root.unsaved > 0 ? GuiI18n.count("gui-property-unsaved-count", root.unsaved) : GuiI18n.text("gui-property-no-unsaved"); color: root.unsaved > 0 ? Theme.accent : Theme.text-muted; vertical-alignment: center; }
+        Rectangle { horizontal-stretch: 1; }
+        AppButton { text: GuiI18n.text("gui-discard-changes"); enabled: root.unsaved > 0; hint: GuiI18n.text("gui-hint-no-unsaved-changes"); clicked => { root.discard(root.host.id); root.reset-network(); } }
+        AppButton { text: GuiI18n.text("gui-save-changes"); tone: "primary"; enabled: root.state-allows-save && !root.restarting && !root.host.property-edits-invalid && root.network-valid; hint: root.restarting ? GuiI18n.text("gui-hint-save-server-restarting") : !root.state-allows-save ? root.state-save-hint : GuiI18n.text("gui-hint-fix-property-values"); clicked => { root.save(root.host.id, root.online-mode, root.access, address-field.text, port-field.text); } }
     }
 }

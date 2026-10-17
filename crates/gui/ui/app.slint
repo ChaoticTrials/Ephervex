@@ -841,7 +841,15 @@ export component AppWindow inherits Window {
     // shared cache after that.
     callback refresh-mods(string, string);
     callback disable-suggested-mods(string);
-    callback save-server-properties(string, string, string, string, string, bool, bool, bool, bool, string, string, string, string);
+    // (server, online mode, access, address, port); the other settings are
+    // the edits the controller keeps for the server.
+    callback save-server-properties(string, bool, string, string, string);
+    // (server, key, value) and (server, key, entry index): an edit to one row
+    // of a server's Properties form.
+    callback edit-server-property(string, string, string);
+    callback choose-server-property(string, string, int);
+    callback show-advanced-server-properties(string, bool);
+    callback discard-server-properties(string);
     callback accept-eula();
     callback revoke-eula();
     callback open-eula-reference();
@@ -1633,7 +1641,11 @@ export component AppWindow inherits Window {
                                     host: host;
                                     eula-accepted: root.eula-accepted;
                                     eula-status: root.eula-status;
-                                    save(id, motd, players, difficulty, gamemode, flight, pvp, allowlist, online, access, address, port, unset) => { root.save-server-properties(id, motd, players, difficulty, gamemode, flight, pvp, allowlist, online, access, address, port, unset); }
+                                    save(id, online, access, address, port) => { root.save-server-properties(id, online, access, address, port); }
+                                    edit(id, key, value) => { root.edit-server-property(id, key, value); }
+                                    choose(id, key, index) => { root.choose-server-property(id, key, index); }
+                                    show-advanced(id, show) => { root.show-advanced-server-properties(id, show); }
+                                    discard(id) => { root.discard-server-properties(id); }
                                     review-eula => { root.modal = "eula"; }
                                 }
                             }

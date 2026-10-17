@@ -328,7 +328,7 @@ export component HostWorkspace inherits Rectangle {
             VerticalLayout { alignment: center; StatePill { state: root.status; state-kind: root.status-kind; restarting: root.restart-stage != ""; } }
             if root.restart-required : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-server-restart-required"); tone-color: Theme.warning; } }
             if root.paired : VerticalLayout { alignment: center; Pill { text: root.pair-label; tone-color: root.pair-tone; } }
-            if root.address != "" : VerticalLayout { alignment: center; Pill { text: root.address; } }
+            if root.address != "" && root.width >= 980px : VerticalLayout { alignment: center; Pill { text: root.address; } }
             if root.java-summary != "" : VerticalLayout { alignment: center; JavaRuntimePill { summary: root.java-summary; origin: root.java-origin; tone: root.java-tone; tone-label: root.java-tone-label; clicked => { root.open-java(); } } }
             Rectangle { horizontal-stretch: 1; }
             if root.can-split-beside : IconButton { icon: @image-url("../../../../assets/icons/split-beside.svg"); accessible-name: GuiI18n.text("gui-workspace-split"); clicked => { root.split-beside(); } }

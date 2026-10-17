@@ -12,6 +12,7 @@ pub mod operators;
 pub mod pending_properties;
 pub mod process;
 pub mod properties;
+pub mod property_catalog;
 pub mod runtime;
 #[cfg(test)]
 mod test_support;
@@ -40,6 +41,10 @@ pub use process::{
 pub use properties::{
     EULA_KEY, MalformedEscape, NetworkProperties, ONLINE_MODE_KEY, PropertiesDocument,
     SERVER_IP_KEY, SERVER_PORT_KEY, SERVER_PROPERTIES_FILE, ServerBind,
+};
+pub use property_catalog::{
+    DIFFICULTIES, GAME_MODES, PropertyDefinition, PropertyGroup, PropertyValueKind,
+    PropertyValueProblem, SERVER_PROPERTY_CATALOG, check_property_value, property_definition,
 };
 pub use runtime::{
     ProcessEvidence, ProcessRole, RUNTIME_FILE, RUNTIME_LOCK_FILE, RuntimeClassification,

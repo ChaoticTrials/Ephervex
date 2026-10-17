@@ -56,8 +56,8 @@ use crate::diagnosis_view::{self, DiagnosisView, OutcomeView, PreviewView};
 use crate::java_view::{JavaChoiceView, JavaStatusView};
 use crate::presentation::{
     ActivityPresentation, ImportErrorKind, ImportFailure, ImportPresentation, InstancePresentation,
-    ModImpactPresentation, ModRequirementPresentation, PairPresentation,
-    SERVER_PROPERTY_DEFINITIONS, ServerPresentation, diagnostic_kind_label, diagnostic_scope_label,
+    ModImpactPresentation, ModRequirementPresentation, PairPresentation, ServerPresentation,
+    diagnostic_kind_label, diagnostic_scope_label,
 };
 use crate::settings_drafts::SettingsSave;
 use crate::workspace_layout::PaneId;
@@ -1580,17 +1580,14 @@ pub struct IsolationData {
 pub struct ServerWorkspaceData {
     /// The server these are, which is the view they belong in.
     pub server: String,
-    pub motd: String,
-    pub max_players: String,
-    pub difficulty: String,
-    pub gamemode: String,
-    pub allow_flight: bool,
-    pub pvp: bool,
-    pub allowlist: bool,
-    /// The form's keys the file does not hold. Their text and choice fields
-    /// are empty and their toggles show the server's default, and none is
-    /// written unless the user sets it.
-    pub unset: Vec<&'static str>,
+    /// The typed keys the server's next start reads, with their values. A key
+    /// the file does not hold is absent, and is written only once the user
+    /// sets it.
+    pub values: std::collections::BTreeMap<String, String>,
+    /// Keys saved while the running process was already up.
+    pub awaiting_restart: std::collections::BTreeSet<String>,
+    /// Whether the file lists every key the server's release reads.
+    pub lists_every_key: bool,
     pub network: ServerNetworkSettings,
 }
 
@@ -7935,24 +7932,26 @@ fn snapshot_deletion_note(app: &App, host: InstalledHost) -> String {
 
 fn send_server_workspace(app: &App, server: ServerId, events: &Sender<Event>) {
     let result = (|| {
-        let record = app.server(server)?;
+        let status = app.server_status(server)?;
         let properties = app.server_properties_at_next_start(server)?;
-        let unset: Vec<&'static str> = SERVER_PROPERTY_DEFINITIONS
-            .iter()
-            .map(|definition| definition.key)
-            .filter(|key| properties.get(key).is_none())
-            .collect();
+        let values: std::collections::BTreeMap<String, String> =
+            ephervex_core::SERVER_PROPERTY_CATALOG
+                .iter()
+                .filter_map(|definition| {
+                    properties
+                        .get(definition.key)
+                        .map(|value| (definition.key.to_owned(), value))
+                })
+                .collect();
         Ok::<_, CoreError>(ServerWorkspaceData {
             server: server.to_string(),
-            motd: properties.get("motd").unwrap_or_default(),
-            max_players: properties.get("max-players").unwrap_or_default(),
-            difficulty: properties.get("difficulty").unwrap_or_default(),
-            gamemode: properties.get("gamemode").unwrap_or_default(),
-            allow_flight: property_bool(&properties, "allow-flight", false),
-            pvp: property_bool(&properties, "pvp", true),
-            allowlist: property_bool(&properties, "white-list", false),
-            unset,
-            network: record.network,
+            lists_every_key: crate::server_property_form::file_lists_every_key(
+                status.record.last_started_at.is_some(),
+                |key| properties.get(key).is_some(),
+            ),
+            values,
+            awaiting_restart: status.properties_awaiting_restart.into_iter().collect(),
+            network: status.record.network,
         })
     })();
     match result {
@@ -13062,12 +13061,6 @@ fn storage_class(persistent: bool) -> StorageClass {
 fn nonempty(value: &str) -> Option<&str> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then_some(trimmed)
-}
-
-fn property_bool(document: &ephervex_core::PropertiesDocument, key: &str, fallback: bool) -> bool {
-    document
-        .get(key)
-        .map_or(fallback, |value| value.eq_ignore_ascii_case("true"))
 }
 
 fn eula_data(status: &EulaStatus) -> EulaData {

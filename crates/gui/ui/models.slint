@@ -544,6 +544,35 @@ export struct JavaRow {
     pinning: string,
 }
 
+// One server.properties key in a server's Properties form. Every string
+// arrives localized.
+export struct ServerPropertyRow {
+    key: string,
+    label: string,
+    detail: string,
+    // "toggle", "integer", "choice" or "text".
+    kind: string,
+    text: string,
+    // The value a key the file does not hold falls back to.
+    placeholder: string,
+    checked: bool,
+    choices: [string],
+    choice-index: int,
+    // Muted text under the description, such as what an absent key falls
+    // back to.
+    note: string,
+    changed: bool,
+    // Saved while the running server was already up.
+    awaiting-restart: bool,
+    error: string,
+}
+
+// One card of a server's Properties form.
+export struct ServerPropertyGroup {
+    heading: string,
+    rows: [ServerPropertyRow],
+}
+
 // One product preference as the Minecraft defaults screen renders it.
 //
 // Everything a row needs and nothing it has to work out for itself: the
@@ -690,16 +719,16 @@ export struct HostView {
     // Bumped each time the stored settings are read, so an open form
     // starts over from them.
     runtime-revision: int,
-    // A server's properties as stored, and the same kind of revision.
-    property-motd: string,
-    property-max-players: string,
-    property-difficulty: string,
-    property-gamemode: string,
-    property-allow-flight: bool,
-    property-pvp: bool,
-    property-allowlist: bool,
-    // Comma-separated keys among those above that the file does not hold.
-    property-unset: string,
+    // A server's settings by group, one row per server.properties key the
+    // form edits, with the unsaved edits already in them.
+    property-groups: [ServerPropertyGroup],
+    // How many settings have unsaved edits, and whether one of them is a
+    // value its key does not accept.
+    property-edits: int,
+    property-edits-invalid: bool,
+    property-show-advanced: bool,
+    // The stored network settings, and the revision bumped each time they
+    // and the rows are read again.
     property-online-mode: bool,
     // "Localhost", "LAN", or "Custom".
     property-access: string,

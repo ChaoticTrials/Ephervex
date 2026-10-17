@@ -14,6 +14,7 @@ mod mod_path_key;
 pub mod monospace;
 mod palette;
 pub mod presentation;
+mod server_property_form;
 pub mod settings_drafts;
 pub mod termination;
 pub mod theme_files;
