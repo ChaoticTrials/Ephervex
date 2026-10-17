@@ -121,6 +121,23 @@ pub(crate) fn follow_surface_requests(ui: &AppWindow) -> Rc<RefCell<Vec<(i32, St
     requests
 }
 
+/// Closes the workspace as the controller does: the pane rows go at once, and
+/// the pane whose button asked goes with them.
+pub(crate) fn follow_workspace_close(ui: &AppWindow) {
+    let weak = ui.as_weak();
+    ui.on_close_workspace(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_workspace_open(false);
+            let panes = ui.get_workspace_panes();
+            if let Some(panes) = panes.as_any().downcast_ref::<VecModel<WorkspacePaneRow>>() {
+                while panes.row_count() > 0 {
+                    panes.remove(panes.row_count() - 1);
+                }
+            }
+        }
+    });
+}
+
 /// Changes the host view at `index`, as a feature's answer does.
 pub(crate) fn update_host(ui: &AppWindow, index: usize, change: impl FnOnce(&mut HostView)) {
     let views = ui.get_host_views();

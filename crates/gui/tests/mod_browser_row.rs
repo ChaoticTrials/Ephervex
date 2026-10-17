@@ -825,23 +825,7 @@ fn a_servers_mod_list_is_laid_out_like_a_clients() {
 #[test]
 fn the_missing_key_notice_opens_the_provider_settings() {
     let ui = window();
-    let weak = ui.as_weak();
-    // As the controller closes it: the pane rows go at once, and the pane
-    // whose button asked goes with them.
-    ui.on_close_workspace(move || {
-        if let Some(ui) = weak.upgrade() {
-            ui.set_workspace_open(false);
-            let panes = ui.get_workspace_panes();
-            if let Some(panes) = panes
-                .as_any()
-                .downcast_ref::<VecModel<ephervex_gui::ui::WorkspacePaneRow>>()
-            {
-                while panes.row_count() > 0 {
-                    panes.remove(panes.row_count() - 1);
-                }
-            }
-        }
-    });
+    support::follow_workspace_close(&ui);
     let missing_key = |view: &mut ephervex_gui::ui::HostView| {
         view.browser_provider = "curseforge".into();
         view.browser_notice = "CurseForge needs an API key, and none is configured.".into();

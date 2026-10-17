@@ -1310,7 +1310,8 @@ export component AppWindow inherits Window {
                                 restart => { if self.is-client { root.client-restart(host.id); } else { root.server-restart(host.id); } }
                                 kill => { root.pending-action-id = host.id; root.pending-action-name = host.server.name; root.modal = "kill"; }
                                 launch-as(account, alongside) => { root.launch-client-as(host.id, account, alongside); }
-                                add-account => { root.close-workspace(); root.page = 4; root.settings-tab = "Accounts"; }
+                                // Closing the workspace drops this pane mid-handler, so navigate first.
+                                add-account => { root.page = 4; root.settings-tab = "Accounts"; root.close-workspace(); }
                                 surface-selected(surface) => { root.show-pane-surface(pane.id, surface); }
                                 workflow-action(workflow, action) => { root.workflow-action(pane.id, host.kind, host.id, workflow, action); }
                                 // Above every surface but Diagnostics, which already leads
@@ -1451,7 +1452,8 @@ export component AppWindow inherits Window {
                                     apply-fix => { root.apply-fix(host.kind, host.id); }
                                     clear => { root.clear-host-runtime(host.kind, host.id); }
                                     allow-pack-mod-changes(allow) => { root.set-allow-pack-mod-version-changes(host.kind, host.id, allow); }
-                                    open-global-defaults => { root.close-workspace(); root.page = 4; root.settings-tab = "Minecraft"; }
+                                    // Closing the workspace drops this pane mid-handler, so navigate first.
+                                    open-global-defaults => { root.page = 4; root.settings-tab = "Minecraft"; root.close-workspace(); }
                                 }
                                 if host.available && host.kind == "client" && pane.surface == "Snapshots" : SnapshotPanel {
                                     items: host.snapshots; total: host.snapshot-total; has-plain-copies: host.snapshots-have-plain-copies;
@@ -1475,7 +1477,8 @@ export component AppWindow inherits Window {
                                     open-route(route) => {
                                         if route == "mods" { root.show-pane-surface(pane.id, "Mods"); }
                                         if route == "settings" { root.show-pane-surface(pane.id, "Settings"); }
-                                        if route == "java-settings" { root.close-workspace(); root.page = 4; root.settings-tab = "Java"; root.load-java-runtimes(); }
+                                        // Closing the workspace drops this pane mid-handler, so navigate first.
+                                        if route == "java-settings" { root.page = 4; root.settings-tab = "Java"; root.load-java-runtimes(); root.close-workspace(); }
                                         if route == "log" { root.show-pane-surface(pane.id, "Logs"); root.log-show(pane.id, "live"); }
                                         if route == "crash-report" { root.show-pane-surface(pane.id, "Logs"); root.log-show(pane.id, "crashes"); root.log-open-file(pane.id, host.diagnosis-crash-report); }
                                     }
