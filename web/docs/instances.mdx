@@ -166,6 +166,13 @@ Open the instance workspace, then **Settings**, or select the Java pill in the
 workspace header. The **Java runtime** card shows the runtime in use, its
 path, how it is chosen, the Java the instance expects, and the status.
 
+<ThemeScreenshot state="client-java-runtime" alt="Java runtime card of an instance that pins a fitting runtime, above the available runtimes" />
+
+When a pinned runtime cannot run the instance, the card shows **Problem** and a
+refused launch says why.
+
+<ThemeScreenshot state="client-java-problem" alt="Failed launch notice naming the pinned Java 25 and the expected Java 17, above the Java runtime card marked Problem" />
+
 Under **Available runtimes**, select **Use** on a runtime, or on **Automatic**
 to let Ephervex choose. When Settings > Java names a preferred executable, that
 entry is **Launcher preference** instead. Runtimes that do not fit are
@@ -174,10 +181,14 @@ under **Another Java executable**, select **Check**, then **Use**. Each choice
 opens a review of the current and new runtime; nothing changes until you
 select **Apply**.
 
+<ThemeScreenshot state="client-java-review" alt="Review of switching an instance from its pinned Java 25 to automatic selection" />
+
 If no installed runtime fits, **Install Java N** installs the Temurin build the
 instance expects, even when automatic downloads are off. It does not change the
 instance's Java setting. If the instance would not use the new runtime on its
 own, a review offers to pin it.
+
+<ThemeScreenshot state="client-java-install" alt="Legacy Forge instance offering Install Java 8 because no installed runtime meets its update ceiling" />
 
 Under **Java and memory**, enter the memory or JVM argument values to override
 and select **Save Runtime Settings**. Empty fields follow the global settings.

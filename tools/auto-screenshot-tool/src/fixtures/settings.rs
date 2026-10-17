@@ -179,6 +179,17 @@ pub(crate) fn java(ui: &AppWindow) {
     ));
 }
 
+/// Removing the managed runtime an instance still pins.
+pub(crate) fn java_remove_pinned(ui: &AppWindow) {
+    java(ui);
+    let runtime = &super::java::JAVA_17;
+    ui.set_pending_action_name(runtime.line().into());
+    ui.set_pending_action_id(runtime.path.into());
+    ui.set_pending_java_pinning(runtime.pinning().into());
+    ui.set_pending_java_pins_known(true);
+    ui.set_modal("remove-java-runtime".into());
+}
+
 pub(crate) fn providers(ui: &AppWindow) {
     open_settings(ui, "Providers & APIs");
     ui.set_default_mod_catalog("curseforge".into());

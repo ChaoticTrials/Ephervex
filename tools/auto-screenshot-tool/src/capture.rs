@@ -8,7 +8,7 @@ use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
 use image::{ImageBuffer, RgbaImage, imageops::FilterType};
 use slint::platform::{PointerEventButton, WindowEvent};
-use slint::{ComponentHandle, LogicalPosition, PhysicalSize};
+use slint::{ComponentHandle, LogicalPosition, Model, PhysicalSize};
 
 use crate::catalog::{Interaction, Region, RegionBounds, State};
 
@@ -199,6 +199,7 @@ fn new_window(state: &State) -> Result<AppWindow> {
 fn fixtures_for_state(ui: &AppWindow, state: &State) {
     crate::fixtures::install_base(ui);
     (state.show)(ui);
+    crate::fixtures::java::fill_shown_hosts(ui);
 }
 
 fn install_i18n(ui: &AppWindow) {
@@ -250,12 +251,13 @@ fn perform(ui: &AppWindow, interaction: Interaction) -> Result<()> {
     let (label, button) = match interaction {
         Interaction::Click(label) => (label, PointerEventButton::Left),
         Interaction::RightClick(label) => (label, PointerEventButton::Right),
+        Interaction::ScrollTo(label) => return scroll_to(ui, label),
     };
     let element = match interaction {
         // A click targets the control itself, which sits inside the larger
         // card that may share its label. A context menu belongs to the card.
         Interaction::Click(_) => find_visible_by(ui, label, |left, right| right.total_cmp(&left)),
-        Interaction::RightClick(_) => find_visible(ui, label),
+        Interaction::RightClick(_) | Interaction::ScrollTo(_) => find_visible(ui, label),
     }?;
     let position = element.absolute_position();
     let size = element.size();
@@ -293,6 +295,74 @@ fn perform(ui: &AppWindow, interaction: Interaction) -> Result<()> {
         "interacting with {label:?} changed nothing"
     );
     Ok(())
+}
+
+/// Where a workspace surface's scroll area starts, below the host header.
+const SURFACE_TOP: f32 = 190.0;
+/// Room left above a scrolled-to element, so the heading over it stays in view.
+const HEADING_ROOM: f32 = 90.0;
+/// The most wheel steps a scroll takes before it gives up.
+const MAX_SCROLL_STEPS: usize = 64;
+
+/// The top of the visible scroll area: below a failed-run notice when one sits
+/// above the surface.
+fn scroll_area_top(ui: &AppWindow) -> f32 {
+    ui.get_host_views()
+        .iter()
+        .filter(|view| !view.run_failure_title.is_empty())
+        .filter_map(|view| find_visible(ui, &view.run_failure_title).ok())
+        .map(|notice| notice.absolute_position().y + notice.size().height)
+        .fold(SURFACE_TOP, f32::max)
+}
+
+/// Scrolls the content under the window's center until the element with this
+/// label sits near the top of the scroll area, the way a reader scrolls to it.
+/// Content outside the scroll viewport is not laid out, so the scroll steps
+/// down until the element appears before lining it up.
+// Window sizes are capped at 3840x2160, well inside f32 precision.
+#[allow(clippy::cast_precision_loss)]
+fn scroll_to(ui: &AppWindow, label: &str) -> Result<()> {
+    let window = ui.window();
+    let size = window.size();
+    let at = LogicalPosition::new(size.width as f32 / 2.0, size.height as f32 / 2.0);
+    let wheel = |delta_y: f32| -> Result<Vec<u8>> {
+        window.dispatch_event(WindowEvent::PointerMoved { position: at });
+        window.dispatch_event(WindowEvent::PointerScrolled {
+            position: at,
+            delta_x: 0.0,
+            delta_y,
+        });
+        slint::platform::update_timers_and_animations();
+        Ok(window
+            .take_snapshot()
+            .context("lay out the window after scrolling")?
+            .as_bytes()
+            .to_vec())
+    };
+    let mut shown = wheel(0.0)?;
+    let area_top = scroll_area_top(ui);
+    for _ in 0..MAX_SCROLL_STEPS {
+        if let Ok(element) = find_visible(ui, label) {
+            let top = element.absolute_position().y;
+            let target = area_top + HEADING_ROOM;
+            if (top - target).abs() > 1.0 {
+                wheel(target - top)?;
+            }
+            let settled = find_visible(ui, label)?.absolute_position().y;
+            ensure!(
+                settled >= area_top,
+                "scrolling left {label:?} under the top of its scroll area"
+            );
+            return Ok(());
+        }
+        let next = wheel(-(size.height as f32) / 3.0)?;
+        ensure!(
+            next != shown,
+            "scrolled to the end without finding {label:?}"
+        );
+        shown = next;
+    }
+    bail!("{label:?} did not appear within {MAX_SCROLL_STEPS} scroll steps")
 }
 
 #[allow(

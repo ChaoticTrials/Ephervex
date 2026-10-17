@@ -108,6 +108,8 @@ Mods:
 Hosts:
 - [x] `client-overview-linked-server` (Paired pill, Start together)
 - [x] `client-settings`, `snapshots`, `snapshot-restore-dialog`
+- [x] `client-java-runtime`, `client-java-problem`, `client-java-review`,
+      `client-java-install`
 - [x] `client-logs-live`, `client-crash-reports`
 - [x] `client-diagnostics-result`, `client-diagnostics-fix-preview`
 - [x] `client-run-failure-notice`
@@ -117,7 +119,7 @@ Hosts:
 Settings:
 - [x] `settings-general` (theme, text sizes, trusted hosts)
 - [x] `settings-minecraft-defaults`
-- [x] `settings-java`
+- [x] `settings-java`, `settings-java-remove-pinned`
 - [x] `settings-providers` (catalog, CurseForge key states)
 - [x] `settings-storage`, `settings-disk-usage`
 

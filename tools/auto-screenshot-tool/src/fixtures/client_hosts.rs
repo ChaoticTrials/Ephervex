@@ -8,6 +8,7 @@ use ephervex_gui::workspace_layout::Surface;
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use slint::{ComponentHandle, Model, SharedString};
 
+use super::java;
 use super::{
     FORGE_1_20, expand_tabs, log_level, recorded, recorded_server_row, rows, running_server,
     size_text,
@@ -15,9 +16,13 @@ use super::{
 
 /// The states this module adds to the catalog.
 #[cfg(test)]
-const STATE_NAMES: [&str; 7] = [
+const STATE_NAMES: [&str; 11] = [
     "client-overview-linked-server",
     "client-settings",
+    "client-java-runtime",
+    "client-java-problem",
+    "client-java-review",
+    "client-java-install",
     "snapshots",
     "snapshot-create-dialog",
     "snapshot-restore-dialog",
@@ -32,7 +37,23 @@ fn open_surface(
     configure: impl FnOnce(&mut HostView),
     log: Option<LogView>,
 ) {
-    let client = ui.get_instances().row_data(0).unwrap_or_default();
+    open_instance_surface(ui, "cavestone", surface, configure, log);
+}
+
+/// Opens the workspace of the instance with `key` on `surface`.
+fn open_instance_surface(
+    ui: &AppWindow,
+    key: &str,
+    surface: Surface,
+    configure: impl FnOnce(&mut HostView),
+    log: Option<LogView>,
+) {
+    let client = ui
+        .get_instances()
+        .iter()
+        .find(|row| row.id == key)
+        .unwrap_or_default();
+    let name = client.name.clone();
     let surfaces = Surface::client()
         .iter()
         .map(|offered| WorkspaceSurfaceRow {
@@ -67,7 +88,7 @@ fn open_surface(
         host: 0,
         log: log_index,
         surface: surface.id().into(),
-        label: format!("CaveStone, {}", lookup(surface.label())).into(),
+        label: format!("{name}, {}", lookup(surface.label())).into(),
         surface_choice: choice,
         can_split_beside: true,
         ..WorkspacePaneRow::default()
@@ -156,6 +177,46 @@ pub(crate) fn client_settings(ui: &AppWindow) {
         },
         None,
     );
+}
+
+/// The Settings of an instance whose pinned Java cannot run it, after the
+/// launch it refused.
+pub(crate) fn client_java_problem(ui: &AppWindow) {
+    open_instance_surface(ui, "fog", Surface::Settings, refused_launch, None);
+}
+
+/// The same instance reviewing a switch back to automatic selection.
+pub(crate) fn client_java_review(ui: &AppWindow) {
+    open_instance_surface(
+        ui,
+        "fog",
+        Surface::Settings,
+        |view| {
+            refused_launch(view);
+            java::review_automatic(view);
+        },
+        None,
+    );
+}
+
+/// Legacy Forge, whose Java 8 ceiling no installed runtime meets, offering
+/// to install one.
+pub(crate) fn client_java_install(ui: &AppWindow) {
+    open_instance_surface(ui, "super-tiny", Surface::Settings, java::fill_host, None);
+}
+
+fn refused_launch(view: &mut HostView) {
+    java::fill_host(view);
+    view.run_failure_title = lookup("gui-run-failed-client").into();
+    view.run_failure = java::refusal(view).unwrap_or_default().into();
+    view.run_likely_cause = lookup_args(
+        "gui-run-likely-cause",
+        [(
+            "cause",
+            Arg::from(lookup("gui-diagnosis-java-incompatible")),
+        )],
+    )
+    .into();
 }
 
 fn snapshot(

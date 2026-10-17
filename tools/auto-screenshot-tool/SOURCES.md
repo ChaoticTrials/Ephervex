@@ -122,6 +122,8 @@ and refuses any file that does not match. They are not part of the repository.
   They use a made-up export named Creeper Containment Lab and made-up optional
   file names, with blocked-file links on the reserved `example.invalid` host.
 - The sign-in address, which is the public Microsoft device-login page.
+- The Java runtimes apart from the recorded Java 17 version, which instances
+  pin them, and the launch the horrors in the fog refused for its pinned Java 25.
 - The Java runtime and mod counts in the Utility Mods server diagnosis, and the
   CaveStone Server shown running behind its install confirmation.
 - Snapshot restore and create dialogs reuse the recorded snapshots, and the

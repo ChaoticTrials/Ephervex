@@ -246,7 +246,7 @@ fn client_checks() -> Vec<DiagnosticCheckRow> {
     vec![
         java_check(
             &JAVA_17,
-            "gui-java-origin-host",
+            "gui-java-origin-host-managed",
             "customized",
             "gui-diagnosis-check-customized",
         ),
@@ -718,7 +718,7 @@ fn utility_mods_checks() -> Vec<DiagnosticCheckRow> {
     vec![
         java_check(
             &JAVA_21,
-            "gui-java-origin-automatic-managed",
+            "gui-java-origin-automatic",
             "ok",
             "gui-diagnosis-check-ok",
         ),

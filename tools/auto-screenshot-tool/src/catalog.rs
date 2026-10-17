@@ -41,11 +41,13 @@ pub(crate) struct State {
     pub(crate) interaction: Option<Interaction>,
 }
 
-/// A pointer press on the element with this accessible label.
+/// A pointer press on the element with this accessible label, or a wheel
+/// scroll that brings it near the top of its scroll area.
 #[derive(Clone, Copy)]
 pub(crate) enum Interaction {
     Click(&'static str),
     RightClick(&'static str),
+    ScrollTo(&'static str),
 }
 
 const INSTANCE_REGIONS: &[Region] = &[
@@ -460,6 +462,41 @@ pub(crate) const STATES: &[State] = &[
         name: "settings-java",
         show: fixtures::settings::java,
         regions: SETTINGS_REGIONS,
+        same_layout_at_both_sizes: false,
+        interaction: None,
+    },
+    State {
+        name: "client-java-runtime",
+        show: fixtures::client_hosts::client_settings,
+        regions: FULL_ONLY,
+        same_layout_at_both_sizes: false,
+        interaction: Some(Interaction::ScrollTo("Java runtime")),
+    },
+    State {
+        name: "client-java-problem",
+        show: fixtures::client_hosts::client_java_problem,
+        regions: FULL_ONLY,
+        same_layout_at_both_sizes: false,
+        interaction: Some(Interaction::ScrollTo("Java runtime")),
+    },
+    State {
+        name: "client-java-review",
+        show: fixtures::client_hosts::client_java_review,
+        regions: FULL_ONLY,
+        same_layout_at_both_sizes: false,
+        interaction: Some(Interaction::ScrollTo("Proposed changes")),
+    },
+    State {
+        name: "client-java-install",
+        show: fixtures::client_hosts::client_java_install,
+        regions: FULL_ONLY,
+        same_layout_at_both_sizes: false,
+        interaction: Some(Interaction::ScrollTo("Java runtime")),
+    },
+    State {
+        name: "settings-java-remove-pinned",
+        show: fixtures::settings::java_remove_pinned,
+        regions: FULL_ONLY,
         same_layout_at_both_sizes: false,
         interaction: None,
     },
