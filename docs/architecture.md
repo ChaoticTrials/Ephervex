@@ -465,6 +465,11 @@ continue, and the acknowledgement is retained in the session. A setup that has
 not started carries a fingerprint of the plan it shows. Every refresh of a
 host's mods reports the fingerprint of the plan the host would get now, and a
 different one retires the setup; an unchanged host keeps it.
+A required project with an enabled and a disabled jar resolves to the enabled
+one. Starting is refused, before the safety snapshot, when a disabled jar the
+session would turn on, pinned or reached by a closure, declares the mod id of
+another jar it would load beside it, with the same check installs use. Two
+jars the host already loaded together are left as they were.
 
 An active session is a compact version-1 document at
 `<host>/.launcher/isolation.json`. It records the pre-isolation snapshot, the
@@ -1128,7 +1133,8 @@ deleted file, and repairing a host: each is refused before the rename or copy,
 and a repair reports the file it left out together with the jar already
 providing that mod id. Undoing a failed batch puts back a mod set the host
 already had, so it is not refused. Isolation rounds apply their own
-configurations without this check.
+configurations without it, because starting a session already checked every
+jar a round could turn on.
 
 An install request may name dependencies, by project id, that a jar already on
 the host may stand in for, such as a local build of a library or its release

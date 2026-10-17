@@ -82,6 +82,22 @@ impl Fixture {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, bytes).unwrap();
     }
+    /// Writes a jar at `path` whose Fabric metadata declares mod id `id`.
+    fn jar_declaring(&self, path: &str, id: &str) {
+        use std::io::Write as _;
+        let path = self.root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        zip.start_file("fabric.mod.json", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        write!(zip, r#"{{"schemaVersion":1,"id":"{id}","version":"1"}}"#).unwrap();
+        zip.finish().unwrap();
+    }
+    /// Turns the mod off on disk, declaring mod id `id`.
+    fn disabled_jar_declaring(&self, name: &str, id: &str) {
+        std::fs::remove_file(self.root.join(format!("minecraft/mods/{name}.jar"))).unwrap();
+        self.jar_declaring(&format!("minecraft/mods/{name}.jar.disabled"), id);
+    }
     fn recipe(&self, change: impl FnOnce(&mut serde_json::Value)) {
         let path = self.root.join(".launcher/source/recipe.json");
         let mut value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
@@ -1553,4 +1569,135 @@ fn rounds_resume_and_finish_still_apply_while_mod_changes_are_refused() {
     assert!(matches!(step, IsolationStep::Complete(_)));
     let report = app.finish_isolation(fixture.host).unwrap();
     assert_eq!(roots(&report), mods(&["e"]));
+}
+
+/// A client where `libx.jar` loads and `libx-old.jar` is disabled, both
+/// declaring mod id `libx`, beside `a` requiring the projects named.
+fn two_copies_of_libx(a_requires: &[&str]) -> Fixture {
+    let fixture = Fixture::with_mods(&[("a", a_requires), ("libx", &[]), ("libx-old", &[])]);
+    fixture.jar_declaring("minecraft/mods/libx.jar", "libx");
+    fixture.disabled_jar_declaring("libx-old", "libx");
+    fixture
+}
+
+/// Starting a session is refused before a snapshot or any rename.
+fn refused_start(fixture: &Fixture, pinned: &[&str]) -> CoreError {
+    let before = enabled_files(fixture);
+    let app = fixture.app();
+    let error = app
+        .begin_isolation(fixture.host, request(pinned), &CancellationToken::new())
+        .expect_err("a second copy of a mod is refused");
+    assert_eq!(enabled_files(fixture), before);
+    assert!(app.snapshots(fixture.host).unwrap().is_empty());
+    assert!(!fixture.root.join(".launcher/isolation.json").exists());
+    error
+}
+
+fn assert_refused_as_copy_of_libx(error: &CoreError) {
+    assert!(
+        matches!(
+            error,
+            CoreError::Pack(ephervex_pack::PackError::DuplicateModId { mod_id, incoming, path, .. })
+                if mod_id == "libx"
+                    && incoming == "mods/libx-old.jar"
+                    && path.ends_with("minecraft/mods/libx.jar")
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn a_session_pinning_a_disabled_copy_of_a_loading_mod_is_refused() {
+    let fixture = two_copies_of_libx(&[]);
+    assert_refused_as_copy_of_libx(&refused_start(&fixture, &["libx-old"]));
+    assert!(
+        fixture
+            .root
+            .join("minecraft/mods/libx-old.jar.disabled")
+            .is_file()
+    );
+}
+
+#[test]
+fn a_session_whose_closure_reaches_a_disabled_copy_of_a_loading_mod_is_refused() {
+    let fixture = two_copies_of_libx(&["libx-old"]);
+    assert_refused_as_copy_of_libx(&refused_start(&fixture, &[]));
+}
+
+#[test]
+fn a_session_turning_on_two_disabled_copies_of_one_mod_is_refused() {
+    let fixture = Fixture::with_mods(&[
+        ("a", &["liba"]),
+        ("b", &["libb"]),
+        ("liba", &[]),
+        ("libb", &[]),
+    ]);
+    fixture.disabled_jar_declaring("liba", "libx");
+    fixture.disabled_jar_declaring("libb", "libx");
+
+    let error = refused_start(&fixture, &[]);
+
+    assert!(
+        matches!(
+            &error,
+            CoreError::Pack(ephervex_pack::PackError::DuplicateModIdInChange { mod_id, first, second })
+                if mod_id == "libx" && first == "mods/liba.jar" && second == "mods/libb.jar"
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn copies_the_host_already_loaded_together_do_not_stop_a_session() {
+    let fixture = Fixture::with_mods(&[("a", &[]), ("libx", &[]), ("libx-old", &[])]);
+    fixture.jar_declaring("minecraft/mods/libx.jar", "libx");
+    fixture.jar_declaring("minecraft/mods/libx-old.jar", "libx");
+
+    let (app, first) = begin(&fixture, &[]);
+    let (_, step) = drive(&app, fixture.host, first, enables(&["a"]));
+
+    assert!(matches!(step, IsolationStep::Complete(_)), "{step:?}");
+}
+
+#[test]
+fn a_disabled_copy_no_closure_reaches_stays_off_for_the_whole_session() {
+    let fixture = two_copies_of_libx(&[]);
+    let (app, first) = begin(&fixture, &[]);
+    let (rounds, step) = drive(&app, fixture.host, first, enables(&["a"]));
+    assert!(matches!(step, IsolationStep::Complete(_)), "{step:?}");
+    app.finish_isolation(fixture.host).unwrap();
+
+    assert!(
+        rounds
+            .iter()
+            .all(|round| !round.enabled.contains(&mods(&["libx-old"])[0]))
+    );
+    assert!(
+        fixture
+            .root
+            .join("minecraft/mods/libx-old.jar.disabled")
+            .is_file()
+    );
+}
+
+#[test]
+fn a_required_project_resolves_to_its_jar_that_loads() {
+    // Named to sort after the loading jar, so it is not the first one listed.
+    let fixture = Fixture::with_mods(&[("a", &["libx"]), ("libx", &[]), ("zz-libx-old", &[])]);
+    fixture.recipe(|recipe| {
+        for file in recipe["files"].as_array_mut().unwrap() {
+            if file["logical_path"] == "mods/zz-libx-old.jar" {
+                file["identity"]["project_id"] = json!("libx");
+            }
+        }
+    });
+    fixture.jar_declaring("minecraft/mods/libx.jar", "libx");
+    fixture.disabled_jar_declaring("zz-libx-old", "libx");
+
+    let plan = fixture.app().plan_isolation(fixture.host, &[]).unwrap();
+    let enabled = plan.enabled_for(&mods(&["a"]));
+    assert!(enabled.contains(&mods(&["libx"])[0]), "{enabled:?}");
+    assert!(!enabled.contains(&mods(&["zz-libx-old"])[0]), "{enabled:?}");
+
+    begin(&fixture, &[]);
 }

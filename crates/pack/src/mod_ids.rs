@@ -102,27 +102,31 @@ pub(crate) async fn settle_mod_ids(
     judged.map_err(|clash| refusal(Some(recipe), clash))
 }
 
-/// Refuses letting the loader read the jar at `jar` as `logical_path` when an
-/// enabled jar beside it already declares one of its mod ids.
+/// Refuses letting the loader read every jar in `jars` when two of them, or
+/// one of them and an enabled jar beside it, declare one mod id.
 ///
-/// For a change that makes a file the loader ignored visible to it, such as
-/// turning a disabled jar back on. `recipe` names the catalog of the jar
-/// already there, when the host has one. Reads the metadata of every enabled
-/// jar in the folder, so it blocks.
+/// Each jar is its logical path and the file holding it now. For a change
+/// that makes files the loader ignored visible to it, such as turning a
+/// disabled jar back on. `recipe` names the catalog of the jar already there,
+/// when the host has one. Reads the metadata of every enabled jar in the
+/// folders involved, so it blocks.
 ///
 /// # Errors
 ///
-/// [`PackError::DuplicateModId`] naming the jar already there.
+/// [`PackError::DuplicateModId`] naming the jar already there, or
+/// [`PackError::DuplicateModIdInChange`] naming two of `jars`.
 pub fn require_distinct_mod_id(
     recipe: Option<&PackRecipe>,
     game_dir: &Path,
-    logical_path: &Path,
-    jar: &Path,
+    jars: &[(&Path, &Path)],
 ) -> PackResult<()> {
-    let incoming = [IncomingJar {
-        logical_path: logical_path.to_path_buf(),
-        staged: jar.to_path_buf(),
-    }];
+    let incoming: Vec<IncomingJar> = jars
+        .iter()
+        .map(|(logical_path, jar)| IncomingJar {
+            logical_path: logical_path.to_path_buf(),
+            staged: jar.to_path_buf(),
+        })
+        .collect();
     judge(&incoming, game_dir, &BTreeSet::new(), &BTreeSet::new())
         .map(|_| ())
         .map_err(|clash| refusal(recipe, clash))

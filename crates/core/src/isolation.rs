@@ -687,6 +687,7 @@ impl App {
             }
             .into());
         }
+        self.refuse_second_copies(host, &plan)?;
         reporter.set_stage(Some("operation-stage-snapshot-isolation".to_owned()));
         let snapshot = self.create_snapshot(
             host,
@@ -918,6 +919,43 @@ impl App {
         } else {
             Ok(())
         }
+    }
+
+    /// Refuses a session that would turn on a jar declaring the mod id of
+    /// another jar loading beside it, since the game would not start and the
+    /// failure would be blamed on whatever the round tests.
+    ///
+    /// Every jar in a closure of the plan loads in some round, and the
+    /// confirmation round loads them all. Two jars the host already loaded
+    /// together are its own state, so only the ones it would turn on are checked.
+    fn refuse_second_copies(&self, host: InstalledHost, plan: &IsolationPlan) -> CoreResult<()> {
+        let turned_on: BTreeSet<&PathBuf> = plan
+            .pinned_closure
+            .iter()
+            .chain(
+                plan.candidates
+                    .iter()
+                    .flat_map(|candidate| &candidate.closure),
+            )
+            .filter(|path| !plan.initially_enabled.contains(path))
+            .collect();
+        if turned_on.is_empty() {
+            return Ok(());
+        }
+        let layout = self.host_layout(host)?;
+        let jars: Vec<(&Path, PathBuf)> = turned_on
+            .into_iter()
+            .map(|path| {
+                let jar = layout.game_dir.join(ephervex_pack::disabled_path(path));
+                (path.as_path(), jar)
+            })
+            .collect();
+        let jars: Vec<(&Path, &Path)> = jars
+            .iter()
+            .map(|(path, jar)| (*path, jar.as_path()))
+            .collect();
+        ephervex_pack::require_distinct_mod_id(layout.recipe.as_ref(), &layout.game_dir, &jars)?;
+        Ok(())
     }
 
     /// Whether every mod the session manages is enabled exactly when intended.

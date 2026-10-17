@@ -913,7 +913,8 @@ pub(crate) enum SecondCopies {
     /// A change the user asked for, which must not stop the game starting.
     Refused,
     /// Not checked: undoing a failed batch, which puts back a mod set the
-    /// host already had, and applying an isolation round's configuration.
+    /// host already had, and applying an isolation round's configuration,
+    /// whose jars were checked when the session started.
     Tolerated,
 }
 
@@ -1658,8 +1659,7 @@ impl App {
             ephervex_pack::require_distinct_mod_id(
                 layout.recipe.as_ref(),
                 &layout.game_dir,
-                logical_path,
-                from,
+                &[(logical_path, from.as_path())],
             )?;
         }
         rename_without_replacing(from, to).map_err(|source| {

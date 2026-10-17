@@ -1104,14 +1104,26 @@ impl ModGraph {
             })
             .collect();
 
-        let mut entries = Vec::with_capacity(snapshot.mods.len());
+        let mut entries: Vec<GraphEntry> = Vec::with_capacity(snapshot.mods.len());
         let mut by_project = BTreeMap::new();
         let mut by_file_name = BTreeMap::new();
         for entry in &snapshot.mods {
             let recorded = relations.get(&entry.logical_path).cloned().flatten();
             let project_id = entry.identity.project_id().map(ToOwned::to_owned);
+            // Of two jars of one project, a relation means the one that loads,
+            // so a closure does not turn on a second copy beside it.
             if let Some(project) = project_id.clone() {
-                by_project.insert(project, entries.len());
+                let index = entries.len();
+                by_project
+                    .entry(project)
+                    .and_modify(|found: &mut usize| {
+                        if presence_rank(entry.presence)
+                            >= presence_rank(entries[*found].mod_entry.presence)
+                        {
+                            *found = index;
+                        }
+                    })
+                    .or_insert(index);
             }
             by_file_name.insert(entry.file_name.to_ascii_lowercase(), entries.len());
             entries.push(GraphEntry {
@@ -1577,6 +1589,15 @@ impl ModGraph {
                 ..self.entries[index].mod_entry.clone()
             })
             .collect()
+    }
+}
+
+/// Which of two jars of one project a relation resolves to: the higher.
+const fn presence_rank(presence: ModPresence) -> u8 {
+    match presence {
+        ModPresence::Installed => 2,
+        ModPresence::Disabled => 1,
+        ModPresence::Missing => 0,
     }
 }
 
