@@ -133,13 +133,12 @@ pub(crate) fn client_overview_linked_server(ui: &AppWindow) {
     );
 }
 
-/// The runtime form of a client that pins its own Java, memory, and arguments.
+/// The runtime form of a client that sets its own memory and arguments.
 pub(crate) fn client_settings(ui: &AppWindow) {
     open_surface(
         ui,
         Surface::Settings,
         |view| {
-            view.runtime_java = "/demo/java/temurin-17/bin/java".into();
             view.runtime_memory_min = "2048".into();
             view.runtime_memory_max = "6144".into();
             view.runtime_jvm_args = "-XX:+UseG1GC -XX:MaxGCPauseMillis=100".into();
@@ -147,7 +146,7 @@ pub(crate) fn client_settings(ui: &AppWindow) {
             view.runtime_global = lookup_args(
                 "gui-instance-runtime-global",
                 [
-                    ("first", Arg::from("1024 - 4096 MiB")),
+                    ("first", Arg::from("1024 - 6144 MiB")),
                     ("second", Arg::from(lookup("gui-java-auto-selected"))),
                 ],
             )

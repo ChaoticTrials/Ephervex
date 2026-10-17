@@ -9,6 +9,7 @@ use ephervex_gui::workspace_layout::Surface;
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use slint::{Model, ModelRc, SharedString, VecModel};
 
+use super::java::{JAVA_17, JAVA_21, Runtime};
 use super::recorded::{self, Diagnostics, Search};
 use super::{
     cavestone_server_mod_rows, client_mod_results, client_mod_rows, expand_tabs, log_level, rows,
@@ -185,28 +186,57 @@ fn client_problems() -> Vec<DiagnosticFindingRow> {
 }
 
 fn client_customizations() -> Vec<DiagnosticFindingRow> {
-    let java = &recorded::diagnostics().java;
+    let java = &JAVA_17;
     vec![with_route(
         finding(
             "c0",
             false,
             &lookup_args(
                 "gui-diagnosis-java-custom",
-                [("version", Arg::from(java.as_str()))],
+                [("version", Arg::from(recorded::diagnostics().java.as_str()))],
             ),
-            &lookup_args(
-                "gui-diagnosis-java-satisfies",
-                [
-                    ("minecraft", Arg::from("1.20.1")),
-                    ("major", Arg::from("17")),
-                ],
-            ),
+            &[
+                java.line(),
+                java.path.to_owned(),
+                lookup_args(
+                    "gui-diagnosis-java-satisfies",
+                    [
+                        ("minecraft", Arg::from("1.20.1")),
+                        ("major", Arg::from("17")),
+                    ],
+                ),
+                lookup("gui-diagnosis-java-pinned-host"),
+            ]
+            .join("\n"),
             &[],
             &[],
         ),
-        "java-settings",
-        "gui-diagnosis-open-java-settings",
+        "settings",
+        "gui-diagnosis-open-settings",
     )]
+}
+
+/// The Java line of a diagnosis: the runtime, how it was chosen, and the
+/// major the host requires.
+fn java_check(
+    runtime: &Runtime,
+    origin: &str,
+    state: &str,
+    state_label: &str,
+) -> DiagnosticCheckRow {
+    check(
+        &lookup("gui-diagnosis-check-java"),
+        lookup_args(
+            "gui-diagnosis-check-java-runtime",
+            [
+                ("runtime", Arg::from(runtime.line())),
+                ("origin", Arg::from(lookup(origin))),
+                ("major", Arg::from(runtime.major.to_string())),
+            ],
+        ),
+        state,
+        state_label,
+    )
 }
 
 fn client_checks() -> Vec<DiagnosticCheckRow> {
@@ -214,15 +244,9 @@ fn client_checks() -> Vec<DiagnosticCheckRow> {
     let files = &diagnostics.files;
     let mods = &diagnostics.mods;
     vec![
-        check(
-            &lookup("gui-diagnosis-check-java"),
-            lookup_args(
-                "gui-diagnosis-check-java-pinned",
-                [
-                    ("version", Arg::from(diagnostics.java.as_str())),
-                    ("major", Arg::from("17")),
-                ],
-            ),
+        java_check(
+            &JAVA_17,
+            "gui-java-origin-host",
             "customized",
             "gui-diagnosis-check-customized",
         ),
@@ -692,12 +716,9 @@ fn utility_mods_problems() -> Vec<DiagnosticFindingRow> {
 fn utility_mods_checks() -> Vec<DiagnosticCheckRow> {
     let crash = &recorded::diagnostics().server_crashes.utility_mods;
     vec![
-        check(
-            &lookup("gui-diagnosis-check-java"),
-            lookup_args(
-                "gui-diagnosis-check-java-managed",
-                [("version", Arg::from("21.0.5")), ("major", Arg::from("21"))],
-            ),
+        java_check(
+            &JAVA_21,
+            "gui-java-origin-automatic-managed",
             "ok",
             "gui-diagnosis-check-ok",
         ),

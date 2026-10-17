@@ -3,7 +3,7 @@
 
 use ephervex_gui::minecraft_defaults::{CATEGORIES, WINDOW_ASPECTS, category_label};
 use ephervex_gui::presentation::{cache_limit_choices, cache_limit_units};
-use ephervex_gui::ui::{AppWindow, DiskUsageRow, JavaRow, MinecraftPreferenceRow};
+use ephervex_gui::ui::{AppWindow, DiskUsageRow, MinecraftPreferenceRow};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use slint::{ModelRc, SharedString, VecModel};
 
@@ -164,53 +164,19 @@ pub(crate) fn minecraft_defaults(ui: &AppWindow) {
     ui.set_minecraft_total_count(181);
 }
 
-fn runtime(version: &str, vendor: &str, path: &str, origin: &str, major: u8) -> JavaRow {
-    JavaRow {
-        path: path.into(),
-        version: version.into(),
-        vendor: vendor.into(),
-        origin: origin.into(),
-        compatible: format!("Java {major}").into(),
-    }
-}
-
 pub(crate) fn java(ui: &AppWindow) {
     open_settings(ui, "Java");
     ui.set_java_auto_detect(true);
     ui.set_java_auto_download(true);
     ui.set_java_memory_min("1024".into());
     ui.set_java_memory_max("6144".into());
-    ui.set_java_preferred_path("/demo/jvm/temurin-17/bin/java".into());
-    ui.set_java_runtimes(rows(vec![
-        runtime(
-            "1.8.0_432",
-            "Azul Systems, Inc.",
-            "/demo/usr/lib/jvm/zulu-8/bin/java",
-            "system",
-            8,
-        ),
-        runtime(
-            "17.0.13",
-            "Eclipse Adoptium",
-            "/demo/jvm/temurin-17/bin/java",
-            "java-home",
-            17,
-        ),
-        runtime(
-            "21.0.5",
-            "Eclipse Adoptium",
-            "/demo/ephervex/runtimes/temurin-21/bin/java",
-            "managed",
-            21,
-        ),
-        runtime(
-            "25.0.1",
-            "Eclipse Adoptium",
-            "/demo/home/.sdkman/candidates/java/25-tem/bin/java",
-            "sdkman",
-            25,
-        ),
-    ]));
+    ui.set_java_preferred_path(SharedString::default());
+    ui.set_java_runtimes(rows(
+        super::java::INVENTORY
+            .iter()
+            .map(|runtime| runtime.row())
+            .collect(),
+    ));
 }
 
 pub(crate) fn providers(ui: &AppWindow) {
