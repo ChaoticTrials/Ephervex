@@ -148,10 +148,16 @@ settings, keep what the file holds.
 
 An edited row shows **Changed**, and a value the server would not accept
 shows why. The bar at the bottom counts unsaved changes. Select **Save
-Changes** to save them or **Discard Changes** to drop them. **Save Changes**
-is available while the server is stopped or after a run failed.
+Changes** to save them or **Discard Changes** to drop them.
+
+You can also save while the server runs under Ephervex. Saving does not
+restart it: until it restarts, the header, **Overview**, and each saved row
+show **Restart required**. Network settings can be changed only while the
+server is stopped.
 
 <ThemeScreenshot state="server-properties" alt="A server's Properties page with the Network and Minecraft Server EULA cards above the grouped World settings" />
+
+<ThemeScreenshot state="server-properties-running" alt="Properties of a running server marked Restart required in the header and above its locked network settings" />
 
 **1** marks **Access**, where you choose who can connect.
 
@@ -178,10 +184,19 @@ For a custom bind, add `--access custom --address 192.0.2.10`. The `network`
 command also accepts `--online-mode=false`, but use it only for a localhost
 server. `properties set` refuses the managed network and EULA keys, and a
 value its key does not accept, such as a `view-distance` outside 2 to 32.
-Other keys are stored as written.
+Other keys are stored as written. On a running server, `properties set` saves
+the value for the next start and says so, and `ephervex server status
+SERVER_ID` lists the keys waiting for a restart. `server network` is refused
+while the server runs.
 
 </TabItem>
 </Tabs>
+
+:::note
+Values saved while the server runs are written again just before it next
+starts. An edit made to those keys in `server.properties` outside Ephervex in
+the meantime, or by the server itself, is replaced.
+:::
 
 ## Set the server's Java and memory
 
@@ -220,7 +235,8 @@ repeated `--jvm-arg ARG` and `--clear`.
 <TabItem value="gui" label="Desktop" default>
 
 Open the server workspace from **Servers** or its linked client. Select
-**Start**. The **Overview** shows its address and runtime state. Open
+**Start**. The header shows its address and port, and the **Overview** shows
+its runtime state. Open
 **Console** to watch output and send a command. Use **Stop** for a graceful
 shutdown or **Restart** to stop and start it again. **Force Kill** is available
 if it cannot stop normally. The console starts over with only the new run's

@@ -117,7 +117,7 @@ Hosts:
 - [x] `client-run-failure-notice`
 - [x] `server-console`, `server-properties` (EULA card), `server-crash-notice`
 - [x] `server-settings`, `server-mod-manager`
-- [x] `server-eula-refused`
+- [x] `server-eula-refused`, `server-properties-running`
 - [x] `split-workspace` (client logs beside server console)
 
 Settings:
@@ -231,7 +231,6 @@ features show one tab or a short note.
 These change screens that exist today. Write the surrounding pages so they are
 easy to update, and capture screenshots late.
 
-- #12 server status and configuration shortcuts
 - #17 resource packs, shader packs and datapacks during import
 - #10 cache and storage maintenance
 - #341 clients and servers surviving an Ephervex restart

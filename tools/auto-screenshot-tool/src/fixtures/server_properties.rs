@@ -12,9 +12,13 @@ use slint::{ModelRc, SharedString};
 
 use super::rows;
 
-/// The rows for a file holding `stored`, split into the cards that show them.
-/// A stored choice is written as one of its names.
-pub(crate) fn property_groups(stored: &[(&str, &str)]) -> ModelRc<ServerPropertyGroup> {
+/// The rows for a file holding `stored`, split into the cards that show them,
+/// with the keys in `awaiting_restart` saved while the server ran. A stored
+/// choice is written as one of its names.
+pub(crate) fn property_groups(
+    stored: &[(&str, &str)],
+    awaiting_restart: &[&str],
+) -> ModelRc<ServerPropertyGroup> {
     let mut groups: Vec<(PropertyGroup, Vec<ServerPropertyRow>)> = Vec::new();
     for definition in SERVER_PROPERTY_CATALOG {
         if definition.group == PropertyGroup::Advanced {
@@ -24,7 +28,10 @@ pub(crate) fn property_groups(stored: &[(&str, &str)]) -> ModelRc<ServerProperty
             .iter()
             .find(|(key, _)| *key == definition.key)
             .map(|(_, value)| *value);
-        let row = property_row(definition, value);
+        let row = ServerPropertyRow {
+            awaiting_restart: awaiting_restart.contains(&definition.key),
+            ..property_row(definition, value)
+        };
         match groups.last_mut() {
             Some((group, rows)) if *group == definition.group => rows.push(row),
             _ => groups.push((definition.group, vec![row])),
@@ -105,7 +112,7 @@ mod tests {
 
     #[test]
     fn a_stored_choice_is_selected_and_an_absent_one_offers_to_stay_unset() {
-        let groups = property_groups(&[("difficulty", "normal")]);
+        let groups = property_groups(&[("difficulty", "normal")], &[]);
         let rows: Vec<ServerPropertyRow> = groups
             .iter()
             .flat_map(|group| group.rows.iter().collect::<Vec<_>>())
@@ -122,7 +129,7 @@ mod tests {
 
     #[test]
     fn advanced_keys_are_left_out() {
-        let groups = property_groups(&[]);
+        let groups = property_groups(&[], &[]);
         let advanced = group_heading(PropertyGroup::Advanced);
         assert!(
             groups

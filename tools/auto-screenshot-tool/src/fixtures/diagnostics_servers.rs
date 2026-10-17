@@ -464,7 +464,7 @@ const CAVESTONE_PROPERTIES: &[(&str, &str)] = &[
 /// The Properties surface of a stopped server with LAN access awaiting EULA consent.
 pub(crate) fn server_properties(ui: &AppWindow) {
     let view = HostView {
-        property_groups: super::server_properties::property_groups(CAVESTONE_PROPERTIES),
+        property_groups: super::server_properties::property_groups(CAVESTONE_PROPERTIES, &[]),
         property_online_mode: false,
         property_access: "LAN".into(),
         property_address: SharedString::default(),
@@ -527,10 +527,47 @@ pub(crate) fn create_server_linked(ui: &AppWindow) {
     ui.set_modal("create-server".into());
 }
 
+/// The Properties of a running server after a save: the new values wait for
+/// its next start.
+pub(crate) fn server_properties_running(ui: &AppWindow) {
+    let server = ServerRow {
+        restart_required: true,
+        ..running_server(named_server(ui, "cavestone-server"))
+    };
+    let stored: Vec<(&str, &str)> = CAVESTONE_PROPERTIES
+        .iter()
+        .map(|&(key, value)| match key {
+            "max-players" => (key, "4"),
+            "difficulty" => (key, "hard"),
+            _ => (key, value),
+        })
+        .collect();
+    let view = HostView {
+        property_groups: super::server_properties::property_groups(
+            &stored,
+            &["max-players", "difficulty"],
+        ),
+        property_online_mode: true,
+        property_access: "LAN".into(),
+        property_port: "25565".into(),
+        properties_revision: 1,
+        ..server_view(server)
+    };
+    ui.set_eula_accepted(true);
+    ui.set_eula_status(
+        lookup_args(
+            "gui-eula-accepted-at",
+            [("value", Arg::from("2026-10-14 17:05 UTC"))],
+        )
+        .into(),
+    );
+    open_server(ui, view, "Properties", None);
+}
+
 /// The EULA review a server needs before its first start.
 pub(crate) fn server_eula_review(ui: &AppWindow) {
     let view = HostView {
-        property_groups: super::server_properties::property_groups(CAVESTONE_PROPERTIES),
+        property_groups: super::server_properties::property_groups(CAVESTONE_PROPERTIES, &[]),
         property_access: "LAN".into(),
         property_port: "25565".into(),
         properties_revision: 1,
