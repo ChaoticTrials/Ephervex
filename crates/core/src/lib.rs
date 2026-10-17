@@ -206,7 +206,10 @@ pub use server::{
     ServerStatus, stoppable_for_deletion,
 };
 pub use server_capture::{CaptureUpdate, ServerCaptureTail};
-pub use server_pack::{IdentificationOutcome, ServerContentSource, ServerPackOutcome};
+pub use server_pack::{
+    IdentificationOutcome, ServerArchiveConflict, ServerArchiveEvidence, ServerContentSource,
+    ServerPackOutcome, read_server_archive_evidence,
+};
 pub use single_instance::{PrimaryInstance, Startup as SingleInstanceStartup};
 pub use snapshot::{
     SnapshotError, SnapshotOrigin, SnapshotRecord, SnapshotRestore, SnapshotRestoreOptions,

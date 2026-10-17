@@ -437,6 +437,14 @@ pub enum CoreError {
         reason: crate::organization::IconRefusal,
     },
 
+    /// A server would be built from published server files that say it needs
+    /// a different Minecraft release or loader than the one selected.
+    #[error("server files {} do not match the selection: {conflict}", archive.display())]
+    ServerArchiveDisagrees {
+        archive: PathBuf,
+        conflict: crate::server_pack::ServerArchiveConflict,
+    },
+
     /// A repair that would rewrite mods something else is using right now.
     #[error("this host cannot be repaired while {reason}")]
     RepairRefused { reason: RepairRefusal },
@@ -630,6 +638,7 @@ impl CoreError {
             Self::GroupNotFound { .. } => "error-group-not-found",
             Self::IconRefused { reason, .. } => reason.message_id(),
             Self::RepairRefused { reason } => reason.message_id(),
+            Self::ServerArchiveDisagrees { conflict, .. } => conflict.message_id(),
             Self::ChangeRefused { reason } => match reason {
                 RepairRefusal::HostRunning => "error-change-host-running",
                 RepairRefusal::IsolationActive => "error-change-isolation-active",
@@ -700,6 +709,7 @@ impl CoreError {
             Self::GroupNameTaken { name } => vec![("name", Arg::from(name.clone()))],
             Self::GroupNotFound { group } => vec![("group", Arg::from(group.clone()))],
             Self::IconRefused { reason, .. } => reason.message_args(),
+            Self::ServerArchiveDisagrees { conflict, .. } => text(conflict.message_args()),
             Self::EntityNameInvalid {
                 reason: NameRefusal::TooLong,
             } => vec![(
@@ -922,6 +932,7 @@ impl CoreError {
             | Self::ModCatalogPreferenceUnrecognized { .. }
             | Self::RepairRefused { .. }
             | Self::ChangeRefused { .. }
+            | Self::ServerArchiveDisagrees { .. }
             | Self::ArtworkUnusable { .. } => None,
         }
     }
@@ -988,6 +999,7 @@ impl CoreError {
             | Self::DiagnosticBundleNotWritten { path, .. }
             | Self::DiagnosticBundleOverwritesSource { path }
             | Self::IconRefused { path, .. }
+            | Self::ServerArchiveDisagrees { archive: path, .. }
             | Self::Auth(
                 ephervex_auth::AuthError::CredentialChangeBusy { path }
                 | ephervex_auth::AuthError::CredentialChangeUnavailable { path },

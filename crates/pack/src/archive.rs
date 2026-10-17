@@ -327,6 +327,12 @@ impl PackArchive {
         &self.limits
     }
 
+    /// Every entry name exactly as the central directory spells it, in archive
+    /// order. Untrusted text: never a path until it has been validated.
+    pub(crate) fn entry_names(&self) -> impl Iterator<Item = &str> {
+        self.zip.file_names()
+    }
+
     /// The archive's own path on disk.
     #[must_use]
     pub fn path(&self) -> &Path {

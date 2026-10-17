@@ -102,7 +102,8 @@ pub use recipe::{
     SideRequirement, UnknownServerFiles,
 };
 pub use server_pack::{
-    EULA_FILE, InstalledServerPack, LIBRARIES_DIR, ServerPackInstall, ServerPackMod,
-    install_server_pack, measure_installed_mods, server_pack_recipe, validate_server_pack,
+    ArchiveLoader, EULA_FILE, InstalledServerPack, LIBRARIES_DIR, ServerPackEvidence,
+    ServerPackInstall, ServerPackMod, install_server_pack, measure_installed_mods,
+    read_server_pack_evidence, server_pack_recipe, validate_server_pack,
 };
 pub use store::{RECIPE_FILE, SourceStore, provider_directory};

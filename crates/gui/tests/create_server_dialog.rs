@@ -10,10 +10,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ephervex_gui::ui::{AppWindow, GuiI18n};
+use ephervex_gui::ui::{AppWindow, GuiI18n, ServerPackRules};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
-use slint::{ComponentHandle, PhysicalSize, SharedString};
+use slint::{ComponentHandle, ModelRc, PhysicalSize, SharedString, VecModel};
 
 /// A standalone server can be built from an archive, so the dialog offers the
 /// choice with no client selected.
@@ -204,6 +204,114 @@ fn submitting_an_import_carries_its_own_archive() {
         submitted.borrow().as_slice(),
         ["/tmp/Repro_server_pack_1.2.3.zip".to_owned()]
     );
+}
+
+/// What the rule was asked: the selection's loader and build, then what the
+/// server files name.
+type RuleQuestion = (String, String, String, String, bool);
+
+/// Server files that contradict a standalone selection keep Create unavailable
+/// and say why, and the rule is asked about exactly what the dialog holds.
+#[test]
+fn a_standalone_selection_its_server_files_contradict_cannot_be_created() {
+    let ui = window();
+    let asked: Rc<RefCell<Vec<RuleQuestion>>> = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&asked);
+    ui.global::<ServerPackRules>().on_conflict(
+        move |_, loader, version, _, pack_loader, pack_version, mods| {
+            sink.borrow_mut().push((
+                loader.to_string(),
+                version.to_string(),
+                pack_loader.to_string(),
+                pack_version.to_string(),
+                mods,
+            ));
+            if loader == pack_loader && version == pack_version {
+                SharedString::default()
+            } else {
+                "These server files were made for NeoForge, not Vanilla.".into()
+            }
+        },
+    );
+
+    open_standalone_with_server_files(&ui);
+    let create = button(&ui, &lookup("gui-create-server")).expect("the dialog has a Create");
+    assert_eq!(create.accessible_enabled(), Some(false));
+    assert_eq!(
+        create.accessible_description().as_deref(),
+        Some("These server files were made for NeoForge, not Vanilla.")
+    );
+    assert_eq!(
+        asked.borrow().last(),
+        Some(&(
+            "Vanilla".to_owned(),
+            String::new(),
+            "NeoForge".to_owned(),
+            "21.1.77".to_owned(),
+            true
+        ))
+    );
+
+    ui.set_create_server_loader("NeoForge".into());
+    ui.set_create_server_loader_version("21.1.77".into());
+    settle(&ui);
+    let create = button(&ui, &lookup("gui-create-server")).expect("the dialog has a Create");
+    assert_eq!(create.accessible_enabled(), Some(true));
+}
+
+/// A linked server's selection is its client's, so the dialog leaves the
+/// comparison to creation instead of blocking on a selection it does not show.
+#[test]
+fn a_linked_server_is_not_held_back_by_the_standalone_rule() {
+    let ui = window();
+    ui.global::<ServerPackRules>()
+        .on_conflict(|_, _, _, _, _, _, _| "always in conflict".into());
+
+    open_create_server(&ui, "repro-client");
+    ui.set_create_server_name("Repro Server".into());
+    ui.set_create_server_pack("/tmp/ServerFiles-4.2.zip".into());
+    ui.set_create_server_pack_name("ServerFiles-4.2.zip".into());
+    ui.set_create_server_pack_mods(true);
+    settle(&ui);
+
+    let create = button(&ui, &lookup("gui-create-server")).expect("the dialog has a Create");
+    assert_eq!(create.accessible_enabled(), Some(true));
+}
+
+/// The note saying where filled-in values came from shows with its archive
+/// and goes with it.
+#[test]
+fn the_server_files_note_shows_only_while_its_archive_is_chosen() {
+    let ui = window();
+    let note = "Minecraft 1.21.1 with NeoForge 21.1.77, as named by the server files.";
+
+    open_standalone_with_server_files(&ui);
+    ui.set_create_server_pack_note(note.into());
+    settle(&ui);
+    assert!(widest(&ui, note).is_some());
+
+    ui.set_create_server_pack(SharedString::default());
+    ui.set_create_server_pack_name(SharedString::default());
+    settle(&ui);
+    assert!(widest(&ui, note).is_none());
+}
+
+fn open_standalone_with_server_files(ui: &AppWindow) {
+    open_create_server(ui, "");
+    ui.set_create_server_name("Repro Server".into());
+    ui.set_minecraft_releases(ModelRc::new(VecModel::from(vec![SharedString::from(
+        "1.21.1",
+    )])));
+    ui.set_create_server_minecraft("1.21.1".into());
+    ui.set_create_server_loader("Vanilla".into());
+    ui.set_create_server_loader_version(SharedString::default());
+    ui.set_create_server_pack("/tmp/ServerFiles-4.2.zip".into());
+    ui.set_create_server_pack_name("ServerFiles-4.2.zip".into());
+    ui.set_create_server_pack_mods(true);
+    ui.set_create_server_pack_minecraft("1.21.1".into());
+    ui.set_create_server_pack_loader("NeoForge".into());
+    ui.set_create_server_pack_loader_version("21.1.77".into());
+    settle(ui);
 }
 
 fn open_import(ui: &AppWindow, create_server: bool) {

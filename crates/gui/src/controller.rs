@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use copypasta::{ClipboardContext, ClipboardProvider as _};
 use ephervex_core::live_diagnostics::{LogFilter, LogLevel, RetainedLog};
 use ephervex_core::{
-    InstalledHost, OptionalSelection, ProviderFileIdentity, StorageCategory, StorageRetention,
-    WindowSize,
+    InstalledHost, OptionalSelection, ProviderFileIdentity, ServerArchiveEvidence, StorageCategory,
+    StorageRetention, WindowSize,
 };
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use ephervex_model::AbsentModPolicy;
@@ -43,7 +43,8 @@ use crate::ui::{
     HostView, ImpactRow, ImportDuplicateRow, ImportOptionRow, InstanceRow, IsolationCandidateRow,
     JavaRow, LicenseRow, LinkedTargetRow, LocalModClashRow, LogChunk, ModRow, ModSearchRow,
     ModVersionRow, NameRules, PendingEntityRow, PromoteServerRow, PropertyRules, RelationRow,
-    RunningRow, ServerRow, SnapshotRow, Theme, WindowSizePreview, WorkflowActionRow,
+    RunningRow, ServerPackRules, ServerRow, SnapshotRow, Theme, WindowSizePreview,
+    WorkflowActionRow,
 };
 use crate::window_aspect;
 use crate::workspace_layout::{PaneId, Revealed, Surface, WorkspaceLayout};
@@ -2399,7 +2400,12 @@ pub fn accept_file_drops(ui: &AppWindow, drops: &FileDrops, controller: &Control
                         );
                     }
                     DropIntent::ServerPack(target) => {
-                        set_server_pack(&ui, target, paths.first().map(PathBuf::as_path));
+                        choose_server_pack(
+                            &ui,
+                            &sender,
+                            target,
+                            paths.first().map(PathBuf::as_path),
+                        );
                     }
                     DropIntent::Import => {
                         let Some(archive) = paths.into_iter().next() else {
@@ -2868,6 +2874,116 @@ fn register_server_pack_choice(ui: &AppWindow, commands: &Sender<Command>) {
     });
 }
 
+/// Shows a newly chosen archive and, for the create-server dialog, starts
+/// reading what it says about the selection it was made for.
+fn choose_server_pack(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    target: ServerPackTarget,
+    path: Option<&Path>,
+) {
+    set_server_pack(ui, target, path);
+    if let (ServerPackTarget::NewServer, Some(path)) = (target, path) {
+        send(
+            commands,
+            Command::InspectServerPack {
+                path: path.to_path_buf(),
+            },
+        );
+    }
+}
+
+/// Applies what the create-server dialog's server files say about their
+/// selection.
+///
+/// A standalone server's fields are filled in from whatever the files name, and
+/// the note says where those values came from. A linked server's selection is
+/// its client's and is left alone. An answer for files the dialog no longer
+/// shows is dropped.
+fn apply_server_pack_evidence(
+    ui: &AppWindow,
+    path: &Path,
+    evidence: Result<ServerArchiveEvidence, String>,
+) {
+    if ui.get_create_server_pack().as_str() != path.display().to_string() {
+        return;
+    }
+    let evidence = match evidence {
+        Ok(evidence) => evidence,
+        Err(message) => {
+            ui.set_create_server_pack_note(
+                lookup_args(
+                    "gui-server-pack-unreadable",
+                    [("value", Arg::from(message.as_str()))],
+                )
+                .into(),
+            );
+            return;
+        }
+    };
+    ui.set_create_server_pack_mods(evidence.carries_mods);
+    ui.set_create_server_pack_loader(
+        evidence
+            .loader
+            .map(|kind| kind.to_string())
+            .unwrap_or_default()
+            .into(),
+    );
+    ui.set_create_server_pack_loader_version(
+        evidence.loader_version.clone().unwrap_or_default().into(),
+    );
+    ui.set_create_server_pack_minecraft(
+        evidence
+            .minecraft_version
+            .clone()
+            .unwrap_or_default()
+            .into(),
+    );
+    if !ui.get_create_server_client_id().is_empty() {
+        ui.set_create_server_pack_note(SharedString::default());
+        return;
+    }
+    if let Some(minecraft) = &evidence.minecraft_version {
+        ui.set_create_server_minecraft(minecraft.into());
+        apply_minecraft_selection(ui, "server", minecraft);
+    }
+    if let Some(kind) = evidence.loader {
+        ui.set_create_server_loader(kind.to_string().into());
+        if let Some(version) = &evidence.loader_version {
+            ui.set_create_server_loader_versions(model(vec![SharedString::from(version)]));
+            ui.set_create_server_loader_version(version.into());
+        } else {
+            ui.set_create_server_loader_versions(model(Vec::new()));
+            ui.set_create_server_loader_version(SharedString::default());
+            ui.invoke_request_loader_catalog(
+                "server".into(),
+                kind.to_string().into(),
+                ui.get_create_server_minecraft(),
+            );
+        }
+    }
+    recompute_create_server_name(ui);
+    let note = match (
+        &evidence.minecraft_version,
+        evidence.loader,
+        &evidence.loader_version,
+    ) {
+        (Some(minecraft), Some(loader), Some(version)) => lookup_args(
+            "gui-server-pack-selection-read",
+            [
+                ("minecraft", Arg::from(minecraft.as_str())),
+                ("loader", Arg::from(loader.to_string())),
+                ("version", Arg::from(version.as_str())),
+            ],
+        ),
+        _ if evidence.carries_mods || evidence.loader.is_some() => {
+            lookup("gui-server-pack-selection-unknown")
+        }
+        _ => String::new(),
+    };
+    ui.set_create_server_pack_note(note.into());
+}
+
 /// Shows a chosen archive, or clears the choice.
 ///
 /// The full path is what the backend needs and the file name is what the dialog
@@ -2888,6 +3004,11 @@ fn set_server_pack(ui: &AppWindow, target: ServerPackTarget, path: Option<&Path>
         ServerPackTarget::NewServer => {
             ui.set_create_server_pack(full);
             ui.set_create_server_pack_name(name);
+            ui.set_create_server_pack_mods(false);
+            ui.set_create_server_pack_minecraft(SharedString::default());
+            ui.set_create_server_pack_loader(SharedString::default());
+            ui.set_create_server_pack_loader_version(SharedString::default());
+            ui.set_create_server_pack_note(SharedString::default());
         }
         ServerPackTarget::Import => {
             ui.set_import_server_pack(full);
@@ -5715,6 +5836,7 @@ fn register_server_actions(ui: &AppWindow, commands: &Sender<Command>, workspace
     });
 
     register_name_rules(ui);
+    register_server_pack_rules(ui);
     register_server_property_actions(ui, commands);
 
     let sender = commands.clone();
@@ -5837,6 +5959,61 @@ fn register_server_console(
 fn register_name_rules(ui: &AppWindow) {
     ui.global::<NameRules>()
         .on_linked_server_name(|client| backend::suggested_server_name(&client).into());
+}
+
+/// Why the create-server dialog's selection disagrees with its server files,
+/// answered by the same check creation refuses with.
+fn register_server_pack_rules(ui: &AppWindow) {
+    ui.global::<ServerPackRules>().on_conflict(
+        |minecraft, loader, loader_version, pack_minecraft, pack_loader, pack_version, mods| {
+            server_pack_conflict(
+                &ServerPackSelection {
+                    minecraft: &minecraft,
+                    loader: &loader,
+                    loader_version: &loader_version,
+                },
+                &ServerArchiveEvidence {
+                    carries_mods: mods,
+                    loader: loader_kind_of(&pack_loader),
+                    loader_version: (!pack_version.is_empty()).then(|| pack_version.into()),
+                    minecraft_version: (!pack_minecraft.is_empty()).then(|| pack_minecraft.into()),
+                },
+            )
+            .into()
+        },
+    );
+}
+
+/// The create-server dialog's selection as its fields hold it.
+struct ServerPackSelection<'a> {
+    minecraft: &'a str,
+    loader: &'a str,
+    loader_version: &'a str,
+}
+
+/// The localized disagreement, or empty when there is none. A modded selection
+/// still waiting for its build says nothing here: the dialog already asks for
+/// one, and comparing an empty build would only repeat that.
+fn server_pack_conflict(
+    selection: &ServerPackSelection<'_>,
+    evidence: &ServerArchiveEvidence,
+) -> String {
+    let loader = match loader_kind_of(selection.loader) {
+        None => ephervex_model::LoaderSelection::vanilla(),
+        Some(_) if selection.loader_version.is_empty() => return String::new(),
+        Some(kind) => ephervex_model::LoaderSelection::exact(kind, selection.loader_version),
+    };
+    evidence
+        .conflict(selection.minecraft, &loader)
+        .map(|conflict| {
+            let args = conflict.message_args();
+            lookup_args(
+                conflict.message_id(),
+                args.iter()
+                    .map(|(name, value)| (*name, Arg::from(value.as_str()))),
+            )
+        })
+        .unwrap_or_default()
 }
 
 fn register_server_property_actions(ui: &AppWindow, commands: &Sender<Command>) {
@@ -8279,7 +8456,10 @@ fn apply_event(
             send(commands, Command::SetHostIcon { host, path });
         }
         Event::ServerPackPicked { target, path } => {
-            set_server_pack(ui, target, Some(&path));
+            choose_server_pack(ui, commands, target, Some(&path));
+        }
+        Event::ServerPackInspected { path, evidence } => {
+            apply_server_pack_evidence(ui, &path, evidence);
         }
         Event::WatchedFolderPicked(path) => {
             let mut folders: Vec<String> = ui
@@ -8579,8 +8759,16 @@ fn apply_loader_versions(
     }
     let rows = model(versions.iter().cloned().map(SharedString::from).collect());
     if form == "server" {
+        // A build the chosen server files name stays chosen: the catalog only
+        // lists what else exists, and replacing it would contradict the files.
+        let current = ui.get_create_server_loader_version();
+        let named = !current.is_empty() && current == ui.get_create_server_pack_loader_version();
         ui.set_create_server_loader_versions(rows);
-        ui.set_create_server_loader_version(versions.first().cloned().unwrap_or_default().into());
+        if !named {
+            ui.set_create_server_loader_version(
+                versions.first().cloned().unwrap_or_default().into(),
+            );
+        }
         recompute_create_server_name(ui);
     } else {
         ui.set_create_loader_versions(rows);
@@ -12627,6 +12815,154 @@ mod tests {
             "/tmp/one_server_pack.zip",
             "clearing one dialog's choice never touches the other's"
         );
+    }
+
+    fn neoforge_server_files() -> ServerArchiveEvidence {
+        ServerArchiveEvidence {
+            carries_mods: true,
+            loader: Some(ephervex_model::LoaderKind::NeoForge),
+            loader_version: Some("21.1.77".to_owned()),
+            minecraft_version: Some("1.21.1".to_owned()),
+        }
+    }
+
+    /// The selection a standalone server's files name is filled in, and the
+    /// dialog says where it came from.
+    #[test]
+    fn server_files_that_name_their_selection_fill_in_a_standalone_server() {
+        let ui = test_window();
+        let archive = Path::new("/tmp/ServerFiles-4.2.zip");
+        ui.set_create_server_client_id(SharedString::default());
+        ui.set_create_server_minecraft("26.1.2".into());
+        ui.set_create_server_loader("Vanilla".into());
+        set_server_pack(&ui, ServerPackTarget::NewServer, Some(archive));
+
+        apply_server_pack_evidence(&ui, archive, Ok(neoforge_server_files()));
+
+        assert_eq!(ui.get_create_server_minecraft(), "1.21.1");
+        assert_eq!(ui.get_create_server_loader(), "NeoForge");
+        assert_eq!(ui.get_create_server_loader_version(), "21.1.77");
+        assert_eq!(
+            ui.get_create_server_pack_note().as_str(),
+            lookup_args(
+                "gui-server-pack-selection-read",
+                [
+                    ("minecraft", Arg::from("1.21.1")),
+                    ("loader", Arg::from("NeoForge")),
+                    ("version", Arg::from("21.1.77")),
+                ],
+            )
+        );
+
+        apply_loader_versions(
+            &ui,
+            "server",
+            ephervex_model::LoaderKind::NeoForge,
+            "1.21.1",
+            &["21.1.90".to_owned(), "21.1.77".to_owned()],
+        );
+        assert_eq!(
+            ui.get_create_server_loader_version(),
+            "21.1.77",
+            "a listing arriving later does not replace the build the files name"
+        );
+    }
+
+    /// Mods with no readable loader leave the selection to the user and say so,
+    /// and a linked server's selection is never touched.
+    #[test]
+    fn server_files_that_do_not_name_a_loader_leave_the_selection_alone() {
+        let ui = test_window();
+        let archive = Path::new("/tmp/ServerFiles-4.2.zip");
+        ui.set_create_server_client_id(SharedString::default());
+        ui.set_create_server_minecraft("26.1.2".into());
+        ui.set_create_server_loader("Vanilla".into());
+        set_server_pack(&ui, ServerPackTarget::NewServer, Some(archive));
+
+        apply_server_pack_evidence(
+            &ui,
+            archive,
+            Ok(ServerArchiveEvidence {
+                carries_mods: true,
+                ..ServerArchiveEvidence::default()
+            }),
+        );
+        assert_eq!(ui.get_create_server_minecraft(), "26.1.2");
+        assert_eq!(ui.get_create_server_loader(), "Vanilla");
+        assert!(ui.get_create_server_pack_mods());
+        assert_eq!(
+            ui.get_create_server_pack_note().as_str(),
+            lookup("gui-server-pack-selection-unknown")
+        );
+
+        ui.set_create_server_client_id("repro-client".into());
+        set_server_pack(&ui, ServerPackTarget::NewServer, Some(archive));
+        apply_server_pack_evidence(&ui, archive, Ok(neoforge_server_files()));
+        assert_eq!(ui.get_create_server_loader(), "Vanilla");
+        assert_eq!(ui.get_create_server_pack_note(), "");
+    }
+
+    /// An answer about files the dialog no longer shows changes nothing.
+    #[test]
+    fn evidence_for_replaced_server_files_is_dropped() {
+        let ui = test_window();
+        ui.set_create_server_client_id(SharedString::default());
+        ui.set_create_server_loader("Vanilla".into());
+        set_server_pack(
+            &ui,
+            ServerPackTarget::NewServer,
+            Some(Path::new("/tmp/second.zip")),
+        );
+
+        apply_server_pack_evidence(
+            &ui,
+            Path::new("/tmp/first.zip"),
+            Ok(neoforge_server_files()),
+        );
+
+        assert_eq!(ui.get_create_server_loader(), "Vanilla");
+        assert!(!ui.get_create_server_pack_mods());
+    }
+
+    #[test]
+    fn the_dialogs_conflict_rule_is_the_one_creation_refuses_with() {
+        let files = neoforge_server_files();
+        let vanilla = ServerPackSelection {
+            minecraft: "1.21.1",
+            loader: "Vanilla",
+            loader_version: "",
+        };
+        assert_eq!(
+            server_pack_conflict(&vanilla, &files),
+            lookup_args(
+                "error-server-archive-loader-differs",
+                [
+                    ("archive", Arg::from("NeoForge")),
+                    ("selected", Arg::from("Vanilla")),
+                ],
+            )
+        );
+        let matching = ServerPackSelection {
+            minecraft: "1.21.1",
+            loader: "NeoForge",
+            loader_version: "21.1.77",
+        };
+        assert_eq!(server_pack_conflict(&matching, &files), "");
+        let unchosen_build = ServerPackSelection {
+            loader_version: "",
+            ..matching
+        };
+        assert_eq!(
+            server_pack_conflict(&unchosen_build, &files),
+            "",
+            "the dialog already asks for a build"
+        );
+        let mods_only = ServerArchiveEvidence {
+            carries_mods: true,
+            ..ServerArchiveEvidence::default()
+        };
+        assert!(has("error-server-archive-needs-loader"));
+        assert_ne!(server_pack_conflict(&vanilla, &mods_only), "");
     }
 
     fn test_workspace(ui: &AppWindow) -> Workspace {

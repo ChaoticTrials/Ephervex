@@ -25,12 +25,12 @@ use std::collections::BTreeMap;
 use ephervex_download::OperationReporter;
 use ephervex_mod_platform::{ModPlatformError, RecognizedFile, curseforge_fingerprint};
 use ephervex_model::{
-    Hash, HashAlgorithm, ImportSourceKind, LoaderSelection, ModProvider, ServerLaunch,
+    Hash, HashAlgorithm, ImportSourceKind, LoaderKind, LoaderSelection, ModProvider, ServerLaunch,
 };
 use ephervex_pack::{
     ExtractionLimits, InstalledServerPack, PackError, ProviderFileIdentity, RecipeRelation,
-    ServerPackInstall, ServerPackMod, SourceStore, install_server_pack, measure_installed_mods,
-    server_pack_recipe,
+    ServerPackEvidence, ServerPackInstall, ServerPackMod, SourceStore, install_server_pack,
+    measure_installed_mods, read_server_pack_evidence, server_pack_recipe,
 };
 use ephervex_storage::ImportSource;
 use tokio_util::sync::CancellationToken;
@@ -106,6 +106,190 @@ pub struct ServerPackOutcome {
     pub mods: usize,
     /// What the catalogs made of those mods.
     pub identification: IdentificationOutcome,
+}
+
+/// What a published server archive says about the Minecraft release and
+/// loader it was built for.
+///
+/// Read from entry names alone (ADR 0024): a jar in `mods/`, a loader
+/// installer at the root, or a loader library directory. A field is known only
+/// when every piece of evidence in the archive agrees on it, so a contradictory
+/// archive constrains nothing it contradicts itself about. Nothing here is ever
+/// a guess: an unknown field stays unknown and is left to the user.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServerArchiveEvidence {
+    /// Whether the archive puts jars in `mods/`, which only a mod loader runs.
+    pub carries_mods: bool,
+    pub loader: Option<LoaderKind>,
+    pub loader_version: Option<String>,
+    pub minecraft_version: Option<String>,
+}
+
+/// How a server selection disagrees with the archive it would be built from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServerArchiveConflict {
+    /// The archive carries mods and the selection is a loader that cannot run
+    /// any.
+    ModsNeedLoader {
+        selected: LoaderKind,
+    },
+    Loader {
+        archive: LoaderKind,
+        selected: LoaderKind,
+    },
+    LoaderVersion {
+        archive: String,
+        selected: String,
+    },
+    MinecraftVersion {
+        archive: String,
+        selected: String,
+    },
+}
+
+impl ServerArchiveConflict {
+    #[must_use]
+    pub const fn message_id(&self) -> &'static str {
+        match self {
+            Self::ModsNeedLoader { .. } => "error-server-archive-needs-loader",
+            Self::Loader { .. } => "error-server-archive-loader-differs",
+            Self::LoaderVersion { .. } => "error-server-archive-loader-version-differs",
+            Self::MinecraftVersion { .. } => "error-server-archive-minecraft-differs",
+        }
+    }
+
+    #[must_use]
+    pub fn message_args(&self) -> Vec<(&'static str, String)> {
+        match self {
+            Self::ModsNeedLoader { selected } => vec![("selected", selected.to_string())],
+            Self::Loader { archive, selected } => vec![
+                ("archive", archive.to_string()),
+                ("selected", selected.to_string()),
+            ],
+            Self::LoaderVersion { archive, selected }
+            | Self::MinecraftVersion { archive, selected } => {
+                vec![("archive", archive.clone()), ("selected", selected.clone())]
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for ServerArchiveConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ModsNeedLoader { selected } => {
+                write!(f, "the archive carries mods that {selected} cannot load")
+            }
+            Self::Loader { archive, selected } => {
+                write!(f, "the archive was built for {archive}, not {selected}")
+            }
+            Self::LoaderVersion { archive, selected } => write!(
+                f,
+                "the archive was built for loader build {archive}, not {selected}"
+            ),
+            Self::MinecraftVersion { archive, selected } => write!(
+                f,
+                "the archive was built for Minecraft {archive}, not {selected}"
+            ),
+        }
+    }
+}
+
+impl ServerArchiveEvidence {
+    /// Reduces what the archive names to what it says without contradiction.
+    ///
+    /// A NeoForge build's Minecraft release is read from its number by the
+    /// loader catalog's own rule, the one that decides which builds are listed
+    /// for which release.
+    pub(crate) fn from_archive(evidence: &ServerPackEvidence) -> Self {
+        let loaders = &evidence.loaders;
+        let agreed = |values: Vec<Option<String>>| -> Option<String> {
+            let first = values.first()?.clone()?;
+            values
+                .iter()
+                .all(|value| value.as_deref() == Some(first.as_str()))
+                .then_some(first)
+        };
+        let loader = loaders
+            .first()
+            .map(|first| first.kind)
+            .filter(|kind| loaders.iter().all(|loader| loader.kind == *kind));
+        let loader_version = loader.and_then(|_| {
+            agreed(
+                loaders
+                    .iter()
+                    .map(|loader| Some(loader.version.clone()))
+                    .collect(),
+            )
+        });
+        let minecraft_version = agreed(
+            loaders
+                .iter()
+                .map(|loader| match loader.kind {
+                    LoaderKind::NeoForge => ephervex_loaders::neoforge_minecraft(&loader.version),
+                    LoaderKind::Forge | LoaderKind::Vanilla => loader.minecraft_version.clone(),
+                })
+                .collect(),
+        );
+        Self {
+            carries_mods: evidence.carries_mods,
+            loader,
+            loader_version,
+            minecraft_version,
+        }
+    }
+
+    /// The first way `minecraft` and `loader` disagree with this archive, or
+    /// `None` when a server built from both would load what the archive
+    /// carries as far as the archive can tell.
+    #[must_use]
+    pub fn conflict(
+        &self,
+        minecraft: &str,
+        loader: &LoaderSelection,
+    ) -> Option<ServerArchiveConflict> {
+        if let Some(archive) = self.loader
+            && archive != loader.kind
+        {
+            return Some(ServerArchiveConflict::Loader {
+                archive,
+                selected: loader.kind,
+            });
+        }
+        if self.carries_mods && !loader.kind.supports_mods() {
+            return Some(ServerArchiveConflict::ModsNeedLoader {
+                selected: loader.kind,
+            });
+        }
+        if let Some(archive) = &self.minecraft_version
+            && archive != minecraft
+        {
+            return Some(ServerArchiveConflict::MinecraftVersion {
+                archive: archive.clone(),
+                selected: minecraft.to_owned(),
+            });
+        }
+        if let Some(archive) = &self.loader_version
+            && loader.version.as_deref() != Some(archive.as_str())
+        {
+            return Some(ServerArchiveConflict::LoaderVersion {
+                archive: archive.clone(),
+                selected: loader.version.clone().unwrap_or_default(),
+            });
+        }
+        None
+    }
+}
+
+/// Reads what a published server archive says about the server it was built
+/// for, without validating or extracting it.
+///
+/// Blocking: it opens the archive and reads its central directory. Meant for a
+/// frontend filling in a selection before creation, which then refuses any
+/// selection the archive contradicts on its own.
+pub fn read_server_archive_evidence(archive: &Path) -> CoreResult<ServerArchiveEvidence> {
+    let evidence = read_server_pack_evidence(archive, ExtractionLimits::default())?;
+    Ok(ServerArchiveEvidence::from_archive(&evidence))
 }
 
 impl App {
@@ -1037,6 +1221,96 @@ mod tests {
             source.reference.as_deref(),
             Some("Repro_server_pack_1.2.3.zip"),
             "the file name is evidence for a person, not an address to re-read"
+        );
+    }
+
+    fn named(
+        kind: LoaderKind,
+        version: &str,
+        minecraft: Option<&str>,
+    ) -> ephervex_pack::ArchiveLoader {
+        ephervex_pack::ArchiveLoader {
+            kind,
+            version: version.to_owned(),
+            minecraft_version: minecraft.map(ToOwned::to_owned),
+        }
+    }
+
+    #[test]
+    fn a_neoforge_build_names_its_minecraft_release_by_the_catalogs_rule() {
+        let evidence = ServerArchiveEvidence::from_archive(&ServerPackEvidence {
+            carries_mods: true,
+            loaders: vec![named(LoaderKind::NeoForge, "26.1.2.94", None)],
+        });
+
+        assert_eq!(
+            evidence,
+            ServerArchiveEvidence {
+                carries_mods: true,
+                loader: Some(LoaderKind::NeoForge),
+                loader_version: Some("26.1.2.94".to_owned()),
+                minecraft_version: Some("26.1.2".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn an_archive_that_contradicts_itself_constrains_only_what_it_agrees_on() {
+        let two_builds = ServerArchiveEvidence::from_archive(&ServerPackEvidence {
+            carries_mods: true,
+            loaders: vec![
+                named(LoaderKind::NeoForge, "21.1.77", None),
+                named(LoaderKind::NeoForge, "21.1.80", None),
+            ],
+        });
+        assert_eq!(two_builds.loader, Some(LoaderKind::NeoForge));
+        assert_eq!(two_builds.loader_version, None);
+        assert_eq!(two_builds.minecraft_version.as_deref(), Some("1.21.1"));
+
+        let two_loaders = ServerArchiveEvidence::from_archive(&ServerPackEvidence {
+            carries_mods: true,
+            loaders: vec![
+                named(LoaderKind::NeoForge, "21.1.77", None),
+                named(LoaderKind::Forge, "47.2.0", Some("1.20.1")),
+            ],
+        });
+        assert_eq!(
+            two_loaders,
+            ServerArchiveEvidence {
+                carries_mods: true,
+                ..ServerArchiveEvidence::default()
+            }
+        );
+        assert!(
+            two_loaders
+                .conflict("1.20.1", &LoaderSelection::vanilla())
+                .is_some(),
+            "mods still need a loader"
+        );
+        assert_eq!(
+            two_loaders.conflict(
+                "1.20.1",
+                &LoaderSelection::exact(LoaderKind::Forge, "47.2.0")
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_neoforge_build_for_an_unreleased_minecraft_names_no_release() {
+        let evidence = ServerArchiveEvidence::from_archive(&ServerPackEvidence {
+            carries_mods: false,
+            loaders: vec![named(
+                LoaderKind::NeoForge,
+                "26.2.0.1-beta+snapshot-3",
+                None,
+            )],
+        });
+
+        assert_eq!(evidence.minecraft_version, None);
+        assert_eq!(
+            evidence.loader_version.as_deref(),
+            Some("26.2.0.1-beta+snapshot-3")
         );
     }
 }

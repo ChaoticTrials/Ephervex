@@ -36,6 +36,22 @@ neither is ever executed. The exact selection comes from the same place it
 always did: the client record for a linked server, the explicit selection for a
 standalone one.
 
+That selection must agree with the archive. An archive's entry names are
+untrusted, but some of them say what the server needs: jars in `mods/` need a
+mod loader, and a loader installer at the root
+(`neoforge-<version>-installer.jar`, `forge-<minecraft>-<version>-installer.jar`)
+or a loader library directory (`libraries/net/neoforged/neoforge/<version>/`,
+`libraries/net/minecraftforge/forge/<minecraft>-<version>/`) names an exact
+loader build and, through it, a Minecraft release. A NeoForge build's release
+is read from its number by the same rule the loader catalog lists builds by.
+Only what every such name agrees on counts. A selection that contradicts it is
+refused before Java is probed or the loader installed, for a linked and a
+standalone server alike, and never adjusted to fit: a server whose loader cannot
+load the archive's mods would install and start without them and look like it
+worked. A frontend may fill in a standalone selection from that evidence before
+creation and must say where the values came from. When the archive carries mods
+but names no exact loader, nothing is guessed and the user chooses.
+
 The archive does not decide these destinations:
 
 - `libraries/`, which a loader installation replaces with a link into the
@@ -101,6 +117,9 @@ identity is never overwritten by a later step.
 - The recipe format version is 3. `ImportSourceKind::ServerPack` is not a value
   an older build can read, so the version gate refuses the file cleanly instead
   of failing to deserialize it.
+- An archive that names no loader build constrains only the loader family
+  through its mods, so a pack that ships neither an installer nor libraries
+  still depends on the user choosing the build it was made for.
 - The archive is not retained. Installing the same server again means naming
   the file again, which is the same bargain import already makes with a pack.
 - A jar the archive installed carries whatever identity could be established

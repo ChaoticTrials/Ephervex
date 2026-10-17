@@ -1660,6 +1660,11 @@ struct CreateServerArgs {
     /// even when the archive ships them. An archive's installer jar and start
     /// script are never run, and its `libraries` folder and `eula.txt` are left
     /// out. Everything else in the archive is installed.
+    ///
+    /// The Minecraft release and loader must match the ones the archive was
+    /// made for. An archive with mods needs a loader, and one whose installer
+    /// jar or libraries name a loader build is refused for any other release,
+    /// loader, or build.
     #[arg(
         long = "server-pack",
         value_name = "FILE",

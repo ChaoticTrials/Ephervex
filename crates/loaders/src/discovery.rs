@@ -336,7 +336,8 @@ pub(crate) fn neoforge_listing(
 /// the patch kept only when it is not zero. A `+snapshot-N`, `+pre-N`, or
 /// `+rc-N` suffix names the pre-release Minecraft id the installer declares, so
 /// such a build never belongs to the release its numbers precede.
-fn neoforge_minecraft(version: &str) -> Option<String> {
+#[must_use]
+pub fn neoforge_minecraft(version: &str) -> Option<String> {
     let (base, metadata) = version
         .split_once('+')
         .map_or((version, None), |(base, metadata)| (base, Some(metadata)));

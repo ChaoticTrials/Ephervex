@@ -1120,6 +1120,13 @@ error-instance-running = That instance is launching or running (process { $pid }
 error-instance-already-persistent = That instance is already stored permanently.
 .action = Only a temporary instance can be made persistent. Delete it when you no longer need it.
 error-server-not-linked = That server does not belong to this instance.
+# Server files whose names say they need a different selection. $archive is what
+# the files name and $selected what was chosen: loader names, loader builds, or
+# Minecraft releases, which stay untranslated.
+error-server-archive-needs-loader = These server files carry mods, and a { $selected } server cannot load them. Choose the loader and build the pack was made for.
+error-server-archive-loader-differs = These server files were made for { $archive }, not { $selected }. Choose the loader and build the pack was made for, or server files that match this selection.
+error-server-archive-loader-version-differs = These server files were made for loader build { $archive }, not { $selected }. Choose that build, or server files that match this selection.
+error-server-archive-minecraft-differs = These server files were made for Minecraft { $archive }, not { $selected }. Choose that release, or server files that match this selection.
 error-mod-file-missing = That mod's file is not installed, so it cannot be enabled or disabled. Repair the instance to fetch it again.
 error-mod-file-not-toggled = That mod's file could not be renamed. Check that the mods folder is writable.
 error-mod-spelling-occupied = That mod has both an enabled and a disabled file, so switching it would replace one of them. Neither file was changed.
@@ -3214,6 +3221,11 @@ gui-server-pack = Server files (optional)
 # decides and what Ephervex installs regardless, because both halves are
 # surprising if you only know one of them.
 gui-server-pack-detail = If the pack publishes its own server files, choose that archive and it becomes the server's content as it is. Ephervex still installs the loader and its libraries, and never runs the archive's installer or start script.
+# Under the chosen server files, when their names say what they were made for
+# and the dialog filled that in.
+gui-server-pack-selection-read = Minecraft { $minecraft } with { $loader } { $version }, as named by the server files.
+gui-server-pack-selection-unknown = These server files do not name the exact Minecraft release and loader build they were made for. Choose the ones the pack was made for.
+gui-server-pack-unreadable = The server files could not be read: { $value }
 gui-import-pack-header = { $first } - { $second }
 gui-import-author = by { $value }
 gui-minecraft-version-label = Minecraft { $value }

@@ -41,6 +41,14 @@ export global NameRules {
     pure callback linked-server-name(string) -> string;
 }
 
+// Why a new server's selection disagrees with the server files it would be
+// built from, answered by the same check creation refuses with. Empty when it
+// agrees. (Minecraft release, loader, loader build, then what the files name:
+// release, loader, build, whether they carry mods.)
+export global ServerPackRules {
+    pure callback conflict(string, string, string, string, string, string, bool) -> string;
+}
+
 // Why a server's Start/Stop, Restart or Force kill is unavailable, read from
 // the state the server is in. A start or stop is blamed only when one is
 // really under way.

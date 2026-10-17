@@ -32,7 +32,8 @@ use uuid::Uuid;
 use crate::app::{App, JavaPlanRequest, JavaTarget};
 use crate::instance::validated_entity_name;
 use crate::server_pack::{
-    ServerArchiveInstall, ServerContentSource, archive_import_source, launch_reserved,
+    ServerArchiveEvidence, ServerArchiveInstall, ServerContentSource, archive_import_source,
+    launch_reserved,
 };
 use crate::{CoreError, CoreResult};
 
@@ -251,7 +252,7 @@ impl App {
             // Minecraft and loader selection still came from the client, by way
             // of `prepare_server`.
             Some(archive) => {
-                validate_server_archive(archive)?;
+                validate_server_archive(archive, &record.minecraft_version, &record.loader)?;
                 record.source = archive_import_source(archive);
                 None
             }
@@ -368,7 +369,7 @@ impl App {
         ensure_empty_directory(&target)?;
         let linked_recipe = match options.content.archive() {
             Some(archive) => {
-                validate_server_archive(archive)?;
+                validate_server_archive(archive, &record.minecraft_version, &record.loader)?;
                 record.source = archive_import_source(archive);
                 None
             }
@@ -1335,14 +1336,33 @@ fn normalize_launch(
     })
 }
 
-/// Refuses an archive the install would refuse before any expensive work starts.
+/// Refuses an archive the install would refuse, or one built for a different
+/// selection, before any expensive work starts.
 ///
 /// Java probing and a loader installation take minutes and megabytes. Checking
 /// the archive first means "that file is not a readable ZIP" or "an entry name
 /// is unsafe" is answered in milliseconds, which is the same reason
 /// `linked_server_recipe` validates a recipe before this point.
-fn validate_server_archive(archive: &Path) -> CoreResult<()> {
-    ephervex_pack::validate_server_pack(archive, ephervex_pack::ExtractionLimits::default())?;
+///
+/// The selection is never adjusted to fit the archive (ADR 0024): a server whose
+/// recorded loader cannot load the archive's mods would install and start
+/// without them, so a disagreement is refused for a linked and a standalone
+/// server alike.
+fn validate_server_archive(
+    archive: &Path,
+    minecraft: &str,
+    loader: &ephervex_model::LoaderSelection,
+) -> CoreResult<()> {
+    let evidence =
+        ephervex_pack::validate_server_pack(archive, ephervex_pack::ExtractionLimits::default())?;
+    if let Some(conflict) =
+        ServerArchiveEvidence::from_archive(&evidence).conflict(minecraft, loader)
+    {
+        return Err(CoreError::ServerArchiveDisagrees {
+            archive: archive.to_path_buf(),
+            conflict,
+        });
+    }
     Ok(())
 }
 
@@ -2072,7 +2092,8 @@ mod tests {
         let archive = directory.path().join("server.zip");
         server_archive(&archive, &["mods/one.jar", "docs\\readme.txt"]);
 
-        let error = validate_server_archive(&archive).expect_err("unsafe entry name");
+        let error = validate_server_archive(&archive, "1.21.1", &neoforge("21.1.77"))
+            .expect_err("unsafe entry name");
 
         assert!(matches!(
             error,
@@ -2086,7 +2107,147 @@ mod tests {
         let archive = directory.path().join("server.zip");
         server_archive(&archive, &["server/mods/one.jar", "server/config/a.toml"]);
 
-        validate_server_archive(&archive).expect("valid");
+        validate_server_archive(&archive, "1.21.1", &neoforge("21.1.77")).expect("valid");
+    }
+
+    fn neoforge(version: &str) -> LoaderSelection {
+        LoaderSelection::exact(ephervex_model::LoaderKind::NeoForge, version)
+    }
+
+    fn archive_conflict(
+        entries: &[&str],
+        minecraft: &str,
+        loader: &LoaderSelection,
+    ) -> Option<crate::server_pack::ServerArchiveConflict> {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let archive = directory.path().join("server.zip");
+        server_archive(&archive, entries);
+        match validate_server_archive(&archive, minecraft, loader) {
+            Ok(()) => None,
+            Err(CoreError::ServerArchiveDisagrees { conflict, .. }) => Some(conflict),
+            Err(other) => panic!("unexpected refusal: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_vanilla_selection_is_refused_for_server_files_that_carry_mods() {
+        use crate::server_pack::ServerArchiveConflict;
+
+        assert_eq!(
+            archive_conflict(&["mods/one.jar"], "26.1.2", &LoaderSelection::vanilla()),
+            Some(ServerArchiveConflict::ModsNeedLoader {
+                selected: ephervex_model::LoaderKind::Vanilla
+            })
+        );
+        assert_eq!(
+            archive_conflict(&["world/level.dat"], "26.1.2", &LoaderSelection::vanilla()),
+            None,
+            "server files with no mods can still make a vanilla server"
+        );
+    }
+
+    #[test]
+    fn a_selection_the_archives_loader_contradicts_is_refused() {
+        use crate::server_pack::ServerArchiveConflict;
+        use ephervex_model::LoaderKind;
+
+        let shipped = &[
+            "ServerFiles/mods/one.jar",
+            "ServerFiles/neoforge-21.1.77-installer.jar",
+        ];
+        assert_eq!(
+            archive_conflict(shipped, "1.21.1", &neoforge("21.1.77")),
+            None
+        );
+        assert_eq!(
+            archive_conflict(shipped, "1.21.1", &LoaderSelection::vanilla()),
+            Some(ServerArchiveConflict::Loader {
+                archive: LoaderKind::NeoForge,
+                selected: LoaderKind::Vanilla,
+            })
+        );
+        assert_eq!(
+            archive_conflict(
+                shipped,
+                "1.21.1",
+                &LoaderSelection::exact(LoaderKind::Forge, "47.2.0")
+            ),
+            Some(ServerArchiveConflict::Loader {
+                archive: LoaderKind::NeoForge,
+                selected: LoaderKind::Forge,
+            })
+        );
+        assert_eq!(
+            archive_conflict(shipped, "1.21.1", &neoforge("21.1.80")),
+            Some(ServerArchiveConflict::LoaderVersion {
+                archive: "21.1.77".to_owned(),
+                selected: "21.1.80".to_owned(),
+            })
+        );
+        assert_eq!(
+            archive_conflict(shipped, "1.21", &neoforge("21.1.77")),
+            Some(ServerArchiveConflict::MinecraftVersion {
+                archive: "1.21.1".to_owned(),
+                selected: "1.21".to_owned(),
+            })
+        );
+
+        let forge = &["libraries/net/minecraftforge/forge/1.20.1-47.2.0/forge.jar"];
+        assert_eq!(
+            archive_conflict(
+                forge,
+                "1.20.2",
+                &LoaderSelection::exact(LoaderKind::Forge, "47.2.0")
+            ),
+            Some(ServerArchiveConflict::MinecraftVersion {
+                archive: "1.20.1".to_owned(),
+                selected: "1.20.2".to_owned(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_server_the_archive_contradicts_is_refused_before_a_root_is_made() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let archive = directory.path().join("ServerFiles-4.2.zip");
+        server_archive(
+            &archive,
+            &[
+                "ServerFiles-4.2/mods/one.jar",
+                "ServerFiles-4.2/neoforge-26.1.2.94-installer.jar",
+            ],
+        );
+        let options = ServerCreateOptions {
+            content: ServerContentSource::Archive {
+                path: archive.clone(),
+            },
+            ..ServerCreateOptions::default()
+        };
+
+        let error = app
+            .create_server(
+                NewServer::new("26.1.2 Server", "26.1.2", LoaderSelection::vanilla()),
+                &options,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("a vanilla server cannot load the archive's mods");
+
+        assert!(
+            matches!(error, CoreError::ServerArchiveDisagrees { .. }),
+            "{error:?}"
+        );
+        assert_eq!(error.message_id(), "error-server-archive-loader-differs");
+        assert!(app.list_servers().expect("list").is_empty());
+        for class in [
+            ephervex_model::StorageClass::Persistent,
+            ephervex_model::StorageClass::Temporary,
+        ] {
+            let root = app.paths().servers_dir(class);
+            let leftovers = std::fs::read_dir(&root).map_or(0, Iterator::count);
+            assert_eq!(leftovers, 0, "{}", root.display());
+        }
     }
 
     #[test]

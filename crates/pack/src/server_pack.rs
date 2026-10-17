@@ -26,9 +26,12 @@ use std::path::{Path, PathBuf};
 use tracing::{debug, info, instrument};
 
 use ephervex_download::hash_file;
-use ephervex_model::{Hash, HashAlgorithm, ImportSourceKind, LoaderSelection, ModOrigin};
+use ephervex_model::{
+    Hash, HashAlgorithm, ImportSourceKind, LoaderKind, LoaderSelection, ModOrigin,
+};
 
 use crate::archive::{EntryDecision, ExtractionLimits, ExtractionReport, PackArchive};
+use crate::detect::{entry_components, is_directory_name};
 use crate::error::{PackError, PackResult};
 use crate::managed::MODS_DIR;
 use crate::recipe::{
@@ -102,7 +105,8 @@ fn wrapper_to_strip(pack: &PackArchive) -> Option<String> {
 }
 
 /// Refuses a server archive that [`install_server_pack`] would refuse for any
-/// entry, without writing anything.
+/// entry, without writing anything, and reports what its entry names say about
+/// the server it was built for.
 ///
 /// Covers the archive being readable and every entry having a safe, unreserved
 /// name that can be opened (not encrypted, not stored with an unsupported
@@ -111,10 +115,201 @@ fn wrapper_to_strip(pack: &PackArchive) -> Option<String> {
 /// installation, which take far longer than the extraction that would
 /// otherwise reject the archive.
 #[instrument(skip(limits), fields(archive = %archive.display()))]
-pub fn validate_server_pack(archive: &Path, limits: ExtractionLimits) -> PackResult<()> {
+pub fn validate_server_pack(
+    archive: &Path,
+    limits: ExtractionLimits,
+) -> PackResult<ServerPackEvidence> {
     let mut pack = PackArchive::open(archive, limits)?;
     let prefix = wrapper_to_strip(&pack).unwrap_or_default();
-    pack.require_extractable_entries(&prefix)
+    pack.require_extractable_entries(&prefix)?;
+    Ok(ServerPackEvidence::of(&pack))
+}
+
+/// Reads what a server archive's entry names say about the server it was built
+/// for, from the central directory alone.
+///
+/// Cheap enough to answer while someone is still filling in a dialog: nothing
+/// is decompressed and no entry is opened. [`validate_server_pack`] reports the
+/// same evidence along with its checks.
+#[instrument(skip(limits), fields(archive = %archive.display()))]
+pub fn read_server_pack_evidence(
+    archive: &Path,
+    limits: ExtractionLimits,
+) -> PackResult<ServerPackEvidence> {
+    let pack = PackArchive::open(archive, limits)?;
+    Ok(ServerPackEvidence::of(&pack))
+}
+
+/// A loader build an archive names through an installer jar or a library
+/// directory, exactly as the entry name spells it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveLoader {
+    pub kind: LoaderKind,
+    pub version: String,
+    /// The Minecraft release the name spells out. Forge coordinates carry one;
+    /// NeoForge's encode it in the build number instead, and reading it from
+    /// there is the loader catalog's rule rather than this crate's.
+    pub minecraft_version: Option<String>,
+}
+
+/// What a server archive's entry names say about the server it was built for.
+///
+/// Every name is untrusted text. Nothing here is a selection: an archive only
+/// offers evidence that a selection must agree with, and an archive whose
+/// names say nothing leaves the selection entirely to the user.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServerPackEvidence {
+    /// Whether a jar sits directly in `mods/`, where a server loads mods from.
+    pub carries_mods: bool,
+    /// Every distinct loader build the archive names, in archive order. More
+    /// than one means the archive contradicts itself.
+    pub loaders: Vec<ArchiveLoader>,
+}
+
+impl ServerPackEvidence {
+    /// Reads the evidence beneath the wrapper extraction would strip, so the
+    /// names are the ones the server directory would end up with.
+    fn of(pack: &PackArchive) -> Self {
+        let wrapper = wrapper_to_strip(pack);
+        let mut carries_mods = false;
+        let mut loaders: Vec<ArchiveLoader> = Vec::new();
+        for name in pack.entry_names() {
+            let Some(mut parts) = entry_components(name) else {
+                continue;
+            };
+            if let Some(wrapper) = &wrapper {
+                if parts.first() != Some(wrapper) {
+                    continue;
+                }
+                parts.remove(0);
+            }
+            let directory = is_directory_name(name);
+            match parts.as_slice() {
+                [mods, jar] if !directory && mods.as_str() == MODS_DIR && is_jar(jar) => {
+                    carries_mods = true;
+                }
+                [file] if !directory => add_distinct(&mut loaders, installer_loader(file)),
+                [libraries, rest @ ..] if libraries.as_str() == LIBRARIES_DIR => {
+                    add_distinct(&mut loaders, library_loader(rest, directory));
+                }
+                _ => {}
+            }
+        }
+        Self {
+            carries_mods,
+            loaders,
+        }
+    }
+}
+
+/// How many distinct loader builds an archive's evidence keeps. Two already
+/// make it contradict itself, so the cap only bounds the work a hostile archive
+/// with thousands of version-shaped names can cause.
+const MAX_ARCHIVE_LOADERS: usize = 8;
+
+fn add_distinct(loaders: &mut Vec<ArchiveLoader>, found: Option<ArchiveLoader>) {
+    if let Some(found) = found
+        && loaders.len() < MAX_ARCHIVE_LOADERS
+        && !loaders.contains(&found)
+    {
+        loaders.push(found);
+    }
+}
+
+fn is_jar(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("jar"))
+}
+
+/// The loader an installer jar at the archive root is named for:
+/// `neoforge-<version>-installer.jar` or `forge-<minecraft>-<version>-installer.jar`,
+/// the names both projects publish their installers under.
+fn installer_loader(file: &str) -> Option<ArchiveLoader> {
+    const SUFFIX: &str = "-installer.jar";
+    let stem_len = file.len().checked_sub(SUFFIX.len())?;
+    if !file.is_char_boundary(stem_len) || !file[stem_len..].eq_ignore_ascii_case(SUFFIX) {
+        return None;
+    }
+    let stem = &file[..stem_len];
+    if let Some(version) = strip_prefix_ignore_case(stem, "neoforge-") {
+        return neoforge_build(version);
+    }
+    strip_prefix_ignore_case(stem, "forge-").and_then(forge_coordinate)
+}
+
+/// The loader a library directory names, below `libraries/`:
+/// `net/neoforged/neoforge/<version>/` or `net/minecraftforge/forge/<minecraft>-<version>/`,
+/// the Maven coordinates each loader's own installer writes.
+///
+/// A version component counts only when something sits beneath it or the entry
+/// is the directory itself, so a stray file with a version-like name is not
+/// read as a library directory.
+fn library_loader(path: &[String], directory: bool) -> Option<ArchiveLoader> {
+    let (kind, version, beneath) = match path {
+        [net, group, artifact, version, beneath @ ..]
+            if net.as_str() == "net"
+                && group.as_str() == "neoforged"
+                && artifact.as_str() == "neoforge" =>
+        {
+            (LoaderKind::NeoForge, version, beneath)
+        }
+        [net, group, artifact, version, beneath @ ..]
+            if net.as_str() == "net"
+                && group.as_str() == "minecraftforge"
+                && artifact.as_str() == "forge" =>
+        {
+            (LoaderKind::Forge, version, beneath)
+        }
+        _ => return None,
+    };
+    if beneath.is_empty() && !directory {
+        return None;
+    }
+    match kind {
+        LoaderKind::NeoForge => neoforge_build(version),
+        LoaderKind::Forge => forge_coordinate(version),
+        LoaderKind::Vanilla => None,
+    }
+}
+
+fn neoforge_build(version: &str) -> Option<ArchiveLoader> {
+    is_version_token(version).then(|| ArchiveLoader {
+        kind: LoaderKind::NeoForge,
+        version: version.to_owned(),
+        minecraft_version: None,
+    })
+}
+
+/// A Forge coordinate is `<minecraft>-<build>`. A Minecraft release name has no
+/// hyphen, so the first one separates them, which is also how the loader
+/// catalog reads Forge's published versions.
+fn forge_coordinate(coordinate: &str) -> Option<ArchiveLoader> {
+    let (minecraft, version) = coordinate.split_once('-')?;
+    (is_version_token(minecraft) && is_version_token(version)).then(|| ArchiveLoader {
+        kind: LoaderKind::Forge,
+        version: version.to_owned(),
+        minecraft_version: Some(minecraft.to_owned()),
+    })
+}
+
+/// Whether text read from an entry name is plausible as a version: short and
+/// made only of the characters loader and Minecraft versions use. Anything else
+/// is not evidence of anything.
+fn is_version_token(text: &str) -> bool {
+    const MAX_VERSION_LEN: usize = 64;
+    !text.is_empty()
+        && text.len() <= MAX_VERSION_LEN
+        && text.chars().any(|c| c.is_ascii_digit())
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+' | '_'))
+}
+
+fn strip_prefix_ignore_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = text.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| &text[prefix.len()..])
 }
 
 /// Extracts a server archive into an installed server directory.
@@ -605,6 +800,123 @@ mod tests {
         );
 
         validate_server_pack(&archive, ExtractionLimits::default()).expect("valid");
+    }
+
+    fn evidence(entries: &[(&str, &[u8])]) -> ServerPackEvidence {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("pack-server.zip");
+        zip_file(&archive, entries);
+        let read = read_server_pack_evidence(&archive, ExtractionLimits::default()).expect("read");
+        let validated = validate_server_pack(&archive, ExtractionLimits::default()).expect("valid");
+        assert_eq!(read, validated, "validation reports the evidence it read");
+        read
+    }
+
+    fn neoforge(version: &str) -> ArchiveLoader {
+        ArchiveLoader {
+            kind: LoaderKind::NeoForge,
+            version: version.to_owned(),
+            minecraft_version: None,
+        }
+    }
+
+    #[test]
+    fn a_neoforge_installer_and_mods_are_read_from_a_wrapped_archive() {
+        let read = evidence(&[
+            ("Server-Files-4.2/mods/one.jar", b"one"),
+            ("Server-Files-4.2/config/a.toml", b"a"),
+            (
+                "Server-Files-4.2/neoforge-21.1.77-installer.jar",
+                b"installer",
+            ),
+            ("Server-Files-4.2/startserver.sh", b"#!/bin/sh\n"),
+        ]);
+
+        assert!(read.carries_mods);
+        assert_eq!(read.loaders, [neoforge("21.1.77")]);
+    }
+
+    #[test]
+    fn a_forge_installer_and_library_directory_name_one_minecraft_release_and_build() {
+        let read = evidence(&[
+            ("forge-1.20.1-47.2.0-installer.jar", b"installer"),
+            (
+                "libraries/net/minecraftforge/forge/1.20.1-47.2.0/forge-1.20.1-47.2.0-server.jar",
+                b"server",
+            ),
+        ]);
+
+        assert!(!read.carries_mods);
+        assert_eq!(
+            read.loaders,
+            [ArchiveLoader {
+                kind: LoaderKind::Forge,
+                version: "47.2.0".to_owned(),
+                minecraft_version: Some("1.20.1".to_owned()),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_neoforge_library_directory_entry_is_evidence_on_its_own() {
+        let read = evidence(&[
+            ("libraries/net/neoforged/neoforge/26.1.2.94/", b""),
+            ("mods/one.jar", b"one"),
+        ]);
+
+        assert_eq!(read.loaders, [neoforge("26.1.2.94")]);
+    }
+
+    #[test]
+    fn an_archive_naming_two_builds_reports_both() {
+        let read = evidence(&[
+            ("neoforge-21.1.77-installer.jar", b"installer"),
+            (
+                "libraries/net/neoforged/neoforge/21.1.80/neoforge.jar",
+                b"lib",
+            ),
+        ]);
+
+        assert_eq!(read.loaders, [neoforge("21.1.77"), neoforge("21.1.80")]);
+    }
+
+    #[test]
+    fn the_builds_an_archive_names_are_bounded() {
+        let names: Vec<String> = (0..100)
+            .map(|build| format!("libraries/net/neoforged/neoforge/21.1.{build}/a.jar"))
+            .collect();
+        let entries: Vec<(&str, &[u8])> = names
+            .iter()
+            .map(|name| (name.as_str(), b"lib".as_slice()))
+            .collect();
+
+        let read = evidence(&entries);
+
+        assert_eq!(read.loaders.len(), MAX_ARCHIVE_LOADERS);
+    }
+
+    #[test]
+    fn names_outside_the_documented_shapes_are_not_evidence() {
+        let read = evidence(&[
+            ("mods/", b""),
+            ("mods/nested/one.jar", b"one"),
+            ("mods/readme.txt", b"text"),
+            ("config/neoforge-21.1.77-installer.jar", b"not at the root"),
+            ("neoforge-$(id)-installer.jar", b"not a version"),
+            ("neoforge--installer.jar", b"no version"),
+            ("forge-47.2.0-installer.jar", b"no minecraft release"),
+            ("neoforge-21.1.77-universal.jar", b"not an installer"),
+            (
+                "libraries/net/neoforged/neoforge/21.1.77",
+                b"a file, not a directory",
+            ),
+            (
+                "libraries/net/neoforged/other/21.1.77/a.jar",
+                b"another artifact",
+            ),
+        ]);
+
+        assert_eq!(read, ServerPackEvidence::default());
     }
 
     #[test]

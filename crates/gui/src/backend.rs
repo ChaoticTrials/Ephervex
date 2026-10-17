@@ -30,8 +30,8 @@ use ephervex_core::{
     ModMutationPlan, ModPresence, ModSearchHit, ModSearchQuery, ModVersionChoice,
     MutationRestriction, NewClient, NewServer, OperationReporter, OptionalSelection, PackAnalysis,
     Paths, PlannedOutcome, ProcessMonitor, ProgressSink, ProviderFileIdentity, RoundAnswer,
-    SearchOptions, ServerCommit, ServerContentSource, ServerCreateOptions, ServerEvent,
-    ServerEvents, ServerFolder, ServerNetworkSettings, ServerObserver, ServerRecord,
+    SearchOptions, ServerArchiveEvidence, ServerCommit, ServerContentSource, ServerCreateOptions,
+    ServerEvent, ServerEvents, ServerFolder, ServerNetworkSettings, ServerObserver, ServerRecord,
     SideRequirement, SideSupport, SnapshotOrigin, SnapshotRestoreOptions, SuspectReason,
     WatchTarget,
 };
@@ -203,6 +203,11 @@ pub enum Command {
     /// arrives long after the click.
     PickServerPack {
         target: ServerPackTarget,
+    },
+    /// Read what the create-server dialog's chosen server files say about the
+    /// selection they were made for.
+    InspectServerPack {
+        path: PathBuf,
     },
     CreateClient {
         request_id: String,
@@ -2091,6 +2096,13 @@ pub enum Event {
         target: ServerPackTarget,
         path: PathBuf,
     },
+    /// What the create-server dialog's server files at `path` say about their
+    /// selection, or why they could not be read. Carries the path so an answer
+    /// for files since replaced is dropped.
+    ServerPackInspected {
+        path: PathBuf,
+        evidence: Result<ServerArchiveEvidence, String>,
+    },
     WatchedFolderPicked(PathBuf),
     ArtifactCacheStatus(ArtifactCacheStatusData),
     /// A manual clear has finished without a fresh usage figure to show, because
@@ -3236,6 +3248,7 @@ fn run_worker(
                     }
                 });
             }
+            Command::InspectServerPack { path } => inspect_server_pack(path, &events),
             Command::PickLocalMods(host) => {
                 let app_paths = app.paths().clone();
                 let events = events.clone();
@@ -6189,6 +6202,30 @@ fn load_language_catalog(paths: Paths, generation: u64, minecraft: String, event
             generation,
             minecraft,
             languages: None,
+        });
+    }
+}
+
+/// Reads chosen server files' evidence off the command loop: the central
+/// directory of a multi-gigabyte archive is still a disk read.
+fn inspect_server_pack(path: PathBuf, events: &Sender<Event>) {
+    let spawned = events.clone();
+    let archive = path.clone();
+    if let Err(error) = thread::Builder::new()
+        .name("ephervex-server-pack".to_owned())
+        .spawn(move || {
+            let evidence = ephervex_core::read_server_archive_evidence(&archive)
+                .map_err(|error| localized_error(&error));
+            let _ = spawned.send(Event::ServerPackInspected {
+                path: archive,
+                evidence,
+            });
+        })
+    {
+        tracing::warn!(%error, "could not schedule reading the server files");
+        let _ = events.send(Event::ServerPackInspected {
+            path,
+            evidence: Err(error.to_string()),
         });
     }
 }
