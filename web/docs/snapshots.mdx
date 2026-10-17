@@ -13,7 +13,8 @@ A snapshot saves the current state of one client instance or local server.
 Use one before changing a reproduction environment, testing a fix, or editing
 a server setup. It captures the game directory, retained source information,
 and exact host metadata. Each host keeps its own snapshots; a client snapshot
-does not include a linked server's state.
+does not include a linked server's state. Favorites, groups, and icons are not
+part of a snapshot, so a restore leaves them as they are.
 
 Snapshots stay inside that host's local storage until you delete them or
 delete the host's files. They are not modpack exports or off-device backups.

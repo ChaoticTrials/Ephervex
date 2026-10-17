@@ -60,6 +60,7 @@ for example `./Ephervex-x86_64.AppImage doctor`.
 | A client or server crashes | Read its [logs and crash report](./diagnostics.mdx#read-logs-and-crash-reports), then diagnose the failed run. |
 | A server says it needs attention after an interruption | Check [server recovery](./servers.mdx#recover-a-server-after-an-interruption) before starting it again. |
 | A download fails or an offline launch needs a file | Check the connection and [what works offline](./files-and-privacy.mdx#work-offline). Missing artifacts must be fetched before an offline launch. |
+| Favorites, groups, and icons could not be read | If the message names a kept file, Ephervex restored the copy from before the last change, or started empty if that copy was unusable too. Otherwise, check that `organization.json` in the data directory is readable. See [file locations](./files-and-privacy.mdx#find-your-files). |
 | Storage or configuration cannot be written | Run `ephervex doctor` and check the resolved directories with `ephervex paths`. See [file locations](./files-and-privacy.mdx#find-your-files). |
 
 ## The AppImage or desktop will not start

@@ -26,7 +26,7 @@ can change them:
 | Purpose | Default location | What it holds |
 | --- | --- | --- |
 | Configuration | `~/.config/ephervex/config.toml` | Settings, including Minecraft defaults; no credentials |
-| Data | `~/.local/share/ephervex/` | Persistent clients and servers, managed Java, shared files, and icons |
+| Data | `~/.local/share/ephervex/` | Persistent clients and servers, managed Java, shared files, favorites, groups, and icons |
 | Cache | `~/.cache/ephervex/` | Reusable downloads, metadata, Minecraft assets, libraries, and unpacked natives |
 | State | `~/.local/state/ephervex/` | Instance index and Ephervex logs |
 | Temporary hosts | `<system temporary directory>/ephervex-<uid>/` | Temporary clients and servers, subject to operating-system cleanup |
@@ -35,6 +35,11 @@ Each client or server also has its own game files, logs, crash reports, and
 `.launcher` metadata. Snapshots stay inside the host that owns them. Cached
 files can be downloaded or rebuilt again, but deleting the cache may make an
 offline launch impossible until the missing files are fetched.
+
+Favorites, groups, and icon choices are kept in `organization.json` in the
+data directory, with the icon images in `icons/`. Each change keeps the
+previous version as `organization.old.json`. They are not part of any client
+or server, so snapshots and diagnostic bundles never include them.
 
 <Tabs groupId="interface" queryString="interface">
 <TabItem value="gui" label="Desktop" default>

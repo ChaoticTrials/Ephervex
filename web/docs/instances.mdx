@@ -107,12 +107,125 @@ game process and reports its exit status when it ends.
 </TabItem>
 </Tabs>
 
+## Search, filter, and sort instances
+
+Searching, filtering, and sorting change only what the list shows.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+On **Instances**, type in **Filter instances...** to search names, Minecraft
+versions, loaders, sources, and group names. **All**, **Temporary**, and
+**Persistent** choose the storage type, and **Favorites** shows only
+favorites.
+
+Select **Filters** to narrow the list by Minecraft version, loader, running
+state, linked servers, or group, and to choose **Sort by**: **Favorites
+first**, **Name**, **Minecraft version**, or **Loader**. Ephervex remembers
+the sort order. While anything narrows the list, the header shows a count such
+as "3 of 8 instances", and **Clear filters** resets everything except the
+sort order.
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+```bash
+ephervex instances list --search TEXT
+ephervex instances list --favorite --loader neoforge --running
+ephervex instances list --group GROUP_NAME --sort name
+```
+
+Every option you give must match. Other filters are `--minecraft VERSION`,
+`--stopped`, `--ungrouped`, and `--linking paired|servers|none`. `--sort`
+takes `favorite`, `name`, `minecraft`, or `loader`; without it, the list uses
+the order chosen in the desktop app. Favorites are marked `[favorite]` and
+grouped instances `[group: NAME]`.
+
+</TabItem>
+</Tabs>
+
+## Mark favorites and set icons
+
+Favorites, groups, and icons change only how Ephervex shows an instance or
+server. They never move files, and you can change them while the game runs.
+Favorites are listed first on **Instances**, with the default sort order, and
+on **Servers**. An icon replaces the loader or server symbol on the card, in
+the inspector, on **Running**, and in the workspace.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Select the star beside an instance's or server's name, or **Add to
+favorites** in its card menu. To set an icon, select **Choose icon...** in the
+card menu, or **Choose icon** under **Organization** in the instance
+inspector, and pick a PNG or JPEG image. **Remove icon** brings back the
+symbol.
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+```bash
+ephervex instance favorite INSTANCE_ID
+ephervex instance unfavorite INSTANCE_ID
+ephervex instance icon INSTANCE_ID IMAGE_FILE
+ephervex instance icon INSTANCE_ID --clear
+```
+
+For a server, use `server favorite`, `server unfavorite`, and `server icon`
+with a `SERVER_ID`.
+
+</TabItem>
+</Tabs>
+
+An icon file can be at most 16 MiB, 8192 pixels on a side, and 16 megapixels.
+Ephervex keeps its own copy scaled to at most 256 pixels, so changing the
+original file later has no effect.
+
+## Group instances
+
+A group is a label for finding instances. An instance is in at most one group;
+servers have none. Each group gets one of six colors and keeps it when
+renamed. Group names are compared without regard to case. Deleting a group
+leaves its instances ungrouped.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+In the instance inspector, choose a **Group** under **Organization**, or
+select the close button beside it to remove the instance from its group. In a
+card menu, **Set group** lists the groups, and **New group...** there creates
+a group with the instance in it.
+
+Select **Groups** on the Instances toolbar, or **Manage groups...** in the
+inspector, to see how many instances each group holds. Select **Rename** or
+**Delete** on a group, or **New group** to create an empty one. **Delete**
+does not ask for confirmation.
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+```bash
+ephervex groups create GROUP_NAME
+ephervex instance group INSTANCE_ID GROUP_NAME
+ephervex instance group INSTANCE_ID --none
+ephervex groups list
+ephervex groups rename GROUP_NAME NEW_NAME
+ephervex groups delete GROUP_NAME
+```
+
+`instance group` needs a group that already exists. `groups delete` does not
+ask for confirmation.
+
+</TabItem>
+</Tabs>
+
 ## Copy or keep an instance
 
 Duplicate an instance when you want a separate copy to change or test. The
 copy starts with the original's storage type. Make Persistent instead when you
 want to keep the same temporary instance without leaving a copy behind. Stop
-the game before either action.
+the game before either action. A copy keeps the original's group and icon, but
+is not a favorite.
 
 <Tabs groupId="interface" queryString="interface">
 <TabItem value="gui" label="Desktop" default>

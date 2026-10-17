@@ -228,7 +228,6 @@ features show one tab or a short note.
 These change screens that exist today. Write the surrounding pages so they are
 easy to update, and capture screenshots late.
 
-- #9 instance search, filters, sort and favorites
 - #12 server status and configuration shortcuts
 - #13 navigation and active-state polish
 - #379 the Haunted Pumpkin theme. Avoid fixed theme-list screenshots. When

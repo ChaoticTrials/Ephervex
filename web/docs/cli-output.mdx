@@ -28,15 +28,18 @@ Parse JSON rather than splitting the output into lines or relying on whitespace.
 | Command | Result |
 | --- | --- |
 | `instances list` | Array of instance objects; `[]` when empty. |
+| `groups list` | Array of group objects with `id`, `name`, and `instances` (member count); `[]` when empty. |
 | `config` or `config show` | Object with `path`, `exists`, and `config`. |
 | `api show`, `api set-curseforge-key`, `api clear-curseforge-key` | Object describing the resulting effective API settings. |
 | `doctor` | Health report, including when a fault causes a nonzero exit. |
 
 An instance object includes `id`, `name`, `storage`, `minecraft_version`,
 `loader` (with `kind` and `version`), `root`, `source`, `attention`,
-`needs_attention`, `created_at`, `last_launched_at`, `running`, and
-`linked_server_ids`. `running` is null when no launch holds the instance;
-otherwise it contains `launcher_pid`, `game_pid`, and `since`.
+`needs_attention`, `created_at`, `last_launched_at`, `running`,
+`linked_server_ids`, `favorite`, `linking` (`paired`, `servers`, or `none`),
+`group` (`id` and `name`, or null), and `icon` (the stored image path, or
+null). `running` is null when no launch holds the instance; otherwise it
+contains `launcher_pid`, `game_pid`, and `since`.
 
 `config` contains the effective configuration, including defaults, rather
 than only values explicitly saved in the file. `exists` says whether the
