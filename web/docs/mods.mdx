@@ -1,6 +1,6 @@
 ---
 title: Mods
-description: Find, install, manage, and check mods in an instance.
+description: Find, install, manage, and check mods in an instance or server.
 ---
 
 import Tabs from '@theme/Tabs';
@@ -30,9 +30,11 @@ know exactly what will be added.
 
 Open the instance workspace and select **Mods**. Choose **Modrinth** or
 **CurseForge** in **Add Mods**, search for a project, and select **Install**.
-Review the release and required dependencies in the install plan, then confirm.
-If an author requires a browser download, Ephervex opens a manual acquisition
-dialog and watches your configured download folders for the verified file.
+The mod and its required dependencies install directly. When the instance has
+linked servers, the install plan opens first so you can choose which ones
+receive the mod. If an author requires a browser download, Ephervex opens a
+manual acquisition dialog and watches your configured download folders for the
+verified file.
 
 <ThemeScreenshot state="client-mods" alt="Instance Mods surface with installed mods and a compatible catalog search" />
 
@@ -45,8 +47,8 @@ Use the ID from `ephervex instances list`. Search and inspect the available
 releases for a project:
 
 ```bash
-ephervex mod search INSTANCE_ID QUERY --provider modrinth
-ephervex mod show INSTANCE_ID PROJECT_ID --provider modrinth
+ephervex mod search --instance INSTANCE_ID QUERY --provider modrinth
+ephervex mod show --instance INSTANCE_ID PROJECT_ID --provider modrinth
 ```
 
 Add `--include-incompatible` to `mod search` or `mod show` to also list
@@ -58,8 +60,8 @@ compatible one. Ephervex refuses a named release that does not fit the
 instance.
 
 ```bash
-ephervex mod plan INSTANCE_ID PROJECT_ID --provider modrinth --version VERSION
-ephervex mod install INSTANCE_ID PROJECT_ID --provider modrinth --version VERSION
+ephervex mod plan --instance INSTANCE_ID PROJECT_ID --provider modrinth --version VERSION
+ephervex mod install --instance INSTANCE_ID PROJECT_ID --provider modrinth --version VERSION
 ```
 
 Repeat `--optional PROJECT_ID` to include an optional dependency. If you omit
@@ -68,6 +70,51 @@ Repeat `--optional PROJECT_ID` to include an optional dependency. If you omit
 
 The CLI does not run the desktop's manual browser download flow. If a release
 cannot be downloaded automatically, install it through the desktop app.
+
+</TabItem>
+</Tabs>
+
+## Install mods on a server
+
+A Forge or NeoForge server can take catalog mods directly, with or without a
+linked client. It changes only that server; a linked client is not touched. A
+running server picks up the change the next time it starts.
+
+Results are checked against the server's exact Minecraft release and loader,
+and mods declared client-only are left out. A mod whose catalog does not state
+whether it runs on a server is still offered, but installing it, or a mod that
+needs it, requires your confirmation. A required dependency declared
+client-only is installed with a warning, because the mod that needs it cannot
+load without it. CurseForge cannot filter by side, so a CurseForge page can
+hold fewer results than the page size.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Open the server workspace, select **Mods**, and search in **Add Mods**. A
+**?** marks a result that does not state server support. Turn on **Show
+incompatible mods** to also list client-only mods, marked **Client only**; they
+cannot be installed. **Install** opens a confirmation only when the install
+includes a mod with unstated server support or a client-only dependency. **Add
+Mods** is hidden for a Vanilla server and for a server whose installation has
+not finished.
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+Use the ID from `ephervex servers list`:
+
+```bash
+ephervex mod search --server SERVER_ID QUERY --provider modrinth
+ephervex mod plan --server SERVER_ID PROJECT_ID --provider modrinth
+ephervex mod install --server SERVER_ID PROJECT_ID --provider modrinth
+```
+
+`mod search` notes each result that does not state server support.
+`--include-incompatible` also lists client-only mods, which still cannot be
+installed. `mod install` refuses an install that includes a mod with unstated
+server support and names it; repeat the command with
+`--accept-unknown-server-support` to install it anyway.
 
 </TabItem>
 </Tabs>
@@ -187,9 +234,9 @@ linked servers. Select the servers that should receive the same change. Every
 selected server gets the exact release the client settles on. A server that
 cannot take it is marked **Unavailable** with the reason, for example an
 unsupported Minecraft version or loader, or a mod the server's own pack
-declares. Each server has its own result. This carries a client change to
-servers already linked to the instance; it does not install catalog mods on a
-server directly.
+declares. Each server has its own result. A running server receives the change
+the next time it starts. To change one server only, see
+[Install mods on a server](#install-mods-on-a-server).
 
 ## Review dependency information
 
