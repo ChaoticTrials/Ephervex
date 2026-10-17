@@ -202,6 +202,7 @@ pub(crate) fn running_page(ui: &AppWindow) {
             usage: usage("214", "6.1 GiB"),
             last_line: "[14Oct2026 19:24:54.763] [Render thread/INFO] [mezz.jei.core.util.LoggedTimer/]: Starting JEI took 3.518 s".into(),
             can_stop: true,
+            icon_slot: -1,
             ..RunningRow::default()
         },
         RunningRow {
@@ -219,6 +220,7 @@ pub(crate) fn running_page(ui: &AppWindow) {
                 .into(),
             controllable: true,
             can_stop: true,
+            icon_slot: -1,
             ..RunningRow::default()
         },
     ]));

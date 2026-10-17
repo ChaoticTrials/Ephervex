@@ -125,6 +125,8 @@ pub(crate) fn instance(
         state: lookup("gui-state-ready").into(),
         state_kind: "ready".into(),
         can_launch: true,
+        group_index: -1,
+        icon_slot: -1,
         ..InstanceRow::default()
     }
 }
@@ -175,6 +177,7 @@ pub(crate) fn server(
         path: format!("/demo/servers/{id}").into(),
         installed: true,
         can_start: true,
+        icon_slot: -1,
         ..ServerRow::default()
     }
 }
@@ -388,7 +391,9 @@ pub(crate) fn install_base(ui: &AppWindow) {
     ui.set_storage_root("/demo/ephervex".into());
     ui.set_application_text_scale(100);
     ui.set_accounts(rows(account_rows()));
-    ui.set_instances(rows(instance_rows()));
+    let instances = instance_rows();
+    ui.set_instance_total(i32::try_from(instances.len()).unwrap_or(i32::MAX));
+    ui.set_instances(rows(instances));
     ui.set_global_servers(rows(server_rows()));
     ui.set_selected_instance_id("cavestone".into());
     ui.set_selected_instance_index(0);

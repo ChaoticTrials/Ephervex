@@ -121,6 +121,7 @@ pub(crate) fn instances_empty(ui: &AppWindow) {
     ui.set_workspace_open(false);
     ui.set_page(0);
     ui.set_instances(rows(Vec::new()));
+    ui.set_instance_total(0);
     ui.set_pending_instances(rows(Vec::new()));
     ui.set_selected_instance_id(SharedString::default());
     ui.set_selected_instance_index(-1);

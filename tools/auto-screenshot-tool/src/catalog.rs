@@ -235,7 +235,7 @@ const INSTANCE_MENU_REGIONS: &[Region] = &[
             left: -84.0,
             top: 288.0,
             width: 304.0,
-            height: 330.0,
+            height: 404.0,
         }),
     },
 ];
@@ -254,9 +254,9 @@ const ACCOUNT_LAUNCH_REGIONS: &[Region] = &[
         // The native account menu stays against the right edge at both sizes.
         bounds: Some(RegionBounds::RightAligned {
             right: 0.0,
-            top: 390.0,
+            top: 538.0,
             width: 300.0,
-            height: 280.0,
+            height: 272.0,
         }),
     },
 ];
