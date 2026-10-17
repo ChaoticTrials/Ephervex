@@ -575,6 +575,35 @@ fn cavestone_server_mods(
     }
 }
 
+/// The Settings of a server that sets its own memory, with independent mod
+/// changes on as its Mods surface shows them.
+pub(crate) fn server_settings(ui: &AppWindow) {
+    let view = HostView {
+        runtime_memory_min: "2048".into(),
+        runtime_memory_max: "4096".into(),
+        runtime_pinned: true,
+        runtime_global: super::client_hosts::global_runtime(),
+        runtime_revision: 1,
+        allow_pack_mod_changes: true,
+        ..server_view(named_server(ui, "cavestone-server"))
+    };
+    open_server(ui, view, "Settings", None);
+}
+
+/// Manage Mod for a pack mod of the server, opened from its Mods list.
+pub(crate) fn server_mod_manager(ui: &AppWindow) {
+    let server = named_server(ui, "cavestone-server");
+    let search = &recorded::server_mods().modrinth_search;
+    let view = cavestone_server_mods(server, "modrinth", search, false);
+    open_server(ui, view, "Mods", None);
+    super::mods::manage_dialog(
+        ui,
+        ("server", "cavestone-server"),
+        &recorded::dialogs().manage,
+        true,
+    );
+}
+
 /// A server's Modrinth search, where one result does not state server support.
 pub(crate) fn server_mods(ui: &AppWindow) {
     let server = named_server(ui, "cavestone-server");

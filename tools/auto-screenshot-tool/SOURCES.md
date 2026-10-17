@@ -126,7 +126,8 @@ and refuses any file that does not match. They are not part of the repository.
   pin them, and the launch the horrors in the fog refused for its pinned Java 25.
 - The Java runtime and mod counts in the Utility Mods server diagnosis, and the
   CaveStone Server shown running behind its install confirmation.
-- Independent mod changes turned on for the CaveStone Server.
+- Independent mod changes turned on for the CaveStone Server, and its memory
+  settings.
 - Snapshot restore and create dialogs reuse the recorded snapshots, and the
   suggested snapshot label is a placeholder in the launcher's own format.
 - Which instances are favorites, how they are grouped, and the filter set on

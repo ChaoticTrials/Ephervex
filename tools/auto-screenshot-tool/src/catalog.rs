@@ -620,6 +620,20 @@ pub(crate) const STATES: &[State] = &[
         interaction: None,
     },
     State {
+        name: "server-settings",
+        show: fixtures::diagnostics_servers::server_settings,
+        regions: DIAGNOSTICS_SERVERS_REGIONS,
+        same_layout_at_both_sizes: false,
+        interaction: None,
+    },
+    State {
+        name: "server-mod-manager",
+        show: fixtures::diagnostics_servers::server_mod_manager,
+        regions: DIAGNOSTICS_SERVERS_REGIONS,
+        same_layout_at_both_sizes: false,
+        interaction: None,
+    },
+    State {
         name: "server-mods",
         show: fixtures::diagnostics_servers::server_mods,
         regions: DIAGNOSTICS_SERVERS_REGIONS,

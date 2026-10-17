@@ -131,9 +131,15 @@ fn impact(name: &str, path: &str, distance: i32) -> ImpactRow {
     }
 }
 
-/// Fills the Manage Mod dialog for a mod with a newer release available.
-fn manage_dialog(ui: &AppWindow, manage: &Manage, pack_owned: bool) {
-    ui.set_mod_action_host("cavestone".into());
+/// Fills the Manage Mod dialog of `host` for a mod with a newer release available.
+pub(crate) fn manage_dialog(
+    ui: &AppWindow,
+    (kind, host): (&str, &str),
+    manage: &Manage,
+    pack_owned: bool,
+) {
+    ui.set_mod_action_host_kind(kind.into());
+    ui.set_mod_action_host(host.into());
     ui.set_mod_action_path(manage.path.clone().into());
     ui.set_mod_action_name(manage.title.clone().into());
     ui.set_mod_action_project_url(format!("https://modrinth.com/mod/{}", manage.project).into());
@@ -146,11 +152,8 @@ fn manage_dialog(ui: &AppWindow, manage: &Manage, pack_owned: bool) {
     ui.set_mod_action_can_remove(true);
     ui.set_mod_action_up_to_date(false);
     ui.set_mod_action_is_pack_owned(pack_owned);
-    ui.set_mod_action_pack_original_version(if pack_owned {
-        manage.installed_id.clone().into()
-    } else {
-        SharedString::default()
-    });
+    // The mod is still on the release it came with, which offers no reset.
+    ui.set_mod_action_pack_original_version(SharedString::default());
     ui.set_mod_action_selected(manage.newest_id.clone().into());
     ui.set_mod_versions(rows(version_rows(manage)));
     ui.set_mod_action_requires(rows(relation_rows(&manage.requires)));
@@ -163,13 +166,23 @@ fn manage_dialog(ui: &AppWindow, manage: &Manage, pack_owned: bool) {
 /// Manage Mod for a pack-owned mod with a newer release available.
 pub(crate) fn mod_manager(ui: &AppWindow) {
     cavestone_workspace(ui, Surface::Mods, |_| {});
-    manage_dialog(ui, &recorded::dialogs().manage, true);
+    manage_dialog(
+        ui,
+        ("client", "cavestone"),
+        &recorded::dialogs().manage,
+        true,
+    );
 }
 
 /// Manage Mod for an added mod whose catalog has a newer release, offering Update.
 pub(crate) fn mod_update_available(ui: &AppWindow) {
     cavestone_workspace(ui, Surface::Mods, |_| {});
-    manage_dialog(ui, &recorded::dialogs().update, false);
+    manage_dialog(
+        ui,
+        ("client", "cavestone"),
+        &recorded::dialogs().update,
+        false,
+    );
 }
 
 /// A pack mod whose jar was deleted outside Ephervex, offering Restore.

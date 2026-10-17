@@ -154,6 +154,19 @@ pub(crate) fn client_overview_linked_server(ui: &AppWindow) {
     );
 }
 
+/// What a host's runtime form says it follows when left empty: the memory
+/// range and the automatic Java choice of the global settings.
+pub(crate) fn global_runtime() -> SharedString {
+    lookup_args(
+        "gui-instance-runtime-global",
+        [
+            ("first", Arg::from("1024 - 6144 MiB")),
+            ("second", Arg::from(lookup("gui-java-auto-selected"))),
+        ],
+    )
+    .into()
+}
+
 /// The runtime form of a client that sets its own memory and arguments.
 pub(crate) fn client_settings(ui: &AppWindow) {
     open_surface(
@@ -164,14 +177,7 @@ pub(crate) fn client_settings(ui: &AppWindow) {
             view.runtime_memory_max = "6144".into();
             view.runtime_jvm_args = "-XX:+UseG1GC -XX:MaxGCPauseMillis=100".into();
             view.runtime_pinned = true;
-            view.runtime_global = lookup_args(
-                "gui-instance-runtime-global",
-                [
-                    ("first", Arg::from("1024 - 6144 MiB")),
-                    ("second", Arg::from(lookup("gui-java-auto-selected"))),
-                ],
-            )
-            .into();
+            view.runtime_global = global_runtime();
             view.runtime_revision = 1;
             view.allow_pack_mod_changes = true;
         },

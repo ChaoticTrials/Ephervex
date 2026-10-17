@@ -115,6 +115,7 @@ Hosts:
 - [x] `client-diagnostics-result`, `client-diagnostics-fix-preview`
 - [x] `client-run-failure-notice`
 - [x] `server-console`, `server-properties` (EULA card), `server-crash-notice`
+- [x] `server-settings`, `server-mod-manager`
 - [x] `split-workspace` (client logs beside server console)
 
 Settings:
