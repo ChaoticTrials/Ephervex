@@ -71,8 +71,8 @@ A linked server is rebuilt from the client's retained pack recipe. JARs added
 manually to the client afterward are not copied automatically. A mod change
 made through the desktop app's mod dialogs can be carried to the linked servers
 you select; see [Mods](./mods.mdx). Any Forge or NeoForge server, linked or
-standalone, can also take catalog mods directly; see
-[Install mods on a server](./mods.mdx#install-mods-on-a-server). Pack files
+standalone, can also take catalog mods directly and change or remove its own;
+see [Install mods on a server](./mods.mdx#install-mods-on-a-server). Pack files
 whose server side is undeclared are included by default; the CLI can narrow
 them with repeated `--include-unknown PATH` flags or omit them with
 `--skip-unknown`. Review the server's **Mods** tab before starting a test.
@@ -159,18 +159,19 @@ set`.
 </TabItem>
 </Tabs>
 
-## Choose the server's Java
+## Set the server's Java and memory
 
-A server picks its Java the same way an instance does; see
-[Set Java and memory for one instance](./instances.mdx#set-java-and-memory-for-one-instance).
-Stop the server before changing its Java, memory, or JVM arguments.
+A server picks its Java, memory, and JVM arguments the same way an instance
+does; see [Set Java and memory for one instance](./instances.mdx#set-java-and-memory-for-one-instance).
+Stop the server before changing them.
 
 <Tabs groupId="interface" queryString="interface">
 <TabItem value="gui" label="Desktop" default>
 
-Open the server's **Properties** tab. The **Java runtime** card works as it
-does in an instance's **Settings**. Server memory and JVM arguments can be set
-only from the CLI.
+Open the server's **Settings** tab, or select the Java pill in the workspace
+header. **Java and memory** and the **Java runtime** card work as they do in
+an instance's **Settings**. The same tab holds
+[Independent mod changes](./mods.mdx#change-or-remove-a-managed-mod).
 
 </TabItem>
 <TabItem value="cli" label="CLI">

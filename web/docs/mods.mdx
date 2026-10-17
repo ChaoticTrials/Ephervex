@@ -53,7 +53,9 @@ ephervex mod show --instance INSTANCE_ID PROJECT_ID --provider modrinth
 
 Add `--include-incompatible` to `mod search` or `mod show` to also list
 results that do not fit the instance, each with the reason. They still cannot
-be installed.
+be installed. When more results may follow, `mod search` ends with the
+`--offset` that starts the next page. A page can hold fewer results than
+`--limit`, so use that value instead of counting.
 
 Plan and install an exact release, or omit `--version` to choose the newest
 compatible one. Ephervex refuses a named release that does not fit the
@@ -78,22 +80,25 @@ cannot be downloaded automatically, install it through the desktop app.
 
 A Forge or NeoForge server can take catalog mods directly, with or without a
 linked client. It changes only that server; a linked client is not touched. A
-running server picks up the change the next time it starts.
+running server picks up the change the next time it starts. The server's own
+**Mods** list can then [change or remove](#change-or-remove-a-managed-mod) its
+mods.
 
 Results are checked against the server's exact Minecraft release and loader,
 and mods declared client-only are left out. A mod whose catalog does not state
 whether it runs on a server is still offered, but installing it, or a mod that
-needs it, requires your confirmation. A required dependency declared
-client-only is installed with a warning, because the mod that needs it cannot
-load without it. CurseForge cannot filter by side, so a CurseForge page can
+needs it, requires your confirmation once. A mod already on the server is not
+asked about again. A required dependency declared client-only is installed
+with a warning, because the mod that needs it cannot load without it. CurseForge cannot filter by side, so a CurseForge page can
 hold fewer results than the page size.
 
 <Tabs groupId="interface" queryString="interface">
 <TabItem value="gui" label="Desktop" default>
 
 Open the server workspace, select **Mods**, and search in **Add Mods**. A
-**?** marks a result that does not state server support. **Add Mods** is hidden
-for a Vanilla server and for a server whose installation has not finished.
+**?** above **Install** marks a result that does not state server support.
+**Add Mods** is hidden for a Vanilla server and for a server whose
+installation has not finished.
 
 <ThemeScreenshot state="server-mods" alt="Server Mods surface with a Modrinth search where Golem Magicka is marked with a question mark" />
 
@@ -118,10 +123,11 @@ ephervex mod plan --server SERVER_ID PROJECT_ID --provider modrinth
 ephervex mod install --server SERVER_ID PROJECT_ID --provider modrinth
 ```
 
-`mod search` notes each result that does not state server support.
-`--include-incompatible` also lists client-only mods, which still cannot be
-installed. `mod install` refuses an install that includes a mod with unstated
-server support and names it; repeat the command with
+`mod search` notes each result that does not state server support, and
+`mod show --server` says when a mod runs only on a client or does not state
+server support. `--include-incompatible` also lists client-only mods, which
+still cannot be installed. `mod install` refuses an install that includes a
+mod with unstated server support and names it; repeat the command with
 `--accept-unknown-server-support` to install it anyway.
 
 </TabItem>
@@ -175,9 +181,10 @@ In **Mods**, use the switch on a mod card to turn it off or on. The impact
 dialog names affected mods and can apply the dependent changes together. Use
 the card's delete action to put a recorded JAR aside; its row then offers
 **Restore**. This applies while **Independent mod changes** is off, as it is
-for an imported pack. When it is on, as it is for an instance created in
-Ephervex, the card action opens a removal plan instead. The plan removes the
-mod and any dependencies nothing else needs, and offers no **Restore**.
+for an imported pack or a server built from a pack or server files. When it is
+on, as it is for an instance or server created in Ephervex, the card action
+opens a removal plan instead. The plan removes the mod and any dependencies
+nothing else needs, and offers no **Restore**.
 Deleting a JAR you added by hand removes that file.
 
 <ThemeScreenshot state="mod-missing-file" alt="Mods list where a deleted pack mod shows Deleted and a Restore button" />
@@ -212,23 +219,30 @@ does not permanently remove it from the instance's recipe.
 
 ## Change or remove a managed mod
 
-Open a mod's **Manage Mod** dialog to see compatible releases, what it
-requires, and what requires it. **Change Version** chooses a specific offered
-release; **Update** selects the newest compatible release. **Remove** removes
-the mod from this instance's managed set and can also remove dependencies that
-nothing else needs.
+Select a mod in an instance's or server's **Mods** list to open **Manage
+Mod**, which shows compatible releases, what the mod requires, and what
+requires it. **Change Version** chooses a specific offered release; **Update**
+selects the newest compatible release. **Remove...** removes the mod from the
+host's managed set and can also remove dependencies that nothing else needs.
 
-An imported pack starts with **Independent mod changes** off. While it is off,
-you can inspect a pack-declared mod, turn it off, or put its JAR aside, but
-cannot change its recorded release or remove it from the pack's instance
-recipe. To allow those changes for this instance, open its workspace
-**Settings** and enable **Let me change and remove this instance's mods**.
-**Reset to Pack's Version** remains available if you change a pack mod and
-want the declared release back.
+An imported pack starts with **Independent mod changes** off, and so does a
+server built from a pack or from server files. While it is off, you can
+inspect a pack-declared mod, turn it off, or put its JAR aside, but cannot
+change its recorded release or remove it from the pack's recipe. To allow
+those changes, open the workspace **Settings** and enable **Let me change and
+remove this instance's mods** or **Let me change and remove this server's
+mods**. A server created in Ephervex always allows them. **Reset to Pack's
+Version** remains available if you change a pack mod and want the declared
+release back.
 
 <ThemeScreenshot state="mod-manager" alt="Manage Mod dialog showing compatible releases and dependency relations" />
 
 <ThemeScreenshot state="mod-update-available" alt="Manage Mod dialog for an added mod with a newer release, offering Update and Change Version" />
+
+On a server, **Change Version** and **Update** apply at once; a running server
+gets the change the next time it starts. A change that would add a mod whose
+catalog does not state server support is refused. Install that mod from **Add
+Mods** first, which asks you to confirm it.
 
 Changing an installed mod's release and permanently removing a managed mod
 are currently desktop actions. The CLI's `mod install --version` installs a
@@ -243,8 +257,8 @@ selected server gets the exact release the client settles on. A server that
 cannot take it is marked **Unavailable** with the reason, for example an
 unsupported Minecraft version or loader, or a mod the server's own pack
 declares. Each server has its own result. A running server receives the change
-the next time it starts. To change one server only, see
-[Install mods on a server](#install-mods-on-a-server).
+the next time it starts. To change one server only, work in that server's own
+**Mods**; see [Install mods on a server](#install-mods-on-a-server).
 
 ## Review dependency information
 

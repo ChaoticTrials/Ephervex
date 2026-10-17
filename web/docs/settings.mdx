@@ -9,9 +9,10 @@ import ThemeScreenshot from '@site/src/components/ThemeScreenshot';
 
 # Settings
 
-Open **Settings** to change Ephervex-wide behavior. An instance's own Java and
-memory overrides live in its [workspace Settings](./instances.mdx#set-java-and-memory-for-one-instance),
-a server's Java in its [Properties](./servers.mdx#choose-the-servers-java).
+Open **Settings** to change Ephervex-wide behavior. An instance's or server's
+own Java and memory overrides live in its workspace **Settings**
+([instances](./instances.mdx#set-java-and-memory-for-one-instance),
+[servers](./servers.mdx#set-the-servers-java-and-memory)).
 Account management has its [own guide](./accounts.mdx). The sections below
 cover the remaining settings pages, including **About & Licenses**, and the
 CLI commands available for them.
@@ -106,9 +107,9 @@ Ephervex can detect installed Java runtimes and download a managed Temurin
 runtime when a compatible version is missing. **Preferred Java executable**
 applies to every instance and server without its own runtime choice; they show
 it as pinned by the launcher preference. The minimum and maximum memory values
-are defaults for every instance and server; each can
-[override them](./instances.mdx#set-java-and-memory-for-one-instance), a
-server only from the CLI.
+are defaults for every instance and server; each can override them
+([instances](./instances.mdx#set-java-and-memory-for-one-instance),
+[servers](./servers.mdx#set-the-servers-java-and-memory)).
 
 <Tabs groupId="interface" queryString="interface">
 <TabItem value="gui" label="Desktop" default>

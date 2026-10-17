@@ -212,7 +212,7 @@ features show one tab or a short note.
       Docusaurus reads them.
 - [x] CLI-only features that need a mention on their own pages: `server
       recover`, `java select`, `instance recipe`, `url-handler`, `doctor`,
-      `completions`, `server runtime` memory and JVM arguments.
+      `completions`.
 
 ## 7. Known stale sources
 
