@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::dependencies::ModGraph;
+use crate::mods::SecondCopies;
 use crate::{
     App, CoreError, CoreResult, DependencyKnowledge, InstalledHost, ModPresence, SnapshotError,
     SnapshotOrigin,
@@ -951,7 +952,7 @@ impl App {
             .iter()
             .map(|path| (path.clone(), enabled.contains(path)))
             .collect();
-        self.apply_mod_toggles(host, &changes)?;
+        self.apply_mod_toggles(host, &changes, SecondCopies::Tolerated)?;
         Ok(())
     }
 }

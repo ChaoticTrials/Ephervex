@@ -27,7 +27,7 @@ use ephervex_minecraft::{
     VanillaInstaller,
 };
 use ephervex_model::{AttentionReason, Hash, InstanceId, LoaderKind, Progress};
-use ephervex_pack::{MutationRecoveryAction, MutationRecoveryIssue, PackError};
+use ephervex_pack::{MutationRecoveryAction, MutationRecoveryIssue, PackError, RestoredState};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
 
@@ -255,15 +255,34 @@ pub struct RepairReport {
     /// Files a repair would have attempted but never reached because the run
     /// was canceled. They are still as they were.
     pub skipped: Vec<PathBuf>,
+    /// Files left as they were because an enabled jar beside them already
+    /// declares the same mod id. The loader refuses to start with both, so the
+    /// user has to choose which one stays.
+    pub second_copies: Vec<SecondCopy>,
     /// Scratch files that could not be removed or restored.
     pub recovery_issues: Vec<MutationRecoveryIssue>,
+}
+
+/// A file a repair did not put back because another jar provides its mod.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecondCopy {
+    /// The file left as it was.
+    pub logical_path: PathBuf,
+    /// The mod id both jars declare.
+    pub mod_id: String,
+    /// The enabled jar that already declares it, relative to the game
+    /// directory.
+    pub existing: PathBuf,
 }
 
 impl RepairReport {
     /// Whether the instance now holds what it recorded.
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        self.unrepairable.is_empty() && self.failed.is_empty() && self.skipped.is_empty()
+        self.unrepairable.is_empty()
+            && self.failed.is_empty()
+            && self.skipped.is_empty()
+            && self.second_copies.is_empty()
     }
 
     /// Whether the run was canceled before it reached every file.
@@ -572,8 +591,15 @@ impl App {
                     continue;
                 }
             };
+            // A jar the user or an isolation round turned off is turned off
+            // again below, so another jar providing its mod is no clash.
+            let state = if retired.as_ref().is_some_and(|retired| retired.was_disabled) {
+                RestoredState::Disabled
+            } else {
+                RestoredState::Enabled
+            };
             match self
-                .restore_mod_file_holding_the_gate(host, &path, reporter, cancel)
+                .restore_mod_file_holding_the_gate(host, &path, state, reporter, cancel)
                 .await
             {
                 Ok(()) => {
@@ -611,6 +637,20 @@ impl App {
                     // replaced, and it is not a fault to try again for.
                     if error.is_cancellation() {
                         report.skipped.push(path);
+                    } else if let CoreError::Pack(PackError::DuplicateModId {
+                        mod_id,
+                        path: existing,
+                        ..
+                    }) = error
+                    {
+                        let existing = existing
+                            .strip_prefix(&layout.game_dir)
+                            .map_or_else(|_| existing.clone(), Path::to_path_buf);
+                        report.second_copies.push(SecondCopy {
+                            logical_path: path,
+                            mod_id,
+                            existing,
+                        });
                     } else {
                         report.failed.push(path);
                     }
@@ -1294,14 +1334,157 @@ mod tests {
     /// Puts the bytes every sound jar holds in the shared artifact cache, the
     /// way an earlier install would have, so a repair can succeed offline.
     fn seed_cache(app: &App) {
+        seed_cache_with(app, BODY);
+    }
+
+    fn seed_cache_with(app: &App, body: &[u8]) {
         let extension = ephervex_download::FileExtension::new("jar").expect("jar");
         let path = app.artifact_cache().layout().content(
             ephervex_download::ContentStore::Downloads,
-            &digest_of(BODY),
+            &digest_of(body),
             Some(&extension),
         );
         std::fs::create_dir_all(path.parent().expect("shard")).expect("shard");
-        std::fs::write(&path, BODY).expect("seed the cache");
+        std::fs::write(&path, body).expect("seed the cache");
+    }
+
+    /// The bytes of a jar whose Fabric metadata declares mod id `id`.
+    fn jar_declaring(id: &str) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut bytes = Vec::new();
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
+        let options =
+            zip::write::SimpleFileOptions::default().last_modified_time(zip::DateTime::default());
+        zip.start_file("fabric.mod.json", options).expect("entry");
+        write!(zip, r#"{{"schemaVersion":1,"id":"{id}","version":"1"}}"#).expect("write");
+        zip.finish().expect("finish");
+        bytes
+    }
+
+    /// An instance whose pack records `libx.jar`, declaring mod id `libx`,
+    /// with an address and its bytes in the shared cache, and has a
+    /// hand-placed `libx-other.jar` declaring the same mod id enabled beside
+    /// it. `libx.jar` itself is not written.
+    fn instance_with_another_libx(base: &Path) -> (App, InstanceId, PathBuf, Vec<u8>) {
+        let app = App::open_at(Paths::rooted_at(base)).expect("app opens");
+        let record = app
+            .create_client_for_test(NewClient::new(
+                "Second Copy Example",
+                "1.21.1",
+                LoaderSelection::exact(LoaderKind::NeoForge, "21.1.77"),
+            ))
+            .expect("create");
+        let libx = jar_declaring("libx");
+        let mut recipe =
+            PackRecipe::for_manual_instance("Second Copy Example", "1.21.1", record.loader.clone());
+        recipe.files = vec![PackFileRecipe {
+            origin: ModOrigin::PackDeclared,
+            identity: None,
+            size: Some(libx.len() as u64),
+            ..recorded(
+                "libx.jar",
+                vec![digest_of(&libx)],
+                vec!["https://cdn.modrinth.com/data/x/libx.jar".to_owned()],
+            )
+        }];
+        SourceStore::new(ephervex_storage::metadata::source_dir(&record.root))
+            .write_recipe(&recipe)
+            .expect("write recipe");
+        seed_cache_with(&app, &libx);
+        let mods = ephervex_storage::metadata::client_game_dir(&record.root).join("mods");
+        std::fs::create_dir_all(&mods).expect("mods dir");
+        std::fs::write(mods.join("libx-other.jar"), jar_declaring("libx")).expect("write");
+        (app, record.id, record.root, libx)
+    }
+
+    #[tokio::test]
+    async fn a_repair_leaves_out_a_jar_whose_mod_another_enabled_jar_provides() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, id, root, _libx) = instance_with_another_libx(base.path());
+        let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+
+        let report = repair(&app, id).await.expect("repair");
+
+        assert_eq!(
+            report.second_copies,
+            [SecondCopy {
+                logical_path: PathBuf::from("mods/libx.jar"),
+                mod_id: "libx".to_owned(),
+                existing: PathBuf::from("mods/libx-other.jar"),
+            }]
+        );
+        assert!(report.repaired.is_empty());
+        assert!(report.failed.is_empty(), "{report:?}");
+        assert!(!report.is_complete());
+        assert!(!mods.join("libx.jar").exists(), "nothing was written");
+    }
+
+    #[tokio::test]
+    async fn a_repair_mends_a_disabled_jar_whose_mod_another_enabled_jar_provides() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, id, root, libx) = instance_with_another_libx(base.path());
+        let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+        std::fs::write(mods.join("libx.jar.disabled"), b"a truncated jar").expect("write");
+
+        let report = repair(&app, id).await.expect("repair");
+
+        assert_eq!(report.repaired, [PathBuf::from("mods/libx.jar")]);
+        assert!(report.is_complete(), "{report:?}");
+        assert_eq!(
+            std::fs::read(mods.join("libx.jar.disabled")).expect("repaired"),
+            libx,
+            "the replacement stays off, so the loader still reads one copy"
+        );
+        assert!(!mods.join("libx.jar").exists());
+    }
+
+    #[tokio::test]
+    async fn restoring_a_put_aside_jar_is_refused_while_another_enabled_jar_provides_its_mod() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, id, root, libx) = instance_with_another_libx(base.path());
+        let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+        let kept = ephervex_storage::metadata::put_aside_dir(&root).join("mods/libx.jar");
+        std::fs::rename(
+            mods.join("libx-other.jar"),
+            mods.join("libx-other.jar.disabled"),
+        )
+        .expect("turn the other copy off");
+        std::fs::write(mods.join("libx.jar"), &libx).expect("write");
+        app.delete_mod_file(InstalledHost::Instance(id), Path::new("mods/libx.jar"))
+            .expect("put aside");
+        std::fs::rename(
+            mods.join("libx-other.jar.disabled"),
+            mods.join("libx-other.jar"),
+        )
+        .expect("turn the other copy on");
+
+        let error = restore(&app, id, "libx.jar")
+            .await
+            .expect_err("a second copy of the mod is refused");
+
+        assert!(
+            matches!(
+                &error,
+                CoreError::Pack(PackError::DuplicateModId { mod_id, path, .. })
+                    if mod_id == "libx" && *path == mods.join("libx-other.jar")
+            ),
+            "{error:?}"
+        );
+        assert!(!mods.join("libx.jar").exists(), "nothing was written");
+        assert_eq!(
+            std::fs::read(&kept).expect("the kept copy stays"),
+            libx,
+            "the put-aside copy is still there to restore later"
+        );
+
+        std::fs::remove_file(mods.join("libx-other.jar")).expect("remove the other copy");
+        restore(&app, id, "libx.jar")
+            .await
+            .expect("with one copy, restoring it is allowed");
+        assert_eq!(
+            std::fs::read(mods.join("libx.jar")).expect("restored"),
+            libx
+        );
     }
 
     #[tokio::test]

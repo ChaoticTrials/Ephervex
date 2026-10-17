@@ -82,13 +82,14 @@ pub use import::{
 };
 pub use install::{
     AppliedLayer, ArtifactFetch, FileInstall, MaterializedFiles, MaterializedServerRecipe,
-    ServerMaterializeRequest, apply_overrides, apply_retained_overrides, install_files,
-    materialize_server_recipe, put_aside_path, restore_file,
+    RestoredState, ServerMaterializeRequest, apply_overrides, apply_retained_overrides,
+    install_files, materialize_server_recipe, put_aside_path, restore_file,
 };
 pub use managed::{
     DISABLED_SUFFIX, InstalledStandIn, MODS_DIR, ManagedModInstall, ManagedModInstallation,
     RESOURCEPACKS_DIR, SHADERPACKS_DIR, disabled_path, install_managed,
 };
+pub use mod_ids::require_distinct_mod_id;
 pub use mutate::{
     ManagedMutation, ManagedMutationReport, ManagedProject, MutationRecoveryAction,
     MutationRecoveryIssue, ReplacedMod, mutate_managed, projected, unique_retired_path,

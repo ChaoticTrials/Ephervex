@@ -219,7 +219,8 @@ pub use url_handler::{
     URL_HANDLER_ENTRY, UrlHandlerRemoval, UrlHandlerSource, UrlHandlerStatus, scheme_mime_type,
 };
 pub use verify::{
-    Integrity, RepairRefusal, RepairReport, SharedArtifactReport, VerificationReport, VerifiedFile,
+    Integrity, RepairRefusal, RepairReport, SecondCopy, SharedArtifactReport, VerificationReport,
+    VerifiedFile,
 };
 
 /// Cancellation, re-exported because the services take one.

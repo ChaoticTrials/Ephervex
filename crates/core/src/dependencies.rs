@@ -25,7 +25,7 @@ use crate::app::App;
 use crate::error::{CoreError, CoreResult};
 use crate::host_recipe_gate;
 use crate::mod_display_cache::{self, RememberedDisplay};
-use crate::mods::{InstalledHost, ModPresence, recipe_relations};
+use crate::mods::{InstalledHost, ModPresence, SecondCopies, recipe_relations};
 
 /// What a dependency refresh learned.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -757,16 +757,17 @@ impl App {
     /// operation that dies halfway through a cascade would otherwise leave a
     /// dependency gone and something that needs it still loading.
     ///
-    /// Each change is the same rename [`App::set_mod_enabled`] performs, and is
-    /// idempotent for the same reason. The batch is all or nothing: a rename
-    /// that fails puts back the ones already made.
+    /// Each change is the same rename [`App::set_mod_enabled`] performs, with
+    /// the same refusal of a second copy of one mod, and is idempotent for the
+    /// same reason. The batch is all or nothing: a rename that fails puts back
+    /// the ones already made.
     pub fn set_mods_enabled(
         &self,
         host: InstalledHost,
         changes: &[(PathBuf, bool)],
     ) -> CoreResult<Vec<(PathBuf, ModPresence)>> {
         self.refuse_mod_change_during_isolation(host)?;
-        self.apply_mod_toggles(host, changes)
+        self.apply_mod_toggles(host, changes, SecondCopies::Refused)
     }
 
     /// The ordered renames behind [`Self::set_mods_enabled`], for the callers
@@ -775,6 +776,7 @@ impl App {
         &self,
         host: InstalledHost,
         changes: &[(PathBuf, bool)],
+        second_copies: SecondCopies,
     ) -> CoreResult<Vec<(PathBuf, ModPresence)>> {
         let graph = ModGraph::build(self, host)?;
         // Disables first, so what a batch turns off stops loading before what
@@ -796,7 +798,7 @@ impl App {
         let mut applied = Vec::with_capacity(ordered.len());
         let mut renamed: Vec<(&Path, bool)> = Vec::new();
         for (path, enabled) in ordered {
-            match self.toggle_mod_file_reporting_move(host, path, *enabled) {
+            match self.toggle_mod_file_reporting_move(host, path, *enabled, second_copies) {
                 Ok((presence, moved)) => {
                     if moved {
                         renamed.push((path, *enabled));

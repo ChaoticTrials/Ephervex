@@ -906,6 +906,17 @@ impl From<ServerId> for InstalledHost {
     }
 }
 
+/// Whether turning a mod on refuses a jar declaring the mod id of one the
+/// loader already reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SecondCopies {
+    /// A change the user asked for, which must not stop the game starting.
+    Refused,
+    /// Not checked: undoing a failed batch, which puts back a mod set the
+    /// host already had, and applying an isolation round's configuration.
+    Tolerated,
+}
+
 /// Where one installed host keeps the state shared by host-level workflows.
 #[derive(Debug)]
 pub(crate) struct HostLayout {
@@ -1579,6 +1590,11 @@ impl App {
     /// [`CoreError::ModSpellingOccupied`] and neither file changes: a plain
     /// rename would silently replace the other file.
     ///
+    /// Turning a jar on is refused with
+    /// [`ephervex_pack::PackError::DuplicateModId`] when an enabled jar beside
+    /// it already declares one of its mod ids, because the loader refuses to
+    /// start with two copies of one mod.
+    ///
     /// Asking for the state a mod is already in succeeds and does nothing, so a
     /// frontend that toggles the same row twice, or a retried command, cannot
     /// produce a half-renamed pair. A mod whose file is missing altogether is a
@@ -1592,18 +1608,19 @@ impl App {
         enabled: bool,
     ) -> CoreResult<ModPresence> {
         self.refuse_mod_change_during_isolation(host)?;
-        self.toggle_mod_file(host, logical_path, enabled)
+        self.toggle_mod_file_reporting_move(host, logical_path, enabled, SecondCopies::Refused)
+            .map(|(presence, _moved)| presence)
     }
 
-    /// The rename behind [`Self::set_mod_enabled`], for the callers that own
-    /// the decision to change the mod set, such as an isolation round.
+    /// The rename behind [`Self::set_mod_enabled`], for a caller putting back
+    /// a state the host already had, such as undoing a failed batch.
     pub(crate) fn toggle_mod_file(
         &self,
         host: InstalledHost,
         logical_path: &Path,
         enabled: bool,
     ) -> CoreResult<ModPresence> {
-        self.toggle_mod_file_reporting_move(host, logical_path, enabled)
+        self.toggle_mod_file_reporting_move(host, logical_path, enabled, SecondCopies::Tolerated)
             .map(|(presence, _moved)| presence)
     }
 
@@ -1617,6 +1634,7 @@ impl App {
         host: InstalledHost,
         logical_path: &Path,
         enabled: bool,
+        second_copies: SecondCopies,
     ) -> CoreResult<(ModPresence, bool)> {
         let layout = self.host_layout(host)?;
         let installed = layout.game_dir.join(logical_path);
@@ -1635,6 +1653,14 @@ impl App {
             return Err(CoreError::ModFileMissing {
                 path: logical_path.to_path_buf(),
             });
+        }
+        if enabled && second_copies == SecondCopies::Refused {
+            ephervex_pack::require_distinct_mod_id(
+                layout.recipe.as_ref(),
+                &layout.game_dir,
+                logical_path,
+                from,
+            )?;
         }
         rename_without_replacing(from, to).map_err(|source| {
             if source.kind() == std::io::ErrorKind::AlreadyExists {
@@ -3690,6 +3716,159 @@ mod tests {
             .expect_err("nothing to enable");
         assert!(matches!(error, CoreError::ModFileMissing { .. }));
         assert_eq!(error.failing_path().as_deref(), Some(path.as_path()));
+    }
+
+    /// Writes a jar at `path` whose Fabric metadata declares mod id `id`.
+    fn jar_declaring(path: &Path, id: &str) {
+        use std::io::Write as _;
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(path).expect("create"));
+        zip.start_file("fabric.mod.json", zip::write::SimpleFileOptions::default())
+            .expect("entry");
+        write!(zip, r#"{{"schemaVersion":1,"id":"{id}","version":"1"}}"#).expect("write");
+        zip.finish().expect("finish");
+    }
+
+    /// An instance whose `journeymap.jar`, recorded as installed from Modrinth,
+    /// and a hand-placed `journeymap-dev.jar` both declare mod id `journeymap`,
+    /// neither enabled.
+    async fn two_copies_of_one_mod(base: &Path) -> (App, InstalledHost, PathBuf) {
+        let (app, instance) = imported_instance(base, &[]).await;
+        let root = app.client(instance).unwrap().root;
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(&root));
+        let mut recipe = store.read_recipe().expect("recipe");
+        recipe
+            .files
+            .iter_mut()
+            .find(|file| file.logical_path == Path::new("mods/journeymap.jar"))
+            .expect("recorded")
+            .identity = Some(ephervex_pack::ProviderFileIdentity {
+            provider: Some(ModProvider::Modrinth),
+            project_id: Some("lfHFW1mp".to_owned()),
+            version_id: Some("GKQEbfSt".to_owned()),
+            file_id: None,
+        });
+        store.write_recipe(&recipe).expect("write");
+        let mods_dir = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+        jar_declaring(&mods_dir.join("journeymap.jar.disabled"), "journeymap");
+        jar_declaring(&mods_dir.join("journeymap-dev.jar.disabled"), "journeymap");
+        (app, InstalledHost::Instance(instance), mods_dir)
+    }
+
+    #[tokio::test]
+    async fn turning_on_a_jar_whose_mod_an_enabled_jar_provides_is_refused() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, host, mods_dir) = two_copies_of_one_mod(base.path()).await;
+        app.set_mod_enabled(host, Path::new("mods/journeymap-dev.jar"), true)
+            .expect("the only enabled copy");
+
+        let error = app
+            .set_mod_enabled(host, Path::new("mods/journeymap.jar"), true)
+            .expect_err("a second copy of the mod is refused");
+
+        assert!(
+            matches!(
+                &error,
+                CoreError::Pack(ephervex_pack::PackError::DuplicateModId {
+                    mod_id,
+                    incoming,
+                    path,
+                    provider: None,
+                    ..
+                }) if mod_id == "journeymap"
+                    && incoming == "mods/journeymap.jar"
+                    && *path == mods_dir.join("journeymap-dev.jar")
+            ),
+            "{error:?}"
+        );
+        assert!(mods_dir.join("journeymap.jar.disabled").is_file());
+        assert!(!mods_dir.join("journeymap.jar").exists());
+    }
+
+    #[tokio::test]
+    async fn the_refusal_names_the_catalog_that_installed_the_enabled_copy() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, host, mods_dir) = two_copies_of_one_mod(base.path()).await;
+        app.set_mod_enabled(host, Path::new("mods/journeymap.jar"), true)
+            .expect("the only enabled copy");
+
+        let error = app
+            .set_mod_enabled(host, Path::new("mods/journeymap-dev.jar"), true)
+            .expect_err("a second copy of the mod is refused");
+
+        assert!(
+            matches!(
+                &error,
+                CoreError::Pack(ephervex_pack::PackError::DuplicateModId {
+                    provider: Some(ModProvider::Modrinth),
+                    ..
+                })
+            ),
+            "{error:?}"
+        );
+        assert!(mods_dir.join("journeymap-dev.jar.disabled").is_file());
+    }
+
+    #[tokio::test]
+    async fn a_batch_turning_on_two_copies_of_one_mod_is_refused_and_put_back() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, host, mods_dir) = two_copies_of_one_mod(base.path()).await;
+
+        let error = app
+            .set_mods_enabled(
+                host,
+                &[
+                    (PathBuf::from("mods/journeymap.jar"), true),
+                    (PathBuf::from("mods/journeymap-dev.jar"), true),
+                ],
+            )
+            .expect_err("the second copy is refused");
+
+        assert!(
+            matches!(
+                error,
+                CoreError::Pack(ephervex_pack::PackError::DuplicateModId { .. })
+            ),
+            "{error:?}"
+        );
+        assert!(mods_dir.join("journeymap.jar.disabled").is_file());
+        assert!(mods_dir.join("journeymap-dev.jar.disabled").is_file());
+    }
+
+    #[tokio::test]
+    async fn a_batch_may_swap_one_copy_of_a_mod_for_another() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, host, mods_dir) = two_copies_of_one_mod(base.path()).await;
+        app.set_mod_enabled(host, Path::new("mods/journeymap.jar"), true)
+            .expect("the only enabled copy");
+
+        app.set_mods_enabled(
+            host,
+            &[
+                (PathBuf::from("mods/journeymap-dev.jar"), true),
+                (PathBuf::from("mods/journeymap.jar"), false),
+            ],
+        )
+        .expect("the copy turned off stops loading before the other starts");
+
+        assert!(mods_dir.join("journeymap-dev.jar").is_file());
+        assert!(mods_dir.join("journeymap.jar.disabled").is_file());
+    }
+
+    #[tokio::test]
+    async fn a_tolerated_toggle_does_not_refuse_a_second_copy() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, host, mods_dir) = two_copies_of_one_mod(base.path()).await;
+        app.set_mod_enabled(host, Path::new("mods/journeymap.jar"), true)
+            .expect("the only enabled copy");
+
+        app.apply_mod_toggles(
+            host,
+            &[(PathBuf::from("mods/journeymap-dev.jar"), true)],
+            SecondCopies::Tolerated,
+        )
+        .expect("an unchecked toggle is not refused");
+
+        assert!(mods_dir.join("journeymap-dev.jar").is_file());
     }
 
     fn listed_entry(path: &str, file: &str, presence: ModPresence) -> ManagedModEntry {

@@ -99,7 +99,37 @@ pub(crate) async fn settle_mod_ids(
     let game_dir = game_dir.to_path_buf();
     let judged =
         off_runtime(move || Ok(judge(&incoming, &game_dir, &leaving, &may_stand_in))).await?;
-    judged.map_err(|clash| match clash {
+    judged.map_err(|clash| refusal(Some(recipe), clash))
+}
+
+/// Refuses letting the loader read the jar at `jar` as `logical_path` when an
+/// enabled jar beside it already declares one of its mod ids.
+///
+/// For a change that makes a file the loader ignored visible to it, such as
+/// turning a disabled jar back on. `recipe` names the catalog of the jar
+/// already there, when the host has one. Reads the metadata of every enabled
+/// jar in the folder, so it blocks.
+///
+/// # Errors
+///
+/// [`PackError::DuplicateModId`] naming the jar already there.
+pub fn require_distinct_mod_id(
+    recipe: Option<&PackRecipe>,
+    game_dir: &Path,
+    logical_path: &Path,
+    jar: &Path,
+) -> PackResult<()> {
+    let incoming = [IncomingJar {
+        logical_path: logical_path.to_path_buf(),
+        staged: jar.to_path_buf(),
+    }];
+    judge(&incoming, game_dir, &BTreeSet::new(), &BTreeSet::new())
+        .map(|_| ())
+        .map_err(|clash| refusal(recipe, clash))
+}
+
+fn refusal(recipe: Option<&PackRecipe>, clash: Clash) -> PackError {
+    match clash {
         Clash::WithinChange {
             mod_id,
             first,
@@ -118,11 +148,11 @@ pub(crate) async fn settle_mod_ids(
         } => PackError::DuplicateModId {
             mod_id,
             incoming: incoming.to_string_lossy().into_owned(),
-            provider: recorded_provider(recipe, &existing),
+            provider: recipe.and_then(|recipe| recorded_provider(recipe, &existing)),
             path: existing_path,
             could_stand_in,
         },
-    })
+    }
 }
 
 /// The catalog the recipe says installed the jar at `logical`, if one did.

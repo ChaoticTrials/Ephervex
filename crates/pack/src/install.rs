@@ -74,6 +74,7 @@ use crate::archive::{
 use crate::blocking::off_runtime;
 use crate::credentials::ArtifactCredentials;
 use crate::error::{PackError, PackResult};
+use crate::mod_ids::{IncomingJar, require_distinct_mod_ids};
 use crate::mutate::{MutationRecoveryAction, MutationRecoveryIssue};
 use crate::path::{DestinationLinks, contained_join, is_reserved, safe_relative_path};
 use crate::recipe::{
@@ -185,7 +186,18 @@ pub async fn install_files(request: FileInstall<'_>) -> PackResult<MaterializedF
     } = request;
 
     let wanted = recipe.files_for(side, selection);
-    install_selected_files(&recipe.files, &wanted, game_dir, None, fetch).await
+    install_selected_files(&recipe.files, &wanted, game_dir, None, None, fetch).await
+}
+
+/// Whether the loader reads a file once [`restore_file`] puts it back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoredState {
+    /// The loader reads it, so a jar declaring the mod id of one the loader
+    /// already reads beside it is refused before it is written.
+    Enabled,
+    /// The caller turns it off again straight away, so it may share a mod id
+    /// with a jar that stays enabled.
+    Disabled,
 }
 
 /// Puts one recorded file back where the recipe says it belongs.
@@ -203,12 +215,19 @@ pub async fn install_files(request: FileInstall<'_>) -> PackResult<MaterializedF
 /// A copy kept in `put_aside_dir` comes back first, with no network, when it
 /// still holds the recorded bytes. A file the recipe records no address for
 /// has no other way back.
+///
+/// # Errors
+///
+/// [`PackError::DuplicateModId`] when `state` is [`RestoredState::Enabled`]
+/// and an enabled jar beside the file already declares one of its mod ids.
+/// The loader would refuse to start with both, so nothing is written.
 #[instrument(skip_all, fields(path = %logical_path.display()))]
 pub async fn restore_file(
     recipe: &PackRecipe,
     logical_path: &Path,
     game_dir: &Path,
     put_aside_dir: &Path,
+    state: RestoredState,
     fetch: ArtifactFetch<'_>,
 ) -> PackResult<MaterializedFiles> {
     let wanted = recipe
@@ -220,14 +239,30 @@ pub async fn restore_file(
         })?;
     let kept = put_aside_path(put_aside_dir, logical_path)?;
     let has_kept = is_kept_copy(&kept)?;
+    let refuse_second_copies = (state == RestoredState::Enabled).then_some(recipe);
     if has_kept {
+        if let Some(recipe) = refuse_second_copies {
+            let incoming = vec![IncomingJar {
+                logical_path: wanted.logical_path.clone(),
+                staged: kept.clone(),
+            }];
+            require_distinct_mod_ids(recipe, incoming, game_dir, BTreeSet::new()).await?;
+        }
         if let Some(restored) =
             restore_put_aside(&recipe.files, wanted, &kept, game_dir, fetch.cancel).await?
         {
             return Ok(restored);
         }
     }
-    let restored = install_selected_files(&recipe.files, &[wanted], game_dir, None, fetch).await?;
+    let restored = install_selected_files(
+        &recipe.files,
+        &[wanted],
+        game_dir,
+        None,
+        refuse_second_copies,
+        fetch,
+    )
+    .await?;
     if has_kept {
         // It no longer held the recorded bytes, and the recorded ones are back.
         discard_put_aside(&kept);
@@ -372,6 +407,7 @@ pub async fn materialize_server_recipe(
             game_dir: client_game_dir,
             put_aside_dir: client_put_aside_dir,
         }),
+        None,
         fetch,
     )
     .await?;
@@ -514,6 +550,11 @@ async fn install_selected_files(
     // from a client. `None` everywhere else, where a recipe entry with no
     // address is a recipe that cannot be installed.
     client: Option<ClientCopies<'_>>,
+    // The recipe of the host whose loader will read what is fetched, for a
+    // caller that refuses a second jar declaring one mod id. Checked before
+    // anything fetched is written. Never set with `client`, whose copies are
+    // written before anything is fetched.
+    refuse_second_copies: Option<&PackRecipe>,
     fetch: ArtifactFetch<'_>,
 ) -> PackResult<MaterializedFiles> {
     let cancel = fetch.cancel;
@@ -573,6 +614,17 @@ async fn install_selected_files(
     let wanted = downloadable.as_slice();
 
     let outcomes = fetch_all(wanted, fetch).await?;
+    if let Some(recipe) = refuse_second_copies {
+        let incoming = wanted
+            .iter()
+            .zip(&outcomes)
+            .map(|(file, outcome)| IncomingJar {
+                logical_path: file.logical_path.clone(),
+                staged: outcome.path.clone(),
+            })
+            .collect();
+        require_distinct_mod_ids(recipe, incoming, game_dir, BTreeSet::new()).await?;
+    }
 
     for (file, outcome) in wanted.iter().zip(outcomes.iter()) {
         if cancel.is_cancelled() {
@@ -1997,6 +2049,7 @@ mod tests {
                 game_dir: &client_game,
                 put_aside_dir: &dir.path().join("put-aside"),
             }),
+            None,
             offline_fetch(&manager, &cache, &reporter, &cancel),
         )
         .await
@@ -2034,6 +2087,7 @@ mod tests {
                 game_dir: &dir.path().join("client"),
                 put_aside_dir: &put_aside,
             }),
+            None,
             offline_fetch(&manager, &cache, &reporter, &cancel),
         )
         .await

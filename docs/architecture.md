@@ -1122,7 +1122,13 @@ declaring the same mod id for the same loader family is refused and names the
 jar already there. The loader would refuse to start with both. That jar may be
 from the other catalog, the pack, or added by hand; a disabled jar and a jar the
 change replaces do not count. Only the metadata entries are read, under a small
-size limit, and a jar whose metadata cannot be read declares nothing.
+size limit, and a jar whose metadata cannot be read declares nothing. The same
+check runs before turning a disabled jar back on, restoring a put-aside or
+deleted file, and repairing a host: each is refused before the rename or copy,
+and a repair reports the file it left out together with the jar already
+providing that mod id. Undoing a failed batch puts back a mod set the host
+already had, so it is not refused. Isolation rounds apply their own
+configurations without this check.
 
 An install request may name dependencies, by project id, that a jar already on
 the host may stand in for, such as a local build of a library or its release

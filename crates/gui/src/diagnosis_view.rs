@@ -1010,6 +1010,23 @@ pub fn outcome_view(
                 ));
             }
             lines.extend(repair.failed.iter().map(|path| path.display().to_string()));
+            if !repair.second_copies.is_empty() {
+                message.push(' ');
+                message.push_str(&count(
+                    "gui-integrity-repair-second-copies",
+                    repair.second_copies.len(),
+                ));
+                lines.extend(repair.second_copies.iter().map(|copy| {
+                    lookup_args(
+                        "gui-integrity-repair-second-copy",
+                        [
+                            ("path", Arg::from(copy.logical_path.display().to_string())),
+                            ("mod_id", Arg::from(copy.mod_id.clone())),
+                            ("existing", Arg::from(copy.existing.display().to_string())),
+                        ],
+                    )
+                }));
+            }
             lines.extend(repair.skipped.iter().map(|path| path.display().to_string()));
             if !repair.recovery_issues.is_empty() {
                 lines.push(lookup("gui-integrity-recovery"));
@@ -1038,7 +1055,8 @@ mod tests {
     use std::path::PathBuf;
 
     use ephervex_core::{
-        ImpactedMod, JavaRuntimeSummary, ModPresence, RepairReport, ResolvedJava, UnmetRequirement,
+        ImpactedMod, JavaRuntimeSummary, ModPresence, RepairReport, ResolvedJava, SecondCopy,
+        UnmetRequirement,
     };
     use ephervex_model::ModOrigin;
 
@@ -1424,6 +1442,50 @@ mod tests {
         assert!(view.changed);
         assert_eq!(view.lines, ["mods/b.jar"]);
         assert_eq!(view.message, count("gui-integrity-repair-stopped", 1));
+    }
+
+    #[test]
+    fn a_restore_left_out_as_a_second_copy_names_the_jar_already_providing_the_mod() {
+        let repair = RepairReport {
+            second_copies: vec![SecondCopy {
+                logical_path: PathBuf::from("mods/libx.jar"),
+                mod_id: "libx".to_owned(),
+                existing: PathBuf::from("mods/libx-other.jar"),
+            }],
+            ..RepairReport::default()
+        };
+        let outcome = FixOutcome {
+            applied: Vec::new(),
+            failed: Vec::new(),
+            skipped: Vec::new(),
+            client_warnings: Vec::new(),
+            server_warnings: Vec::new(),
+            repair: Some(repair),
+        };
+
+        let view = outcome_view(&DiagnosticFix::RestoreFiles(Vec::new()), &outcome, &|_| {
+            String::new()
+        });
+
+        assert!(view.failed);
+        assert!(!view.changed);
+        assert_eq!(
+            view.lines,
+            [lookup_args(
+                "gui-integrity-repair-second-copy",
+                [
+                    ("path", Arg::from("mods/libx.jar")),
+                    ("mod_id", Arg::from("libx")),
+                    ("existing", Arg::from("mods/libx-other.jar")),
+                ],
+            )]
+        );
+        assert!(
+            view.message
+                .ends_with(&count("gui-integrity-repair-second-copies", 1)),
+            "{}",
+            view.message
+        );
     }
 
     #[test]

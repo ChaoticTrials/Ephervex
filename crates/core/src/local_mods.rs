@@ -38,8 +38,8 @@ use std::path::{Path, PathBuf};
 use ephervex_download::{CacheLayout, OperationReporter};
 use ephervex_model::{Hash, ModOrigin};
 use ephervex_pack::{
-    ArtifactFetch, ExtractionLimits, MODS_DIR, PackArchive, PackRecipe, PackSide, SourceStore,
-    safe_file_name,
+    ArtifactFetch, ExtractionLimits, MODS_DIR, PackArchive, PackRecipe, PackSide, RestoredState,
+    SourceStore, safe_file_name,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
@@ -533,6 +533,10 @@ impl App {
     /// Deliberately not a mutation. It resolves no dependencies, asks no
     /// catalog and needs no provider identity, which is what lets it work for a
     /// pack file served from a mirror no catalog can name.
+    ///
+    /// Refused with [`ephervex_pack::PackError::DuplicateModId`] before
+    /// anything is written when an enabled jar beside it already declares one
+    /// of its mod ids, because the loader refuses to start with both.
     #[instrument(skip(self, reporter, cancel), fields(host = %host.id()))]
     pub async fn restore_mod_file(
         &self,
@@ -545,16 +549,26 @@ impl App {
         // Held across the download and the write, so a session cannot start
         // in between and leave a jar it never considered.
         let _gate = self.hold_mod_change(host, cancel).await?;
-        self.restore_mod_file_holding_the_gate(host, logical_path, reporter, cancel)
-            .await
+        self.restore_mod_file_holding_the_gate(
+            host,
+            logical_path,
+            RestoredState::Enabled,
+            reporter,
+            cancel,
+        )
+        .await
     }
 
     /// [`Self::restore_mod_file`] for a caller that already holds the host's
     /// recipe gate and has checked for an isolation session under it.
+    ///
+    /// `state` is what the caller leaves the jar as, so one it turns off again
+    /// straight away is not refused as a second copy of a mod.
     pub(crate) async fn restore_mod_file_holding_the_gate(
         &self,
         host: InstalledHost,
         logical_path: &Path,
+        state: RestoredState,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<()> {
@@ -575,6 +589,7 @@ impl App {
                     logical_path,
                     &layout.game_dir,
                     &ephervex_storage::metadata::put_aside_dir(&layout.root),
+                    state,
                     ArtifactFetch {
                         manager: &manager,
                         cache: &cache,

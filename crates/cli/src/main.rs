@@ -5741,6 +5741,15 @@ async fn run_mod_repair(app: &App, host: InstalledHost, json: bool) -> anyhow::R
             "failed": json_paths(&report.failed),
             "skipped": json_paths(&report.skipped),
             "unrepairable": json_paths(&report.unrepairable),
+            "second_copies": report
+                .second_copies
+                .iter()
+                .map(|copy| serde_json::json!({
+                    "path": json_path(&copy.logical_path),
+                    "mod_id": copy.mod_id,
+                    "existing": json_path(&copy.existing),
+                }))
+                .collect::<Vec<_>>(),
         }));
     } else {
         for path in &report.repaired {
@@ -5765,6 +5774,14 @@ async fn run_mod_repair(app: &App, host: InstalledHost, json: bool) -> anyhow::R
     }
     for path in &report.failed {
         eprintln!("could not be replaced: {}", path.display());
+    }
+    for copy in &report.second_copies {
+        eprintln!(
+            "not put back: {} - {} already provides mod id {}; remove or disable one of them first",
+            copy.logical_path.display(),
+            copy.existing.display(),
+            copy.mod_id
+        );
     }
     for path in &report.skipped {
         eprintln!("not reached: {}", path.display());

@@ -1441,6 +1441,13 @@ gui-integrity-repair-failed = { $count ->
     [one] One file could not be replaced. Check the network connection and try again.
    *[other] { $count } files could not be replaced. Check the network connection and try again.
 }
+# A recorded file a repair or restore left out because another enabled jar
+# already provides its mod. Mod ids and paths are technical values.
+gui-integrity-repair-second-copies = { $count ->
+    [one] One file was not put back, because another enabled jar already provides its mod and the game does not start with two copies of one mod. Remove or disable one of them first.
+   *[other] { $count } files were not put back, because other enabled jars already provide their mods and the game does not start with two copies of one mod. Remove or disable one of each pair first.
+}
+gui-integrity-repair-second-copy = { $path }: { $existing } already provides mod id { $mod_id }
 gui-integrity-recovery = A broken file could not be put back after its repair failed. What was moved aside is kept here for review, and this host needs attention before it is changed again:
 gui-integrity-shared-title = Shared launch files
 gui-integrity-shared-detail = The Minecraft client JAR and libraries every instance of this release shares. Repair does not replace these.
@@ -1798,14 +1805,15 @@ error-mod-destination-recorded = A mod Ephervex installed from { $provider } is 
 error-mod-destination-recorded-by-pack = A mod Ephervex installed is already in the way.
 .action = { $path } is recorded as a different mod of this pack, so it was left alone. Remove that mod first if you want this one installed in its place.
 
-# Two jars declaring one mod id stop the game from starting. The jar already
-# there is most often the same mod installed from the other catalog at another
-# release. Mod ids and file names are technical values.
+# Two jars declaring one mod id stop the game from starting. Shown when an
+# install, version change, enable or restore would load a second one. The jar
+# already there is most often the same mod installed from the other catalog at
+# another release. Mod ids and file names are technical values.
 error-mod-duplicate-mod-id-recorded = { $incoming } is another copy of a mod installed from { $provider }.
-.action = { $path } already provides mod id { $mod_id }, and the game does not start with two copies of one mod, so nothing was written. Remove that mod first if you want this release instead.
+.action = { $path } already provides mod id { $mod_id }, and the game does not start with two copies of one mod, so nothing was changed. Remove that mod first if you want this release instead.
 
 error-mod-duplicate-mod-id = { $incoming } is another copy of a mod already in this folder.
-.action = { $path } already provides mod id { $mod_id }, and the game does not start with two copies of one mod, so nothing was written. Remove or disable that file first if you want this release instead.
+.action = { $path } already provides mod id { $mod_id }, and the game does not start with two copies of one mod, so nothing was changed. Remove or disable that file first if you want this release instead.
 
 error-mod-duplicate-mod-id-in-change = Two of these mods are copies of the same mod.
 .action = { $first } and { $second } both provide mod id { $mod_id }, and the game does not start with two copies of one mod, so nothing was written.
