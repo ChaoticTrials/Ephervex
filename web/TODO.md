@@ -107,6 +107,7 @@ Mods:
 
 Hosts:
 - [x] `client-overview-linked-server` (Paired pill, Start together)
+- [x] `instance-organization`, `instances-filters`, `instance-groups-dialog`
 - [x] `client-settings`, `snapshots`, `snapshot-restore-dialog`
 - [x] `client-java-runtime`, `client-java-problem`, `client-java-review`,
       `client-java-install`

@@ -128,5 +128,8 @@ and refuses any file that does not match. They are not part of the repository.
   CaveStone Server shown running behind its install confirmation.
 - Snapshot restore and create dialogs reuse the recorded snapshots, and the
   suggested snapshot label is a placeholder in the launcher's own format.
+- Which instances are favorites, how they are grouped, and the filter set on
+  the Instances page. The two instance icons are the recorded logos of
+  UtilitiX and Skyblock Builder.
 - The custom themes and their problems. The theme folder's logo is the
   Ephervex logo with its color channels rotated.

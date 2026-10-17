@@ -19,6 +19,7 @@ pub(crate) mod instance_dialogs;
 pub(crate) mod java;
 pub(crate) mod mods;
 pub(crate) mod notices;
+pub(crate) mod organization;
 pub(crate) mod recorded;
 pub(crate) mod settings;
 

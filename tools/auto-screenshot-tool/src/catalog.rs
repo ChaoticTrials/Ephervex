@@ -240,6 +240,34 @@ const INSTANCE_MENU_REGIONS: &[Region] = &[
     },
 ];
 
+const INSTANCE_LIST_REGIONS: &[Region] = &[Region {
+    name: "full",
+    accessible_label: None,
+    padding: (0.0, 0.0),
+    bounds: None,
+}];
+
+const INSTANCE_ORGANIZATION_REGIONS: &[Region] = &[
+    Region {
+        name: "full",
+        accessible_label: None,
+        padding: (0.0, 0.0),
+        bounds: None,
+    },
+    Region {
+        name: "inspector",
+        accessible_label: None,
+        padding: (0.0, 0.0),
+        // The inspector is top-aligned against the right edge at both sizes.
+        bounds: Some(RegionBounds::RightAligned {
+            right: 0.0,
+            top: 78.0,
+            width: 360.0,
+            height: 478.0,
+        }),
+    },
+];
+
 const ACCOUNT_LAUNCH_REGIONS: &[Region] = &[
     Region {
         name: "full",
@@ -758,6 +786,27 @@ pub(crate) const STATES: &[State] = &[
         regions: ACCOUNT_LAUNCH_REGIONS,
         same_layout_at_both_sizes: false,
         interaction: Some(Interaction::Click("Launch as")),
+    },
+    State {
+        name: "instance-organization",
+        show: fixtures::organization::instance_organization,
+        regions: INSTANCE_ORGANIZATION_REGIONS,
+        same_layout_at_both_sizes: false,
+        interaction: None,
+    },
+    State {
+        name: "instances-filters",
+        show: fixtures::organization::instances_filters,
+        regions: INSTANCE_LIST_REGIONS,
+        same_layout_at_both_sizes: false,
+        interaction: None,
+    },
+    State {
+        name: "instance-groups-dialog",
+        show: fixtures::organization::instance_groups_dialog,
+        regions: INSTANCE_LIST_REGIONS,
+        same_layout_at_both_sizes: false,
+        interaction: None,
     },
     State {
         name: "theme-selector-open",

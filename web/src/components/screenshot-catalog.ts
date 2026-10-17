@@ -17,6 +17,9 @@ export const catalogGroups: CatalogGroup[] = [
     id: 'instances',
     title: 'Instances',
     entries: [
+      {state: 'instance-organization', title: 'Favorites, groups, and icons'},
+      {state: 'instances-filters', title: 'Filtering instances'},
+      {state: 'instance-groups-dialog', title: 'Managing groups'},
       {state: 'instances-overview', title: 'Instance list', regions: {'client-card': 'Instance card'}},
       {state: 'instance-actions-menu', title: 'Instance actions menu'},
       {state: 'instance-make-persistent-dialog', title: 'Making an instance persistent'},
