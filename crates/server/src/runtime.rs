@@ -1120,6 +1120,7 @@ mod tests {
 
     use super::test_support::{NO_SUCH_SESSION, wait_for_run_tag};
     use super::*;
+    use crate::test_support::copy_executable;
 
     fn private_directory(parent: &Path, name: &str) -> PathBuf {
         let path = parent.join(name);
@@ -1655,19 +1656,9 @@ mod tests {
     /// A tagged process that leads a session of its own and whose environment this user cannot read.
     fn spawn_unreadable_leader(directory: &Path, run: Uuid) -> KillOnDrop {
         let program = directory.join("sleep");
-        std::fs::copy("/bin/sleep", &program).expect("copy sleep");
+        copy_executable(Path::new("/bin/sleep"), &program);
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o111))
             .expect("execute only");
-        // A concurrent fork can briefly hold the copy's write descriptor, which blocks an exec.
-        for _ in 0..100 {
-            match std::process::Command::new(&program).arg("0").status() {
-                Ok(_) => break,
-                Err(error) if error.raw_os_error() == Some(26) => {
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                Err(error) => panic!("probe: {error}"),
-            }
-        }
         // Not a group leader, so setsid takes over the process itself rather than forking.
         KillOnDrop(
             std::process::Command::new("setsid")
@@ -1841,7 +1832,7 @@ mod tests {
         let root = root();
         let bin = tempfile::tempdir().expect("bin dir");
         let java = bin.path().join("java");
-        std::fs::copy("/bin/sleep", &java).expect("copy sleep");
+        copy_executable(Path::new("/bin/sleep"), &java);
         let child = KillOnDrop(
             std::process::Command::new(&java)
                 .arg("60")
@@ -1878,7 +1869,7 @@ mod tests {
         let root = root();
         let bin = tempfile::tempdir().expect("bin dir");
         let launcher = bin.path().join("launcher");
-        std::fs::copy("/bin/sleep", &launcher).expect("copy sleep");
+        copy_executable(Path::new("/bin/sleep"), &launcher);
         let supervisor = KillOnDrop(
             std::process::Command::new(&launcher)
                 .arg("60")

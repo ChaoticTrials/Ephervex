@@ -12,6 +12,8 @@ pub mod operators;
 pub mod process;
 pub mod properties;
 pub mod runtime;
+#[cfg(test)]
+mod test_support;
 
 pub use capture::{
     CAPTURE_BUDGET_BYTES, CAPTURE_INDEX_FILE, CAPTURE_SEGMENT_BYTES, CaptureHealth, CapturePrune,

@@ -1366,6 +1366,7 @@ mod tests {
     use super::*;
     use crate::runtime::test_support::{NO_SUCH_SESSION, wait_for_run_tag};
     use crate::runtime::{RuntimeClassification, classify_runtime, control_socket_file_name};
+    use crate::test_support::copy_executable;
 
     /// The process group a process belongs to, from `/proc/<pid>/stat`.
     fn process_group_of(pid: u32) -> String {
@@ -1793,7 +1794,7 @@ mod tests {
     async fn a_replacement_that_cannot_start_leaves_the_server_stopped_and_says_so() {
         let bin = tempfile::tempdir().expect("bin");
         let java = bin.path().join("java");
-        std::fs::copy("/bin/sh", &java).expect("a java stand-in");
+        copy_executable(Path::new("/bin/sh"), &java);
         let server = supervise_journaled(Some(java.clone())).await;
         // The executable goes away while the first child runs, so only the
         // replacement's start can fail.
