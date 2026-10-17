@@ -86,8 +86,8 @@ pub use install::{
     materialize_server_recipe, put_aside_path, restore_file,
 };
 pub use managed::{
-    DISABLED_SUFFIX, MODS_DIR, ManagedModInstall, ManagedModInstallation, RESOURCEPACKS_DIR,
-    SHADERPACKS_DIR, disabled_path, install_managed,
+    DISABLED_SUFFIX, InstalledStandIn, MODS_DIR, ManagedModInstall, ManagedModInstallation,
+    RESOURCEPACKS_DIR, SHADERPACKS_DIR, disabled_path, install_managed,
 };
 pub use mutate::{
     ManagedMutation, ManagedMutationReport, ManagedProject, MutationRecoveryAction,

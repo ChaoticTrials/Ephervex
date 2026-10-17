@@ -39,7 +39,7 @@ use tracing::{info, instrument, warn};
 
 use crate::error::{PackError, PackResult};
 use crate::install::{ArtifactFetch, copy_into_instance, fetch_all};
-use crate::mod_ids::{IncomingJar, require_distinct_mod_ids};
+use crate::mod_ids::{IncomingJar, settle_mod_ids};
 use crate::mutate::{MutationRecoveryAction, MutationRecoveryIssue};
 use crate::path::{DestinationLinks, contained_join, is_reserved, safe_relative_path};
 use crate::recipe::{
@@ -106,10 +106,27 @@ pub struct ManagedModInstallation {
     /// did not take the instance's side. The record now does; no file was
     /// written.
     pub recorded: Vec<PathBuf>,
+    /// Requested files left unwritten and unrecorded because a jar already in
+    /// the folder declares every mod id they do, and the request allowed that
+    /// jar to stand in for them.
+    pub stood_in: Vec<InstalledStandIn>,
     /// How many artifacts came from the verified shared cache rather than the
     /// network.
     pub reused_from_cache: usize,
     pub bytes: u64,
+}
+
+/// A requested file that a jar already in the folder stands in for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledStandIn {
+    /// Where the requested file would have been written, relative to the game
+    /// directory.
+    pub planned: PathBuf,
+    /// The jar standing in for it, relative to the game directory.
+    pub installed: PathBuf,
+    /// Every mod id the requested file declares, which the jar standing in
+    /// declares too.
+    pub mod_ids: Vec<String>,
 }
 
 impl ManagedModInstallation {
@@ -137,6 +154,15 @@ pub struct ManagedModInstall<'a> {
     pub game_dir: &'a Path,
     /// Where the updated recipe is written.
     pub store: &'a SourceStore,
+    /// Logical paths, as `additions` names them, of files an enabled jar
+    /// already in the folder may stand in for.
+    ///
+    /// Such a file is downloaded and verified like any other. When one jar
+    /// beside it declares every mod id it does, it is neither written nor
+    /// recorded, and the report names that jar. Otherwise it is installed, or
+    /// refused as a second copy, exactly as if it were not named here. Empty
+    /// means a second copy of a mod is always refused.
+    pub installed_may_stand_in: &'a BTreeSet<PathBuf>,
     pub fetch: ArtifactFetch<'a>,
 }
 
@@ -258,6 +284,9 @@ enum Disposition {
     /// not the recorded artifact. It is neither rewritten nor reported as
     /// installed.
     Altered,
+    /// A jar already in the folder stands in for this one, which is neither
+    /// written nor recorded.
+    StoodIn,
 }
 
 /// Installs mods and records them in the recipe.
@@ -274,14 +303,22 @@ pub async fn install_managed(request: ManagedModInstall<'_>) -> PackResult<Manag
         side,
         game_dir,
         store,
+        installed_may_stand_in,
         fetch,
     } = request;
     let cancel = fetch.cancel;
     let settled = settle_recorded_paths(recipe, additions, Some(side));
+    // Named as the request named them, wherever the recipe has them.
+    let may_stand_in: BTreeSet<PathBuf> = additions
+        .iter()
+        .zip(&settled)
+        .filter(|(requested, _)| installed_may_stand_in.contains(&requested.logical_path))
+        .map(|(_, settled)| settled.logical_path.clone())
+        .collect();
     let additions = settled.as_slice();
 
     // Nothing below this line runs until every destination is known to be safe.
-    let dispositions = plan_destinations(recipe, additions, side, game_dir).await?;
+    let mut dispositions = plan_destinations(recipe, additions, side, game_dir).await?;
 
     let mut report = ManagedModInstallation::default();
     let mut pending: Vec<(&PackFileRecipe, Disposition)> = Vec::new();
@@ -317,7 +354,23 @@ pub async fn install_managed(request: ManagedModInstall<'_>) -> PackResult<Manag
             staged: fetched.path.clone(),
         })
         .collect();
-    require_distinct_mod_ids(recipe, incoming, game_dir, BTreeSet::new()).await?;
+    report.stood_in =
+        settle_mod_ids(recipe, incoming, game_dir, BTreeSet::new(), may_stand_in).await?;
+    let stood_in: BTreeSet<&Path> = report
+        .stood_in
+        .iter()
+        .map(|stand_in| stand_in.planned.as_path())
+        .collect();
+    for (file, disposition) in additions.iter().zip(&mut dispositions) {
+        if stood_in.contains(file.logical_path.as_path()) {
+            *disposition = Disposition::StoodIn;
+        }
+    }
+    let (pending, outcomes): (Vec<_>, Vec<_>) = pending
+        .into_iter()
+        .zip(outcomes)
+        .filter(|((file, _), _)| !stood_in.contains(file.logical_path.as_path()))
+        .unzip();
 
     // Everything from here on can leave a file behind, so it is undone on
     // failure. `created` is the exact set this operation wrote - never a guess
@@ -341,6 +394,7 @@ pub async fn install_managed(request: ManagedModInstall<'_>) -> PackResult<Manag
         installed = report.installed.len(),
         repaired = report.repaired.len(),
         already_present = report.already_present.len(),
+        stood_in = report.stood_in.len(),
         reused = report.reused_from_cache,
         "installed managed mods"
     );
@@ -687,7 +741,7 @@ fn commit(
                     *entry = recorded;
                 }
             }
-            Disposition::AlreadyPresent | Disposition::Altered => {}
+            Disposition::AlreadyPresent | Disposition::Altered | Disposition::StoodIn => {}
         }
     }
 

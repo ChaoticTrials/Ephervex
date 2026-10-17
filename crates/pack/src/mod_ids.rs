@@ -21,6 +21,7 @@ use tracing::debug;
 use crate::archive::{ExtractionLimits, PackArchive};
 use crate::blocking::off_runtime;
 use crate::error::{PackError, PackResult};
+use crate::managed::InstalledStandIn;
 use crate::recipe::PackRecipe;
 
 /// Where Fabric reads a mod's metadata. Quilt reads it as well.
@@ -74,15 +75,31 @@ pub(crate) async fn require_distinct_mod_ids(
     game_dir: &Path,
     leaving: BTreeSet<PathBuf>,
 ) -> PackResult<()> {
+    settle_mod_ids(recipe, incoming, game_dir, leaving, BTreeSet::new())
+        .await
+        .map(|_| ())
+}
+
+/// [`require_distinct_mod_ids`], except that an incoming jar named in
+/// `may_stand_in` is left out rather than refused when one enabled jar already
+/// beside it declares every mod id it does.
+///
+/// Every id, from one jar: a jar declaring only some of them would leave the
+/// rest missing. What is left out is returned, and must not be written.
+pub(crate) async fn settle_mod_ids(
+    recipe: &PackRecipe,
+    incoming: Vec<IncomingJar>,
+    game_dir: &Path,
+    leaving: BTreeSet<PathBuf>,
+    may_stand_in: BTreeSet<PathBuf>,
+) -> PackResult<Vec<InstalledStandIn>> {
     if incoming.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let game_dir = game_dir.to_path_buf();
-    let clash = off_runtime(move || Ok(find_clash(&incoming, &game_dir, &leaving))).await?;
-    let Some(clash) = clash else {
-        return Ok(());
-    };
-    Err(match clash {
+    let judged =
+        off_runtime(move || Ok(judge(&incoming, &game_dir, &leaving, &may_stand_in))).await?;
+    judged.map_err(|clash| match clash {
         Clash::WithinChange {
             mod_id,
             first,
@@ -97,11 +114,13 @@ pub(crate) async fn require_distinct_mod_ids(
             incoming,
             existing,
             existing_path,
+            could_stand_in,
         } => PackError::DuplicateModId {
             mod_id,
             incoming: incoming.to_string_lossy().into_owned(),
             provider: recorded_provider(recipe, &existing),
             path: existing_path,
+            could_stand_in,
         },
     })
 }
@@ -132,31 +151,40 @@ enum Clash {
         /// Relative to the game directory.
         existing: PathBuf,
         existing_path: PathBuf,
+        /// Whether `existing` declares every mod id `incoming` does.
+        could_stand_in: bool,
     },
 }
 
-fn find_clash(
+/// The incoming jars an installed jar stands in for, or the first clash that
+/// nothing may stand in for.
+fn judge(
     incoming: &[IncomingJar],
     game_dir: &Path,
     leaving: &BTreeSet<PathBuf>,
-) -> Option<Clash> {
-    let mut claimed: BTreeMap<DeclaredModId, &Path> = BTreeMap::new();
-    for jar in incoming {
-        for declared in declared_mod_ids(&jar.staged) {
-            if let Some(first) = claimed.get(&declared)
+    may_stand_in: &BTreeSet<PathBuf>,
+) -> Result<Vec<InstalledStandIn>, Clash> {
+    let declared: Vec<BTreeSet<DeclaredModId>> = incoming
+        .iter()
+        .map(|jar| declared_mod_ids(&jar.staged))
+        .collect();
+    let mut claimed: BTreeMap<&DeclaredModId, &Path> = BTreeMap::new();
+    for (jar, ids) in incoming.iter().zip(&declared) {
+        for id in ids {
+            if let Some(first) = claimed.get(id)
                 && *first != jar.logical_path
             {
-                return Some(Clash::WithinChange {
-                    mod_id: declared.id,
+                return Err(Clash::WithinChange {
+                    mod_id: id.id.clone(),
                     first: first.to_path_buf(),
                     second: jar.logical_path.clone(),
                 });
             }
-            claimed.insert(declared, &jar.logical_path);
+            claimed.insert(id, &jar.logical_path);
         }
     }
     if claimed.is_empty() {
-        return None;
+        return Ok(Vec::new());
     }
 
     let written: BTreeSet<&Path> = incoming
@@ -167,25 +195,53 @@ fn find_clash(
         .iter()
         .filter_map(|jar| jar.logical_path.parent())
         .collect();
-    for folder in folders {
-        for existing in enabled_jars(game_dir, folder) {
-            if written.contains(existing.as_path()) || leaving.contains(&existing) {
-                continue;
+    let existing: Vec<(PathBuf, BTreeSet<DeclaredModId>)> = folders
+        .into_iter()
+        .flat_map(|folder| enabled_jars(game_dir, folder))
+        .filter(|existing| !written.contains(existing.as_path()) && !leaving.contains(existing))
+        .map(|existing| {
+            let provided = declared_mod_ids(&game_dir.join(&existing));
+            (existing, provided)
+        })
+        .collect();
+
+    let mut stood_in = Vec::new();
+    for (jar, ids) in incoming.iter().zip(&declared) {
+        let mut clashing = existing
+            .iter()
+            .filter(|(_, provided)| !provided.is_disjoint(ids));
+        let Some(first) = clashing.next() else {
+            continue;
+        };
+        let covering = std::iter::once(first)
+            .chain(clashing)
+            .find(|(_, provided)| ids.is_subset(provided));
+        match covering {
+            Some((installed, _)) if may_stand_in.contains(&jar.logical_path) => {
+                stood_in.push(InstalledStandIn {
+                    planned: jar.logical_path.clone(),
+                    installed: installed.clone(),
+                    mod_ids: ids.iter().map(|id| id.id.clone()).collect(),
+                });
             }
-            let existing_path = game_dir.join(&existing);
-            for declared in declared_mod_ids(&existing_path) {
-                if let Some(incoming) = claimed.get(&declared) {
-                    return Some(Clash::WithExisting {
-                        mod_id: declared.id,
-                        incoming: incoming.to_path_buf(),
-                        existing,
-                        existing_path,
-                    });
-                }
+            _ => {
+                let (existing, provided) = covering.unwrap_or(first);
+                let mod_id = ids
+                    .intersection(provided)
+                    .next()
+                    .map(|id| id.id.clone())
+                    .unwrap_or_default();
+                return Err(Clash::WithExisting {
+                    mod_id,
+                    incoming: jar.logical_path.clone(),
+                    existing: existing.clone(),
+                    existing_path: game_dir.join(existing),
+                    could_stand_in: covering.is_some(),
+                });
             }
         }
     }
-    None
+    Ok(stood_in)
 }
 
 /// The jars a loader would read from one folder of the game directory, as
@@ -450,7 +506,27 @@ mod tests {
                 .iter()
                 .map(|name| Path::new("mods").join(name))
                 .collect();
-            find_clash(incoming, self.dir.path(), &leaving)
+            judge(incoming, self.dir.path(), &leaving, &BTreeSet::new()).err()
+        }
+
+        fn letting_stand_in(
+            &self,
+            incoming: &[IncomingJar],
+            may_stand_in: &[&str],
+        ) -> Result<Vec<InstalledStandIn>, Clash> {
+            let may_stand_in = may_stand_in
+                .iter()
+                .map(|name| Path::new("mods").join(name))
+                .collect();
+            judge(incoming, self.dir.path(), &BTreeSet::new(), &may_stand_in)
+        }
+
+        /// A Forge jar at `path` declaring every id in `ids`.
+        fn forge_jar(path: &Path, ids: &[&str]) {
+            let toml = ids.iter().fold(String::new(), |toml, id| {
+                toml + "[[mods]]\nmodId=\"" + id + "\"\n"
+            });
+            jar(path, &[(FORGE_METADATA, &toml)]);
         }
     }
 
@@ -524,6 +600,96 @@ mod tests {
                 assert_eq!(second, Path::new("mods/libx-b.jar"));
             }
             other => panic!("expected a clash within the change, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_installed_jar_declaring_every_id_stands_in_when_allowed() {
+        let folder = Folder::new();
+        folder.installed("libx-dev.jar", "libx");
+        folder.installed("other.jar", "other");
+        let incoming = [
+            folder.incoming("root.jar", "root"),
+            folder.incoming("libx-7.0.4.jar", "libx"),
+        ];
+
+        let stood_in = folder
+            .letting_stand_in(&incoming, &["libx-7.0.4.jar"])
+            .expect("the installed jar stands in");
+
+        assert_eq!(
+            stood_in,
+            [InstalledStandIn {
+                planned: PathBuf::from("mods/libx-7.0.4.jar"),
+                installed: PathBuf::from("mods/libx-dev.jar"),
+                mod_ids: vec!["libx".to_owned()],
+            }]
+        );
+    }
+
+    #[test]
+    fn an_installed_jar_that_could_stand_in_is_still_a_clash_unless_allowed() {
+        let folder = Folder::new();
+        folder.installed("libx-dev.jar", "libx");
+        let incoming = [folder.incoming("libx-7.0.4.jar", "libx")];
+
+        match folder.letting_stand_in(&incoming, &["root.jar"]) {
+            Err(Clash::WithExisting { could_stand_in, .. }) => assert!(could_stand_in),
+            other => panic!("expected a clash with the installed jar, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_installed_jar_declaring_only_some_of_the_ids_never_stands_in() {
+        let folder = Folder::new();
+        Folder::forge_jar(&folder.dir.path().join("mods/libx-dev.jar"), &["libx"]);
+        let staged = folder.staging.path().join("libx-7.0.4.jar");
+        Folder::forge_jar(&staged, &["libx", "libx_extra"]);
+        let incoming = [IncomingJar {
+            logical_path: PathBuf::from("mods/libx-7.0.4.jar"),
+            staged,
+        }];
+
+        match folder.letting_stand_in(&incoming, &["libx-7.0.4.jar"]) {
+            Err(Clash::WithExisting {
+                mod_id,
+                existing,
+                could_stand_in,
+                ..
+            }) => {
+                assert_eq!(mod_id, "libx");
+                assert_eq!(existing, Path::new("mods/libx-dev.jar"));
+                assert!(!could_stand_in);
+            }
+            other => panic!("expected a clash with the installed jar, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_jar_that_could_stand_in_is_the_one_named_when_another_shares_an_id() {
+        let folder = Folder::new();
+        Folder::forge_jar(&folder.dir.path().join("mods/a-partial.jar"), &["libx"]);
+        Folder::forge_jar(
+            &folder.dir.path().join("mods/b-whole.jar"),
+            &["libx", "libx_extra"],
+        );
+        let staged = folder.staging.path().join("libx-7.0.4.jar");
+        Folder::forge_jar(&staged, &["libx", "libx_extra"]);
+        let incoming = [IncomingJar {
+            logical_path: PathBuf::from("mods/libx-7.0.4.jar"),
+            staged,
+        }];
+
+        match folder.clash(&incoming, &[]) {
+            Some(Clash::WithExisting {
+                existing,
+                could_stand_in,
+                ..
+            }) => {
+                assert_eq!(existing, Path::new("mods/b-whole.jar"));
+                assert!(could_stand_in);
+            }
+            other => panic!("expected a clash with the installed jar, got {other:?}"),
         }
     }
 }

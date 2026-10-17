@@ -238,6 +238,20 @@ pub enum CoreError {
     #[error("server support for {} was not stated and was not confirmed", .projects.join(", "))]
     ModServerSupportUnconfirmed { projects: Vec<String> },
 
+    /// A dependency the install would write is another copy of a mod a jar
+    /// already on the host provides, and the request did not let that jar
+    /// stand in for it.
+    ///
+    /// `path` declares every mod id the dependency's file does, so naming
+    /// `project_id` among the request's stand-ins installs without writing it.
+    #[error("`{}` already provides mod id `{mod_id}` of dependency `{project_id}`", path.display())]
+    ModDependencyAlreadyProvided {
+        dependency: String,
+        project_id: String,
+        mod_id: String,
+        path: PathBuf,
+    },
+
     /// Changing a server mod's version would add mods whose catalog never
     /// stated server support. Installing them from the catalog is where that
     /// is confirmed.
@@ -603,6 +617,7 @@ impl CoreError {
             Self::ModAcquisitionRestricted { .. } => "error-mod-acquisition-restricted",
             Self::ModClientOnly { .. } => "error-mod-client-only",
             Self::ModServerSupportUnconfirmed { .. } => "error-mod-server-support-unconfirmed",
+            Self::ModDependencyAlreadyProvided { .. } => "error-mod-dependency-already-provided",
             Self::ModChangeServerSupportUnconfirmed { .. } => {
                 "error-mod-change-server-support-unconfirmed"
             }
@@ -688,6 +703,16 @@ impl CoreError {
                 vec![("catalog", Arg::from(configured.clone()))]
             }
             Self::ModClientOnly { project } => vec![("project", Arg::from(project.clone()))],
+            Self::ModDependencyAlreadyProvided {
+                dependency,
+                project_id,
+                mod_id,
+                ..
+            } => vec![
+                ("dependency", Arg::from(dependency.clone())),
+                ("project", Arg::from(project_id.clone())),
+                ("mod_id", Arg::from(mod_id.clone())),
+            ],
             Self::ModServerSupportUnconfirmed { projects }
             | Self::ModChangeServerSupportUnconfirmed { projects } => {
                 vec![("mods", Arg::from(projects.join(", ")))]
@@ -902,6 +927,7 @@ impl CoreError {
             | Self::ModAcquisitionRestricted { .. }
             | Self::ModClientOnly { .. }
             | Self::ModServerSupportUnconfirmed { .. }
+            | Self::ModDependencyAlreadyProvided { .. }
             | Self::ModChangeServerSupportUnconfirmed { .. }
             | Self::ModMutationRestricted { .. }
             | Self::ModIdentityIncomplete { .. }
@@ -996,6 +1022,7 @@ impl CoreError {
             | Self::ModFileNotAdded { path, .. }
             | Self::ModIdentityIncomplete { path }
             | Self::ModDependencyNotMovable { path, .. }
+            | Self::ModDependencyAlreadyProvided { path, .. }
             | Self::DiagnosticBundleNotWritten { path, .. }
             | Self::DiagnosticBundleOverwritesSource { path }
             | Self::IconRefused { path, .. }

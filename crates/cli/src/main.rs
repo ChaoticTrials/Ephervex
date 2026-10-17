@@ -439,12 +439,8 @@ enum ModCommand {
         project: String,
         #[command(flatten)]
         selection: ModSelectionArgs,
-        /// Install onto a server even when the catalog does not say whether
-        /// the mod, or a mod it needs, runs on a server.
-        ///
-        /// Without it, such an install is refused and the mods are named.
-        #[arg(long)]
-        accept_unknown_server_support: bool,
+        #[command(flatten)]
+        consent: InstallConsentArgs,
     },
     /// Show or set which catalog mod commands use when none is named.
     ///
@@ -770,6 +766,26 @@ enum SnapshotCommand {
         #[arg(long)]
         yes: bool,
     },
+}
+
+/// What the user agrees to for one install.
+#[derive(Debug, Args)]
+struct InstallConsentArgs {
+    /// Install onto a server even when the catalog does not say whether the
+    /// mod, or a mod it needs, runs on a server.
+    ///
+    /// Without it, such an install is refused and the mods are named.
+    #[arg(long)]
+    accept_unknown_server_support: bool,
+    /// Let a jar already in the mods folder stand in for the dependency with
+    /// this project id, when that jar provides the same mod.
+    ///
+    /// Repeatable. The dependency is still downloaded and checked, and is left
+    /// out only if one jar already there declares every mod id it does.
+    /// Without it, a dependency that another jar already provides is refused,
+    /// because the game does not start with two copies of one mod.
+    #[arg(long = "use-installed", value_name = "PROJECT")]
+    use_installed: Vec<String>,
 }
 
 /// Which version, and which optional extras, an install should take.
@@ -4768,8 +4784,8 @@ async fn run_mod_command(app: &mut App, command: &ModCommand, json: bool) -> any
             host,
             project,
             selection,
-            accept_unknown_server_support: accept,
-        } => return run_mod_install(app, host.host()?, project, selection, *accept, json).await,
+            consent,
+        } => return run_mod_install(app, host.host()?, project, selection, consent, json).await,
         ModCommand::Catalog { catalog, clear } => {
             run_mod_catalog(app, *catalog, *clear, json)?;
         }
@@ -5455,16 +5471,18 @@ async fn run_mod_install(
     host: InstalledHost,
     project: &str,
     selection: &ModSelectionArgs,
-    accept_unknown_server_support: bool,
+    consent: &InstallConsentArgs,
     json: bool,
 ) -> anyhow::Result<()> {
     let catalog = catalog_or_preference(app, selection.provider)?;
-    let mut request = selection.request(project, catalog);
+    let mut request = selection
+        .request(project, catalog)
+        .letting_installed_stand_in_for(consent.use_installed.iter().cloned());
     if matches!(host, InstalledHost::Server(_)) {
         let plan = app.plan_mod_installation(host, &request).await?;
         let unconfirmed = plan.undeclared_server_support();
         if !unconfirmed.is_empty() {
-            if !accept_unknown_server_support {
+            if !consent.accept_unknown_server_support {
                 return Err(unconfirmed_server_support(&mod_names(&unconfirmed)));
             }
             request = request.confirming_server_support(
@@ -5476,11 +5494,42 @@ async fn run_mod_install(
         }
     }
     let reporter = OperationReporter::silent("installing-mods");
-    let installed = app
+    let installed = match app
         .install_mods(host, &request, &reporter, &CancellationToken::new())
-        .await?;
+        .await
+    {
+        Err(CoreError::ModDependencyAlreadyProvided {
+            dependency,
+            project_id,
+            path,
+            ..
+        }) => return Err(dependency_already_provided(&dependency, &project_id, &path)),
+        installed => installed?,
+    };
     print_installed_mods(&installed, host, json);
     Ok(())
+}
+
+/// Refuses an install whose dependency a jar already installed provides,
+/// naming the option that lets that jar stand in for it.
+fn dependency_already_provided(dependency: &str, project: &str, path: &Path) -> anyhow::Error {
+    let args = || {
+        [
+            ("dependency", MessageArg::from(dependency)),
+            ("project", MessageArg::from(project)),
+            ("path", MessageArg::from(path)),
+        ]
+    };
+    let next = ephervex_i18n::lookup_attribute_args(
+        "mod-install-dependency-already-provided",
+        "action",
+        args(),
+    )
+    .unwrap_or_default();
+    anyhow::anyhow!(next).context(ephervex_i18n::lookup_args(
+        "mod-install-dependency-already-provided",
+        args(),
+    ))
 }
 
 /// Refuses a server install that would add mods with no stated server side.
@@ -6216,6 +6265,16 @@ fn installation_lines(name: &str, installation: &ManagedModInstallation) -> Vec<
             .iter()
             .map(|path| install_path_line("mod-install-kept-modified", path)),
     );
+    lines.extend(installation.stood_in.iter().map(|stand_in| {
+        ephervex_i18n::lookup_args(
+            "mod-install-stood-in",
+            [
+                ("planned", MessageArg::from(stand_in.planned.as_path())),
+                ("installed", MessageArg::from(stand_in.installed.as_path())),
+                ("mod_ids", MessageArg::from(stand_in.mod_ids.join(", "))),
+            ],
+        )
+    }));
     lines
 }
 
@@ -6232,6 +6291,11 @@ fn installed_mods_json(installed: &InstalledMods) -> serde_json::Value {
         "already_present": json_paths(&installed.installation.already_present),
         "recorded": json_paths(&installed.installation.recorded),
         "modified": json_paths(&installed.installation.modified),
+        "stood_in": installed.installation.stood_in.iter().map(|stand_in| serde_json::json!({
+            "planned": json_path(&stand_in.planned),
+            "installed": json_path(&stand_in.installed),
+            "mod_ids": stand_in.mod_ids,
+        })).collect::<Vec<_>>(),
         "reused_from_cache": installed.installation.reused_from_cache,
         "bytes": installed.installation.bytes,
         "plan": {
@@ -10542,6 +10606,40 @@ mod tests {
     }
 
     #[test]
+    fn an_install_names_the_jar_that_stood_in_for_a_dependency() {
+        let installation = ManagedModInstallation {
+            installed: vec![PathBuf::from("mods/root.jar")],
+            stood_in: vec![ephervex_core::InstalledStandIn {
+                planned: PathBuf::from("mods/libx-7.0.4.jar"),
+                installed: PathBuf::from("mods/libx-dev.jar"),
+                mod_ids: vec!["libx".to_owned()],
+            }],
+            ..ManagedModInstallation::default()
+        };
+
+        let lines = installation_lines("Root", &installation);
+
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(lines[2].contains("mods/libx-7.0.4.jar"), "{lines:?}");
+        assert!(lines[2].contains("mods/libx-dev.jar"), "{lines:?}");
+        assert!(lines[2].contains("libx"), "{lines:?}");
+    }
+
+    #[test]
+    fn a_dependency_already_provided_is_refused_with_the_option_that_uses_the_installed_jar() {
+        let refusal = dependency_already_provided(
+            "LibX",
+            "LIBX",
+            Path::new("/instance/minecraft/mods/libx-dev.jar"),
+        );
+        let text = format!("{refusal:#}");
+
+        assert!(text.contains("libx-dev.jar"), "{text}");
+        assert!(text.contains("LibX"), "{text}");
+        assert!(text.contains("--use-installed LIBX"), "{text}");
+    }
+
+    #[test]
     fn an_install_reports_a_kept_jar_beside_the_files_it_wrote() {
         let installation = ManagedModInstallation {
             installed: vec![PathBuf::from("mods/dep.jar")],
@@ -11007,18 +11105,37 @@ mod tests {
         ])
         .expect("valid install");
         let Command::Mod {
-            command:
-                ModCommand::Install {
-                    host,
-                    accept_unknown_server_support,
-                    ..
-                },
+            command: ModCommand::Install { host, consent, .. },
         } = cli.command
         else {
             panic!("expected mod install");
         };
         assert!(matches!(host.host(), Ok(InstalledHost::Server(_))));
-        assert!(accept_unknown_server_support);
+        assert!(consent.accept_unknown_server_support);
+    }
+
+    #[test]
+    fn a_mod_install_takes_every_dependency_an_installed_jar_may_stand_in_for() {
+        let cli = Cli::try_parse_from([
+            "ephervex",
+            "mod",
+            "install",
+            "--instance",
+            INSTANCE_ID,
+            "--use-installed",
+            "LIBX",
+            "--use-installed",
+            "LIBY",
+            "jei",
+        ])
+        .expect("valid install");
+        let Command::Mod {
+            command: ModCommand::Install { consent, .. },
+        } = cli.command
+        else {
+            panic!("expected mod install");
+        };
+        assert_eq!(consent.use_installed, ["LIBX", "LIBY"]);
     }
 
     #[test]

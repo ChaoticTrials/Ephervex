@@ -1124,6 +1124,17 @@ from the other catalog, the pack, or added by hand; a disabled jar and a jar the
 change replaces do not count. Only the metadata entries are read, under a small
 size limit, and a jar whose metadata cannot be read declares nothing.
 
+An install request may name dependencies, by project id, that a jar already on
+the host may stand in for, such as a local build of a library or its release
+from the other catalog. Such a dependency is still downloaded and verified. It
+is left out only when one enabled jar beside it declares every mod id its file
+does: it is then neither written nor recorded, and the installation reports
+which jar stands in for it. A jar declaring only some of those ids never stands
+in, nothing stands in for the mod asked for, and a dependency the request does
+not name is refused, with the refusal naming that dependency and the jar that
+provides it. No release is substituted without that explicit choice. The
+command line's form of it is `--use-installed <PROJECT>` on `mod install`.
+
 Mods installed through a provider are entries in the same recipe (ADR 0013), so
 a server built later contains them. No automatic operation overwrites or deletes
 a jar the launcher did not install. Installation writes the recipe last; any failure -

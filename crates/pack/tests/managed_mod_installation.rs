@@ -10,6 +10,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use ephervex_download::{
@@ -135,12 +136,25 @@ async fn install(
     recipe: &mut PackRecipe,
     additions: &[PackFileRecipe],
 ) -> Result<ephervex_pack::ManagedModInstallation, PackError> {
+    install_letting_stand_in(instance, recipe, additions, &[]).await
+}
+
+/// Installs `additions`, letting a jar already in `mods/` stand in for the
+/// ones named in `may_stand_in`.
+async fn install_letting_stand_in(
+    instance: &Instance,
+    recipe: &mut PackRecipe,
+    additions: &[PackFileRecipe],
+    may_stand_in: &[&str],
+) -> Result<ephervex_pack::ManagedModInstallation, PackError> {
+    let may_stand_in: BTreeSet<PathBuf> = may_stand_in.iter().map(PathBuf::from).collect();
     install_managed(ManagedModInstall {
         recipe,
         additions,
         side: PackSide::Client,
         game_dir: &instance.game_dir,
         store: &instance.store,
+        installed_may_stand_in: &may_stand_in,
         fetch: ArtifactFetch {
             manager: &manager(),
             cache: &instance.cache,
@@ -1298,11 +1312,13 @@ async fn a_curseforge_dependency_that_is_another_release_of_a_modrinth_mod_is_re
             incoming,
             path,
             provider,
+            could_stand_in,
         } => {
             assert_eq!(mod_id, "libx");
             assert_eq!(incoming, "mods/libx-7.0.4.jar");
             assert_eq!(path, &instance.jar("libx-7.0.3.jar"));
             assert_eq!(*provider, Some(ModProvider::Modrinth));
+            assert!(*could_stand_in);
         }
         other => panic!("expected a duplicate mod id, got {other:?}"),
     }
@@ -1435,4 +1451,161 @@ async fn two_jars_of_one_installation_that_declare_one_mod_id_are_refused() {
         "{error:?}"
     );
     assert!(mod_jars(&instance).is_empty());
+}
+
+/// A mod and the library it needs, with a developer's own build of that library
+/// already in `mods/`.
+async fn a_mod_needing_a_library_the_developer_built(
+    server: &MockServer,
+) -> (Instance, [PackFileRecipe; 2]) {
+    let release = neoforge_jar("libx", "7.0.4");
+    serve(server, "/libx.jar", release).await;
+    serve(server, "/root.jar", ROOT_JAR).await;
+    let instance = Instance::new();
+    std::fs::write(
+        instance.jar("libx-dev.jar"),
+        neoforge_jar("libx", "the developer's build"),
+    )
+    .expect("write");
+    let requested = [
+        addition(server, "/root.jar", "root-1.0.jar", ROOT_JAR, "ROOT"),
+        addition(server, "/libx.jar", "libx-7.0.4.jar", release, "LIBX"),
+    ];
+    (instance, requested)
+}
+
+#[tokio::test]
+async fn a_jar_already_in_mods_stands_in_for_a_dependency_when_the_request_allows_it() {
+    let server = MockServer::start().await;
+    let (instance, requested) = a_mod_needing_a_library_the_developer_built(&server).await;
+    let mut recipe = recipe();
+
+    let report =
+        install_letting_stand_in(&instance, &mut recipe, &requested, &["mods/libx-7.0.4.jar"])
+            .await
+            .expect("the developer's build stands in for the library");
+
+    assert_eq!(
+        report.stood_in,
+        [ephervex_pack::InstalledStandIn {
+            planned: PathBuf::from("mods/libx-7.0.4.jar"),
+            installed: PathBuf::from("mods/libx-dev.jar"),
+            mod_ids: vec!["libx".to_owned()],
+        }]
+    );
+    assert_eq!(report.installed, [PathBuf::from("mods/root-1.0.jar")]);
+    assert_eq!(mod_jars(&instance), ["libx-dev.jar", "root-1.0.jar"]);
+    let recorded = instance.store.read_recipe().expect("recipe");
+    assert!(
+        recorded
+            .managed_project(ModProvider::Modrinth, "ROOT")
+            .is_some()
+    );
+    assert!(
+        recorded
+            .managed_project(ModProvider::Modrinth, "LIBX")
+            .is_none(),
+        "the library that was not written is not recorded"
+    );
+}
+
+#[tokio::test]
+async fn a_dependency_a_jar_already_in_mods_provides_is_refused_unless_the_request_allows_it() {
+    let server = MockServer::start().await;
+    let (instance, requested) = a_mod_needing_a_library_the_developer_built(&server).await;
+    let mut recipe = recipe();
+
+    let error =
+        install_letting_stand_in(&instance, &mut recipe, &requested, &["mods/root-1.0.jar"])
+            .await
+            .expect_err("only the files named may be stood in for");
+
+    assert!(
+        matches!(
+            &error,
+            PackError::DuplicateModId {
+                could_stand_in: true,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(mod_jars(&instance), ["libx-dev.jar"]);
+    assert!(!instance.store.has_recipe());
+}
+
+#[tokio::test]
+async fn a_dependency_allowed_a_stand_in_is_installed_when_nothing_stands_in_for_it() {
+    let server = MockServer::start().await;
+    let (instance, requested) = a_mod_needing_a_library_the_developer_built(&server).await;
+    std::fs::rename(
+        instance.jar("libx-dev.jar"),
+        instance.jar("libx-dev.jar.disabled"),
+    )
+    .expect("disable the build");
+    let mut recipe = recipe();
+
+    let report =
+        install_letting_stand_in(&instance, &mut recipe, &requested, &["mods/libx-7.0.4.jar"])
+            .await
+            .expect("installs the library");
+
+    assert!(report.stood_in.is_empty());
+    assert_eq!(
+        mod_jars(&instance),
+        ["libx-7.0.4.jar", "libx-dev.jar.disabled", "root-1.0.jar"]
+    );
+}
+
+#[tokio::test]
+async fn a_jar_providing_only_some_of_a_dependencys_mod_ids_does_not_stand_in_for_it() {
+    use std::io::Write as _;
+    let mut bytes = Vec::new();
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
+    zip.start_file(
+        "META-INF/neoforge.mods.toml",
+        zip::write::SimpleFileOptions::default(),
+    )
+    .expect("entry");
+    zip.write_all(b"[[mods]]\nmodId=\"libx\"\n[[mods]]\nmodId=\"libx_extra\"\n")
+        .expect("write");
+    zip.finish().expect("finish");
+    let release: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+
+    let server = MockServer::start().await;
+    serve(&server, "/libx.jar", release).await;
+    let instance = Instance::new();
+    std::fs::write(
+        instance.jar("libx-dev.jar"),
+        neoforge_jar("libx", "the developer's build"),
+    )
+    .expect("write");
+    let mut recipe = recipe();
+
+    let error = install_letting_stand_in(
+        &instance,
+        &mut recipe,
+        &[addition(
+            &server,
+            "/libx.jar",
+            "libx-7.0.4.jar",
+            release,
+            "LIBX",
+        )],
+        &["mods/libx-7.0.4.jar"],
+    )
+    .await
+    .expect_err("libx_extra would be missing");
+
+    assert!(
+        matches!(
+            &error,
+            PackError::DuplicateModId {
+                could_stand_in: false,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(mod_jars(&instance), ["libx-dev.jar"]);
 }

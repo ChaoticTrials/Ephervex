@@ -89,6 +89,15 @@ pub struct ModInstallRequest {
     /// confirmed. Read only when installing onto a server: a mod there whose
     /// catalog never stated server support is refused unless it is named here.
     pub confirmed_server_support: BTreeSet<String>,
+    /// Dependencies, by project id, that a jar already on the host may stand in
+    /// for.
+    ///
+    /// Such a dependency is downloaded and verified like any other. It is left
+    /// out only when one enabled jar beside it declares every mod id its file
+    /// does, and the installation names that jar. A dependency not named here
+    /// that another jar provides is refused, never quietly replaced by it, and
+    /// nothing stands in for the mod asked for.
+    pub installed_may_stand_in: BTreeSet<String>,
 }
 
 impl ModInstallRequest {
@@ -100,7 +109,20 @@ impl ModInstallRequest {
             version: None,
             optional: BTreeSet::new(),
             confirmed_server_support: BTreeSet::new(),
+            installed_may_stand_in: BTreeSet::new(),
         }
+    }
+
+    /// Lets a jar already on the host stand in for these dependencies when it
+    /// provides the same mod.
+    #[must_use]
+    pub fn letting_installed_stand_in_for<I, S>(mut self, projects: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.installed_may_stand_in = projects.into_iter().map(Into::into).collect();
+        self
     }
 
     /// Confirms that these projects belong on a server although their catalog
@@ -1398,8 +1420,14 @@ impl App {
         // half of its report, leaving a caller unable to tell "nothing to do"
         // from "nothing was requested".
         let mut additions: Vec<PackFileRecipe> = Vec::new();
-        for planned in plan.all_mods() {
+        let mut dependencies: BTreeMap<PathBuf, &PlannedMod> = BTreeMap::new();
+        for (index, planned) in plan.all_mods().into_iter().enumerate() {
             let addition = addition_for(&recipe, &plan, planned, host.side())?;
+            if index > 0 {
+                dependencies
+                    .entry(addition.logical_path.clone())
+                    .or_insert(planned);
+            }
             // Two planned mods can be the same reused jar; it is handed over
             // once. Two different files at one path still reach the installer,
             // which refuses them.
@@ -1407,6 +1435,16 @@ impl App {
                 additions.push(addition);
             }
         }
+        // The mod asked for is the point of the install, so nothing stands in
+        // for it, even where a dependency shares its file.
+        if let Some(root) = additions.first() {
+            dependencies.remove(&root.logical_path);
+        }
+        let installed_may_stand_in: BTreeSet<PathBuf> = dependencies
+            .iter()
+            .filter(|(_, planned)| request.installed_may_stand_in.contains(&planned.project.id))
+            .map(|(path, _)| path.clone())
+            .collect();
 
         let manager = self.artifact_manager()?;
 
@@ -1417,6 +1455,7 @@ impl App {
             side: host.side(),
             game_dir: &game_dir,
             store: &store,
+            installed_may_stand_in: &installed_may_stand_in,
             fetch: ArtifactFetch {
                 manager: &manager,
                 cache: &CacheLayout::new(self.paths().cache_dir()),
@@ -1442,7 +1481,7 @@ impl App {
                 );
                 return Err(self
                     .as_manual_acquisition(
-                        CoreError::from(error),
+                        dependency_refusal(error, &dependencies),
                         &destination,
                         &plan,
                         &game_dir,
@@ -2541,6 +2580,35 @@ fn settle_plan_for_server(plan: &mut ModInstallPlan) -> CoreResult<()> {
         .collect();
     plan.warnings.extend(warnings);
     Ok(())
+}
+
+/// A refusal of a second copy of a dependency, named as that dependency when a
+/// jar already on the host could stand in for it.
+fn dependency_refusal(
+    error: PackError,
+    dependencies: &BTreeMap<PathBuf, &PlannedMod>,
+) -> CoreError {
+    if let PackError::DuplicateModId {
+        mod_id,
+        incoming,
+        path,
+        could_stand_in: true,
+        ..
+    } = &error
+        && let Some(planned) = dependencies.get(Path::new(incoming))
+    {
+        return CoreError::ModDependencyAlreadyProvided {
+            dependency: if planned.project.title.is_empty() {
+                planned.project.id.clone()
+            } else {
+                planned.project.title.clone()
+            },
+            project_id: planned.project.id.clone(),
+            mod_id: mod_id.clone(),
+            path: path.clone(),
+        };
+    }
+    CoreError::from(error)
 }
 
 /// Refuses a server install that would put a mod on the server whose catalog

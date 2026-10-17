@@ -378,13 +378,16 @@ pub enum PackError {
     /// The loader refuses to start with two copies of one mod. Most often the
     /// same mod installed from the other catalog at another release. `path` is
     /// the jar already there, and `provider` the catalog the recipe says
-    /// installed it, when one did.
+    /// installed it, when one did. `could_stand_in` says whether that jar
+    /// declares every mod id `incoming` does, so that it could be used in its
+    /// place.
     #[error("`{incoming}` declares mod id `{mod_id}`, which `{}` already provides", path.display())]
     DuplicateModId {
         mod_id: String,
         incoming: String,
         path: PathBuf,
         provider: Option<ephervex_model::ModProvider>,
+        could_stand_in: bool,
     },
 
     /// Two jars this change would write declare the same mod id.
@@ -763,12 +766,14 @@ mod tests {
                 incoming: "mods/libx-7.0.4.jar".to_owned(),
                 path: PathBuf::from("/instance/minecraft/mods/libx-7.0.3.jar"),
                 provider: Some(ephervex_model::ModProvider::Modrinth),
+                could_stand_in: true,
             },
             PackError::DuplicateModId {
                 mod_id: "libx".to_owned(),
                 incoming: "mods/libx-7.0.4.jar".to_owned(),
                 path: PathBuf::from("/instance/minecraft/mods/libx-dev.jar"),
                 provider: None,
+                could_stand_in: false,
             },
             PackError::DuplicateModIdInChange {
                 mod_id: "libx".to_owned(),

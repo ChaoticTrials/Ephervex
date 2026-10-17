@@ -1177,11 +1177,14 @@ async fn a_dependency_that_is_another_release_of_the_other_catalogs_mod_is_refus
     assert!(
         matches!(
             &refused,
-            CoreError::Pack(ephervex_pack::PackError::DuplicateModId {
+            CoreError::ModDependencyAlreadyProvided {
+                project_id,
                 mod_id,
-                provider: Some(ModProvider::CurseForge),
+                path,
                 ..
-            }) if mod_id == "duplib"
+            } if project_id == "DUPLIB"
+                && mod_id == "duplib"
+                && path.ends_with("mods/DupLib-curseforge.jar")
         ),
         "{refused:?}"
     );
@@ -1221,7 +1224,7 @@ async fn a_client_refuses_a_dependency_that_is_another_release_of_the_other_cata
     assert!(
         matches!(
             &refused,
-            CoreError::Pack(ephervex_pack::PackError::DuplicateModId { .. })
+            CoreError::ModDependencyAlreadyProvided { project_id, .. } if project_id == "DUPLIB"
         ),
         "{refused:?}"
     );
@@ -1251,4 +1254,147 @@ async fn the_same_jar_from_the_other_catalog_is_reused_rather_than_refused_as_a_
         world.server_jars(server),
         ["DupLib-curseforge.jar", "duproot-DUPROOTV1.jar"]
     );
+}
+
+#[tokio::test]
+async fn the_other_catalogs_release_stands_in_for_a_dependency_once_the_request_allows_it() {
+    let world = world().await;
+    let server = plain_server(&world);
+    install(&world, server, &ModInstallRequest::new("DUPLIB"))
+        .await
+        .expect("installs the library");
+    as_installed_from_curseforge(
+        &server_game_dir(&world, server),
+        &server_store(&world, server),
+        "DUPLIB",
+        Some("DupLib-curseforge.jar"),
+        Some(b"the other catalog's release"),
+    );
+
+    let installed = install(
+        &world,
+        server,
+        &ModInstallRequest::new("DUPROOT").letting_installed_stand_in_for(["DUPLIB"]),
+    )
+    .await
+    .expect("the installed release stands in for the library");
+
+    assert_eq!(
+        installed.installation.stood_in,
+        [ephervex_pack::InstalledStandIn {
+            planned: PathBuf::from("mods/duplib-DUPLIBV1.jar"),
+            installed: PathBuf::from("mods/DupLib-curseforge.jar"),
+            mod_ids: vec!["duplib".to_owned()],
+        }]
+    );
+    assert_eq!(
+        world.server_jars(server),
+        ["DupLib-curseforge.jar", "duproot-DUPROOTV1.jar"]
+    );
+    let recipe = world.server_recipe(server);
+    assert!(
+        recipe
+            .managed_project(ModProvider::Modrinth, "DUPROOT")
+            .is_some()
+    );
+    assert!(
+        recipe
+            .managed_project(ModProvider::Modrinth, "DUPLIB")
+            .is_none(),
+        "the release that was not written is not recorded"
+    );
+}
+
+/// Writes a developer's own build of the duplicated library into `mods/`.
+fn place_library_build(game_dir: &std::path::Path) {
+    use std::io::Write as _;
+    let mut bytes = Vec::new();
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
+    zip.start_file(
+        "META-INF/neoforge.mods.toml",
+        zip::write::SimpleFileOptions::default(),
+    )
+    .expect("entry");
+    zip.write_all(b"[[mods]]\nmodId=\"duplib\"\nversion=\"dev\"\n")
+        .expect("write");
+    zip.finish().expect("finish");
+    std::fs::create_dir_all(game_dir.join("mods")).expect("mods dir");
+    std::fs::write(game_dir.join("mods/duplib-dev.jar"), bytes).expect("write");
+}
+
+#[tokio::test]
+async fn a_hand_placed_build_stands_in_for_a_dependency_only_after_it_is_allowed_to() {
+    let world = world().await;
+    let root = world.app.client(world.client).expect("client").root;
+    place_library_build(&ephervex_storage::metadata::client_game_dir(&root));
+    let install_root = |request: ModInstallRequest| {
+        let world = &world;
+        async move {
+            world
+                .app
+                .install_mods(
+                    InstalledHost::Instance(world.client),
+                    &request,
+                    &silent(),
+                    &CancellationToken::new(),
+                )
+                .await
+        }
+    };
+
+    let refused = install_root(ModInstallRequest::new("DUPROOT"))
+        .await
+        .expect_err("the build is not used unasked");
+    assert!(
+        matches!(
+            &refused,
+            CoreError::ModDependencyAlreadyProvided { project_id, path, .. }
+                if project_id == "DUPLIB" && path.ends_with("mods/duplib-dev.jar")
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(world.client_jars(), ["duplib-dev.jar"]);
+
+    let installed =
+        install_root(ModInstallRequest::new("DUPROOT").letting_installed_stand_in_for(["DUPLIB"]))
+            .await
+            .expect("the build stands in for the library");
+
+    assert_eq!(
+        installed
+            .installation
+            .stood_in
+            .iter()
+            .map(|stand_in| stand_in.installed.clone())
+            .collect::<Vec<_>>(),
+        [PathBuf::from("mods/duplib-dev.jar")]
+    );
+    assert_eq!(
+        world.client_jars(),
+        ["duplib-dev.jar", "duproot-DUPROOTV1.jar"]
+    );
+}
+
+#[tokio::test]
+async fn nothing_stands_in_for_the_mod_asked_for() {
+    let world = world().await;
+    let server = plain_server(&world);
+    place_library_build(&server_game_dir(&world, server));
+
+    let refused = install(
+        &world,
+        server,
+        &ModInstallRequest::new("DUPLIB").letting_installed_stand_in_for(["DUPLIB"]),
+    )
+    .await
+    .expect_err("the library asked for is refused as a second copy");
+
+    assert!(
+        matches!(
+            &refused,
+            CoreError::Pack(ephervex_pack::PackError::DuplicateModId { .. })
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(world.server_jars(server), ["duplib-dev.jar"]);
 }

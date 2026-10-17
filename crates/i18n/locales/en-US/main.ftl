@@ -1810,6 +1810,12 @@ error-mod-duplicate-mod-id = { $incoming } is another copy of a mod already in t
 error-mod-duplicate-mod-id-in-change = Two of these mods are copies of the same mod.
 .action = { $first } and { $second } both provide mod id { $mod_id }, and the game does not start with two copies of one mod, so nothing was written.
 
+# A dependency of the chosen mod is already provided by a jar on the host, such
+# as a local build or the same mod from the other catalog. Mod ids and paths are
+# technical values.
+error-mod-dependency-already-provided = { $path } already provides { $dependency }, which this mod needs.
+.action = It declares mod id { $mod_id } too, and the game does not start with two copies of one mod, so nothing was written. Remove or disable that file first if you want this release of { $dependency } instead.
+
 error-mod-path-unsafe = That mod would be written outside its place in the game directory.
 .action = { $path } is not a valid location for a mod file, so nothing was written.
 
@@ -1919,6 +1925,12 @@ mod-search-client-only = Client only. It cannot be installed on a server.
 mod-plan-server-support-unstated = { $name } does not state whether it runs on a server.
 mod-install-server-support-unconfirmed = The catalog does not state whether { $mods } runs on a server.
 .action = Add --accept-unknown-server-support to install it anyway.
+
+mod-install-dependency-already-provided = { $path } already provides { $dependency }, which this mod needs.
+.action = Add --use-installed { $project } to install without it, or remove or disable that file first if you want this release of { $dependency } instead.
+
+# Printed after an install, for a dependency a jar already on the host provides.
+mod-install-stood-in = { $planned } was not installed: { $installed } provides mod id { $mod_ids }.
 
 mod-warning-server-side-unsupported = { $project } says it does not run on a server, but { $required_by } needs it.
 .action = It was installed because the mod that needs it cannot load without it.
