@@ -1,6 +1,6 @@
 ---
 title: Themes
-description: Choose a built-in theme or add a custom Ephervex color theme.
+description: Choose a built-in theme or add a custom Ephervex theme with its own colors and logo.
 ---
 
 import Tabs from '@theme/Tabs';
@@ -11,8 +11,9 @@ import ThemeScreenshot from '@site/src/components/ThemeScreenshot';
 
 Ephervex ships **Dark** and **Light** interface themes. A custom theme is a
 TOML file that starts from either built-in theme and changes the colors you
-choose. Themes affect Ephervex, not Minecraft. Interface text size and the
-separate diagnostics and console text size are set in [General settings](./settings.mdx#general);
+choose. A theme folder can also replace the logo and window icon. Themes
+affect Ephervex, not Minecraft. Interface text size and the separate
+diagnostics and console text size are set in [General settings](./settings.mdx#general);
 themes do not change fonts or layout.
 
 ## Choose a theme
@@ -56,25 +57,27 @@ It sets every available color. Copy it into your themes folder as
 `modrinth.toml`, then select **Modrinth** under **Interface theme**.
 
 The file name, without `.toml`, is the theme's ID. Use lowercase letters,
-digits, `-`, or `_` in the name. The `name` field is the label shown in the
-selector. Set `parent` to `"dark"` or `"light"`; omitted colors come from
-that parent, including the color scheme used by standard controls.
+digits, `-`, or `_` in the name. A [theme folder](#add-a-logo-and-window-icon)
+takes its ID from the folder name instead. The `name` field is the label
+shown in the selector. Set `parent` to `"dark"` or `"light"`; omitted colors
+come from that parent, including the color scheme used by standard controls.
 `format_version`, `name`, `parent`, and `[colors]` may all be omitted. The
-defaults are format 1, the file name, Dark, and no overrides. Names longer
-than 64 characters are cut to 64.
+defaults are format 1, the file or folder name, Dark, and no overrides. Names
+longer than 64 characters are cut to 64.
 
 Colors must be quoted hexadecimal values in `"#rrggbb"` form. Use
 `"#rrggbbaa"` when a color needs transparency. Edit the file, then select
 **Refresh** in the app's top bar or restart Ephervex. Choose **My Theme**
-under **Interface theme**. Renaming the file changes its ID, so select the
-renamed theme again.
+under **Interface theme**. Renaming a file or folder changes its ID, so
+select the renamed theme again.
 
 <Tabs groupId="interface" queryString="interface">
 <TabItem value="gui" label="Desktop" default>
 
 Create the themes folder and TOML file with your file manager and text editor.
 Return to **Settings > General**, refresh, and choose the new theme. The
-selector also shows any problems found while loading theme files.
+setting also says how many problems were found, and **Show problems** lists
+them.
 
 </TabItem>
 <TabItem value="cli" label="CLI">
@@ -116,17 +119,82 @@ the context menus opened by a right-click or a "Launch as" button take no
 theme colors. They follow only the light or dark look of the parent, so a
 theme with a very different palette can leave them looking out of place.
 
+## Add a logo and window icon
+
+A theme folder replaces the Ephervex logo and window icon with its own images.
+Name the folder after the theme's ID and put `theme.toml` and a `branding`
+folder in it:
+
+```text
+~/.config/ephervex/themes/my-theme/
+├── theme.toml
+└── branding/
+    ├── logo.png
+    └── icon.png
+```
+
+`theme.toml` uses the same format as a theme file, and a folder without one
+is ignored. Name the images in a
+`[branding]` section, relative to the `branding` folder:
+
+```toml
+[branding]
+logo = "logo.png"
+icon = "icon.png"
+```
+
+| Key | Replaces |
+| --- | --- |
+| `logo` | The logo in the top bar and on **Settings > About & Licenses** |
+| `icon` | The window icon |
+
+Both keys are optional, and each image falls back to the Ephervex logo on its
+own. If a theme file and a usable theme folder share a name, the folder is
+used. The [Modrinth theme](https://github.com/ChaoticTrials/Ephervex/blob/main/docs/themes/modrinth.toml)
+has a commented-out `[branding]` section to start from.
+
+
+Each image must:
+
+- Be a PNG, JPEG, or WebP file named `.png`, `.jpg`, `.jpeg`, or `.webp`,
+  with contents that match the name.
+- Be at most 4 MiB and at most 1024 by 1024 pixels.
+- Be inside the theme's own `branding` folder, at most three folders deep.
+  Leave out `branding/`, and do not use `.`, `..`, a leading `/`, `\`, or
+  `:`.
+- Be a real file. Ephervex does not follow symbolic links inside a theme
+  folder, and skips a theme folder or `theme.toml` that is a link.
+
+Images keep their shape. A logo is fitted to its space, and an icon that is
+not square is centered on a transparent square. Ephervex reads only the
+selected theme's images, and changing the theme changes the logo right away.
+
+The window icon follows the theme only where the desktop takes it from the
+window, such as X11 taskbars that show the window's own icon. On Wayland, and
+in docks that show the installed app's icon, such as GNOME Shell, the Ephervex
+icon stays. The logo inside the window always follows the theme.
+
 ## Fix a theme that does not load
 
-Check **Settings > General > Interface theme** for a message naming the file
-and problem. Ephervex skips a file with invalid TOML, an unsupported parent,
-a newer format version, a wrong field type, or an invalid color. It also skips
-a file whose name uses anything other than lowercase letters, digits, `-`, and
-`_`, and a file that is not UTF-8 text. Unknown color names and other unknown
-keys are reported and ignored while the rest of the theme loads.
+**Settings > General > Interface theme** says how many problems were found in
+the themes folder.
 
-Theme files are limited to 64 KiB each, and Ephervex reads at most 100 of
-them. If the selected file cannot be read, Ephervex uses Dark while keeping
-the choice; fix the file and refresh to bring it back.
+<ThemeScreenshot state="theme-load-error" alt="Interface theme setting saying five problems were found, with a Show problems button" />
 
-<ThemeScreenshot state="theme-load-error" alt="Interface theme setting with a message under it naming each skipped theme file and the reason" />
+Select **Show problems** to list them, one line per problem.
+
+
+Ephervex skips a file with invalid TOML, an unsupported parent, a newer format
+version, a wrong field type, or an invalid color. It also skips a file whose
+name uses anything other than lowercase letters, digits, `-`, and `_`, a file
+that is not UTF-8 text, and a file that has the same name as a usable theme
+folder. Unknown color names, other unknown keys, and `[branding]` entries that
+cannot be used are reported and ignored while the rest of the theme loads.
+`[branding]` in a standalone file is always ignored, because only a theme
+folder has a `branding` folder. A branding image that cannot be shown is
+listed with its path, and the Ephervex logo is shown instead.
+
+Theme files are limited to 64 KiB each, and Ephervex reads at most 100 themes,
+files and folders together. If the selected theme cannot be read, Ephervex
+uses Dark while keeping the choice; fix the file and select **Refresh** to
+bring it back.

@@ -229,9 +229,9 @@ easy to update, and capture screenshots late.
 - #9 instance search, filters, sort and favorites
 - #12 server status and configuration shortcuts
 - #13 navigation and active-state polish
-- #378 sandboxed branding assets and theme packages, #379 the Haunted Pumpkin
-  theme. Avoid fixed theme-list screenshots. When the launcher includes the
-  Halloween theme, use its screenshots during the same date range as the site.
+- #379 the Haunted Pumpkin theme. Avoid fixed theme-list screenshots. When
+  the launcher includes the Halloween theme, use its screenshots during the
+  same date range as the site.
 - #17 resource packs, shader packs and datapacks during import
 - #10 cache and storage maintenance
 - #341 clients and servers surviving an Ephervex restart
