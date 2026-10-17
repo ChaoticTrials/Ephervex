@@ -553,7 +553,8 @@ pub(crate) fn server_needs_recovery(ui: &AppWindow) {
     open_server(ui, server_view(server), "Overview", None);
 }
 
-/// The CaveStone Server's Mods surface with `search` from `provider` beside its list.
+/// The CaveStone Server's Mods surface with `search` from `provider` beside its
+/// list. Its pack mods are shown changeable, as independent mod changes allow.
 fn cavestone_server_mods(
     server: ServerRow,
     provider: &str,
@@ -568,6 +569,8 @@ fn cavestone_server_mods(
         browser_results: rows(server_mod_results(search)),
         browser_next_offset: -1,
         browser_include_incompatible: include_incompatible,
+        allow_pack_mod_changes: true,
+        mods_are_the_users: true,
         ..server_view(server)
     }
 }
