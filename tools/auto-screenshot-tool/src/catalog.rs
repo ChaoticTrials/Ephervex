@@ -641,6 +641,13 @@ pub(crate) const STATES: &[State] = &[
         interaction: None,
     },
     State {
+        name: "server-eula-refused",
+        show: fixtures::diagnostics_servers::server_eula_refused,
+        regions: DIAGNOSTICS_SERVERS_REGIONS,
+        same_layout_at_both_sizes: false,
+        interaction: None,
+    },
+    State {
         name: "server-mods",
         show: fixtures::diagnostics_servers::server_mods,
         regions: DIAGNOSTICS_SERVERS_REGIONS,

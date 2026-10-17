@@ -6,7 +6,7 @@ use ephervex_gui::ui::{
     WorkspaceSurfaceRow,
 };
 use ephervex_gui::workspace_layout::Surface;
-use ephervex_i18n::{Arg, lookup, lookup_args};
+use ephervex_i18n::{Arg, lookup, lookup_args, lookup_attribute};
 use slint::{Model, ModelRc, SharedString, VecModel};
 
 use super::java::{JAVA_17, JAVA_21, Runtime};
@@ -540,6 +540,24 @@ pub(crate) fn server_eula_review(ui: &AppWindow) {
     ui.set_eula_status(lookup("gui-eula-not-accepted").into());
     open_server(ui, view, "Properties", None);
     ui.set_modal("eula".into());
+}
+
+/// A server start refused because the Minecraft EULA was never accepted,
+/// which offers the EULA review instead of a failed run's routes.
+pub(crate) fn server_eula_refused(ui: &AppWindow) {
+    let message = [
+        lookup("error-server-eula-not-accepted"),
+        lookup_attribute("error-server-eula-not-accepted", "desktop-action").unwrap_or_default(),
+    ]
+    .join("\n");
+    let view = HostView {
+        run_failure_title: lookup("gui-run-refused-server").into(),
+        run_failure: message.into(),
+        run_eula_refused: true,
+        ..server_view(named_server(ui, "cavestone-server"))
+    };
+    ui.set_eula_accepted(false);
+    open_server(ui, view, "Overview", None);
 }
 
 /// A server whose recorded processes have exited, which blocks Start until it is repaired.

@@ -84,6 +84,7 @@ export const catalogGroups: CatalogGroup[] = [
       {state: 'server-running', title: 'Server running'},
       {state: 'server-console', title: 'Server console'},
       {state: 'server-properties', title: 'Server properties and EULA'},
+      {state: 'server-eula-refused', title: 'A start refused for the EULA'},
       {state: 'server-settings', title: 'Server Java and memory'},
       {state: 'server-eula-review', title: 'Reviewing the EULA'},
       {state: 'server-crash-notice', title: 'Server crash notice'},

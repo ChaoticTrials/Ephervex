@@ -117,6 +117,7 @@ Hosts:
 - [x] `client-run-failure-notice`
 - [x] `server-console`, `server-properties` (EULA card), `server-crash-notice`
 - [x] `server-settings`, `server-mod-manager`
+- [x] `server-eula-refused`
 - [x] `split-workspace` (client logs beside server console)
 
 Settings:
