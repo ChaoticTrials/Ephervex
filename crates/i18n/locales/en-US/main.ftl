@@ -1798,6 +1798,18 @@ error-mod-destination-recorded = A mod Ephervex installed from { $provider } is 
 error-mod-destination-recorded-by-pack = A mod Ephervex installed is already in the way.
 .action = { $path } is recorded as a different mod of this pack, so it was left alone. Remove that mod first if you want this one installed in its place.
 
+# Two jars declaring one mod id stop the game from starting. The jar already
+# there is most often the same mod installed from the other catalog at another
+# release. Mod ids and file names are technical values.
+error-mod-duplicate-mod-id-recorded = { $incoming } is another copy of a mod installed from { $provider }.
+.action = { $path } already provides mod id { $mod_id }, and the game does not start with two copies of one mod, so nothing was written. Remove that mod first if you want this release instead.
+
+error-mod-duplicate-mod-id = { $incoming } is another copy of a mod already in this folder.
+.action = { $path } already provides mod id { $mod_id }, and the game does not start with two copies of one mod, so nothing was written. Remove or disable that file first if you want this release instead.
+
+error-mod-duplicate-mod-id-in-change = Two of these mods are copies of the same mod.
+.action = { $first } and { $second } both provide mod id { $mod_id }, and the game does not start with two copies of one mod, so nothing was written.
+
 error-mod-path-unsafe = That mod would be written outside its place in the game directory.
 .action = { $path } is not a valid location for a mod file, so nothing was written.
 

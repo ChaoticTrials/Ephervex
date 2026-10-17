@@ -60,6 +60,7 @@ pub mod error;
 pub mod import;
 pub mod install;
 pub mod managed;
+mod mod_ids;
 pub mod modrinth;
 pub mod mutate;
 pub mod path;

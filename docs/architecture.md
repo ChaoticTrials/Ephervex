@@ -1113,7 +1113,16 @@ inputs throughout; no graph is satisfied by changing them.
 A planned file the host already has from the other catalog, matched by the
 SHA-1 both publish, counts as already installed and is not written again
 (ADR 0022). A recorded mod that stands where a different file would go is
-refused by name, as the other mod it is.
+refused by name, as the other mod it is. Any other release of the same mod is
+recognized by the mod id in the jar's own metadata (`fabric.mod.json`,
+`quilt.mod.json`, `META-INF/mods.toml`, `META-INF/neoforge.mods.toml`). Once
+every new jar is downloaded and verified, and before anything is written, an
+install or version change that would leave an enabled jar beside another one
+declaring the same mod id for the same loader family is refused and names the
+jar already there. The loader would refuse to start with both. That jar may be
+from the other catalog, the pack, or added by hand; a disabled jar and a jar the
+change replaces do not count. Only the metadata entries are read, under a small
+size limit, and a jar whose metadata cannot be read declares nothing.
 
 Mods installed through a provider are entries in the same recipe (ADR 0013), so
 a server built later contains them. No automatic operation overwrites or deletes

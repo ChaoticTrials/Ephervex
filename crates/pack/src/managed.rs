@@ -39,6 +39,7 @@ use tracing::{info, instrument, warn};
 
 use crate::error::{PackError, PackResult};
 use crate::install::{ArtifactFetch, copy_into_instance, fetch_all};
+use crate::mod_ids::{IncomingJar, require_distinct_mod_ids};
 use crate::mutate::{MutationRecoveryAction, MutationRecoveryIssue};
 use crate::path::{DestinationLinks, contained_join, is_reserved, safe_relative_path};
 use crate::recipe::{
@@ -307,6 +308,16 @@ pub async fn install_managed(request: ManagedModInstall<'_>) -> PackResult<Manag
 
     let wanted: Vec<&PackFileRecipe> = pending.iter().map(|(file, _)| *file).collect();
     let outcomes = fetch_all(&wanted, fetch).await?;
+    // Verified and not yet written, so a refusal leaves the folder untouched.
+    let incoming = pending
+        .iter()
+        .zip(&outcomes)
+        .map(|((file, _), fetched)| IncomingJar {
+            logical_path: file.logical_path.clone(),
+            staged: fetched.path.clone(),
+        })
+        .collect();
+    require_distinct_mod_ids(recipe, incoming, game_dir, BTreeSet::new()).await?;
 
     // Everything from here on can leave a file behind, so it is undone on
     // failure. `created` is the exact set this operation wrote - never a guess

@@ -1550,8 +1550,30 @@ pub(crate) mod tests {
     // -- the catalog every test runs against -------------------------------
 
     /// The bytes standing in for one release's jar.
+    ///
+    /// A `DUP` project's release is a real jar declaring a NeoForge mod id, the
+    /// project id in lower case, so that a second copy of it is recognizable.
     fn jar(version_id: &str) -> Vec<u8> {
-        format!("a fixture jar standing in for {version_id}").into_bytes()
+        let project = version_id
+            .rsplit_once('V')
+            .map_or(version_id, |(project, _)| project);
+        if !project.starts_with("DUP") {
+            return format!("a fixture jar standing in for {version_id}").into_bytes();
+        }
+        let mut bytes = Vec::new();
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
+        let options =
+            zip::write::SimpleFileOptions::default().last_modified_time(zip::DateTime::default());
+        zip.start_file("META-INF/neoforge.mods.toml", options)
+            .expect("entry");
+        write!(
+            zip,
+            "[[mods]]\nmodId=\"{}\"\nversion=\"{version_id}\"\n",
+            project.to_ascii_lowercase()
+        )
+        .expect("write");
+        zip.finish().expect("finish");
+        bytes
     }
 
     fn sha1_of(bytes: &[u8]) -> String {
@@ -1653,6 +1675,13 @@ pub(crate) mod tests {
             project_json("NEEDSUNK", "Needs Undeclared", "required", "required"),
             project_json("SERVERONLY", "Server Only", "unsupported", "required"),
             project_json("LATERUNK", "Later Undeclared", "required", "required"),
+            project_json("DUPLIB", "Duplicated Library", "required", "required"),
+            project_json(
+                "DUPROOT",
+                "Needs Duplicated Library",
+                "required",
+                "required",
+            ),
         ];
         let versions = vec![
             version_json(base, "ROOTV1", "ROOTPROJ", &[MINECRAFT], &["CLIENTLIB"], 0),
@@ -1707,6 +1736,8 @@ pub(crate) mod tests {
                 "NEWLIB",
                 "NEWV2",
             ),
+            version_json(base, "DUPLIBV1", "DUPLIB", &[MINECRAFT], &[], 0),
+            version_json(base, "DUPROOTV1", "DUPROOT", &[MINECRAFT], &["DUPLIB"], 0),
             version_json(base, "NEWV1", "NEWLIB", &[MINECRAFT], &[], 0),
             version_json(base, "NEWV2", "NEWLIB", &[MINECRAFT], &[], 20),
             pinning(

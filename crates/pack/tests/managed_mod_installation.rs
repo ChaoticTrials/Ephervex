@@ -1192,3 +1192,247 @@ async fn a_record_that_answered_the_other_side_keeps_its_answer_when_the_release
     assert!(report.recorded.is_empty());
     assert_eq!(recipe, before);
 }
+
+// -- a second copy of one mod ---------------------------------------------
+
+/// A jar declaring one NeoForge mod id. `release` varies the bytes the way two
+/// releases of one mod do.
+fn neoforge_jar(mod_id: &str, release: &str) -> &'static [u8] {
+    use std::io::Write as _;
+    let mut bytes = Vec::new();
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
+    let options =
+        zip::write::SimpleFileOptions::default().last_modified_time(zip::DateTime::default());
+    zip.start_file("META-INF/neoforge.mods.toml", options)
+        .expect("entry");
+    write!(
+        zip,
+        "modLoader=\"javafml\"\n[[mods]]\nmodId=\"{mod_id}\"\nversion=\"{release}\"\n"
+    )
+    .expect("write");
+    zip.finish().expect("finish");
+    Box::leak(bytes.into_boxed_slice())
+}
+
+/// The same addition, as another catalog publishes it.
+fn from_catalog(mut file: PackFileRecipe, provider: ModProvider) -> PackFileRecipe {
+    if let Some(identity) = file.identity.as_mut() {
+        identity.provider = Some(provider);
+    }
+    file
+}
+
+/// Installs release 7.0.3 of a library from `installed_from`, then a mod from
+/// `requested_from` whose dependency is that catalog's release 7.0.4 of the
+/// same library.
+async fn install_the_other_catalogs_release(
+    installed_from: ModProvider,
+    requested_from: ModProvider,
+) -> (Instance, PackRecipe, PackError) {
+    let older = neoforge_jar("libx", "7.0.3");
+    let newer = neoforge_jar("libx", "7.0.4");
+    let server = MockServer::start().await;
+    serve(&server, "/libx-7.0.3.jar", older).await;
+    serve(&server, "/libx-7.0.4.jar", newer).await;
+    serve(&server, "/root.jar", ROOT_JAR).await;
+
+    let instance = Instance::new();
+    let mut recipe = recipe();
+    install(
+        &instance,
+        &mut recipe,
+        &[from_catalog(
+            addition(
+                &server,
+                "/libx-7.0.3.jar",
+                "libx-7.0.3.jar",
+                older,
+                "LIBX-A",
+            ),
+            installed_from,
+        )],
+    )
+    .await
+    .expect("installs the library");
+
+    let requested = [
+        from_catalog(
+            addition(&server, "/root.jar", "root-1.0.jar", ROOT_JAR, "ROOT-B"),
+            requested_from,
+        ),
+        from_catalog(
+            addition(
+                &server,
+                "/libx-7.0.4.jar",
+                "libx-7.0.4.jar",
+                newer,
+                "LIBX-B",
+            ),
+            requested_from,
+        ),
+    ];
+    let error = install(&instance, &mut recipe, &requested)
+        .await
+        .expect_err("a second copy of the library is refused");
+    (instance, recipe, error)
+}
+
+fn mod_jars(instance: &Instance) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(instance.mods_dir())
+        .expect("mods dir")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn a_curseforge_dependency_that_is_another_release_of_a_modrinth_mod_is_refused() {
+    let (instance, recipe, error) =
+        install_the_other_catalogs_release(ModProvider::Modrinth, ModProvider::CurseForge).await;
+
+    match &error {
+        PackError::DuplicateModId {
+            mod_id,
+            incoming,
+            path,
+            provider,
+        } => {
+            assert_eq!(mod_id, "libx");
+            assert_eq!(incoming, "mods/libx-7.0.4.jar");
+            assert_eq!(path, &instance.jar("libx-7.0.3.jar"));
+            assert_eq!(*provider, Some(ModProvider::Modrinth));
+        }
+        other => panic!("expected a duplicate mod id, got {other:?}"),
+    }
+    assert_eq!(error.message_id(), "error-mod-duplicate-mod-id-recorded");
+    assert_eq!(mod_jars(&instance), ["libx-7.0.3.jar"]);
+    assert_eq!(recipe.managed_mods().len(), 1);
+    assert_eq!(
+        instance
+            .store
+            .read_recipe()
+            .expect("recipe")
+            .managed_mods()
+            .len(),
+        1,
+        "nothing was recorded for a refused installation"
+    );
+}
+
+#[tokio::test]
+async fn a_modrinth_dependency_that_is_another_release_of_a_curseforge_mod_is_refused() {
+    let (instance, _, error) =
+        install_the_other_catalogs_release(ModProvider::CurseForge, ModProvider::Modrinth).await;
+
+    assert!(
+        matches!(
+            &error,
+            PackError::DuplicateModId {
+                provider: Some(ModProvider::CurseForge),
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(mod_jars(&instance), ["libx-7.0.3.jar"]);
+}
+
+#[tokio::test]
+async fn a_mod_whose_id_a_jar_added_by_hand_already_provides_is_refused() {
+    let release = neoforge_jar("libx", "7.0.4");
+    let server = MockServer::start().await;
+    serve(&server, "/libx.jar", release).await;
+    let instance = Instance::new();
+    std::fs::write(
+        instance.jar("libx-dev.jar"),
+        neoforge_jar("libx", "the developer's build"),
+    )
+    .expect("write");
+    let mut recipe = recipe();
+
+    let error = install(
+        &instance,
+        &mut recipe,
+        &[addition(
+            &server,
+            "/libx.jar",
+            "libx-7.0.4.jar",
+            release,
+            "LIBX",
+        )],
+    )
+    .await
+    .expect_err("a second copy is refused");
+
+    assert!(
+        matches!(&error, PackError::DuplicateModId { provider: None, .. }),
+        "{error:?}"
+    );
+    assert_eq!(error.message_id(), "error-mod-duplicate-mod-id");
+    assert_eq!(error.failing_path(), Some(instance.jar("libx-dev.jar")));
+    assert_eq!(mod_jars(&instance), ["libx-dev.jar"]);
+    assert!(!instance.store.has_recipe());
+}
+
+#[tokio::test]
+async fn a_disabled_copy_of_the_mod_does_not_stop_an_install() {
+    let release = neoforge_jar("libx", "7.0.4");
+    let server = MockServer::start().await;
+    serve(&server, "/libx.jar", release).await;
+    let instance = Instance::new();
+    std::fs::write(
+        instance.jar("libx-7.0.3.jar.disabled"),
+        neoforge_jar("libx", "7.0.3"),
+    )
+    .expect("write");
+    let mut recipe = recipe();
+
+    install(
+        &instance,
+        &mut recipe,
+        &[addition(
+            &server,
+            "/libx.jar",
+            "libx-7.0.4.jar",
+            release,
+            "LIBX",
+        )],
+    )
+    .await
+    .expect("the loader never reads the disabled copy");
+
+    assert_eq!(
+        mod_jars(&instance),
+        ["libx-7.0.3.jar.disabled", "libx-7.0.4.jar"]
+    );
+}
+
+#[tokio::test]
+async fn two_jars_of_one_installation_that_declare_one_mod_id_are_refused() {
+    let first = neoforge_jar("libx", "a");
+    let second = neoforge_jar("libx", "b");
+    let server = MockServer::start().await;
+    serve(&server, "/a.jar", first).await;
+    serve(&server, "/b.jar", second).await;
+    let instance = Instance::new();
+    let mut recipe = recipe();
+
+    let error = install(
+        &instance,
+        &mut recipe,
+        &[
+            addition(&server, "/a.jar", "libx-a.jar", first, "LIBX-A"),
+            addition(&server, "/b.jar", "libx-b.jar", second, "LIBX-B"),
+        ],
+    )
+    .await
+    .expect_err("two copies are refused");
+
+    assert!(
+        matches!(&error, PackError::DuplicateModIdInChange { mod_id, .. } if mod_id == "libx"),
+        "{error:?}"
+    );
+    assert!(mod_jars(&instance).is_empty());
+}

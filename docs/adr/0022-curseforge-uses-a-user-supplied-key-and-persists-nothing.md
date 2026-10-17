@@ -118,7 +118,9 @@ as already present by its id, and a dependency graph never crosses catalogs.
 Bytes are the one exception. A planned file whose published SHA-1 matches a
 file the host already has from the other catalog counts as present, so the
 jar is not written a second time and stays recorded under the catalog that
-installed it. A hand-placed jar is never matched this way. While a mod requires
+installed it. A hand-placed jar is never matched this way. A different
+release of the same mod from the other catalog is not present, and installing
+it would leave two copies, so it is refused by the mod id both jars declare. While a mod requires
 a project its own catalog has no entry for on the host, the other catalog's
 dependencies are not proven unnecessary, because one of them may be that jar.
 

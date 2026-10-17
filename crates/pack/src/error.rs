@@ -372,6 +372,29 @@ pub enum PackError {
         project_id: String,
     },
 
+    /// A jar this change would write declares a mod id that a jar already in
+    /// the same folder declares.
+    ///
+    /// The loader refuses to start with two copies of one mod. Most often the
+    /// same mod installed from the other catalog at another release. `path` is
+    /// the jar already there, and `provider` the catalog the recipe says
+    /// installed it, when one did.
+    #[error("`{incoming}` declares mod id `{mod_id}`, which `{}` already provides", path.display())]
+    DuplicateModId {
+        mod_id: String,
+        incoming: String,
+        path: PathBuf,
+        provider: Option<ephervex_model::ModProvider>,
+    },
+
+    /// Two jars this change would write declare the same mod id.
+    #[error("`{first}` and `{second}` both declare mod id `{mod_id}`")]
+    DuplicateModIdInChange {
+        mod_id: String,
+        first: String,
+        second: String,
+    },
+
     /// The original failure was followed by a rollback failure.
     ///
     /// The paths in `issues` remain in launcher-owned recovery storage. They
@@ -453,6 +476,11 @@ impl PackError {
             }
             Self::DestinationCollision { .. } => "error-mod-destination-collision",
             Self::DuplicateManagedProject { .. } => "error-mod-duplicate-project",
+            Self::DuplicateModId {
+                provider: Some(_), ..
+            } => "error-mod-duplicate-mod-id-recorded",
+            Self::DuplicateModId { provider: None, .. } => "error-mod-duplicate-mod-id",
+            Self::DuplicateModIdInChange { .. } => "error-mod-duplicate-mod-id-in-change",
             Self::ManagedPathUnsafe { .. } => "error-mod-path-unsafe",
             Self::ManagedDestinationLinked { .. } => "error-mod-destination-linked",
             Self::RollbackIncomplete { .. } => "error-mod-rollback-incomplete",
@@ -485,6 +513,7 @@ impl PackError {
             | Self::RecipeDestinationOccupied { path }
             | Self::DestinationOccupied { path }
             | Self::DestinationRecorded { path, .. }
+            | Self::DuplicateModId { path, .. }
             | Self::ManagedPathUnsafe { path }
             | Self::ManagedDestinationLinked { path }
             | Self::HandPlacedNotMutable { path }
@@ -604,6 +633,27 @@ impl PackError {
                 ("provider", provider.to_string()),
                 ("project", project_id.clone()),
             ],
+            Self::DuplicateModId {
+                mod_id,
+                incoming,
+                provider,
+                ..
+            } => {
+                let mut args = vec![("mod_id", mod_id.clone()), ("incoming", incoming.clone())];
+                if let Some(provider) = provider {
+                    args.push(("provider", provider.to_string()));
+                }
+                args
+            }
+            Self::DuplicateModIdInChange {
+                mod_id,
+                first,
+                second,
+            } => vec![
+                ("mod_id", mod_id.clone()),
+                ("first", first.clone()),
+                ("second", second.clone()),
+            ],
             Self::FileHashesMissing { path }
             | Self::FileDownloadsMissing { path }
             | Self::DownloadUrlRejected { path, .. }
@@ -701,7 +751,31 @@ mod tests {
     fn every_variant() -> Vec<PackError> {
         let mut variants = archive_and_manifest_variants();
         variants.extend(file_and_recipe_variants());
+        variants.extend(duplicate_mod_variants());
         variants
+    }
+
+    /// The refusals for a jar that would be a second copy of one mod.
+    fn duplicate_mod_variants() -> Vec<PackError> {
+        vec![
+            PackError::DuplicateModId {
+                mod_id: "libx".to_owned(),
+                incoming: "mods/libx-7.0.4.jar".to_owned(),
+                path: PathBuf::from("/instance/minecraft/mods/libx-7.0.3.jar"),
+                provider: Some(ephervex_model::ModProvider::Modrinth),
+            },
+            PackError::DuplicateModId {
+                mod_id: "libx".to_owned(),
+                incoming: "mods/libx-7.0.4.jar".to_owned(),
+                path: PathBuf::from("/instance/minecraft/mods/libx-dev.jar"),
+                provider: None,
+            },
+            PackError::DuplicateModIdInChange {
+                mod_id: "libx".to_owned(),
+                first: "mods/libx-a.jar".to_owned(),
+                second: "mods/libx-b.jar".to_owned(),
+            },
+        ]
     }
 
     /// The refusals about the archive itself and the manifest inside it.

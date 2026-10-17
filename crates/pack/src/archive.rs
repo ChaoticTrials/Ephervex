@@ -587,7 +587,24 @@ impl PackArchive {
         let index = self
             .file_index(&self.under_pack_root(name))
             .ok_or(PackError::ManifestMissing { entry: name })?;
+        let bytes = self.read_into_memory(index)?;
+        self.manifests.insert(name, bytes.clone());
+        Ok(bytes)
+    }
 
+    /// Reads the file entry at `name`, counted from the archive's own root
+    /// rather than the pack's, into memory under the manifest ceiling.
+    ///
+    /// `None` when the archive has no such file.
+    pub(crate) fn read_root_entry(&mut self, name: &str) -> PackResult<Option<Vec<u8>>> {
+        let Some(index) = entry_components(name).and_then(|parts| self.file_index(&parts)) else {
+            return Ok(None);
+        };
+        self.read_into_memory(index).map(Some)
+    }
+
+    /// Reads one entry into memory, bounded by the manifest and entry ceilings.
+    fn read_into_memory(&mut self, index: usize) -> PackResult<Vec<u8>> {
         let allowance = self.allowance(&[
             ("manifest-size", self.limits.max_manifest_bytes),
             ("entry-size", self.limits.max_entry_bytes),
@@ -620,7 +637,6 @@ impl PackArchive {
         })?;
         drop(entry);
         self.spend_bytes(read);
-        self.manifests.insert(name, bytes.clone());
         Ok(bytes)
     }
 

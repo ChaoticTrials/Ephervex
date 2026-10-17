@@ -1154,3 +1154,101 @@ async fn a_dependency_another_catalogs_mod_may_need_is_kept_when_its_dependent_g
     );
     assert!(plan.orphans_unprovable);
 }
+
+#[tokio::test]
+async fn a_dependency_that_is_another_release_of_the_other_catalogs_mod_is_refused() {
+    let world = world().await;
+    let server = plain_server(&world);
+    install(&world, server, &ModInstallRequest::new("DUPLIB"))
+        .await
+        .expect("installs the library");
+    as_installed_from_curseforge(
+        &server_game_dir(&world, server),
+        &server_store(&world, server),
+        "DUPLIB",
+        Some("DupLib-curseforge.jar"),
+        Some(b"the other catalog's release"),
+    );
+
+    let refused = install(&world, server, &ModInstallRequest::new("DUPROOT"))
+        .await
+        .expect_err("a second copy of the library is refused");
+
+    assert!(
+        matches!(
+            &refused,
+            CoreError::Pack(ephervex_pack::PackError::DuplicateModId {
+                mod_id,
+                provider: Some(ModProvider::CurseForge),
+                ..
+            }) if mod_id == "duplib"
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(world.server_jars(server), ["DupLib-curseforge.jar"]);
+    assert!(
+        world
+            .server_recipe(server)
+            .managed_project(ModProvider::Modrinth, "DUPROOT")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn a_client_refuses_a_dependency_that_is_another_release_of_the_other_catalogs_mod() {
+    let world = world().await;
+    install_on_client(&world, &ModInstallRequest::new("DUPLIB")).await;
+    let root = world.app.client(world.client).expect("client").root;
+    as_installed_from_curseforge(
+        &ephervex_storage::metadata::client_game_dir(&root),
+        &SourceStore::new(ephervex_storage::metadata::source_dir(&root)),
+        "DUPLIB",
+        Some("DupLib-curseforge.jar"),
+        Some(b"the other catalog's release"),
+    );
+
+    let refused = world
+        .app
+        .install_mods(
+            InstalledHost::Instance(world.client),
+            &ModInstallRequest::new("DUPROOT"),
+            &silent(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("a second copy of the library is refused");
+
+    assert!(
+        matches!(
+            &refused,
+            CoreError::Pack(ephervex_pack::PackError::DuplicateModId { .. })
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(world.client_jars(), ["DupLib-curseforge.jar"]);
+}
+
+#[tokio::test]
+async fn the_same_jar_from_the_other_catalog_is_reused_rather_than_refused_as_a_copy() {
+    let world = world().await;
+    let server = plain_server(&world);
+    install(&world, server, &ModInstallRequest::new("DUPLIB"))
+        .await
+        .expect("installs the library");
+    as_installed_from_curseforge(
+        &server_game_dir(&world, server),
+        &server_store(&world, server),
+        "DUPLIB",
+        Some("DupLib-curseforge.jar"),
+        None,
+    );
+
+    install(&world, server, &ModInstallRequest::new("DUPROOT"))
+        .await
+        .expect("the library that is there is the one required");
+
+    assert_eq!(
+        world.server_jars(server),
+        ["DupLib-curseforge.jar", "duproot-DUPROOTV1.jar"]
+    );
+}

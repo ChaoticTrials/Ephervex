@@ -58,6 +58,7 @@ use crate::managed::{
     ManagedDestinations, RecordedJar, disabled_path, occupant, occupied, recorded_jar,
     recording_side, require_one_entry_per_project, settle_recorded_paths,
 };
+use crate::mod_ids::{IncomingJar, require_distinct_mod_ids};
 use crate::recipe::{PackFileRecipe, PackRecipe, PackSide, ProviderFileIdentity};
 use crate::store::SourceStore;
 
@@ -275,6 +276,16 @@ pub async fn mutate_managed(request: ManagedMutation<'_>) -> PackResult<ManagedM
     } else {
         fetch_all(&wanted, fetch).await?
     };
+    // Verified and not yet written, so a refusal leaves the folder untouched.
+    refuse_second_copies(
+        recipe,
+        &pending,
+        &fetched,
+        &stay_disabled,
+        &retirements,
+        game_dir,
+    )
+    .await?;
 
     // Everything from here on can leave the instance changed, so each step
     // records exactly what it did and the whole lot is undone on failure.
@@ -319,6 +330,35 @@ pub async fn mutate_managed(request: ManagedMutation<'_>) -> PackResult<ManagedM
         "mutated managed mods"
     );
     Ok(report)
+}
+
+/// Refuses writing a jar that declares the mod id of a jar the loader would
+/// still read beside it.
+///
+/// A replacement written disabled is invisible to the loader, and a jar this
+/// mutation retires is gone before anything is written, so neither counts.
+async fn refuse_second_copies(
+    recipe: &PackRecipe,
+    pending: &[(&PackFileRecipe, &Action)],
+    fetched: &[ephervex_download::DownloadOutcome],
+    stay_disabled: &BTreeSet<PathBuf>,
+    retirements: &[Retirement],
+    game_dir: &Path,
+) -> PackResult<()> {
+    let incoming = pending
+        .iter()
+        .zip(fetched)
+        .filter(|((file, _), _)| !stay_disabled.contains(&file.logical_path))
+        .map(|((file, _), outcome)| IncomingJar {
+            logical_path: file.logical_path.clone(),
+            staged: outcome.path.clone(),
+        })
+        .collect();
+    let leaving = retirements
+        .iter()
+        .map(|retirement| retirement.logical_path.clone())
+        .collect();
+    require_distinct_mod_ids(recipe, incoming, game_dir, leaving).await
 }
 
 /// Decides what to do with every requested mod, and refuses the whole mutation

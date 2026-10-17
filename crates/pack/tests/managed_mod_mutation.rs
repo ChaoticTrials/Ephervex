@@ -2069,3 +2069,140 @@ async fn planning_a_pack_owned_version_change_records_the_original_release_like_
     );
     assert_eq!(predicted, recipe);
 }
+
+// -- a second copy of one mod ---------------------------------------------
+
+/// A jar declaring one NeoForge mod id. `release` varies the bytes the way two
+/// releases of one mod do.
+fn neoforge_jar(mod_id: &str, release: &str) -> &'static [u8] {
+    use std::io::Write as _;
+    let mut bytes = Vec::new();
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
+    let options =
+        zip::write::SimpleFileOptions::default().last_modified_time(zip::DateTime::default());
+    zip.start_file("META-INF/neoforge.mods.toml", options)
+        .expect("entry");
+    write!(
+        zip,
+        "modLoader=\"javafml\"\n[[mods]]\nmodId=\"{mod_id}\"\nversion=\"{release}\"\n"
+    )
+    .expect("write");
+    zip.finish().expect("finish");
+    Box::leak(bytes.into_boxed_slice())
+}
+
+#[tokio::test]
+async fn a_new_release_replaces_the_jar_declaring_the_same_mod_id() {
+    let older = neoforge_jar("libx", "1");
+    let newer = neoforge_jar("libx", "2");
+    let server = MockServer::start().await;
+    serve(&server, "/libx-1.jar", older).await;
+    serve(&server, "/libx-2.jar", newer).await;
+    let instance = Instance::new();
+    let mut recipe = recipe();
+    let release = |route, name, body, version| {
+        entry(
+            &server,
+            route,
+            name,
+            body,
+            "LIBX",
+            version,
+            ModOrigin::UserSelected,
+        )
+    };
+    mutate(
+        &instance,
+        &mut recipe,
+        &[release("/libx-1.jar", "libx-1.jar", older, "LIBXV1")],
+        &[],
+    )
+    .await
+    .expect("installs");
+
+    mutate(
+        &instance,
+        &mut recipe,
+        &[release("/libx-2.jar", "libx-2.jar", newer, "LIBXV2")],
+        &[],
+    )
+    .await
+    .expect("the outgoing jar is no copy left beside the new one");
+
+    assert_eq!(instance.jars(), ["libx-2.jar"]);
+}
+
+#[tokio::test]
+async fn a_change_whose_new_dependency_is_another_catalogs_installed_mod_changes_nothing() {
+    let server = MockServer::start().await;
+    let instance = Instance::new();
+    let mut recipe = installed(&server, &instance).await;
+    let installed_copy = neoforge_jar("libx", "7.0.3");
+    let other_release = neoforge_jar("libx", "7.0.4");
+    serve(&server, "/libx-7.0.3.jar", installed_copy).await;
+    serve(&server, "/libx-7.0.4.jar", other_release).await;
+    serve(&server, "/root-2.jar", ROOT_V2).await;
+    let mut from_curseforge = entry(
+        &server,
+        "/libx-7.0.3.jar",
+        "libx-7.0.3.jar",
+        installed_copy,
+        "238222",
+        "5000001",
+        ModOrigin::UserSelected,
+    );
+    from_curseforge
+        .identity
+        .as_mut()
+        .expect("identity")
+        .provider = Some(ModProvider::CurseForge);
+    mutate(&instance, &mut recipe, &[from_curseforge], &[])
+        .await
+        .expect("installs the other catalog's copy");
+    let before = instance.store.read_recipe().expect("recipe");
+
+    let error = mutate(
+        &instance,
+        &mut recipe,
+        &[
+            entry(
+                &server,
+                "/root-2.jar",
+                "root-2.0.jar",
+                ROOT_V2,
+                "ROOTPROJ",
+                "ROOTV2",
+                ModOrigin::UserSelected,
+            ),
+            entry(
+                &server,
+                "/libx-7.0.4.jar",
+                "libx-7.0.4.jar",
+                other_release,
+                "LIBX",
+                "LIBXV2",
+                ModOrigin::RequiredDependency,
+            ),
+        ],
+        &[],
+    )
+    .await
+    .expect_err("a second copy of the library is refused");
+
+    assert!(
+        matches!(
+            &error,
+            PackError::DuplicateModId {
+                provider: Some(ModProvider::CurseForge),
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(
+        instance.jars(),
+        ["library-2.0.jar", "libx-7.0.3.jar", "root-1.0.jar"]
+    );
+    assert_eq!(instance.store.read_recipe().expect("recipe"), before);
+    assert_eq!(version_of(&recipe, "ROOTPROJ").as_deref(), Some("ROOTV1"));
+}
