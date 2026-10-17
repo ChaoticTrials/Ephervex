@@ -16,7 +16,7 @@ use ephervex_gui::ui::{
 };
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{
-    AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions,
+    AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions, mock_elapsed_time,
 };
 use slint::platform::{Key, PointerEventButton, WindowEvent};
 use slint::{
@@ -163,6 +163,15 @@ fn host_button(ui: &AppWindow, pane: i32) -> ElementHandle {
     button(ui, &pane_control("gui-pane-host", pane))
 }
 
+fn folder_button(ui: &AppWindow, pane: i32, host: i32) -> ElementHandle {
+    let folder = if host == CLIENT {
+        "gui-open-instance-folder"
+    } else {
+        "gui-open-server-folder"
+    };
+    button(ui, &pane_action(folder, pane))
+}
+
 fn pane_action(message: &str, pane: i32) -> String {
     lookup_args(
         "gui-pane-action",
@@ -304,6 +313,7 @@ fn each_panes_header_stays_inside_the_pane() {
             };
             let controls = [
                 host_button(&ui, id),
+                folder_button(&ui, id, host),
                 button(&ui, &pane_control("gui-pane-close", id)),
                 button(&ui, &pane_action(primary, id)),
             ];
@@ -314,6 +324,77 @@ fn each_panes_header_stays_inside_the_pane() {
                 );
             }
         }
+    }
+}
+
+/// On the smallest window the tabs make room for the folder and the layout
+/// controls beside them, so none of them is pushed out of its pane.
+#[test]
+fn a_panes_tab_row_stays_inside_the_pane_on_the_smallest_window() {
+    let ui = window();
+    ui.window().set_size(PhysicalSize::new(980, 680));
+    for (shape, panes) in shapes() {
+        let placed: Vec<(i32, i32, bool)> = panes
+            .iter()
+            .map(|pane| (pane.id, pane.host, pane.can_split_below))
+            .collect();
+        split(&ui, panes);
+        for (id, host, below) in placed {
+            let pane = pane_area(&ui, id);
+            let mut controls = vec![
+                folder_button(&ui, id, host),
+                button(&ui, &pane_control("gui-pane-close", id)),
+            ];
+            if below {
+                controls.push(button(&ui, &pane_control("gui-pane-split-below", id)));
+            }
+            controls.extend(in_pane(
+                &ui,
+                id,
+                &lookup("gui-workspace-more-surfaces"),
+                AccessibleRole::Button,
+            ));
+            for control in &controls {
+                assert!(
+                    pane.contains(Area::of(control)),
+                    "{shape}: {:?} of pane {id} is outside it",
+                    control.accessible_label()
+                );
+            }
+        }
+    }
+}
+
+/// A split pane's header opens the folder of the host that pane shows, named
+/// for that host's kind, so two panes never open each other's folder.
+#[test]
+fn a_panes_folder_button_opens_the_folder_of_its_own_host() {
+    let ui = window();
+    let opened = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&opened);
+    ui.on_open_client_folder(move |id| sink.borrow_mut().push(("client", id.to_string())));
+    let sink = Rc::clone(&opened);
+    ui.on_open_server_folder(move |id| sink.borrow_mut().push(("server", id.to_string())));
+    let (_, panes) = shapes().into_iter().next().expect("the 1:1 shape");
+    split(&ui, panes);
+
+    button(&ui, &pane_action("gui-open-server-folder", 2)).invoke_accessible_default_action();
+    button(&ui, &pane_action("gui-open-instance-folder", 1)).invoke_accessible_default_action();
+    assert_eq!(
+        opened.borrow().as_slice(),
+        [
+            ("server", "server".to_owned()),
+            ("client", "client".to_owned())
+        ]
+    );
+    for (message, pane) in [
+        ("gui-open-instance-folder", 2),
+        ("gui-open-server-folder", 1),
+    ] {
+        assert!(
+            find(&ui, &pane_action(message, pane), AccessibleRole::Button).is_none(),
+            "pane {pane} names the folder of the host it shows"
+        );
     }
 }
 
@@ -372,6 +453,42 @@ fn split_panes_offer_what_their_shape_allows() {
         button(&ui, &pane_control("gui-pane-close", pane)).invoke_accessible_default_action();
     }
     assert_eq!(closed.borrow().as_slice(), [1, 2, 3]);
+}
+
+/// Hovering a pane's glyph buttons names what they do and nothing more. The
+/// pane they belong to is already in front of the eye; only assistive
+/// technology needs it spelled out.
+#[test]
+fn a_panes_glyph_buttons_name_only_their_action_on_hover() {
+    let ui = window();
+    let (_, panes) = shapes().into_iter().next().expect("the 1:1 shape");
+    split(&ui, panes);
+    for (label, tooltip) in [
+        (
+            pane_action("gui-open-server-folder", 2),
+            lookup("gui-open-server-folder"),
+        ),
+        (
+            pane_control("gui-pane-split-below", 2),
+            lookup("gui-pane-split-below-tooltip"),
+        ),
+        (
+            pane_control("gui-pane-close", 2),
+            lookup("gui-pane-close-tooltip"),
+        ),
+    ] {
+        let shown = |text: &str| {
+            ElementHandle::find_by_accessible_label(&ui, text)
+                .filter(|element| element.size().width > 0.0)
+                .count()
+        };
+        let before = shown(&tooltip);
+        button(&ui, &label).mock_single_click(PointerEventButton::Left);
+        mock_elapsed_time(std::time::Duration::from_millis(600));
+        settle(&ui);
+        assert_eq!(shown(&tooltip), before + 1, "hovering {label}");
+        assert_eq!(shown(&label), 1, "only the button itself carries {label}");
+    }
 }
 
 /// A pane's host button names its host and opens the host picker for that

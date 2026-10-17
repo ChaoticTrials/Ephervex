@@ -8,7 +8,9 @@ import {
     FavoriteToggle,
     IconButton,
     LaunchAsButton,
-    Pill
+    Pill,
+    StatePill,
+    StateTone
 } from "../components/controls.slint";
 import { IndexComboBox } from "../components/selection.slint";
 import { BodyText, Divider, ElidedHeading, Eyebrow, Heading } from "../components/text.slint";
@@ -162,7 +164,7 @@ export component InstanceCard inherits Rectangle {
             HorizontalLayout {
                 alignment: center; spacing: 7px;
                 BodyText { text: item.storage; color: item.storage-kind == "temporary" ? Theme.warning : Theme.success; font-size: Theme.caption-size; }
-                Pill { text: item.restart-stage != "" ? GuiI18n.text("gui-state-restarting") : item.state; tone-color: item.restart-stage != "" ? Theme.warning : item.state-kind == "running" ? Theme.success : item.state-kind == "starting" ? Theme.warning : Theme.text-secondary; }
+                StatePill { state: item.state; state-kind: item.state-kind; restarting: item.restart-stage != ""; }
                 if item.creating-server-detail != "" : Pill { text: GuiI18n.text("gui-state-creating-server"); tone-color: Theme.accent; }
                 if item.needs-attention : Pill { text: GuiI18n.text("gui-attention"); tone-color: Theme.danger; }
             }
@@ -261,7 +263,7 @@ export component ServerCard inherits Rectangle {
             HorizontalLayout {
                 alignment: center; spacing: 7px;
                 BodyText { text: item.storage; color: item.storage-kind == "temporary" ? Theme.warning : Theme.success; font-size: Theme.caption-size; }
-                Pill { text: item.restart-stage != "" ? GuiI18n.text("gui-state-restarting") : item.state; tone-color: item.restart-stage != "" ? Theme.warning : item.state-kind == "running" ? Theme.success : item.state-kind == "stopped" ? Theme.text-secondary : Theme.warning; }
+                StatePill { state: item.state; state-kind: item.state-kind; restarting: item.restart-stage != ""; }
             }
             HorizontalLayout { alignment: center; spacing: 7px;
                 if item.can-start || item.can-stop : AppButton {
@@ -336,7 +338,7 @@ export component InstanceInspector inherits Rectangle {
         }
         Divider { }
         Eyebrow { text: GuiI18n.text("gui-overview"); }
-        HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-status"); } BodyText { text: item.needs-attention ? GuiI18n.text("gui-needs-attention") : item.restart-stage != "" ? GuiI18n.text("gui-state-restarting") : item.state; color: item.needs-attention || item.restart-stage != "" ? Theme.warning : item.state-kind == "running" ? Theme.success : item.state-kind == "starting" ? Theme.warning : Theme.text-secondary; } }
+        HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-status"); } BodyText { text: item.needs-attention ? GuiI18n.text("gui-needs-attention") : item.restart-stage != "" ? GuiI18n.text("gui-state-restarting") : item.state; color: item.needs-attention ? Theme.warning : StateTone.of(item.restart-stage != "" ? "restarting" : item.state-kind); } }
         HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-source"); } BodyText { text: item.source; } }
         HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-mods"); } BodyText { text: GuiI18n.count("gui-managed-count", item.mods); } }
         HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-storage"); } BodyText { text: item.storage; } }

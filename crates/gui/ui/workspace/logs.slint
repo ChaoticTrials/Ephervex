@@ -330,17 +330,34 @@ export component DiagnosticFileList inherits Rectangle {
     }
 }
 
-// What one exact Minecraft release does with one row.
-//
-// The badge says it in words rather than in color alone, and carries the
-// full sentence as its accessible label so a screen reader gets the
-// reason, not just the verdict.
+// What a crash notice offers to do about the mods: open the list, or act on it.
+component CrashModsAction inherits AppButton {
+    in property <bool> beside-the-mods;
+    in property <int> suggested;
+    callback review();
+    callback disable-suggested();
+    text: root.beside-the-mods ? GuiI18n.count("gui-crash-disable-suggested", root.suggested) : GuiI18n.text("gui-crash-review-mods");
+    tone: "primary";
+    enabled: !root.beside-the-mods || root.suggested > 0;
+    hint: GuiI18n.text("gui-hint-no-suggested-mods");
+    clicked => {
+        if root.beside-the-mods {
+            root.disable-suggested();
+        } else {
+            root.review();
+        }
+    }
+}
+
 // What the newest crash report says, above the list it points into.
 //
 // Two placements, one component: on a tab that is not the mods list it
 // offers to open that list, and on the mods list itself it offers to act on
 // it. The suggestion count is what decides whether acting is even possible;
 // a report naming only mods that are already disabled offers nothing.
+//
+// It also leads to the report itself and, away from the mods, to the log and
+// Diagnostics, unless a run-failure notice above it already does.
 export component CrashNotice inherits Rectangle {
     in property <string> report;
     in property <string> failure;
@@ -348,54 +365,100 @@ export component CrashNotice inherits Rectangle {
     in property <int> suggested;
     // Whether this sits on the panel whose rows carry the suspect marks.
     in property <bool> beside-the-mods;
+    in property <bool> routes: true;
+    // The width it is drawn at, read from a parent whose width does not
+    // depend on it: the actions' arrangement would otherwise decide the
+    // width it is chosen by. Only the routes' arrangement reads it.
+    in property <length> room;
     callback review();
     callback disable-suggested();
+    callback open-diagnostics();
+    callback open-crash-report();
+    callback open-log();
     height: content.preferred-height;
     border-radius: 6px;
     border-width: 1px;
     border-color: Theme.danger.with-alpha(0.6);
     background: Theme.danger.with-alpha(0.08);
-    content := HorizontalLayout {
+    content := VerticalLayout {
         padding: 10px;
-        spacing: 10px;
-        VerticalLayout {
-            alignment: center;
-            spacing: 3px;
-            horizontal-stretch: 1;
-            Text {
-                text: GuiI18n.text("gui-crash-title");
-                color: Theme.danger;
-                font-size: Theme.row-heading-size;
-                font-weight: 600;
-                overflow: elide;
+        spacing: 8px;
+        HorizontalLayout {
+            spacing: 10px;
+            VerticalLayout {
+                alignment: center;
+                spacing: 3px;
+                horizontal-stretch: 1;
+                Text {
+                    text: GuiI18n.text("gui-crash-title");
+                    color: Theme.danger;
+                    font-size: Theme.row-heading-size;
+                    font-weight: 600;
+                    overflow: elide;
+                }
+                // Exact, because the thrown type and its message are what a bug
+                // report has to quote.
+                BodyText {
+                    text: root.failure != "" ? root.failure : root.report;
+                    color: Theme.text-secondary;
+                    font-size: Theme.caption-size;
+                    wrap: word-wrap;
+                }
+                if root.client-code-on-server : BodyText {
+                    text: GuiI18n.text("crash-client-code-on-server");
+                    color: Theme.text-secondary;
+                    font-size: Theme.caption-size;
+                    wrap: word-wrap;
+                }
             }
-            // Exact, because the thrown type and its message are what a bug
-            // report has to quote.
-            BodyText {
-                text: root.failure != "" ? root.failure : root.report;
-                color: Theme.text-secondary;
-                font-size: Theme.caption-size;
-                wrap: word-wrap;
-            }
-            if root.client-code-on-server : BodyText {
-                text: GuiI18n.text("crash-client-code-on-server");
-                color: Theme.text-secondary;
-                font-size: Theme.caption-size;
-                wrap: word-wrap;
+            if root.beside-the-mods : VerticalLayout {
+                alignment: center;
+                spacing: 8px;
+                CrashModsAction { beside-the-mods: true; suggested: root.suggested; disable-suggested => { root.disable-suggested(); } }
+                if root.routes : AppButton { text: GuiI18n.text("gui-diagnosis-open-crash-report"); clicked => { root.open-crash-report(); } }
             }
         }
-        VerticalLayout {
-            alignment: center;
-            if !root.beside-the-mods : AppButton {
-                text: GuiI18n.text("gui-crash-review-mods");
-                tone: "primary";
-                clicked => { root.review(); }
+        if !root.beside-the-mods && !root.routes : HorizontalLayout {
+            alignment: start;
+            CrashModsAction { review => { root.review(); } }
+        }
+        // Placed by hand: the four actions go on one row, two to a row, or
+        // one to a row, whichever their own widths fit, so the choice holds
+        // for any font and text size.
+        if !root.beside-the-mods && root.routes : Rectangle {
+            property <length> gap: 8px;
+            property <length> step: Theme.control-height + self.gap;
+            property <length> inner: root.room - 20px;
+            property <int> per-row: mods.min-width + diagnostics.min-width + report.min-width + log.min-width + 3 * self.gap <= self.inner ? 4
+                : max(mods.min-width + diagnostics.min-width, report.min-width + log.min-width) + self.gap <= self.inner ? 2
+                : 1;
+            height: (4 / self.per-row) * self.step - self.gap;
+            mods := CrashModsAction {
+                x: 0px; y: 0px;
+                width: min(self.min-width, parent.inner);
+                review => { root.review(); }
             }
-            if root.beside-the-mods : AppButton {
-                text: GuiI18n.count("gui-crash-disable-suggested", root.suggested);
-                tone: "primary";
-                enabled: root.suggested > 0; hint: GuiI18n.text("gui-hint-no-suggested-mods");
-                clicked => { root.disable-suggested(); }
+            diagnostics := AppButton {
+                x: parent.per-row > 1 ? mods.min-width + parent.gap : 0px;
+                y: parent.per-row > 1 ? 0px : parent.step;
+                width: min(self.min-width, parent.inner);
+                text: GuiI18n.text("gui-run-open-diagnostics");
+                clicked => { root.open-diagnostics(); }
+            }
+            report := AppButton {
+                x: parent.per-row == 4 ? mods.min-width + diagnostics.min-width + 2 * parent.gap : 0px;
+                y: parent.per-row == 4 ? 0px : parent.per-row == 2 ? parent.step : 2 * parent.step;
+                width: min(self.min-width, parent.inner);
+                text: GuiI18n.text("gui-diagnosis-open-crash-report");
+                clicked => { root.open-crash-report(); }
+            }
+            log := AppButton {
+                x: parent.per-row == 4 ? mods.min-width + diagnostics.min-width + report.min-width + 3 * parent.gap
+                    : parent.per-row == 2 ? report.min-width + parent.gap : 0px;
+                y: parent.per-row == 4 ? 0px : parent.per-row == 2 ? parent.step : 3 * parent.step;
+                width: min(self.min-width, parent.inner);
+                text: GuiI18n.text("gui-diagnosis-open-log");
+                clicked => { root.open-log(); }
             }
         }
     }

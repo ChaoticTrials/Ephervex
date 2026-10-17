@@ -218,14 +218,17 @@ export component FavoriteToggle inherits Rectangle {
 export component IconButton inherits Rectangle {
     in property <image> icon;
     in property <string> accessible-name;
+    // What hover says the glyph does. The accessible name unless that has to
+    // carry context the eye already has, such as which pane it belongs to.
+    in property <string> tooltip: root.accessible-name;
     in property <bool> enabled: true;
     // Why this button cannot be pressed, shown on hover while it is
     // disabled.
     in property <string> hint;
     callback clicked();
-    // A glyph alone does not say what it does, so hover shows the same
-    // name assistive technology hears, or the reason while it is disabled.
-    private property <string> hover-note: !root.enabled && root.hint != "" ? root.hint : root.accessible-name;
+    // A glyph alone does not say what it does, so hover names it, or gives
+    // the reason while it is disabled.
+    private property <string> hover-note: !root.enabled && root.hint != "" ? root.hint : root.tooltip;
     width: Theme.control-height;
     height: Theme.control-height;
     border-radius: 6px;
@@ -726,6 +729,37 @@ export component Pill inherits Rectangle {
         horizontal-alignment: center;
         vertical-alignment: center;
     }
+}
+
+// The tone of a host's lifecycle state, the same wherever the host is
+// drawn. A settled state takes `rest`.
+export global StateTone {
+    pure public function of-or(state-kind: string, rest: color) -> color {
+        if (state-kind == "running") {
+            return Theme.success;
+        }
+        if (state-kind == "failed") {
+            return Theme.danger;
+        }
+        if (state-kind == "starting" || state-kind == "stopping" || state-kind == "restarting"
+            || state-kind == "orphaned" || state-kind == "unknown" || state-kind == "needs-recovery") {
+            return Theme.warning;
+        }
+        return rest;
+    }
+    pure public function of(state-kind: string) -> color {
+        return of-or(state-kind, Theme.text-secondary);
+    }
+}
+
+// A host's lifecycle state. A restart under way reads as Restarting
+// whatever the state beneath it says.
+export component StatePill inherits Pill {
+    in property <string> state;
+    in property <string> state-kind;
+    in property <bool> restarting;
+    text: root.restarting ? GuiI18n.text("gui-state-restarting") : root.state;
+    tone-color: StateTone.of(root.restarting ? "restarting" : root.state-kind);
 }
 
 // A pill that can be pressed: a short status a person can act on. It reaches

@@ -2277,6 +2277,7 @@ gui-launch-connect = Launch & Connect to { $value }
 gui-open-workspace = Open Workspace
 gui-create-linked-server = Create Linked Server
 gui-open-folder = Open Folder
+gui-open-instance-folder = Open Instance Folder
 gui-duplicate-instance = Duplicate
 # Shown in place of the action while the game is running. A copy taken then
 # would mix files the game is still writing.
@@ -2385,6 +2386,8 @@ gui-pane-host = Host shown in { $value }
 gui-workspace-more-surfaces = More
 gui-pane-split-below = Add a pane below { $value }
 gui-pane-close = Close { $value }
+gui-pane-split-below-tooltip = Add a pane below
+gui-pane-close-tooltip = Close pane
 # A host action inside one pane, named with the pane: (action, pane).
 gui-pane-action = { $first } ({ $second })
 gui-instance = Instance

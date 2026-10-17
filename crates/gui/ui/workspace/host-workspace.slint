@@ -1,7 +1,7 @@
 // A host workspace's chrome: pane header, surface tabs, workflow banner, and the pane host picker.
 
 import { HostIcon, LoaderGlyph } from "../components/artwork.slint";
-import { AppButton, BusySpinner, IconButton, LaunchAsButton, Pill, PillButton } from "../components/controls.slint";
+import { AppButton, BusySpinner, IconButton, LaunchAsButton, Pill, PillButton, StatePill, StateTone } from "../components/controls.slint";
 import { BodyText, Divider, Heading } from "../components/text.slint";
 import { GuiI18n, HostIcons } from "../globals.slint";
 import {
@@ -47,6 +47,7 @@ export component WorkspaceTab inherits Rectangle {
         font-weight: root.selected ? 600 : 400;
         horizontal-alignment: center;
         vertical-alignment: center;
+        overflow: elide;
     }
     Rectangle {
         x: 12px; y: parent.height - 2px; width: parent.width - 24px; height: 2px;
@@ -82,20 +83,21 @@ export component PaneHostButton inherits Rectangle {
 }
 
 // A host's surfaces as tabs: as many as fit, then More, which lists the
-// rest. The selected surface always keeps a tab of its own.
+// rest. The selected surface always keeps a tab of its own. A bar too narrow
+// for two tabs at full width shares itself between one tab and More.
 export component SurfaceTabs inherits Rectangle {
     in property <[WorkspaceSurfaceRow]> surfaces;
     in property <string> selected;
     in property <int> selected-index;
     callback chosen(string);
-    property <length> tab-width: Theme.workspace-tab-width;
+    property <length> tab-width: min(Theme.workspace-tab-width, root.width / 2);
     property <bool> all-fit: root.surfaces.length * root.tab-width <= root.width;
     // Tabs shown besides More, never fewer than the selected one.
     property <int> fitting: root.all-fit ? root.surfaces.length : max(1, floor((root.width - root.tab-width) / root.tab-width));
     property <bool> selected-hidden: root.selected-index >= root.fitting;
     height: 38px;
     horizontal-stretch: 1;
-    min-width: 2 * root.tab-width;
+    min-width: 2 * Theme.workspace-tab-min-width;
     // Placed by hand rather than laid out: how many tabs fit depends on
     // this bar's width, which a layout would in turn take from the tabs.
     property <int> leading: root.fitting - (root.selected-hidden ? 1 : 0);
@@ -230,6 +232,8 @@ export component HostWorkspace inherits Rectangle {
     in property <string> pane-label;
     // "Client" or "Server", beside the host's name in a compact header.
     in property <string> host-kind-label;
+    // What a compact header's folder glyph opens, named for the host's kind.
+    in property <string> folder-label;
     in property <int> surface-choice;
     in property <bool> can-split-beside;
     in property <bool> can-split-below;
@@ -245,7 +249,7 @@ export component HostWorkspace inherits Rectangle {
     in property <string> java-tone-label;
     in property <string> java-origin;
     callback open-java();
-    property <color> pair-tone: root.pair-state-kind == "starting" || root.pair-state-kind == "restarting" ? Theme.warning : root.pair-state-kind == "running" ? Theme.success : Theme.accent;
+    property <color> pair-tone: StateTone.of-or(root.pair-state-kind, Theme.accent);
     callback choose-host();
     callback split-beside();
     callback split-below();
@@ -283,7 +287,7 @@ export component HostWorkspace inherits Rectangle {
                         accessible-name: GuiI18n.value("gui-pane-host", root.pane-label);
                         clicked => { root.choose-host(); }
                     }
-                    VerticalLayout { alignment: center; Pill { text: root.restart-stage != "" ? GuiI18n.text("gui-state-restarting") : root.status; tone-color: root.restart-stage != "" || root.status-kind == "starting" ? Theme.warning : root.status-kind == "running" ? Theme.success : Theme.text-secondary; } }
+                    VerticalLayout { alignment: center; StatePill { state: root.status; state-kind: root.status-kind; restarting: root.restart-stage != ""; } }
                     if root.paired && root.width >= 520px : VerticalLayout { alignment: center; Pill { text: root.pair-label; tone-color: root.pair-tone; } }
                     if root.java-summary != "" && root.width >= 640px : VerticalLayout { alignment: center; JavaRuntimePill { summary: root.java-summary; origin: root.java-origin; tone: root.java-tone; tone-label: root.java-tone-label; clicked => { root.open-java(); } } }
                 }
@@ -306,15 +310,16 @@ export component HostWorkspace inherits Rectangle {
                     selected-index: root.surface-choice;
                     chosen(surface) => { root.surface-selected(surface); }
                 }
-                if root.can-split-below : IconButton { icon: @image-url("../../../../assets/icons/split-below.svg"); accessible-name: GuiI18n.value("gui-pane-split-below", root.pane-label); clicked => { root.split-below(); } }
-                if root.can-close : IconButton { icon: @image-url("../../../../assets/icons/close.svg"); accessible-name: GuiI18n.value("gui-pane-close", root.pane-label); clicked => { root.close-pane(); } }
+                IconButton { icon: @image-url("../../../../assets/icons/folder.svg"); accessible-name: GuiI18n.values("gui-pane-action", root.folder-label, root.pane-label); tooltip: root.folder-label; clicked => { root.open-folder(); } }
+                if root.can-split-below : IconButton { icon: @image-url("../../../../assets/icons/split-below.svg"); accessible-name: GuiI18n.value("gui-pane-split-below", root.pane-label); tooltip: GuiI18n.text("gui-pane-split-below-tooltip"); clicked => { root.split-below(); } }
+                if root.can-close : IconButton { icon: @image-url("../../../../assets/icons/close.svg"); accessible-name: GuiI18n.value("gui-pane-close", root.pane-label); tooltip: GuiI18n.text("gui-pane-close-tooltip"); clicked => { root.close-pane(); } }
             }
         }
         if !root.compact : HorizontalLayout {
             spacing: 12px;
             AppButton { text: root.back-label; clicked => { root.back(); } }
             Heading { text: root.title; font-size: Theme.workspace-title-size; overflow: elide; }
-            VerticalLayout { alignment: center; Pill { text: root.restart-stage != "" ? GuiI18n.text("gui-state-restarting") : root.status; tone-color: root.restart-stage != "" || root.status-kind == "starting" ? Theme.warning : root.status-kind == "running" ? Theme.success : Theme.text-secondary; } }
+            VerticalLayout { alignment: center; StatePill { state: root.status; state-kind: root.status-kind; restarting: root.restart-stage != ""; } }
             if root.paired : VerticalLayout { alignment: center; Pill { text: root.pair-label; tone-color: root.pair-tone; } }
             if root.java-summary != "" : VerticalLayout { alignment: center; JavaRuntimePill { summary: root.java-summary; origin: root.java-origin; tone: root.java-tone; tone-label: root.java-tone-label; clicked => { root.open-java(); } } }
             Rectangle { horizontal-stretch: 1; }
@@ -413,7 +418,7 @@ export component HostPickerCard inherits Rectangle {
                 }
                 BodyText { text: root.item.summary; overflow: elide; }
             }
-            VerticalLayout { alignment: center; Pill { text: root.item.state; tone-color: root.item.state-kind == "running" ? Theme.success : root.item.state-kind == "starting" ? Theme.warning : Theme.text-secondary; } }
+            VerticalLayout { alignment: center; StatePill { state: root.item.state; state-kind: root.item.state-kind; } }
         }
         for server in root.item.linked : Rectangle {
             property <bool> current: root.current-kind == "server" && root.current-id == server.id;
@@ -431,7 +436,7 @@ export component HostPickerCard inherits Rectangle {
                 if server.icon-slot >= 0 : VerticalLayout { alignment: center; Image { width: 22px; height: 22px; source: HostIcons.images[server.icon-slot]; image-fit: contain; } }
                 Text { text: GuiI18n.text("gui-server"); color: Theme.text-muted; font-size: Theme.caption-size; vertical-alignment: center; }
                 Text { text: server.name; color: Theme.text; font-size: Theme.body-size; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
-                VerticalLayout { alignment: center; Pill { text: server.state; tone-color: server.state-kind == "running" ? Theme.success : server.state-kind == "starting" ? Theme.warning : Theme.text-secondary; } }
+                VerticalLayout { alignment: center; StatePill { state: server.state; state-kind: server.state-kind; } }
             }
         }
     }

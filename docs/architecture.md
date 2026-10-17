@@ -320,9 +320,9 @@ Split beside; a full-height pane of a split offers a pane below it; every pane
 of a split can be closed, and closing settles on the next smaller shape in
 reading order, down to the single pane. A new pane shows the same host's
 Overview. Each pane of a split carries a compact header: the host, its state,
-its Restart and primary action on one row, and the surface tabs and layout
-controls on the next. A pane too narrow for the host and its actions on one
-row moves the actions to a row of their own under the host.
+its Restart and primary action on one row, and the surface tabs, the host's
+folder, and the layout controls on the next. A pane too narrow for the host and
+its actions on one row moves the actions to a row of their own under the host.
 The host opens a picker of cards like the home screen:
 every client, with its linked servers on its card, and the servers the Servers
 page lists, running hosts first. Clients rank by what runs on their card: the
@@ -339,7 +339,9 @@ The layout owns composition only (see ADR 0039). The controller renders one
 host view per shown host and one row per pane pointing at it, and every feature
 (snapshots, runtime settings, server properties, mod lists and catalog
 searches, isolation, Diagnostics and bundles, workflow status) writes by host,
-so every pane on a host reads the same state. What a single pane is looking at
+so every pane on a host reads the same state. A host's lifecycle state is drawn
+in the same tone wherever it is shown: changing or needing a look, running,
+failed, or settled. What a single pane is looking at
 stays with the pane: each Logs or Console pane has its own log viewer, and the
 worker follows each client's log for as long as a pane reads it. The
 single-flight guards (the isolation change, the diagnosis or fix, a host's
@@ -415,7 +417,9 @@ failed send keeps it for correction. Feedback names the target server. Sending a
 
 Logs distinguishes launcher-captured output from files written by Minecraft.
 Its folder action follows that distinction, and Overview offers direct paths
-to Console and crash reports. These shortcuts reuse the existing pane log
+to Console and crash reports. The notice for a server's newest crash report
+leads to that report, the log, and Diagnostics, unless the failed-run notice
+above it already offers them. These shortcuts reuse the existing pane log
 viewers and source ownership; they do not add another subscription or change
 workspace composition (ADR 0039).
 
