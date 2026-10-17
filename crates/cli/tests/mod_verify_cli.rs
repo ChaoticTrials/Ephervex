@@ -279,3 +279,31 @@ fn shared_verification_refuses_a_cached_version_document_that_no_longer_matches_
         "integrity was reported from altered metadata: {stdout}"
     );
 }
+
+#[test]
+fn shared_with_a_server_is_a_usage_error() {
+    let sandbox = Sandbox::new();
+
+    let output = sandbox.run(&[
+        "mod",
+        "verify",
+        "--server",
+        "00000000-0000-4000-8000-000000000002",
+        "--shared",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a server has no shared files to check, so the flag is refused: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--shared") && stderr.contains("--server"),
+        "the error names both flags: {stderr}"
+    );
+    assert!(
+        !stderr.contains("No such server"),
+        "the server was looked up despite the refused flag: {stderr}"
+    );
+}

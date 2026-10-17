@@ -489,8 +489,9 @@ enum ModCommand {
         /// rather than under their own digests, so nothing re-checks them once
         /// they are written. Their digests come from the release's metadata,
         /// which has to have been cached already - launch the instance once if
-        /// it has not.
-        #[arg(long, requires = "instance")]
+        /// it has not. Only a client instance has them, so this cannot be
+        /// combined with --server.
+        #[arg(long, requires = "instance", conflicts_with = "server")]
         shared: bool,
     },
     /// Replace every file this instance is missing or holding wrongly.
@@ -5536,16 +5537,24 @@ async fn run_mod_verify(
     shared: bool,
     json: bool,
 ) -> anyhow::Result<()> {
+    let host = host.host()?;
+    let shared_instance = match (shared, host) {
+        (false, _) => None,
+        (true, InstalledHost::Instance(instance)) => Some(instance),
+        (true, InstalledHost::Server(_)) => {
+            anyhow::bail!("--shared checks a client instance's shared files; a server has none")
+        }
+    };
     let report = app
         .verify_host(
-            host.host()?,
+            host,
             &OperationReporter::silent("verifying-instance"),
             &CancellationToken::new(),
         )
         .await?;
-    let artifacts = match (shared, host.instance) {
-        (true, Some(instance)) => Some(app.verify_shared_artifacts(instance).await?),
-        _ => None,
+    let artifacts = match shared_instance {
+        Some(instance) => Some(app.verify_shared_artifacts(instance).await?),
+        None => None,
     };
     print_verification(&report, artifacts.as_ref(), json);
     let shared_sound = artifacts
