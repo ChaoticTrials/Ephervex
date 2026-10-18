@@ -127,7 +127,7 @@ pub use disk_usage::{
     CategoryUsage, DiskUsageReport, RetentionUsage, StorageCategory, StorageRetention,
 };
 pub use download_watch::{DownloadWatcher, RESCAN_INTERVAL, WatchTarget};
-pub use error::{CoreError, CoreResult, ErrorChain, ProvidedDependency};
+pub use error::{CoreError, CoreResult, ErrorChain, ProvidedDependency, Remedy};
 pub use health::{
     ApplicationIdentity, ArtifactCacheHealth, BundledDataHealth, BundledDocumentHealth,
     ConfigurationHealth, CredentialBackendHealth, DirectoryHealth, DirectoryState,

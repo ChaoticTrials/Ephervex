@@ -489,6 +489,18 @@ pub enum CoreError {
     },
 }
 
+/// The next step a failure points to, for a frontend to offer as an action.
+///
+/// Typed so a frontend never decides what to offer by reading a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Remedy {
+    /// Check the files the host launches from, with `App::verify_host` and
+    /// `App::verify_shared_artifacts`. Offered when a stored file is damaged or
+    /// unreadable, never for a download that was refused.
+    VerifyHost,
+}
+
 /// A dependency that a jar already on a host provides, as a refusal names it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProvidedDependency {
@@ -823,7 +835,25 @@ impl CoreError {
     /// this as a problem to fix rather than a check it had to skip.
     #[must_use]
     pub const fn is_damaged_local_data(&self) -> bool {
-        matches!(self, Self::Minecraft(error) if error.is_damaged_local_data())
+        match self {
+            Self::Minecraft(error) => error.is_damaged_local_data(),
+            Self::Launch(error) => error.is_damaged_local_data(),
+            _ => false,
+        }
+    }
+
+    /// The next step this failure points to, where there is one.
+    ///
+    /// A damaged stored copy is the case where checking the host's files is
+    /// the right next move, so a frontend can route the failure into a
+    /// verification without matching on the error hierarchy.
+    #[must_use]
+    pub const fn remedy(&self) -> Option<Remedy> {
+        if self.is_damaged_local_data() {
+            Some(Remedy::VerifyHost)
+        } else {
+            None
+        }
     }
 
     /// Whether the user canceled rather than something failing.
@@ -1377,6 +1407,47 @@ mod tests {
             "a document a provider served wrong is not a damaged local copy"
         );
         assert!(!CoreError::from(MinecraftError::unsupported("1.7.10")).is_damaged_local_data());
+    }
+
+    #[test]
+    fn a_damaged_stored_copy_points_to_verifying_the_host() {
+        let natives = CoreError::from(LaunchError::Natives(
+            ephervex_minecraft::NativesError::Unreadable {
+                path: PathBuf::from("/store/libraries/lwjgl-natives.jar"),
+                source: std::io::Error::other("bad zip"),
+            },
+        ));
+        let metadata = CoreError::from(MinecraftError::CachedVersionMetadataDamaged {
+            id: "1.21.1".to_owned(),
+        });
+
+        assert!(natives.is_damaged_local_data());
+        assert_eq!(natives.remedy(), Some(Remedy::VerifyHost));
+        assert_eq!(metadata.remedy(), Some(Remedy::VerifyHost));
+    }
+
+    #[test]
+    fn failures_that_are_not_a_damaged_stored_copy_offer_no_remedy() {
+        let refused_download = CoreError::from(LaunchError::download(
+            "client.jar",
+            ephervex_download::DownloadError::HashMismatch {
+                url: "https://example.invalid/client.jar".to_owned(),
+                algorithm: ephervex_model::HashAlgorithm::Sha1,
+                expected: "aa".to_owned(),
+                actual: "bb".to_owned(),
+            },
+        ));
+
+        assert_eq!(
+            refused_download.remedy(),
+            None,
+            "a download refused for its digest was never stored"
+        );
+        assert_eq!(CoreError::from(LaunchError::Canceled).remedy(), None);
+        assert_eq!(
+            CoreError::from(MinecraftError::unsupported("1.7.10")).remedy(),
+            None
+        );
     }
 
     #[test]

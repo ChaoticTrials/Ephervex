@@ -41,7 +41,7 @@ use ephervex_core::{
 };
 use ephervex_core::{
     InstalledStandIn, LinkedStandIns, LinkedTargetFailure, LinkedTargetOutcome, PlanWarning,
-    PlannedMod, PropertiesTakeEffect, ProvidedDependency,
+    PlannedMod, PropertiesTakeEffect, ProvidedDependency, Remedy,
 };
 use ephervex_i18n::{
     Arg, has_attribute, lookup, lookup_args, lookup_attribute, lookup_attribute_args,
@@ -1962,6 +1962,8 @@ pub enum Event {
     RunFailed {
         host: InstalledHost,
         failure: String,
+        /// The next step the failure points to, when it points to one.
+        remedy: Option<Remedy>,
         view: Option<Box<DiagnosisView>>,
         // A newer run of the host invalidates a quick diagnosis still in flight.
         revision: RunRevision,
@@ -3591,7 +3593,7 @@ fn run_worker(
                             &app,
                             &events,
                             InstalledHost::Server(server),
-                            Some(failure),
+                            Some(failure.into()),
                             RunRevision::Server(revision),
                         ));
                     },
@@ -6900,13 +6902,29 @@ fn end_client_run() -> RunRevision {
     RunRevision::Client(RUN_CLOCK.fetch_add(1, Ordering::SeqCst))
 }
 
+/// A failed run as its notice reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunFailure {
+    message: String,
+    remedy: Option<Remedy>,
+}
+
+impl From<String> for RunFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            remedy: None,
+        }
+    }
+}
+
 /// Explains a run that just failed with a diagnosis that hashes nothing, so
 /// it is quick and never mistaken for the full check.
 async fn explain_failed_run(
     app: &App,
     events: &Sender<Event>,
     host: InstalledHost,
-    failure: Option<String>,
+    failure: Option<RunFailure>,
     revision: RunRevision,
 ) {
     let Some(failure) = failure else {
@@ -6924,7 +6942,8 @@ async fn explain_failed_run(
         .map(|diagnosis| Box::new(diagnosis_view::diagnosis_view(&diagnosis, &localized_error)));
     let _ = events.send(Event::RunFailed {
         host,
-        failure,
+        failure: failure.message,
+        remedy: failure.remedy,
         view,
         revision,
     });
@@ -6970,12 +6989,12 @@ fn server_exit_failure(exit: &ephervex_core::ServerExit) -> Option<String> {
 fn launch_failure(
     result: &CoreResult<ephervex_core::LaunchOutcome>,
     stopped: bool,
-) -> Option<String> {
+) -> Option<RunFailure> {
     if stopped {
         return None;
     }
     match result {
-        Ok(outcome) => launch_exit_failure(outcome),
+        Ok(outcome) => launch_exit_failure(outcome).map(RunFailure::from),
         Err(error) => launch_error_failure(error),
     }
 }
@@ -6994,11 +7013,14 @@ fn game_exit_failure(exit: Option<ephervex_core::GameExit>) -> Option<String> {
         .then(|| lookup("gui-run-exited-with-error"))
 }
 
-fn launch_error_failure(error: &CoreError) -> Option<String> {
+fn launch_error_failure(error: &CoreError) -> Option<RunFailure> {
     if error.is_cancellation() || error.requires_interactive_login() {
         None
     } else {
-        Some(run_error_text(error))
+        Some(RunFailure {
+            message: run_error_text(error),
+            remedy: error.remedy(),
+        })
     }
 }
 
@@ -7009,12 +7031,12 @@ fn connect_client_failure(
     result: &CoreResult<ephervex_core::LaunchAndConnectOutcome>,
     server_ready: bool,
     stopped: bool,
-) -> Option<String> {
+) -> Option<RunFailure> {
     if stopped {
         return None;
     }
     match result {
-        Ok(outcome) => launch_exit_failure(&outcome.launch),
+        Ok(outcome) => launch_exit_failure(&outcome.launch).map(RunFailure::from),
         Err(error) if server_ready => launch_error_failure(error),
         Err(_) => None,
     }
@@ -15031,6 +15053,19 @@ mod tests {
     }
 
     #[test]
+    fn a_launch_failure_keeps_the_remedy_core_names_for_it() {
+        let error = CoreError::from(ephervex_server::ServerError::NotInstalled);
+        let failure = launch_error_failure(&error).expect("a failure");
+
+        assert_eq!(failure.remedy, error.remedy());
+        assert_eq!(failure.remedy, None);
+        assert_eq!(
+            launch_failure(&Err(error), false).map(|failure| failure.remedy),
+            Some(None)
+        );
+    }
+
+    #[test]
     fn a_connect_run_fails_the_client_only_once_the_server_is_ready() {
         let error = || -> CoreResult<ephervex_core::LaunchAndConnectOutcome> {
             Err(ephervex_server::ServerError::NotInstalled.into())
@@ -17088,7 +17123,7 @@ mod tests {
             &app,
             &events,
             host,
-            Some("unexpected exit".to_owned()),
+            Some("unexpected exit".to_owned().into()),
             RunRevision::Server(1),
         )
         .await;

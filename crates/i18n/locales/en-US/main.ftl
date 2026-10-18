@@ -1775,6 +1775,7 @@ gui-run-server-stopped-before-ready = The server stopped before it finished star
 gui-run-likely-cause = Likely cause: { $cause }
 gui-run-no-cause = Diagnostics found no configuration problem. The crash report or log has the details.
 gui-run-open-diagnostics = Open Diagnostics
+gui-run-verify-host = Verify files
 gui-run-dismiss = Dismiss
 
 operation-creating-snapshot = Creating snapshot

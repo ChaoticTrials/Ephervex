@@ -98,6 +98,9 @@ struct RunNotice {
     /// A start refused for missing Minecraft EULA consent, which offers the
     /// EULA review rather than Diagnostics.
     eula_refused: bool,
+    /// The failure points at a damaged stored file, which offers to verify the
+    /// host's files.
+    verify_suggested: bool,
 }
 
 /// What the Diagnostics surface is choosing to put in a bundle for its host.
@@ -512,6 +515,7 @@ fn render(workspace: &Workspace, state: &DiagnosisFlowState, host: InstalledHost
             .unwrap_or_default()
             .into();
         view.run_eula_refused = run.is_some_and(|run| run.eula_refused);
+        view.run_verify_suggested = run.is_some_and(|run| run.verify_suggested);
         write_bundle(view, bundle);
     });
 }
@@ -686,6 +690,7 @@ pub(super) fn apply_run_failed(
     state: &mut DiagnosisFlowState,
     host: InstalledHost,
     failure: String,
+    remedy: Option<ephervex_core::Remedy>,
     view: Option<DiagnosisView>,
 ) {
     // The notice sits on the host's other surfaces too, so a shown host gets
@@ -722,6 +727,7 @@ pub(super) fn apply_run_failed(
         likely,
         report: view.as_ref().and_then(|view| view.crash_report.clone()),
         eula_refused: false,
+        verify_suggested: remedy == Some(ephervex_core::Remedy::VerifyHost),
     });
     // Work the user started is newer than anything this pass could say.
     if let Some(view) = view
@@ -761,6 +767,7 @@ pub(super) fn apply_start_refused(
         likely: String::new(),
         report: None,
         eula_refused: true,
+        verify_suggested: false,
     });
     render(workspace, state, host);
 }
@@ -996,6 +1003,13 @@ fn register_work(ui: &AppWindow, commands: &Sender<Command>, workspace: &Workspa
         };
         let mut state = views.diagnosis.borrow_mut();
         if state.host(host).is_none() {
+            return;
+        }
+        // Hashing files while another change rewrites them would report faults
+        // that are only the change in flight. The Diagnose button is disabled
+        // for the same reason; this covers the other places that can ask.
+        if ui.get_host_busy_id() == host.id() {
+            ui.invoke_present_toast(lookup("gui-hint-busy").into(), true);
             return;
         }
         let Some(request) = state.dispatch(host, Work::Diagnose) else {

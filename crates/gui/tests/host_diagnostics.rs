@@ -459,6 +459,47 @@ fn a_failed_run_is_explained_on_the_client_overview_with_a_way_to_diagnostics() 
     );
 }
 
+#[test]
+fn a_failure_pointing_at_a_damaged_file_offers_to_verify_the_host_and_dismisses_itself() {
+    let ui = window();
+    let requests = support::follow_surface_requests(&ui);
+    let asked = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&asked);
+    ui.on_diagnose_host(move |kind, id| sink.borrow_mut().push((kind.to_string(), id.to_string())));
+    let dismissed = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&dismissed);
+    ui.on_dismiss_run_failure(move |kind, id| {
+        sink.borrow_mut().push((kind.to_string(), id.to_string()));
+    });
+    let row = instance();
+    let id = row.id.to_string();
+    client_workspace(&ui, row);
+    support::update_host(&ui, 0, |view| {
+        view.run_failure_title = lookup("gui-run-failed-client").into();
+        view.run_failure = "One of the native library archives could not be read.".into();
+    });
+    settle(&ui);
+    assert!(
+        find_button(&ui, "gui-run-verify-host").is_none(),
+        "a failure with no stored file to blame offers no verification"
+    );
+
+    support::update_host(&ui, 0, |view| view.run_verify_suggested = true);
+    settle(&ui);
+    button(&ui, "gui-run-verify-host").mock_single_click(PointerEventButton::Left);
+    settle(&ui);
+
+    assert_eq!(
+        asked.borrow().as_slice(),
+        [("client".to_owned(), id.clone())]
+    );
+    assert_eq!(
+        requests.borrow().last(),
+        Some(&(1, "Diagnostics".to_owned()))
+    );
+    assert_eq!(dismissed.borrow().as_slice(), [("client".to_owned(), id)]);
+}
+
 /// A server whose run failed, as the controller shows it after a quick
 /// diagnosis.
 fn failed_server(ui: &AppWindow, crash_report: &str) {

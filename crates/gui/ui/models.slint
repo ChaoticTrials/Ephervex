@@ -848,6 +848,9 @@ export struct HostView {
     // The notice is a start refused for missing Minecraft EULA consent, not a
     // failed run.
     run-eula-refused: bool,
+    // The failure points at a damaged stored file, so the notice offers to
+    // verify the host's files.
+    run-verify-suggested: bool,
     // The diagnostic bundle being chosen for the host.
     bundle-parts: [BundlePartRow],
     bundle-selection: string,

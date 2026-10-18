@@ -8037,6 +8037,7 @@ fn apply_run_failure(
     lifecycle: &RefCell<HostLifecycle>,
     host: InstalledHost,
     failure: String,
+    remedy: Option<ephervex_core::Remedy>,
     view: Option<Box<crate::diagnosis_view::DiagnosisView>>,
     revision: backend::RunRevision,
 ) {
@@ -8056,6 +8057,7 @@ fn apply_run_failure(
             &mut workspace.diagnosis.borrow_mut(),
             host,
             failure,
+            remedy,
             view.map(|view| *view),
         );
     }
@@ -8496,9 +8498,10 @@ fn apply_event(
         Event::RunFailed {
             host,
             failure,
+            remedy,
             view,
             revision,
-        } => apply_run_failure(workspace, lifecycle, host, failure, view, revision),
+        } => apply_run_failure(workspace, lifecycle, host, failure, remedy, view, revision),
         Event::BundlePlanned { host, parts } => {
             diagnosis_flow::apply_bundle_plan(
                 workspace,
@@ -12196,6 +12199,7 @@ mod tests {
             &mut workspace.diagnosis.borrow_mut(),
             host,
             lookup("gui-run-exited-with-error"),
+            None,
             Some(view),
         );
 
@@ -12226,6 +12230,48 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_run_offers_verification_only_when_its_failure_names_a_remedy() {
+        let ui = test_window();
+        let (workspace, _commands) = test_workspace_sending(&ui);
+        diagnosis_flow::register(&ui, &workspace.commands, &workspace);
+        let host = client_host();
+        workspace.open(&ui, host, Surface::Overview);
+
+        for (remedy, offered) in [
+            (None, false),
+            (Some(ephervex_core::Remedy::VerifyHost), true),
+        ] {
+            diagnosis_flow::apply_run_failed(
+                &workspace,
+                &mut workspace.diagnosis.borrow_mut(),
+                host,
+                lookup("gui-run-exited-with-error"),
+                remedy,
+                None,
+            );
+            assert_eq!(first_view(&ui).run_verify_suggested, offered);
+            ui.invoke_dismiss_run_failure("client".into(), host.id().into());
+            assert!(!first_view(&ui).run_verify_suggested);
+        }
+    }
+
+    #[test]
+    fn diagnosing_is_refused_while_another_change_rewrites_the_host() {
+        let (ui, _workspace, commands, host) = diagnostics_surface();
+
+        ui.set_host_busy_id(host.id().into());
+        ui.invoke_diagnose_host("client".into(), host.id().into());
+        assert!(commands.try_recv().is_err());
+
+        ui.set_host_busy_id("elsewhere".into());
+        ui.invoke_diagnose_host("client".into(), host.id().into());
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::DiagnoseHost { .. })
+        ));
+    }
+
+    #[test]
     fn a_failed_run_does_not_replace_a_diagnosis_the_user_started() {
         let (ui, workspace, commands, host) = diagnostics_surface();
         ui.invoke_diagnose_host("client".into(), host.id().into());
@@ -12235,6 +12281,7 @@ mod tests {
             &mut workspace.diagnosis.borrow_mut(),
             host,
             lookup("gui-run-exited-with-error"),
+            None,
             Some(mixed()),
         );
         assert_eq!(first_view(&ui).diagnosis_state, "working");
@@ -13900,6 +13947,7 @@ mod tests {
             host,
             lookup("gui-run-exited-with-error"),
             None,
+            None,
         );
     }
 
@@ -13982,6 +14030,7 @@ mod tests {
             &workspace.lifecycle,
             client,
             lookup("gui-run-exited-with-error"),
+            None,
             None,
             backend::RunRevision::Client(ended),
         );

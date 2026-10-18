@@ -257,15 +257,19 @@ export component FixPanel inherits Rectangle {
 // Beside a host whose run just failed: what failed, what a quick diagnosis
 // thinks caused it, and where to look next. A server start refused for
 // missing EULA consent never ran, so it offers the EULA review instead. It
-// never opens anything by itself.
+// never opens anything by itself. A failure that points at a damaged stored
+// file also offers to verify the host's files.
 export component RunFailureNotice inherits Rectangle {
     in property <HostView> host;
     callback open-diagnostics();
     callback open-crash-report();
     callback open-log();
     callback review-eula();
+    callback verify-host();
     callback dismiss();
-    property <bool> narrow: self.width < 560px;
+    // The extra button needs more room before the row stacks.
+    property <bool> narrow: self.width < (root.host.run-verify-suggested ? 680px : 560px);
+    property <string> diagnostics-tone: root.host.run-verify-suggested ? "default" : "primary";
     property <color> tone: root.host.run-eula-refused ? Theme.warning : Theme.danger;
     height: content.preferred-height;
     border-radius: 8px;
@@ -289,7 +293,8 @@ export component RunFailureNotice inherits Rectangle {
         if !root.host.run-eula-refused && !root.narrow : HorizontalLayout {
             spacing: 8px;
             alignment: start;
-            AppButton { text: GuiI18n.text("gui-run-open-diagnostics"); tone: "primary"; clicked => { root.open-diagnostics(); } }
+            if root.host.run-verify-suggested : AppButton { text: GuiI18n.text("gui-run-verify-host"); tone: "primary"; clicked => { root.verify-host(); } }
+            AppButton { text: GuiI18n.text("gui-run-open-diagnostics"); tone: root.diagnostics-tone; clicked => { root.open-diagnostics(); } }
             if root.host.run-crash-report != "" : AppButton { text: GuiI18n.text("gui-diagnosis-open-crash-report"); clicked => { root.open-crash-report(); } }
             AppButton { text: GuiI18n.text("gui-diagnosis-open-log"); clicked => { root.open-log(); } }
             AppButton { text: GuiI18n.text("gui-run-dismiss"); clicked => { root.dismiss(); } }
@@ -299,7 +304,8 @@ export component RunFailureNotice inherits Rectangle {
             HorizontalLayout {
                 spacing: 8px;
                 alignment: start;
-                AppButton { text: GuiI18n.text("gui-run-open-diagnostics"); tone: "primary"; clicked => { root.open-diagnostics(); } }
+                if root.host.run-verify-suggested : AppButton { text: GuiI18n.text("gui-run-verify-host"); tone: "primary"; clicked => { root.verify-host(); } }
+                AppButton { text: GuiI18n.text("gui-run-open-diagnostics"); tone: root.diagnostics-tone; clicked => { root.open-diagnostics(); } }
                 AppButton { text: GuiI18n.text("gui-run-dismiss"); clicked => { root.dismiss(); } }
             }
             HorizontalLayout {

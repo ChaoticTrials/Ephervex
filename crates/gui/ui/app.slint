@@ -1388,6 +1388,7 @@ export component AppWindow inherits Window {
                                     host: host;
                                     review-eula => { root.modal = "eula"; root.dismiss-run-failure(host.kind, host.id); }
                                     open-diagnostics => { root.show-pane-surface(pane.id, "Diagnostics"); root.dismiss-run-failure(host.kind, host.id); }
+                                    verify-host => { root.show-pane-surface(pane.id, "Diagnostics"); root.diagnose-host(host.kind, host.id); root.dismiss-run-failure(host.kind, host.id); }
                                     open-crash-report => { root.show-pane-surface(pane.id, "Logs"); root.log-show(pane.id, "crashes"); root.log-open-file(pane.id, host.run-crash-report); root.dismiss-run-failure(host.kind, host.id); }
                                     open-log => { root.show-pane-surface(pane.id, "Logs"); root.log-show(pane.id, "live"); root.dismiss-run-failure(host.kind, host.id); }
                                     dismiss => { root.dismiss-run-failure(host.kind, host.id); }

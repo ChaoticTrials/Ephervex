@@ -354,6 +354,19 @@ impl LaunchError {
         }
     }
 
+    /// Whether a stored copy a launch reads is damaged or unreadable, as
+    /// opposed to anything fetched or planned wrongly during this launch.
+    ///
+    /// A download that arrives with the wrong digest is refused and never kept,
+    /// so it says nothing about the files already stored.
+    #[must_use]
+    pub const fn is_damaged_local_data(&self) -> bool {
+        matches!(
+            self,
+            Self::Natives(crate::natives::NativesError::Unreadable { .. })
+        )
+    }
+
     /// Whether the user canceled rather than something failing.
     #[must_use]
     pub const fn is_cancellation(&self) -> bool {
@@ -417,6 +430,38 @@ mod tests {
     fn an_unreachable_provider_is_not_a_cancellation() {
         let error = MinecraftError::unsupported("1.7.10");
         assert!(!error.is_cancellation());
+    }
+
+    #[test]
+    fn only_an_unreadable_stored_natives_archive_is_damaged_local_data() {
+        let unreadable = LaunchError::Natives(crate::natives::NativesError::Unreadable {
+            path: PathBuf::from("/store/libraries/lwjgl-natives.jar"),
+            source: std::io::Error::other("bad zip"),
+        });
+        let unsafe_entry = LaunchError::Natives(crate::natives::NativesError::UnsafePath {
+            path: PathBuf::from("/store/libraries/lwjgl-natives.jar"),
+            entry: "../escape".to_owned(),
+        });
+        let mismatched = LaunchError::download(
+            "client.jar",
+            ephervex_download::DownloadError::HashMismatch {
+                url: "https://example.invalid/client.jar".to_owned(),
+                algorithm: ephervex_model::HashAlgorithm::Sha1,
+                expected: "aa".to_owned(),
+                actual: "bb".to_owned(),
+            },
+        );
+
+        assert!(unreadable.is_damaged_local_data());
+        assert!(
+            !unsafe_entry.is_damaged_local_data(),
+            "an archive that is readable but hostile is not a damaged copy"
+        );
+        assert!(
+            !mismatched.is_damaged_local_data(),
+            "a refused download was never stored, so it implicates no stored file"
+        );
+        assert!(!LaunchError::Canceled.is_damaged_local_data());
     }
 
     #[test]
