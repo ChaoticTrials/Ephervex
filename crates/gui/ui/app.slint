@@ -53,6 +53,7 @@ import {
     AccountRow,
     ActivityRow,
     BlockedFileRow,
+    BundlePartRow,
     DiskUsageRow,
     GroupRow,
     HostView,
@@ -82,7 +83,7 @@ import { DiskUsagePanel, OverrideCard } from "settings/application.slint";
 import { MinecraftPreferenceRowCard } from "settings/minecraft-defaults.slint";
 import { ServerDefaultsPanel } from "settings/server-defaults.slint";
 import { Theme } from "theme.slint";
-import { DiagnosticsSurface, RunFailureNotice } from "workspace/diagnostics.slint";
+import { DiagnosticBundlePanel, DiagnosticsSurface, RunFailureNotice } from "workspace/diagnostics.slint";
 import { HostRuntimeForm, ServerPropertiesForm } from "workspace/host-settings.slint";
 import { HostPickerCard, HostWorkspace, WorkspaceTab } from "workspace/host-workspace.slint";
 import { IsolationSurface } from "workspace/isolation.slint";
@@ -283,6 +284,14 @@ export component AppWindow inherits Window {
     in-out property <bool> disk-usage-incomplete;
     in-out property <string> disk-usage-incomplete-text;
     in-out property <[string]> disk-usage-unreadable;
+    // The bundle of the launcher's own logs, chosen on the Diagnostics page.
+    in-out property <[BundlePartRow]> launcher-bundle-parts;
+    in-out property <string> launcher-bundle-selection;
+    in-out property <int> launcher-bundle-selected-count;
+    in-out property <bool> launcher-bundle-exporting;
+    in-out property <string> launcher-bundle-result;
+    in-out property <string> launcher-bundle-result-path;
+    in-out property <string> launcher-bundle-error;
     in-out property <[ActivityRow]> activities;
     in-out property <[AccountRow]> accounts;
     // The same accounts as menu rows, for the Launch as menu.
@@ -916,6 +925,10 @@ export component AppWindow inherits Window {
     callback select-all-bundle-parts(string, string, bool);
     callback export-bundle(string, string);
     callback open-bundle-folder(string);
+    callback request-launcher-bundle();
+    callback toggle-launcher-bundle-part(string, bool);
+    callback select-all-launcher-bundle-parts(bool);
+    callback export-launcher-bundle();
     callback copy-text(string);
     callback add-offline-account(string);
     callback set-default-account(string);
@@ -1719,14 +1732,17 @@ export component AppWindow inherits Window {
                         // Measured when asked for, not on opening: a large
                         // installation takes a while to walk.
                         SettingsNavItem { label: GuiI18n.text("gui-settings-disk-usage"); selected: root.settings-tab == "Disk Usage"; clicked => { root.settings-tab = "Disk Usage"; } }
+                        // The launcher's logs change as the launcher runs, so the
+                        // offer is read again whenever the page is opened.
+                        SettingsNavItem { label: GuiI18n.text("gui-settings-diagnostics"); selected: root.settings-tab == "Diagnostics"; clicked => { root.settings-tab = "Diagnostics"; root.request-launcher-bundle(); } }
                         Rectangle { vertical-stretch: 1; }
                         Divider { }
                         SettingsNavItem { label: GuiI18n.text("gui-settings-about"); selected: root.settings-tab == "About & Licenses"; clicked => { root.settings-tab = "About & Licenses"; } }
                     } }
                     Rectangle { horizontal-stretch: 1; background: Theme.background; ScrollView { viewport-width: self.visible-width; VerticalLayout { x: max(0px, (parent.width - self.width) / 2); alignment: start; width: min(parent.width, root.settings-two-columns ? 1500px : 1100px); padding: 30px; spacing: 20px;
                         PageIntro {
-                            title: root.settings-tab == "General" ? GuiI18n.text("gui-settings-general") : root.settings-tab == "Minecraft" ? GuiI18n.text("gui-settings-minecraft") : root.settings-tab == "Server Properties" ? GuiI18n.text("gui-settings-server-properties") : root.settings-tab == "Java" ? GuiI18n.text("gui-settings-java") : root.settings-tab == "Accounts" ? GuiI18n.text("gui-settings-accounts") : root.settings-tab == "Providers & APIs" ? GuiI18n.text("gui-settings-providers") : root.settings-tab == "Storage" ? GuiI18n.text("gui-settings-storage") : root.settings-tab == "Disk Usage" ? GuiI18n.text("gui-settings-disk-usage") : GuiI18n.text("gui-settings-about");
-                            subtitle: root.settings-tab == "Minecraft" ? GuiI18n.text("gui-minecraft-defaults-detail") : root.settings-tab == "Server Properties" ? GuiI18n.text("gui-server-defaults-intro") : root.settings-tab == "Java" ? GuiI18n.text("gui-java-detail") : root.settings-tab == "Accounts" ? GuiI18n.text("gui-accounts-detail") : root.settings-tab == "Providers & APIs" ? GuiI18n.text("gui-provider-detail") : root.settings-tab == "Storage" ? GuiI18n.text("gui-storage-detail") : root.settings-tab == "Disk Usage" ? GuiI18n.text("gui-disk-usage-page-detail") : root.settings-tab == "About & Licenses" ? GuiI18n.text("gui-tagline") : GuiI18n.text("gui-settings-detail");
+                            title: root.settings-tab == "General" ? GuiI18n.text("gui-settings-general") : root.settings-tab == "Minecraft" ? GuiI18n.text("gui-settings-minecraft") : root.settings-tab == "Server Properties" ? GuiI18n.text("gui-settings-server-properties") : root.settings-tab == "Java" ? GuiI18n.text("gui-settings-java") : root.settings-tab == "Accounts" ? GuiI18n.text("gui-settings-accounts") : root.settings-tab == "Providers & APIs" ? GuiI18n.text("gui-settings-providers") : root.settings-tab == "Storage" ? GuiI18n.text("gui-settings-storage") : root.settings-tab == "Disk Usage" ? GuiI18n.text("gui-settings-disk-usage") : root.settings-tab == "Diagnostics" ? GuiI18n.text("gui-settings-diagnostics") : GuiI18n.text("gui-settings-about");
+                            subtitle: root.settings-tab == "Minecraft" ? GuiI18n.text("gui-minecraft-defaults-detail") : root.settings-tab == "Server Properties" ? GuiI18n.text("gui-server-defaults-intro") : root.settings-tab == "Java" ? GuiI18n.text("gui-java-detail") : root.settings-tab == "Accounts" ? GuiI18n.text("gui-accounts-detail") : root.settings-tab == "Providers & APIs" ? GuiI18n.text("gui-provider-detail") : root.settings-tab == "Storage" ? GuiI18n.text("gui-storage-detail") : root.settings-tab == "Disk Usage" ? GuiI18n.text("gui-disk-usage-page-detail") : root.settings-tab == "Diagnostics" ? GuiI18n.text("gui-launcher-diagnostics-detail") : root.settings-tab == "About & Licenses" ? GuiI18n.text("gui-tagline") : GuiI18n.text("gui-settings-detail");
                         }
                         if root.settings-tab == "General" : VerticalLayout { alignment: start; spacing: 14px;
                             // Side by side where the window is wide enough for two
@@ -2121,6 +2137,23 @@ export component AppWindow inherits Window {
                             refresh => { root.measure-disk-usage(); }
                             stop => { root.stop-disk-usage(); }
                             open-location(category, index) => { root.open-storage-location(category, index); }
+                        }
+                        if root.settings-tab == "Diagnostics" : VerticalLayout { spacing: 14px;
+                            SectionTitle { title: GuiI18n.text("gui-launcher-bundle-title"); detail: GuiI18n.text("gui-launcher-bundle-detail"); }
+                            DiagnosticBundlePanel {
+                                empty-text: GuiI18n.text("gui-launcher-bundle-empty");
+                                parts: root.launcher-bundle-parts;
+                                selection: root.launcher-bundle-selection;
+                                selected-count: root.launcher-bundle-selected-count;
+                                exporting: root.launcher-bundle-exporting;
+                                result: root.launcher-bundle-result;
+                                result-path: root.launcher-bundle-result-path;
+                                error: root.launcher-bundle-error;
+                                toggle(name, value) => { root.toggle-launcher-bundle-part(name, value); }
+                                select-all(value) => { root.select-all-launcher-bundle-parts(value); }
+                                export => { root.export-launcher-bundle(); }
+                                open-folder => { root.open-bundle-folder(root.launcher-bundle-result-path); }
+                            }
                         }
                         if root.settings-tab == "Storage" : VerticalLayout { spacing: 14px;
                             SectionTitle { title: GuiI18n.text("gui-persistent-storage"); detail: GuiI18n.text("gui-persistent-storage-detail"); }

@@ -1559,7 +1559,9 @@ out until chosen. An empty choice cannot be exported. The destination comes
 from the desktop's save dialog, the export runs as an ordinary operation, and
 the result names the written file and what could not be read, with a way to
 show its folder. A bundle holds one host's files: the launcher's own logs are
-a separate scope the command line bundles with `ephervex logs bundle --launcher`.
+a separate scope, bundled on their own from the Diagnostics page of Settings in
+the desktop (starting with the newest launcher log chosen) and with
+`ephervex logs bundle --launcher` on the command line.
 
 
 ## Security boundaries

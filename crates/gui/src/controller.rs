@@ -8529,12 +8529,33 @@ fn apply_event(
             request,
             &message,
         ),
-        Event::BundleSettled { request } => {
-            diagnosis_flow::settle_bundle(
-                workspace,
+        Event::LauncherBundlePlanned { parts } => {
+            diagnosis_flow::apply_launcher_bundle_plan(
+                ui,
                 &mut workspace.diagnosis.borrow_mut(),
-                request,
+                parts,
             );
+        }
+        Event::LauncherBundleExported { request, report } => {
+            diagnosis_flow::apply_launcher_bundle_exported(
+                ui,
+                &workspace.diagnosis.borrow(),
+                request,
+                &report,
+            );
+        }
+        Event::LauncherBundleExportFailed { request, message } => {
+            diagnosis_flow::apply_launcher_bundle_export_failed(
+                ui,
+                &workspace.diagnosis.borrow(),
+                request,
+                &message,
+            );
+        }
+        Event::BundleSettled { request } => {
+            let mut diagnosis = workspace.diagnosis.borrow_mut();
+            diagnosis_flow::settle_bundle(workspace, &mut diagnosis, request);
+            diagnosis_flow::settle_launcher_bundle(ui, &mut diagnosis, request);
         }
         Event::Toast { message, error } => {
             ui.invoke_present_toast(message.into(), error);
@@ -12346,6 +12367,139 @@ mod tests {
             unreadable: Vec::new(),
             bytes: 2048,
         }
+    }
+
+    /// The Settings Diagnostics page with the launcher's usual offer.
+    fn planned_launcher_bundle() -> (AppWindow, Workspace, std::sync::mpsc::Receiver<Command>) {
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        diagnosis_flow::register(&ui, &workspace.commands, &workspace);
+        ui.invoke_request_launcher_bundle();
+        assert!(
+            matches!(commands.try_recv(), Ok(Command::PlanLauncherBundle)),
+            "opening the page asks what the launcher's own bundle could carry"
+        );
+        diagnosis_flow::apply_launcher_bundle_plan(
+            &ui,
+            &mut workspace.diagnosis.borrow_mut(),
+            vec![
+                bundle_part("launcher/ephervex.2026-01-02.log", "launcher_log"),
+                bundle_part("launcher/ephervex.2026-01-01.log", "launcher_log"),
+            ],
+        );
+        (ui, workspace, commands)
+    }
+
+    #[test]
+    fn the_launcher_bundle_starts_with_only_the_newest_launcher_log_chosen() {
+        let (ui, _workspace, _commands) = planned_launcher_bundle();
+        assert_eq!(ui.get_launcher_bundle_selected_count(), 1);
+        let rows: Vec<_> = ui.get_launcher_bundle_parts().iter().collect();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].selected);
+        assert!(!rows[1].selected);
+    }
+
+    #[test]
+    fn a_launcher_bundle_export_carries_the_chosen_logs_and_waits_for_the_running_one() {
+        let (ui, workspace, commands) = planned_launcher_bundle();
+        ui.invoke_toggle_launcher_bundle_part("launcher/ephervex.2026-01-01.log".into(), true);
+        ui.invoke_export_launcher_bundle();
+        ui.invoke_export_launcher_bundle();
+
+        let sent: Vec<_> = commands.try_iter().collect();
+        assert_eq!(sent.len(), 1, "a second export waits: {sent:?}");
+        let Command::ExportLauncherBundle { request, names } = &sent[0] else {
+            panic!("a launcher export: {sent:?}");
+        };
+        assert_eq!(
+            names,
+            &[
+                "launcher/ephervex.2026-01-02.log",
+                "launcher/ephervex.2026-01-01.log"
+            ]
+        );
+        assert!(ui.get_launcher_bundle_exporting());
+        ui.invoke_select_all_launcher_bundle_parts(false);
+        assert_eq!(
+            ui.get_launcher_bundle_selected_count(),
+            2,
+            "the choice is fixed while it is written"
+        );
+
+        diagnosis_flow::settle_launcher_bundle(
+            &ui,
+            &mut workspace.diagnosis.borrow_mut(),
+            *request,
+        );
+        assert!(!ui.get_launcher_bundle_exporting());
+    }
+
+    #[test]
+    fn an_empty_launcher_bundle_choice_is_not_exported() {
+        let (ui, _workspace, commands) = planned_launcher_bundle();
+        ui.invoke_select_all_launcher_bundle_parts(false);
+        ui.invoke_export_launcher_bundle();
+        assert!(commands.try_recv().is_err());
+        assert!(!ui.get_launcher_bundle_exporting());
+    }
+
+    #[test]
+    fn a_launcher_export_result_answers_only_the_newest_launcher_export() {
+        let (ui, workspace, commands) = planned_launcher_bundle();
+        ui.invoke_export_launcher_bundle();
+        let Ok(Command::ExportLauncherBundle { request, .. }) = commands.try_recv() else {
+            panic!("a launcher export");
+        };
+
+        diagnosis_flow::apply_launcher_bundle_exported(
+            &ui,
+            &workspace.diagnosis.borrow(),
+            request + 1,
+            &exported_report(),
+        );
+        assert!(ui.get_launcher_bundle_result().is_empty());
+
+        diagnosis_flow::apply_launcher_bundle_exported(
+            &ui,
+            &workspace.diagnosis.borrow(),
+            request,
+            &exported_report(),
+        );
+        assert!(
+            ui.get_launcher_bundle_result()
+                .contains("/home/user/bundle.zip")
+        );
+        assert_eq!(
+            ui.get_launcher_bundle_result_path(),
+            "/home/user/bundle.zip"
+        );
+
+        diagnosis_flow::apply_launcher_bundle_export_failed(
+            &ui,
+            &workspace.diagnosis.borrow(),
+            request,
+            "no space",
+        );
+        assert!(ui.get_launcher_bundle_result().is_empty());
+        assert!(ui.get_launcher_bundle_result_path().is_empty());
+        assert_eq!(ui.get_launcher_bundle_error(), "no space");
+    }
+
+    #[test]
+    fn settling_a_host_export_leaves_the_launcher_export_pending() {
+        let (ui, workspace, commands) = planned_launcher_bundle();
+        ui.invoke_export_launcher_bundle();
+        let Ok(Command::ExportLauncherBundle { request, .. }) = commands.try_recv() else {
+            panic!("a launcher export");
+        };
+
+        diagnosis_flow::settle_launcher_bundle(
+            &ui,
+            &mut workspace.diagnosis.borrow_mut(),
+            request + 1,
+        );
+        assert!(ui.get_launcher_bundle_exporting());
     }
 
     #[test]

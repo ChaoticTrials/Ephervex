@@ -414,6 +414,14 @@ pub enum Command {
         request: u64,
         names: Vec<String>,
     },
+    /// Lists what a bundle of the launcher's own logs could carry.
+    PlanLauncherBundle,
+    /// Asks where to save, then writes the named launcher logs to one local
+    /// archive.
+    ExportLauncherBundle {
+        request: u64,
+        names: Vec<String>,
+    },
     /// Shows the folder an exported bundle was written to.
     OpenBundleFolder(PathBuf),
     LoadModVersions {
@@ -1979,6 +1987,18 @@ pub enum Event {
     },
     BundleExportFailed {
         host: InstalledHost,
+        request: u64,
+        message: String,
+    },
+    /// What a bundle of the launcher's own logs could carry.
+    LauncherBundlePlanned {
+        parts: Vec<BundlePartData>,
+    },
+    LauncherBundleExported {
+        request: u64,
+        report: BundleExportData,
+    },
+    LauncherBundleExportFailed {
         request: u64,
         message: String,
     },
@@ -4597,22 +4617,16 @@ fn run_worker(
                 });
             }
             Command::PlanDiagnosticBundle(host) => {
-                let parts = match app.plan_diagnostic_bundle(diagnostic_scope(host)) {
-                    Ok(contents) => contents
-                        .parts
-                        .iter()
-                        .map(|part| BundlePartData {
-                            name: part.name.clone(),
-                            kind: part.kind.as_str(),
-                            size_bytes: part.size_bytes,
-                        })
-                        .collect(),
-                    Err(error) => {
-                        send_error(&events, &error);
-                        Vec::new()
-                    }
-                };
+                let parts =
+                    bundle_parts(&events, app.plan_diagnostic_bundle(diagnostic_scope(host)));
                 let _ = events.send(Event::BundlePlanned { host, parts });
+            }
+            Command::PlanLauncherBundle => {
+                let parts = bundle_parts(
+                    &events,
+                    app.plan_diagnostic_bundle(DiagnosticScope::Launcher),
+                );
+                let _ = events.send(Event::LauncherBundlePlanned { parts });
             }
             Command::ExportDiagnosticBundle {
                 host,
@@ -4626,7 +4640,7 @@ fn run_worker(
                     let Some(destination) = rfd::FileDialog::new()
                         .set_title(lookup("gui-bundle-save-title"))
                         .add_filter(lookup("gui-bundle-archives"), &["zip"])
-                        .set_file_name(bundle_file_name(host))
+                        .set_file_name(bundle_file_name(host.kind()))
                         .save_file()
                     else {
                         let _ = events.send(Event::BundleSettled { request });
@@ -4655,18 +4669,65 @@ fn run_worker(
                                     let _ = reports.send(Event::BundleExported {
                                         host,
                                         request,
-                                        report: BundleExportData {
-                                            path: report.path,
-                                            included: report.included.len(),
-                                            unreadable: report.unreadable,
-                                            bytes: report.bytes,
-                                        },
+                                        report: bundle_export_data(report),
                                     });
                                     Ok(OperationReport::Reported)
                                 }
                                 Err(error) => {
                                     let _ = reports.send(Event::BundleExportFailed {
                                         host,
+                                        request,
+                                        message: localized_error(&error),
+                                    });
+                                    Err(error)
+                                }
+                            }
+                        },
+                    );
+                });
+            }
+            Command::ExportLauncherBundle { request, names } => {
+                let paths = app.paths().clone();
+                let events = events.clone();
+                let cancellations = Arc::clone(&cancellations);
+                spawn_dialog(&dialogs, move || {
+                    let Some(destination) = rfd::FileDialog::new()
+                        .set_title(lookup("gui-bundle-save-title"))
+                        .add_filter(lookup("gui-bundle-archives"), &["zip"])
+                        .set_file_name(bundle_file_name("launcher"))
+                        .save_file()
+                    else {
+                        let _ = events.send(Event::BundleSettled { request });
+                        return;
+                    };
+                    let reports = events.clone();
+                    spawn_async_operation(
+                        paths,
+                        &events,
+                        cancellations,
+                        AsyncOperationRequest {
+                            title: "operation-exporting-diagnostic-bundle",
+                            entity: lookup("gui-settings-diagnostics"),
+                            allow_cancel: false,
+                            dialogs: ModalScope::NONE,
+                            finished: Some(Event::BundleSettled { request }),
+                        },
+                        move |app, _reporter, _cancel| async move {
+                            let exported = app.export_diagnostic_bundle(
+                                DiagnosticScope::Launcher,
+                                &ephervex_core::BundleSelection { names },
+                                &destination,
+                            );
+                            match exported {
+                                Ok(report) => {
+                                    let _ = reports.send(Event::LauncherBundleExported {
+                                        request,
+                                        report: bundle_export_data(report),
+                                    });
+                                    Ok(OperationReport::Reported)
+                                }
+                                Err(error) => {
+                                    let _ = reports.send(Event::LauncherBundleExportFailed {
                                         request,
                                         message: localized_error(&error),
                                     });
@@ -6734,12 +6795,43 @@ const fn diagnostic_scope(host: InstalledHost) -> DiagnosticScope {
 
 /// A name the save dialog suggests, which says what the archive is and when it
 /// was made without naming anything the user did not choose to share.
-fn bundle_file_name(host: InstalledHost) -> String {
+fn bundle_file_name(subject: &str) -> String {
     format!(
-        "ephervex-{}-diagnostics-{}.zip",
-        host.kind(),
+        "ephervex-{subject}-diagnostics-{}.zip",
         chrono::Local::now().format("%Y%m%d-%H%M%S")
     )
+}
+
+/// What a planner's offer looks like to the window. A failed plan is reported
+/// and offers nothing.
+fn bundle_parts(
+    events: &Sender<Event>,
+    plan: CoreResult<ephervex_core::BundleContents>,
+) -> Vec<BundlePartData> {
+    match plan {
+        Ok(contents) => contents
+            .parts
+            .iter()
+            .map(|part| BundlePartData {
+                name: part.name.clone(),
+                kind: part.kind.as_str(),
+                size_bytes: part.size_bytes,
+            })
+            .collect(),
+        Err(error) => {
+            send_error(events, &error);
+            Vec::new()
+        }
+    }
+}
+
+fn bundle_export_data(report: ephervex_core::BundleReport) -> BundleExportData {
+    BundleExportData {
+        path: report.path,
+        included: report.included.len(),
+        unreadable: report.unreadable,
+        bytes: report.bytes,
+    }
 }
 
 /// Checks a host, and a client's shared launch files, for the Diagnostics surface.

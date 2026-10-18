@@ -19,6 +19,8 @@ export component DiagnosticBundlePanel inherits VerticalLayout {
     in property <string> result;
     in property <string> result-path;
     in property <string> error;
+    // What stands in for the list while the planner offers nothing.
+    in property <string> empty-text: GuiI18n.text("gui-bundle-empty");
     callback toggle(string, bool);
     callback select-all(bool);
     callback export();
@@ -26,7 +28,7 @@ export component DiagnosticBundlePanel inherits VerticalLayout {
     spacing: 8px;
     BodyText { text: GuiI18n.text("gui-bundle-detail"); color: Theme.text-muted; wrap: word-wrap; }
     BodyText { text: GuiI18n.text("gui-bundle-privacy"); color: Theme.text-secondary; wrap: word-wrap; }
-    if root.parts.length == 0 : BodyText { text: GuiI18n.text("gui-bundle-empty"); color: Theme.text-muted; wrap: word-wrap; }
+    if root.parts.length == 0 : BodyText { text: root.empty-text; color: Theme.text-muted; wrap: word-wrap; }
     if root.parts.length > 0 : BodyText { text: root.selection; color: Theme.text-secondary; wrap: word-wrap; }
     if root.parts.length > 0 : HorizontalLayout {
         spacing: 8px;

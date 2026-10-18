@@ -119,8 +119,9 @@ struct BundleChoice {
 
 impl BundleChoice {
     /// Takes a fresh plan. The first one chooses the newest game log, the
-    /// newest crash report, and the host's own recorded state, rather than
-    /// every file there is; a later one keeps whatever is still offered.
+    /// newest crash report, the newest launcher log, and the host's own
+    /// recorded state, rather than every file there is; a later one keeps
+    /// whatever is still offered.
     fn plan(&mut self, parts: Vec<BundlePartData>) {
         if self.planned {
             self.selected
@@ -128,11 +129,13 @@ impl BundleChoice {
         } else {
             let mut newest_log = false;
             let mut newest_crash = false;
+            let mut newest_launcher_log = false;
             self.selected = parts
                 .iter()
                 .filter(|part| match part.kind {
                     "game_log" => !std::mem::replace(&mut newest_log, true),
                     "crash_report" => !std::mem::replace(&mut newest_crash, true),
+                    "launcher_log" => !std::mem::replace(&mut newest_launcher_log, true),
                     "recipe" | "record" => true,
                     _ => false,
                 })
@@ -179,6 +182,9 @@ pub(super) struct DiagnosisFlowState {
     /// The newest export id handed out to any host. It is never reset, so an
     /// id is not reused by another host or by a host that left and came back.
     last_bundle_request: u64,
+    /// The choice for a bundle of the launcher's own logs, which belongs to
+    /// no host (ADR 0038). It shares `last_bundle_request` for its ids.
+    launcher_bundle: BundleChoice,
     last_preview: u64,
     /// The one diagnosis or fix the worker has not finished. A second
     /// request, from any view of any host, is refused here before a second
@@ -250,6 +256,18 @@ impl DiagnosisFlowState {
         let request = self.last_bundle_request;
         bundle.last_request = request;
         bundle.pending = Some(request);
+        Some(request)
+    }
+
+    /// Starts a launcher bundle export with an id no export has had.
+    fn dispatch_launcher_bundle(&mut self) -> Option<u64> {
+        if !self.launcher_bundle.can_dispatch() {
+            return None;
+        }
+        self.last_bundle_request = self.last_bundle_request.wrapping_add(1);
+        let request = self.last_bundle_request;
+        self.launcher_bundle.last_request = request;
+        self.launcher_bundle.pending = Some(request);
         Some(request)
     }
 
@@ -841,6 +859,17 @@ pub(super) fn apply_bundle_exported(
         return;
     }
     let path = report.path.display().to_string();
+    let result = exported_message(report);
+    workspace.update(host, |view| {
+        view.bundle_error = SharedString::default();
+        view.bundle_result = result.into();
+        view.bundle_result_path = path.into();
+    });
+}
+
+/// What a finished export says: where it went, and what could not be read.
+fn exported_message(report: &BundleExportData) -> String {
+    let path = report.path.display().to_string();
     let mut result = lookup_args(
         "gui-bundle-exported",
         [
@@ -859,11 +888,7 @@ pub(super) fn apply_bundle_exported(
             [("value", Arg::from(report.unreadable.join(", ")))],
         ));
     }
-    workspace.update(host, |view| {
-        view.bundle_error = SharedString::default();
-        view.bundle_result = result.into();
-        view.bundle_result_path = path.into();
-    });
+    result
 }
 
 pub(super) fn apply_bundle_export_failed(
@@ -897,6 +922,60 @@ pub(super) fn settle_bundle(workspace: &Workspace, state: &mut DiagnosisFlowStat
             surface.bundle.pending = None;
             workspace.update(host, |view| view.bundle_exporting = false);
         }
+    }
+}
+
+/// Writes the launcher bundle choice to the Settings page that shows it.
+fn render_launcher_bundle(ui: &AppWindow, bundle: &BundleChoice) {
+    let view = bundle_view(bundle);
+    ui.set_launcher_bundle_selected_count(view.count);
+    ui.set_launcher_bundle_selection(view.selection);
+    ui.set_launcher_bundle_parts(view.parts);
+}
+
+/// Takes the planner's offer of the launcher's own logs.
+pub(super) fn apply_launcher_bundle_plan(
+    ui: &AppWindow,
+    state: &mut DiagnosisFlowState,
+    parts: Vec<BundlePartData>,
+) {
+    state.launcher_bundle.plan(parts);
+    render_launcher_bundle(ui, &state.launcher_bundle);
+}
+
+pub(super) fn apply_launcher_bundle_exported(
+    ui: &AppWindow,
+    state: &DiagnosisFlowState,
+    request: u64,
+    report: &BundleExportData,
+) {
+    if request != state.launcher_bundle.last_request {
+        return;
+    }
+    ui.set_launcher_bundle_error(SharedString::default());
+    ui.set_launcher_bundle_result(exported_message(report).into());
+    ui.set_launcher_bundle_result_path(report.path.display().to_string().into());
+}
+
+pub(super) fn apply_launcher_bundle_export_failed(
+    ui: &AppWindow,
+    state: &DiagnosisFlowState,
+    request: u64,
+    message: &str,
+) {
+    if request != state.launcher_bundle.last_request {
+        return;
+    }
+    ui.set_launcher_bundle_result(SharedString::default());
+    ui.set_launcher_bundle_result_path(SharedString::default());
+    ui.set_launcher_bundle_error(message.into());
+}
+
+/// Releases a finished launcher export, when it was the launcher's.
+pub(super) fn settle_launcher_bundle(ui: &AppWindow, state: &mut DiagnosisFlowState, request: u64) {
+    if state.launcher_bundle.pending == Some(request) {
+        state.launcher_bundle.pending = None;
+        ui.set_launcher_bundle_exporting(false);
     }
 }
 
@@ -1203,6 +1282,8 @@ fn register_bundle(ui: &AppWindow, commands: &Sender<Command>, workspace: &Works
         );
     });
 
+    register_launcher_bundle(ui, commands, workspace);
+
     let sender = commands.clone();
     ui.on_open_bundle_folder(move |path| {
         if !path.is_empty() {
@@ -1211,6 +1292,66 @@ fn register_bundle(ui: &AppWindow, commands: &Sender<Command>, workspace: &Works
                 Command::OpenBundleFolder(PathBuf::from(path.as_str())),
             );
         }
+    });
+}
+
+/// The launcher's own log bundle on the Settings Diagnostics page. It is a
+/// bundle of its own because a host's bundle carries that host's files.
+fn register_launcher_bundle(ui: &AppWindow, commands: &Sender<Command>, workspace: &Workspace) {
+    let sender = commands.clone();
+    ui.on_request_launcher_bundle(move || send(&sender, Command::PlanLauncherBundle));
+
+    let views = workspace.clone();
+    let weak = ui.as_weak();
+    ui.on_toggle_launcher_bundle_part(move |name, selected| {
+        let mut state = views.diagnosis.borrow_mut();
+        if state.launcher_bundle.pending.is_some() {
+            return;
+        }
+        if selected {
+            state.launcher_bundle.selected.insert(name.into());
+        } else {
+            state.launcher_bundle.selected.remove(name.as_str());
+        }
+        if let Some(ui) = weak.upgrade() {
+            render_launcher_bundle(&ui, &state.launcher_bundle);
+        }
+    });
+
+    let views = workspace.clone();
+    let weak = ui.as_weak();
+    ui.on_select_all_launcher_bundle_parts(move |selected| {
+        let mut state = views.diagnosis.borrow_mut();
+        let bundle = &mut state.launcher_bundle;
+        if bundle.pending.is_some() {
+            return;
+        }
+        bundle.selected = if selected {
+            bundle.parts.iter().map(|part| part.name.clone()).collect()
+        } else {
+            HashSet::new()
+        };
+        if let Some(ui) = weak.upgrade() {
+            render_launcher_bundle(&ui, &state.launcher_bundle);
+        }
+    });
+
+    let sender = commands.clone();
+    let views = workspace.clone();
+    let weak = ui.as_weak();
+    ui.on_export_launcher_bundle(move || {
+        let mut state = views.diagnosis.borrow_mut();
+        // An empty selection is refused rather than written as an archive
+        // holding nothing but its manifest.
+        let Some(request) = state.dispatch_launcher_bundle() else {
+            return;
+        };
+        let names = state.launcher_bundle.chosen();
+        if let Some(ui) = weak.upgrade() {
+            ui.set_launcher_bundle_exporting(true);
+            ui.set_launcher_bundle_error(SharedString::default());
+        }
+        send(&sender, Command::ExportLauncherBundle { request, names });
     });
 }
 
