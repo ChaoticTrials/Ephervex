@@ -623,6 +623,51 @@ fn tabs_that_do_not_fit_wait_under_more() {
     );
 }
 
+/// The list under More is placed when it opens, so it closes when the window
+/// is resized rather than staying where it was drawn.
+#[test]
+fn the_list_under_more_closes_when_the_window_is_resized() {
+    let ui = window();
+    let beside = || {
+        let mut panes = vec![
+            placed(1, CLIENT, "Overview", 0, 0, false),
+            placed(2, SERVER, "Diagnostics", 1, 0, false),
+        ];
+        panes[1].surface_choice = 8;
+        panes
+    };
+    for (pane, hidden, panes) in [
+        (1, "gui-instance-tab-logs", beside()),
+        (2, "gui-server-tab-console", beside()),
+    ] {
+        ui.window().set_size(PhysicalSize::new(980, 680));
+        split(&ui, panes);
+        let hidden = lookup(hidden);
+        let listed = |ui: &AppWindow| {
+            ElementHandle::find_by_accessible_label(ui, &hidden)
+                .any(|element| element.accessible_role() == Some(AccessibleRole::Button))
+        };
+        let more_label = lookup("gui-workspace-more-surfaces");
+        let more = |ui: &AppWindow| {
+            in_pane(ui, pane, &more_label, AccessibleRole::Button)
+                .into_iter()
+                .next()
+        };
+        assert!(!listed(&ui), "pane {pane} starts with {hidden} under More");
+
+        let before = more(&ui).expect("More").absolute_position();
+        more(&ui).expect("More").invoke_accessible_default_action();
+        settle(&ui);
+        assert!(listed(&ui), "pane {pane}: More lists {hidden}");
+
+        ui.window().set_size(PhysicalSize::new(1100, 680));
+        settle(&ui);
+        let after = more(&ui).expect("More is still needed").absolute_position();
+        assert_ne!(after, before, "pane {pane}: More did not move");
+        assert!(!listed(&ui), "pane {pane}: the list closed with the resize");
+    }
+}
+
 /// Opens More and clicks the entry for `value`. The list is a popup placed
 /// under More, and an entry's position is reported within that popup.
 fn open_more(ui: &AppWindow, more: &ElementHandle, value: &str) {

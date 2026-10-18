@@ -37,6 +37,13 @@ export component ChoiceBox inherits Rectangle {
     private property <int> highlight;
     private property <length> popup-padding: 4px;
     private property <int> visible-items: min(6, root.model.length);
+    // The open list is placed when it opens, so a dropdown that moves or
+    // resizes afterwards would leave it behind. Opening can itself scroll the
+    // dropdown into view, so the place is recorded once that has happened.
+    private property <Point> anchor: root.absolute-position;
+    private property <length> anchor-width: root.width;
+    private property <Point> opened-at;
+    private property <length> opened-width;
     min-width: 160px;
     min-height: Theme.control-height;
     preferred-height: Theme.control-height;
@@ -55,9 +62,19 @@ export component ChoiceBox inherits Rectangle {
     accessible-value: root.current-value;
     accessible-action-expand => { root.show-list(); }
 
+    changed anchor => { root.close-if-displaced(); }
+    changed anchor-width => { root.close-if-displaced(); }
+
+    function close-if-displaced() {
+        if (root.open && (root.anchor.x != root.opened-at.x || root.anchor.y != root.opened-at.y || root.anchor-width != root.opened-width)) {
+            popup.close();
+        }
+    }
     function show-list() {
         if (root.enabled && root.model.length > 0) {
             root.highlight = Math.max(root.current-index, 0);
+            root.opened-at = root.anchor;
+            root.opened-width = root.anchor-width;
             popup.show();
         }
     }

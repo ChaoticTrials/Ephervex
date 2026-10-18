@@ -320,6 +320,99 @@ fn pressing_an_entry_of_the_open_list_picks_it() {
     assert_eq!(dropdown(&ui, &target).accessible_expanded(), Some(false));
 }
 
+#[test]
+fn an_open_list_closes_when_the_window_is_resized_under_it() {
+    let ui = window();
+    ui.set_loading(false);
+    ui.set_loader_change_loading(false);
+    ui.set_loader_change_versions(strings(&["0.16.0", "0.15.11", "0.15.10"]));
+    ui.set_loader_change_selected("0.15.11".into());
+    ui.set_modal("loader-change".into());
+    settle(&ui);
+    let target = lookup("gui-loader-change-target");
+
+    dropdown(&ui, &target).invoke_accessible_expand_action();
+    settle(&ui);
+    assert_eq!(dropdown(&ui, &target).accessible_expanded(), Some(true));
+
+    // The dialog stays centered, so the dropdown moves with the window while
+    // the list would stay where it was drawn.
+    let before = dropdown(&ui, &target).absolute_position();
+    ui.window().set_size(PhysicalSize::new(1100, 900));
+    settle(&ui);
+    assert_ne!(dropdown(&ui, &target).absolute_position(), before);
+
+    assert_eq!(dropdown(&ui, &target).accessible_expanded(), Some(false));
+    assert_eq!(ui.get_loader_change_selected(), "0.15.11");
+    assert_eq!(shown(&ui, &target), "0.15.11");
+}
+
+#[test]
+fn an_open_list_stays_open_while_nothing_moves() {
+    let ui = window();
+    ui.set_loading(false);
+    ui.set_loader_change_loading(false);
+    ui.set_loader_change_versions(strings(&["0.16.0", "0.15.11", "0.15.10"]));
+    ui.set_loader_change_selected("0.15.11".into());
+    ui.set_modal("loader-change".into());
+    settle(&ui);
+    let target = lookup("gui-loader-change-target");
+
+    dropdown(&ui, &target).invoke_accessible_expand_action();
+    settle(&ui);
+    settle(&ui);
+
+    assert_eq!(dropdown(&ui, &target).accessible_expanded(), Some(true));
+}
+
+#[test]
+fn clicking_a_dropdown_cut_off_by_the_page_edge_opens_its_list_and_keeps_it_open() {
+    let ui = window();
+    ui.set_loading(false);
+    ui.set_page(4);
+    ui.set_settings_tab("General".into());
+    let label = lookup("gui-default-operator-level");
+
+    // The page draws only what is in view, so the dropdown first exists once
+    // the window is tall enough to show its top edge. A little more height
+    // leaves a sliver of it showing above the page's edge.
+    let mut height = 400;
+    let found = |ui: &AppWindow| {
+        ElementHandle::find_by_accessible_label(ui, &label)
+            .any(|element| element.accessible_role() == Some(AccessibleRole::Combobox))
+    };
+    while {
+        ui.window().set_size(PhysicalSize::new(1600, height));
+        settle(&ui);
+        !found(&ui)
+    } {
+        height += 1;
+        assert!(height < 1600, "the dropdown never appears");
+    }
+    ui.window().set_size(PhysicalSize::new(1600, height + 12));
+    settle(&ui);
+
+    // Focusing the dropdown scrolls it into view, which moves it.
+    let box_ = dropdown(&ui, &label);
+    let (at, size) = (box_.absolute_position(), box_.size());
+    let position = slint::LogicalPosition::new(at.x + size.width / 2.0, at.y + 2.0);
+    ui.window()
+        .dispatch_event(WindowEvent::PointerMoved { position });
+    ui.window().dispatch_event(WindowEvent::PointerPressed {
+        position,
+        button: PointerEventButton::Left,
+    });
+    ui.window().dispatch_event(WindowEvent::PointerReleased {
+        position,
+        button: PointerEventButton::Left,
+    });
+    settle(&ui);
+    settle(&ui);
+
+    assert_eq!(dropdown(&ui, &label).accessible_expanded(), Some(true));
+    assert_ne!(dropdown(&ui, &label).absolute_position(), at);
+}
+
 /// The dropdown carrying `label`, not the text beside it that reads the same.
 fn dropdown(ui: &AppWindow, label: &str) -> ElementHandle {
     ElementHandle::find_by_accessible_label(ui, label)

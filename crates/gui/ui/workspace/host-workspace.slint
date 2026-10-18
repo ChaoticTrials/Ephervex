@@ -113,6 +113,11 @@ export component SurfaceTabs inherits Rectangle {
         clicked => { root.chosen(surface.id); }
     }
     if !root.all-fit : Rectangle {
+        // The list is placed when it opens, so More moving or resizing would
+        // leave it behind.
+        property <Point> anchor: self.absolute-position;
+        changed anchor => { menu.close(); }
+        changed width => { menu.close(); }
         x: root.fitting * root.tab-width;
         y: 0px;
         width: root.tab-width;
