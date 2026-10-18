@@ -2,6 +2,7 @@
 // notes that show it.
 
 import { ScrollView } from "std-widgets.slint";
+import { ContextTouchArea, PopupMenu } from "menus.slint";
 import { GuiI18n } from "../globals.slint";
 import { Theme } from "../theme.slint";
 
@@ -204,6 +205,8 @@ export component ElidedHeading inherits Rectangle {
     out property <length> text-width: title.preferred-width;
     callback clicked();
     callback double-clicked();
+    // A press of the secondary button over the title, in window coordinates.
+    callback context-requested(x: length, y: length);
     horizontal-stretch: 1;
     vertical-stretch: 0;
     height: title.preferred-height;
@@ -216,9 +219,10 @@ export component ElidedHeading inherits Rectangle {
         overflow: elide;
         vertical-alignment: center;
     }
-    area := TouchArea {
+    area := ContextTouchArea {
         clicked => { root.clicked(); }
         double-clicked => { root.double-clicked(); }
+        context-requested(x, y) => { root.context-requested(x, y); }
     }
     HoverNote {
         text: title.preferred-width > title.width ? root.text : "";
@@ -245,28 +249,52 @@ export component SelectableText inherits Rectangle {
     accessible-role: text-input;
     accessible-read-only: true;
     accessible-value: text;
-    ContextMenuArea {
-        Menu {
-            MenuItem { title: GuiI18n.text("gui-copy"); enabled: root.text != ""; activated => { selectable-input.copy(); } }
-            MenuItem { title: GuiI18n.text("gui-select-all"); enabled: root.text != ""; activated => { selectable-input.select-all(); } }
+    menu := PopupMenu {
+        entries: [
+            { id: "copy", label: GuiI18n.text("gui-copy"), disabled: root.text == "" },
+            { id: "select-all", label: GuiI18n.text("gui-select-all"), disabled: root.text == "" },
+        ];
+        activated(id) => {
+            if (id == "copy") {
+                selectable-input.copy();
+            } else {
+                selectable-input.select-all();
+            }
         }
-        selectable-scroll := ScrollView {
-            viewport-width: root.wrap == TextWrap.no-wrap ? max(self.visible-width, selectable-input.preferred-width + 16px) : self.visible-width;
-            viewport-height: max(self.visible-height, selectable-input.preferred-height + 16px);
-            selectable-input := TextInput {
-                x: 8px; y: 8px;
-                width: root.wrap == TextWrap.no-wrap ? max(selectable-scroll.visible-width - 16px, self.preferred-width) : selectable-scroll.visible-width - 16px;
-                height: max(selectable-scroll.visible-height - 16px, self.preferred-height);
-                text: root.text;
-                color: Theme.text-secondary;
-                selection-background-color: Theme.accent;
-                selection-foreground-color: Theme.background;
-                read-only: true;
-                single-line: false;
-                wrap: root.wrap;
-                font-family: root.font-family;
-                font-size: root.font-size;
-                page-height: selectable-scroll.visible-height;
+    }
+    ContextTouchArea {
+        context-requested(x, y) => { menu.show-at-window(x, y); }
+        FocusScope {
+            // Only here to hear the menu key from the text inside. Taking
+            // focus on a press would also take the press from the area
+            // around it, and a Tab stop would be one the user cannot see.
+            focus-on-click: false;
+            focus-on-tab-navigation: false;
+            key-pressed(event) => {
+                if (event.text == Key.Menu) {
+                    menu.show({ x: 0px, y: 0px });
+                    return accept;
+                }
+                return reject;
+            }
+            selectable-scroll := ScrollView {
+                viewport-width: root.wrap == TextWrap.no-wrap ? max(self.visible-width, selectable-input.preferred-width + 16px) : self.visible-width;
+                viewport-height: max(self.visible-height, selectable-input.preferred-height + 16px);
+                selectable-input := TextInput {
+                    x: 8px; y: 8px;
+                    width: root.wrap == TextWrap.no-wrap ? max(selectable-scroll.visible-width - 16px, self.preferred-width) : selectable-scroll.visible-width - 16px;
+                    height: max(selectable-scroll.visible-height - 16px, self.preferred-height);
+                    text: root.text;
+                    color: Theme.text-secondary;
+                    selection-background-color: Theme.accent;
+                    selection-foreground-color: Theme.background;
+                    read-only: true;
+                    single-line: false;
+                    wrap: root.wrap;
+                    font-family: root.font-family;
+                    font-size: root.font-size;
+                    page-height: selectable-scroll.visible-height;
+                }
             }
         }
     }

@@ -12,10 +12,11 @@ import {
     StatePill,
     StateTone
 } from "../components/controls.slint";
+import { ContextTouchArea, PopupMenu } from "../components/menus.slint";
 import { IndexComboBox } from "../components/selection.slint";
 import { BodyText, Divider, ElidedHeading, Eyebrow, Heading } from "../components/text.slint";
 import { GuiI18n } from "../globals.slint";
-import { AccountRow, GroupRow, InstanceRow, PendingEntityRow, ServerRow } from "../models.slint";
+import { GroupRow, InstanceRow, MenuRow, PendingEntityRow, ServerRow } from "../models.slint";
 import { Theme } from "../theme.slint";
 
 export component PendingCard inherits Rectangle {
@@ -75,7 +76,8 @@ export component PendingCard inherits Rectangle {
 export component InstanceCard inherits Rectangle {
     in property <InstanceRow> item;
     in property <bool> selected;
-    in property <[GroupRow]> groups;
+    // One row per group the instance can be put in, its id the group's.
+    in property <[MenuRow]> group-entries;
     callback toggle-favorite(string, bool);
     callback set-group(string, string);
     callback new-group(string);
@@ -91,6 +93,10 @@ export component InstanceCard inherits Rectangle {
     callback make-persistent(string);
     callback rename(string, string);
     callback delete(string, string);
+    // Where the menu was last opened, so the group list it leads to opens in
+    // its place.
+    private property <length> menu-x;
+    private property <length> menu-y;
     height: Theme.card-height;
     border-radius: 8px;
     border-width: selected ? 2px : 1px;
@@ -99,14 +105,20 @@ export component InstanceCard inherits Rectangle {
     accessible-role: button;
     accessible-label: item.name;
     accessible-action-default => { root.choose(item.id); }
+    function open-menu(x: length, y: length) {
+        root.menu-x = x;
+        root.menu-y = y;
+        menu.show-at-window(x, y);
+    }
     // First, so it is *under* the card's own buttons rather than over
     // them. A touch area declared after them takes the press first, and one
     // that sets a width without an x is centered rather than left-aligned,
     // which put it across the left of the Launch button and swallowed every
     // click that landed on the label.
-    card-area := TouchArea {
+    card-area := ContextTouchArea {
         clicked => { root.choose(item.id); }
         double-clicked => { root.open-workspace(item.id); }
+        context-requested(x, y) => { root.open-menu(x, y); }
     }
     Rectangle {
         x: 0px; y: 10px; width: 3px; height: parent.height - 20px;
@@ -121,7 +133,7 @@ export component InstanceCard inherits Rectangle {
             horizontal-stretch: 1;
             HorizontalLayout {
                 spacing: 9px;
-                FavoriteToggle { size: 28px; host-name: item.name; favorite: item.favorite; toggled => { root.toggle-favorite(item.id, !item.favorite); } }
+                FavoriteToggle { size: 28px; host-name: item.name; favorite: item.favorite; toggled => { root.toggle-favorite(item.id, !item.favorite); } context-requested(x, y) => { root.open-menu(x, y); } }
                 // Held to its text, so the group label sits beside the name
                 // and only a name too long for the row is cut short.
                 ElidedHeading {
@@ -130,6 +142,7 @@ export component InstanceCard inherits Rectangle {
                     max-width: self.text-width;
                     clicked => { root.choose(item.id); }
                     double-clicked => { root.open-workspace(item.id); }
+                    context-requested(x, y) => { root.open-menu(x, y); }
                 }
                 if item.group-name != "" : VerticalLayout { alignment: center; Pill { text: item.group-name; tone-color: Theme.group-tone(item.group-tone); content-height: 22px; } }
                 Rectangle { horizontal-stretch: 1; }
@@ -169,45 +182,80 @@ export component InstanceCard inherits Rectangle {
                 if item.needs-attention : Pill { text: GuiI18n.text("gui-attention"); tone-color: Theme.danger; }
             }
             HorizontalLayout { alignment: center; spacing: 7px;
-                if item.can-launch : AppButton { width: 150px; text: GuiI18n.text("gui-launch"); tone: "primary"; clicked => { root.launch(item.id); } }
-                if !item.can-launch && item.can-kill : AppButton { width: 150px; text: GuiI18n.text("gui-kill-instance"); tone: "danger"; clicked => { root.kill(item.id); } }
+                if item.can-launch : AppButton { width: 150px; text: GuiI18n.text("gui-launch"); tone: "primary"; clicked => { root.launch(item.id); } context-requested(x, y) => { root.open-menu(x, y); } }
+                if !item.can-launch && item.can-kill : AppButton { width: 150px; text: GuiI18n.text("gui-kill-instance"); tone: "danger"; clicked => { root.kill(item.id); } context-requested(x, y) => { root.open-menu(x, y); } }
                 if !item.can-launch && !item.can-kill : Rectangle { width: 150px; }
-                IconButton { icon: @image-url("../../../../assets/icons/open-workspace.svg"); accessible-name: GuiI18n.text("gui-open-workspace"); clicked => { root.open-workspace(item.id); } }
+                IconButton { icon: @image-url("../../../../assets/icons/open-workspace.svg"); accessible-name: GuiI18n.text("gui-open-workspace"); clicked => { root.open-workspace(item.id); } context-requested(x, y) => { root.open-menu(x, y); } }
             }
         }
     }
-    // The repeater hands this card another row when the list changes in
-    // place, and an open menu would then act on that row.
-    property <string> menu-owner-id: item.id;
-    changed menu-owner-id => { card-menu.close(); }
-    card-menu := ContextMenuArea {
-        Menu {
-            MenuItem { title: GuiI18n.text("gui-open-workspace"); activated => { root.open-workspace(item.id); } }
-            MenuItem { title: GuiI18n.text("gui-launch"); enabled: item.can-launch; activated => { root.launch(item.id); } }
-            MenuItem { title: GuiI18n.text("gui-kill-instance"); enabled: item.can-kill; activated => { root.kill(item.id); } }
-            MenuItem { title: GuiI18n.text("gui-open-folder"); activated => { root.open-folder(item.id); } }
-            MenuItem { title: GuiI18n.text("gui-create-linked-server"); activated => { root.create-server(item.id, item.name); } }
-            MenuSeparator { }
-            MenuItem { title: item.favorite ? GuiI18n.text("gui-remove-favorite") : GuiI18n.text("gui-add-favorite"); activated => { root.toggle-favorite(item.id, !item.favorite); } }
-            Menu {
-                title: GuiI18n.text("gui-set-group");
-                for group in root.groups : MenuItem { title: group.name; activated => { root.set-group(item.id, group.id); } }
-                // Below the separator, so no group's name can pass for it.
-                if root.groups.length > 0 : MenuSeparator { }
-                MenuItem { title: GuiI18n.text("gui-new-group-ellipsis"); activated => { root.new-group(item.id); } }
-                MenuItem { title: GuiI18n.text("gui-remove-from-group"); enabled: item.group-id != ""; activated => { root.set-group(item.id, ""); } }
-            }
-            MenuItem { title: GuiI18n.text("gui-choose-icon-ellipsis"); activated => { root.pick-icon(item.id); } }
-            if item.icon-slot >= 0 : MenuItem { title: GuiI18n.text("gui-remove-icon"); activated => { root.clear-icon(item.id); } }
-            MenuSeparator { }
-            MenuItem { title: GuiI18n.text("gui-rename"); activated => { root.rename(item.id, item.name); } }
+    menu := PopupMenu {
+        entries: [
+            { id: "open-workspace", label: GuiI18n.text("gui-open-workspace") },
+            { id: "launch", label: GuiI18n.text("gui-launch"), disabled: !item.can-launch },
+            { id: "kill", label: GuiI18n.text("gui-kill-instance"), disabled: !item.can-kill },
+            { id: "open-folder", label: GuiI18n.text("gui-open-folder") },
+            { id: "create-server", label: GuiI18n.text("gui-create-linked-server") },
+            { separator: true },
+            { id: "favorite", label: item.favorite ? GuiI18n.text("gui-remove-favorite") : GuiI18n.text("gui-add-favorite") },
+            { id: "set-group", label: GuiI18n.text("gui-set-group"), submenu: true },
+            { id: "choose-icon", label: GuiI18n.text("gui-choose-icon-ellipsis") },
+            { id: "remove-icon", label: GuiI18n.text("gui-remove-icon"), hidden: item.icon-slot < 0 },
+            { separator: true },
+            { id: "rename", label: GuiI18n.text("gui-rename") },
             // Only a temporary instance has anywhere to go, and only a
             // stopped one can be moved out from under itself.
             // A menu entry has nowhere to put a hint, so a disabled one
-            // says why in its own title rather than greying out silently.
-            if item.storage-kind == "temporary" : MenuItem { title: item.can-kill ? GuiI18n.text("gui-make-persistent-while-running") : GuiI18n.text("gui-make-persistent"); enabled: !item.can-kill; activated => { root.make-persistent(item.id); } }
-            MenuItem { title: item.can-kill ? GuiI18n.text("gui-duplicate-instance-while-running") : GuiI18n.text("gui-duplicate-instance"); enabled: !item.can-kill; activated => { root.duplicate(item.id); } }
-            MenuItem { title: item.can-kill ? GuiI18n.text("gui-delete-instance-while-running") : GuiI18n.text("gui-delete-instance"); enabled: !item.can-kill; activated => { root.delete(item.id, item.name); } }
+            // says why in its own label rather than graying out silently.
+            { id: "make-persistent", label: item.can-kill ? GuiI18n.text("gui-make-persistent-while-running") : GuiI18n.text("gui-make-persistent"), disabled: item.can-kill, hidden: item.storage-kind != "temporary" },
+            { id: "duplicate", label: item.can-kill ? GuiI18n.text("gui-duplicate-instance-while-running") : GuiI18n.text("gui-duplicate-instance"), disabled: item.can-kill },
+            { id: "delete", label: item.can-kill ? GuiI18n.text("gui-delete-instance-while-running") : GuiI18n.text("gui-delete-instance"), disabled: item.can-kill },
+        ];
+        activated(id) => {
+            if (id == "open-workspace") {
+                root.open-workspace(item.id);
+            } else if (id == "launch") {
+                root.launch(item.id);
+            } else if (id == "kill") {
+                root.kill(item.id);
+            } else if (id == "open-folder") {
+                root.open-folder(item.id);
+            } else if (id == "create-server") {
+                root.create-server(item.id, item.name);
+            } else if (id == "favorite") {
+                root.toggle-favorite(item.id, !item.favorite);
+            } else if (id == "set-group") {
+                group-menu.show-at-window(root.menu-x, root.menu-y);
+            } else if (id == "choose-icon") {
+                root.pick-icon(item.id);
+            } else if (id == "remove-icon") {
+                root.clear-icon(item.id);
+            } else if (id == "rename") {
+                root.rename(item.id, item.name);
+            } else if (id == "make-persistent") {
+                root.make-persistent(item.id);
+            } else if (id == "duplicate") {
+                root.duplicate(item.id);
+            } else if (id == "delete") {
+                root.delete(item.id, item.name);
+            }
+        }
+    }
+    group-menu := PopupMenu {
+        choices: root.group-entries;
+        entries: [
+            // Below the rule, so no group's name can pass for it.
+            { separator: true, hidden: root.group-entries.length == 0 },
+            { id: "new-group", label: GuiI18n.text("gui-new-group-ellipsis") },
+            { id: "no-group", label: GuiI18n.text("gui-remove-from-group"), disabled: item.group-id == "" },
+        ];
+        chosen(id) => { root.set-group(item.id, id); }
+        activated(id) => {
+            if (id == "new-group") {
+                root.new-group(item.id);
+            } else {
+                root.set-group(item.id, "");
+            }
         }
     }
 }
@@ -234,10 +282,12 @@ export component ServerCard inherits Rectangle {
     accessible-role: button;
     accessible-label: item.name;
     accessible-action-default => { root.choose(item.id); }
+    function open-menu(x: length, y: length) { menu.show-at-window(x, y); }
     // Under the card's buttons, not over them. See `InstanceCard`.
-    card-area := TouchArea {
+    card-area := ContextTouchArea {
         clicked => { root.choose(item.id); }
         double-clicked => { root.open-workspace(item.id); }
+        context-requested(x, y) => { root.open-menu(x, y); }
     }
     Rectangle {
         x: 0px; y: 10px; width: 3px; height: parent.height - 20px;
@@ -252,11 +302,12 @@ export component ServerCard inherits Rectangle {
             horizontal-stretch: 1;
             HorizontalLayout {
                 spacing: 9px;
-                FavoriteToggle { size: 28px; host-name: item.name; favorite: item.favorite; toggled => { root.toggle-favorite(item.id, !item.favorite); } }
+                FavoriteToggle { size: 28px; host-name: item.name; favorite: item.favorite; toggled => { root.toggle-favorite(item.id, !item.favorite); } context-requested(x, y) => { root.open-menu(x, y); } }
                 ElidedHeading {
                     text: item.name;
                     clicked => { root.choose(item.id); }
                     double-clicked => { root.open-workspace(item.id); }
+                    context-requested(x, y) => { root.open-menu(x, y); }
                 }
             }
             BodyText { text: GuiI18n.values("gui-target-summary", item.minecraft, item.loader) + " | " + item.relationship; overflow: elide; }
@@ -275,29 +326,50 @@ export component ServerCard inherits Rectangle {
                     text: item.can-start ? GuiI18n.text("gui-start") : GuiI18n.text("gui-stop");
                     tone: "primary";
                     clicked => { root.primary(item.id); }
+                    context-requested(x, y) => { root.open-menu(x, y); }
                 }
                 if !item.can-start && !item.can-stop : Rectangle { width: 150px; }
-                IconButton { icon: @image-url("../../../../assets/icons/open-workspace.svg"); accessible-name: GuiI18n.text("gui-open-server-workspace"); clicked => { root.open-workspace(item.id); } }
+                IconButton { icon: @image-url("../../../../assets/icons/open-workspace.svg"); accessible-name: GuiI18n.text("gui-open-server-workspace"); clicked => { root.open-workspace(item.id); } context-requested(x, y) => { root.open-menu(x, y); } }
             }
         }
     }
-    // See `InstanceCard`.
-    property <string> menu-owner-id: item.id;
-    changed menu-owner-id => { card-menu.close(); }
-    card-menu := ContextMenuArea {
-        Menu {
-            MenuItem { title: GuiI18n.text("gui-open-server-workspace"); activated => { root.open-workspace(item.id); } }
-            MenuItem { title: item.can-start ? GuiI18n.text("gui-start") : GuiI18n.text("gui-stop"); enabled: item.can-start || item.can-stop; activated => { root.primary(item.id); } }
-            MenuItem { title: GuiI18n.text("gui-restart"); enabled: item.can-restart && item.restart-stage == ""; activated => { root.restart(item.id); } }
-            MenuItem { title: GuiI18n.text("gui-open-folder"); activated => { root.open-folder(item.id); } }
-            MenuSeparator { }
-            MenuItem { title: item.favorite ? GuiI18n.text("gui-remove-favorite") : GuiI18n.text("gui-add-favorite"); activated => { root.toggle-favorite(item.id, !item.favorite); } }
-            MenuItem { title: GuiI18n.text("gui-choose-icon-ellipsis"); activated => { root.pick-icon(item.id); } }
-            if item.icon-slot >= 0 : MenuItem { title: GuiI18n.text("gui-remove-icon"); activated => { root.clear-icon(item.id); } }
-            MenuSeparator { }
-            MenuItem { title: GuiI18n.text("gui-rename"); activated => { root.rename(item.id, item.name); } }
-            MenuItem { title: GuiI18n.text("gui-force-kill"); enabled: item.can-kill; activated => { root.kill(item.id, item.name); } }
-            MenuItem { title: GuiI18n.text("gui-delete-server"); activated => { root.delete(item.id, item.name); } }
+    menu := PopupMenu {
+        entries: [
+            { id: "open-workspace", label: GuiI18n.text("gui-open-server-workspace") },
+            { id: "primary", label: item.can-start ? GuiI18n.text("gui-start") : GuiI18n.text("gui-stop"), disabled: !item.can-start && !item.can-stop },
+            { id: "restart", label: GuiI18n.text("gui-restart"), disabled: !item.can-restart || item.restart-stage != "" },
+            { id: "open-folder", label: GuiI18n.text("gui-open-folder") },
+            { separator: true },
+            { id: "favorite", label: item.favorite ? GuiI18n.text("gui-remove-favorite") : GuiI18n.text("gui-add-favorite") },
+            { id: "choose-icon", label: GuiI18n.text("gui-choose-icon-ellipsis") },
+            { id: "remove-icon", label: GuiI18n.text("gui-remove-icon"), hidden: item.icon-slot < 0 },
+            { separator: true },
+            { id: "rename", label: GuiI18n.text("gui-rename") },
+            { id: "force-kill", label: GuiI18n.text("gui-force-kill"), disabled: !item.can-kill },
+            { id: "delete", label: GuiI18n.text("gui-delete-server") },
+        ];
+        activated(id) => {
+            if (id == "open-workspace") {
+                root.open-workspace(item.id);
+            } else if (id == "primary") {
+                root.primary(item.id);
+            } else if (id == "restart") {
+                root.restart(item.id);
+            } else if (id == "open-folder") {
+                root.open-folder(item.id);
+            } else if (id == "favorite") {
+                root.toggle-favorite(item.id, !item.favorite);
+            } else if (id == "choose-icon") {
+                root.pick-icon(item.id);
+            } else if (id == "remove-icon") {
+                root.clear-icon(item.id);
+            } else if (id == "rename") {
+                root.rename(item.id, item.name);
+            } else if (id == "force-kill") {
+                root.kill(item.id, item.name);
+            } else if (id == "delete") {
+                root.delete(item.id, item.name);
+            }
         }
     }
 }
@@ -308,7 +380,7 @@ export component InstanceInspector inherits Rectangle {
     in property <InstanceRow> item;
     in property <bool> has-selection;
     // The accounts a launch can be made as, for the control beside Launch.
-    in property <[AccountRow]> accounts;
+    in property <[MenuRow]> account-entries;
     callback launch(string);
     callback launch-as(string, string, bool);
     callback add-account();
@@ -388,7 +460,7 @@ export component InstanceInspector inherits Rectangle {
         if item.can-launch || item.can-kill : HorizontalLayout { spacing: 8px;
             if item.can-launch : AppButton { width: (parent.width - 8px) / 2; text: GuiI18n.text("gui-launch"); tone: "primary"; clicked => { root.launch(item.id); } }
             if item.can-kill : AppButton { width: (parent.width - 8px) / 2; text: GuiI18n.text("gui-kill-instance"); tone: "danger"; clicked => { root.kill(item.id); } }
-            LaunchAsButton { width: (parent.width - 8px) / 2; accounts: root.accounts; alongside: item.can-kill; launch-as(account, alongside) => { root.launch-as(item.id, account, alongside); } add-account => { root.add-account(); } }
+            LaunchAsButton { width: (parent.width - 8px) / 2; account-entries: root.account-entries; alongside: item.can-kill; launch-as(account, alongside) => { root.launch-as(item.id, account, alongside); } add-account => { root.add-account(); } }
         }
         // A server's name is in this caption, so the button takes the
         // width the panel has rather than asking for the width the name

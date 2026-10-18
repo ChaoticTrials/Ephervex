@@ -395,6 +395,132 @@ fn ctrl_c_and_ctrl_a_reach_the_console() {
     assert_eq!(*copied.borrow(), 1, "an unmodified c is not a shortcut");
 }
 
+/// A right-click on a line offers the selection commands, and leaves the
+/// selection alone so that Copy selection can copy what the pointer is over.
+#[test]
+fn right_clicking_a_console_line_offers_the_selection_commands() {
+    let ui = window();
+    let selected: Rc<RefCell<Vec<(i32, i32, bool)>>> = Rc::default();
+    let record = Rc::clone(&selected);
+    ui.on_log_select_at(move |_, row, column, extend| {
+        record.borrow_mut().push((row, column, extend));
+    });
+    let all: Rc<RefCell<usize>> = Rc::default();
+    let record = Rc::clone(&all);
+    ui.on_log_select_all(move |_| *record.borrow_mut() += 1);
+    let copied: Rc<RefCell<usize>> = Rc::default();
+    let record = Rc::clone(&copied);
+    ui.on_log_copy_selection(move |_| *record.borrow_mut() += 1);
+
+    server_console(&ui);
+    settle(&ui);
+    assert!(menu_entry(&ui, "gui-select-all").is_none());
+
+    let rows = console_rows(&ui);
+    let origin = LogicalPosition::new(
+        rows[2].absolute_position().x + 120.0,
+        rows[2].absolute_position().y + rows[2].size().height / 2.0,
+    );
+    right_click(&ui, origin);
+
+    assert!(
+        selected.borrow().is_empty(),
+        "a right-click does not move the selection"
+    );
+    let copy = menu_entry(&ui, "gui-copy-selection").expect("the menu offers Copy selection");
+    click_in_menu(&ui, origin, &copy);
+    assert_eq!(
+        *copied.borrow(),
+        0,
+        "nothing is selected, so there is nothing to copy"
+    );
+
+    let every = menu_entry(&ui, "gui-select-all").expect("the menu offers Select all");
+    click_in_menu(&ui, origin, &every);
+    assert_eq!(*all.borrow(), 1);
+    assert!(
+        menu_entry(&ui, "gui-select-all").is_none(),
+        "choosing an entry closes the menu"
+    );
+}
+
+/// A report is read-only text with its own menu, opened by the pointer or, with
+/// the text focused, by the menu key.
+#[test]
+fn an_open_crash_report_offers_its_menu_to_the_pointer_and_to_the_menu_key() {
+    let ui = window();
+    server_logs(&ui);
+    set_view(&ui, |view| {
+        view.files = ModelRc::new(VecModel::from(vec![log_file()]));
+        view.mode = "crashes".into();
+        view.file = "2026-08-30-1.log.gz".into();
+        view.report = "    at net.minecraft.server.Main.main(Main.java:125)\n"
+            .repeat(20)
+            .into();
+    });
+    settle(&ui);
+
+    let report = ElementHandle::find_by_element_type_name(&ui, "SelectableText")
+        .find(|element| element.size().width > 0.0)
+        .expect("the report is shown");
+    let inside = LogicalPosition::new(
+        report.absolute_position().x + 60.0,
+        report.absolute_position().y + 60.0,
+    );
+    right_click(&ui, inside);
+    assert!(
+        menu_entry(&ui, "gui-select-all").is_some(),
+        "a right-click on the report opens its menu"
+    );
+    key(&ui, &char::from(slint::platform::Key::Escape).to_string());
+    settle(&ui);
+    assert!(menu_entry(&ui, "gui-select-all").is_none());
+
+    // A press in the text gives it the keyboard.
+    press(&ui, inside);
+    release(&ui, inside);
+    settle(&ui);
+    key(&ui, &char::from(slint::platform::Key::Menu).to_string());
+    settle(&ui);
+    assert!(
+        menu_entry(&ui, "gui-select-all").is_some(),
+        "the menu key opens it from the keyboard"
+    );
+}
+
+fn right_click(ui: &AppWindow, position: LogicalPosition) {
+    ui.window()
+        .dispatch_event(WindowEvent::PointerMoved { position });
+    ui.window().dispatch_event(WindowEvent::PointerPressed {
+        position,
+        button: PointerEventButton::Right,
+    });
+    ui.window().dispatch_event(WindowEvent::PointerReleased {
+        position,
+        button: PointerEventButton::Right,
+    });
+    settle(ui);
+}
+
+/// A row of an open menu, which is a button carrying the entry's label.
+fn menu_entry(ui: &AppWindow, label: &str) -> Option<ElementHandle> {
+    ElementHandle::find_by_accessible_label(ui, &lookup(label)).find(|element| {
+        element.accessible_role() == Some(AccessibleRole::Button) && element.size().width > 0.0
+    })
+}
+
+/// Presses the middle of a row of a menu opened at `origin`. A popup's elements
+/// report their positions from the popup's own corner.
+fn click_in_menu(ui: &AppWindow, origin: LogicalPosition, row: &ElementHandle) {
+    let position = LogicalPosition::new(
+        origin.x + row.absolute_position().x + row.size().width / 2.0,
+        origin.y + row.absolute_position().y + row.size().height / 2.0,
+    );
+    press(ui, position);
+    release(ui, position);
+    settle(ui);
+}
+
 /// A double click selects the word under it, which is how an id gets copied.
 #[test]
 fn double_clicking_a_console_line_selects_the_word_under_it() {

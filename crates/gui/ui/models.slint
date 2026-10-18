@@ -89,6 +89,23 @@ export struct InstanceRow {
     icon-slot: int,
 }
 
+// One entry of a popup menu. A field left out of a literal is its default, so
+// an ordinary entry names only its id and label.
+export struct MenuRow {
+    // Handed back when the entry is chosen. Unique within one menu.
+    id: string,
+    label: string,
+    // Shown muted and cannot be chosen.
+    disabled: bool,
+    // Takes no room and cannot be reached, so one list can hold every entry
+    // a menu might offer.
+    hidden: bool,
+    // A rule between two runs of entries; the other fields are unused.
+    separator: bool,
+    // Marked with an arrow: choosing it opens another menu.
+    submenu: bool,
+}
+
 // One group instances can be put in.
 export struct GroupRow {
     id: string,

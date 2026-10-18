@@ -12,9 +12,11 @@ mod support;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ephervex_gui::ui::{AccountRow, AppWindow, GuiI18n, InstanceRow};
+use ephervex_gui::ui::{AccountRow, AppWindow, GuiI18n, InstanceRow, MenuRow};
 use ephervex_i18n::{Arg, lookup, lookup_args};
-use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
+use i_slint_backend_testing::{
+    AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions,
+};
 use slint::platform::PointerEventButton;
 use slint::{ComponentHandle, ModelRc, PhysicalSize, SharedString, VecModel};
 
@@ -80,6 +82,18 @@ fn launch_as_offers_every_account_and_a_way_to_add_one() {
     });
 
     instance_workspace(&ui);
+    ui.set_account_launch_entries(ModelRc::new(VecModel::from(vec![
+        MenuRow {
+            id: "alice-id".into(),
+            label: "Alice".into(),
+            ..MenuRow::default()
+        },
+        MenuRow {
+            id: "bob-id".into(),
+            label: "Bob".into(),
+            ..MenuRow::default()
+        },
+    ])));
     settle(&ui);
 
     let launch_as = ElementHandle::find_by_accessible_label(&ui, &lookup("gui-launch-as"))
@@ -88,12 +102,19 @@ fn launch_as_offers_every_account_and_a_way_to_add_one() {
     launch_as.mock_single_click(PointerEventButton::Left);
     settle(&ui);
 
-    // The menu is a native popup, so what is assertable here is that the press
-    // was taken by the control rather than falling through to the workspace,
-    // and that plain Launch is untouched beside it.
+    // The press was taken by the control rather than falling through to the
+    // workspace, plain Launch is untouched beside it, and the menu it opened
+    // lists every account and a way to add one.
     assert!(
         launched.borrow().is_empty(),
         "opening the menu must not launch anything by itself"
+    );
+    for label in ["Alice", "Bob"] {
+        assert!(menu_row(&ui, label), "the menu lists the account {label}");
+    }
+    assert!(
+        menu_row(&ui, &lookup("gui-add-account")),
+        "and ends with a way to add one"
     );
     assert!(
         ElementHandle::find_by_accessible_label(&ui, &lookup("gui-launch"))
@@ -342,4 +363,11 @@ fn install_i18n(ui: &AppWindow) {
         )
         .into()
     });
+}
+
+/// Whether an open menu has a row carrying `label`.
+fn menu_row(ui: &AppWindow, label: &str) -> bool {
+    ElementHandle::find_by_accessible_label(ui, label).any(|element| {
+        element.accessible_role() == Some(AccessibleRole::Button) && element.size().width > 0.0
+    })
 }

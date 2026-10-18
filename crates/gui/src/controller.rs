@@ -42,10 +42,10 @@ use crate::settings_drafts::{DraftField, SettingsDrafts, SettingsSave};
 use crate::ui::{
     AccountRow, ActivityRow, AppWindow, BlockedFileRow, DiagnosticRow, DiskUsageRow, GuiI18n,
     HostView, ImpactRow, ImportDuplicateRow, ImportOptionRow, InstanceRow, IsolationCandidateRow,
-    JavaRow, LicenseRow, LinkedTargetRow, LocalModClashRow, LogChunk, ModRow, ModSearchRow,
-    ModVersionRow, NameRules, PendingEntityRow, PromoteServerRow, PropertyRules, RelationRow,
-    RunningRow, ServerPackRules, ServerPropertyGroup, ServerPropertyRow, ServerRow, SnapshotRow,
-    Theme, WindowSizePreview, WorkflowActionRow,
+    JavaRow, LicenseRow, LinkedTargetRow, LocalModClashRow, LogChunk, MenuRow, ModRow,
+    ModSearchRow, ModVersionRow, NameRules, PendingEntityRow, PromoteServerRow, PropertyRules,
+    RelationRow, RunningRow, ServerPackRules, ServerPropertyGroup, ServerPropertyRow, ServerRow,
+    SnapshotRow, Theme, WindowSizePreview, WorkflowActionRow,
 };
 use crate::window_aspect;
 use crate::workspace_layout::{PaneId, Revealed, Surface, WorkspaceLayout};
@@ -9616,6 +9616,7 @@ fn apply_snapshot(
     let clients =
         apply_instance_snapshot(ui, instances, groups, instance_sort, version_order, list);
     let servers = apply_server_snapshot(ui, servers);
+    ui.set_account_launch_entries(model(account_launch_entries(&accounts)));
     ui.set_accounts(model(account_rows(accounts)));
     // A refresh happens for reasons unrelated to this screen, so the model
     // folds the confirmed state under whatever is unsaved rather than over it.
@@ -9954,6 +9955,25 @@ fn apply_activities(ui: &AppWindow, activities: &[ActivityData]) {
         .collect::<Vec<_>>();
     ui.set_active_operations(to_i32(rows.iter().filter(|row| row.active).count()));
     ui.set_activities(model(rows));
+}
+
+/// The accounts a launch can be made as, for the Launch as menu.
+///
+/// The default is named like the rest. It is still the one plain Launch uses,
+/// and saying so twice would read as two different accounts.
+fn account_launch_entries(rows: &[AccountData]) -> Vec<MenuRow> {
+    rows.iter()
+        .map(|row| MenuRow {
+            id: row.id.as_str().into(),
+            label: if row.is_default {
+                format!("{} ({})", row.name, lookup("gui-default"))
+            } else {
+                row.name.clone()
+            }
+            .into(),
+            ..MenuRow::default()
+        })
+        .collect()
 }
 
 fn account_rows(rows: Vec<AccountData>) -> Vec<AccountRow> {
@@ -16534,7 +16554,11 @@ mod tests {
         ] {
             assert!(source.contains(label), "missing context action {label}");
         }
-        assert!(source.matches("ContextMenuArea {").count() >= 3);
+        assert!(source.matches("PopupMenu {").count() >= 3);
+        assert!(
+            !source.contains("ContextMenuArea"),
+            "the toolkit's own menu takes no color from a theme"
+        );
     }
 
     fn plan(install_count: usize, targets: usize) -> backend::ModPlanData {
@@ -19054,7 +19078,7 @@ mod tests {
         for component in ["component InstanceCard", "component ServerCard"] {
             let card = ui_declaration(source, component).expect("the card component");
             let area = card
-                .find("card-area := TouchArea")
+                .find("card-area := ContextTouchArea")
                 .expect("a card touch area");
             let layout = card.find("HorizontalLayout {").expect("the card layout");
             assert!(

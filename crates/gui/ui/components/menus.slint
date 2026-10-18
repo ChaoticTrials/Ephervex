@@ -1,0 +1,226 @@
+// Popup menus painted from the active theme.
+//
+// The toolkit's own context menu paints from palette colors the application
+// cannot write, so it follows only the light or dark look of a theme. This
+// menu is drawn from the same tokens as the dropdown lists, so every theme
+// reaches it.
+//
+// A menu is a list of `MenuRow`s. Opening it is the caller's job: a press of
+// the secondary button reaches `show-at-window` through `ContextTouchArea`,
+// and a button opens it with `show`.
+
+import { MenuRow } from "../models.slint";
+import { Theme } from "../theme.slint";
+
+// A touch area that also reports a press of the secondary button and where it
+// landed, in window coordinates. Every touch area that sits over a card or a
+// text view and takes presses itself uses this, because a touch area accepts
+// a press of any button and the area behind it never sees it.
+export component ContextTouchArea inherits TouchArea {
+    callback context-requested(x: length, y: length);
+    pointer-event(event) => {
+        if event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
+            root.context-requested(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+        }
+    }
+}
+
+component MenuRowView inherits Rectangle {
+    in property <MenuRow> entry;
+    in property <bool> highlighted;
+    callback hovered();
+    callback unhovered();
+    callback picked();
+    height: root.entry.hidden ? 0px : root.entry.separator ? 9px : 30px * Theme.text-scale;
+    preferred-width: root.entry.hidden || root.entry.separator ? 0px : label.preferred-width + (root.entry.submenu ? 44px : 24px);
+    visible: !root.entry.hidden;
+    border-radius: 4px;
+    background: root.highlighted ? Theme.selection : transparent;
+
+    label := Text {
+        x: 12px;
+        width: parent.width - (root.entry.submenu ? 44px : 24px);
+        height: parent.height;
+        text: root.entry.separator ? "" : root.entry.label;
+        color: root.entry.disabled ? Theme.text-muted : Theme.text;
+        font-size: Theme.body-size;
+        overflow: elide;
+        vertical-alignment: center;
+    }
+    if root.entry.submenu : Text {
+        x: parent.width - 28px;
+        width: 16px;
+        height: parent.height;
+        text: "\u{25b8}";
+        color: root.entry.disabled ? Theme.text-muted : Theme.text-secondary;
+        font-size: Theme.label-size;
+        horizontal-alignment: right;
+        vertical-alignment: center;
+    }
+    if root.entry.separator : Rectangle {
+        x: 8px;
+        y: (parent.height - self.height) / 2;
+        width: parent.width - 16px;
+        height: 1px;
+        background: Theme.border;
+    }
+    if !root.entry.separator && !root.entry.hidden : Rectangle {
+        accessible-role: button;
+        accessible-label: root.entry.label;
+        accessible-enabled: !root.entry.disabled;
+        accessible-action-default => { root.picked(); }
+        TouchArea {
+            enabled: !root.entry.disabled;
+            changed has-hover => {
+                if (self.has-hover) {
+                    root.hovered();
+                } else {
+                    root.unhovered();
+                }
+            }
+            clicked => { root.picked(); }
+        }
+    }
+}
+
+// A menu of `choices` followed by `entries`. The choices come from a model the
+// caller holds, such as the accounts a launch can be made as, and the entries
+// are the fixed commands after them. Both are one list to the user.
+//
+// In the open menu the arrow keys, Home and End move the highlight over the
+// rows that can be chosen, Enter or Space picks the highlighted one and
+// Escape closes without a pick. A pick is reported once, after the menu has
+// closed: a choice through `chosen` and an entry through `activated`.
+export component PopupMenu inherits Rectangle {
+    in property <[MenuRow]> choices;
+    in property <[MenuRow]> entries;
+    out property <bool> open: popup.is-open;
+    callback chosen(id: string);
+    callback activated(id: string);
+    // Takes no room and sits at its parent's corner, which is the origin
+    // `show` measures from. A box given a size and no position is centered.
+    x: 0px;
+    y: 0px;
+    width: 0px;
+    height: 0px;
+    private property <length> anchor-x;
+    private property <length> anchor-y;
+    private property <length> frame-padding: 4px;
+    // The row a picking key would choose, or -1 for none.
+    private property <int> highlight: -1;
+    private property <int> count: root.choices.length + root.entries.length;
+
+    // Opens the menu with its corner at `position`, measured from this
+    // element's own corner.
+    public function show(position: Point) {
+        root.anchor-x = position.x;
+        root.anchor-y = position.y;
+        root.highlight = -1;
+        popup.show();
+    }
+    // Opens the menu at a point measured from the window's corner.
+    public function show-at-window(x: length, y: length) {
+        root.show({ x: x - root.absolute-position.x, y: y - root.absolute-position.y });
+    }
+    public function close() { popup.close(); }
+    // An open menu is placed once, so it would stay where it was drawn while
+    // what it belongs to moves under it: a card scrolled or reflowed.
+    changed absolute-position => { popup.close(); }
+
+    pure function row-at(index: int) -> MenuRow {
+        return index < root.choices.length ? root.choices[index] : root.entries[index - root.choices.length];
+    }
+    pure function usable(index: int) -> bool {
+        return index >= 0 && index < root.count && !root.row-at(index).hidden && !root.row-at(index).separator && !root.row-at(index).disabled;
+    }
+    pure function wrap(index: int) -> int {
+        return index < 0 ? root.count - 1 : index >= root.count ? 0 : index;
+    }
+    pure function skip(index: int, direction: int) -> int {
+        return root.usable(index) ? index : root.wrap(index + direction);
+    }
+    // The row after `from` in `direction`, wrapping at either end. A run of
+    // more than eight rows that cannot be picked is not crossed, and the
+    // highlight stays where it is.
+    pure function step(from: int, direction: int) -> int {
+        let first = root.wrap(from + direction);
+        let second = root.skip(first, direction);
+        let third = root.skip(second, direction);
+        let fourth = root.skip(third, direction);
+        let fifth = root.skip(fourth, direction);
+        let sixth = root.skip(fifth, direction);
+        let seventh = root.skip(sixth, direction);
+        let last = root.skip(seventh, direction);
+        return root.usable(last) ? last : from;
+    }
+    function pick(index: int) {
+        if (root.usable(index)) {
+            let id = root.row-at(index).id;
+            let is-choice = index < root.choices.length;
+            popup.close();
+            if (is-choice) {
+                root.chosen(id);
+            } else {
+                root.activated(id);
+            }
+        }
+    }
+
+    popup := PopupWindow {
+        x: root.anchor-x;
+        y: root.anchor-y;
+        // The layout's own preferred size already includes its padding.
+        width: min(420px, max(180px, list.preferred-width));
+        height: list.preferred-height;
+        close-policy: close-on-click-outside;
+        forward-focus: keys;
+
+        keys := FocusScope {
+            key-pressed(event) => {
+                if (event.text == Key.DownArrow) {
+                    root.highlight = root.step(root.highlight, 1);
+                } else if (event.text == Key.UpArrow) {
+                    root.highlight = root.step(root.highlight, -1);
+                } else if (event.text == Key.Home) {
+                    root.highlight = root.step(-1, 1);
+                } else if (event.text == Key.End) {
+                    root.highlight = root.step(root.count, -1);
+                } else if (event.text == Key.Return || event.text == " ") {
+                    root.pick(root.highlight);
+                } else if (event.text == Key.Escape) {
+                    popup.close();
+                } else {
+                    return reject;
+                }
+                return accept;
+            }
+
+            Rectangle {
+                border-radius: 7px;
+                border-width: 1px;
+                border-color: Theme.border;
+                background: Theme.overlay;
+                drop-shadow-blur: 16px;
+                drop-shadow-offset-y: 6px;
+                drop-shadow-color: Theme.shadow;
+                list := VerticalLayout {
+                    padding: root.frame-padding;
+                    for choice[index] in root.choices : MenuRowView {
+                        entry: choice;
+                        highlighted: index == root.highlight;
+                        hovered => { root.highlight = index; }
+                        unhovered => { if (root.highlight == index) { root.highlight = -1; } }
+                        picked => { root.pick(index); }
+                    }
+                    for command[index] in root.entries : MenuRowView {
+                        entry: command;
+                        highlighted: root.choices.length + index == root.highlight;
+                        hovered => { root.highlight = root.choices.length + index; }
+                        unhovered => { if (root.highlight == root.choices.length + index) { root.highlight = -1; } }
+                        picked => { root.pick(root.choices.length + index); }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -65,6 +65,7 @@ import {
     LinkedTargetRow,
     LocalModClashRow,
     LogView,
+    MenuRow,
     MinecraftPreferenceRow,
     ModVersionRow,
     PendingEntityRow,
@@ -284,6 +285,8 @@ export component AppWindow inherits Window {
     in-out property <[string]> disk-usage-unreadable;
     in-out property <[ActivityRow]> activities;
     in-out property <[AccountRow]> accounts;
+    // The same accounts as menu rows, for the Launch as menu.
+    in-out property <[MenuRow]> account-launch-entries;
     in-out property <[JavaRow]> java-runtimes;
     // -- Minecraft defaults for future client instances.
     in-out property <[MinecraftPreferenceRow]> minecraft-preference-rows;
@@ -346,6 +349,8 @@ export component AppWindow inherits Window {
     in-out property <int> instance-sort-index: 0;
     // Every group, and "no group" followed by their names for a group choice.
     in-out property <[GroupRow]> instance-groups;
+    // The same groups as menu rows, for the instance card menu.
+    in-out property <[MenuRow]> instance-group-entries;
     in-out property <[string]> instance-group-names;
     // How many instances exist, and how many conditions narrow the list.
     in-out property <int> instance-total: 0;
@@ -1163,7 +1168,7 @@ export component AppWindow inherits Window {
                                     for item[index] in root.instances : VerticalLayout {
                                     InstanceCard {
                                         item: item;
-                                        groups: root.instance-groups;
+                                        group-entries: root.instance-group-entries;
                                         toggle-favorite(id, favorite) => { root.set-favorite("client", id, favorite); }
                                         set-group(id, group) => { root.set-client-group(id, group); }
                                         new-group(id) => { root.pending-action-kind = "new-group"; root.pending-action-id = id; root.pending-rename-text = ""; root.modal-error = ""; root.modal = "rename"; }
@@ -1197,7 +1202,7 @@ export component AppWindow inherits Window {
                         manage-groups => { root.modal-error = ""; root.modal = "groups"; }
                         pick-icon(id) => { root.pick-host-icon("client", id); }
                         clear-icon(id) => { root.clear-host-icon("client", id); }
-                        accounts: root.accounts;
+                        account-entries: root.account-launch-entries;
                         launch(id) => { root.launch-client(id); }
                         launch-as(id, account, alongside) => { root.launch-client-as(id, account, alongside); }
                         add-account => { root.close-workspace(); root.page = 4; root.settings-tab = "Accounts"; }
@@ -1326,7 +1331,7 @@ export component AppWindow inherits Window {
                                 host-running: self.is-client ? host.client.can-kill : host.server.can-stop;
                                 surfaces: host.surfaces;
                                 selected-surface: pane.surface;
-                                accounts: root.accounts;
+                                account-entries: root.account-launch-entries;
                                 show-launch-as: self.is-client;
                                 launch-alongside: self.is-client && host.client.can-kill;
                                 primary-label: self.is-client ? (host.client.can-kill ? GuiI18n.text("gui-stop-game") : GuiI18n.text("gui-launch")) : (host.server.can-stop ? GuiI18n.text("gui-stop") : GuiI18n.text("gui-start"));

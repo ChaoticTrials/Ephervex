@@ -87,11 +87,11 @@ also holds a commented-out `[branding]` section for use in a theme folder.
 | `surface` | Cards and panels |
 | `field` | Text inputs and dropdowns |
 | `elevated` | A raised card, such as one under the pointer |
-| `overlay` | Popovers, which must read against an `elevated` card |
+| `overlay` | Popovers, such as dropdown lists and menus, which must read against an `elevated` card |
 | `border` | Borders and dividers |
 | `bar` | The top bar, the navigation column, and the status bar |
 | `well` | The floor of technical views: consoles, logs, crash reports |
-| `selection` | A selected row |
+| `selection` | A selected row, and the highlighted entry of a menu |
 | `selection-card` | A selected card |
 | `selection-strong` | A selected chip |
 | `toggle-on` | The track of a switch that is on |
@@ -244,11 +244,11 @@ Nothing else checks dates. See ADR 0049 for the rules a season follows.
 
 ## What a theme does not reach
 
-Dropdowns, sliders and spinners are drawn from the colors above. Scroll bars,
-lists and the context menu on a right-click or a "Launch as" button are the
-toolkit's own controls: they follow the parent's light or dark look but take no
-colors from a theme, so a theme with a very different palette can leave them
-looking out of place.
+Dropdowns, sliders, spinners and menus, including the one a right-click or a
+"Launch as" button opens, are drawn from the colors above. Scroll bars and lists
+are the toolkit's own controls: they follow the parent's light or dark look but
+take no colors from a theme, so a theme with a very different palette can leave
+them looking out of place.
 
 ## When a file has a problem
 

@@ -1,8 +1,9 @@
 // Buttons, fields, toggles, pills, navigation items, and the small panels built from them.
 
+import { ContextTouchArea, PopupMenu } from "menus.slint";
 import { BodyText, Heading, HoverNote } from "text.slint";
 import { GuiI18n } from "../globals.slint";
-import { AccountRow } from "../models.slint";
+import { MenuRow } from "../models.slint";
 import { Theme } from "../theme.slint";
 
 // One setting: what it is on the left, the control that changes it on the
@@ -121,6 +122,9 @@ export component AppButton inherits Rectangle {
     in property <string> tone: "secondary";
     in property <bool> enabled: true;
     callback clicked();
+    // A press of the secondary button over the control, in window coordinates,
+    // for a card that offers its menu wherever it is pressed.
+    callback context-requested(x: length, y: length);
     // Why it cannot be pressed, or the whole caption when the button was
     // given less room than the caption needed. A button that works and
     // shows its label has nothing to add.
@@ -156,9 +160,10 @@ export component AppButton inherits Rectangle {
     KeyboardFocus { width: root.width; height: root.height; enabled: root.enabled; activated => { root.clicked(); } }
     // Always enabled, so a disabled button still reports hover and can
     // explain itself. The press is gated on `enabled` instead.
-    area := TouchArea {
+    area := ContextTouchArea {
         mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.not-allowed;
         clicked => { if root.enabled { root.clicked(); } }
+        context-requested(x, y) => { root.context-requested(x, y); }
     }
     HoverNote { text: root.hover-note; hovered: area.has-hover; pointer-x: area.mouse-x; pointer-y: area.mouse-y; }
 }
@@ -179,6 +184,9 @@ export component FavoriteToggle inherits Rectangle {
     // Why the star cannot be pressed, shown on hover while it is disabled.
     in property <string> hint;
     callback toggled();
+    // A press of the secondary button over the control, in window coordinates,
+    // for a card that offers its menu wherever it is pressed.
+    callback context-requested(x: length, y: length);
     // The star has no caption, so hover says what pressing it does, or why
     // it cannot be pressed.
     private property <string> hover-note: !root.enabled && root.hint != "" ? root.hint : root.accessible-label;
@@ -204,9 +212,10 @@ export component FavoriteToggle inherits Rectangle {
     KeyboardFocus { width: root.width; height: root.height; enabled: root.enabled; activated => { root.toggled(); } }
     // Always enabled, so a disabled star still reports hover and can explain
     // itself. The press is gated on `enabled` instead.
-    area := TouchArea {
+    area := ContextTouchArea {
         mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.not-allowed;
         clicked => { if root.enabled { root.toggled(); } }
+        context-requested(x, y) => { root.context-requested(x, y); }
     }
     HoverNote { text: root.hover-note; hovered: area.has-hover; pointer-x: area.mouse-x; pointer-y: area.mouse-y; }
 }
@@ -222,6 +231,9 @@ export component IconButton inherits Rectangle {
     // disabled.
     in property <string> hint;
     callback clicked();
+    // A press of the secondary button over the control, in window coordinates,
+    // for a card that offers its menu wherever it is pressed.
+    callback context-requested(x: length, y: length);
     // A glyph alone does not say what it does, so hover names it, or gives
     // the reason while it is disabled.
     private property <string> hover-note: !root.enabled && root.hint != "" ? root.hint : root.tooltip;
@@ -242,9 +254,10 @@ export component IconButton inherits Rectangle {
     KeyboardFocus { width: root.width; height: root.height; enabled: root.enabled; activated => { root.clicked(); } }
     // Always enabled, so a disabled button still reports hover and can
     // explain itself. The press is gated on `enabled` instead.
-    area := TouchArea {
+    area := ContextTouchArea {
         mouse-cursor: root.enabled ? MouseCursor.default : MouseCursor.not-allowed;
         clicked => { if root.enabled { root.clicked(); } }
+        context-requested(x, y) => { root.context-requested(x, y); }
     }
     HoverNote { text: root.hover-note; hovered: area.has-hover; pointer-x: area.mouse-x; pointer-y: area.mouse-y; }
 }
@@ -628,7 +641,8 @@ export component InlineToggle inherits Rectangle {
 // it. Choosing here applies to one launch and never changes the default,
 // which is what makes it safe to use for a quick second client.
 export component LaunchAsButton inherits Rectangle {
-    in property <[AccountRow]> accounts;
+    // One row per account a launch can be made as, its id the account's.
+    in property <[MenuRow]> account-entries;
     in property <bool> enabled: true;
     // Whether the instance is already running, so a launch from here is a
     // second client rather than the first.
@@ -653,21 +667,14 @@ export component LaunchAsButton inherits Rectangle {
     accessible-enabled: enabled;
     accessible-description: !root.enabled ? root.hint : "";
     accessible-action-default => { if root.enabled { menu.show({ x: 0, y: root.height }); } }
-    menu := ContextMenuArea {
-        Menu {
-            for account in root.accounts : MenuItem {
-                // The default is named like the rest. It is still the one
-                // plain Launch uses, and saying so twice would read as two
-                // different accounts.
-                title: account.is-default ? account.name + " (" + GuiI18n.text("gui-default") + ")" : account.name;
-                activated => { root.launch-as(account.id, root.alongside); }
-            }
-            MenuSeparator {}
-            MenuItem {
-                title: GuiI18n.text("gui-add-account");
-                activated => { root.add-account(); }
-            }
-        }
+    menu := PopupMenu {
+        choices: root.account-entries;
+        entries: [
+            { separator: true, hidden: root.account-entries.length == 0 },
+            { id: "add-account", label: GuiI18n.text("gui-add-account") },
+        ];
+        chosen(id) => { root.launch-as(id, root.alongside); }
+        activated => { root.add-account(); }
     }
     content := HorizontalLayout {
         padding-left: 14px; padding-right: 14px; spacing: 5px; alignment: center;

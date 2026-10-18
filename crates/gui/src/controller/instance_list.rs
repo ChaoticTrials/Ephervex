@@ -19,7 +19,7 @@ use ephervex_model::{LoaderKind, StorageClass};
 use slint::{ComponentHandle as _, Image, Model as _, ModelRc, SharedString, VecModel};
 
 use super::{attach_creating_servers, model, reconciled, to_i32};
-use crate::ui::{AppWindow, GroupRow, HostIcons, InstanceRow};
+use crate::ui::{AppWindow, GroupRow, HostIcons, InstanceRow, MenuRow};
 
 /// The images icons are drawn from, which rows name by position.
 struct IconPool {
@@ -219,6 +219,16 @@ impl InstanceListState {
         ui.set_instance_group_index(to_i32(group_index));
 
         self.write_options(ui);
+        ui.set_instance_group_entries(model(
+            self.groups
+                .iter()
+                .map(|group| MenuRow {
+                    id: group.id.to_string().into(),
+                    label: group.name.as_str().into(),
+                    ..MenuRow::default()
+                })
+                .collect(),
+        ));
         ui.set_instance_groups(model(
             self.groups
                 .iter()

@@ -2,6 +2,7 @@
 
 import { ListView, ScrollView } from "std-widgets.slint";
 import { AppButton, FilterChip, IconButton, TextField } from "../components/controls.slint";
+import { PopupMenu } from "../components/menus.slint";
 import { BodyText } from "../components/text.slint";
 import { GuiI18n } from "../globals.slint";
 import { DiagnosticRow, LogChunk } from "../models.slint";
@@ -66,6 +67,20 @@ export component LiveLogViewer inherits Rectangle {
     // take, which is the only way to learn a font's advance, and a
     // fixed-width family makes that one number true of every character.
     probe := Text { visible: false; width: 0px; height: 0px; text: "0000000000"; font-family: Theme.mono-family; font-size: root.font-size; }
+
+    menu := PopupMenu {
+        entries: [
+            { id: "copy-selection", label: GuiI18n.text("gui-copy-selection"), disabled: !root.has-selection },
+            { id: "select-all", label: GuiI18n.text("gui-select-all"), disabled: root.chunks.length == 0 },
+        ];
+        activated(id) => {
+            if (id == "copy-selection") {
+                root.copy-selection();
+            } else {
+                root.select-all();
+            }
+        }
+    }
 
     VerticalLayout {
         spacing: 0px;
@@ -178,26 +193,20 @@ export component LiveLogViewer inherits Rectangle {
                 private property <int> observed-selection: root.selection-revision;
                 changed observed-selection => { self.apply-selection(); }
                 init => { self.apply-selection(); }
-                ContextMenuArea {
-                    Menu {
-                        MenuItem { title: GuiI18n.text("gui-copy-selection"); enabled: root.has-selection; activated => { root.copy-selection(); } }
-                        MenuItem { title: GuiI18n.text("gui-select-all"); enabled: root.chunks.length > 0; activated => { root.select-all(); } }
-                    }
-                    chunk-input := TextInput {
-                        x: 10px; y: 4px;
-                        width: root.wrap-lines ? output.visible-width - 20px : max(output.visible-width - 20px, self.preferred-width);
-                        height: self.preferred-height;
-                        text: chunk.text;
-                        color: chunk.level == "error" || chunk.level == "fatal" ? Theme.log-error : chunk.level == "warn" ? Theme.warning : chunk.level == "debug" || chunk.level == "trace" ? Theme.text-muted : Theme.text-secondary;
-                        selection-background-color: Theme.accent;
-                        selection-foreground-color: Theme.background;
-                        read-only: true;
-                        single-line: false;
-                        wrap: root.wrap-lines ? word-wrap : no-wrap;
-                        font-family: Theme.mono-family;
-                        font-size: root.font-size;
-                        accessible-label: GuiI18n.text("gui-log-output-block");
-                    }
+                chunk-input := TextInput {
+                    x: 10px; y: 4px;
+                    width: root.wrap-lines ? output.visible-width - 20px : max(output.visible-width - 20px, self.preferred-width);
+                    height: self.preferred-height;
+                    text: chunk.text;
+                    color: chunk.level == "error" || chunk.level == "fatal" ? Theme.log-error : chunk.level == "warn" ? Theme.warning : chunk.level == "debug" || chunk.level == "trace" ? Theme.text-muted : Theme.text-secondary;
+                    selection-background-color: Theme.accent;
+                    selection-foreground-color: Theme.background;
+                    read-only: true;
+                    single-line: false;
+                    wrap: root.wrap-lines ? word-wrap : no-wrap;
+                    font-family: Theme.mono-family;
+                    font-size: root.font-size;
+                    accessible-label: GuiI18n.text("gui-log-output-block");
                 }
                 // Declared last, so it takes the pointer before the text
                 // item can start a selection of its own. A text item's
@@ -219,7 +228,13 @@ export component LiveLogViewer inherits Rectangle {
                 select := TouchArea {
                     mouse-cursor: text;
                     pointer-event(event) => {
-                        if event.kind == PointerEventKind.down {
+                        if event.button == PointerEventButton.right {
+                            // The selection stays as it is, so the menu can
+                            // copy what the pointer is over.
+                            if event.kind == PointerEventKind.down {
+                                menu.show-at-window(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                            }
+                        } else if event.kind == PointerEventKind.down {
                             keys.focus();
                             root.select-at(row, self.column-at(self.mouse-x), event.modifiers.shift);
                         }

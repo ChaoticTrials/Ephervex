@@ -5,7 +5,7 @@ import { AppButton, BusySpinner, IconButton, LaunchAsButton, Pill, PillButton, S
 import { BodyText, Divider, Heading } from "../components/text.slint";
 import { GuiI18n, HostIcons } from "../globals.slint";
 import {
-    AccountRow,
+    MenuRow,
     WorkflowActionRow,
     WorkspaceHostChoice,
     WorkspaceSurfaceRow
@@ -176,7 +176,8 @@ export component HostWorkspace inherits Rectangle {
     in property <bool> host-running;
     in property <[WorkspaceSurfaceRow]> surfaces;
     in property <string> selected-surface;
-    in property <[AccountRow]> accounts;
+    // One row per account a launch can be made as, its id the account's.
+    in property <[MenuRow]> account-entries;
     in property <bool> show-launch-as;
     in property <bool> launch-alongside;
     in property <string> primary-label;
@@ -339,7 +340,7 @@ export component HostWorkspace inherits Rectangle {
             if root.can-split-beside : IconButton { icon: @image-url("../../../../assets/icons/split-beside.svg"); accessible-name: GuiI18n.text("gui-workspace-split"); clicked => { root.split-beside(); } }
             AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-folder(); } }
             if root.show-launch-as : LaunchAsButton {
-                accounts: root.accounts;
+                account-entries: root.account-entries;
                 enabled: root.primary-enabled && !root.occupied;
                 hint: root.occupied ? root.occupied-text : root.primary-hint;
                 alongside: root.launch-alongside;
