@@ -1,0 +1,259 @@
+//! A card's context menu stays with the row it was opened for.
+//!
+//! Instance and server cards are repeater children, so a list that changes in
+//! place hands an existing card another row while its menu is still open. The
+//! menu must not go on to act on that other row.
+
+#![allow(clippy::expect_used)]
+
+use std::rc::Rc;
+
+use ephervex_gui::ui::{AppWindow, GuiI18n, InstanceRow, ServerRow};
+use ephervex_i18n::{Arg, lookup, lookup_args};
+use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
+use slint::platform::{Key, PointerEventButton, WindowEvent};
+use slint::{ComponentHandle, Model, ModelRc, PhysicalSize, SharedString, VecModel};
+
+#[test]
+fn an_open_instance_menu_never_acts_on_the_row_that_replaced_its_row() {
+    let ui = window();
+    ui.set_loading(false);
+    ui.set_page(0);
+    ui.set_workspace_open(false);
+    let rows = Rc::new(VecModel::from(vec![
+        instance("alpha", "Alpha"),
+        instance("bravo", "Bravo"),
+    ]));
+    ui.set_instances(ModelRc::from(Rc::clone(&rows)));
+    settle(&ui);
+
+    open_menu(&ui, "Alpha");
+    assert!(
+        find(&ui, &lookup("gui-delete-instance")).is_some(),
+        "the menu opened on the Alpha card"
+    );
+
+    swap_rows(&rows);
+    settle(&ui);
+
+    activate_last_entry_if_open(&ui, &lookup("gui-delete-instance"));
+    assert_ne!(
+        ui.get_pending_action_id(),
+        "bravo",
+        "the menu opened on Alpha must not delete Bravo"
+    );
+}
+
+/// Guards the two tests around it: driving the menu from the keyboard does
+/// reach the delete entry, so a closed menu there is the card's doing.
+#[test]
+fn the_delete_entry_of_an_untouched_menu_acts_on_its_own_row() {
+    let ui = window();
+    ui.set_loading(false);
+    ui.set_page(0);
+    ui.set_workspace_open(false);
+    ui.set_instances(ModelRc::new(VecModel::from(vec![
+        instance("alpha", "Alpha"),
+        instance("bravo", "Bravo"),
+    ])));
+    settle(&ui);
+
+    open_menu(&ui, "Alpha");
+    activate_last_entry_if_open(&ui, &lookup("gui-delete-instance"));
+
+    assert_eq!(ui.get_pending_action_id(), "alpha");
+}
+
+#[test]
+fn an_open_server_menu_never_acts_on_the_row_that_replaced_its_row() {
+    let ui = window();
+    ui.set_loading(false);
+    ui.set_page(1);
+    let rows = Rc::new(VecModel::from(vec![
+        server("alpha", "Alpha"),
+        server("bravo", "Bravo"),
+    ]));
+    ui.set_global_servers(ModelRc::from(Rc::clone(&rows)));
+    settle(&ui);
+
+    open_menu(&ui, "Alpha");
+    assert!(
+        find(&ui, &lookup("gui-delete-server")).is_some(),
+        "the menu opened on the Alpha card"
+    );
+
+    swap_rows(&rows);
+    settle(&ui);
+
+    activate_last_entry_if_open(&ui, &lookup("gui-delete-server"));
+    assert_ne!(
+        ui.get_pending_action_id(),
+        "bravo",
+        "the menu opened on Alpha must not delete Bravo"
+    );
+}
+
+/// Exchanges the first two rows in place, which keeps the repeater's cards and
+/// gives each the other's item.
+fn swap_rows<T: Clone + 'static>(rows: &VecModel<T>) {
+    let (first, second) = (
+        rows.row_data(0).expect("first row"),
+        rows.row_data(1).expect("second row"),
+    );
+    rows.set_row_data(0, second);
+    rows.set_row_data(1, first);
+}
+
+fn find(ui: &AppWindow, label: &str) -> Option<ElementHandle> {
+    ElementHandle::find_by_accessible_label(ui, label).next()
+}
+
+fn open_menu(ui: &AppWindow, card_label: &str) {
+    find(ui, card_label)
+        .expect("the list holds the card")
+        .mock_single_click(PointerEventButton::Right);
+    settle(ui);
+}
+
+/// Activates the menu's last entry, which is the delete entry on both cards,
+/// when the menu is still showing. A menu that closed with its row offers
+/// nothing to activate, which is the other acceptable outcome.
+///
+/// Driven from the keyboard: Up from no highlight lands on the last entry.
+fn activate_last_entry_if_open(ui: &AppWindow, label: &str) {
+    if find(ui, label).is_none() {
+        return;
+    }
+    for key in [Key::UpArrow, Key::Return] {
+        let text: SharedString = key.into();
+        ui.window()
+            .dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+        ui.window()
+            .dispatch_event(WindowEvent::KeyReleased { text });
+        settle(ui);
+    }
+}
+
+fn settle(ui: &AppWindow) {
+    slint::platform::update_timers_and_animations();
+    ui.window().take_snapshot().expect("render");
+}
+
+fn window() -> AppWindow {
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        renderer_name: Some("software".into()),
+        mock_time: true,
+        threading: false,
+    })))
+    .expect("testing backend");
+    let ui = AppWindow::new().expect("window");
+    install_i18n(&ui);
+    ui.window().set_size(PhysicalSize::new(1480, 900));
+    ui.show().expect("show");
+    ui
+}
+
+fn install_i18n(ui: &AppWindow) {
+    let global = ui.global::<GuiI18n>();
+    global.on_text(|id| lookup(id.as_str()).into());
+    global.on_count(|id, count| {
+        lookup_args(id.as_str(), [("count", Arg::Count(i64::from(count)))]).into()
+    });
+    global.on_value(|id, value| {
+        lookup_args(id.as_str(), [("value", Arg::from(value.to_string()))]).into()
+    });
+    global.on_values(|id, first, second| {
+        lookup_args(
+            id.as_str(),
+            [
+                ("first", Arg::from(first.to_string())),
+                ("second", Arg::from(second.to_string())),
+            ],
+        )
+        .into()
+    });
+}
+
+fn instance(id: &str, name: &str) -> InstanceRow {
+    InstanceRow {
+        snapshot_deletion_note: "Deleting files also deletes 2 retained snapshots.".into(),
+        id: id.into(),
+        name: name.into(),
+        minecraft: "1.20.1".into(),
+        loader: "Forge 47.4.10".into(),
+        loader_kind: "forge".into(),
+        storage: "Temporary".into(),
+        storage_kind: "temporary".into(),
+        source: "Created in Ephervex".into(),
+        path: "/tmp/ephervex/instances/x".into(),
+        updated: "Just now".into(),
+        linked_servers: 0,
+        stoppable_linked_servers: 0,
+        unstoppable_linked_servers: 0,
+        mods: 0,
+        needs_attention: false,
+        state: "Ready".into(),
+        state_kind: "ready".into(),
+        can_launch: true,
+        can_kill: false,
+        connect_server_id: SharedString::default(),
+        connect_server_name: SharedString::default(),
+        connect_reason: SharedString::default(),
+        can_connect: false,
+        creating_server_detail: SharedString::default(),
+        creating_server_progress: 0.0,
+        creating_server_indeterminate: false,
+        restart_stage: SharedString::default(),
+        can_restart: false,
+        paired_server_id: SharedString::default(),
+        paired_server_name: SharedString::default(),
+        pair_start_together: false,
+        pair_starting: false,
+        favorite: false,
+        group_id: slint::SharedString::default(),
+        group_name: slint::SharedString::default(),
+        group_index: 0,
+        group_tone: 0,
+        icon_slot: -1,
+    }
+}
+
+fn server(id: &str, name: &str) -> ServerRow {
+    ServerRow {
+        snapshot_deletion_note: "Deleting files also deletes 2 retained snapshots.".into(),
+        id: id.into(),
+        name: name.into(),
+        minecraft: "1.20.1".into(),
+        loader: "Forge 47.4.10".into(),
+        loader_kind: "forge".into(),
+        storage: "Temporary".into(),
+        storage_kind: "temporary".into(),
+        relationship: "Standalone".into(),
+        linked_client_id: SharedString::default(),
+        state: "Stopped".into(),
+        state_kind: "stopped".into(),
+        state_detail: "Not running".into(),
+        address: "127.0.0.1:25565".into(),
+        restart_required: false,
+        path: "/tmp/ephervex/servers/x".into(),
+        installed: true,
+        can_start: true,
+        can_stop: false,
+        can_restart: false,
+        can_kill: false,
+        can_send_command: false,
+        console_status: SharedString::default(),
+        console_completion: 0,
+        console_delivered: false,
+        can_connect: false,
+        connect_reason: SharedString::default(),
+        restart_stage: SharedString::default(),
+        needs_attention: false,
+        paired_client_id: SharedString::default(),
+        paired_client_name: SharedString::default(),
+        pair_start_together: false,
+        pair_starting: false,
+        favorite: false,
+        icon_slot: -1,
+    }
+}

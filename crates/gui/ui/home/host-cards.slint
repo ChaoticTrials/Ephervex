@@ -176,7 +176,11 @@ export component InstanceCard inherits Rectangle {
             }
         }
     }
-    ContextMenuArea {
+    // The repeater hands this card another row when the list changes in
+    // place, and an open menu would then act on that row.
+    property <string> menu-owner-id: item.id;
+    changed menu-owner-id => { card-menu.close(); }
+    card-menu := ContextMenuArea {
         Menu {
             MenuItem { title: GuiI18n.text("gui-open-workspace"); activated => { root.open-workspace(item.id); } }
             MenuItem { title: GuiI18n.text("gui-launch"); enabled: item.can-launch; activated => { root.launch(item.id); } }
@@ -277,7 +281,10 @@ export component ServerCard inherits Rectangle {
             }
         }
     }
-    ContextMenuArea {
+    // See `InstanceCard`.
+    property <string> menu-owner-id: item.id;
+    changed menu-owner-id => { card-menu.close(); }
+    card-menu := ContextMenuArea {
         Menu {
             MenuItem { title: GuiI18n.text("gui-open-server-workspace"); activated => { root.open-workspace(item.id); } }
             MenuItem { title: item.can-start ? GuiI18n.text("gui-start") : GuiI18n.text("gui-stop"); enabled: item.can-start || item.can-stop; activated => { root.primary(item.id); } }
