@@ -145,10 +145,6 @@ pub struct ContentAddress {
 /// was still writing.
 pub const PART_SUFFIX: &str = "part";
 
-/// Directory under the cache root holding the provenance markers of files the
-/// user supplied by hand. See [`CacheLayout::supplied_marker`].
-const SUPPLIED_DIRECTORY: &str = "supplied-downloads";
-
 /// The one format cached artwork is ever stored in.
 ///
 /// Every desktop image decoder this launcher ships with reads PNG, which is the
@@ -522,6 +518,10 @@ impl CacheLayout {
             .join(format!("{provider}.json")))
     }
 
+    /// Directory under the cache root holding the provenance markers of files
+    /// the user supplied by hand. See [`CacheLayout::supplied_marker`].
+    pub const SUPPLIED_DIRECTORY: &'static str = "supplied-downloads";
+
     /// Where the record that a content-addressed file was supplied by hand is
     /// kept.
     ///
@@ -532,7 +532,7 @@ impl CacheLayout {
     #[must_use]
     pub fn supplied_marker(&self, hash: &Hash) -> PathBuf {
         self.root
-            .join(SUPPLIED_DIRECTORY)
+            .join(Self::SUPPLIED_DIRECTORY)
             .join(hash.algorithm.to_string())
             .join(hash.digest())
     }

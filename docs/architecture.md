@@ -674,8 +674,11 @@ measured once, as itself.
 
 Each file also has one retention class: persistent, temporary (a temporary
 host, under the operating system's temporary directory), regenerable (caches
-and managed runtimes that can be fetched or derived again), or recovery. Recovery
-state is never regenerable: it is what makes an interrupted change reversible
+and managed runtimes that can be fetched or derived again), or recovery. A
+download the user supplied by hand, recognized by its marker under
+`supplied-downloads/`, stays in the download cache category but is persistent,
+because it cannot be fetched again; the marker directory is classified the same
+way. Recovery state is never regenerable: it is what makes an interrupted change reversible
 or reviewable. Both breakdowns sum to the total. Directories and files that
 exist and cannot be read are counted and named, and their size is missing from
 every figure; a file that disappears during the walk is simply not there.

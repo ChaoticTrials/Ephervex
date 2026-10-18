@@ -34,7 +34,7 @@ use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use ephervex_download::OperationReporter;
+use ephervex_download::{CacheLayout, ContentStore, OperationReporter, is_supplied_download};
 use ephervex_model::Progress;
 use ephervex_pack::PackError;
 use ephervex_storage::Paths;
@@ -63,7 +63,8 @@ pub enum StorageCategory {
     /// output it captured from servers.
     Logs,
     /// Verified downloads, loader installers, provider metadata, and artwork,
-    /// all of which can be fetched again.
+    /// and the provenance records of downloads the user supplied by hand. All
+    /// but those downloads can be fetched again.
     DownloadCache,
     /// Minecraft's assets, libraries, and unpacked natives, shared by every
     /// host that launches the same release.
@@ -139,7 +140,8 @@ impl StorageCategory {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StorageRetention {
     /// Kept until the user removes it: persistent hosts, their snapshots and
-    /// logs, and Ephervex's own records.
+    /// logs, Ephervex's own records, and downloads the user supplied by hand
+    /// because their provider does not let the launcher fetch them.
     Persistent,
     /// Temporary hosts, which live under the operating system's temporary
     /// directory and go when it is cleared.
@@ -273,7 +275,9 @@ const PROGRESS_EVERY: u64 = 500;
 
 type Classified = (StorageCategory, StorageRetention);
 
-fn classify(rule: RootRule, components: &[&OsStr]) -> Classified {
+/// `cache` is the layout of the cache root, which is what tells a download the
+/// user supplied by hand apart from one that can be fetched again.
+fn classify(rule: RootRule, cache: &CacheLayout, components: &[&OsStr]) -> Classified {
     use StorageCategory as C;
     use StorageRetention as R;
     let first = components.first().and_then(|name| name.to_str());
@@ -286,8 +290,16 @@ fn classify(rule: RootRule, components: &[&OsStr]) -> Classified {
         }
         RootRule::Cache => match first {
             Some("assets" | "libraries" | "natives") => (C::SharedGameFiles, R::Regenerable),
-            Some("downloads" | "installer-cache" | "metadata" | "artwork") => {
-                (C::DownloadCache, R::Regenerable)
+            Some(name) if name == ContentStore::Downloads.directory() => {
+                if is_supplied_file(cache, components) {
+                    (C::DownloadCache, R::Persistent)
+                } else {
+                    (C::DownloadCache, R::Regenerable)
+                }
+            }
+            Some("installer-cache" | "metadata" | "artwork") => (C::DownloadCache, R::Regenerable),
+            Some(name) if name == CacheLayout::SUPPLIED_DIRECTORY => {
+                (C::DownloadCache, R::Persistent)
             }
             _ => (C::Other, R::Regenerable),
         },
@@ -307,6 +319,21 @@ fn classify(rule: RootRule, components: &[&OsStr]) -> Classified {
         RootRule::Config => (C::LauncherState, R::Persistent),
         RootRule::Temp => (C::Other, R::Temporary),
     }
+}
+
+/// Whether `components`, relative to the cache root, name a download store
+/// entry whose digest is recorded as supplied by hand.
+fn is_supplied_file(cache: &CacheLayout, components: &[&OsStr]) -> bool {
+    let [_, algorithm, shard, file_name] = components else {
+        return false;
+    };
+    let (Some(algorithm), Some(shard), Some(file_name)) =
+        (algorithm.to_str(), shard.to_str(), file_name.to_str())
+    else {
+        return false;
+    };
+    CacheLayout::recognize_content(algorithm, shard, file_name)
+        .is_some_and(|address| is_supplied_download(cache, &address.hash))
 }
 
 /// Where a file inside one host belongs. `components` starts with the host's
@@ -419,6 +446,7 @@ fn measure(
         if !metadata.is_dir() {
             continue;
         }
+        let cache = CacheLayout::new(&root.path);
         let mut pending = vec![root.path.clone()];
         while let Some(directory) = pending.pop() {
             if cancel.is_cancelled() {
@@ -461,7 +489,7 @@ fn measure(
                         .strip_prefix(&root.path)
                         .map(|relative| relative.iter().collect())
                         .unwrap_or_default();
-                    tally.file(&metadata, classify(root.rule, &components));
+                    tally.file(&metadata, classify(root.rule, &cache, &components));
                     if tally.files % PROGRESS_EVERY == 0 {
                         reporter.set_items_at(
                             Progress {
@@ -644,6 +672,8 @@ fn disk_usage_report(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+    use ephervex_model::{Hash, HashAlgorithm};
+
     use super::*;
 
     fn write(path: &Path, bytes: usize) {
@@ -745,6 +775,70 @@ mod tests {
             "caches and runtimes, and nothing a host or a change depends on"
         );
         assert_eq!(report.retention_bytes(StorageRetention::Temporary), 4096);
+    }
+
+    fn supplied_download(paths: &Paths, digit: char, bytes: usize) -> (PathBuf, Hash) {
+        let digest = digit.to_string().repeat(40);
+        let hash = Hash::new(HashAlgorithm::Sha1, &digest).expect("valid sha1");
+        let layout = CacheLayout::new(paths.cache_dir());
+        let file = layout.content(ContentStore::Downloads, &hash, None);
+        write(&file, bytes);
+        (file, hash)
+    }
+
+    fn mark_supplied(paths: &Paths, hash: &Hash) {
+        let marker = CacheLayout::new(paths.cache_dir()).supplied_marker(hash);
+        write(&marker, 0);
+    }
+
+    #[test]
+    fn a_download_supplied_by_hand_is_not_reported_as_regenerable() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let paths = Paths::rooted_at(base.path());
+        let (_, supplied) = supplied_download(&paths, '1', 100);
+        supplied_download(&paths, '2', 20);
+        mark_supplied(&paths, &supplied);
+
+        let report = report(&paths);
+
+        assert_eq!(report.retention_bytes(StorageRetention::Persistent), 100);
+        assert_eq!(report.retention_bytes(StorageRetention::Regenerable), 20);
+        assert_eq!(
+            bytes(&report, StorageCategory::DownloadCache),
+            120,
+            "both stay in the download cache"
+        );
+    }
+
+    #[test]
+    fn the_supplied_download_markers_are_classified_explicitly() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let paths = Paths::rooted_at(base.path());
+        let (_, supplied) = supplied_download(&paths, '1', 100);
+        mark_supplied(&paths, &supplied);
+        // Markers are empty; a stray file in the directory shows where it lands.
+        write(&paths.cache_dir().join("supplied-downloads/note.txt"), 7);
+
+        let report = report(&paths);
+
+        assert_eq!(bytes(&report, StorageCategory::Other), 0);
+        assert_eq!(bytes(&report, StorageCategory::DownloadCache), 107);
+        assert_eq!(report.retention_bytes(StorageRetention::Persistent), 107);
+        assert_eq!(report.retention_bytes(StorageRetention::Regenerable), 0);
+    }
+
+    #[test]
+    fn a_marker_for_another_digest_does_not_spare_a_download() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let paths = Paths::rooted_at(base.path());
+        supplied_download(&paths, '1', 100);
+        let other = Hash::new(HashAlgorithm::Sha1, &"3".repeat(40)).expect("valid sha1");
+        mark_supplied(&paths, &other);
+
+        let report = report(&paths);
+
+        assert_eq!(report.retention_bytes(StorageRetention::Persistent), 0);
+        assert_eq!(report.retention_bytes(StorageRetention::Regenerable), 100);
     }
 
     #[test]
