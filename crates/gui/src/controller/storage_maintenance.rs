@@ -125,6 +125,7 @@ const fn withheld_message(reason: WithheldReason) -> &'static str {
         WithheldReason::LoaderFilesNotRecorded => "gui-storage-withheld-loader",
         WithheldReason::HostReferencesUnknown => "gui-storage-withheld-unknown",
         WithheldReason::LinkedIntoHost => "gui-storage-withheld-linked",
+        WithheldReason::SuppliedByHand => "gui-storage-withheld-supplied",
     }
 }
 

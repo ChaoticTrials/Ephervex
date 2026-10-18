@@ -147,6 +147,9 @@ pub enum WithheldReason {
     /// The file is also a hard link inside a host, so removing it from the
     /// store would free no space.
     LinkedIntoHost,
+    /// The user supplied the file by hand because its provider does not allow
+    /// downloading it, so it cannot be fetched again once removed.
+    SuppliedByHand,
 }
 
 /// A count of entries and what they weigh.
@@ -592,6 +595,9 @@ fn judge(entry: &StoreEntry, host: &HostReferences, references: &References) -> 
     if named {
         return Judgement::Required;
     }
+    if entry.supplied_by_hand {
+        return Judgement::Withheld(WithheldReason::SuppliedByHand);
+    }
     if host.unreadable_hosts > 0 {
         return Judgement::Withheld(WithheldReason::HostReferencesUnknown);
     }
@@ -830,6 +836,7 @@ impl App {
                         KeptReason::Withheld(WithheldReason::LoaderFilesNotRecorded) => 1,
                         KeptReason::Withheld(WithheldReason::HostReferencesUnknown) => 2,
                         KeptReason::Withheld(WithheldReason::LinkedIntoHost) => 3,
+                        KeptReason::Withheld(WithheldReason::SuppliedByHand) => 4,
                     };
                     kept.entry((kind, slot))
                         .or_insert_with(|| KeptStorage {
@@ -1434,7 +1441,9 @@ async fn read_asset_index(plan: &InstallationPlan) -> IndexState {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-    use ephervex_download::{ContentStore, FileExtension, MetadataCache, MetadataKey};
+    use ephervex_download::{
+        ContentStore, FileExtension, MetadataCache, MetadataKey, record_supplied_download,
+    };
     use ephervex_minecraft::{VERSION_MANIFEST_CACHE_KEY, VERSION_MANIFEST_URL};
     use ephervex_model::{HashAlgorithm, LoaderSelection};
     use ephervex_storage::{NewClient, Paths};
@@ -1963,6 +1972,63 @@ mod tests {
                 .iter()
                 .any(|kept| kept.reason == KeptReason::Withheld(WithheldReason::LinkedIntoHost))
         );
+    }
+
+    #[tokio::test]
+    async fn a_file_supplied_by_hand_is_kept_rather_than_judged_unused() {
+        let world = World::new().await;
+        world.client("1.21.1", LoaderSelection::vanilla());
+        let supplied = world.stray_download(b"a restricted mod jar");
+        let ordinary = world.stray_download(b"an ordinary pack file");
+        record_supplied_download(&world.layout, &sha1_of(b"a restricted mod jar"))
+            .await
+            .unwrap();
+
+        let inspection = world.inspect().await;
+        let downloads = group(&inspection, ManagedStorageKind::DownloadedFiles);
+        assert_eq!(downloads.unused.entries, 1);
+        assert_eq!(
+            downloads
+                .withheld
+                .first()
+                .map(|(reason, usage)| (*reason, usage.entries)),
+            Some((WithheldReason::SuppliedByHand, 1))
+        );
+
+        let plan = world.plan().await;
+        assert!(
+            plan.kept()
+                .iter()
+                .any(|kept| kept.reason == KeptReason::Withheld(WithheldReason::SuppliedByHand))
+        );
+        world.apply(&plan).await.expect("apply");
+        assert!(
+            supplied.is_file(),
+            "the hand-supplied file survives cleanup"
+        );
+        assert!(!ordinary.exists(), "an ordinary unused download is removed");
+    }
+
+    #[tokio::test]
+    async fn a_plan_made_before_a_file_was_marked_as_supplied_by_hand_does_not_remove_it() {
+        let world = World::new().await;
+        world.client("1.21.1", LoaderSelection::vanilla());
+        let supplied = world.stray_download(b"a restricted mod jar");
+        let plan = world.plan().await;
+        assert_eq!(
+            plan.entries(),
+            1,
+            "unmarked, the file is planned for removal"
+        );
+
+        record_supplied_download(&world.layout, &sha1_of(b"a restricted mod jar"))
+            .await
+            .unwrap();
+        let outcome = world.apply(&plan).await.expect("apply");
+
+        assert!(supplied.is_file());
+        assert_eq!(outcome.no_longer_unused, 1);
+        assert_eq!(outcome.removed, Usage::default());
     }
 
     // --------------------------------------------------------------- cleanup

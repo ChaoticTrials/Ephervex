@@ -43,6 +43,7 @@ use crate::artifact_cache::{
     note_entry_failure, note_listing_failure, read_directory,
 };
 use crate::cache::{CacheLayout, ContentAddress, ContentStore, PART_SUFFIX};
+use crate::supplied::is_supplied_download;
 
 /// How many levels above a removed file an emptied directory is pruned for a
 /// store whose layout is `<root>/<shard>/<file>`-shaped.
@@ -82,6 +83,10 @@ pub struct StoreEntry {
     /// host or another directory still holds its bytes after every name in the
     /// store is removed.
     pub linked_outside_store: bool,
+    /// The user supplied this file by hand because its provider does not allow
+    /// the launcher to download it, so removing it cannot be undone by fetching
+    /// it again. See [`crate::record_supplied_download`].
+    pub supplied_by_hand: bool,
 }
 
 /// The entries of the shared stores at one moment.
@@ -301,6 +306,7 @@ impl Walk<'_> {
                 bytes: metadata.len(),
                 files: 1,
                 linked_outside_store: false,
+                supplied_by_hand: false,
             },
             links,
         ));
@@ -341,6 +347,10 @@ fn inventory_of(layout: &CacheLayout, cancel: &CancellationToken) -> StoreInvent
         .into_iter()
         .map(|(mut entry, links)| {
             entry.linked_outside_store = links > entry.paths.len() as u64;
+            entry.supplied_by_hand = matches!(
+                &entry.address,
+                EntryAddress::Content(address) if is_supplied_download(layout, &address.hash)
+            );
             entry
         })
         .collect();
@@ -515,6 +525,7 @@ fn walk_natives(walk: &mut Walk<'_>, layout: &CacheLayout) {
                     bytes,
                     files,
                     linked_outside_store: false,
+                    supplied_by_hand: false,
                 },
                 1,
             ));
@@ -951,6 +962,21 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn an_entry_supplied_by_hand_is_reported_as_such() {
+        let fixture = Fixture::new();
+        let supplied = fixture.download(0x31, 3);
+        let ordinary = fixture.download(0x32, 3);
+        crate::supplied::record_supplied_download(fixture.layout(), &sha1(0x31))
+            .await
+            .expect("record");
+
+        let inventory = fixture.inventory().await;
+
+        assert!(entry_at(&inventory, &supplied).supplied_by_hand);
+        assert!(!entry_at(&inventory, &ordinary).supplied_by_hand);
+    }
+
     fn entry_for(store: ContentStore, path: &Path) -> StoreEntry {
         StoreEntry {
             store,
@@ -959,6 +985,7 @@ mod tests {
             bytes: 3,
             files: 1,
             linked_outside_store: false,
+            supplied_by_hand: false,
         }
     }
 

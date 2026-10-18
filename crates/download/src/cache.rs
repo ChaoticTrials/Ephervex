@@ -90,7 +90,8 @@ impl ContentStore {
     }
 
     /// Whether this store holds nothing but finalized, hash-addressed artifacts
-    /// that can be fetched again from their source.
+    /// that can be fetched again from their source. A file the user supplied by
+    /// hand is the exception and is recorded by [`crate::record_supplied_download`].
     ///
     /// This is the predicate the artifact-cache budget is defined over, and it
     /// is deliberately narrow. The other stores are excluded for reasons that
@@ -143,6 +144,10 @@ pub struct ContentAddress {
 /// entry. If those two ever disagreed, maintenance could delete bytes a transfer
 /// was still writing.
 pub const PART_SUFFIX: &str = "part";
+
+/// Directory under the cache root holding the provenance markers of files the
+/// user supplied by hand. See [`CacheLayout::supplied_marker`].
+const SUPPLIED_DIRECTORY: &str = "supplied-downloads";
 
 /// The one format cached artwork is ever stored in.
 ///
@@ -515,6 +520,21 @@ impl CacheLayout {
             .store_root(ContentStore::Metadata)
             .join("mod-display")
             .join(format!("{provider}.json")))
+    }
+
+    /// Where the record that a content-addressed file was supplied by hand is
+    /// kept.
+    ///
+    /// Beside the stores rather than inside one, so no store walk can mistake a
+    /// marker for an entry and no store can be asked to collect its own
+    /// provenance. Keyed by digest alone: every name a file has in a store
+    /// shares the one marker.
+    #[must_use]
+    pub fn supplied_marker(&self, hash: &Hash) -> PathBuf {
+        self.root
+            .join(SUPPLIED_DIRECTORY)
+            .join(hash.algorithm.to_string())
+            .join(hash.digest())
     }
 
     /// Sharding on the first two hex characters keeps directory sizes

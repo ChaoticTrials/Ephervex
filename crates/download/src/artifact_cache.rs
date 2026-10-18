@@ -7,7 +7,10 @@
 //! true: `downloads/` and `installer-cache/`. Both are addressed purely by a
 //! verified content hash, both are written only by the download manager's
 //! verify-then-rename publication, and everything in them can be fetched again
-//! from the address it came from. Nothing installed depends on an entry staying
+//! from the address it came from, except a file the user supplied by hand
+//! because its provider refuses to serve it: that one is recorded by
+//! [`crate::record_supplied_download`] and left alone by every pass here.
+//! Nothing installed depends on an entry staying
 //! there - a pack file is copied into the instance, a managed JDK archive is
 //! unpacked into the data root, a loader installer has already run - so removing
 //! one costs a re-download and nothing else.
@@ -49,6 +52,7 @@ use ephervex_model::ArtifactCacheLimit;
 use tracing::{debug, trace, warn};
 
 use crate::cache::{CacheLayout, ContentStore};
+use crate::supplied::is_supplied_download;
 
 /// The maintenance lock's name under the cache root.
 ///
@@ -572,7 +576,7 @@ fn survey(layout: &CacheLayout) -> Result<Survey, ArtifactCacheError> {
                 };
 
                 for file in files {
-                    collect_entry(&file, &name, &shard_name, &mut seen, &mut survey);
+                    collect_entry(layout, &file, &name, &shard_name, &mut seen, &mut survey);
                 }
             }
         }
@@ -588,6 +592,7 @@ fn survey(layout: &CacheLayout) -> Result<Survey, ArtifactCacheError> {
 
 /// Considers one directory entry inside a shard.
 fn collect_entry(
+    layout: &CacheLayout,
     path: &Path,
     algorithm: &str,
     shard: &str,
@@ -597,8 +602,14 @@ fn collect_entry(
     let Some(file_name) = path.file_name().and_then(std::ffi::OsStr::to_str) else {
         return;
     };
-    if CacheLayout::recognize_content(algorithm, shard, file_name).is_none() {
+    let Some(address) = CacheLayout::recognize_content(algorithm, shard, file_name) else {
         trace!(path = %path.display(), "leaving an unrecognized cache file alone");
+        return;
+    };
+    // A file the user supplied by hand cannot be fetched again, so it is
+    // neither counted against the budget nor offered for eviction.
+    if is_supplied_download(layout, &address.hash) {
+        trace!(path = %path.display(), "leaving a hand-supplied file alone");
         return;
     }
 
@@ -886,6 +897,7 @@ mod tests {
 
     use super::*;
     use crate::cache::{FileExtension, PART_SUFFIX};
+    use crate::supplied::record_supplied_download;
 
     /// A cache root that only this test can see.
     struct Fixture {
@@ -1147,6 +1159,30 @@ mod tests {
         fixture.cache.clear().await.expect("clear");
         assert!(link.symlink_metadata().is_ok(), "the link is left alone");
         assert!(target.is_file());
+    }
+
+    #[tokio::test]
+    async fn a_file_supplied_by_hand_is_neither_counted_nor_collected_nor_cleared() {
+        let fixture = Fixture::new();
+        let supplied = fixture.publish(ContentStore::Downloads, 0x30, 500, hour(9));
+        let ordinary = fixture.publish(ContentStore::Downloads, 0x31, 100, hour(1));
+        record_supplied_download(fixture.layout(), &digest(0x30))
+            .await
+            .expect("record");
+
+        let usage = fixture.cache.usage().await.expect("usage");
+        assert_eq!((usage.bytes, usage.entries), (100, 1));
+
+        fixture
+            .cache
+            .collect(ArtifactCacheLimit::Limited(0))
+            .await
+            .expect("collect");
+        assert!(supplied.is_file(), "collection spared the supplied file");
+        assert!(!ordinary.exists());
+
+        fixture.cache.clear().await.expect("clear");
+        assert!(supplied.is_file(), "a clear spared the supplied file");
     }
 
     #[tokio::test]

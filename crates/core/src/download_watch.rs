@@ -16,8 +16,8 @@
 use std::path::{Path, PathBuf};
 
 use ephervex_download::{
-    CacheLayout, ContentStore, FileExtension, file_matches_hashes, publish_staged, staging_path,
-    stored_file_matches,
+    CacheLayout, ContentStore, FileExtension, file_matches_hashes, publish_staged,
+    record_supplied_download, staging_path, stored_file_matches,
 };
 use ephervex_model::Hash;
 use ephervex_pack::{BlockedProviderFile, ProviderFileIdentity};
@@ -171,6 +171,10 @@ impl DownloadWatcher {
 /// absent and is replaced, so a bad entry cannot outlive the correct copy the
 /// user supplied.
 ///
+/// The adopted file is recorded as supplied by hand: the provider would not
+/// serve it, so neither byte-budget collection nor storage cleanup may treat it
+/// as something that can be downloaded again.
+///
 /// The candidate itself is left exactly where the user put it - this adopts
 /// a copy, never a move, so a folder the user is still watching in a file
 /// manager does not lose the file it just found.
@@ -192,6 +196,10 @@ async fn adopt_into_cache(
         .and_then(|extension| extension.to_str())
         .and_then(|extension| FileExtension::new(extension).ok());
     let destination = cache.content(ContentStore::Downloads, hash, extension.as_ref());
+    // Recorded before the file is published, and also when an identical copy is
+    // already there, so a walk of the store that sees the file sees its
+    // provenance too.
+    record_supplied_download(cache, hash).await?;
     if stored_file_matches(&destination, None, &target.hashes)
         .await
         .unwrap_or(false)
@@ -237,7 +245,7 @@ async fn stage_and_publish(
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-    use ephervex_download::ContentStore;
+    use ephervex_download::{ContentStore, is_supplied_download};
     use ephervex_model::{HashAlgorithm, ModProvider};
     use ephervex_pack::ProviderFileIdentity;
     use ephervex_storage::Paths;
@@ -294,6 +302,10 @@ mod tests {
         assert!(
             folder.path().join("mod.jar").exists(),
             "the user's own copy is left in place"
+        );
+        assert!(
+            is_supplied_download(app.artifact_cache().layout(), &hash),
+            "the adopted copy is recorded as supplied by hand"
         );
     }
 

@@ -615,6 +615,14 @@ counts it once, and evicting it removes every recognized name; its bytes count a
 freed only when all of them are gone, so a name that cannot be removed leaves the
 bytes in the reported usage.
 
+A file the user supplied by hand because its provider refuses to serve it
+(a distribution-restricted CurseForge file found by the download watcher) is the
+one entry that cannot be fetched again. Adopting it records a marker under
+`supplied-downloads/`, keyed by digest and written before the file is published.
+Budget collection and a manual clear neither count nor remove a marked file, and
+storage cleanup lists it as kept, never as unused. Files adopted before the marker
+existed carry none and are treated like any other download.
+
 The budget is soft in both directions that matter. A required artifact is
 fetched, verified, and used whatever its size, even when it is larger than the
 whole budget; and an operation holds a shared lease on the cache for as long as

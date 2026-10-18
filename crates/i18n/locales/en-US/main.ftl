@@ -3607,6 +3607,7 @@ gui-storage-line-withheld = Kept: { $value }, because { $reason }
 gui-storage-withheld-loader = a Forge or NeoForge instance or server needs libraries and installers that Ephervex does not list per host
 gui-storage-withheld-unknown = what an instance needs could not be read, so nothing is judged unused
 gui-storage-withheld-linked = the file is also linked inside an instance or server, so removing it frees no space
+gui-storage-withheld-supplied = the file was downloaded by hand and its provider does not let Ephervex download it again
 gui-storage-integrity-sound = { $count ->
     [one] 1 file checked, and it is intact.
    *[other] { $count } files checked, and all are intact.

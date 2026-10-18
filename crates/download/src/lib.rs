@@ -67,6 +67,7 @@ mod publication;
 pub mod retry;
 pub mod scratch;
 pub mod store_inventory;
+mod supplied;
 pub mod verify;
 
 pub use allowlist::{
@@ -109,4 +110,5 @@ pub use retry::{RetryPolicy, retry_after, status_is_transient};
 pub use store_inventory::{
     ArtifactCacheExclusive, EntryAddress, EntryRemoval, StoreEntry, StoreInventory,
 };
+pub use supplied::{is_supplied_download, record_supplied_download};
 pub use verify::{HashMismatch, HashVerifier, file_matches_hashes, hash_file, stored_file_matches};
