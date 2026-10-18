@@ -91,7 +91,7 @@ the colors (ADR 0041). Each token reads the field of the same name on
 the shipped widgets paint in. Components read tokens and never the palette, so
 none of them knows which palette is active.
 
-The built-in palettes, Dark, Light and the seasonal Halloween palette, live in
+The Dark, Light, and seasonal palettes live in
 the `BuiltInPalettes` global.
 The theme preference is a separate value: `crates/gui/src/palette.rs` resolves
 it to one complete palette and writes it to `Theme`, and is the only place that

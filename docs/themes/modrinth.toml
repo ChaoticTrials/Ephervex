@@ -31,6 +31,12 @@ elevated = "#26292f"
 overlay = "#33363d"
 border = "#34363c"
 bar = "#111316"
+header-ribbon-1 = "#00000000"
+header-ribbon-2 = "#00000000"
+header-ribbon-3 = "#00000000"
+header-ribbon-4 = "#00000000"
+header-ribbon-5 = "#00000000"
+header-ribbon-6 = "#00000000"
 well = "#0e0f12"
 
 # Selection and toggles, tinted with the brand green.

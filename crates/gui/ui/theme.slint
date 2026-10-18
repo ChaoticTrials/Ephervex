@@ -41,6 +41,14 @@ export global Theme {
     // One step under `background`, for the chrome that frames a page:
     // the top bar, the navigation column and the status bar.
     out property <color> bar: palette.bar;
+    // Six equal segments along the top bar. Transparent colors leave the
+    // ribbon absent without changing the height or the other page chrome.
+    out property <color> header-ribbon-1: palette.header-ribbon-1;
+    out property <color> header-ribbon-2: palette.header-ribbon-2;
+    out property <color> header-ribbon-3: palette.header-ribbon-3;
+    out property <color> header-ribbon-4: palette.header-ribbon-4;
+    out property <color> header-ribbon-5: palette.header-ribbon-5;
+    out property <color> header-ribbon-6: palette.header-ribbon-6;
     // The floor a technical view is read against - a console, a crash
     // report, a log file - held apart from `background` so a page and the
     // output on it are never the same surface.

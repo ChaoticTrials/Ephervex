@@ -1070,6 +1070,21 @@ export component AppWindow inherits Window {
             background: Theme.bar;
             border-width: 1px;
             border-color: Theme.border;
+            Rectangle {
+                x: 0px;
+                y: parent.height - 5px;
+                width: parent.width;
+                height: 5px;
+                HorizontalLayout {
+                    spacing: 0px;
+                    Rectangle { background: Theme.header-ribbon-1; horizontal-stretch: 1; }
+                    Rectangle { background: Theme.header-ribbon-2; horizontal-stretch: 1; }
+                    Rectangle { background: Theme.header-ribbon-3; horizontal-stretch: 1; }
+                    Rectangle { background: Theme.header-ribbon-4; horizontal-stretch: 1; }
+                    Rectangle { background: Theme.header-ribbon-5; horizontal-stretch: 1; }
+                    Rectangle { background: Theme.header-ribbon-6; horizontal-stretch: 1; }
+                }
+            }
             HorizontalLayout {
                 // No `alignment`: under anything but the default, every cell
                 // is given its preferred size, which collapses the spacer

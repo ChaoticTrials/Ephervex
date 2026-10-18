@@ -273,7 +273,7 @@ bounded by size and count. They are never uploaded and no paste service is
 integrated. `EPHERVEX_LOG` raises or lowers what is recorded, for example
 `EPHERVEX_LOG=ephervex_download=debug`.
 
-`SEASONS_THEME=halloween` shows a seasonal theme on any date, for checking it
+`SEASONS_THEME` shows a named seasonal theme on any date, for checking it
 outside its season ([Themes](themes.md#previewing-a-seasonal-theme)).
 
 ## Credentials

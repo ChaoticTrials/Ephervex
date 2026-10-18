@@ -24,6 +24,9 @@ const FORCED_SEASON_ENV_VAR: &str = "SEASONS_THEME";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SeasonalTheme {
     Halloween,
+    Christmas,
+    Pride,
+    AprilFools,
 }
 
 impl SeasonalTheme {
@@ -32,6 +35,9 @@ impl SeasonalTheme {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Halloween => "halloween",
+            Self::Christmas => "christmas",
+            Self::Pride => "pride",
+            Self::AprilFools => "april-fools",
         }
     }
 }
@@ -144,11 +150,28 @@ impl ThemeSeason {
 }
 
 /// Every season. Seasons do not overlap.
-pub const THEME_SEASONS: &[ThemeSeason] = &[ThemeSeason {
-    theme: SeasonalTheme::Halloween,
-    first: MonthDay::new(10, 25),
-    last: MonthDay::new(10, 31),
-}];
+pub const THEME_SEASONS: &[ThemeSeason] = &[
+    ThemeSeason {
+        theme: SeasonalTheme::Halloween,
+        first: MonthDay::new(10, 25),
+        last: MonthDay::new(10, 31),
+    },
+    ThemeSeason {
+        theme: SeasonalTheme::Christmas,
+        first: MonthDay::new(12, 24),
+        last: MonthDay::new(12, 26),
+    },
+    ThemeSeason {
+        theme: SeasonalTheme::Pride,
+        first: MonthDay::new(6, 1),
+        last: MonthDay::new(6, 30),
+    },
+    ThemeSeason {
+        theme: SeasonalTheme::AprilFools,
+        first: MonthDay::new(4, 1),
+        last: MonthDay::new(4, 1),
+    },
+];
 
 /// The season `date` falls in, if any.
 #[must_use]
@@ -224,6 +247,9 @@ mod tests {
     }
 
     const HALLOWEEN: ShownTheme = ShownTheme::Seasonal(SeasonalTheme::Halloween);
+    const CHRISTMAS: ShownTheme = ShownTheme::Seasonal(SeasonalTheme::Christmas);
+    const PRIDE: ShownTheme = ShownTheme::Seasonal(SeasonalTheme::Pride);
+    const APRIL_FOOLS: ShownTheme = ShownTheme::Seasonal(SeasonalTheme::AprilFools);
 
     fn dark() -> ApplicationTheme {
         ApplicationTheme::BuiltIn(ApplicationColorScheme::Dark)
@@ -250,6 +276,46 @@ mod tests {
                 shown_theme(&dark(), true, outside),
                 ShownTheme::Recorded(dark())
             );
+        }
+    }
+
+    #[test]
+    fn christmas_is_shown_over_dark_and_light_from_december_24_through_december_26() {
+        for recorded in [dark(), light()] {
+            for year in [2026, 2027, 2028] {
+                let unchanged = ShownTheme::Recorded(recorded.clone());
+                assert_eq!(shown_theme(&recorded, true, date(year, 12, 23)), unchanged);
+                for day in 24..=26 {
+                    assert_eq!(shown_theme(&recorded, true, date(year, 12, day)), CHRISTMAS);
+                }
+                assert_eq!(shown_theme(&recorded, true, date(year, 12, 27)), unchanged);
+            }
+        }
+    }
+
+    #[test]
+    fn pride_is_shown_over_dark_and_light_throughout_june() {
+        for recorded in [dark(), light()] {
+            for year in [2026, 2027, 2028] {
+                let unchanged = ShownTheme::Recorded(recorded.clone());
+                assert_eq!(shown_theme(&recorded, true, date(year, 5, 31)), unchanged);
+                for day in 1..=30 {
+                    assert_eq!(shown_theme(&recorded, true, date(year, 6, day)), PRIDE);
+                }
+                assert_eq!(shown_theme(&recorded, true, date(year, 7, 1)), unchanged);
+            }
+        }
+    }
+
+    #[test]
+    fn april_fools_is_shown_over_dark_and_light_only_on_april_first() {
+        for recorded in [dark(), light()] {
+            for year in [2026, 2027, 2028] {
+                let unchanged = ShownTheme::Recorded(recorded.clone());
+                assert_eq!(shown_theme(&recorded, true, date(year, 3, 31)), unchanged);
+                assert_eq!(shown_theme(&recorded, true, date(year, 4, 1)), APRIL_FOOLS);
+                assert_eq!(shown_theme(&recorded, true, date(year, 4, 2)), unchanged);
+            }
         }
     }
 
