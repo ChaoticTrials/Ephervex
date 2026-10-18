@@ -305,7 +305,11 @@ stated. Installing opens a confirmation when a mod, or one it needs, has an
 unstated server side or is a client-only required dependency, and otherwise
 installs at once; a running server's confirmation says the change applies at its
 next start. Diagnostics offers the same install, through the same confirmation,
-for a proven-missing dependency a server does not record. A server's mod opens
+for a proven-missing dependency a server does not record. When the catalog
+declares that dependency does not run on a server, Diagnostics does not offer
+the install: it reports the mods that require it as probably client-only and
+offers a previewed fix that turns them off, together with the loading mods that
+need them. A server's mod opens
 the same manager a client's does, for changing its version or removing it. On a
 server made here, or on one from a pack whose Settings tab allows independent
 mod changes, the bin removes the mod instead of putting its jar aside.

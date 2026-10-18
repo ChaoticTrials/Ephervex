@@ -230,6 +230,8 @@ pub struct UnmetRequirement {
     pub chain: Vec<ImpactedMod>,
     /// How many needed mods declare it directly, the last step included.
     pub required_by: usize,
+    /// Those mods themselves, in list order.
+    pub requirers: Vec<ImpactedMod>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -428,6 +430,22 @@ impl App {
             unknown,
             unidentifiable,
         })
+    }
+
+    /// The enabled mods that need this one, also through mods that are turned
+    /// off. What Diagnostics turns off when this mod cannot run on the host.
+    pub(crate) fn loading_dependents_of(
+        &self,
+        host: InstalledHost,
+        logical_path: &Path,
+    ) -> CoreResult<Vec<ImpactedMod>> {
+        let graph = ModGraph::build(self, host)?;
+        let index = graph
+            .index_of(logical_path)
+            .ok_or_else(|| CoreError::ModFileMissing {
+                path: logical_path.to_path_buf(),
+            })?;
+        Ok(graph.loading_dependents_of(index))
     }
 
     /// What this mod needs before it can load.
@@ -1334,6 +1352,10 @@ impl ModGraph {
                     dependency,
                     chain: self.chain_to(requirers[0], &needed),
                     required_by: requirers.len(),
+                    requirers: requirers
+                        .iter()
+                        .map(|&index| self.entries[index].mod_entry.clone())
+                        .collect(),
                 })
                 .collect(),
             conflicts: conflicts
@@ -1584,6 +1606,42 @@ impl ModGraph {
         }
         found
             .into_iter()
+            .map(|(index, distance)| ImpactedMod {
+                distance,
+                ..self.entries[index].mod_entry.clone()
+            })
+            .collect()
+    }
+
+    /// Every enabled mod that needs `start`, transitively, also through mods
+    /// that are turned off.
+    ///
+    /// A turned-off mod that an enabled one needs is still part of what the
+    /// enabled mod pulls in, so the enabled mod is what stops loading it.
+    fn loading_dependents_of(&self, start: usize) -> Vec<ImpactedMod> {
+        let mut seen: BTreeMap<usize, u32> = BTreeMap::new();
+        let mut frontier = vec![start];
+        let mut distance = 0;
+        while !frontier.is_empty() {
+            distance += 1;
+            let mut next = Vec::new();
+            for index in frontier {
+                for (candidate, entry) in self.entries.iter().enumerate() {
+                    if candidate == start
+                        || seen.contains_key(&candidate)
+                        || entry.mod_entry.presence == ModPresence::Missing
+                        || !self.declares(candidate, index, ModRelationKind::Required)
+                    {
+                        continue;
+                    }
+                    seen.insert(candidate, distance);
+                    next.push(candidate);
+                }
+            }
+            frontier = next;
+        }
+        seen.into_iter()
+            .filter(|&(index, _)| self.entries[index].mod_entry.presence == ModPresence::Installed)
             .map(|(index, distance)| ImpactedMod {
                 distance,
                 ..self.entries[index].mod_entry.clone()

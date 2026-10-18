@@ -69,7 +69,10 @@ Diagnostics explains the problem and routes to the surface that owns it
 instead. A missing mod whose catalog project is known and that the host does
 not record is offered, on a client or a server, as an install of the newest
 compatible release through the install confirmation, which names the exact
-release before anything changes.
+release before anything changes. When the catalog declares that project does not
+run on a server, a server is not offered the install. The mods that require it
+are reported as probably client-only, and the fix is to turn them off, with the
+loading mods that need them, so no mod is left needing one that is off.
 
 **One diagnosis or fix at a time.** Results and previews are keyed by host and
 shared by every pane on it (ADR 0039). A fix claims the host like any other

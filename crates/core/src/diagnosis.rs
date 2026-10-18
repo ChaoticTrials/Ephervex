@@ -20,6 +20,7 @@ use ephervex_java::{
     ExpectedJava, JavaError, JavaPathChoice, JavaRuntime, JavaSourceKind, PinSource,
     RejectionReason,
 };
+use ephervex_mod_platform::SideSupport;
 use ephervex_model::LoaderSelection;
 use ephervex_server::EulaStatus;
 use ephervex_storage::diagnostics::{MAX_VIEW_BYTES, TextAnchor};
@@ -29,7 +30,7 @@ use tracing::{info, instrument};
 
 use crate::app::{App, JavaPlan, JavaPlanRequest, JavaTarget, PinProbe, PlanRefusal};
 use crate::crash_analysis::{LoaderReportedDependency, loader_dependency_failures};
-use crate::dependencies::{DeclaredConflict, UnmetDependency, UnmetRequirement};
+use crate::dependencies::{DeclaredConflict, ImpactedMod, UnmetDependency, UnmetRequirement};
 use crate::diagnostics::{DiagnosticRequest, DiagnosticScope};
 use crate::error::{CoreError, CoreResult};
 use crate::java_status::{
@@ -226,6 +227,9 @@ pub enum FindingKind {
     DependencyDisabled(UnmetRequirement),
     /// A required mod is not installed.
     DependencyMissing(UnmetRequirement),
+    /// A server lacks a mod its catalog says never runs on a server, so the
+    /// mods that require it are most likely client-only.
+    DependentProbablyClientOnly(UnmetRequirement),
     DeclaredConflict(DeclaredConflict),
     /// Recorded files are absent or damaged.
     ManagedFilesDamaged {
@@ -275,6 +279,7 @@ impl FindingKind {
             | Self::JavaUnavailable { .. }
             | Self::DependencyDisabled(_)
             | Self::DependencyMissing(_)
+            | Self::DependentProbablyClientOnly(_)
             | Self::DeclaredConflict(_)
             | Self::ManagedFilesDamaged { .. }
             | Self::SharedFilesDamaged { .. } => FindingClass::Problem,
@@ -389,6 +394,8 @@ impl LoaderReportedRequirement {
 pub enum DiagnosticFix {
     /// Turn these mods on, dependencies first.
     EnableMods(Vec<PathBuf>),
+    /// Turn these mods off, dependents first.
+    DisableMods(Vec<PathBuf>),
     /// Remove this host's Java override so automatic selection applies, or the
     /// launcher preference when one is set.
     UseAutomaticJava,
@@ -407,7 +414,10 @@ impl DiagnosticFix {
     const fn touches_mods(&self) -> bool {
         matches!(
             self,
-            Self::EnableMods(_) | Self::RestoreFiles(_) | Self::RestorePutAside(_)
+            Self::EnableMods(_)
+                | Self::DisableMods(_)
+                | Self::RestoreFiles(_)
+                | Self::RestorePutAside(_)
         )
     }
 }
@@ -548,6 +558,10 @@ impl DiagnosisRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProposedChange {
     Enable {
+        name: String,
+        logical_path: PathBuf,
+    },
+    Disable {
         name: String,
         logical_path: PathBuf,
     },
@@ -780,6 +794,25 @@ impl App {
                     })
                     .collect()
             }
+            DiagnosticFix::DisableMods(paths) => {
+                let snapshot = self.host_mod_snapshot(host)?;
+                paths
+                    .iter()
+                    .filter_map(|path| {
+                        snapshot
+                            .mods
+                            .iter()
+                            .find(|entry| {
+                                &entry.logical_path == path
+                                    && entry.presence == ModPresence::Installed
+                            })
+                            .map(|entry| ProposedChange::Disable {
+                                name: entry.display_name().to_owned(),
+                                logical_path: entry.logical_path.clone(),
+                            })
+                    })
+                    .collect()
+            }
             DiagnosticFix::UseAutomaticJava => {
                 let facts = self.host_facts(host)?;
                 if facts.java_override.is_none() {
@@ -855,6 +888,33 @@ impl App {
                     match self.set_mod_enabled(host, path, true) {
                         Ok(_) => outcome.applied.push(name),
                         Err(error) => outcome.failed.push((name, error)),
+                    }
+                }
+            }
+            DiagnosticFix::DisableMods(paths) => {
+                let snapshot = self.host_mod_snapshot(host)?;
+                let (names, changes): (Vec<String>, Vec<(PathBuf, bool)>) = paths
+                    .iter()
+                    .filter_map(|path| {
+                        snapshot.mods.iter().find(|entry| {
+                            &entry.logical_path == path && entry.presence == ModPresence::Installed
+                        })
+                    })
+                    .map(|entry| {
+                        (
+                            entry.display_name().to_owned(),
+                            (entry.logical_path.clone(), false),
+                        )
+                    })
+                    .unzip();
+                if cancel.is_cancelled() {
+                    outcome.skipped = names;
+                } else if !changes.is_empty() {
+                    // One ordered batch that undoes itself when a rename
+                    // fails, so what stays on never lacks a mod it needs.
+                    match self.set_mods_enabled(host, &changes) {
+                        Ok(_) => outcome.applied = names,
+                        Err(error) => outcome.failed.push((names.join(", "), error)),
                     }
                 }
             }
@@ -1220,6 +1280,21 @@ impl App {
         unmet
             .into_iter()
             .map(|requirement| match &requirement.dependency {
+                // A catalog that says a mod never runs on a server answers
+                // "install it?" for the server: no. What asks for it does not
+                // belong on a server either, unless the host records the
+                // dependency itself, in which case it comes back as recorded.
+                UnmetDependency::Missing {
+                    recorded: None,
+                    server_side: SideSupport::Unsupported,
+                    ..
+                } if matches!(host, InstalledHost::Server(_)) => {
+                    let order = self.disable_order(host, &requirement.requirers);
+                    Finding {
+                        fix: (!order.is_empty()).then_some(DiagnosticFix::DisableMods(order)),
+                        kind: FindingKind::DependentProbablyClientOnly(requirement),
+                    }
+                }
                 UnmetDependency::Disabled(target) => Finding {
                     fix: Some(DiagnosticFix::EnableMods(
                         self.enable_order(host, &target.logical_path),
@@ -1278,6 +1353,35 @@ impl App {
         }
         order.dedup();
         order.reverse();
+        order
+    }
+
+    /// The loading mods among `requirers` and every loading mod that needs
+    /// one of them, dependents first so nothing is turned off while something
+    /// that needs it is still on.
+    fn disable_order(&self, host: InstalledHost, requirers: &[ImpactedMod]) -> Vec<PathBuf> {
+        let mut found: Vec<(u32, PathBuf)> = Vec::new();
+        for requirer in requirers {
+            if requirer.presence == ModPresence::Installed {
+                found.push((0, requirer.logical_path.clone()));
+            }
+            // A requirer that is already off still has loading mods that need
+            // it, directly or through other mods that are off.
+            if let Ok(dependents) = self.loading_dependents_of(host, &requirer.logical_path) {
+                found.extend(
+                    dependents
+                        .into_iter()
+                        .map(|entry| (entry.distance, entry.logical_path)),
+                );
+            }
+        }
+        found.sort_by_key(|(distance, _)| std::cmp::Reverse(*distance));
+        let mut order: Vec<PathBuf> = Vec::new();
+        for (_, path) in found {
+            if !order.contains(&path) {
+                order.push(path);
+            }
+        }
         order
     }
 
@@ -1736,6 +1840,22 @@ fn write_integrity(out: &mut String, integrity: Option<&IntegrityCheck>, home: O
     }
 }
 
+/// The report line for mods whose requirement a server cannot run.
+fn client_only_dependent_line(requirement: &UnmetRequirement) -> String {
+    let UnmetDependency::Missing { name, .. } = &requirement.dependency else {
+        return String::new();
+    };
+    let dependents: Vec<&str> = requirement
+        .requirers
+        .iter()
+        .map(|requirer| requirer.name.as_str())
+        .collect();
+    format!(
+        "{name} does not run on a server; mods that require it are most likely client-only: {}",
+        dependents.join(", ")
+    )
+}
+
 fn report_line(kind: &FindingKind, path: &dyn Fn(&Path) -> String) -> String {
     use std::fmt::Write as _;
 
@@ -1799,6 +1919,9 @@ fn report_line(kind: &FindingKind, path: &dyn Fn(&Path) -> String) -> String {
                 "{name} is not installed; required by {}",
                 chain(requirement)
             )
+        }
+        FindingKind::DependentProbablyClientOnly(requirement) => {
+            client_only_dependent_line(requirement)
         }
         FindingKind::DeclaredConflict(conflict) => format!(
             "{} declares it does not work with {}",
@@ -1935,7 +2058,7 @@ fn redact_home(path: &Path, home: Option<&Path>) -> String {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::expect_used)]
+    #![allow(clippy::expect_used, clippy::panic)]
     use super::*;
 
     fn reported(requested_by: &str, range: &str) -> LoaderReportedDependency {
@@ -2083,5 +2206,380 @@ mod tests {
             line.starts_with("- Shared launch files: damaged ("),
             "{line}"
         );
+    }
+
+    const IRIS: &str = "YL57xq9U";
+
+    /// A host whose recipe declares each mod and the projects it requires.
+    /// Every mod is its own project, named by its file name.
+    fn host_with_mods(
+        app: &App,
+        on_server: bool,
+        declared: &[(&str, &[&str])],
+    ) -> (InstalledHost, PathBuf) {
+        use ephervex_model::{Hash, HashAlgorithm, ModOrigin};
+        use ephervex_pack::{
+            PackFileRecipe, PackRecipe, ProviderFileIdentity, SideRequirement, SourceStore,
+        };
+
+        let loader = ephervex_model::LoaderSelection::vanilla();
+        let (host, root) = if on_server {
+            let record = app
+                .registry_for_services()
+                .create_server(ephervex_storage::NewServer::new(
+                    "Client-only dependent",
+                    "1.21.1",
+                    loader.clone(),
+                ))
+                .expect("server");
+            (InstalledHost::Server(record.id), record.root)
+        } else {
+            let record = app
+                .create_client_for_test(ephervex_storage::NewClient::new(
+                    "Client-only dependent",
+                    "1.21.1",
+                    loader.clone(),
+                ))
+                .expect("client");
+            (InstalledHost::Instance(record.id), record.root)
+        };
+        let mut recipe = PackRecipe::for_manual_instance("Client-only dependent", "1.21.1", loader);
+        recipe.files = declared
+            .iter()
+            .map(|&(name, requires)| PackFileRecipe {
+                logical_path: PathBuf::from("mods").join(format!("{name}.jar")),
+                hashes: vec![
+                    Hash::new(
+                        HashAlgorithm::Sha1,
+                        "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+                    )
+                    .expect("sha1"),
+                ],
+                downloads: Vec::new(),
+                size: Some(0),
+                client: SideRequirement::Required,
+                server: SideRequirement::Required,
+                selected: None,
+                origin: ModOrigin::UserSelected,
+                identity: Some(ProviderFileIdentity {
+                    provider: Some(ephervex_model::ModProvider::Modrinth),
+                    project_id: Some(name.to_owned()),
+                    version_id: Some(format!("{name}-1")),
+                    file_id: None,
+                }),
+                original_identity: None,
+                installed_despite_unsupported: None,
+                relations: Some(
+                    requires
+                        .iter()
+                        .map(|project| ephervex_pack::RecipeRelation {
+                            kind: ephervex_model::ModRelationKind::Required,
+                            target: ephervex_pack::RelationTarget::Project {
+                                project_id: (*project).to_owned(),
+                                version_id: None,
+                            },
+                        })
+                        .collect(),
+                ),
+            })
+            .collect();
+        SourceStore::new(ephervex_storage::metadata::source_dir(&root))
+            .write_recipe(&recipe)
+            .expect("recipe");
+        let game = match host {
+            InstalledHost::Server(_) => ephervex_storage::metadata::server_game_dir(&root),
+            InstalledHost::Instance(_) => ephervex_storage::metadata::client_game_dir(&root),
+        };
+        std::fs::create_dir_all(game.join("mods")).expect("mods");
+        for (name, _) in declared {
+            std::fs::write(game.join("mods").join(format!("{name}.jar")), b"").expect("jar");
+        }
+        (host, game.join("mods"))
+    }
+
+    /// What the catalog check leaves behind once it has named the dependency's
+    /// server side.
+    fn unmet_with_server_side(
+        app: &App,
+        host: InstalledHost,
+        server_side: SideSupport,
+    ) -> Vec<UnmetRequirement> {
+        let mut unmet = app.requirement_problems(host).expect("problems").unmet;
+        for requirement in &mut unmet {
+            if let UnmetDependency::Missing {
+                server_side: side, ..
+            } = &mut requirement.dependency
+            {
+                *side = server_side;
+            }
+        }
+        unmet
+    }
+
+    #[tokio::test]
+    async fn a_servers_dependency_that_never_runs_on_a_server_makes_what_requires_it_client_only() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = App::open_at(ephervex_storage::Paths::rooted_at(base.path())).expect("app");
+        let (host, mods) = host_with_mods(
+            &app,
+            true,
+            &[
+                ("iris-search", &[IRIS]),
+                ("search-addon", &["iris-search"]),
+                ("create", &[]),
+            ],
+        );
+
+        let findings = app.relation_findings(
+            host,
+            unmet_with_server_side(&app, host, SideSupport::Unsupported),
+        );
+
+        let [finding] = findings.as_slice() else {
+            panic!("{findings:?}");
+        };
+        assert!(matches!(
+            finding.kind,
+            FindingKind::DependentProbablyClientOnly(_)
+        ));
+        assert_eq!(finding.class(), FindingClass::Problem);
+        assert_eq!(
+            finding.fix,
+            Some(DiagnosticFix::DisableMods(vec![
+                PathBuf::from("mods/search-addon.jar"),
+                PathBuf::from("mods/iris-search.jar"),
+            ])),
+            "what needs the dependent goes too, first, so it is not left needing a turned-off mod"
+        );
+        let fix = finding.fix.clone().expect("fix");
+        assert!(fix.touches_mods(), "an isolation session owns the mods");
+
+        let preview = app.preview_fix(host, &fix).await.expect("preview");
+        assert_eq!(
+            preview.changes,
+            [
+                ProposedChange::Disable {
+                    name: "search-addon.jar".to_owned(),
+                    logical_path: PathBuf::from("mods/search-addon.jar"),
+                },
+                ProposedChange::Disable {
+                    name: "iris-search.jar".to_owned(),
+                    logical_path: PathBuf::from("mods/iris-search.jar"),
+                },
+            ]
+        );
+        assert!(
+            mods.join("iris-search.jar").is_file(),
+            "a preview changes nothing"
+        );
+
+        let outcome = app
+            .apply_fix(
+                host,
+                &fix,
+                &OperationReporter::silent("fixing"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("apply");
+        assert_eq!(outcome.applied, ["search-addon.jar", "iris-search.jar"]);
+        assert!(mods.join("iris-search.jar.disabled").is_file());
+        assert!(mods.join("search-addon.jar.disabled").is_file());
+        assert!(mods.join("create.jar").is_file(), "unrelated mods stay on");
+        assert!(
+            app.requirement_problems(host)
+                .expect("problems")
+                .unmet
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn every_mod_that_requires_a_server_unsupported_dependency_is_turned_off_with_it() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = App::open_at(ephervex_storage::Paths::rooted_at(base.path())).expect("app");
+        let (host, _mods) = host_with_mods(
+            &app,
+            true,
+            &[("iris-search", &[IRIS]), ("iris-tweaks", &[IRIS])],
+        );
+
+        let findings = app.relation_findings(
+            host,
+            unmet_with_server_side(&app, host, SideSupport::Unsupported),
+        );
+
+        let [finding] = findings.as_slice() else {
+            panic!("{findings:?}");
+        };
+        assert_eq!(
+            finding.fix,
+            Some(DiagnosticFix::DisableMods(vec![
+                PathBuf::from("mods/iris-search.jar"),
+                PathBuf::from("mods/iris-tweaks.jar"),
+            ]))
+        );
+    }
+
+    #[test]
+    fn a_server_is_never_offered_a_client_only_dependency_whose_requirer_is_turned_off() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = App::open_at(ephervex_storage::Paths::rooted_at(base.path())).expect("app");
+        let (host, mods) = host_with_mods(
+            &app,
+            true,
+            &[("iris-search", &[IRIS]), ("search-addon", &["iris-search"])],
+        );
+        std::fs::rename(
+            mods.join("iris-search.jar"),
+            mods.join("iris-search.jar.disabled"),
+        )
+        .expect("turn off");
+
+        let findings = app.relation_findings(
+            host,
+            unmet_with_server_side(&app, host, SideSupport::Unsupported)
+                .into_iter()
+                .filter(|requirement| {
+                    matches!(
+                        requirement.dependency,
+                        UnmetDependency::Missing { recorded: None, .. }
+                    )
+                })
+                .collect(),
+        );
+
+        let [finding] = findings.as_slice() else {
+            panic!("{findings:?}");
+        };
+        assert!(matches!(
+            finding.kind,
+            FindingKind::DependentProbablyClientOnly(_)
+        ));
+        assert_eq!(
+            finding.fix,
+            Some(DiagnosticFix::DisableMods(vec![PathBuf::from(
+                "mods/search-addon.jar"
+            )])),
+            "the loading mod that needs the turned-off requirer is what goes"
+        );
+    }
+
+    #[test]
+    fn a_loading_mod_that_needs_a_turned_off_requirer_through_other_turned_off_mods_is_turned_off()
+    {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = App::open_at(ephervex_storage::Paths::rooted_at(base.path())).expect("app");
+        let (host, mods) = host_with_mods(
+            &app,
+            true,
+            &[
+                ("iris-search", &[IRIS]),
+                ("search-lib", &["iris-search"]),
+                ("search-addon", &["search-lib"]),
+            ],
+        );
+        for name in ["iris-search", "search-lib"] {
+            std::fs::rename(
+                mods.join(format!("{name}.jar")),
+                mods.join(format!("{name}.jar.disabled")),
+            )
+            .expect("turn off");
+        }
+
+        let findings = app.relation_findings(
+            host,
+            unmet_with_server_side(&app, host, SideSupport::Unsupported)
+                .into_iter()
+                .filter(|requirement| {
+                    matches!(
+                        requirement.dependency,
+                        UnmetDependency::Missing { recorded: None, .. }
+                    )
+                })
+                .collect(),
+        );
+
+        let [finding] = findings.as_slice() else {
+            panic!("{findings:?}");
+        };
+        assert_eq!(
+            finding.fix,
+            Some(DiagnosticFix::DisableMods(vec![PathBuf::from(
+                "mods/search-addon.jar"
+            )]))
+        );
+    }
+
+    #[test]
+    fn a_dependency_whose_server_side_is_not_declared_unsupported_keeps_the_missing_finding() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = App::open_at(ephervex_storage::Paths::rooted_at(base.path())).expect("app");
+        let (host, _mods) = host_with_mods(&app, true, &[("iris-search", &[IRIS])]);
+
+        for side in [
+            SideSupport::Unknown,
+            SideSupport::Required,
+            SideSupport::Optional,
+        ] {
+            let findings = app.relation_findings(host, unmet_with_server_side(&app, host, side));
+            assert!(
+                matches!(
+                    findings.as_slice(),
+                    [Finding {
+                        kind: FindingKind::DependencyMissing(_),
+                        fix: None
+                    }]
+                ),
+                "{side:?}: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_client_still_needs_a_dependency_that_only_runs_on_a_client() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = App::open_at(ephervex_storage::Paths::rooted_at(base.path())).expect("app");
+        let (host, _mods) = host_with_mods(&app, false, &[("iris-search", &[IRIS])]);
+
+        let findings = app.relation_findings(
+            host,
+            unmet_with_server_side(&app, host, SideSupport::Unsupported),
+        );
+
+        assert!(
+            matches!(
+                findings.as_slice(),
+                [Finding {
+                    kind: FindingKind::DependencyMissing(_),
+                    fix: None
+                }]
+            ),
+            "{findings:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_canceled_disable_lists_the_mods_it_never_reached() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = App::open_at(ephervex_storage::Paths::rooted_at(base.path())).expect("app");
+        let (host, mods) = host_with_mods(&app, true, &[("iris-search", &[IRIS])]);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let outcome = app
+            .apply_fix(
+                host,
+                &DiagnosticFix::DisableMods(vec![PathBuf::from("mods/iris-search.jar")]),
+                &OperationReporter::silent("fixing"),
+                &cancel,
+            )
+            .await
+            .expect("apply");
+
+        assert!(outcome.was_canceled());
+        assert_eq!(outcome.skipped, ["iris-search.jar"]);
+        assert!(outcome.applied.is_empty());
+        assert!(mods.join("iris-search.jar").is_file());
     }
 }

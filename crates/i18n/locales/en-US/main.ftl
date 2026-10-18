@@ -1580,7 +1580,14 @@ gui-diagnosis-dependency-missing = { $name } is not installed
 gui-diagnosis-dependency-missing-detail = Install it from the Mods page. Diagnostics does not choose a version for you.
 gui-diagnosis-dependency-restore-detail = This host records it, so restoring puts back the exact release it recorded.
 gui-diagnosis-dependency-install-detail = Installing takes the newest release for this host's Minecraft version and loader, and shows it before anything changes.
-gui-diagnosis-dependency-client-only-detail = { $name } runs only on a client, so it is not installed on a server. { $dependent } needs it, so it most likely belongs only on a client too. Turn it off on this server from the Mods page.
+gui-diagnosis-dependent-client-only = { $count ->
+    [one] { $dependent } is probably client-only
+   *[other] { $dependent } are probably client-only
+}
+gui-diagnosis-dependent-client-only-detail = { $name } runs only on a client, so it is not installed on a server. { $count ->
+    [one] { $dependent } needs it, so it most likely belongs only on a client too.
+   *[other] { $dependent } need it, so they most likely belong only on a client too.
+} Reviewing the fix shows which mods would be turned off on this server.
 gui-diagnosis-restore-mod = Restore { $name }
 gui-diagnosis-install-latest = Install latest compatible version
 gui-diagnosis-conflict = { $name } does not work with { $other }
@@ -1735,12 +1742,14 @@ gui-fix-apply = Apply
 gui-fix-applying = Applying...
 gui-fix-preview-failed = The change could not be previewed: { $error }
 gui-fix-enable = Enable
+gui-fix-disable = Turn off
 gui-fix-restore = Restore
 gui-fix-current = Current
 gui-fix-java-download = Ephervex managed Java { $major }, downloaded at the next launch
 gui-fix-proposed = After
 gui-fix-java-expected = This host expects { $expected }.
 gui-fix-enable-note = No files will be removed.
+gui-fix-disable-note = No files will be removed. Each mod can be turned on again from the Mods page.
 gui-fix-java-note = This changes only this host's Java selection. Its memory and JVM arguments stay as they are.
 gui-fix-restore-note = Each file is fetched from its recorded source and checked before it replaces the broken copy. No other files change.
 gui-fix-restore-put-aside-note = Each mod comes back from the copy Ephervex kept when it was put aside. No other files change.
@@ -1762,6 +1771,15 @@ gui-fix-enabled = { $count ->
 }
 gui-fix-enabled-partly = Enabled { $count } of { $total } mods. These did not change:
 gui-fix-enable-stopped = Stopped after enabling { $count } of { $total } mods. These did not change:
+gui-fix-disabled = { $count ->
+    [one] Turned off 1 mod.
+   *[other] Turned off { $count } mods.
+}
+gui-fix-disable-failed = No mod was turned off, because one of them could not be:
+gui-fix-disable-stopped = { $total ->
+    [one] Stopped before turning off 1 mod. It did not change:
+   *[other] Stopped before turning off { $total } mods. These did not change:
+}
 gui-fix-java-applied = This host no longer pins its own Java runtime.
 gui-fix-java-not-applied = The Java selection did not change:
 gui-fix-java-pinned = This host now uses the selected Java runtime.

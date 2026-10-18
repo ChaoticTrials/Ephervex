@@ -5,7 +5,7 @@ use ephervex_core::{
     CoreError, DiagnosticFix, Finding, FindingClass, FindingKind, FixOutcome, FixPreview,
     HostDiagnosis, InstalledHost, Integrity, IntegrityCheck, JavaCheck, JavaLayer, JavaMismatch,
     JavaSelectionMode, JavaUnavailable, LoaderReportedRequirement, ProposedChange, RepairRefusal,
-    SideSupport, UnmetDependency, UnmetRequirement,
+    UnmetDependency, UnmetRequirement,
 };
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use ephervex_model::ModProvider;
@@ -276,6 +276,7 @@ pub fn finding_view(finding: &Finding, mc: &str, on_server: bool) -> FindingView
         | FindingKind::JavaCustomized { .. } => java_card(&finding.kind, mc),
         FindingKind::DependencyDisabled(_)
         | FindingKind::DependencyMissing(_)
+        | FindingKind::DependentProbablyClientOnly(_)
         | FindingKind::DeclaredConflict(_)
         | FindingKind::LoaderReportedDependency(_)
         | FindingKind::HandPlacedMods { .. }
@@ -283,19 +284,10 @@ pub fn finding_view(finding: &Finding, mc: &str, on_server: bool) -> FindingView
         _ => other_card(&finding.kind, on_server),
     };
     let missing = missing_dependency(&finding.kind);
-    // A server is not offered a mod the catalog says never runs on one: the
-    // install would be refused, and what asks for it likely belongs only on
-    // a client too.
-    let client_only = if on_server {
-        client_only_detail(&finding.kind)
-    } else {
-        None
-    };
     // A mod its host records is restored at the recorded release instead,
     // never replaced by a newer one. Only a mod nothing records is installed
     // from a catalog, on a client and on a server alike.
     let install = match (missing, &finding.fix) {
-        _ if client_only.is_some() => None,
         (
             Some(UnmetDependency::Missing {
                 project_id: Some(project),
@@ -308,9 +300,7 @@ pub fn finding_view(finding: &Finding, mc: &str, on_server: bool) -> FindingView
         ) => Some((*provider, project.clone())),
         _ => None,
     };
-    if let Some(detail) = client_only {
-        card.detail.push(detail);
-    } else if missing.is_some() {
+    if missing.is_some() {
         card.detail.push(lookup(if finding.fix.is_some() {
             "gui-diagnosis-dependency-restore-detail"
         } else if install.is_some() {
@@ -348,32 +338,6 @@ pub fn finding_view(finding: &Finding, mc: &str, on_server: bool) -> FindingView
         route: card.route,
         install,
     }
-}
-
-/// What to say about a missing mod the catalog declares client-only, and the
-/// mod that asks for it.
-fn client_only_detail(kind: &FindingKind) -> Option<String> {
-    let FindingKind::DependencyMissing(UnmetRequirement {
-        dependency:
-            UnmetDependency::Missing {
-                name,
-                server_side: SideSupport::Unsupported,
-                ..
-            },
-        chain,
-        ..
-    }) = kind
-    else {
-        return None;
-    };
-    let dependent = chain.last().map_or("", |requirer| requirer.name.as_str());
-    Some(lookup_args(
-        "gui-diagnosis-dependency-client-only-detail",
-        [
-            ("name", Arg::from(name.as_str())),
-            ("dependent", Arg::from(dependent)),
-        ],
-    ))
 }
 
 fn missing_dependency(kind: &FindingKind) -> Option<&UnmetDependency> {
@@ -458,6 +422,38 @@ fn java_card(kind: &FindingKind, mc: &str) -> Card {
     }
 }
 
+fn client_only_dependent_card(requirement: &UnmetRequirement) -> Card {
+    let UnmetDependency::Missing { name, .. } = &requirement.dependency else {
+        return Card::new(String::new(), Vec::new(), None);
+    };
+    let dependents = requirement
+        .requirers
+        .iter()
+        .map(|requirer| requirer.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut card = Card::new(
+        lookup_args(
+            "gui-diagnosis-dependent-client-only",
+            [
+                ("dependent", Arg::from(dependents.as_str())),
+                ("count", Arg::from(requirement.requirers.len())),
+            ],
+        ),
+        vec![lookup_args(
+            "gui-diagnosis-dependent-client-only-detail",
+            [
+                ("name", Arg::from(name.as_str())),
+                ("dependent", Arg::from(dependents.as_str())),
+                ("count", Arg::from(requirement.requirers.len())),
+            ],
+        )],
+        Some(FindingRoute::Mods),
+    );
+    card.chain = chain_with(requirement, name);
+    card
+}
+
 fn mod_card(kind: &FindingKind) -> Card {
     match kind {
         FindingKind::DependencyDisabled(requirement) => {
@@ -489,6 +485,9 @@ fn mod_card(kind: &FindingKind) -> Card {
             );
             card.chain = chain_with(requirement, name);
             card
+        }
+        FindingKind::DependentProbablyClientOnly(requirement) => {
+            client_only_dependent_card(requirement)
         }
         FindingKind::DeclaredConflict(conflict) => Card::new(
             lookup_args(
@@ -693,6 +692,7 @@ fn checks(diagnosis: &HostDiagnosis, localized: &dyn Fn(&CoreError) -> String) -
             kind,
             FindingKind::DependencyDisabled(_)
                 | FindingKind::DependencyMissing(_)
+                | FindingKind::DependentProbablyClientOnly(_)
                 | FindingKind::DeclaredConflict(_)
         )
     });
@@ -919,6 +919,11 @@ pub fn preview_view(preview: &FixPreview) -> PreviewView {
                 name: name.clone(),
                 detail: logical_path.display().to_string(),
             }),
+            ProposedChange::Disable { name, logical_path } => changes.push(ChangeView {
+                action: lookup("gui-fix-disable"),
+                name: name.clone(),
+                detail: logical_path.display().to_string(),
+            }),
             ProposedChange::Restore { logical_path } => changes.push(ChangeView {
                 action: lookup("gui-fix-restore"),
                 name: logical_path.display().to_string(),
@@ -948,6 +953,7 @@ pub fn preview_view(preview: &FixPreview) -> PreviewView {
     }
     notes.push(lookup(match preview.fix {
         DiagnosticFix::EnableMods(_) => "gui-fix-enable-note",
+        DiagnosticFix::DisableMods(_) => "gui-fix-disable-note",
         DiagnosticFix::UseAutomaticJava | DiagnosticFix::PinJava(_) => "gui-fix-java-note",
         DiagnosticFix::RestoreFiles(_) => "gui-fix-restore-note",
         DiagnosticFix::RestorePutAside(_) => "gui-fix-restore-put-aside-note",
@@ -967,6 +973,52 @@ pub fn preview_view(preview: &FixPreview) -> PreviewView {
     }
 }
 
+/// What turning mods on did, change by change.
+fn enable_message(outcome: &FixOutcome, lines: &mut Vec<String>) -> String {
+    if outcome.was_canceled() {
+        lines.extend(outcome.skipped.iter().cloned());
+        lookup_args(
+            "gui-fix-enable-stopped",
+            [
+                ("count", Arg::from(outcome.applied.len())),
+                (
+                    "total",
+                    Arg::from(outcome.applied.len() + outcome.failed.len() + outcome.skipped.len()),
+                ),
+            ],
+        )
+    } else if outcome.failed.is_empty() {
+        count("gui-fix-enabled", outcome.applied.len())
+    } else {
+        lookup_args(
+            "gui-fix-enabled-partly",
+            [
+                ("count", Arg::from(outcome.applied.len())),
+                (
+                    "total",
+                    Arg::from(outcome.applied.len() + outcome.failed.len()),
+                ),
+            ],
+        )
+    }
+}
+
+/// What turning mods off did. The batch is all or nothing, so a failure means
+/// none of them changed.
+fn disable_message(outcome: &FixOutcome, lines: &mut Vec<String>) -> String {
+    if outcome.was_canceled() {
+        lines.extend(outcome.skipped.iter().cloned());
+        lookup_args(
+            "gui-fix-disable-stopped",
+            [("total", Arg::from(outcome.skipped.len()))],
+        )
+    } else if outcome.failed.is_empty() {
+        count("gui-fix-disabled", outcome.applied.len())
+    } else {
+        lookup("gui-fix-disable-failed")
+    }
+}
+
 #[must_use]
 pub fn outcome_view(
     fix: &DiagnosticFix,
@@ -980,34 +1032,8 @@ pub fn outcome_view(
         .collect();
     let stopped = outcome.was_canceled();
     let message = match fix {
-        DiagnosticFix::EnableMods(_) if stopped => {
-            lines.extend(outcome.skipped.iter().cloned());
-            lookup_args(
-                "gui-fix-enable-stopped",
-                [
-                    ("count", Arg::from(outcome.applied.len())),
-                    (
-                        "total",
-                        Arg::from(
-                            outcome.applied.len() + outcome.failed.len() + outcome.skipped.len(),
-                        ),
-                    ),
-                ],
-            )
-        }
-        DiagnosticFix::EnableMods(_) if outcome.failed.is_empty() => {
-            count("gui-fix-enabled", outcome.applied.len())
-        }
-        DiagnosticFix::EnableMods(_) => lookup_args(
-            "gui-fix-enabled-partly",
-            [
-                ("count", Arg::from(outcome.applied.len())),
-                (
-                    "total",
-                    Arg::from(outcome.applied.len() + outcome.failed.len()),
-                ),
-            ],
-        ),
+        DiagnosticFix::EnableMods(_) => enable_message(outcome, &mut lines),
+        DiagnosticFix::DisableMods(_) => disable_message(outcome, &mut lines),
         DiagnosticFix::UseAutomaticJava if outcome.failed.is_empty() => {
             lookup("gui-fix-java-applied")
         }
@@ -1083,7 +1109,7 @@ mod tests {
 
     use ephervex_core::{
         ImpactedMod, JavaRuntimeSummary, ModPresence, RepairReport, ResolvedJava, SecondCopy,
-        UnmetRequirement,
+        SideSupport, UnmetRequirement,
     };
     use ephervex_model::ModOrigin;
 
@@ -1115,6 +1141,7 @@ mod tests {
                 },
                 chain: vec![impacted("Create"), impacted("Flywheel")],
                 required_by: 1,
+                requirers: vec![impacted("Flywheel")],
             }),
             fix: None,
         };
@@ -1222,37 +1249,111 @@ mod tests {
                 },
                 chain: vec![impacted("Data Trader")],
                 required_by: 1,
+                requirers: vec![impacted("Data Trader")],
             }),
             fix,
         }
     }
 
     /// A server is not offered a mod the catalog says never runs on one; it is
-    /// told that what asks for it likely belongs only on a client. A client is
-    /// still offered the install.
+    /// told that what asks for it likely belongs only on a client, and the fix
+    /// turns that off.
     #[test]
-    fn a_server_is_not_offered_a_client_only_dependency() {
-        let mut finding = missing_libx(None, None);
-        if let FindingKind::DependencyMissing(UnmetRequirement {
-            dependency: UnmetDependency::Missing { server_side, .. },
-            ..
-        }) = &mut finding.kind
-        {
-            *server_side = SideSupport::Unsupported;
-        }
+    fn a_dependent_of_a_client_only_dependency_is_reported_as_probably_client_only() {
+        let mut finding = missing_libx(
+            None,
+            Some(DiagnosticFix::DisableMods(vec![PathBuf::from(
+                "mods/Data Trader.jar",
+            )])),
+        );
+        let FindingKind::DependencyMissing(requirement) = finding.kind.clone() else {
+            unreachable!("the fixture is a missing dependency");
+        };
+        finding.kind = FindingKind::DependentProbablyClientOnly(requirement);
 
-        let server = finding_view(&finding, "1.20.1", true);
-        assert_eq!(server.install, None);
-        assert!(server.detail.contains(&lookup_args(
-            "gui-diagnosis-dependency-client-only-detail",
+        let view = finding_view(&finding, "1.20.1", true);
+
+        assert_eq!(
+            view.title,
+            lookup_args(
+                "gui-diagnosis-dependent-client-only",
+                [
+                    ("dependent", Arg::from("Data Trader")),
+                    ("count", Arg::from(1))
+                ]
+            )
+        );
+        assert!(view.detail.contains(&lookup_args(
+            "gui-diagnosis-dependent-client-only-detail",
             [
                 ("name", Arg::from("LibX")),
-                ("dependent", Arg::from("Data Trader"))
+                ("dependent", Arg::from("Data Trader")),
+                ("count", Arg::from(1))
             ],
         )));
+        assert_eq!(view.chain, ["Data Trader", "LibX"]);
+        assert_eq!(view.install, None, "a server is never offered the install");
+        assert_eq!(view.fix_label, lookup("gui-diagnosis-review-fix"));
+    }
 
-        let client = finding_view(&finding, "1.20.1", false);
-        assert!(client.install.is_some());
+    #[test]
+    fn several_dependents_of_a_client_only_dependency_are_named_in_the_plural() {
+        let mut finding = missing_libx(None, None);
+        let FindingKind::DependencyMissing(mut requirement) = finding.kind.clone() else {
+            unreachable!("the fixture is a missing dependency");
+        };
+        requirement.requirers = vec![impacted("Data Trader"), impacted("Trade Tweaks")];
+        finding.kind = FindingKind::DependentProbablyClientOnly(requirement);
+
+        let view = finding_view(&finding, "1.20.1", true);
+
+        assert!(
+            view.title.contains("are probably client-only"),
+            "{}",
+            view.title
+        );
+        assert!(
+            view.title.contains("Data Trader, Trade Tweaks"),
+            "{}",
+            view.title
+        );
+        assert!(view.detail.contains("need it"), "{}", view.detail);
+    }
+
+    #[test]
+    fn turning_mods_off_is_previewed_and_reported_per_change() {
+        let fix = DiagnosticFix::DisableMods(vec![PathBuf::from("mods/Data Trader.jar")]);
+        let preview = preview_view(&FixPreview {
+            fix: fix.clone(),
+            changes: vec![ProposedChange::Disable {
+                name: "Data Trader".to_owned(),
+                logical_path: PathBuf::from("mods/Data Trader.jar"),
+            }],
+            blocked: None,
+        });
+        assert_eq!(preview.changes[0].action, lookup("gui-fix-disable"));
+        assert_eq!(preview.changes[0].name, "Data Trader");
+        assert_eq!(preview.notes, [lookup("gui-fix-disable-note")]);
+
+        let applied = outcome_view(
+            &fix,
+            &FixOutcome {
+                applied: vec!["Data Trader".to_owned()],
+                ..FixOutcome::default()
+            },
+            &|_| String::new(),
+        );
+        assert_eq!(applied.message, count("gui-fix-disabled", 1));
+
+        let canceled = outcome_view(
+            &fix,
+            &FixOutcome {
+                skipped: vec!["Data Trader".to_owned()],
+                ..FixOutcome::default()
+            },
+            &|_| String::new(),
+        );
+        assert_eq!(canceled.lines, ["Data Trader"]);
     }
 
     #[test]
