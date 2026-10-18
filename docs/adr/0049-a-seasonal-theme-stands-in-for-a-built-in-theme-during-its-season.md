@@ -42,6 +42,15 @@ checks the local date once a minute. It reads the settings again only when the
 new date changes the theme that should be shown, and at most once per date, so
 the theme changes once at each boundary and never switches back and forth.
 
+**A season can be forced for debugging.** The `SEASONS_THEME` environment
+variable names a `SeasonalTheme` by its identifier, ignoring case, and that
+season is shown on every day in place of the date's. It replaces only the date
+check: a user theme is still never replaced, turning seasonal themes off still
+shows the recorded theme, and nothing is recorded. The name is looked up in the
+season table, so a new season needs no further work. An unset, empty or unknown
+value leaves the date in charge, and an unknown one is logged with the accepted
+values rather than stopping startup. The variable is read once per process.
+
 ## Consequences
 
 - Users of Dark or Light see each season unless they turn seasonal themes off.

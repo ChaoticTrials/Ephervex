@@ -6541,16 +6541,28 @@ fn minecraft_version_order(app: &App) -> ephervex_core::VersionOrder {
 }
 
 fn application_settings(app: &App) -> Result<SettingsData, CoreError> {
-    application_settings_on(app, chrono::Local::now().date_naive())
+    application_settings_on(
+        app,
+        chrono::Local::now().date_naive(),
+        ephervex_core::seasonal_theme::forced_season(),
+    )
 }
 
 /// The settings as they are on `today`, the user's local calendar date, which
-/// decides whether a season's theme is shown.
-fn application_settings_on(app: &App, today: chrono::NaiveDate) -> Result<SettingsData, CoreError> {
+/// decides whether a season's theme is shown unless `forced` names one.
+fn application_settings_on(
+    app: &App,
+    today: chrono::NaiveDate,
+    forced: Option<ephervex_core::seasonal_theme::SeasonalTheme>,
+) -> Result<SettingsData, CoreError> {
     let api = app.api_settings()?;
     let display = app.application_display_settings();
-    let shown_theme =
-        ephervex_core::seasonal_theme::shown_theme(&display.theme, display.seasonal_themes, today);
+    let shown_theme = ephervex_core::seasonal_theme::shown_theme_with(
+        &display.theme,
+        display.seasonal_themes,
+        forced,
+        today,
+    );
     let themes_folder = app
         .paths()
         .config_dir()
@@ -14614,7 +14626,7 @@ mod tests {
         let mut app = App::open_at(paths).expect("the app opens");
         let date = |month, day| chrono::NaiveDate::from_ymd_opt(2026, month, day).expect("date");
 
-        let halloween = application_settings_on(&app, date(10, 31)).expect("settings");
+        let halloween = application_settings_on(&app, date(10, 31), None).expect("settings");
         assert_eq!(halloween.theme, ephervex_core::ApplicationTheme::default());
         assert_eq!(
             halloween.shown_theme,
@@ -14622,7 +14634,7 @@ mod tests {
         );
         assert!(halloween.branding.logo.is_some() && halloween.branding.icon.is_some());
 
-        let november = application_settings_on(&app, date(11, 1)).expect("settings");
+        let november = application_settings_on(&app, date(11, 1), None).expect("settings");
         assert_eq!(
             november.shown_theme,
             ShownTheme::Recorded(november.theme.clone())
@@ -14633,10 +14645,40 @@ mod tests {
         );
 
         app.set_seasonal_themes(false).expect("turn off");
-        let off = application_settings_on(&app, date(10, 31)).expect("settings");
+        let off = application_settings_on(&app, date(10, 31), None).expect("settings");
         assert!(!off.seasonal_themes);
         assert_eq!(off.shown_theme, ShownTheme::Recorded(off.theme.clone()));
         assert_eq!(off.branding, crate::theme_files::BrandingImages::default());
+    }
+
+    /// A forced season replaces the date check only: the recorded theme is
+    /// untouched, a user theme is never replaced and turning seasons off wins.
+    #[test]
+    fn a_forced_season_shows_its_theme_on_any_date_without_recording_it() {
+        use ephervex_core::seasonal_theme::{SeasonalTheme, ShownTheme};
+
+        without_desktop_keyring();
+        let base = tempfile::tempdir().expect("a disposable root");
+        let paths = ephervex_core::Paths::rooted_at(base.path());
+        let mut app = App::open_at(paths).expect("the app opens");
+        let date = |month, day| chrono::NaiveDate::from_ymd_opt(2026, month, day).expect("date");
+        let forced = Some(SeasonalTheme::Halloween);
+
+        let march = application_settings_on(&app, date(3, 1), forced).expect("settings");
+        assert_eq!(march.theme, ephervex_core::ApplicationTheme::default());
+        assert_eq!(
+            march.shown_theme,
+            ShownTheme::Seasonal(SeasonalTheme::Halloween)
+        );
+        assert!(march.branding.logo.is_some() && march.branding.icon.is_some());
+
+        app.set_seasonal_themes(false).expect("turn off");
+        let off = application_settings_on(&app, date(3, 1), forced).expect("settings");
+        assert_eq!(off.shown_theme, ShownTheme::Recorded(off.theme.clone()));
+
+        app.set_seasonal_themes(true).expect("turn on");
+        let unset = application_settings_on(&app, date(3, 1), None).expect("settings");
+        assert_eq!(unset.shown_theme, ShownTheme::Recorded(unset.theme.clone()));
     }
 
     fn settles(received: &std::sync::mpsc::Receiver<Event>) -> Vec<u64> {

@@ -225,6 +225,25 @@ The icon Ephervex was installed with does not change, as described under
 [Window and taskbar icons](#window-and-taskbar-icons). A seasonal theme is not
 a `parent` a theme file can name.
 
+### Previewing a seasonal theme
+
+To see a seasonal theme outside its season, start Ephervex with the
+`SEASONS_THEME` environment variable set to the theme's name:
+
+```sh
+SEASONS_THEME=halloween ephervex-gui
+```
+
+The theme is shown on every day for as long as the variable is set, also across
+restarts and the once-a-minute date check. The value is matched without regard
+to case. An unset or empty variable leaves the date in charge. A value that
+names no seasonal theme is ignored and the date decides; the log says which
+values are accepted.
+
+The variable replaces only the date. A theme of your own is still never
+replaced, turning off Settings > General > Seasonal themes still shows the theme
+you chose, and your theme setting is never changed.
+
 ### Adding a seasonal theme
 
 A seasonal theme has four parts:
@@ -240,7 +259,9 @@ A seasonal theme has four parts:
 4. Its name in the localization files, for the note the settings page shows
    while it is active.
 
-Nothing else checks dates. See ADR 0049 for the rules a season follows.
+`SEASONS_THEME` accepts the new theme's `SeasonalTheme::as_str` name with no
+further work, because it looks the name up in `THEME_SEASONS`. Nothing else
+checks dates. See ADR 0049 for the rules a season follows.
 
 ## What a theme does not reach
 

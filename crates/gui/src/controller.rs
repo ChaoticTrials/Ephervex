@@ -2596,7 +2596,10 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
 
     let season_weak = ui.as_weak();
     let season_commands = backend.commands.clone();
-    let season_watch = RefCell::new(SeasonWatch::default());
+    let season_watch = RefCell::new(SeasonWatch {
+        forced: ephervex_core::seasonal_theme::forced_season(),
+        ..SeasonWatch::default()
+    });
     let season_timer = Timer::default();
     season_timer.start(TimerMode::Repeated, SEASON_CHECK, move || {
         let Some(ui) = season_weak.upgrade() else {
@@ -2650,6 +2653,8 @@ struct SeasonWatch {
     /// The date a refresh was last asked for, so a refresh that does not
     /// change the theme is not asked for again until the next date.
     asked_on: Option<chrono::NaiveDate>,
+    /// The season shown on every day in place of the date's, if any.
+    forced: Option<ephervex_core::seasonal_theme::SeasonalTheme>,
 }
 
 impl SeasonWatch {
@@ -2667,7 +2672,12 @@ impl SeasonWatch {
         let Some(preferred) = ephervex_core::ApplicationTheme::from_stored(preferred) else {
             return false;
         };
-        let wanted = ephervex_core::seasonal_theme::shown_theme(&preferred, seasonal_themes, today);
+        let wanted = ephervex_core::seasonal_theme::shown_theme_with(
+            &preferred,
+            seasonal_themes,
+            self.forced,
+            today,
+        );
         if wanted.name() == shown || self.asked_on == Some(today) {
             return false;
         }
@@ -15516,6 +15526,25 @@ mod tests {
             }
         }
         assert_eq!(asked, [(day(10, 25), 0), (day(11, 1), 0)]);
+    }
+
+    /// A forced season holds on every date: the theme is asked for once when
+    /// it is not yet shown, and no date change asks for another.
+    #[test]
+    fn a_forced_season_is_not_dropped_or_asked_for_again_as_the_date_changes() {
+        let mut watch = SeasonWatch {
+            forced: Some(ephervex_core::seasonal_theme::SeasonalTheme::Halloween),
+            ..SeasonWatch::default()
+        };
+        assert!(watch.due("light", true, "light", day(3, 1)));
+        for date in [day(3, 1), day(3, 2), day(10, 24), day(11, 1), day(11, 2)] {
+            for _ in 0..3 {
+                assert!(
+                    !watch.due("light", true, "season:halloween", date),
+                    "{date}"
+                );
+            }
+        }
     }
 
     #[test]
