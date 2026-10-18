@@ -18,6 +18,16 @@
 //! and a project whose constraint strengthened is resolved again. Two different
 //! pins on one project do not arbitrate: they fail, naming both requesters.
 //!
+//! # Plans that only a pin can justify
+//!
+//! A pass takes each project's newest release until a pin says otherwise, which
+//! can go around in circles, end in a pin conflict or hit a refusal although a
+//! consistent plan exists: a release can be needed only because of a pin that
+//! the release itself brings in. When a pass stalls like that, the resolver
+//! assumes pins on a few releases, within fixed bounds, and keeps an assumption
+//! only if the settled graph pins that release for real. With no such plan the
+//! pass's own refusal stands.
+//!
 //! # Determinism
 //!
 //! Everything is keyed in `BTreeMap`/`BTreeSet`, the next project to resolve is
@@ -42,14 +52,20 @@ use crate::error::{ModPlatformError, ModPlatformResult};
 use crate::model::{Compatibility, InstanceTarget, ModDependency, ModProject, ModVersionInfo};
 use crate::provider::ModProviderApi;
 
-/// How many resolution rounds are allowed before the resolver gives up.
+/// How many resolution rounds one pass is allowed before the resolver gives up.
 ///
-/// Resolution follows only what the root's current selection reaches, so a
-/// project can be resolved again when the release that pinned it is replaced.
-/// A graph with no consistent choice of versions can keep replacing releases
-/// indefinitely, and this ceiling turns that into a refused install rather than
-/// a launcher that never finishes.
+/// A pass that repeats a state stops at once, so only a graph that keeps
+/// needing new actions, such as a very long chain, reaches this.
 const MAX_RESOLUTION_ROUNDS: usize = 512;
+
+/// How many releases may be assumed pinned at once.
+const MAX_PIN_ASSUMPTIONS: usize = 3;
+
+/// How many assumption sets are tried before the first pass's refusal stands.
+const MAX_ASSUMPTION_BRANCHES: usize = 64;
+
+/// How many rounds all the assumption sets together may take.
+const MAX_SEARCH_ROUNDS: usize = 2048;
 
 /// The name the plan gives the mod the user asked for.
 const ROOT: &str = "root";
@@ -575,6 +591,69 @@ const fn is_graph_refusal(error: &ModPlatformError) -> bool {
     )
 }
 
+/// A copy of a catalog refusal, which carries only plain values. Other errors
+/// are not copied, so they are asked for again.
+fn copy_refusal(error: &ModPlatformError) -> Option<ModPlatformError> {
+    Some(match error {
+        ModPlatformError::IncompatibleSelectedVersion {
+            project_id,
+            version_id,
+            minecraft,
+            loader,
+        } => ModPlatformError::IncompatibleSelectedVersion {
+            project_id: project_id.clone(),
+            version_id: version_id.clone(),
+            minecraft: minecraft.clone(),
+            loader: *loader,
+        },
+        ModPlatformError::NoCompatibleVersion {
+            project_id,
+            minecraft,
+            loader,
+        } => ModPlatformError::NoCompatibleVersion {
+            project_id: project_id.clone(),
+            minecraft: minecraft.clone(),
+            loader: *loader,
+        },
+        ModPlatformError::ProjectUnknown {
+            provider,
+            reference,
+        } => ModPlatformError::ProjectUnknown {
+            provider: *provider,
+            reference: reference.clone(),
+        },
+        ModPlatformError::VersionUnknown {
+            provider,
+            version_id,
+        } => ModPlatformError::VersionUnknown {
+            provider: *provider,
+            version_id: version_id.clone(),
+        },
+        ModPlatformError::InconsistentDependency {
+            declared_by,
+            project_id,
+            version_project_id,
+        } => ModPlatformError::InconsistentDependency {
+            declared_by: declared_by.clone(),
+            project_id: project_id.clone(),
+            version_project_id: version_project_id.clone(),
+        },
+        ModPlatformError::InconsistentSelectedVersion {
+            project_id,
+            version_project_id,
+        } => ModPlatformError::InconsistentSelectedVersion {
+            project_id: project_id.clone(),
+            version_project_id: version_project_id.clone(),
+        },
+        ModPlatformError::MalformedDependency { declared_by } => {
+            ModPlatformError::MalformedDependency {
+                declared_by: declared_by.clone(),
+            }
+        }
+        _ => return None,
+    })
+}
+
 /// Whether an error describes the content of one release rather than the
 /// provider failing: the release is unusable or unknown, not the lookup.
 const fn is_release_content_refusal(error: &ModPlatformError) -> bool {
@@ -587,6 +666,13 @@ const fn is_release_content_refusal(error: &ModPlatformError) -> bool {
     )
 }
 
+/// Whether an error ends only the attempt, rather than the whole resolution.
+const fn is_dead_end(error: &ModPlatformError) -> bool {
+    is_graph_refusal(error)
+        || is_release_content_refusal(error)
+        || matches!(error, ModPlatformError::ResolutionDidNotConverge { .. })
+}
+
 /// A refusal, with the pin and the declarers it was reached under. It holds
 /// only while the graph still asks for the project the same way, so a
 /// refusal naming a declarer that has left the graph is not kept.
@@ -596,8 +682,162 @@ struct Refusal {
     error: ModPlatformError,
 }
 
+/// Everything a pass's next action depends on: each resolved release with the
+/// pin it was resolved under, and the refusals held. Meeting one twice means
+/// the pass loops forever.
+type ResolutionState = (
+    Vec<(String, String, Option<String>)>,
+    Vec<(String, Option<String>, BTreeSet<String>)>,
+);
+
+/// One project the resolver picked a release for, and the pin it was under.
+#[derive(Debug, Clone)]
+struct Step {
+    project: String,
+    pin: Option<String>,
+    declarers: BTreeSet<String>,
+}
+
+/// A pass that ended without a plan, though other choices might produce one.
+#[derive(Debug)]
+struct Stalled {
+    cause: StallCause,
+    /// The projects whose releases kept changing, or that were pinned two ways
+    /// and the mods that pinned them.
+    involved: BTreeSet<String>,
+    /// The involved projects and everything requiring them, at the stall.
+    upstream: BTreeSet<String>,
+    /// Every other project the pass held or had listed releases for.
+    rest: BTreeSet<String>,
+}
+
+/// A group of assumptions to try.
+#[derive(Debug)]
+enum Candidates {
+    /// These pairs.
+    Pairs(Vec<(String, String)>),
+    /// Every pin that a release read so far makes on one of these projects.
+    PinsOn(BTreeSet<String>),
+    /// Each release of this project that fits the instance.
+    ReleasesOf(String),
+}
+
+#[derive(Debug)]
+enum StallCause {
+    /// The pass came back to an earlier state, after these steps.
+    Repeating(Vec<Step>),
+    /// The graph pins projects to two different versions.
+    Conflicting(Vec<ModPlatformError>),
+    /// The catalog refuses a project the graph reaches.
+    Refused(ModPlatformError),
+}
+
+impl Stalled {
+    /// The pins the pass kept switching between, or both sides of a conflict.
+    fn hints(&self) -> Vec<(String, String)> {
+        let hints: BTreeSet<(String, String)> = match &self.cause {
+            StallCause::Refused(_) => BTreeSet::new(),
+            StallCause::Repeating(steps) => steps
+                .iter()
+                .filter_map(|step| Some((step.project.clone(), step.pin.clone()?)))
+                .collect(),
+            StallCause::Conflicting(conflicts) => conflicts
+                .iter()
+                .filter_map(|conflict| match conflict {
+                    ModPlatformError::ConflictingPinnedVersions {
+                        project_id,
+                        first,
+                        second,
+                        ..
+                    } => Some([
+                        (project_id.clone(), first.clone()),
+                        (project_id.clone(), second.clone()),
+                    ]),
+                    _ => None,
+                })
+                .flatten()
+                .collect(),
+        };
+        hints.into_iter().collect()
+    }
+
+    /// What to assume, most promising first.
+    fn candidates(&self) -> Vec<Candidates> {
+        let mut groups = vec![
+            Candidates::Pairs(self.hints()),
+            Candidates::PinsOn(self.upstream.clone()),
+        ];
+        groups.extend(self.involved.iter().cloned().map(Candidates::ReleasesOf));
+        groups.extend(
+            self.upstream
+                .difference(&self.involved)
+                .cloned()
+                .map(Candidates::ReleasesOf),
+        );
+        // A refusal concerns one project, so only what leads to it is varied.
+        if !matches!(self.cause, StallCause::Refused(_)) {
+            groups.push(Candidates::PinsOn(self.rest.clone()));
+            groups.extend(self.rest.iter().cloned().map(Candidates::ReleasesOf));
+        }
+        groups
+    }
+
+    /// The refusal that stands when no assumption produces a plan.
+    fn into_error(self) -> ModPlatformError {
+        match self.cause {
+            StallCause::Repeating(steps) => {
+                let projects: BTreeSet<String> =
+                    steps.iter().map(|step| step.project.clone()).collect();
+                let pins: BTreeSet<String> = steps
+                    .iter()
+                    .filter_map(|step| {
+                        let pin = step.pin.as_ref()?;
+                        Some(format!(
+                            "{} = {pin} ({})",
+                            step.project,
+                            join(&step.declarers)
+                        ))
+                    })
+                    .collect();
+                ModPlatformError::NoConsistentVersions {
+                    projects: join(&projects),
+                    pins: pins.into_iter().collect::<Vec<_>>().join("; "),
+                }
+            }
+            StallCause::Conflicting(mut conflicts) => conflicts.remove(0),
+            StallCause::Refused(error) => error,
+        }
+    }
+}
+
+/// How a pass over the graph ended.
+#[derive(Debug)]
+enum Pass {
+    /// Nothing is left to resolve and no pin conflicts.
+    Settled,
+    Stalled(Stalled),
+}
+
 struct Resolver<'a> {
     request: ResolveRequest<'a>,
+    /// Rounds spent on assumption sets so far.
+    search_rounds: usize,
+    /// Releases assumed pinned while searching; each counts as a pin on its
+    /// project until the graph is settled.
+    assumed: BTreeMap<String, String>,
+    /// Releases already chosen for a project under a pin.
+    selected: BTreeMap<(String, Option<String>), ModVersionInfo>,
+    /// Releases from a listing, for a pin that only an assumption makes. The
+    /// release the user selected is always looked up by its id.
+    listed_pins: BTreeMap<(String, String), ModVersionInfo>,
+    /// Catalog refusals of a project's listing, so asking again is not needed.
+    listing_refusals: BTreeMap<String, ModPlatformError>,
+    /// Catalog refusals of a selection, by project, pin and the pin's declarers.
+    selection_refusals: BTreeMap<(String, Option<String>, BTreeSet<String>), ModPlatformError>,
+    /// Every release the provider lists for a project already asked about.
+    listings: BTreeMap<String, Vec<ModVersionInfo>>,
+    /// The relations of releases already read, by project and release.
+    normalized: BTreeMap<(String, String), Vec<Normalized>>,
     constraints: BTreeMap<String, Constraint>,
     resolved: BTreeMap<String, Resolution>,
     /// Relations contributed by each resolved `(project, version)`. Keyed by
@@ -631,6 +871,14 @@ impl<'a> Resolver<'a> {
     fn new(request: ResolveRequest<'a>) -> Self {
         Self {
             request,
+            search_rounds: 0,
+            assumed: BTreeMap::new(),
+            selected: BTreeMap::new(),
+            listed_pins: BTreeMap::new(),
+            listing_refusals: BTreeMap::new(),
+            selection_refusals: BTreeMap::new(),
+            listings: BTreeMap::new(),
+            normalized: BTreeMap::new(),
             constraints: BTreeMap::new(),
             resolved: BTreeMap::new(),
             edges: BTreeMap::new(),
@@ -649,10 +897,268 @@ impl<'a> Resolver<'a> {
     async fn run(&mut self) -> ModPlatformResult<ModInstallPlan> {
         let root_id = self.request.selection.project_id.clone();
 
+        match self.pass().await? {
+            Pass::Settled => {}
+            Pass::Stalled(stalled) => {
+                if !self.search_assumptions(&stalled).await? {
+                    return Err(stalled.into_error());
+                }
+            }
+        }
+        self.finish(&root_id).await
+    }
+
+    /// Resolves again with some releases assumed pinned, fewest assumptions
+    /// first and within fixed bounds. Leaves the resolver on the settled graph
+    /// and returns `true` when one set is pinned by the graph itself.
+    async fn search_assumptions(&mut self, stalled: &Stalled) -> ModPlatformResult<bool> {
+        let mut tried: BTreeSet<BTreeMap<String, String>> = BTreeSet::new();
+        let mut attempts = 0;
+        let mut frontier = vec![(BTreeMap::new(), None)];
+        for _ in 0..MAX_PIN_ASSUMPTIONS {
+            let mut deeper = Vec::new();
+            for (base, own) in frontier {
+                for group in own.as_ref().unwrap_or(stalled).candidates() {
+                    for (project, release) in self.expand(group).await? {
+                        if base.contains_key(&project) {
+                            continue;
+                        }
+                        let mut assumed = base.clone();
+                        assumed.insert(project, release);
+                        if !tried.insert(assumed.clone()) {
+                            continue;
+                        }
+                        if attempts == MAX_ASSUMPTION_BRANCHES
+                            || self.search_rounds >= MAX_SEARCH_ROUNDS
+                        {
+                            return Ok(false);
+                        }
+                        attempts += 1;
+                        self.restart(assumed.clone());
+                        match self.pass().await {
+                            Ok(Pass::Settled) if self.assumptions_hold() => return Ok(true),
+                            Ok(Pass::Settled) => {}
+                            Ok(Pass::Stalled(stalled)) => deeper.push((assumed, Some(stalled))),
+                            Err(error) if is_dead_end(&error) => {}
+                            Err(error) => return Err(error),
+                        }
+                    }
+                }
+            }
+            frontier = deeper;
+        }
+        Ok(false)
+    }
+
+    /// The assumptions a group stands for; only a reached group asks the provider.
+    async fn expand(&mut self, group: Candidates) -> ModPlatformResult<Vec<(String, String)>> {
+        match group {
+            Candidates::Pairs(pairs) => Ok(pairs),
+            Candidates::PinsOn(projects) => Ok(self
+                .pinnable()
+                .into_iter()
+                .filter(|(project, _)| projects.contains(project))
+                .collect()),
+            Candidates::ReleasesOf(project) => {
+                let Some(mut releases) = self.listed_releases(&project).await? else {
+                    return Ok(Vec::new());
+                };
+                releases.sort_by(|left, right| {
+                    (right.published_at, &right.id).cmp(&(left.published_at, &left.id))
+                });
+                releases.retain(|release| {
+                    release
+                        .compatibility(self.request.target, self.request.loader_name)
+                        .is_compatible()
+                });
+                // Assuming a listed release needs no lookup of its own.
+                for release in &releases {
+                    self.listed_pins
+                        .entry((project.clone(), release.id.clone()))
+                        .or_insert_with(|| release.clone());
+                }
+                Ok(releases
+                    .into_iter()
+                    .map(|release| (project.clone(), release.id))
+                    .collect())
+            }
+        }
+    }
+
+    /// The projects, and everything that requires them directly or not.
+    fn requesters_of(&self, projects: &BTreeSet<String>) -> BTreeSet<String> {
+        let mut found = projects.clone();
+        let mut pending: Vec<String> = projects.iter().cloned().collect();
+        while let Some(project) = pending.pop() {
+            let Some(constraint) = self.constraints.get(&project) else {
+                continue;
+            };
+            for requester in &constraint.requesters {
+                if found.insert(requester.clone()) {
+                    pending.push(requester.clone());
+                }
+            }
+        }
+        found
+    }
+
+    /// A project's releases, or `None` when the catalog cannot list them.
+    async fn listed_releases(
+        &mut self,
+        project_id: &str,
+    ) -> ModPlatformResult<Option<Vec<ModVersionInfo>>> {
+        if let Some(listed) = self.listings.get(project_id) {
+            return Ok(Some(listed.clone()));
+        }
+        if self.listing_refusals.contains_key(project_id) {
+            return Ok(None);
+        }
+        match self.versions(project_id).await {
+            Ok(listed) => {
+                self.listings.insert(project_id.to_owned(), listed.clone());
+                Ok(Some(listed))
+            }
+            Err(error) if is_graph_refusal(&error) => {
+                if let Some(copy) = copy_refusal(&error) {
+                    self.listing_refusals.insert(project_id.to_owned(), copy);
+                }
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Every `(project, release)` that a release read so far pins.
+    fn pinnable(&self) -> BTreeSet<(String, String)> {
+        self.listings
+            .values()
+            .flatten()
+            .chain(self.selected.values())
+            .flat_map(|release| &release.dependencies)
+            .filter(|dependency| {
+                dependency.kind == ModRelationKind::Required
+                    || (dependency.kind == ModRelationKind::Optional
+                        && dependency.project_id.as_ref().is_some_and(|project| {
+                            self.request.selection.optional.contains(project)
+                        }))
+            })
+            .filter_map(|dependency| {
+                let release = dependency.version_id.as_ref()?;
+                let project = dependency
+                    .project_id
+                    .as_ref()
+                    .or_else(|| self.pinned_owners.get(release))?;
+                Some((project.clone(), release.clone()))
+            })
+            .collect()
+    }
+
+    /// Clears the graph for another attempt; what the provider said is kept.
+    fn restart(&mut self, assumed: BTreeMap<String, String>) {
+        self.assumed = assumed;
+        self.constraints.clear();
+        self.resolved.clear();
+        self.edges.clear();
+        self.refused.clear();
+        self.conflicts.clear();
+    }
+
+    /// Whether the graph pins every assumed release without the assumption.
+    fn assumptions_hold(&self) -> bool {
+        let (constraints, _) = self.fold_assuming(&BTreeSet::new(), &BTreeMap::new());
+        self.assumed.iter().all(|(project, release)| {
+            constraints
+                .get(project)
+                .and_then(|constraint| constraint.pin.as_deref())
+                == Some(release.as_str())
+        })
+    }
+
+    fn state(&self) -> ResolutionState {
+        (
+            self.resolved
+                .iter()
+                .map(|(project, resolution)| {
+                    (
+                        project.clone(),
+                        resolution.version.id.clone(),
+                        resolution.under.clone(),
+                    )
+                })
+                .collect(),
+            self.refused
+                .iter()
+                .map(|(project, refusal)| {
+                    (
+                        project.clone(),
+                        refusal.pin.clone(),
+                        refusal.declarers.clone(),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// The stall a pass ends in when the graph pins projects two ways.
+    fn conflict_stall(&mut self) -> Stalled {
+        let conflicts = std::mem::take(&mut self.conflicts);
+        let mut involved = BTreeSet::new();
+        for (project, conflict) in &conflicts {
+            involved.insert(project.clone());
+            if let Some(constraint) = self.constraints.get(project) {
+                involved.extend(constraint.pin_sources.iter().cloned());
+            }
+            if let ModPlatformError::ConflictingPinnedVersions { second_source, .. } = conflict {
+                involved.insert(second_source.clone());
+            }
+        }
+        self.stall(
+            StallCause::Conflicting(conflicts.into_values().collect()),
+            involved,
+        )
+    }
+
+    fn stall(&self, cause: StallCause, mut involved: BTreeSet<String>) -> Stalled {
+        // The root's own selection and an assumption's source name no project.
+        involved.retain(|project| project != ROOT && !project.is_empty());
+        let mut upstream = self.requesters_of(&involved);
+        upstream.retain(|project| project != ROOT && !project.is_empty());
+        Stalled {
+            rest: self
+                .constraints
+                .keys()
+                .chain(self.listings.keys())
+                .filter(|project| !upstream.contains(*project))
+                .cloned()
+                .collect(),
+            upstream,
+            cause,
+            involved,
+        }
+    }
+
+    /// Counts a round against the search's budget while assumptions are in play.
+    fn spend_search_round(&mut self, round: usize) -> ModPlatformResult<()> {
+        if self.assumed.is_empty() {
+            return Ok(());
+        }
+        self.search_rounds += 1;
+        if self.search_rounds > MAX_SEARCH_ROUNDS {
+            return Err(ModPlatformError::ResolutionDidNotConverge { iterations: round });
+        }
+        Ok(())
+    }
+
+    /// Resolves one project at a time until nothing is left to resolve.
+    async fn pass(&mut self) -> ModPlatformResult<Pass> {
+        let mut seen: BTreeMap<ResolutionState, usize> = BTreeMap::new();
+        let mut steps: Vec<Step> = Vec::new();
+
         for round in 0..=MAX_RESOLUTION_ROUNDS {
             if self.request.cancel.is_cancelled() {
                 return Err(ModPlatformError::Canceled);
             }
+            self.spend_search_round(round)?;
 
             self.refold();
             self.refused.retain(|project, refusal| {
@@ -661,14 +1167,25 @@ impl<'a> Resolver<'a> {
                 })
             });
             let Some(next) = self.next_dirty() else {
-                if let Some((_, conflict)) = self.conflicts.pop_first() {
-                    return Err(conflict);
+                if !self.conflicts.is_empty() {
+                    return Ok(Pass::Stalled(self.conflict_stall()));
                 }
-                if let Some((_, refusal)) = self.refused.pop_first() {
-                    return Err(refusal.error);
+                if let Some((project, refusal)) = self.refused.pop_first() {
+                    let mut involved = refusal.declarers;
+                    involved.insert(project);
+                    return Ok(Pass::Stalled(
+                        self.stall(StallCause::Refused(refusal.error), involved),
+                    ));
                 }
-                break;
+                return Ok(Pass::Settled);
             };
+            if let Some(first) = seen.insert(self.state(), steps.len()) {
+                let cycle = steps.split_off(first);
+                let involved = cycle.iter().map(|step| step.project.clone()).collect();
+                return Ok(Pass::Stalled(
+                    self.stall(StallCause::Repeating(cycle), involved),
+                ));
+            }
             // The last round only observes: it allows no further action.
             if round == MAX_RESOLUTION_ROUNDS {
                 return Err(ModPlatformError::ResolutionDidNotConverge { iterations: round });
@@ -678,7 +1195,15 @@ impl<'a> Resolver<'a> {
                 || (None, BTreeSet::new()),
                 |constraint| (constraint.pin.clone(), constraint.pin_sources.clone()),
             );
-            let version = match self.select_version(&next, pin.as_deref(), &declarers).await {
+            steps.push(Step {
+                project: next.clone(),
+                pin: pin.clone(),
+                declarers: declarers.clone(),
+            });
+            let version = match self
+                .selected_version(&next, pin.as_deref(), &declarers)
+                .await
+            {
                 Ok(version) => version,
                 Err(error) if is_graph_refusal(&error) => {
                     self.refused.insert(
@@ -698,7 +1223,7 @@ impl<'a> Resolver<'a> {
             // A project's relations belong to the version that declared them,
             // so re-resolving retracts the old ones wholesale.
             self.edges.retain(|(project, _), _| project != &next);
-            let normalized = match self.normalize_all(&version).await {
+            let normalized = match self.relations_of(&version).await {
                 Ok(normalized) => normalized,
                 Err(error) if is_graph_refusal(&error) => {
                     // The old release's relations are gone, so it must not stay
@@ -727,7 +1252,9 @@ impl<'a> Resolver<'a> {
             );
         }
 
-        self.finish(&root_id).await
+        Err(ModPlatformError::ResolutionDidNotConverge {
+            iterations: MAX_RESOLUTION_ROUNDS,
+        })
     }
 
     /// Rebuilds the constraint map from the root plus the edges reachable from it.
@@ -807,6 +1334,19 @@ impl<'a> Resolver<'a> {
         BTreeMap<String, Constraint>,
         BTreeMap<String, ModPlatformError>,
     ) {
+        self.fold_assuming(skipped, &self.assumed)
+    }
+
+    /// [`Self::fold`] with the given releases counted as pins, for the projects
+    /// the graph reaches.
+    fn fold_assuming(
+        &self,
+        skipped: &BTreeSet<String>,
+        assumed: &BTreeMap<String, String>,
+    ) -> (
+        BTreeMap<String, Constraint>,
+        BTreeMap<String, ModPlatformError>,
+    ) {
         let selection = self.request.selection;
         let reachable = self.reachable_projects(skipped);
         let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
@@ -847,6 +1387,27 @@ impl<'a> Resolver<'a> {
                     origin,
                 ) {
                     conflicts.entry(project_id.clone()).or_insert(error);
+                }
+            }
+        }
+
+        for (project_id, release) in assumed {
+            let Some(constraint) = constraints.get_mut(project_id) else {
+                continue;
+            };
+            match constraint.pin.as_deref() {
+                None => constraint.pin = Some(release.clone()),
+                Some(existing) if existing == release => {}
+                Some(existing) => {
+                    conflicts.entry(project_id.clone()).or_insert_with(|| {
+                        ModPlatformError::ConflictingPinnedVersions {
+                            project_id: project_id.clone(),
+                            first: existing.to_owned(),
+                            first_source: join(&constraint.pin_sources),
+                            second: release.clone(),
+                            second_source: String::new(),
+                        }
+                    });
                 }
             }
         }
@@ -936,10 +1497,66 @@ impl<'a> Resolver<'a> {
             .map(|(_, project)| project.clone())
     }
 
+    /// [`Self::select_version`], remembering a successful answer so that a
+    /// project resolved the same way again is not looked up again.
+    async fn selected_version(
+        &mut self,
+        project_id: &str,
+        pin: Option<&str>,
+        declarers: &BTreeSet<String>,
+    ) -> ModPlatformResult<ModVersionInfo> {
+        let key = (project_id.to_owned(), pin.map(str::to_owned));
+        if let Some(version) = self.selected.get(&key) {
+            return Ok(version.clone());
+        }
+        let refusal_key = (key.0.clone(), key.1.clone(), declarers.clone());
+        if let Some(refusal) = self
+            .selection_refusals
+            .get(&refusal_key)
+            .and_then(copy_refusal)
+        {
+            return Err(refusal);
+        }
+        if let (true, Some(pin)) = (declarers.is_empty(), pin) {
+            if let Some(version) = self
+                .listed_pins
+                .get(&(project_id.to_owned(), pin.to_owned()))
+            {
+                return Ok(version.clone());
+            }
+        }
+        match self.select_version(project_id, pin, declarers).await {
+            Ok(version) => {
+                self.selected.insert(key, version.clone());
+                Ok(version)
+            }
+            Err(error) => {
+                if let Some(copy) = copy_refusal(&error) {
+                    self.selection_refusals.insert(refusal_key, copy);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// [`Self::normalize_all`], remembering a successful answer for the release.
+    async fn relations_of(
+        &mut self,
+        version: &ModVersionInfo,
+    ) -> ModPlatformResult<Vec<Normalized>> {
+        let key = (version.project_id.clone(), version.id.clone());
+        if let Some(relations) = self.normalized.get(&key) {
+            return Ok(relations.clone());
+        }
+        let relations = self.normalize_all(version).await?;
+        self.normalized.insert(key, relations.clone());
+        Ok(relations)
+    }
+
     /// Picks the version one project resolves to. `declarers` are the sources
     /// of `pin`, so a refusal of the pin can name who asked for it.
     async fn select_version(
-        &self,
+        &mut self,
         project_id: &str,
         pin: Option<&str>,
         declarers: &BTreeSet<String>,
@@ -968,7 +1585,13 @@ impl<'a> Resolver<'a> {
             return Ok(version);
         }
 
-        let versions = self.versions(project_id).await?;
+        let versions = match self.listed_releases(project_id).await? {
+            Some(listed) => listed,
+            None => match self.listing_refusals.get(project_id).and_then(copy_refusal) {
+                Some(refusal) => return Err(refusal),
+                None => self.versions(project_id).await?,
+            },
+        };
         if let Some(kept) = self
             .installed_release_to_keep(project_id, &versions)
             .await?
@@ -1874,9 +2497,18 @@ mod tests {
         /// When set, only this many failing lookups happen before the ids
         /// answer normally, for a failure that clears up.
         failures_before_recovery: Option<std::sync::atomic::AtomicUsize>,
+        /// How many times the resolver asked for versions, to show a refusal
+        /// did not cost a lookup per round.
+        lookups: std::sync::atomic::AtomicUsize,
+        /// Every project whose releases were listed.
+        asked: std::sync::Mutex<BTreeSet<String>>,
     }
 
     impl Catalog {
+        fn lookups(&self) -> usize {
+            self.lookups.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
         fn failing_for(mut self, failure: fn() -> ModPlatformError, ids: &[&str]) -> Self {
             self.failure = Some(failure);
             self.failing_ids = ids.iter().map(|id| (*id).to_owned()).collect();
@@ -1946,6 +2578,8 @@ mod tests {
                         left.load(std::sync::atomic::Ordering::SeqCst),
                     )
                 }),
+                lookups: std::sync::atomic::AtomicUsize::new(0),
+                asked: std::sync::Mutex::default(),
             }
         }
     }
@@ -1990,6 +2624,12 @@ mod tests {
             _reporter: &OperationReporter,
             _cancel: &CancellationToken,
         ) -> ModPlatformResult<Vec<ModVersionInfo>> {
+            self.lookups
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.asked
+                .lock()
+                .expect("not poisoned")
+                .insert(project_id.to_owned());
             if let Some(error) = self.failure_for(&[project_id]) {
                 return Err(error);
             }
@@ -2020,6 +2660,8 @@ mod tests {
             _reporter: &OperationReporter,
             _cancel: &CancellationToken,
         ) -> ModPlatformResult<Vec<ModVersionInfo>> {
+            self.lookups
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let requested: Vec<&str> = ids.iter().map(String::as_str).collect();
             if let Some(error) = self.failure_for(&requested) {
                 return Err(error);
@@ -3368,6 +4010,353 @@ mod tests {
                     if *project_id == format!("P{}", MAX_RESOLUTION_ROUNDS - 1)
             ),
             "{error:?}"
+        );
+    }
+
+    // -- choices that undo each other --------------------------------------
+
+    /// ROOT requires SSS. The newest SSS requires NNN, which pins the older SSS,
+    /// and the older SSS does not need NNN, so the pin would disappear with it.
+    fn a_pin_that_removes_itself() -> Catalog {
+        Catalog::default()
+            .with(
+                "ROOT",
+                vec![needs(
+                    compatible("root-1", "ROOT"),
+                    ModRelationKind::Required,
+                    "SSS",
+                )],
+            )
+            .with(
+                "SSS",
+                vec![
+                    needs(
+                        at(compatible("s-old", "SSS"), 0),
+                        ModRelationKind::Required,
+                        "CCC",
+                    ),
+                    needs(
+                        at(compatible("s-new", "SSS"), 10),
+                        ModRelationKind::Required,
+                        "NNN",
+                    ),
+                ],
+            )
+            .with("CCC", vec![compatible("c-1", "CCC")])
+            .with(
+                "NNN",
+                vec![pins_of(
+                    compatible("n-1", "NNN"),
+                    ModRelationKind::Required,
+                    "SSS",
+                    "s-old",
+                )],
+            )
+    }
+
+    #[tokio::test]
+    async fn a_graph_whose_choices_undo_each_other_is_refused_naming_the_projects() {
+        let catalog = a_pin_that_removes_itself();
+
+        let error = plan_with(&catalog, InstallSelection::new("ROOT"), &[])
+            .await
+            .expect_err("must refuse");
+        assert!(
+            matches!(
+                error,
+                ModPlatformError::NoConsistentVersions { ref projects, ref pins }
+                    if projects == "CCC, NNN, SSS" && pins == "SSS = s-old (NNN)"
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_graph_whose_choices_undo_each_other_is_refused_without_a_lookup_per_round() {
+        let catalog = a_pin_that_removes_itself();
+
+        plan_with(&catalog, InstallSelection::new("ROOT"), &[])
+            .await
+            .expect_err("must refuse");
+        assert!(
+            catalog.lookups() < 40,
+            "{} lookups for a four-project graph",
+            catalog.lookups()
+        );
+    }
+
+    /// ROOT's newest release requires K. K's newest release pins an older ROOT
+    /// that does not need K, so it cannot stay. K's older release requires PIN,
+    /// and PIN pins that older release: the plan holds only because PIN is
+    /// there, and PIN is there only because of the release it pins.
+    fn a_pin_that_sustains_itself() -> Catalog {
+        Catalog::default()
+            .with(
+                "ROOT",
+                vec![
+                    at(compatible("root-old", "ROOT"), 0),
+                    needs(
+                        at(compatible("root-new", "ROOT"), 10),
+                        ModRelationKind::Required,
+                        "K",
+                    ),
+                ],
+            )
+            .with(
+                "K",
+                vec![
+                    needs(
+                        at(compatible("k-old", "K"), 0),
+                        ModRelationKind::Required,
+                        "PIN",
+                    ),
+                    pins_of(
+                        at(compatible("k-new", "K"), 10),
+                        ModRelationKind::Required,
+                        "ROOT",
+                        "root-old",
+                    ),
+                ],
+            )
+            .with(
+                "PIN",
+                vec![pins_of(
+                    compatible("pin-1", "PIN"),
+                    ModRelationKind::Required,
+                    "K",
+                    "k-old",
+                )],
+            )
+    }
+
+    #[tokio::test]
+    async fn a_plan_held_up_only_by_the_pin_its_own_release_brings_in_is_found() {
+        let catalog = a_pin_that_sustains_itself();
+
+        let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+        assert_eq!(
+            chosen_versions(&plan),
+            pairs([("K", "k-old"), ("PIN", "pin-1"), ("ROOT", "root-new")])
+        );
+        let k = plan
+            .dependencies
+            .iter()
+            .find(|planned| planned.version.project_id == "K")
+            .expect("present");
+        assert_eq!(k.requested_by, vec!["PIN".to_owned(), "ROOT".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn the_plan_a_self_sustaining_pin_allows_does_not_depend_on_response_order() {
+        let catalog = a_pin_that_sustains_itself();
+
+        let forward = plan(&catalog, InstallSelection::new("ROOT")).await;
+        let backward = plan(&catalog.reversed(), InstallSelection::new("ROOT")).await;
+        assert_eq!(decisions(&forward), decisions(&backward));
+    }
+
+    #[tokio::test]
+    async fn a_release_the_user_selected_is_not_moved_to_find_a_plan() {
+        // K pins the newest ROOT, so the only plan runs that release. Selecting
+        // the older one is refused rather than answered with that plan.
+        let catalog = Catalog::default()
+            .with(
+                "ROOT",
+                vec![
+                    needs(
+                        at(compatible("root-old", "ROOT"), 0),
+                        ModRelationKind::Required,
+                        "K",
+                    ),
+                    needs(
+                        at(compatible("root-new", "ROOT"), 10),
+                        ModRelationKind::Required,
+                        "K",
+                    ),
+                ],
+            )
+            .with(
+                "K",
+                vec![pins_of(
+                    compatible("k-1", "K"),
+                    ModRelationKind::Required,
+                    "ROOT",
+                    "root-new",
+                )],
+            );
+
+        let unselected = plan(&catalog, InstallSelection::new("ROOT")).await;
+        assert_eq!(
+            chosen_versions(&unselected),
+            pairs([("K", "k-1"), ("ROOT", "root-new")])
+        );
+        let error = plan_with(
+            &catalog,
+            InstallSelection::new("ROOT").at_version("root-old"),
+            &[],
+        )
+        .await
+        .expect_err("must refuse");
+        assert!(
+            matches!(
+                error,
+                ModPlatformError::ConflictingPinnedVersions { ref project_id, .. }
+                    if project_id == "ROOT"
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plan_is_found_when_the_newest_release_of_a_project_is_refused() {
+        // K's newest release needs a project the catalog does not know. Its
+        // older release is held up by a pin of its own, and avoids it.
+        let catalog = a_pin_that_sustains_itself().with(
+            "K",
+            vec![
+                needs(
+                    at(compatible("k-old", "K"), 0),
+                    ModRelationKind::Required,
+                    "PIN",
+                ),
+                needs(
+                    at(compatible("k-new", "K"), 10),
+                    ModRelationKind::Required,
+                    "GONE",
+                ),
+            ],
+        );
+
+        let plan = plan(&catalog, InstallSelection::new("ROOT")).await;
+        assert_eq!(
+            chosen_versions(&plan),
+            pairs([("K", "k-old"), ("PIN", "pin-1"), ("ROOT", "root-new")])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dependency_the_catalog_does_not_know_is_refused_after_one_lookup_of_it() {
+        let releases: Vec<ModVersionInfo> = (0..80)
+            .map(|index| {
+                needs(
+                    at(compatible(&format!("r-{index}"), "ROOT"), index),
+                    ModRelationKind::Required,
+                    "GONE",
+                )
+            })
+            .collect();
+        let catalog = Catalog::default().with("ROOT", releases);
+
+        let error = plan_with(&catalog, InstallSelection::new("ROOT"), &[])
+            .await
+            .expect_err("must refuse");
+        assert!(
+            matches!(
+                error,
+                ModPlatformError::ProjectUnknown { ref reference, .. } if reference == "GONE"
+            ),
+            "{error:?}"
+        );
+        assert!(
+            catalog.lookups() < 10,
+            "{} lookups to refuse one unknown dependency",
+            catalog.lookups()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_release_that_cannot_be_fetched_ends_only_the_attempt_that_assumed_it() {
+        fn unusable() -> ModPlatformError {
+            ModPlatformError::HashesMissing {
+                version_id: "s-ancient".to_owned(),
+            }
+        }
+        let mut catalog = a_pin_that_removes_itself().failing_for(unusable, &["s-ancient"]);
+        catalog.versions.get_mut("NNN").expect("present").insert(
+            0,
+            pins_of(
+                at(compatible("n-0", "NNN"), -10),
+                ModRelationKind::Required,
+                "SSS",
+                "s-ancient",
+            ),
+        );
+
+        let error = plan_with(&catalog, InstallSelection::new("ROOT"), &[])
+            .await
+            .expect_err("must refuse");
+        assert!(
+            matches!(error, ModPlatformError::NoConsistentVersions { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_search_asks_the_provider_only_about_real_projects() {
+        let catalog = a_pin_that_removes_itself();
+
+        plan_with(&catalog, InstallSelection::new("ROOT"), &[])
+            .await
+            .expect_err("must refuse");
+        let asked = catalog.asked.lock().expect("not poisoned");
+        assert!(
+            !asked.contains("root") && !asked.contains(""),
+            "asked about {asked:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pin_conflict_with_no_way_out_is_still_reported_as_the_conflict() {
+        // Two mods pin a library to different releases of its many. No
+        // assumption can make both true, and the refusal must say so rather
+        // than describing a search.
+        let releases: Vec<ModVersionInfo> = (0..200)
+            .map(|index| at(compatible(&format!("l-{index}"), "L"), index))
+            .collect();
+        let catalog = Catalog::default()
+            .with(
+                "ROOT",
+                vec![needs(
+                    needs(compatible("root-1", "ROOT"), ModRelationKind::Required, "A"),
+                    ModRelationKind::Required,
+                    "B",
+                )],
+            )
+            .with(
+                "A",
+                vec![pins_of(
+                    compatible("a-1", "A"),
+                    ModRelationKind::Required,
+                    "L",
+                    "l-3",
+                )],
+            )
+            .with(
+                "B",
+                vec![pins_of(
+                    compatible("b-1", "B"),
+                    ModRelationKind::Required,
+                    "L",
+                    "l-7",
+                )],
+            )
+            .with("L", releases);
+
+        let error = plan_with(&catalog, InstallSelection::new("ROOT"), &[])
+            .await
+            .expect_err("must refuse");
+        assert!(
+            matches!(
+                error,
+                ModPlatformError::ConflictingPinnedVersions { ref project_id, .. }
+                    if project_id == "L"
+            ),
+            "{error:?}"
+        );
+        assert!(
+            catalog.lookups() < 100,
+            "{} lookups to refuse one conflict",
+            catalog.lookups()
         );
     }
 
@@ -5690,6 +6679,182 @@ mod tests {
             reached,
             vec!["ROOTPROJ"],
             "the older release needs no library, so nothing else is reached"
+        );
+    }
+
+    // -- exhaustive agreement ------------------------------------------------
+
+    /// A small deterministic generator, so a failing catalog can be replayed
+    /// from its seed.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn below(&mut self, bound: usize) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let bound = u64::try_from(bound).expect("a small bound");
+            usize::try_from((self.0 >> 33) % bound).expect("below a small bound")
+        }
+    }
+
+    /// A random catalog of `projects` projects, each with one to three
+    /// releases that require and pin one another, and sometimes a project the
+    /// catalog does not know.
+    fn random_catalog(seed: u64, projects: usize) -> Catalog {
+        let mut rng = Lcg(seed);
+        let counts: Vec<usize> = (0..projects).map(|_| 1 + rng.below(3)).collect();
+        let mut catalog = Catalog::default();
+        for (index, count) in counts.iter().enumerate() {
+            let project_id = format!("P{index}");
+            let mut releases = Vec::new();
+            for release in 0..*count {
+                let mut candidate = at(
+                    compatible(&format!("p{index}v{release}"), &project_id),
+                    i64::try_from(release).expect("a small index") * 10,
+                );
+                for (other, other_count) in counts.iter().enumerate() {
+                    if other == index || rng.below(100) >= 35 {
+                        continue;
+                    }
+                    let other_id = format!("P{other}");
+                    candidate = if rng.below(100) < 40 {
+                        let pinned = rng.below(*other_count);
+                        pins_of(
+                            candidate,
+                            ModRelationKind::Required,
+                            &other_id,
+                            &format!("p{other}v{pinned}"),
+                        )
+                    } else {
+                        needs(candidate, ModRelationKind::Required, &other_id)
+                    };
+                }
+                if rng.below(100) < 3 {
+                    candidate = needs(candidate, ModRelationKind::Required, "GONE");
+                }
+                releases.push(candidate);
+            }
+            catalog = catalog.with(&project_id, releases);
+        }
+        catalog
+    }
+
+    /// Every set of `(project, release)` choices that is consistent: each
+    /// project the root reaches runs the release the reached graph pins it to,
+    /// or its newest when nothing pins it.
+    fn consistent_plans(
+        catalog: &Catalog,
+        root_pin: Option<&str>,
+    ) -> BTreeSet<Vec<(String, String)>> {
+        let projects: Vec<&String> = catalog.versions.keys().collect();
+        let mut found = BTreeSet::new();
+        let mut choice = vec![0_usize; projects.len()];
+        loop {
+            let chosen = |project: &str| -> Option<&ModVersionInfo> {
+                let index = projects.iter().position(|id| id.as_str() == project)?;
+                catalog.versions[projects[index]].get(choice[index])
+            };
+            let mut reached = BTreeSet::from(["P0".to_owned()]);
+            let mut pins: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+            if let Some(pin) = root_pin {
+                pins.entry("P0".to_owned())
+                    .or_default()
+                    .insert(pin.to_owned());
+            }
+            let mut queue = vec!["P0".to_owned()];
+            let mut valid = true;
+            while let Some(project) = queue.pop() {
+                let Some(release) = chosen(&project) else {
+                    valid = false;
+                    break;
+                };
+                for dependency in &release.dependencies {
+                    let Some(target) = dependency.project_id.clone() else {
+                        continue;
+                    };
+                    if let Some(pin) = &dependency.version_id {
+                        pins.entry(target.clone()).or_default().insert(pin.clone());
+                    }
+                    if reached.insert(target.clone()) {
+                        queue.push(target);
+                    }
+                }
+            }
+            if valid {
+                valid = reached.iter().all(|project| {
+                    let Some(release) = chosen(project) else {
+                        return false;
+                    };
+                    match pins.get(project) {
+                        Some(pinned) if pinned.len() > 1 => false,
+                        Some(pinned) => pinned.contains(&release.id),
+                        None => {
+                            let newest = catalog.versions[project]
+                                .iter()
+                                .max_by_key(|version| (version.published_at, version.id.clone()))
+                                .map(|version| version.id.clone());
+                            newest.as_deref() == Some(release.id.as_str())
+                        }
+                    }
+                });
+            }
+            if valid {
+                found.insert(
+                    reached
+                        .iter()
+                        .filter_map(|project| {
+                            chosen(project).map(|release| (project.clone(), release.id.clone()))
+                        })
+                        .collect(),
+                );
+            }
+            // Advance the odometer.
+            let mut position = 0;
+            loop {
+                if position == projects.len() {
+                    return found;
+                }
+                choice[position] += 1;
+                if choice[position] < catalog.versions[projects[position]].len() {
+                    break;
+                }
+                choice[position] = 0;
+                position += 1;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_resolver_finds_a_plan_exactly_when_a_consistent_one_exists() {
+        let mut disagreements = Vec::new();
+        for seed in 0..600_u64 {
+            let projects = 3 + usize::try_from(seed % 4).expect("a small remainder");
+            let catalog = random_catalog(seed, projects);
+            let root_pin = (seed % 7 == 0).then_some("p0v0");
+            let mut selection = InstallSelection::new("P0");
+            if let Some(pin) = root_pin {
+                selection = selection.at_version(pin);
+            }
+            let consistent = consistent_plans(&catalog, root_pin);
+            let verdict = match plan_with(&catalog, selection, &[]).await {
+                Ok(plan) if consistent.contains(&chosen_versions(&plan)) => None,
+                Ok(plan) => Some(format!("planned {:?}", chosen_versions(&plan))),
+                Err(_) if consistent.is_empty() => None,
+                Err(error) => Some(format!(
+                    "refused with {error:?} though {consistent:?} exist"
+                )),
+            };
+            if let Some(verdict) = verdict {
+                disagreements.push(format!("seed {seed} ({projects} projects): {verdict}"));
+            }
+        }
+        assert!(
+            disagreements.is_empty(),
+            "{} disagreements, first: {:#?}",
+            disagreements.len(),
+            &disagreements[..disagreements.len().min(5)]
         );
     }
 }

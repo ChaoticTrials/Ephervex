@@ -1107,6 +1107,8 @@ provider catalog
    ▼
 dependency resolution to a fixpoint             (no writes)
    ├── constraints merged per project
+   ├── pin cycles and conflicts searched for a consistent plan,
+   │   within fixed bounds
    ├── conflicts, unresolvable requirements, and
    │   already-installed version changes refused here
    ▼

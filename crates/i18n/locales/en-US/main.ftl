@@ -2086,6 +2086,9 @@ error-mod-dependency-malformed = A dependency of { $declared_by } identifies not
 error-mod-resolution-did-not-converge = Ephervex could not settle this mod's dependencies.
 .action = This is a defect in Ephervex rather than a problem with the mod. Please report it.
 
+error-mod-versions-inconsistent = No combination of versions satisfies these mods.
+.action = Choosing the release a mod pins removes the mod that pins it, so the choice flips back and forth between { $projects }. Each pin is shown as project = release (the mods that pin it): { $pins }. Install a specific version of one of them or leave out one of the mods involved.
+
 error-mod-canceled = The operation was canceled.
 
 ## Dedicated servers

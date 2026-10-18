@@ -254,12 +254,24 @@ pub enum ModPlatformError {
 
     /// Resolution did not settle within its iteration budget.
     ///
-    /// Should be unreachable - a pin strengthens at most once per project and a
-    /// second distinct pin is a hard failure - so reaching it means an
-    /// invariant is wrong. Failing loudly beats spinning forever inside a
-    /// launcher.
+    /// Reached only by a graph that keeps needing new resolutions, such as an
+    /// extremely long dependency chain. A graph whose choices undo each other is
+    /// [`Self::NoConsistentVersions`]. Failing loudly beats spinning forever
+    /// inside a launcher.
     #[error("dependency resolution did not settle after {iterations} rounds")]
     ResolutionDidNotConverge { iterations: usize },
+
+    /// No choice of releases satisfies every pin: choosing a release brings in
+    /// a pin that selects another, and the other drops it again.
+    #[error("no consistent choice of versions exists for {projects}: {pins}")]
+    NoConsistentVersions {
+        /// The projects whose releases kept replacing each other, comma
+        /// separated.
+        projects: String,
+        /// The pins that replaced them, each as `project = release (mods that
+        /// pin it)`.
+        pins: String,
+    },
 
     /// The user canceled.
     #[error("the operation was canceled")]
@@ -306,6 +318,7 @@ impl ModPlatformError {
             // however the launcher arrived at it.
             Self::ProjectAlreadyInstalled { .. } => "error-mod-already-installed",
             Self::ResolutionDidNotConverge { .. } => "error-mod-resolution-did-not-converge",
+            Self::NoConsistentVersions { .. } => "error-mod-versions-inconsistent",
             Self::Canceled => "error-mod-canceled",
         }
     }
@@ -481,6 +494,9 @@ impl ModPlatformError {
             ],
             Self::ResolutionDidNotConverge { iterations } => {
                 vec![("iterations", iterations.to_string())]
+            }
+            Self::NoConsistentVersions { projects, pins } => {
+                vec![("projects", projects.clone()), ("pins", pins.clone())]
             }
             _ => return None,
         };
@@ -670,6 +686,10 @@ mod tests {
                 status: 401,
             },
             ModPlatformError::ResolutionDidNotConverge { iterations: 100 },
+            ModPlatformError::NoConsistentVersions {
+                projects: "alpha, beta".to_owned(),
+                pins: "alpha = 1.0 (beta)".to_owned(),
+            },
             ModPlatformError::Canceled,
         ]
     }
