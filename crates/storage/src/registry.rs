@@ -997,6 +997,9 @@ impl Registry {
     /// metadata, because the directory is not verifiably this instance's.
     /// Forgetting the record does not read that metadata.
     ///
+    /// Removing the files removes the client's launch captures too. A kept
+    /// client can be indexed again under the same id, so its captures stay.
+    ///
     /// Unlinking rewrites each linked server's metadata, so the caller passes
     /// the claims it holds on the servers it listed. A linked server none of
     /// them covers refuses the deletion before any server is changed.
@@ -1041,6 +1044,7 @@ impl Registry {
             if indexed.root != record.root {
                 remove_tree(&indexed.root)?;
             }
+            remove_tree(&self.paths().client_captures_dir(id))?;
         }
 
         self.index.connection().execute(
@@ -3545,6 +3549,41 @@ mod tests {
 
             assert_eq!(capture.exists(), kept, "{files:?}");
             assert!(neighbor_capture.is_dir(), "another server's capture stays");
+        }
+    }
+
+    #[test]
+    fn deleting_a_clients_files_removes_every_launch_capture_and_forgetting_it_keeps_them() {
+        for (files, kept) in [
+            (crate::FileDisposition::Remove, false),
+            (crate::FileDisposition::Keep, true),
+        ] {
+            let environment = TestEnvironment::new();
+            let registry = environment.registry();
+            let client = registry
+                .create_published_client(NewClient::new("x", "1.20.1", LoaderSelection::vanilla()))
+                .expect("create");
+            let neighbor = registry
+                .create_published_client(NewClient::new("y", "1.20.1", LoaderSelection::vanilla()))
+                .expect("create");
+            let captures = [
+                registry.paths().client_capture_dir(client.id, None),
+                registry.paths().client_capture_dir(client.id, Some("a")),
+            ];
+            let neighbor_capture = registry.paths().client_capture_dir(neighbor.id, None);
+            for directory in captures.iter().chain([&neighbor_capture]) {
+                std::fs::create_dir_all(directory).expect("capture directory");
+                std::fs::write(directory.join("capture-a.jsonl"), b"{}\n").expect("segment");
+            }
+
+            registry
+                .delete_client(client.id, files, &[])
+                .expect("delete");
+
+            for capture in &captures {
+                assert_eq!(capture.exists(), kept, "{files:?}");
+            }
+            assert!(neighbor_capture.is_dir(), "another client's capture stays");
         }
     }
 

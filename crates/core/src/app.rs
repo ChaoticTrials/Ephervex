@@ -2994,6 +2994,28 @@ mod tests {
         assert!(running.root.exists(), "the running server stays");
     }
 
+    #[test]
+    fn deleting_a_client_removes_the_output_its_launches_captured() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let client = repro_client(&app);
+        let captures = [
+            app.paths().client_capture_dir(client.id, None),
+            app.paths().client_capture_dir(client.id, Some("a")),
+        ];
+        for capture in &captures {
+            std::fs::create_dir_all(capture).expect("capture directory");
+            std::fs::write(capture.join("capture-a.jsonl"), b"{}\n").expect("segment");
+        }
+
+        app.delete_client(client.id, FileDisposition::Remove)
+            .expect("delete");
+
+        for capture in &captures {
+            assert!(!capture.exists());
+        }
+    }
+
     /// Only a kill ends this server, so its deletion cannot wait on a clean stop.
     #[tokio::test]
     async fn deleting_files_kills_a_running_linked_server_and_removes_everything() {

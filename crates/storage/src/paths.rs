@@ -418,14 +418,19 @@ impl Paths {
     ///
     /// `launch` is the handle of an additional launch, and `None` is the first.
     /// Held beside the server captures, outside the instance, for the same
-    /// reason: the output of a launch is worth keeping after its files move or
-    /// the OS clears a temporary instance's root.
+    /// reason: the output of a launch must survive its files moving. It is
+    /// removed when the client's files are deleted or its record is dropped
+    /// because they are gone.
     #[must_use]
     pub fn client_capture_dir(&self, id: InstanceId, launch: Option<&str>) -> PathBuf {
-        self.logs_dir()
-            .join("clients")
-            .join(id.to_string())
+        self.client_captures_dir(id)
             .join(launch.map_or_else(|| "first".to_owned(), |handle| format!("launch-{handle}")))
+    }
+
+    /// Every launch capture of one client: `logs/clients/<id>`.
+    #[must_use]
+    pub fn client_captures_dir(&self, id: InstanceId) -> PathBuf {
+        self.logs_dir().join("clients").join(id.to_string())
     }
 
     /// `<temp>/ephervex-<uid>/instances/`.

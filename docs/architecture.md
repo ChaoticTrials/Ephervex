@@ -824,7 +824,9 @@ Launcher capture is separate from Minecraft's own `server/logs/` and
 `server/crash-reports/`. A bounded memory ring feeds frontends while rotated
 JSON Lines segments provide durable combined output. Retention and write
 failures are observable events; pipe draining continues when durable capture
-is unavailable.
+is unavailable. Deleting a host's files removes its captures, and so does
+dropping the record of a temporary host whose files the OS cleared. Forgetting a
+host while keeping its files keeps its captures.
 
 ## Linked pairs
 

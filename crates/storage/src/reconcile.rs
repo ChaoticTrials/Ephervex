@@ -304,7 +304,10 @@ fn forget_stale_client(
     let outcome = registry.delete_client(id, FileDisposition::Keep, &held);
     drop(claims);
     match outcome {
-        Ok(()) => Ok(true),
+        Ok(()) => {
+            discard_client_captures(registry, id);
+            Ok(true)
+        }
         // A server linked since the listing is claimed by the next pass.
         Err(RegistryError::HostNotClaimed { .. }) => {
             tracing::info!(
@@ -597,6 +600,20 @@ fn reconcile_listed_servers(
         reconcile_server(registry, record, held_claim(&probe), report)?;
     }
     Ok(())
+}
+
+/// Removes the launch captures of a client whose record was dropped because
+/// its files are gone, logging a failure like [`discard_server_capture`].
+fn discard_client_captures(registry: &Registry, id: InstanceId) {
+    let captures = registry.paths().client_captures_dir(id);
+    if let Err(error) = crate::removal::remove_tree_if_present(&captures) {
+        tracing::warn!(
+            instance_id = %id,
+            path = %captures.display(),
+            %error,
+            "could not remove the output captures of a removed client"
+        );
+    }
 }
 
 /// Removes the output capture of a server whose record was dropped because its
@@ -1522,6 +1539,27 @@ mod tests {
 
     use crate::records::{ClientCommitWarning, NewClient, NewServer};
     use crate::test_support::TestEnvironment;
+
+    #[test]
+    fn a_temporary_client_the_os_cleared_loses_its_launch_captures_with_its_record() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new("temp", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        let first = registry.paths().client_capture_dir(client.id, None);
+        let additional = registry.paths().client_capture_dir(client.id, Some("a"));
+        for directory in [&first, &additional] {
+            std::fs::create_dir_all(directory).expect("capture directory");
+            std::fs::write(directory.join("capture-a.jsonl"), b"{}\n").expect("segment");
+        }
+        std::fs::remove_dir_all(&client.root).expect("clear temp");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.removed_stale_temporary.len(), 1);
+        assert!(!registry.paths().client_captures_dir(client.id).exists());
+    }
 
     #[test]
     fn a_temporary_server_the_os_cleared_loses_its_output_capture_with_its_record() {
