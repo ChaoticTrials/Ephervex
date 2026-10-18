@@ -2003,8 +2003,6 @@ error-mod-project-type-unsupported = That is not a mod.
 
 error-mod-version-unknown = No such version.
 
-# At most one file per version may be marked primary, so two is a malformed
-# version rather than a choice to make.
 error-mod-file-unknown = { $provider } has no such file for that mod.
 .action = The pack asks for file { $file_id } of project { $project }, which { $provider } no longer lists. Ephervex will not install a different file in its place.
 
@@ -2029,6 +2027,8 @@ error-mod-change-server-support-unconfirmed = The catalog does not state whether
 error-mod-file-identity-mismatch = { $provider } answered about a different file than the one requested.
 .action = Ephervex asked for { $requested } and was told about { $returned }, so nothing was installed.
 
+# At most one file per version may be marked primary, so two is a malformed
+# version rather than a choice to make.
 error-mod-primary-file-ambiguous = That version does not name exactly one file to install.
 .action = Ephervex will not pick between { $found } candidate files. Choose a different version.
 
