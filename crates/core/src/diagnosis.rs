@@ -187,6 +187,16 @@ impl JavaRuntimeSummary {
     }
 }
 
+/// A shared launch file whose bytes are wrong, and where it is stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DamagedSharedFile {
+    /// What it is: a library coordinate, or the client jar.
+    pub name: PathBuf,
+    /// Where it is on disk, so it can be found. Taken from the same plan that
+    /// named it.
+    pub stored_at: Option<PathBuf>,
+}
+
 /// One thing a diagnosis found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FindingKind {
@@ -240,7 +250,7 @@ pub enum FindingKind {
     },
     /// Shared launch files are present with the wrong bytes.
     SharedFilesDamaged {
-        files: Vec<PathBuf>,
+        files: Vec<DamagedSharedFile>,
     },
     /// A pinned runtime that satisfies every requirement.
     JavaCustomized {
@@ -1571,9 +1581,12 @@ fn integrity_findings(check: &IntegrityCheck) -> Vec<Finding> {
         });
     }
     if let Some(Ok(shared)) = &check.shared {
-        let files: Vec<PathBuf> = shared
+        let files: Vec<DamagedSharedFile> = shared
             .faults()
-            .map(|file| file.logical_path.clone())
+            .map(|file| DamagedSharedFile {
+                name: file.logical_path.clone(),
+                stored_at: shared.location_of(file).map(Path::to_path_buf),
+            })
             .collect();
         if !files.is_empty() {
             findings.push(Finding {
@@ -1856,6 +1869,22 @@ fn client_only_dependent_line(requirement: &UnmetRequirement) -> String {
     )
 }
 
+/// The report line for shared launch files whose bytes are wrong, with where
+/// each is stored.
+fn shared_files_line(files: &[DamagedSharedFile], path: &dyn Fn(&Path) -> String) -> String {
+    format!(
+        "Shared launch files damaged: {}",
+        files
+            .iter()
+            .map(|file| match &file.stored_at {
+                Some(stored_at) => format!("{} at {}", file.name.display(), path(stored_at)),
+                None => file.name.display().to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
 fn report_line(kind: &FindingKind, path: &dyn Fn(&Path) -> String) -> String {
     use std::fmt::Write as _;
 
@@ -1942,14 +1971,7 @@ fn report_line(kind: &FindingKind, path: &dyn Fn(&Path) -> String) -> String {
                 names.join(", ")
             )
         }
-        FindingKind::SharedFilesDamaged { files } => format!(
-            "Shared launch files damaged: {}",
-            files
-                .iter()
-                .map(|file| file.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
+        FindingKind::SharedFilesDamaged { files } => shared_files_line(files, path),
         FindingKind::JavaCustomized { .. }
         | FindingKind::JvmArgumentsCustomized { .. }
         | FindingKind::MemoryCustomized { .. }
@@ -2184,11 +2206,48 @@ mod tests {
                 shared_file("b.jar", Integrity::Absent),
             ],
             loader_libraries_uncovered: false,
+            ..SharedArtifactReport::default()
         }));
 
         assert_eq!(
             line,
             "- Shared launch files: 1 checked, 0 damaged, 2 not downloaded yet"
+        );
+    }
+
+    #[test]
+    fn a_damaged_shared_file_finding_names_where_the_file_is_stored() {
+        use crate::verify::{Integrity, SharedArtifactReport};
+
+        let stored_at = PathBuf::from("/cache/libraries/org/example/lib/1.0/lib-1.0.jar");
+        let report = SharedArtifactReport {
+            metadata_cached: true,
+            files: vec![
+                shared_file("org.example:lib:1.0", Integrity::Corrupt),
+                shared_file("org.example:fine:1.0", Integrity::Intact),
+            ],
+            locations: [(PathBuf::from("org.example:lib:1.0"), stored_at.clone())].into(),
+            loader_libraries_uncovered: false,
+        };
+        let findings = integrity_findings(&IntegrityCheck {
+            files: crate::verify::VerificationReport { files: Vec::new() },
+            shared: Some(Ok(report)),
+        });
+
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        let finding = &findings[0];
+        assert_eq!(
+            finding.kind,
+            FindingKind::SharedFilesDamaged {
+                files: vec![DamagedSharedFile {
+                    name: PathBuf::from("org.example:lib:1.0"),
+                    stored_at: Some(stored_at),
+                }]
+            }
+        );
+        assert_eq!(
+            report_line(&finding.kind, &|path| path.display().to_string()),
+            "Shared launch files damaged: org.example:lib:1.0 at /cache/libraries/org/example/lib/1.0/lib-1.0.jar"
         );
     }
 

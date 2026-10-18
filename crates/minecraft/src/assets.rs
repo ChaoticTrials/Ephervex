@@ -123,6 +123,19 @@ impl AssetIndex {
             .fold(0, u64::saturating_add)
     }
 
+    /// Where each distinct object is, or should be, in the shared assets
+    /// store.
+    pub fn object_paths(
+        &self,
+        layout: &ephervex_download::CacheLayout,
+    ) -> Result<std::collections::BTreeSet<std::path::PathBuf>, ephervex_download::CacheKeyError>
+    {
+        self.objects
+            .values()
+            .map(|object| layout.asset_object(&object.hash))
+            .collect()
+    }
+
     /// The distinct objects, deduplicated by digest.
     ///
     /// Several logical names legitimately share one file - the same texture

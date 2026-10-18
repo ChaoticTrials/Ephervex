@@ -90,6 +90,20 @@ pub struct PlannedLogging {
     pub artifact: PlannedArtifact,
 }
 
+/// The shared-store paths one installation depends on.
+///
+/// What a cleanup has to treat as in use while a host that launches this
+/// version exists. Asset objects are not here: they are named by the asset
+/// index's contents, see [`AssetIndex::object_paths`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoredPaths {
+    /// Files: the client jar, libraries, natives jars, the logging
+    /// configuration, and both copies of the asset index.
+    pub files: BTreeSet<PathBuf>,
+    /// Directories treated as one unit: the unpacked natives.
+    pub directories: BTreeSet<PathBuf>,
+}
+
 /// Why a library the metadata listed is not part of this launch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExcludedLibrary {
@@ -300,6 +314,21 @@ impl InstallationPlan {
             .collect();
         entries.push(self.client_jar.path.clone());
         entries
+    }
+
+    /// Every shared-store path this installation names, apart from the asset
+    /// objects its index lists.
+    #[must_use]
+    pub fn stored_paths(&self) -> StoredPaths {
+        let mut paths = StoredPaths::default();
+        paths.files.extend(
+            self.required_artifacts()
+                .into_iter()
+                .map(|artifact| artifact.path.clone()),
+        );
+        paths.files.insert(self.asset_index_path.clone());
+        paths.directories.insert(self.natives_dir.clone());
+        paths
     }
 
     /// Every artifact that has to be fetched before the game can start, except
@@ -528,7 +557,26 @@ impl VanillaInstaller {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> LaunchResult<usize> {
-        let objects = index.distinct_objects();
+        self.download_assets_at(index, None, reporter, cancel).await
+    }
+
+    /// Fetches the distinct objects the index names whose destination is in
+    /// `only`, or all of them when it is `None`.
+    async fn download_assets_at(
+        &self,
+        index: &AssetIndex,
+        only: Option<&BTreeSet<PathBuf>>,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> LaunchResult<usize> {
+        let mut objects = index.distinct_objects();
+        if let Some(only) = only {
+            objects.retain(|(_, object)| {
+                self.layout
+                    .asset_object(&object.hash)
+                    .is_ok_and(|destination| only.contains(&destination))
+            });
+        }
         let mut requests = Vec::with_capacity(objects.len());
         for (name, object) in &objects {
             let destination = self.layout.asset_object(&object.hash)?;
@@ -553,6 +601,88 @@ impl VanillaInstaller {
                 LaunchError::download(name, failure.into_error())
             })?;
         Ok(objects.len())
+    }
+
+    /// Fetches again only the named artifacts of one installation.
+    ///
+    /// For an artifact an earlier fetch left absent or damaged. Each goes
+    /// through the same request, digest check, and publication as in
+    /// [`Self::install`]: the download manager sets aside whatever is at a
+    /// destination that does not match what the request describes, and
+    /// publishes the verified replacement atomically, so a failed fetch leaves
+    /// the entry absent rather than present and wrong.
+    ///
+    /// `paths` selects among the plan's artifacts and the asset objects the
+    /// plan's index lists; a path that names neither is ignored. The unpacked
+    /// natives are derived from their jars, so they are unpacked again when a
+    /// natives jar was among those fetched, and the launch view of the asset
+    /// index is copied again from the verified canonical file when it was
+    /// named. Returns how many artifacts were requested.
+    #[instrument(skip_all, fields(version = %plan.version))]
+    pub async fn reacquire(
+        &self,
+        plan: &InstallationPlan,
+        paths: &BTreeSet<PathBuf>,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> LaunchResult<usize> {
+        let mut labels: Vec<String> = Vec::new();
+        let mut requests = Vec::new();
+        for planned in plan
+            .required_artifacts()
+            .into_iter()
+            .filter(|planned| paths.contains(&planned.path))
+        {
+            requests.push(request_for(planned)?);
+            labels.push(planned.label.clone());
+        }
+
+        reporter.set_step(Some(format!("{} · libraries", plan.version)));
+        if !requests.is_empty() {
+            self.manager
+                .download_all(&requests, reporter, cancel)
+                .await
+                .map_err(|failure| {
+                    if failure.is_cancellation() {
+                        return LaunchError::Canceled;
+                    }
+                    let name = labels
+                        .get(failure.index())
+                        .cloned()
+                        .unwrap_or_else(|| "a required file".to_owned());
+                    LaunchError::download(name, failure.into_error())
+                })?;
+        }
+        let mut fetched = requests.len();
+
+        let objects_root = plan.assets_dir.join("objects");
+        if paths.iter().any(|path| path.starts_with(&objects_root)) {
+            let index_json = tokio::fs::read_to_string(&plan.asset_index.path)
+                .await
+                .map_err(|source| LaunchError::GameDirectory {
+                    path: plan.asset_index.path.clone(),
+                    source,
+                })?;
+            let index = AssetIndex::parse(&plan.asset_index_id, &index_json)?;
+            reporter.set_step(Some(format!("{} · assets", plan.version)));
+            fetched += self
+                .download_assets_at(&index, Some(paths), reporter, cancel)
+                .await?;
+        }
+
+        ensure_not_canceled(cancel)?;
+        if plan
+            .natives
+            .iter()
+            .any(|natives| paths.contains(&natives.artifact.path))
+        {
+            unpack_natives(plan, cancel).await?;
+            ensure_not_canceled(cancel)?;
+        }
+        if paths.contains(&plan.asset_index_path) {
+            materialize_verified(&plan.asset_index.path, &plan.asset_index_path).await?;
+        }
+        Ok(fetched)
     }
 
     fn asset_url(&self, hash: &ephervex_model::Hash) -> String {

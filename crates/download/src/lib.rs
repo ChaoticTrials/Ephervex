@@ -66,6 +66,7 @@ pub mod progress;
 mod publication;
 pub mod retry;
 pub mod scratch;
+pub mod store_inventory;
 pub mod verify;
 
 pub use allowlist::{
@@ -105,4 +106,7 @@ pub use progress::{ByteTally, ChannelSink, OperationReporter, ProgressSink};
 /// crate that only parses text.
 pub use reqwest::Url;
 pub use retry::{RetryPolicy, retry_after, status_is_transient};
+pub use store_inventory::{
+    ArtifactCacheExclusive, EntryAddress, EntryRemoval, StoreEntry, StoreInventory,
+};
 pub use verify::{HashMismatch, HashVerifier, file_matches_hashes, hash_file, stored_file_matches};

@@ -56,6 +56,7 @@ mod java_runtime;
 mod log_views;
 mod mod_views;
 mod server_tools;
+mod storage_maintenance;
 mod workspace;
 
 use diagnosis_flow::DiagnosisFlowState;
@@ -1383,6 +1384,9 @@ struct DiskUsageState {
     operation: Option<String>,
     /// Whether the view holds a finished measurement.
     measured: bool,
+    /// The maintenance section's own state, kept beside the measurement it
+    /// can make out of date.
+    maintenance: storage_maintenance::MaintenanceState,
 }
 
 const fn storage_category_messages(category: StorageCategory) -> (&'static str, &'static str) {
@@ -1557,7 +1561,28 @@ fn settle_disk_usage(ui: &AppWindow, state: &mut DiskUsageState, request: u64) {
     }
 }
 
+/// Marks the shown measurement as describing a disk that has since changed.
+///
+/// Cleanup and recovery change what the stores hold, so figures measured before
+/// them are not presented as current: they are taken off the screen and the
+/// view says why, and a measurement still running is discarded, because it may
+/// have read the disk half way through the change.
+fn invalidate_disk_usage(ui: &AppWindow, state: &mut DiskUsageState) {
+    if !state.measured && state.pending.is_none() {
+        return;
+    }
+    state.last_request = state.last_request.wrapping_add(1);
+    state.measured = false;
+    ui.set_disk_usage_stale(true);
+    // A measurement still running keeps showing as running, with its Stop, until
+    // it ends and is settled; only its result is dropped.
+    if state.pending.is_none() {
+        ui.set_disk_usage_state("idle".into());
+    }
+}
+
 fn apply_disk_usage_activity(ui: &AppWindow, state: &mut DiskUsageState, activity: &ActivityData) {
+    storage_maintenance::apply_activity(ui, &mut state.maintenance, activity);
     if state.pending.is_none()
         || activity.item.title != lookup("operation-measuring-disk-usage")
         || !matches!(activity.item.status_kind, "queued" | "running")
@@ -1586,6 +1611,7 @@ fn register_disk_usage_actions(
         state.last_request = state.last_request.wrapping_add(1);
         state.pending = Some(state.last_request);
         if let Some(ui) = weak.upgrade() {
+            ui.set_disk_usage_stale(false);
             ui.set_disk_usage_state("measuring".into());
             ui.set_disk_usage_progress(SharedString::default());
         }
@@ -1614,6 +1640,8 @@ fn register_disk_usage_actions(
             send(&sender, Command::OpenStorageLocation { category, index });
         }
     });
+
+    storage_maintenance::register(ui, commands, state);
 }
 
 /// A restart this controller asked for, and where it is.
@@ -7262,20 +7290,6 @@ fn minecraft_preference_id(id: &SharedString) -> Option<ephervex_core::Preferenc
 /// A new listing clears the previous selection along with it: leaving a file's
 /// content on screen under a different scope's list is how a reader ends up
 /// reading the wrong crash report.
-/// What the reusable artifact cache's own answers do to the storage page.
-fn apply_artifact_cache_event(ui: &AppWindow, event: Event) {
-    match event {
-        Event::ArtifactCacheStatus(status) => apply_artifact_cache_status(ui, status),
-        // No new figure to show, so the previous one stands. What must not
-        // stand is the clearing state: the toast beside this event is the
-        // whole answer, and the button has to be usable again.
-        Event::ArtifactCacheClearFinished => ui.set_artifact_cache_clearing(false),
-        // Every other event is read by `apply_event`, which routed the two
-        // above here.
-        _ => {}
-    }
-}
-
 /// Shows a host's isolation state in every pane showing the host, answering
 /// whether the workspace still shows it.
 fn apply_isolation_data(workspace: &Workspace, data: IsolationData) -> bool {
@@ -8158,9 +8172,7 @@ fn apply_event(
         | Event::MinecraftLanguages { .. } => {
             apply_minecraft_event(ui, event, minecraft, commands);
         }
-        Event::ArtifactCacheStatus(_) | Event::ArtifactCacheClearFinished => {
-            apply_artifact_cache_event(ui, event);
-        }
+        Event::ArtifactCacheStatus(status) => apply_artifact_cache_status(ui, status),
         Event::HostRuntime(runtime) => {
             // Kept with the host it belongs to, so a late answer lands in its
             // own view and never in the fields of another host.
@@ -8398,6 +8410,9 @@ fn apply_event(
         }
         Event::DiskUsageSettled { request } => {
             settle_disk_usage(ui, &mut disk_usage.borrow_mut(), request);
+        }
+        Event::StorageMaintenance(event) => {
+            storage_maintenance::apply(ui, &mut disk_usage.borrow_mut(), *event, commands);
         }
         Event::HostRestart {
             host,
@@ -9312,8 +9327,6 @@ fn register_artifact_cache(
             },
         );
     });
-    let sender = commands.clone();
-    ui.on_clear_artifact_cache(move || send(&sender, Command::ClearArtifactCache));
 }
 
 /// The budget selector, from the configuration file alone.
@@ -9380,8 +9393,6 @@ fn apply_artifact_cache_status(ui: &AppWindow, status: ArtifactCacheStatusData) 
     ui.set_artifact_cache_usage_exact(status.exact);
     ui.set_artifact_cache_over_budget(status.over_budget);
     ui.set_artifact_cache_usage_known(true);
-    // Whatever the clear did, it is finished: the figure above is the answer.
-    ui.set_artifact_cache_clearing(false);
 }
 
 /// The theme list and the chosen theme, and the palette and branding of the
@@ -16063,6 +16074,422 @@ mod tests {
         ));
     }
 
+    fn counted(id: &str, count: i64) -> String {
+        lookup_args(id, [("count", Arg::from(count))])
+    }
+
+    fn storage_event(event: backend::StorageMaintenanceEvent) -> Event {
+        Event::StorageMaintenance(Box::new(event))
+    }
+
+    fn apply_storage(
+        ui: &AppWindow,
+        state: &Rc<RefCell<DiskUsageState>>,
+        commands: &std::sync::mpsc::Sender<Command>,
+        event: backend::StorageMaintenanceEvent,
+    ) {
+        let Event::StorageMaintenance(event) = storage_event(event) else {
+            unreachable!("built just above");
+        };
+        storage_maintenance::apply(ui, &mut state.borrow_mut(), *event, commands);
+    }
+
+    fn storage_usage(entries: u64, bytes: u64) -> ephervex_core::Usage {
+        ephervex_core::Usage {
+            entries,
+            files: entries,
+            bytes,
+        }
+    }
+
+    fn inspection() -> ephervex_core::StorageInspection {
+        use ephervex_core::{ManagedStorageGroup, ManagedStorageKind, WithheldReason};
+        ephervex_core::StorageInspection {
+            groups: ManagedStorageKind::ALL
+                .into_iter()
+                .map(|kind| ManagedStorageGroup {
+                    kind,
+                    required: if kind == ManagedStorageKind::Libraries {
+                        storage_usage(3, 3 * 1024 * 1024)
+                    } else {
+                        ephervex_core::Usage::default()
+                    },
+                    unused: if kind == ManagedStorageKind::DownloadedFiles {
+                        storage_usage(2, 2048)
+                    } else {
+                        ephervex_core::Usage::default()
+                    },
+                    withheld: if kind == ManagedStorageKind::InstallerFiles {
+                        vec![(
+                            WithheldReason::LoaderFilesNotRecorded,
+                            storage_usage(1, 512),
+                        )]
+                    } else {
+                        Vec::new()
+                    },
+                })
+                .collect(),
+            clients: 2,
+            servers: 1,
+            complete: true,
+            inspected_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn each_maintenance_step_asks_once_and_is_shown_as_running_until_it_settles() {
+        let (ui, commands, state) = disk_usage_window();
+        ui.invoke_inspect_storage();
+        ui.invoke_verify_storage();
+        ui.invoke_review_storage_cleanup();
+        let sent: Vec<_> = commands.try_iter().collect();
+        assert_eq!(sent.len(), 1, "a second step waits for the first: {sent:?}");
+        assert!(matches!(sent[0], Command::InspectStorage));
+        assert_eq!(ui.get_storage_maintenance_busy(), "inspect");
+
+        let (sender, _unused) = std::sync::mpsc::channel();
+        apply_storage(
+            &ui,
+            &state,
+            &sender,
+            backend::StorageMaintenanceEvent::Settled,
+        );
+        assert_eq!(ui.get_storage_maintenance_busy(), "");
+        ui.invoke_verify_storage();
+        assert!(matches!(commands.try_recv(), Ok(Command::VerifyStorage)));
+        ui.invoke_recover_storage();
+        assert!(commands.try_recv().is_err(), "still verifying");
+    }
+
+    #[test]
+    fn an_inspection_lists_every_kind_with_what_is_in_use_unused_and_kept() {
+        let (ui, _commands, state) = disk_usage_window();
+        let (sender, _unused) = std::sync::mpsc::channel();
+        apply_storage(
+            &ui,
+            &state,
+            &sender,
+            backend::StorageMaintenanceEvent::Inspected(inspection()),
+        );
+
+        assert!(ui.get_storage_inspected());
+        assert_eq!(
+            ui.get_storage_headline(),
+            lookup_args(
+                "gui-storage-reclaimable",
+                [(
+                    "value",
+                    Arg::from(ephervex_model::format_binary_bytes(2048))
+                )]
+            )
+            .as_str()
+        );
+        let rows: Vec<_> = ui.get_storage_groups().iter().collect();
+        assert_eq!(rows.len(), ephervex_core::ManagedStorageKind::ALL.len());
+        assert_eq!(rows[0].id, "downloaded_files");
+        assert_eq!(
+            rows[0].size,
+            ephervex_model::format_binary_bytes(2048).as_str()
+        );
+        assert_eq!(
+            rows[0].lines.iter().collect::<Vec<_>>(),
+            [SharedString::from(
+                lookup_args(
+                    "gui-storage-line-unused",
+                    [(
+                        "value",
+                        Arg::from(ephervex_model::format_binary_bytes(2048))
+                    )]
+                )
+                .as_str()
+            )]
+        );
+        let installers: Vec<String> = rows[1].lines.iter().map(|line| line.to_string()).collect();
+        assert_eq!(installers.len(), 1);
+        assert!(
+            installers[0].contains(&lookup("gui-storage-withheld-loader")),
+            "a kept group says why: {installers:?}"
+        );
+        assert_eq!(
+            rows[1].size, "0 B",
+            "kept storage is not offered as reclaimable"
+        );
+        assert!(!ui.get_storage_incomplete());
+    }
+
+    #[test]
+    fn a_reviewed_plan_opens_the_review_and_the_confirmation_names_that_plan() {
+        use ephervex_core::{CleanupItem, KeptReason, KeptStorage, ManagedStorageKind};
+        let (ui, commands, state) = disk_usage_window();
+        let plan = ephervex_core::test_support::cleanup_plan_for_review(
+            vec![CleanupItem {
+                kind: ManagedStorageKind::Libraries,
+                usage: storage_usage(2, 4096),
+                largest: vec![PathBuf::from("libraries/org/old/old.jar")],
+            }],
+            vec![KeptStorage {
+                kind: ManagedStorageKind::AssetObjects,
+                reason: KeptReason::Required,
+                usage: storage_usage(5, 10_000),
+            }],
+            false,
+        );
+        let (sender, _unused) = std::sync::mpsc::channel();
+        apply_storage(
+            &ui,
+            &state,
+            &sender,
+            backend::StorageMaintenanceEvent::Planned {
+                plan: 7,
+                preview: plan,
+            },
+        );
+
+        assert_eq!(ui.get_modal(), "storage-cleanup");
+        assert_eq!(ui.get_storage_plan_id(), 7);
+        assert!(!ui.get_storage_plan_empty());
+        assert!(
+            ui.get_storage_plan_incomplete(),
+            "a partial listing says so"
+        );
+        assert_eq!(
+            ui.get_storage_plan_confirm(),
+            lookup_args(
+                "gui-storage-cleanup-confirm",
+                [(
+                    "value",
+                    Arg::from(ephervex_model::format_binary_bytes(4096))
+                )]
+            )
+            .as_str()
+        );
+        let item = ui.get_storage_plan_items().row_data(0).expect("an item");
+        assert_eq!(
+            item.size,
+            ephervex_model::format_binary_bytes(4096).as_str()
+        );
+        assert_eq!(
+            item.detail,
+            lookup("gui-storage-why-libraries").as_str(),
+            "the review says why it is disposable"
+        );
+        assert_eq!(item.examples.row_count(), 1);
+        assert_eq!(ui.get_storage_plan_kept().row_count(), 1);
+
+        ui.invoke_confirm_storage_cleanup(ui.get_storage_plan_id());
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::ApplyStorageCleanup { plan: 7 })
+        ));
+        assert_eq!(ui.get_storage_maintenance_busy(), "clean");
+    }
+
+    #[test]
+    fn a_cleanup_has_no_way_to_start_without_a_plan_id() {
+        let (ui, commands, _state) = disk_usage_window();
+        ui.invoke_confirm_storage_cleanup(-1);
+        assert!(commands.try_recv().is_err());
+        assert_eq!(ui.get_storage_maintenance_busy(), "");
+    }
+
+    #[test]
+    fn a_cleanup_and_a_recovery_take_the_old_totals_and_results_off_the_screen() {
+        let (ui, commands, state) = disk_usage_window();
+        ui.invoke_measure_disk_usage();
+        let Ok(Command::MeasureDiskUsage { request }) = commands.try_recv() else {
+            panic!("a measurement");
+        };
+        apply_disk_usage(&ui, &mut state.borrow_mut(), request, &disk_usage_report());
+        settle_disk_usage(&ui, &mut state.borrow_mut(), request);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        apply_storage(
+            &ui,
+            &state,
+            &sender,
+            backend::StorageMaintenanceEvent::Inspected(inspection()),
+        );
+        assert_eq!(ui.get_disk_usage_state(), "measured");
+
+        apply_storage(
+            &ui,
+            &state,
+            &sender,
+            backend::StorageMaintenanceEvent::Cleaned(ephervex_core::CleanupOutcome {
+                planned: storage_usage(1, 100),
+                removed: storage_usage(1, 100),
+                ..ephervex_core::CleanupOutcome::default()
+            }),
+        );
+
+        assert_eq!(
+            ui.get_disk_usage_state(),
+            "idle",
+            "stale totals are not shown"
+        );
+        assert!(ui.get_disk_usage_stale());
+        assert!(!ui.get_storage_inspected(), "nor is the old inspection");
+        assert_eq!(ui.get_storage_result().row_count(), 1);
+        assert!(
+            matches!(receiver.try_recv(), Ok(Command::MeasureArtifactCache)),
+            "the storage page's own figure is measured again"
+        );
+
+        ui.invoke_measure_disk_usage();
+        assert!(
+            !ui.get_disk_usage_stale(),
+            "measuring again clears the notice"
+        );
+    }
+
+    #[test]
+    fn a_measurement_still_running_when_the_disk_changes_is_discarded() {
+        let (ui, commands, state) = disk_usage_window();
+        ui.invoke_measure_disk_usage();
+        let Ok(Command::MeasureDiskUsage { request }) = commands.try_recv() else {
+            panic!("a measurement");
+        };
+        let (sender, _unused) = std::sync::mpsc::channel();
+        apply_storage(
+            &ui,
+            &state,
+            &sender,
+            backend::StorageMaintenanceEvent::Cleaned(ephervex_core::CleanupOutcome::default()),
+        );
+
+        apply_disk_usage(&ui, &mut state.borrow_mut(), request, &disk_usage_report());
+
+        assert_eq!(
+            ui.get_disk_usage_state(),
+            "measuring",
+            "a figure read while the disk was changing is not shown, and the run is still a run"
+        );
+        settle_disk_usage(&ui, &mut state.borrow_mut(), request);
+        assert_eq!(ui.get_disk_usage_state(), "idle");
+        assert!(ui.get_disk_usage_stale());
+        ui.invoke_measure_disk_usage();
+        assert!(
+            matches!(commands.try_recv(), Ok(Command::MeasureDiskUsage { .. })),
+            "measuring again works once the discarded run has ended"
+        );
+    }
+
+    #[test]
+    fn a_recovery_shows_what_is_still_damaged_and_why_a_version_failed() {
+        use ephervex_core::{
+            IntegrityReport, ManagedStorageKind, RecoveryReport, StorageFault, StorageFaultKind,
+        };
+        let fault = |path: &str, needed: bool| StorageFault {
+            kind: ManagedStorageKind::Libraries,
+            path: PathBuf::from(path),
+            label: path.to_owned(),
+            fault: StorageFaultKind::Corrupt,
+            standing: if needed {
+                ephervex_core::FaultStanding::Needed
+            } else {
+                ephervex_core::FaultStanding::Unused
+            },
+        };
+        let still = fault("libraries/a.jar", true);
+        let (ui, _commands, state) = disk_usage_window();
+        let (sender, _unused) = std::sync::mpsc::channel();
+        apply_storage(
+            &ui,
+            &state,
+            &sender,
+            backend::StorageMaintenanceEvent::Recovered {
+                report: RecoveryReport {
+                    recovered: vec![fault("libraries/b.jar", true)],
+                    still_damaged: vec![still.clone()],
+                    left_for_cleanup: vec![fault("downloads/c.jar", false)],
+                    left_in_place: Vec::new(),
+                    failures: Vec::new(),
+                    canceled: false,
+                    after: IntegrityReport {
+                        checked: 4,
+                        faults: vec![still, fault("downloads/c.jar", false)],
+                        unchecked: Vec::new(),
+                        complete: true,
+                        verified_at: chrono::Utc::now(),
+                    },
+                },
+                failures: vec![("1.21.1".to_owned(), "the download failed".to_owned())],
+            },
+        );
+
+        let result: Vec<String> = ui
+            .get_storage_result()
+            .iter()
+            .map(|line| line.to_string())
+            .collect();
+        assert!(
+            result.contains(&counted("gui-storage-recovery-recovered", 1)),
+            "{result:?}"
+        );
+        assert!(result.contains(&counted("gui-storage-recovery-still-damaged", 1)));
+        assert!(result.contains(&counted("gui-storage-recovery-leftover", 1)));
+        assert!(
+            result
+                .iter()
+                .any(|line| line.contains("1.21.1") && line.contains("the download failed")),
+            "the provider failure is named: {result:?}"
+        );
+        assert!(ui.get_storage_checked());
+        assert_eq!(ui.get_storage_faults().row_count(), 2);
+        assert!(
+            ui.get_storage_can_recover(),
+            "the file that is still damaged can be tried again"
+        );
+        assert!(ui.get_storage_integrity().contains('2'));
+    }
+
+    #[test]
+    fn stopping_maintenance_cancels_the_operation_it_reported() {
+        let (ui, commands, state) = disk_usage_window();
+        ui.invoke_verify_storage();
+        let _ = commands.try_recv();
+        let activity = ActivityData {
+            item: crate::presentation::ActivityPresentation {
+                id: "operation-12".to_owned(),
+                title: lookup("operation-verifying-storage"),
+                status: String::new(),
+                status_kind: "running",
+                detail: "a.jar".to_owned(),
+                progress: 0.0,
+                indeterminate: true,
+                cancellable: true,
+                failed: false,
+            },
+            entity: String::new(),
+            time: String::new(),
+        };
+        apply_disk_usage_activity(&ui, &mut state.borrow_mut(), &activity);
+        assert_eq!(ui.get_storage_maintenance_progress(), "a.jar");
+        ui.invoke_stop_storage_maintenance();
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::CancelOperation(operation)) if operation == "operation-12"
+        ));
+    }
+
+    #[test]
+    fn a_confirmation_for_a_replaced_review_tells_the_user_to_review_again() {
+        let (ui, _commands, state) = disk_usage_window();
+        let (sender, _unused) = std::sync::mpsc::channel();
+        apply_storage(
+            &ui,
+            &state,
+            &sender,
+            backend::StorageMaintenanceEvent::PlanOutdated,
+        );
+        apply_storage(
+            &ui,
+            &state,
+            &sender,
+            backend::StorageMaintenanceEvent::Settled,
+        );
+        assert_eq!(ui.get_storage_maintenance_busy(), "");
+    }
+
     /// A window listing one client and one server, as the lists and the
     /// workspaces all read them.
     fn restart_window() -> (
@@ -16373,6 +16800,7 @@ mod tests {
             include_str!("controller/diagnosis_flow.rs"),
             include_str!("controller/java_runtime.rs"),
             include_str!("controller/log_views.rs"),
+            include_str!("controller/storage_maintenance.rs"),
             include_str!("controller/workspace.rs"),
             include_str!("main.rs"),
         ];
@@ -20326,14 +20754,16 @@ mod tests {
     }
 
     #[test]
-    fn the_cache_section_measures_on_demand_and_guards_a_second_clear() {
+    fn the_cache_section_measures_on_demand_and_only_ever_reviews_a_cleanup() {
         let source = ui_markup();
         // Measuring walks the store, so it must not be on the ordinary refresh
         // path — only on opening the page that shows the figure.
         assert!(source.contains("root.measure-artifact-cache()"));
-        assert!(source.contains("callback clear-artifact-cache()"));
-        assert!(source.contains("root.artifact-cache-clearing = true"));
-        assert!(source.contains("enabled: !root.artifact-cache-clearing"));
+        // The page offers a review of what a cleanup would remove and nothing
+        // that removes without one.
+        assert!(source.contains("root.review-storage-cleanup()"));
+        assert!(!source.contains("clear-artifact-cache"));
+        assert!(source.contains("callback confirm-storage-cleanup(int)"));
         // The size box only exists on the Custom entry, and which entry that is
         // comes from the same list the backend built.
         assert!(
@@ -20346,9 +20776,10 @@ mod tests {
             !backend.contains("artifact_cache_status()) => Event::Snapshot"),
             "the usage figure is not part of the ordinary snapshot"
         );
-        // Both events that can end a clear release the guard the button set, so
-        // a clear that reports only a failure cannot leave it disabled.
-        assert!(backend.contains("Event::ArtifactCacheClearFinished"));
+        assert!(
+            !backend.contains("clear_artifact_cache"),
+            "no frontend path removes the cache without a reviewed plan"
+        );
     }
 
     fn failure(message: &str) -> ImportFailure {

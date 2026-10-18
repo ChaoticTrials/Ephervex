@@ -116,27 +116,6 @@ impl App {
         self.set_artifact_cache_limit(limit).await
     }
 
-    /// Removes every reusable artifact the cache safely can.
-    ///
-    /// Refuses with [`ArtifactCacheError::Busy`] at once when an operation of
-    /// this process still holds a lease, and after a short bounded wait when
-    /// another process holds the cache, so a frontend reports "the cache is in
-    /// use" instead of hanging. The report is truthful about what is left:
-    /// entries that could not be removed are counted, and the remaining usage is
-    /// not rounded down to zero for tidiness.
-    ///
-    /// The configured budget is untouched — clearing is not a settings change.
-    pub async fn clear_artifact_cache(&self) -> CoreResult<ArtifactCacheMaintenance> {
-        let report = self.artifact_cache().clear().await?;
-        info!(
-            removed = report.removed_entries,
-            freed = report.freed_bytes,
-            remaining = report.usage_after,
-            "cleared the reusable artifact cache"
-        );
-        Ok(report)
-    }
-
     /// Runs cache-consuming work with the shared lease held, then maintains.
     ///
     /// The lease is taken before `work` is polled and dropped before maintenance
@@ -360,7 +339,7 @@ mod tests {
         assert_eq!(status.used_bytes, 3 * MIB);
         assert!(!status.is_over_budget());
 
-        let report = app.clear_artifact_cache().await.expect("manual clear");
+        let report = app.artifact_cache().clear().await.expect("manual clear");
         assert_eq!(report.removed_entries, 1);
         assert!(!path.exists());
         assert_eq!(
@@ -417,7 +396,8 @@ mod tests {
         assert!(path.is_file(), "a leased artifact is untouchable");
 
         let error = app
-            .clear_artifact_cache()
+            .artifact_cache()
+            .clear()
             .await
             .expect_err("a manual clear says so instead of hanging");
         assert_eq!(error.message_id(), "error-artifact-cache-busy");
@@ -535,7 +515,8 @@ mod tests {
             .expect("read-only shard");
 
         let report = app
-            .clear_artifact_cache()
+            .artifact_cache()
+            .clear()
             .await
             .expect("a clear that cannot remove everything is not an error");
 

@@ -95,7 +95,7 @@ pub use catalog::{CachedManifest, ReleaseListing, VersionCatalog, cached_version
 pub use error::{LaunchError, LaunchResult, MinecraftError, MinecraftResult};
 pub use install::{
     ASSET_RESOURCE_BASE, ExcludedLibrary, ExclusionReason, Installation, InstallationPlan,
-    PlannedArtifact, PlannedLogging, PlannedNatives, VanillaInstaller,
+    PlannedArtifact, PlannedLogging, PlannedNatives, StoredPaths, VanillaInstaller,
 };
 pub use language::{LANGUAGE_METADATA_OBJECT, LanguageCatalog, LanguageCatalogs, LanguageEntry};
 pub use launch::{

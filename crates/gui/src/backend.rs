@@ -401,6 +401,21 @@ pub enum Command {
     MeasureDiskUsage {
         request: u64,
     },
+    /// Lists what the shared stores hold and which of it no installed host
+    /// needs.
+    InspectStorage,
+    /// Checks the shared stores' files against their digests.
+    VerifyStorage,
+    /// Fetches again the damaged files an installed game version needs.
+    RecoverStorage,
+    /// Plans removing what no installed host needs, for the user to review.
+    PlanStorageCleanup,
+    /// Applies the plan a review showed. Refused when a newer review has
+    /// replaced it, so a confirmation never applies a plan the user did not
+    /// see.
+    ApplyStorageCleanup {
+        plan: u64,
+    },
     /// Shows one of a storage category's own directories.
     OpenStorageLocation {
         category: ephervex_core::StorageCategory,
@@ -759,7 +774,6 @@ pub enum Command {
         custom_value: String,
         custom_unit: String,
     },
-    ClearArtifactCache,
     /// Record which catalog the mod browser opens on, or clear the choice.
     SaveDefaultModCatalog {
         catalog: Option<ModProvider>,
@@ -1977,6 +1991,8 @@ pub enum Event {
     DiskUsageSettled {
         request: u64,
     },
+    /// An answer from the shared-store maintenance operations.
+    StorageMaintenance(Box<StorageMaintenanceEvent>),
     /// What a diagnostic bundle for a host could carry.
     BundlePlanned {
         host: InstalledHost,
@@ -2172,10 +2188,6 @@ pub enum Event {
     },
     WatchedFolderPicked(PathBuf),
     ArtifactCacheStatus(ArtifactCacheStatusData),
-    /// A manual clear has finished without a fresh usage figure to show, because
-    /// the clear was refused or the store could not be measured afterwards. The
-    /// view still has to stop presenting the clear as running.
-    ArtifactCacheClearFinished,
 }
 
 /// The reusable artifact cache as the storage settings show it.
@@ -2189,6 +2201,74 @@ pub struct ArtifactCacheStatusData {
     /// bound, and the view says so rather than presenting it as exact.
     pub exact: bool,
     pub over_budget: bool,
+}
+
+/// What the shared-store maintenance operations report back.
+#[derive(Debug, Clone)]
+pub enum StorageMaintenanceEvent {
+    Inspected(ephervex_core::StorageInspection),
+    Verified(ephervex_core::IntegrityReport),
+    /// A recovery's report, with each failed version's cause already localized.
+    Recovered {
+        report: ephervex_core::RecoveryReport,
+        failures: Vec<(String, String)>,
+    },
+    /// A cleanup plan to review. `plan` names it for the confirmation.
+    Planned {
+        plan: u64,
+        preview: ephervex_core::CleanupPlan,
+    },
+    Cleaned(ephervex_core::CleanupOutcome),
+    /// A confirmation named a plan that a newer review has replaced.
+    PlanOutdated,
+    /// The operation ended, whichever way, so the view stops showing it as
+    /// running.
+    Settled,
+}
+
+/// The cleanup plan the user was last shown, kept until they confirm it.
+#[derive(Default)]
+struct PendingCleanup {
+    issued: u64,
+    plan: Option<(u64, ephervex_core::CleanupPlan)>,
+}
+
+type PendingCleanupSlot = Arc<Mutex<PendingCleanup>>;
+
+fn lock_pending(slot: &PendingCleanupSlot) -> std::sync::MutexGuard<'_, PendingCleanup> {
+    slot.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Runs one shared-store maintenance operation as a cancelable activity.
+fn spawn_storage_operation<F, Fut>(
+    paths: Paths,
+    events: &Sender<Event>,
+    cancellations: CancellationRegistry,
+    title: &'static str,
+    operation: F,
+) where
+    F: FnOnce(App, OperationReporter, CancellationToken) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<(), CoreError>> + 'static,
+{
+    spawn_async_operation(
+        paths,
+        events,
+        cancellations,
+        AsyncOperationRequest {
+            title,
+            entity: lookup("gui-settings-disk-usage"),
+            allow_cancel: true,
+            dialogs: ModalScope::NONE,
+            finished: Some(Event::StorageMaintenance(Box::new(
+                StorageMaintenanceEvent::Settled,
+            ))),
+        },
+        move |app, reporter, cancel| async move {
+            operation(app, reporter, cancel).await?;
+            Ok(OperationReport::Reported)
+        },
+    );
 }
 
 #[derive(Debug, Clone)]
@@ -2942,6 +3022,7 @@ fn run_worker(
     // cache and Java work each keep their order for the same reason.
     let dialogs = DialogGate::default();
     let cache_lane = SerialLane::start("ephervex-artifact-cache");
+    let pending_cleanup: PendingCleanupSlot = Arc::default();
     let java_lane = SerialLane::start("ephervex-java-inventory");
     let catalog_lane = SerialLane::start("ephervex-version-catalog");
     // Set when a detached task has refreshed the published options data on
@@ -4609,6 +4690,124 @@ fn run_worker(
                     },
                 );
             }
+            Command::InspectStorage => {
+                let reports = events.clone();
+                spawn_storage_operation(
+                    app.paths().clone(),
+                    &events,
+                    Arc::clone(&cancellations),
+                    "operation-inspecting-storage",
+                    move |app, _reporter, cancel| async move {
+                        let inspection = app.inspect_managed_storage(&cancel).await?;
+                        let _ = reports.send(Event::StorageMaintenance(Box::new(
+                            StorageMaintenanceEvent::Inspected(inspection),
+                        )));
+                        Ok(())
+                    },
+                );
+            }
+            Command::VerifyStorage => {
+                let reports = events.clone();
+                spawn_storage_operation(
+                    app.paths().clone(),
+                    &events,
+                    Arc::clone(&cancellations),
+                    "operation-verifying-storage",
+                    move |app, reporter, cancel| async move {
+                        let report = app.verify_managed_storage(&reporter, &cancel).await?;
+                        let _ = reports.send(Event::StorageMaintenance(Box::new(
+                            StorageMaintenanceEvent::Verified(report),
+                        )));
+                        Ok(())
+                    },
+                );
+            }
+            Command::RecoverStorage => {
+                let reports = events.clone();
+                spawn_storage_operation(
+                    app.paths().clone(),
+                    &events,
+                    Arc::clone(&cancellations),
+                    "operation-recovering-storage",
+                    move |app, reporter, cancel| async move {
+                        let report = app.recover_managed_storage(&reporter, &cancel).await?;
+                        let failures = report
+                            .failures
+                            .iter()
+                            .map(|failure| {
+                                (failure.version.clone(), localized_error(&failure.error))
+                            })
+                            .collect();
+                        let _ = reports.send(Event::StorageMaintenance(Box::new(
+                            StorageMaintenanceEvent::Recovered { report, failures },
+                        )));
+                        Ok(())
+                    },
+                );
+            }
+            Command::PlanStorageCleanup => {
+                let reports = events.clone();
+                let pending = Arc::clone(&pending_cleanup);
+                spawn_storage_operation(
+                    app.paths().clone(),
+                    &events,
+                    Arc::clone(&cancellations),
+                    "operation-planning-storage-cleanup",
+                    move |app, _reporter, cancel| async move {
+                        let plan = app
+                            .plan_storage_cleanup(&ephervex_core::ManagedStorageKind::ALL, &cancel)
+                            .await?;
+                        let issued = {
+                            let mut slot = lock_pending(&pending);
+                            slot.issued += 1;
+                            slot.plan = Some((slot.issued, plan.clone()));
+                            slot.issued
+                        };
+                        let _ = reports.send(Event::StorageMaintenance(Box::new(
+                            StorageMaintenanceEvent::Planned {
+                                plan: issued,
+                                preview: plan,
+                            },
+                        )));
+                        Ok(())
+                    },
+                );
+            }
+            Command::ApplyStorageCleanup { plan } => {
+                let confirmed = {
+                    let mut slot = lock_pending(&pending_cleanup);
+                    match slot.plan.take() {
+                        Some((issued, shown)) if issued == plan => Some(shown),
+                        other => {
+                            slot.plan = other;
+                            None
+                        }
+                    }
+                };
+                if let Some(confirmed) = confirmed {
+                    let reports = events.clone();
+                    spawn_storage_operation(
+                        app.paths().clone(),
+                        &events,
+                        Arc::clone(&cancellations),
+                        "operation-cleaning-storage",
+                        move |app, _reporter, cancel| async move {
+                            let outcome = app.apply_storage_cleanup(&confirmed, &cancel).await?;
+                            let _ = reports.send(Event::StorageMaintenance(Box::new(
+                                StorageMaintenanceEvent::Cleaned(outcome),
+                            )));
+                            Ok(())
+                        },
+                    );
+                } else {
+                    for event in [
+                        StorageMaintenanceEvent::PlanOutdated,
+                        StorageMaintenanceEvent::Settled,
+                    ] {
+                        let _ = events.send(Event::StorageMaintenance(Box::new(event)));
+                    }
+                }
+            }
             Command::OpenStorageLocation { category, index } => {
                 let _ = events.send(Event::Toast {
                     message: app.open_storage_location(category, index).map_or_else(
@@ -6039,21 +6238,6 @@ fn run_worker(
                     }
                 }
             }
-            Command::ClearArtifactCache => {
-                spawn_in_lane(
-                    &cache_lane,
-                    app.paths().clone(),
-                    events.clone(),
-                    |app, events, runtime| {
-                        let cleared = runtime.block_on(app.clear_artifact_cache());
-                        for event in clear_artifact_cache_events(cleared, || {
-                            runtime.block_on(app.artifact_cache_status())
-                        }) {
-                            let _ = events.send(event);
-                        }
-                    },
-                );
-            }
             Command::SaveDefaultModCatalog { catalog } => {
                 let stored = app.set_default_mod_catalog(catalog);
                 let confirmed = stored.is_ok();
@@ -6700,66 +6884,6 @@ fn application_settings_on(
             ephervex_core::format_binary_bytes,
         ),
     })
-}
-
-/// What a finished clear tells the user.
-///
-/// Three outcomes rather than one sentence, because "freed 6 GiB", "freed 6 GiB
-/// but some is still cached", and "there was nothing to free" are different
-/// things and a user acting on the wrong one goes looking for a bug.
-fn cleared_cache_message(report: &ephervex_core::ArtifactCacheMaintenance) -> String {
-    let freed = ephervex_core::format_binary_bytes(report.freed_bytes);
-    if report.usage_after > 0 || !report.is_clean() {
-        if report.removed_entries == 0 && report.usage_before == 0 {
-            return lookup("gui-artifact-cache-already-empty");
-        }
-        let remaining = ephervex_core::format_binary_bytes(report.usage_after);
-        return ephervex_i18n::lookup_args(
-            "gui-artifact-cache-cleared-partly",
-            [
-                ("value", ephervex_i18n::Arg::from(freed.as_str())),
-                ("remaining", ephervex_i18n::Arg::from(remaining.as_str())),
-            ],
-        );
-    }
-    if report.removed_entries == 0 {
-        return lookup("gui-artifact-cache-already-empty");
-    }
-    ephervex_i18n::lookup_args(
-        "gui-artifact-cache-cleared",
-        [("value", ephervex_i18n::Arg::from(freed.as_str()))],
-    )
-}
-
-/// Everything a manual clear reports back, in the order the view receives it.
-///
-/// Each outcome ends with an event that takes the view out of its clearing
-/// state: a fresh usage figure when the store could be measured, and an explicit
-/// "finished" otherwise. A clear that only reported an error would otherwise
-/// leave the button that started it disabled with nothing on the way to enable
-/// it again.
-fn clear_artifact_cache_events(
-    cleared: Result<ephervex_core::ArtifactCacheMaintenance, CoreError>,
-    measure: impl FnOnce() -> Result<ephervex_core::ArtifactCacheStatus, CoreError>,
-) -> Vec<Event> {
-    let report = match cleared {
-        Ok(report) => report,
-        Err(error) => return vec![error_toast(&error), Event::ArtifactCacheClearFinished],
-    };
-    let mut events = vec![Event::Toast {
-        message: cleared_cache_message(&report),
-        error: false,
-    }];
-    match measure() {
-        Ok(status) => events.push(Event::ArtifactCacheStatus(artifact_cache_status_data(
-            &status,
-        ))),
-        Err(error) => {
-            events.push(error_toast(&error));
-            events.push(Event::ArtifactCacheClearFinished);
-        }
-    }
-    events
 }
 
 /// The measured cache, formatted for the storage settings.
@@ -14878,87 +15002,6 @@ mod tests {
         CoreError::from(ephervex_core::ArtifactCacheError::Busy {
             path: PathBuf::from("/cache/artifact-cache.lock"),
         })
-    }
-
-    #[test]
-    fn a_refused_clear_reports_the_reason_and_ends_the_clearing_state() {
-        let measured = std::cell::Cell::new(false);
-        let events = clear_artifact_cache_events(Err(busy_cache()), || {
-            measured.set(true);
-            Err(busy_cache())
-        });
-
-        assert!(
-            !measured.get(),
-            "a clear that never ran leaves the store unchanged, so nothing needs re-measuring"
-        );
-        assert!(matches!(
-            events.first(),
-            Some(Event::Toast { error: true, .. })
-        ));
-        assert!(matches!(
-            events.last(),
-            Some(Event::ArtifactCacheClearFinished)
-        ));
-    }
-
-    #[test]
-    fn a_clear_that_cannot_be_measured_afterwards_still_ends_the_clearing_state() {
-        let events = clear_artifact_cache_events(
-            Ok(ephervex_core::ArtifactCacheMaintenance {
-                removed_entries: 3,
-                freed_bytes: 4096,
-                ..ephervex_core::ArtifactCacheMaintenance::default()
-            }),
-            || Err(busy_cache()),
-        );
-
-        assert!(
-            matches!(events.first(), Some(Event::Toast { error: false, .. })),
-            "the clear succeeded, so its result is still reported as such"
-        );
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, Event::Toast { error: true, .. }))
-        );
-        assert!(matches!(
-            events.last(),
-            Some(Event::ArtifactCacheClearFinished)
-        ));
-    }
-
-    #[test]
-    fn a_measured_clear_ends_on_the_figure_it_measured() {
-        let events = clear_artifact_cache_events(
-            Ok(ephervex_core::ArtifactCacheMaintenance {
-                removed_entries: 1,
-                freed_bytes: 1024,
-                ..ephervex_core::ArtifactCacheMaintenance::default()
-            }),
-            || {
-                Ok(ephervex_core::ArtifactCacheStatus {
-                    used_bytes: 0,
-                    entries: 0,
-                    complete: true,
-                    limit: ephervex_core::ArtifactCacheLimit::default(),
-                })
-            },
-        );
-
-        assert!(matches!(events.last(), Some(Event::ArtifactCacheStatus(_))));
-        // The status event is itself terminal for the view, so a second
-        // "finished" beside it would say nothing new.
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, Event::ArtifactCacheClearFinished))
-        );
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, Event::Toast { error: true, .. }))
-        );
     }
 
     #[test]

@@ -78,6 +78,7 @@ mod server_catalog_install;
 pub mod server_pack;
 pub mod single_instance;
 pub mod snapshot;
+mod storage_maintenance;
 pub mod termination;
 #[cfg(test)]
 mod test_fixtures;
@@ -114,10 +115,10 @@ pub use dependencies::{
     UnmetDependency, UnmetRequirement,
 };
 pub use diagnosis::{
-    DiagnosisRequest, DiagnosticFix, Finding, FindingClass, FindingKind, FixOutcome, FixPreview,
-    HostDiagnosis, IntegrityCheck, JavaChange, JavaCheck, JavaLayer, JavaMismatch,
-    JavaRuntimeSummary, JavaUnavailable, LoaderReportedRequirement, LoaderRequest, ModCounts,
-    ProposedChange,
+    DamagedSharedFile, DiagnosisRequest, DiagnosticFix, Finding, FindingClass, FindingKind,
+    FixOutcome, FixPreview, HostDiagnosis, IntegrityCheck, JavaChange, JavaCheck, JavaLayer,
+    JavaMismatch, JavaRuntimeSummary, JavaUnavailable, LoaderReportedRequirement, LoaderRequest,
+    ModCounts, ProposedChange,
 };
 pub use diagnostics::{
     ClientLogTail, DEFAULT_DIAGNOSTIC_BYTES, DiagnosticCatalog, DiagnosticRequest, DiagnosticScope,
@@ -213,6 +214,12 @@ pub use server_pack::{
 pub use single_instance::{PrimaryInstance, Startup as SingleInstanceStartup};
 pub use snapshot::{
     SnapshotError, SnapshotOrigin, SnapshotRecord, SnapshotRestore, SnapshotRestoreOptions,
+};
+pub use storage_maintenance::{
+    CleanupFailure, CleanupItem, CleanupOutcome, CleanupPlan, FaultStanding, IntegrityReport,
+    KeptReason, KeptStorage, ManagedStorageGroup, ManagedStorageKind, RecoveryFailure,
+    RecoveryReport, StorageFault, StorageFaultKind, StorageInspection, UncheckedStorage, Usage,
+    WithheldReason,
 };
 pub use termination::TerminationRequests;
 pub use url_handler::{

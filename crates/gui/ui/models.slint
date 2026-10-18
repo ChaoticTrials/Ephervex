@@ -287,6 +287,21 @@ export struct DiskUsageRow {
     locations: [string],
 }
 
+// One kind of shared storage, as the maintenance section and the cleanup
+// review list it.
+export struct StorageGroupRow {
+    // The core kind identifier.
+    id: string,
+    label: string,
+    detail: string,
+    // What can be reclaimed from it, or what a cleanup would remove.
+    size: string,
+    // What it holds, split by whether anything needs it, one fact a line.
+    lines: [string],
+    // The largest entries a cleanup would remove.
+    examples: [string],
+}
+
 // One surface a host workspace offers. The workspace chrome only knows
 // stable ids and labels; each host decides which surfaces it has.
 export struct WorkspaceSurfaceRow {

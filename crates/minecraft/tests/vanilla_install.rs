@@ -24,7 +24,7 @@ use ephervex_download::{
     CacheLayout, DownloadManager, DownloaderConfig, HttpConfig, OperationReporter, ProgressSink,
 };
 use ephervex_minecraft::{
-    LaunchError, OsName, Platform, RuleContext, VanillaInstaller, VersionMetadata,
+    AssetIndex, LaunchError, OsName, Platform, RuleContext, VanillaInstaller, VersionMetadata,
 };
 use ephervex_model::Operation;
 use tokio_util::sync::CancellationToken;
@@ -651,4 +651,179 @@ async fn the_command_built_from_a_real_installation_points_at_the_files_that_exi
         |argument| argument.starts_with("-Dlog4j.configurationFile=")
             && Path::new(argument.trim_start_matches("-Dlog4j.configurationFile=")).is_file()
     ));
+}
+
+#[tokio::test]
+async fn an_installation_names_every_shared_path_it_wrote() {
+    let server = MockServer::start().await;
+    let fake = Fake::new();
+    let index = Served::new("/1.12.json", fake.asset_index());
+    index.mount(&server).await;
+    fake.mount(&server).await;
+    let cache = tempfile::tempdir().expect("temp dir");
+    let installer = installer(cache.path(), &server);
+    let metadata = VersionMetadata::parse(&fake.legacy_document(&server, &index)).expect("parses");
+    let plan = installer.plan(&metadata, &linux()).expect("plans");
+    installer
+        .install(plan.clone(), &reporter(), &CancellationToken::new())
+        .await
+        .expect("installs");
+
+    let stored = plan.stored_paths();
+    for path in &stored.files {
+        assert!(
+            path.is_file(),
+            "{} is named but was not written",
+            path.display()
+        );
+    }
+    assert_eq!(stored.directories, [plan.natives_dir.clone()].into());
+    assert!(plan.natives_dir.is_dir());
+    assert!(stored.files.contains(&plan.client_jar.path));
+    assert!(stored.files.contains(&plan.asset_index_path));
+
+    let layout = CacheLayout::new(cache.path());
+    let objects = AssetIndex::parse("1.12", &String::from_utf8(fake.asset_index()).unwrap())
+        .expect("index")
+        .object_paths(&layout)
+        .expect("paths");
+    assert_eq!(objects.len(), 1);
+    assert!(objects.iter().all(|path| path.is_file()));
+}
+
+#[tokio::test]
+async fn reacquiring_fetches_only_the_named_artifacts_and_replaces_damaged_bytes() {
+    let server = MockServer::start().await;
+    let fake = Fake::new();
+    let index = Served::new("/1.12.json", fake.asset_index());
+    index.mount(&server).await;
+    fake.mount(&server).await;
+    let cache = tempfile::tempdir().expect("temp dir");
+    let installer = installer(cache.path(), &server);
+    let metadata = VersionMetadata::parse(&fake.legacy_document(&server, &index)).expect("parses");
+    let plan = installer.plan(&metadata, &linux()).expect("plans");
+    installer
+        .install(plan.clone(), &reporter(), &CancellationToken::new())
+        .await
+        .expect("installs");
+
+    let library = plan.libraries[0].path.clone();
+    let natives_jar = plan.natives[0].artifact.path.clone();
+    let digest = sha1(b"an asset object");
+    let asset = cache
+        .path()
+        .join("assets/objects")
+        .join(&digest[..2])
+        .join(&digest);
+    std::fs::write(&library, b"damaged").expect("damage the library");
+    std::fs::write(&asset, b"damaged").expect("damage the asset");
+    std::fs::remove_file(&natives_jar).expect("remove the natives jar");
+    std::fs::remove_file(plan.natives_dir.join("liblwjgl.so")).expect("remove unpacked natives");
+    std::fs::remove_file(&plan.client_jar.path).expect("remove the client jar");
+    std::fs::write(&plan.asset_index_path, b"stale view").expect("damage the launch view");
+
+    let named = [
+        library.clone(),
+        asset.clone(),
+        natives_jar.clone(),
+        plan.asset_index_path.clone(),
+    ]
+    .into_iter()
+    .collect();
+    let fetched = installer
+        .reacquire(&plan, &named, &reporter(), &CancellationToken::new())
+        .await
+        .expect("reacquires");
+
+    assert_eq!(
+        fetched, 3,
+        "the library, the natives jar, and the asset object"
+    );
+    assert_eq!(std::fs::read(&library).expect("library"), fake.library.body);
+    assert_eq!(std::fs::read(&asset).expect("asset"), fake.asset.body);
+    assert!(natives_jar.is_file());
+    assert!(
+        plan.natives_dir.join("liblwjgl.so").is_file(),
+        "unpacked natives are derived again from a re-fetched natives jar"
+    );
+    assert_eq!(
+        std::fs::read(&plan.asset_index_path).expect("view"),
+        fake.asset_index(),
+        "the launch view is copied again from the verified index"
+    );
+    assert!(
+        !plan.client_jar.path.exists(),
+        "an artifact that was not named is not fetched"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_reacquisition_leaves_the_entry_absent_rather_than_present_and_wrong() {
+    let server = MockServer::start().await;
+    let fake = Fake::new();
+    let index = Served::new("/1.12.json", fake.asset_index());
+    index.mount(&server).await;
+    fake.mount(&server).await;
+    let cache = tempfile::tempdir().expect("temp dir");
+    let installer = installer(cache.path(), &server);
+    let metadata = VersionMetadata::parse(&fake.legacy_document(&server, &index)).expect("parses");
+    let plan = installer.plan(&metadata, &linux()).expect("plans");
+    installer
+        .install(plan.clone(), &reporter(), &CancellationToken::new())
+        .await
+        .expect("installs");
+    let library = plan.libraries[0].path.clone();
+    std::fs::write(&library, b"damaged").expect("damage the library");
+    server.reset().await;
+    Mock::given(method("GET"))
+        .and(path("/lib.jar"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"tampered".to_vec()))
+        .mount(&server)
+        .await;
+
+    let error = installer
+        .reacquire(
+            &plan,
+            &[library.clone()].into_iter().collect(),
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("the replacement does not match its digest");
+
+    assert!(
+        matches!(error, LaunchError::DownloadFailed { .. }),
+        "{error:?}"
+    );
+    assert!(
+        !library.exists(),
+        "neither the damaged bytes nor the unverified replacement may stay at the path"
+    );
+}
+
+#[tokio::test]
+async fn a_canceled_reacquisition_is_reported_as_canceled() {
+    let server = MockServer::start().await;
+    let fake = Fake::new();
+    let index = Served::new("/1.12.json", fake.asset_index());
+    index.mount(&server).await;
+    fake.mount(&server).await;
+    let cache = tempfile::tempdir().expect("temp dir");
+    let installer = installer(cache.path(), &server);
+    let metadata = VersionMetadata::parse(&fake.legacy_document(&server, &index)).expect("parses");
+    let plan = installer.plan(&metadata, &linux()).expect("plans");
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    let error = installer
+        .reacquire(
+            &plan,
+            &[plan.libraries[0].path.clone()].into_iter().collect(),
+            &reporter(),
+            &cancel,
+        )
+        .await
+        .expect_err("canceled");
+
+    assert!(matches!(error, LaunchError::Canceled), "{error:?}");
 }

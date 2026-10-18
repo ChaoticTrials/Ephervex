@@ -75,6 +75,7 @@ import {
     RunningRow,
     ServerPropertyGroup,
     ServerRow,
+    StorageGroupRow,
     ToastRow,
     WorkspaceHostChoice,
     WorkspacePaneRow
@@ -292,6 +293,32 @@ export component AppWindow inherits Window {
     in-out property <string> launcher-bundle-result;
     in-out property <string> launcher-bundle-result-path;
     in-out property <string> launcher-bundle-error;
+    // Maintenance changed the disk after the last measurement, so its totals
+    // are not shown as current.
+    in-out property <bool> disk-usage-stale;
+    // The maintenance section of the disk usage view, and the cleanup review.
+    in-out property <string> storage-maintenance-busy;
+    in-out property <string> storage-maintenance-progress;
+    in-out property <bool> storage-inspected;
+    in-out property <string> storage-headline;
+    in-out property <string> storage-hosts;
+    in-out property <bool> storage-incomplete;
+    in-out property <[StorageGroupRow]> storage-groups;
+    in-out property <bool> storage-checked;
+    in-out property <string> storage-integrity;
+    in-out property <[string]> storage-faults;
+    in-out property <[string]> storage-unchecked;
+    in-out property <bool> storage-can-recover;
+    in-out property <[string]> storage-result;
+    // The plan the review shows, named so a confirmation applies that plan and
+    // no other.
+    in-out property <int> storage-plan-id;
+    in-out property <string> storage-plan-summary;
+    in-out property <[StorageGroupRow]> storage-plan-items;
+    in-out property <[string]> storage-plan-kept;
+    in-out property <bool> storage-plan-incomplete;
+    in-out property <bool> storage-plan-empty;
+    in-out property <string> storage-plan-confirm;
     in-out property <[ActivityRow]> activities;
     in-out property <[AccountRow]> accounts;
     // The same accounts as menu rows, for the Launch as menu.
@@ -626,9 +653,6 @@ export component AppWindow inherits Window {
     in-out property <bool> artifact-cache-usage-known;
     in-out property <bool> artifact-cache-usage-exact: true;
     in-out property <bool> artifact-cache-over-budget;
-    // Guards the clear button against a second click while the first is
-    // still in the backend.
-    in-out property <bool> artifact-cache-clearing;
     in-out property <int> application-text-scale: 100;
     in-out property <int> technical-text-size: 12;
     // The chosen theme by its recorded name, and the theme list: labels to
@@ -827,6 +851,12 @@ export component AppWindow inherits Window {
     callback client-restart(string);
     callback measure-disk-usage();
     callback stop-disk-usage();
+    callback inspect-storage();
+    callback verify-storage();
+    callback recover-storage();
+    callback review-storage-cleanup();
+    callback stop-storage-maintenance();
+    callback confirm-storage-cleanup(int);
     callback open-storage-location(string, int);
     callback server-kill(string);
     callback server-console(string, string) -> bool;
@@ -948,7 +978,6 @@ export component AppWindow inherits Window {
     callback remove-watched-folder(string);
     callback measure-artifact-cache();
     callback save-artifact-cache-limit(int, string, string);
-    callback clear-artifact-cache();
     // Text scale, technical text size, whether linked servers are listed
     // globally, whether the default account is made an operator, and the
     // level it is given. One callback because the General page saves with
@@ -2135,8 +2164,20 @@ export component AppWindow inherits Window {
                             total: root.disk-usage-total; measured-at: root.disk-usage-measured-at;
                             retention: root.disk-usage-retention; categories: root.disk-usage-categories;
                             incomplete: root.disk-usage-incomplete; incomplete-text: root.disk-usage-incomplete-text; unreadable: root.disk-usage-unreadable;
+                            stale: root.disk-usage-stale;
+                            maintenance-busy: root.storage-maintenance-busy; maintenance-progress: root.storage-maintenance-progress;
+                            maintenance-inspected: root.storage-inspected; maintenance-headline: root.storage-headline; maintenance-hosts: root.storage-hosts;
+                            maintenance-incomplete: root.storage-incomplete; maintenance-groups: root.storage-groups;
+                            maintenance-checked: root.storage-checked; maintenance-integrity: root.storage-integrity;
+                            maintenance-faults: root.storage-faults; maintenance-unchecked: root.storage-unchecked;
+                            maintenance-can-recover: root.storage-can-recover; maintenance-result: root.storage-result;
                             refresh => { root.measure-disk-usage(); }
                             stop => { root.stop-disk-usage(); }
+                            inspect => { root.inspect-storage(); }
+                            verify => { root.verify-storage(); }
+                            recover => { root.recover-storage(); }
+                            review => { root.review-storage-cleanup(); }
+                            stop-maintenance => { root.stop-storage-maintenance(); }
                             open-location(category, index) => { root.open-storage-location(category, index); }
                         }
                         if root.settings-tab == "Diagnostics" : VerticalLayout { spacing: 14px;
@@ -2238,11 +2279,10 @@ export component AppWindow inherits Window {
                                 BodyText { text: GuiI18n.text("gui-artifact-cache-cleanup-note"); color: Theme.text-muted; wrap: word-wrap; }
                             } }
                             HorizontalLayout {
-                                // Named for the cache and nothing else: an
-                                // instance or a server is never what this
-                                // removes, and the button must not read as if it
-                                // might be.
-                                AppButton { text: root.artifact-cache-clearing ? GuiI18n.text("gui-clearing-artifact-cache") : GuiI18n.text("gui-clear-artifact-cache"); enabled: !root.artifact-cache-clearing; hint: GuiI18n.text("gui-hint-cache-clearing"); clicked => { root.artifact-cache-clearing = true; root.clear-artifact-cache(); } }
+                                // Opens a list of what would be removed. Nothing
+                                // is removed until that list is confirmed, and an
+                                // instance or a server is never on it.
+                                AppButton { text: GuiI18n.text("gui-review-storage-cleanup"); enabled: root.storage-maintenance-busy == ""; hint: GuiI18n.text("gui-storage-busy-hint"); clicked => { root.review-storage-cleanup(); } }
                                 Rectangle { horizontal-stretch: 1; }
                             }
                         }
@@ -2318,8 +2358,8 @@ export component AppWindow inherits Window {
         background: Theme.scrim;
         TouchArea { clicked => { } }
         Rectangle {
-            width: root.modal == "license" || root.modal == "third-party" ? min(820px, parent.width - 80px) : root.modal == "mod-plan" || root.modal == "mod-apply" || root.modal == "mod-remove" || root.modal == "mod-result" || root.modal == "mod-manage" || root.modal == "mod-acquire" ? min(720px, parent.width - 80px) : min(620px, parent.width - 80px);
-            height: root.modal == "license" || root.modal == "third-party" ? min(720px, parent.height - 80px) : root.modal == "import" || root.modal == "pane-host" ? min(620px, parent.height - 80px) : root.modal == "mod-plan" ? min(500px * Theme.text-scale + root.linked-targets.length * 68px + 14px + root.mod-plan-extra, parent.height - 80px) : root.modal == "mod-manage" ? min(620px, parent.height - 80px) : root.modal == "mod-acquire" ? min(260px * Theme.text-scale + root.mod-acquisition-items.length * 64px, parent.height - 80px) : root.modal == "mod-apply" ? min(370px * Theme.text-scale + root.linked-targets.length * 68px + 14px, parent.height - 80px) : root.modal == "mod-result" ? min(300px * Theme.text-scale + root.linked-results.length * 68px + 14px, parent.height - 80px) : root.modal == "loader-change" ? 400px : root.modal == "mod-remove" ? min((root.linked-targets.length > 0 ? 424px : 300px) * Theme.text-scale + root.mod-removal-dependencies.length * 24px + root.linked-targets.length * 68px, parent.height - 80px) : root.modal == "eula" ? 440px : root.modal == "kill" ? 300px : root.modal == "delete-instance" || root.modal == "delete-server" ? 330px : root.modal == "groups" ? min(420px, parent.height - 80px) : root.modal == "rename" ? min(modal-body.preferred-height, parent.height - 80px) : root.modal == "snapshot-create" || root.modal == "snapshot-restore" || root.modal == "snapshot-rename" || root.modal == "snapshot-delete" ? 330px : root.modal == "mod-impact" ? min(300px * Theme.text-scale + (root.mod-impact-breaks.length + root.mod-impact-degrades.length + root.mod-impact-unknown.length + root.mod-impact-unidentifiable.length + root.mod-requires-disabled.length + root.mod-requires-absent.length + root.mod-requires-incompatible.length) * 24px, parent.height - 80px) : root.modal == "delete-mod" ? 320px : root.modal == "mod-stand-in" ? min(340px * Theme.text-scale, parent.height - 80px) : root.modal == "remove-java-runtime" ? (root.pending-java-pinning == "" && root.pending-java-pins-known ? 320px : 320px + 66px * Theme.text-scale) : root.modal == "mod-clash" ? 380px : root.modal == "absent-mods" ? min(250px + root.absent-mods.length * 22px, parent.height - 80px) : root.modal == "make-persistent" ? min(290px + root.promote-servers.length * 28px, parent.height - 80px) : root.modal == "open-pack-link" ? 300px : root.modal == "theme-problems" ? min(260px * Theme.text-scale + root.theme-problems.length * 44px, parent.height - 80px) : root.modal == "create-server" ? min((root.create-server-client-id == "" ? 640px : 535px) + (root.create-server-client-id == "" && root.create-server-loader != "Vanilla" ? 44px : 0px) + (root.create-server-pack != "" && root.create-server-pack-note != "" ? 44px : 0px), parent.height - 80px) : 570px;
+            width: root.modal == "license" || root.modal == "third-party" ? min(820px, parent.width - 80px) : root.modal == "mod-plan" || root.modal == "mod-apply" || root.modal == "mod-remove" || root.modal == "mod-result" || root.modal == "mod-manage" || root.modal == "mod-acquire" || root.modal == "storage-cleanup" ? min(720px, parent.width - 80px) : min(620px, parent.width - 80px);
+            height: root.modal == "license" || root.modal == "third-party" ? min(720px, parent.height - 80px) : root.modal == "import" || root.modal == "pane-host" ? min(620px, parent.height - 80px) : root.modal == "mod-plan" ? min(500px * Theme.text-scale + root.linked-targets.length * 68px + 14px + root.mod-plan-extra, parent.height - 80px) : root.modal == "mod-manage" || root.modal == "storage-cleanup" ? min(620px, parent.height - 80px) : root.modal == "mod-acquire" ? min(260px * Theme.text-scale + root.mod-acquisition-items.length * 64px, parent.height - 80px) : root.modal == "mod-apply" ? min(370px * Theme.text-scale + root.linked-targets.length * 68px + 14px, parent.height - 80px) : root.modal == "mod-result" ? min(300px * Theme.text-scale + root.linked-results.length * 68px + 14px, parent.height - 80px) : root.modal == "loader-change" ? 400px : root.modal == "mod-remove" ? min((root.linked-targets.length > 0 ? 424px : 300px) * Theme.text-scale + root.mod-removal-dependencies.length * 24px + root.linked-targets.length * 68px, parent.height - 80px) : root.modal == "eula" ? 440px : root.modal == "kill" ? 300px : root.modal == "delete-instance" || root.modal == "delete-server" ? 330px : root.modal == "groups" ? min(420px, parent.height - 80px) : root.modal == "rename" ? min(modal-body.preferred-height, parent.height - 80px) : root.modal == "snapshot-create" || root.modal == "snapshot-restore" || root.modal == "snapshot-rename" || root.modal == "snapshot-delete" ? 330px : root.modal == "mod-impact" ? min(300px * Theme.text-scale + (root.mod-impact-breaks.length + root.mod-impact-degrades.length + root.mod-impact-unknown.length + root.mod-impact-unidentifiable.length + root.mod-requires-disabled.length + root.mod-requires-absent.length + root.mod-requires-incompatible.length) * 24px, parent.height - 80px) : root.modal == "delete-mod" ? 320px : root.modal == "mod-stand-in" ? min(340px * Theme.text-scale, parent.height - 80px) : root.modal == "remove-java-runtime" ? (root.pending-java-pinning == "" && root.pending-java-pins-known ? 320px : 320px + 66px * Theme.text-scale) : root.modal == "mod-clash" ? 380px : root.modal == "absent-mods" ? min(250px + root.absent-mods.length * 22px, parent.height - 80px) : root.modal == "make-persistent" ? min(290px + root.promote-servers.length * 28px, parent.height - 80px) : root.modal == "open-pack-link" ? 300px : root.modal == "theme-problems" ? min(260px * Theme.text-scale + root.theme-problems.length * 44px, parent.height - 80px) : root.modal == "create-server" ? min((root.create-server-client-id == "" ? 640px : 535px) + (root.create-server-client-id == "" && root.create-server-loader != "Vanilla" ? 44px : 0px) + (root.create-server-pack != "" && root.create-server-pack-note != "" ? 44px : 0px), parent.height - 80px) : 570px;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             border-radius: 8px;
@@ -2327,7 +2367,7 @@ export component AppWindow inherits Window {
             border-color: Theme.border;
             background: Theme.elevated;
             modal-body := VerticalLayout { padding: 22px; spacing: 13px;
-                HorizontalLayout { cross-axis-alignment: center; Heading { text: root.modal == "pane-host" ? GuiI18n.text("gui-modal-pane-host") : root.modal == "create-instance" ? GuiI18n.text("gui-modal-new-instance") : root.modal == "import" ? GuiI18n.text("gui-modal-import") : root.modal == "create-server" ? GuiI18n.text("gui-modal-new-server") : root.modal == "mod-plan" ? GuiI18n.text("gui-modal-install-mod") : root.modal == "mod-manage" ? GuiI18n.text("gui-modal-manage-mod") : root.modal == "mod-acquire" ? GuiI18n.text("gui-modal-mod-acquire") : root.modal == "loader-change" ? GuiI18n.text("gui-modal-change-loader") : root.modal == "mod-remove" ? GuiI18n.text("gui-modal-remove-mod") : root.modal == "mod-apply" ? GuiI18n.text("gui-modal-apply-mod") : root.modal == "mod-result" ? GuiI18n.text("gui-modal-mod-result") : root.modal == "eula" ? GuiI18n.text("gui-server-eula") : root.modal == "kill" ? GuiI18n.text("gui-modal-force-kill") : root.modal == "delete-instance" ? GuiI18n.text("gui-delete-instance") : root.modal == "delete-server" ? GuiI18n.text("gui-delete-server") : root.modal == "groups" ? GuiI18n.text("gui-modal-groups") : root.modal == "rename" ? (root.pending-action-kind == "new-group" ? GuiI18n.text("gui-modal-new-group") : GuiI18n.text("gui-modal-rename")) : root.modal == "snapshot-create" ? GuiI18n.text("gui-snapshot-create") : root.modal == "snapshot-restore" ? GuiI18n.text("gui-snapshot-restore") : root.modal == "snapshot-rename" ? GuiI18n.text("gui-snapshot-rename") : root.modal == "snapshot-delete" ? GuiI18n.text("gui-snapshot-delete") : root.modal == "mod-impact" ? GuiI18n.value(root.mod-impact-enabling ? "gui-mod-impact-enable-title" : "gui-mod-impact-disable-title", root.mod-impact-name) : root.modal == "delete-mod" ? GuiI18n.text("gui-modal-delete-mod") : root.modal == "mod-stand-in" ? GuiI18n.text("gui-modal-mod-stand-in") : root.modal == "remove-java-runtime" ? GuiI18n.text("gui-java-remove-runtime-title") : root.modal == "mod-clash" ? GuiI18n.text("gui-modal-mod-clash") : root.modal == "absent-mods" ? GuiI18n.text("gui-modal-absent-mods") : root.modal == "make-persistent" ? GuiI18n.text("gui-make-persistent") : root.modal == "open-pack-link" ? GuiI18n.text("gui-open-pack-link") : root.modal == "theme-problems" ? GuiI18n.text("gui-modal-theme-problems") : root.modal == "license" ? GuiI18n.text("gui-modal-apache-license") : root.third-party-open >= 0 ? root.third-party-packages[root.third-party-open].name + " " + root.third-party-packages[root.third-party-open].version + " | " + root.third-party-packages[root.third-party-open].license : GuiI18n.text("gui-third-party-licenses"); font-size: Theme.brand-size; } Rectangle { horizontal-stretch: 1; } IconButton { icon: @image-url("../../../assets/icons/close.svg"); accessible-name: GuiI18n.text("gui-close"); clicked => { if root.modal == "import" { root.close-import-modal(); } else if root.modal == "mod-stand-in" { root.answer-mod-stand-in(root.mod-stand-in-id, false); } else { if root.modal == "mod-plan" { root.abandon-browser-install(); } if root.modal == "mod-acquire" { root.cancel-mod-acquisition(root.mod-acquisition-id); } if root.modal == "open-pack-link" { root.cancel-pack-link(); } root.modal = ""; root.modal-error = ""; } } } }
+                HorizontalLayout { cross-axis-alignment: center; Heading { text: root.modal == "pane-host" ? GuiI18n.text("gui-modal-pane-host") : root.modal == "create-instance" ? GuiI18n.text("gui-modal-new-instance") : root.modal == "import" ? GuiI18n.text("gui-modal-import") : root.modal == "create-server" ? GuiI18n.text("gui-modal-new-server") : root.modal == "mod-plan" ? GuiI18n.text("gui-modal-install-mod") : root.modal == "mod-manage" ? GuiI18n.text("gui-modal-manage-mod") : root.modal == "mod-acquire" ? GuiI18n.text("gui-modal-mod-acquire") : root.modal == "loader-change" ? GuiI18n.text("gui-modal-change-loader") : root.modal == "mod-remove" ? GuiI18n.text("gui-modal-remove-mod") : root.modal == "mod-apply" ? GuiI18n.text("gui-modal-apply-mod") : root.modal == "mod-result" ? GuiI18n.text("gui-modal-mod-result") : root.modal == "eula" ? GuiI18n.text("gui-server-eula") : root.modal == "kill" ? GuiI18n.text("gui-modal-force-kill") : root.modal == "delete-instance" ? GuiI18n.text("gui-delete-instance") : root.modal == "delete-server" ? GuiI18n.text("gui-delete-server") : root.modal == "groups" ? GuiI18n.text("gui-modal-groups") : root.modal == "rename" ? (root.pending-action-kind == "new-group" ? GuiI18n.text("gui-modal-new-group") : GuiI18n.text("gui-modal-rename")) : root.modal == "snapshot-create" ? GuiI18n.text("gui-snapshot-create") : root.modal == "snapshot-restore" ? GuiI18n.text("gui-snapshot-restore") : root.modal == "snapshot-rename" ? GuiI18n.text("gui-snapshot-rename") : root.modal == "snapshot-delete" ? GuiI18n.text("gui-snapshot-delete") : root.modal == "mod-impact" ? GuiI18n.value(root.mod-impact-enabling ? "gui-mod-impact-enable-title" : "gui-mod-impact-disable-title", root.mod-impact-name) : root.modal == "delete-mod" ? GuiI18n.text("gui-modal-delete-mod") : root.modal == "mod-stand-in" ? GuiI18n.text("gui-modal-mod-stand-in") : root.modal == "remove-java-runtime" ? GuiI18n.text("gui-java-remove-runtime-title") : root.modal == "storage-cleanup" ? GuiI18n.text("gui-storage-cleanup-title") : root.modal == "mod-clash" ? GuiI18n.text("gui-modal-mod-clash") : root.modal == "absent-mods" ? GuiI18n.text("gui-modal-absent-mods") : root.modal == "make-persistent" ? GuiI18n.text("gui-make-persistent") : root.modal == "open-pack-link" ? GuiI18n.text("gui-open-pack-link") : root.modal == "theme-problems" ? GuiI18n.text("gui-modal-theme-problems") : root.modal == "license" ? GuiI18n.text("gui-modal-apache-license") : root.third-party-open >= 0 ? root.third-party-packages[root.third-party-open].name + " " + root.third-party-packages[root.third-party-open].version + " | " + root.third-party-packages[root.third-party-open].license : GuiI18n.text("gui-third-party-licenses"); font-size: Theme.brand-size; } Rectangle { horizontal-stretch: 1; } IconButton { icon: @image-url("../../../assets/icons/close.svg"); accessible-name: GuiI18n.text("gui-close"); clicked => { if root.modal == "import" { root.close-import-modal(); } else if root.modal == "mod-stand-in" { root.answer-mod-stand-in(root.mod-stand-in-id, false); } else { if root.modal == "mod-plan" { root.abandon-browser-install(); } if root.modal == "mod-acquire" { root.cancel-mod-acquisition(root.mod-acquisition-id); } if root.modal == "open-pack-link" { root.cancel-pack-link(); } root.modal = ""; root.modal-error = ""; } } } }
                 Divider { }
                 if root.modal == "create-instance" : VerticalLayout { spacing: 11px; BodyText { text: GuiI18n.text("gui-create-instance-detail"); wrap: word-wrap; } Text { text: GuiI18n.text("gui-name"); color: Theme.text-secondary; font-size: Theme.label-size; } TextField { text <=> root.create-name; placeholder: root.create-name-suggestion; accessible-name: GuiI18n.text("gui-name"); } Text { text: GuiI18n.text("gui-minecraft-release"); color: Theme.text-secondary; font-size: Theme.label-size; } HorizontalLayout { spacing: 8px; ValueComboBox { horizontal-stretch: 1; label: GuiI18n.text("gui-minecraft-release"); model: root.minecraft-releases; value: root.create-minecraft; selected(value) => { root.create-minecraft = value; root.create-loader-version = ""; root.create-loader-versions = []; root.minecraft-selection-changed("client", value); if root.create-loader != "Vanilla" { root.request-loader-catalog("client", root.create-loader, value); } root.recompute-create-name(); } } FavoriteToggle { version: root.create-minecraft; favorite: root.create-minecraft-favorite; enabled: root.create-minecraft != ""; hint: GuiI18n.text("gui-hint-choose-minecraft-release"); toggled => { root.toggle-favorite-version(root.create-minecraft); } } } Text { text: GuiI18n.text("gui-loader"); color: Theme.text-secondary; font-size: Theme.label-size; } ValueComboBox { label: GuiI18n.text("gui-loader"); model: root.create-loaders; value: root.create-loader; selected(value) => { root.create-loader = value; root.create-loader-version = ""; root.create-loader-versions = []; if value != "Vanilla" { root.request-loader-catalog("client", value, root.create-minecraft); } root.recompute-create-name(); } } if root.create-loader != "Vanilla" : ValueComboBox { label: GuiI18n.text("gui-loader-version-placeholder"); model: root.create-loader-versions; value: root.create-loader-version; selected(value) => { root.create-loader-version = value; } changed value => { root.recompute-create-name(); } } HorizontalLayout { BodyText { text: GuiI18n.text("gui-store-persistently"); } Toggle { checked <=> root.create-persistent; } BodyText { text: root.create-persistent ? GuiI18n.text("gui-persistent-root") : GuiI18n.text("gui-temporary-root"); color: Theme.text-muted; } } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-create-instance"); tone: "primary"; enabled: root.minecraft-releases.length > 0 && (root.create-name != "" || root.create-name-suggestion != "") && root.create-minecraft != "" && (root.create-loader == "Vanilla" || root.create-loader-version != ""); hint: root.minecraft-releases.length == 0 ? GuiI18n.text("gui-hint-minecraft-list-unavailable") : root.create-minecraft == "" ? GuiI18n.text("gui-hint-choose-minecraft-release") : root.create-name == "" && root.create-name-suggestion == "" ? GuiI18n.text("gui-hint-enter-name") : GuiI18n.text("gui-hint-choose-loader-version"); clicked => { root.submit-create-instance(root.create-name != "" ? root.create-name : root.create-name-suggestion, root.create-minecraft, root.create-loader, root.create-loader-version, root.create-persistent); } } } }
                 if root.modal == "import" : ScrollView {
@@ -2844,6 +2884,47 @@ export component AppWindow inherits Window {
                 }
                 if root.modal == "delete-mod" : VerticalLayout { spacing: 14px; BodyText { text: GuiI18n.value(root.mod-action-is-hand-placed ? "gui-delete-mod-detail" : "gui-delete-restorable-mod-detail", root.pending-action-name); color: Theme.warning; wrap: word-wrap; } BodyText { text: GuiI18n.text(root.mod-action-is-hand-placed ? "gui-delete-mod-note" : "gui-delete-restorable-mod-note"); wrap: word-wrap; } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; root.modal-error = ""; } } AppButton { text: GuiI18n.text("gui-delete"); tone: "danger"; clicked => { root.delete-hand-placed-mod(root.pending-action-kind, root.pending-action-id, root.mod-action-path); } } } }
                 if root.modal == "mod-stand-in" : VerticalLayout { spacing: 14px; BodyText { text: root.mod-stand-in-detail; color: Theme.warning; wrap: word-wrap; } BodyText { text: root.mod-stand-in-note; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.answer-mod-stand-in(root.mod-stand-in-id, false); } } AppButton { text: GuiI18n.text("gui-mod-stand-in-accept"); tone: "primary"; clicked => { root.answer-mod-stand-in(root.mod-stand-in-id, true); } } } }
+                if root.modal == "storage-cleanup" : VerticalLayout {
+                    spacing: 12px;
+                    vertical-stretch: 1;
+                    ScrollView {
+                        viewport-width: self.width;
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            spacing: 10px;
+                            Heading { text: root.storage-plan-summary; font-size: Theme.row-heading-size; wrap: word-wrap; }
+                            if root.storage-plan-empty : BodyText { text: GuiI18n.text("gui-storage-cleanup-empty"); wrap: word-wrap; }
+                            for item in root.storage-plan-items : Rectangle {
+                                border-radius: 8px;
+                                border-width: 1px;
+                                border-color: Theme.border;
+                                background: Theme.surface;
+                                height: plan-item-body.preferred-height;
+                                plan-item-body := VerticalLayout {
+                                    padding: 12px;
+                                    spacing: 4px;
+                                    HorizontalLayout {
+                                        spacing: 10px;
+                                        Heading { text: item.label; font-size: Theme.row-heading-size; horizontal-stretch: 1; }
+                                        BodyText { text: item.size; vertical-alignment: center; }
+                                    }
+                                    for line in item.lines : BodyText { text: line; wrap: word-wrap; }
+                                    BodyText { text: item.detail; color: Theme.text-secondary; wrap: word-wrap; }
+                                    for example in item.examples : BodyText { text: example; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
+                                }
+                            }
+                            if root.storage-plan-kept.length > 0 : Heading { text: GuiI18n.text("gui-storage-cleanup-kept"); font-size: Theme.row-heading-size; }
+                            for kept in root.storage-plan-kept : BodyText { text: kept; color: Theme.text-secondary; wrap: word-wrap; }
+                            if root.storage-plan-incomplete : BodyText { text: GuiI18n.text("gui-storage-cleanup-incomplete"); color: Theme.warning; wrap: word-wrap; }
+                            BodyText { text: GuiI18n.text("gui-storage-cleanup-protected"); color: Theme.text-muted; wrap: word-wrap; }
+                        }
+                    }
+                    ActionRow {
+                        Rectangle { horizontal-stretch: 1; }
+                        AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } }
+                        AppButton { text: root.storage-plan-confirm; tone: "danger"; enabled: !root.storage-plan-empty; hint: GuiI18n.text("gui-storage-cleanup-empty"); clicked => { root.confirm-storage-cleanup(root.storage-plan-id); root.modal = ""; } }
+                    }
+                }
                 if root.modal == "remove-java-runtime" : VerticalLayout { spacing: 14px; BodyText { text: GuiI18n.value("gui-java-remove-runtime-detail", root.pending-action-name); color: Theme.warning; wrap: word-wrap; } BodyText { text: root.pending-action-id; color: Theme.text-muted; wrap: word-wrap; } if root.pending-java-pinning != "" : BodyText { text: GuiI18n.value("gui-java-remove-runtime-pinned", root.pending-java-pinning); color: Theme.warning; wrap: word-wrap; } if !root.pending-java-pins-known : BodyText { text: GuiI18n.text("gui-java-remove-runtime-pins-unknown"); color: Theme.warning; wrap: word-wrap; } BodyText { text: GuiI18n.text("gui-java-remove-runtime-note"); wrap: word-wrap; } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; root.modal-error = ""; } } AppButton { text: GuiI18n.text("gui-remove"); tone: "danger"; clicked => { root.remove-java-runtime(root.pending-action-id); root.modal = ""; root.modal-error = ""; } } } }
                 if root.modal == "mod-clash" && root.mod-clash-index < root.mod-clashes.length : VerticalLayout { spacing: 14px; BodyText { text: GuiI18n.value("gui-mod-clash-detail", root.mod-clashes[root.mod-clash-index].file-name); wrap: word-wrap; } if root.mod-clashes[root.mod-clash-index].existing-is-disabled : BodyText { text: GuiI18n.text("gui-mod-clash-disabled"); color: Theme.warning; wrap: word-wrap; } if root.mod-clashes[root.mod-clash-index].existing-is-recorded : BodyText { text: GuiI18n.text("gui-mod-clash-recorded"); color: Theme.warning; wrap: word-wrap; } if root.mod-clashes.length > 1 : BodyText { text: GuiI18n.values("gui-mod-clash-progress", root.mod-clash-index + 1, root.mod-clashes.length); color: Theme.text-muted; font-size: Theme.caption-size; } ActionRow { AppButton { text: GuiI18n.text("gui-skip-all"); clicked => { root.resolve-mod-clash("skip-all"); } } AppButton { text: GuiI18n.text("gui-overwrite-all"); clicked => { root.resolve-mod-clash("overwrite-all"); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-skip"); clicked => { root.resolve-mod-clash("skip"); } } AppButton { text: GuiI18n.text("gui-overwrite"); tone: "primary"; clicked => { root.resolve-mod-clash("overwrite"); } } } }
                 if root.modal == "pane-host" : VerticalLayout { spacing: 12px;

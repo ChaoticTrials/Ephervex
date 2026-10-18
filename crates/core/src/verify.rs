@@ -156,12 +156,15 @@ impl VerificationReport {
 /// a store every instance shares, is addressed by a Maven coordinate rather
 /// than by its digest, and is therefore the one class of managed artifact that
 /// nothing re-checks once it is written.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SharedArtifactReport {
     /// Nothing could be checked, because no metadata for this release is
     /// cached. Not a fault: nothing has asked about the version yet.
     pub metadata_cached: bool,
     pub files: Vec<VerifiedFile>,
+    /// Where each checked file is stored, by the name it is listed under in
+    /// `files`. What makes a damaged file something a person can find.
+    pub locations: std::collections::BTreeMap<PathBuf, PathBuf>,
     /// Whether a loader adds libraries this pass did not cover.
     ///
     /// Vanilla's own artifacts are planned from the release's metadata, which
@@ -187,6 +190,12 @@ impl SharedArtifactReport {
             .files
             .iter()
             .any(|file| matches!(file.integrity, Integrity::Corrupt | Integrity::Unreadable))
+    }
+
+    /// Where `file` is stored, when the report knows.
+    #[must_use]
+    pub fn location_of(&self, file: &VerifiedFile) -> Option<&Path> {
+        self.locations.get(&file.logical_path).map(PathBuf::as_path)
     }
 
     /// The files whose bytes are wrong.
@@ -406,6 +415,7 @@ impl App {
             return Ok(SharedArtifactReport {
                 metadata_cached: false,
                 files: Vec::new(),
+                locations: std::collections::BTreeMap::new(),
                 loader_libraries_uncovered,
             });
         };
@@ -434,7 +444,9 @@ impl App {
         }
 
         let mut files = Vec::with_capacity(planned.len());
+        let mut locations = std::collections::BTreeMap::new();
         for artifact in planned {
+            locations.insert(PathBuf::from(&artifact.label), artifact.path.clone());
             files.push(VerifiedFile {
                 logical_path: PathBuf::from(&artifact.label),
                 integrity: check(
@@ -459,6 +471,7 @@ impl App {
         Ok(SharedArtifactReport {
             metadata_cached: true,
             files,
+            locations,
             loader_libraries_uncovered,
         })
     }
@@ -852,7 +865,7 @@ pub(crate) fn is_put_aside(put_aside_dir: &Path, file: &ephervex_pack::PackFileR
 }
 
 /// What one file on disk is, against the digests recorded for it.
-async fn check(path: &Path, expected: &[Hash]) -> Integrity {
+pub(crate) async fn check(path: &Path, expected: &[Hash]) -> Integrity {
     // A disabled jar is installed and recorded; it is renamed out of the
     // loader's way, and verifying it is still verifying the instance.
     let path = if path.is_file() {
@@ -905,6 +918,46 @@ mod tests {
             !report.loader_libraries_uncovered,
             "a vanilla client has no loader libraries to leave uncovered"
         );
+    }
+
+    #[tokio::test]
+    async fn a_damaged_shared_file_is_reported_with_the_path_it_is_stored_at() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = App::open_at(Paths::rooted_at(base.path())).expect("app");
+        crate::test_fixtures::seed_minecraft(app.paths().cache_dir()).await;
+        let client = app
+            .create_client_for_test(NewClient::new(
+                "shared",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("client");
+
+        let first = app
+            .verify_shared_artifacts(client.id)
+            .await
+            .expect("report");
+        let library = first
+            .files
+            .iter()
+            .find(|file| file.logical_path.to_string_lossy().contains(':'))
+            .expect("a library");
+        let stored_at = first
+            .location_of(library)
+            .expect("every checked file has a location")
+            .to_path_buf();
+        assert!(stored_at.starts_with(app.paths().cache_dir().join("libraries")));
+        std::fs::create_dir_all(stored_at.parent().unwrap()).unwrap();
+        std::fs::write(&stored_at, b"bit rot").unwrap();
+
+        let second = app
+            .verify_shared_artifacts(client.id)
+            .await
+            .expect("report");
+
+        let fault = second.faults().next().expect("the damaged library");
+        assert_eq!(fault.logical_path, library.logical_path);
+        assert_eq!(second.location_of(fault), Some(stored_at.as_path()));
     }
 
     #[test]
@@ -1705,6 +1758,7 @@ mod tests {
                 },
             ],
             loader_libraries_uncovered: false,
+            ..SharedArtifactReport::default()
         };
         assert!(report.is_sound());
         assert_eq!(report.not_yet_fetched().count(), 1);

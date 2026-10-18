@@ -660,7 +660,12 @@ fn files_card(kind: &FindingKind, on_server: bool) -> Card {
             );
             card.files = files
                 .iter()
-                .map(|path| path.display().to_string())
+                .map(|file| match &file.stored_at {
+                    Some(stored_at) => {
+                        format!("{} ({})", file.name.display(), stored_at.display())
+                    }
+                    None => file.name.display().to_string(),
+                })
                 .collect();
             card
         }
@@ -1698,6 +1703,7 @@ mod tests {
                     })
                     .collect(),
                 loader_libraries_uncovered,
+                ..ephervex_core::SharedArtifactReport::default()
             })),
         };
         integrity_checks(Some(&check), &|error| error.to_string())

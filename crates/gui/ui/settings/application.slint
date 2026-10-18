@@ -3,7 +3,7 @@
 import { AppButton, BusySpinner, Pill, TextField } from "../components/controls.slint";
 import { BodyText, Divider, Heading, SectionTitle } from "../components/text.slint";
 import { GuiI18n } from "../globals.slint";
-import { DiskUsageRow } from "../models.slint";
+import { DiskUsageRow, StorageGroupRow } from "../models.slint";
 import { Theme } from "../theme.slint";
 
 // One setting that ships with a default somebody may replace: what they
@@ -46,9 +46,33 @@ export component DiskUsagePanel inherits VerticalLayout {
     in property <bool> incomplete;
     in property <string> incomplete-text;
     in property <[string]> unreadable;
+    // The totals above no longer describe the disk, because maintenance
+    // changed it since they were measured.
+    in property <bool> stale;
+    // What maintenance is doing: "", "inspect", "verify", "recover", "plan", or
+    // "clean".
+    in property <string> maintenance-busy;
+    in property <string> maintenance-progress;
+    in property <bool> maintenance-inspected;
+    in property <string> maintenance-headline;
+    in property <string> maintenance-hosts;
+    in property <bool> maintenance-incomplete;
+    in property <[StorageGroupRow]> maintenance-groups;
+    in property <bool> maintenance-checked;
+    in property <string> maintenance-integrity;
+    in property <[string]> maintenance-faults;
+    in property <[string]> maintenance-unchecked;
+    in property <bool> maintenance-can-recover;
+    // What the last recovery or cleanup did, one fact a line.
+    in property <[string]> maintenance-result;
     callback refresh();
     callback stop();
     callback open-location(string, int);
+    callback inspect();
+    callback verify();
+    callback recover();
+    callback review();
+    callback stop-maintenance();
     // The same four tokens, in the same order, on the stacked bar and in
     // the legend beside it, which also names each part in words.
     function retention-color(id: string) -> color {
@@ -70,7 +94,7 @@ export component DiskUsagePanel inherits VerticalLayout {
         BusySpinner { width: 16px; height: 16px; }
         BodyText { text: root.progress != "" ? root.progress : GuiI18n.text("gui-disk-usage-measuring"); horizontal-stretch: 1; wrap: word-wrap; }
     }
-    if root.state == "idle" : BodyText { text: GuiI18n.text("gui-disk-usage-idle"); color: Theme.text-muted; wrap: word-wrap; }
+    if root.state == "idle" : BodyText { text: root.stale ? GuiI18n.text("gui-disk-usage-stale") : GuiI18n.text("gui-disk-usage-idle"); color: root.stale ? Theme.warning : Theme.text-muted; wrap: word-wrap; }
     if root.state == "measured" : VerticalLayout {
         spacing: 14px;
         HorizontalLayout {
@@ -147,4 +171,70 @@ export component DiskUsagePanel inherits VerticalLayout {
             }
         }
     }
+    // Maintenance of the shared, regenerable stores. Reachable whether or not a
+    // measurement exists: it reads the stores and the hosts, not the totals.
+    Divider { }
+    SectionTitle { title: GuiI18n.text("gui-storage-maintenance-title"); detail: GuiI18n.text("gui-storage-maintenance-detail"); }
+    HorizontalLayout {
+        spacing: 10px;
+        AppButton { text: root.maintenance-inspected ? GuiI18n.text("gui-storage-inspect-again") : GuiI18n.text("gui-storage-inspect"); enabled: root.maintenance-busy == ""; hint: GuiI18n.text("gui-storage-busy-hint"); clicked => { root.inspect(); } }
+        AppButton { text: GuiI18n.text("gui-storage-verify"); enabled: root.maintenance-busy == ""; hint: GuiI18n.text("gui-storage-busy-hint"); clicked => { root.verify(); } }
+        Rectangle { horizontal-stretch: 1; }
+    }
+    HorizontalLayout {
+        spacing: 10px;
+        AppButton { text: GuiI18n.text("gui-storage-recover"); enabled: root.maintenance-busy == "" && root.maintenance-can-recover; hint: root.maintenance-busy != "" ? GuiI18n.text("gui-storage-busy-hint") : GuiI18n.text("gui-storage-recover-hint"); clicked => { root.recover(); } }
+        AppButton { text: GuiI18n.text("gui-storage-preview-cleanup"); tone: "primary"; enabled: root.maintenance-busy == ""; hint: GuiI18n.text("gui-storage-busy-hint"); clicked => { root.review(); } }
+        Rectangle { horizontal-stretch: 1; }
+    }
+    if root.maintenance-busy != "" : HorizontalLayout {
+        spacing: 8px;
+        BusySpinner { width: 16px; height: 16px; }
+        BodyText { text: root.maintenance-progress != "" ? root.maintenance-progress : GuiI18n.text("gui-storage-working"); horizontal-stretch: 1; wrap: word-wrap; }
+        AppButton { text: GuiI18n.text("gui-storage-stop"); clicked => { root.stop-maintenance(); } }
+    }
+    if root.maintenance-result.length > 0 : Rectangle {
+        border-radius: 7px;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: Theme.surface;
+        height: result-body.preferred-height;
+        result-body := VerticalLayout {
+            padding: 12px;
+            spacing: 4px;
+            for line in root.maintenance-result : BodyText { text: line; wrap: word-wrap; }
+        }
+    }
+    if !root.maintenance-inspected && !root.maintenance-checked && root.maintenance-busy == "" : BodyText { text: GuiI18n.text("gui-storage-idle"); color: Theme.text-muted; wrap: word-wrap; }
+    if root.maintenance-inspected : VerticalLayout {
+        spacing: 10px;
+        Heading { text: root.maintenance-headline; }
+        BodyText { text: root.maintenance-hosts; color: Theme.text-muted; wrap: word-wrap; }
+        if root.maintenance-incomplete : BodyText { text: GuiI18n.text("gui-storage-incomplete"); color: Theme.warning; wrap: word-wrap; }
+        for group in root.maintenance-groups : Rectangle {
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Theme.border;
+            background: Theme.surface;
+            height: group-body.preferred-height;
+            group-body := VerticalLayout {
+                padding: 12px;
+                spacing: 4px;
+                HorizontalLayout {
+                    spacing: 10px;
+                    Heading { text: group.label; font-size: Theme.row-heading-size; horizontal-stretch: 1; }
+                    BodyText { text: group.size; vertical-alignment: center; }
+                }
+                BodyText { text: group.detail; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
+                for line in group.lines : BodyText { text: line; color: Theme.text-secondary; wrap: word-wrap; }
+            }
+        }
+    }
+    if root.maintenance-checked : VerticalLayout {
+        spacing: 6px;
+        Heading { text: root.maintenance-integrity; font-size: Theme.row-heading-size; wrap: word-wrap; }
+        for fault in root.maintenance-faults : BodyText { text: fault; color: Theme.warning; font-size: Theme.caption-size; wrap: word-wrap; }
+        for note in root.maintenance-unchecked : BodyText { text: note; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
+    }
+
 }

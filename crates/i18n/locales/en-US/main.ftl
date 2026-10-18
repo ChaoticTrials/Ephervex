@@ -1450,7 +1450,7 @@ gui-integrity-repair-second-copies = { $count ->
 gui-integrity-repair-second-copy = { $path }: { $existing } already provides mod id { $mod_id }
 gui-integrity-recovery = A broken file could not be put back after its repair failed. What was moved aside is kept here for review, and this host needs attention before it is changed again:
 gui-integrity-shared-title = Shared launch files
-gui-integrity-shared-detail = The Minecraft client JAR and libraries every instance of this release shares. Repair does not replace these.
+gui-integrity-shared-detail = The Minecraft client JAR and libraries every instance of this release shares, shown with where each is stored. Repair does not replace these. Disk usage in Settings can check them and fetch damaged ones again.
 gui-integrity-shared-not-cached = Not checked: this Minecraft release has not been launched yet, so there is nothing cached to check against.
 gui-integrity-shared-sound = { $count ->
     [one] One shared file checked, and it is intact.
@@ -3227,7 +3227,6 @@ gui-hint-no-suggested-mods = No mods are suggested for disabling.
 gui-hint-no-unsaved-changes = There are no unsaved changes.
 gui-hint-nothing-to-save = There are no changes to save, or a value has to be corrected first.
 gui-hint-enter-api-key = Enter an API key first.
-gui-hint-cache-clearing = The cache is already being cleared.
 gui-hint-measure-running = Measuring is already running.
 gui-hint-minecraft-list-unavailable = The Minecraft version list has not loaded yet.
 gui-hint-choose-minecraft-release = Choose a Minecraft release first.
@@ -3285,7 +3284,7 @@ gui-watched-download-folders-empty = No folders configured. Ephervex watches you
 gui-add-watched-folder = Add Folder
 gui-choose-watched-folder = Choose a folder to watch
 gui-artifact-cache = Reusable artifact cache
-gui-artifact-cache-detail = Downloaded mods, pack files, loader installers, and runtime archives are kept so importing the same pack twice costs no network. Instances and servers own their own copies, so clearing this only costs a re-download.
+gui-artifact-cache-detail = Downloaded mods, pack files, loader installers, and runtime archives are kept so importing the same pack twice costs no network. Instances and servers own their own copies, so removing an entry only costs a re-download.
 gui-artifact-cache-usage = { $first } of { $second } used
 gui-artifact-cache-usage-approximate = at least { $first } of { $second } used
 gui-artifact-cache-limit = Limit
@@ -3295,11 +3294,6 @@ gui-artifact-cache-custom = Custom
 gui-artifact-cache-custom-value = Size
 gui-artifact-cache-over-budget = OVER BUDGET
 gui-artifact-cache-cleanup-note = When usage passes the limit, the oldest downloads are removed until about four fifths of the limit is in use. Downloads in progress and artifacts an operation is still using are never removed.
-gui-clear-artifact-cache = Clear Reusable Cache
-gui-clearing-artifact-cache = Clearing the reusable artifact cache...
-gui-artifact-cache-cleared = Freed { $value } from the reusable artifact cache.
-gui-artifact-cache-cleared-partly = Freed { $value }; { $remaining } could not be removed and is still cached.
-gui-artifact-cache-already-empty = The reusable artifact cache is already empty.
 gui-artifact-cache-limit-saved = Saved the reusable artifact cache limit.
 gui-save-artifact-cache-limit = Save Limit
 gui-logo-accessible = Ephervex application logo
@@ -3504,7 +3498,7 @@ gui-launcher-bundle-title = Launcher log
 gui-launcher-bundle-detail = Collects Ephervex's own log into one zip file. A problem with a client or server often starts here, so attach it beside that host's bundle.
 gui-launcher-bundle-empty = Ephervex has not written a log yet.
 gui-disk-usage-title = Storage
-gui-disk-usage-detail = Measures Ephervex's instances, servers, caches, and records. Nothing is deleted or changed.
+gui-disk-usage-detail = Measures Ephervex's instances, servers, caches, and records. Measuring never deletes or changes anything.
 gui-disk-usage-metric = Sizes are the files' own lengths. Copy-on-write snapshots and sparse files can take up less actual disk space than shown. A file with several hard links is counted once, and linked folders are not followed.
 gui-disk-usage-measure = Measure
 gui-disk-usage-refresh = Measure again
@@ -3554,6 +3548,148 @@ gui-disk-usage-recovery = Recovery state
 gui-disk-usage-recovery-detail = Files moved aside, files still arriving, and snapshot-restore journals that interrupted changes left inside hosts. Kept for review.
 gui-disk-usage-other = Other
 gui-disk-usage-other-detail = Anything else in Ephervex's directories.
+gui-disk-usage-stale = Storage changed since it was last measured. Measure again to see current sizes.
+operation-inspecting-storage = Inspecting reclaimable storage
+operation-verifying-storage = Checking shared files
+operation-recovering-storage = Fetching damaged files again
+operation-planning-storage-cleanup = Planning a storage cleanup
+operation-cleaning-storage = Cleaning up storage
+gui-storage-maintenance-title = Maintenance
+gui-storage-maintenance-detail = Looks at the files Ephervex downloaded and shares between instances and servers. Nothing is removed until you review a list and confirm it. Everything inside an instance or server, such as worlds, mods, configuration, snapshots, and recovery files, is never touched.
+gui-storage-inspect = Inspect
+gui-storage-inspect-again = Inspect Again
+gui-storage-verify = Check Integrity
+gui-storage-recover = Fetch Damaged Files Again
+gui-storage-preview-cleanup = Review Cleanup...
+gui-storage-stop = Stop
+gui-storage-working = Working...
+gui-storage-busy-hint = Another maintenance step is running. Wait for it to finish, or stop it.
+gui-storage-recover-hint = No damaged files that an instance needs were found. Check integrity first.
+gui-storage-idle = Not inspected yet. Inspecting reads the shared folders and what your instances and servers need from them.
+gui-storage-reclaimable = { $value } can be reclaimed
+gui-storage-nothing-reclaimable = Nothing can be reclaimed right now
+gui-storage-hosts = Based on { $clients ->
+    [one] 1 instance
+   *[other] { $clients } instances
+} and { $servers ->
+    [one] 1 server
+   *[other] { $servers } servers
+}, inspected at { $value }.
+gui-storage-incomplete = Some folders could not be read, so these sizes are lower bounds.
+gui-storage-kind-downloaded-files = Downloaded files
+gui-storage-kind-downloaded-files-detail = Game jars and logging settings, pack files, and runtime archives. Shared by every instance and server.
+gui-storage-kind-installer-files = Loader installers
+gui-storage-kind-installer-files-detail = The installers Forge and NeoForge are set up with. Shared by every instance and server.
+gui-storage-kind-asset-objects = Game assets
+gui-storage-kind-asset-objects-detail = Sounds, textures, and language files Minecraft loads by hash. Shared by every instance.
+gui-storage-kind-asset-indexes = Asset indexes
+gui-storage-kind-asset-indexes-detail = The lists that tell each game version which assets it uses. Shared by every instance.
+gui-storage-kind-libraries = Libraries
+gui-storage-kind-libraries-detail = The jars the game and its loaders run with. Shared by every instance and server.
+gui-storage-kind-unpacked-natives = Unpacked natives
+gui-storage-kind-unpacked-natives-detail = Native code unpacked for older game versions. Shared by every instance.
+gui-storage-line-required = In use by an instance: { $value }
+gui-storage-line-unused = Not needed by any instance or server: { $value }
+gui-storage-line-withheld = Kept: { $value }, because { $reason }
+gui-storage-withheld-loader = a Forge or NeoForge instance or server needs libraries and installers that Ephervex does not list per host
+gui-storage-withheld-unknown = what an instance needs could not be read, so nothing is judged unused
+gui-storage-withheld-linked = the file is also linked inside an instance or server, so removing it frees no space
+gui-storage-integrity-sound = { $count ->
+    [one] 1 file checked, and it is intact.
+   *[other] { $count } files checked, and all are intact.
+}
+gui-storage-integrity-faults = { $count ->
+    [one] 1 file is damaged or missing.
+   *[other] { $count } files are damaged or missing.
+}
+gui-storage-fault-corrupt = damaged
+gui-storage-fault-missing = missing
+gui-storage-fault-unreadable = unreadable
+gui-storage-fault-needed = { $path } ({ $state }), needed by an installed game version
+gui-storage-fault-unneeded = { $path } ({ $state }), not needed by anything; a cleanup removes it
+gui-storage-fault-kept = { $path } ({ $state }), kept by a cleanup because { $reason }
+gui-storage-faults-more = { $count ->
+    [one] And 1 more.
+   *[other] And { $count } more.
+}
+gui-storage-unchecked-natives = Unpacked natives were not checked: nothing records what their files should contain.
+gui-storage-unchecked-loader = Loader libraries were not checked: Ephervex does not read a loader's own file lists. Installer files check themselves.
+gui-storage-unchecked-version = Not checked: no version information for { $version } has been downloaded yet, so what it needs is not listed.
+gui-storage-unchecked-libraries = { $count ->
+    [one] 1 library file was not checked: no installed game version lists it, so no digest is recorded for it.
+   *[other] { $count } library files were not checked: no installed game version lists them, so no digests are recorded for them.
+}
+gui-storage-recovery-recovered = { $count ->
+    [one] 1 file was fetched again and verified.
+   *[other] { $count } files were fetched again and verified.
+}
+gui-storage-recovery-nothing = No damaged file that an installed game version needs was found.
+gui-storage-recovery-still-damaged = { $count ->
+    [one] 1 file is still damaged or missing.
+   *[other] { $count } files are still damaged or missing.
+}
+gui-storage-recovery-failure = Minecraft { $version }: { $detail }
+gui-storage-recovery-leftover = { $count ->
+    [one] 1 damaged file that nothing needs was left for a cleanup to remove.
+   *[other] { $count } damaged files that nothing needs were left for a cleanup to remove.
+}
+gui-storage-recovery-kept = { $count ->
+    [one] 1 damaged file that a cleanup keeps was left in place.
+   *[other] { $count } damaged files that a cleanup keeps were left in place.
+}
+gui-storage-recovery-canceled = Stopped before every game version was handled.
+gui-storage-cleanup-title = Review Storage Cleanup
+gui-storage-cleanup-summary = { $count ->
+    [one] 1 item would be removed, freeing up to { $value }.
+   *[other] { $count } items would be removed, freeing up to { $value }.
+}
+gui-storage-cleanup-empty = Nothing can be removed. Everything in the shared folders is either needed by an instance or server, or kept for a reason listed below.
+gui-storage-cleanup-item = { $count ->
+    [one] 1 item
+   *[other] { $count } items
+}, { $value }
+gui-storage-cleanup-largest = Largest: { $value }
+gui-storage-why-downloaded-files = No instance's game version needs it. It is downloaded again when something asks for it.
+gui-storage-why-installer-files = No instance or server runs a loader, so no installer is needed. It is downloaded again when one is.
+gui-storage-why-asset-objects = No instance's game version lists it. It is downloaded again when a version that does is launched.
+gui-storage-why-asset-indexes = No instance's game version uses it. It is copied again when needed.
+gui-storage-why-libraries = No instance's game version lists it, and no instance or server runs a loader. It is downloaded again when needed.
+gui-storage-why-unpacked-natives = No instance's game version uses it. It is unpacked again when needed.
+gui-storage-cleanup-kept = Kept
+gui-storage-kept-required = { $kind }: { $value } in use by an instance
+gui-storage-kept-withheld = { $kind }: { $value }, because { $reason }
+gui-storage-cleanup-protected = Instances, servers, worlds, mods, configuration, snapshots, and recovery files are never part of this cleanup.
+gui-storage-cleanup-incomplete = Some folders could not be read, so more may be removable than is listed.
+gui-storage-cleanup-confirm = Remove { $value }
+gui-storage-cleanup-removed = Removed { $count ->
+    [one] 1 item
+   *[other] { $count } items
+} and freed { $value }.
+gui-storage-cleanup-partial = Removed { $count ->
+    [one] 1 item
+   *[other] { $count } items
+} and freed { $value } of the { $planned } planned.
+gui-storage-cleanup-nothing-removed = Nothing was removed.
+gui-storage-cleanup-failed = { $count ->
+    [one] 1 item could not be removed and is still on disk.
+   *[other] { $count } items could not be removed and are still on disk.
+}
+gui-storage-cleanup-failure-line = { $path }: { $cause }
+gui-storage-cleanup-skipped = { $count ->
+    [one] 1 item was no longer unused when the cleanup ran, so it was kept.
+   *[other] { $count } items were no longer unused when the cleanup ran, so they were kept.
+}
+gui-storage-cleanup-gone = { $count ->
+    [one] 1 item was already gone.
+   *[other] { $count } items were already gone.
+}
+gui-storage-cleanup-not-reached = { $count ->
+    [one] 1 item was not reached because the cleanup was stopped.
+   *[other] { $count } items were not reached because the cleanup was stopped.
+}
+gui-storage-cleanup-retry = Reviewing the cleanup again is safe: it plans from what is on disk and in use at that moment.
+gui-storage-cleanup-outdated = That review is out of date. Review the cleanup again.
+gui-review-storage-cleanup = Review Storage Cleanup...
 gui-activity-restarting = Restarting
 gui-restart-stage-stopping = Stopping, to start it again once it has stopped
 gui-restart-stage-starting = Stopped. Starting it again

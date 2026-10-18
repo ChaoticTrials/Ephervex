@@ -451,7 +451,7 @@ fn collect_abandoned_workspaces(layout: &CacheLayout) {
 /// Everything in this module is `stat`, `readdir`, `unlink`, and a blocking
 /// `flock`, none of which has a useful asynchronous form; doing it on a blocking
 /// thread is what keeps a collection from stalling a progress bar.
-async fn blocking<T, F>(work: F) -> Result<T, ArtifactCacheError>
+pub(crate) async fn blocking<T, F>(work: F) -> Result<T, ArtifactCacheError>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T, ArtifactCacheError> + Send + 'static,
@@ -467,7 +467,7 @@ where
 
 /// Which side of the maintenance lock is wanted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Exclusivity {
+pub(crate) enum Exclusivity {
     /// Any number of operations may hold this at once; it only excludes
     /// maintenance.
     Shared,
@@ -709,7 +709,7 @@ fn prune_empty_shard(entry: &Path) {
 }
 
 /// Lists a directory. `Ok(None)` means it does not exist.
-fn read_directory(path: &Path) -> std::io::Result<Option<Vec<PathBuf>>> {
+pub(crate) fn read_directory(path: &Path) -> std::io::Result<Option<Vec<PathBuf>>> {
     let entries = match std::fs::read_dir(path) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -723,7 +723,7 @@ fn read_directory(path: &Path) -> std::io::Result<Option<Vec<PathBuf>>> {
 }
 
 /// The name of `path`, if it is a real directory rather than a link or a file.
-fn directory_name(path: &Path, report: &mut ArtifactCacheMaintenance) -> Option<String> {
+pub(crate) fn directory_name(path: &Path, report: &mut ArtifactCacheMaintenance) -> Option<String> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(source) => {
@@ -741,7 +741,7 @@ fn directory_name(path: &Path, report: &mut ArtifactCacheMaintenance) -> Option<
         .map(str::to_owned)
 }
 
-fn note_listing_failure(
+pub(crate) fn note_listing_failure(
     path: &Path,
     error: &std::io::Error,
     report: &mut ArtifactCacheMaintenance,
@@ -755,7 +755,7 @@ fn note_listing_failure(
     });
 }
 
-fn note_entry_failure(
+pub(crate) fn note_entry_failure(
     path: &Path,
     stage: MaintenanceStage,
     error: &std::io::Error,
@@ -783,7 +783,7 @@ fn note_entry_failure(
     clippy::unnecessary_wraps,
     reason = "the platform without an identity to report is the other branch"
 )]
-fn file_identity(metadata: &Metadata) -> Option<(u64, u64)> {
+pub(crate) fn file_identity(metadata: &Metadata) -> Option<(u64, u64)> {
     use std::os::unix::fs::MetadataExt as _;
     Some((metadata.dev(), metadata.ino()))
 }
@@ -805,7 +805,10 @@ fn file_identity(_metadata: &Metadata) -> Option<(u64, u64)> {
 /// operation that still holds its own shared lease has to fail fast rather than
 /// wait for itself.
 #[cfg(unix)]
-fn lock(path: &Path, exclusivity: Exclusivity) -> Result<Option<File>, ArtifactCacheError> {
+pub(crate) fn lock(
+    path: &Path,
+    exclusivity: Exclusivity,
+) -> Result<Option<File>, ArtifactCacheError> {
     use rustix::fs::{FlockOperation, flock};
 
     let unusable = |source: std::io::Error| ArtifactCacheError::LockUnusable {
@@ -838,7 +841,7 @@ fn lock(path: &Path, exclusivity: Exclusivity) -> Result<Option<File>, ArtifactC
 
 /// Takes the exclusive side, waiting out a holder that is not a lease of this
 /// process for up to [`FOREIGN_HOLDER_GRACE`].
-fn lock_exclusively(path: &Path) -> Result<Option<File>, ArtifactCacheError> {
+pub(crate) fn lock_exclusively(path: &Path) -> Result<Option<File>, ArtifactCacheError> {
     let deadline = Instant::now() + FOREIGN_HOLDER_GRACE;
     loop {
         match lock(path, Exclusivity::Exclusive) {
@@ -861,7 +864,10 @@ fn is_contention(errno: rustix::io::Errno) -> bool {
 /// against a second process, so collection is refused and ordinary operations
 /// carry on unaffected.
 #[cfg(not(unix))]
-fn lock(path: &Path, exclusivity: Exclusivity) -> Result<Option<File>, ArtifactCacheError> {
+pub(crate) fn lock(
+    path: &Path,
+    exclusivity: Exclusivity,
+) -> Result<Option<File>, ArtifactCacheError> {
     match exclusivity {
         Exclusivity::Shared => Ok(None),
         Exclusivity::Exclusive => Err(ArtifactCacheError::LockUnusable {

@@ -52,6 +52,18 @@ pub fn commit_client_without_index(
     app.commit_client_without_index_for_test(id, change)
 }
 
+/// A storage cleanup plan with these items, as a frontend shows one for review.
+///
+/// It lists what it was given and removes nothing: a plan core makes carries
+/// the entries behind its items, and a frontend test has none to give.
+pub fn cleanup_plan_for_review(
+    items: Vec<crate::CleanupItem>,
+    kept: Vec<crate::KeptStorage>,
+    complete: bool,
+) -> crate::CleanupPlan {
+    crate::CleanupPlan::for_review_tests(items, kept, complete)
+}
+
 /// Replaces an app's Java inventory with these runtimes, as if a scan had
 /// found exactly them. A later refresh scans the machine again.
 pub fn use_java_inventory(app: &App, runtimes: Vec<JavaRuntime>) {

@@ -641,8 +641,8 @@ empty cache.
 
 Core measures what Ephervex's own roots hold: the persistent and temporary
 instance and server roots, and the cache, data, state, config, and temporary
-roots. It reads the file system and changes nothing; the view built on it
-offers no cleanup.
+roots. Measuring reads the file system and changes nothing; reclaiming space
+is the separate maintenance operations below.
 
 Every figure is the apparent size of regular files, the length each reports.
 It is the one number that is exact on every filesystem, and it overstates
@@ -683,6 +683,27 @@ files it has counted. A result is a snapshot with the time it was taken, and
 Measure again takes a new one rather than anything tracking later changes. The
 page shows the total, a bar and a legend splitting it by retention class, and
 every category with its size in words beside its bar, largest first.
+
+### Storage maintenance
+
+Below the measurement, the same page maintains the shared, regenerable stores
+under the cache root (ADR 0053). Inspect lists each kind of entry (downloads,
+installers, asset objects and indexes, libraries, unpacked natives) split into
+what an installed client's game version names, what nothing names, and what is
+kept anyway with the reason. Nothing is judged unused from age. A Forge or
+NeoForge host keeps libraries and installers, and an unreadable version record
+keeps everything.
+
+Check Integrity compares entries named by their digest, and the files an
+installed version's metadata lists, with those digests, and says what it could
+not cover. Fetch Damaged Files Again re-downloads only the damaged or missing
+files an installed version needs, through the ordinary download path, and
+checks again afterwards. Review Cleanup shows the plan: kinds, counts, sizes,
+why each is disposable, and what stays. Only its confirmation applies it, under
+the exclusive cache lock, deciding again from the references at that moment.
+Instances, servers, mods, worlds, configuration, snapshots, and recovery state
+are never part of it. After a cleanup or recovery the measurement above is
+marked out of date.
 
 ## Dedicated-server data flow
 
