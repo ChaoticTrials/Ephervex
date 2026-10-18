@@ -174,6 +174,29 @@ fn a_put_aside_file_is_named_and_not_called_intact() {
 }
 
 #[test]
+fn mod_delete_help_says_a_repair_leaves_the_jar_aside() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.run(&["mod", "delete", "--help"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let help = String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        help.contains("a repair leaves it aside"),
+        "the help does not say what a repair does with it: {help}"
+    );
+    assert!(
+        !help.contains("a repair fetches it again"),
+        "the help says a repair brings the jar back: {help}"
+    );
+}
+
+#[test]
 fn shared_files_not_downloaded_yet_are_not_counted_as_checked() {
     let sandbox = Sandbox::new();
     let id = sandbox.instance_with_an_unproven_jar();

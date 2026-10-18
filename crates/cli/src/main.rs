@@ -510,6 +510,9 @@ enum ModCommand {
     /// back: re-import the pack for a client, or put the file back in the
     /// server folder by hand.
     ///
+    /// A mod put aside with `ephervex mod delete` stays aside: a repair only
+    /// replaces what is missing or wrong, and a deleted mod is neither.
+    ///
     /// Refused while the host is running or an isolation session is active.
     Repair {
         #[command(flatten)]
@@ -558,10 +561,14 @@ enum ModCommand {
     /// Take a mod's jar off disk, keeping the record that wants it.
     ///
     /// Not the same as removing it. The instance still says it should have
-    /// this mod, so the row offers to put it back, a server built from this
-    /// recipe still contains it, and a repair fetches it again. What changes
-    /// is that the loader cannot see it, which is how a crash gets bisected
-    /// down to one jar.
+    /// this mod, so a server built from this recipe still contains it. The
+    /// jar is put aside and kept, and a repair leaves it aside rather than
+    /// fetching it again; the desktop application's mod list and Diagnostics
+    /// put it back. What changes is that the loader cannot see it, which is
+    /// how a crash gets bisected down to one jar.
+    ///
+    /// A jar placed in the mods folder by hand has no record to keep, so
+    /// deleting it is permanent.
     ///
     /// If other mods need this one, their jars go too, because leaving them
     /// installed and unable to load is the state worth avoiding. Ephervex names
