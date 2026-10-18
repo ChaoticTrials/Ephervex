@@ -32,8 +32,17 @@
 //! would take it for the whole host once the source is gone. So a copy is made
 //! into a hidden directory beside the destination, flushed, and renamed into
 //! place in one step (ADR 0025).
+//!
+//! The flush covers exactly the files and directories the copy wrote, and runs
+//! on a bounded pool beside the copy, so its cost does not grow as one device
+//! round trip per entry. A filesystem-wide flush would also wait for every
+//! unrelated dirty page on the data root's filesystem, and its error reporting
+//! varies with the filesystem, so it is not used.
 
+use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use crate::removal::remove_tree_if_present;
 
@@ -51,6 +60,14 @@ pub(crate) struct RelocationReport {
 
 /// What a staging directory's name ends with.
 const STAGE_SUFFIX: &str = ".moving";
+
+/// Entries flushed at once. A device or network share overlaps many
+/// outstanding flushes far better than it serves them one at a time.
+const FLUSH_WORKERS: usize = 16;
+
+/// Entries copied but not yet picked up by a flush worker. Together with the
+/// workers this bounds the descriptors held open however many files a tree has.
+const FLUSH_QUEUE: usize = 64;
 
 /// Moves `source` to `destination`, keeping symlinks as symlinks.
 ///
@@ -207,11 +224,23 @@ fn remove_directories(path: &Path) -> std::io::Result<()> {
     std::fs::remove_dir(path)
 }
 
+/// Copies `source` into the new directory `destination` and flushes everything
+/// it wrote, returning only once all of it is durable.
 fn copy_into(
     source: &Path,
     destination: &Path,
     progress: &mut dyn FnMut(usize),
     report: &mut RelocationReport,
+) -> std::io::Result<()> {
+    flush_concurrently(|flusher| copy_entries(source, destination, progress, report, flusher))
+}
+
+fn copy_entries(
+    source: &Path,
+    destination: &Path,
+    progress: &mut dyn FnMut(usize),
+    report: &mut RelocationReport,
+    flusher: &Flusher<'_>,
 ) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -236,9 +265,9 @@ fn copy_into(
             std::os::unix::fs::symlink(std::fs::read_link(&from)?, &to)?;
             report.links += 1;
         } else if kind.is_dir() {
-            copy_into(&from, &to, progress, report)?;
+            copy_entries(&from, &to, progress, report, flusher)?;
         } else if kind.is_file() {
-            copy_file(&from, &to)?;
+            flusher.submit(copy_file(&from, &to)?)?;
             report.files += 1;
             progress(report.files);
         }
@@ -247,15 +276,17 @@ fn copy_into(
     }
     // Opened before the mode narrows, so even an unreadable directory flushes.
     // Flushed before the rename that publishes it, like every file in it.
-    let directory = std::fs::File::open(destination)?;
+    let directory = File::open(destination)?;
     directory.set_permissions(source_permissions)?;
-    directory.sync_all()
+    flusher.submit(directory)
 }
 
-fn copy_file(from: &Path, to: &Path) -> std::io::Result<()> {
+/// Copies one file and returns it, written and with its mode applied but not
+/// yet flushed.
+fn copy_file(from: &Path, to: &Path) -> std::io::Result<File> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
-    let mut input = std::fs::File::open(from)?;
+    let mut input = File::open(from)?;
     let permissions = input.metadata()?.permissions();
     // Created with the source's mode, so a private file is never readable by
     // others while it is copied.
@@ -267,7 +298,86 @@ fn copy_file(from: &Path, to: &Path) -> std::io::Result<()> {
     std::io::copy(&mut input, &mut output)?;
     // The mode above is narrowed by the umask; the source's is kept exactly.
     output.set_permissions(permissions)?;
-    output.sync_all()
+    Ok(output)
+}
+
+/// Hands written files and directories to the workers that flush them.
+struct Flusher<'a> {
+    queue: SyncSender<File>,
+    failure: &'a Mutex<Option<std::io::Error>>,
+}
+
+impl Flusher<'_> {
+    /// Queues `entry` to be flushed, waiting while the workers are saturated.
+    /// Refuses once any flush has failed, so a copy stops early; the flush's own
+    /// error is what `flush_concurrently` reports.
+    fn submit(&self, entry: File) -> std::io::Result<()> {
+        let refused = || std::io::Error::other("an earlier flush failed");
+        if lock(self.failure).is_some() {
+            return Err(refused());
+        }
+        self.queue.send(entry).map_err(|_| refused())
+    }
+}
+
+/// Runs `copy`, which submits what it writes, and returns once every submitted
+/// entry has been flushed. A flush failure is reported ahead of the copy's own
+/// error, because the copy only stopped because of it.
+fn flush_concurrently<T>(
+    copy: impl FnOnce(&Flusher<'_>) -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    let (queue, pending) = std::sync::mpsc::sync_channel(FLUSH_QUEUE);
+    let pending = Mutex::new(pending);
+    let failure = Mutex::new(None);
+    let (pending_ref, failure_ref) = (&pending, &failure);
+
+    let copied = std::thread::scope(move |scope| {
+        let mut workers = 0;
+        for _ in 0..FLUSH_WORKERS {
+            let spawned = std::thread::Builder::new()
+                .spawn_scoped(scope, move || flush_submitted(pending_ref, failure_ref));
+            match spawned {
+                Ok(_) => workers += 1,
+                // Fewer workers only slow the flush; none would block the copy.
+                Err(error) if workers == 0 => return Err(error),
+                Err(_) => break,
+            }
+        }
+        // Dropped on return, which closes the queue and lets the workers end.
+        let flusher = Flusher {
+            queue,
+            failure: failure_ref,
+        };
+        copy(&flusher)
+    });
+
+    match lock(&failure).take() {
+        Some(error) => Err(error),
+        None => copied,
+    }
+}
+
+/// A worker: flushes entries until the queue closes. After a failure it keeps
+/// draining without flushing, so the copy is never left blocked on a full queue.
+fn flush_submitted(pending: &Mutex<Receiver<File>>, failure: &Mutex<Option<std::io::Error>>) {
+    loop {
+        let received = lock(pending).recv();
+        let Ok(entry) = received else {
+            return;
+        };
+        if lock(failure).is_some() {
+            continue;
+        }
+        if let Err(error) = entry.sync_all() {
+            lock(failure).get_or_insert(error);
+        }
+    }
+}
+
+/// Locks `mutex`, treating a worker that panicked as no reason to lose the
+/// state, since every critical section here leaves it consistent.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 #[cfg(test)]
@@ -662,6 +772,67 @@ mod tests {
 
         assert!(!destination.exists());
         assert!(!stage_for(&destination).expect("stage").exists());
+    }
+
+    #[test]
+    fn a_tree_larger_than_the_flush_queue_and_workers_is_copied_and_flushed() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let source = base.path().join("source");
+        let destination = base.path().join("destination");
+        for directory in 0..30 {
+            for file in 0..60 {
+                write(
+                    &source.join(format!("d{directory}/f{file}.bin")),
+                    &format!("{directory}/{file}"),
+                );
+            }
+        }
+
+        force_copy(true);
+        let moved = relocate_tree(&source, &destination, &mut ignore_progress());
+        force_copy(false);
+
+        let report = moved.expect("a tree larger than the queue and the workers combined");
+        assert_eq!(report.files, 1800);
+        assert_eq!(report.directories, 31);
+        assert_eq!(
+            std::fs::read_to_string(destination.join("d29/f59.bin")).expect("read"),
+            "29/59"
+        );
+        assert!(!stage_for(&destination).expect("stage").exists());
+    }
+
+    #[test]
+    fn a_failed_flush_fails_the_copy_without_blocking_it() {
+        // Flushing a character device is refused, whatever the filesystem.
+        let result = flush_concurrently(|flusher| {
+            for _ in 0..10 * FLUSH_QUEUE {
+                flusher.submit(File::open("/dev/null")?)?;
+            }
+            Ok(())
+        });
+
+        let error = result.expect_err("a flush that fails is the copy's failure");
+        assert_ne!(
+            error.to_string(),
+            "an earlier flush failed",
+            "the flush's own error is reported, not the copy's refusal"
+        );
+    }
+
+    #[test]
+    fn a_flush_still_pending_when_the_copy_returns_is_awaited_and_reported() {
+        let base = tempfile::tempdir().expect("temp dir");
+        // The refused flush is the last entry and the copy returns at once, so
+        // only waiting for the workers can surface it.
+        let result = flush_concurrently(|flusher| {
+            for index in 0..3 * FLUSH_QUEUE {
+                flusher.submit(File::create(base.path().join(index.to_string()))?)?;
+            }
+            flusher.submit(File::open("/dev/null")?)
+        });
+
+        result.expect_err("a flush that fails after the copy finished is still reported");
     }
 
     #[test]
