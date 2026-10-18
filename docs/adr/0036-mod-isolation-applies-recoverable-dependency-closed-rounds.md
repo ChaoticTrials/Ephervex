@@ -55,10 +55,11 @@ together with the candidates that require it, stopped reproduction. Reaching
 zero or one candidate uses a confirmation round and reports only that the
 smallest testable candidate set was reached.
 
-One session belongs to one client or one server. A client session lists linked
-servers but never changes them. Missing required dependencies and refreshable
-but unrecorded dependency knowledge each require an explicit
-reduced-confidence acknowledgement. Unidentifiable jars cannot be refreshed,
+One session belongs to one client or one server. A client session lists its
+linked servers and changes only the installed ones its request names, as
+described below. Missing required dependencies and refreshable but unrecorded
+dependency knowledge each require an explicit reduced-confidence
+acknowledgement, and a named server's gaps count the same way. Unidentifiable jars cannot be refreshed,
 so they remain independent candidates and make the result reduced-confidence.
 
 The session is a compact version-1 document at
@@ -113,6 +114,41 @@ the desktop app changing one host's recipe take turns. A wait that cannot be
 canceled gives up after a few seconds behind another process instead of
 stalling a frontend. The linked mod plan marks a server with a session as
 blocked, so a confirmation never offers a change that applying would refuse.
+
+A client session can keep named linked servers in step with each round, so a
+problem that needs both sides is narrowed in one session. The session stores a
+plan for each such server. A server mod that was enabled follows the client mods
+of the same catalog project (the same jar name when neither records a project)
+that take part in the search, and is enabled exactly when the round enables one
+of them, together with everything its own mods require. Every other server mod
+stays as it was, takes no part in the search, and is named in the result as
+untested: one only the server has, one whose client mods take no part, and one
+the server had disabled. The server's configuration is therefore derived from the
+round, and the session document remains the one authority on every host it
+changes. Each server has its own safety snapshot, taken before any mod
+mutation, and the session records it.
+
+A named server is owned by the session. The client's session is the authority:
+it lists the server and holds the server's safety snapshot. A marker at
+`<server>/.launcher/isolation-leader.json` names the client, so ownership is
+found through the marker or through the server's link, and a marker left behind
+by an ended session changes nothing. An owned server refuses what a host with
+its own session refuses: mod changes, snapshot restore and deletion of its
+safety snapshot, linked mod operations, a session of its own, and deletion of
+the server. Starting it to test a round is allowed. Starting a session, and every
+operation that changes round state, also refuse while any named server is
+running. Resume and reconcile reapply both the client and the servers and write
+any missing marker. Cancel restores each server from its own snapshot, records
+that in the session, and then restores the client, so a cancel that fails
+partway never restores a server over what it has run since. Finish keeps every
+host on the outcome and retains every safety snapshot. While the session runs, a
+server whose folder cannot be reached is skipped for each operation and brought
+back in step once the folder returns. If the session ends first, cancel and
+finish still end it, skip that server, and name it with its safety snapshot, so
+the result never claims a server was restored or set to the outcome when it
+was not. Only a server the registry no longer has is released from the
+session. The session document is removed before the markers, because a marker
+without a session is inert.
 
 Deleting the safety snapshot is refused while its session is active. A session
 whose snapshot is already missing still ends: finish skips the dated label, and

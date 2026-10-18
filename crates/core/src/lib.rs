@@ -47,6 +47,7 @@ pub mod import;
 pub mod instance;
 pub mod instance_listing;
 pub mod isolation;
+mod isolation_servers;
 pub mod java_choices;
 pub mod java_failure;
 pub mod java_install;
@@ -149,6 +150,10 @@ pub use isolation::{
     IsolationReconciliation, IsolationReport, IsolationRequest, IsolationResultCandidate,
     IsolationRound, IsolationRoundKind, IsolationRoundRecord, IsolationSession, IsolationStep,
     RoundAnswer, RoundContradiction,
+};
+pub use isolation_servers::{
+    IsolationFollowedServer, IsolationLeader, IsolationServerConfiguration, IsolationServerMod,
+    IsolationServerPlan, IsolationServerResult, IsolationUnreachedServer,
 };
 pub use java_choices::{
     AutomaticJava, JavaChoice, JavaChoices, JavaPinIndex, JavaRuntimePins, LauncherJavaChoice,

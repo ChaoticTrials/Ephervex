@@ -85,6 +85,13 @@ pub const PUT_ASIDE_DIR: &str = "put-aside";
 /// The session names the host it began on and the safety snapshot it will
 /// restore, so it is meaningful to that host alone.
 pub const ISOLATION_FILE: &str = "isolation.json";
+/// `.launcher/isolation-leader.json`, present on a server that an isolation
+/// session on its linked client keeps in step.
+///
+/// It names the client and the server's own safety snapshot. It holds only
+/// while that client's session lists the server, so a leftover file never
+/// locks a server.
+pub const ISOLATION_LEADER_FILE: &str = "isolation-leader.json";
 /// The Minecraft game directory inside a client instance root.
 ///
 /// Kept separate from `.launcher/` so that pack extraction, which writes into
@@ -190,7 +197,7 @@ pub(crate) fn is_transaction_state(relative: &Path) -> bool {
     name.to_str().is_some_and(|name| {
         matches!(
             name,
-            SNAPSHOTS_DIR | RETIRED_DIR | STAGING_DIR | ISOLATION_FILE
+            SNAPSHOTS_DIR | RETIRED_DIR | STAGING_DIR | ISOLATION_FILE | ISOLATION_LEADER_FILE
         ) || name.starts_with(crate::restore::RESTORE_PREFIX)
     })
 }

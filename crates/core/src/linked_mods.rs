@@ -967,9 +967,9 @@ impl App {
         }
         // The same refusal applying makes, so a confirmation never offers a
         // server the apply would turn away.
-        match self.isolation_state(InstalledHost::Server(server)) {
-            Ok(None) => {}
-            Ok(Some(_)) => {
+        match self.isolation_holds(InstalledHost::Server(server)) {
+            Ok(false) => {}
+            Ok(true) => {
                 return Some(blocked(&record, root, LinkedTargetBlock::IsolationActive));
             }
             Err(error) => {
@@ -2962,6 +2962,7 @@ pub(crate) mod tests {
                     pinned: Vec::new(),
                     accept_unrecorded: true,
                     accept_missing: true,
+                    linked_servers: Vec::new(),
                 },
                 &CancellationToken::new(),
             )
@@ -3003,6 +3004,7 @@ pub(crate) mod tests {
                     pinned: Vec::new(),
                     accept_unrecorded: true,
                     accept_missing: true,
+                    linked_servers: Vec::new(),
                 },
                 &CancellationToken::new(),
             )

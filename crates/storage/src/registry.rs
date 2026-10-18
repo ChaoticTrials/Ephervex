@@ -2851,6 +2851,7 @@ mod tests {
         write_file(&launcher.join("staging/restore-1/restore.json"), "{}");
         write_file(&launcher.join("restore-2/restore.json"), "{}");
         write_file(&launcher.join(metadata::ISOLATION_FILE), "{}");
+        write_file(&launcher.join(metadata::ISOLATION_LEADER_FILE), "{}");
         write_file(&launcher.join("source/recipe.json"), "{}");
 
         let copy = registry
@@ -2865,6 +2866,7 @@ mod tests {
             "staging",
             "restore-2",
             metadata::ISOLATION_FILE,
+            metadata::ISOLATION_LEADER_FILE,
         ] {
             assert!(!copied.join(relative).exists(), "copied {relative}");
         }

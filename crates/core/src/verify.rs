@@ -688,7 +688,7 @@ impl App {
     /// so a mod added, replaced or removed underneath it would either break
     /// every later round or escape being a suspect.
     pub(crate) fn refuse_mod_change_during_isolation(&self, host: InstalledHost) -> CoreResult<()> {
-        if self.isolation_state(host)?.is_some() {
+        if self.isolation_holds(host)? {
             return Err(CoreError::ChangeRefused {
                 reason: RepairRefusal::IsolationActive,
             });
@@ -736,7 +736,7 @@ impl App {
         };
         Ok(if running {
             Some(RepairRefusal::HostRunning)
-        } else if self.isolation_state(host)?.is_some() {
+        } else if self.isolation_holds(host)? {
             Some(RepairRefusal::IsolationActive)
         } else {
             None
@@ -1701,6 +1701,7 @@ mod tests {
                 pinned: Vec::new(),
                 accept_unrecorded: true,
                 accept_missing: true,
+                linked_servers: Vec::new(),
             },
             &CancellationToken::new(),
         )

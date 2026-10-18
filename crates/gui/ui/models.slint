@@ -802,6 +802,13 @@ export struct HostView {
     isolation-unidentifiable: [string],
     isolation-missing: [string],
     isolation-linked-servers: [string],
+    isolation-linked-unrecorded: [string],
+    isolation-linked-missing: [string],
+    isolation-followed-servers: [string],
+    isolation-untested-server-mods: [string],
+    // The client whose isolation session owns this server, or empty.
+    isolation-led-by: string,
+    isolation-sync-linked-servers: bool,
     isolation-remaining-candidates: [string],
     isolation-pinned: [string],
     isolation-required-dependencies: [string],

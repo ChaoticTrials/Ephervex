@@ -69,6 +69,19 @@ export component IsolationRecoveryNotice inherits Rectangle {
     }
 }
 
+// The linked servers a session keeps in step, and what each is set to.
+export component IsolationFollowedServers inherits VerticalLayout {
+    in property <[string]> items;
+    // Server mods no round tests, which stay as they were.
+    in property <[string]> untested;
+    visible: root.items.length > 0;
+    spacing: 4px;
+    if root.items.length > 0 : BodyText { text: GuiI18n.text("gui-isolation-followed-servers"); color: Theme.text-secondary; wrap: word-wrap; }
+    for item in root.items : BodyText { text: item; color: Theme.text-secondary; font-size: Theme.caption-size; wrap: word-wrap; }
+    if root.untested.length > 0 : BodyText { text: GuiI18n.text("gui-isolation-untested-server-mods"); color: Theme.warning; wrap: word-wrap; }
+    for item in root.untested : BodyText { text: item; color: Theme.text-secondary; font-size: Theme.caption-size; wrap: word-wrap; }
+}
+
 export component IsolationResultGroups inherits ScrollView {
     in property <[string]> remaining-candidates;
     in property <[string]> pinned;
@@ -106,6 +119,12 @@ export component IsolationSurface inherits Rectangle {
     in property <[string]> unidentifiable;
     in property <[string]> missing;
     in property <[string]> linked-servers;
+    in property <[string]> linked-unrecorded;
+    in property <[string]> linked-missing;
+    in property <[string]> followed-servers;
+    in property <[string]> untested-server-mods;
+    // The client whose session owns this server, or empty.
+    in property <string> led-by;
     in property <[string]> remaining-candidates;
     in property <[string]> pinned;
     in property <[string]> required-dependencies;
@@ -121,22 +140,28 @@ export component IsolationSurface inherits Rectangle {
     in property <string> query;
     in property <bool> accept-unrecorded;
     in property <bool> accept-missing;
+    // Whether linked servers follow each round, chosen before Start.
+    in property <bool> sync-linked-servers;
     in property <string> error;
     // The first thing Start waits for the user to do, named beside it.
     // An isolation change in flight is progress, not a requirement: the
     // workspace's progress banner already says what it is doing.
+    // Linked servers that join the session add their own gaps to the ones
+    // that need an acknowledgement.
+    property <bool> needs-missing: root.missing.length > 0 || (root.sync-linked-servers && root.linked-missing.length > 0);
+    property <bool> needs-unrecorded: root.unrecorded.length > 0 || (root.sync-linked-servers && root.linked-unrecorded.length > 0);
     property <string> start-requirement: root.busy ? ""
         : root.host-running ? "running"
-        : root.missing.length > 0 && !root.accept-missing ? "missing"
-        : root.unrecorded.length > 0 && !root.accept-unrecorded ? "unrecorded"
+        : root.needs-missing && !root.accept-missing ? "missing"
+        : root.needs-unrecorded && !root.accept-unrecorded ? "unrecorded"
         : "";
     property <string> start-blocked-text: GuiI18n.text(root.start-requirement == "running" ? "gui-isolation-start-blocked-running" : root.start-requirement == "missing" ? "gui-isolation-start-blocked-missing" : "gui-isolation-start-blocked-unrecorded");
     callback filter(string);
     callback toggle-pin(string, bool);
-    // ("missing" | "unrecorded", accepted)
+    // ("missing" | "unrecorded" | "linked", accepted)
     callback acknowledge(string, bool);
     callback begin();
-    callback start-session(bool, bool);
+    callback start-session(bool, bool, bool);
     callback answer(string);
     callback undo();
     callback finish();
@@ -150,8 +175,8 @@ export component IsolationSurface inherits Rectangle {
         alignment: center;
         spacing: 10px;
         Heading { text: GuiI18n.text("gui-isolation-title"); horizontal-alignment: center; }
-        BodyText { text: GuiI18n.text("gui-isolation-empty-detail"); color: Theme.text-muted; horizontal-alignment: center; wrap: word-wrap; }
-        HorizontalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-isolation-start-setup"); tone: "primary"; enabled: !root.busy; hint: GuiI18n.text("gui-hint-busy"); clicked => { root.begin(); } } }
+        BodyText { text: root.led-by != "" ? GuiI18n.value("gui-isolation-led-by", root.led-by) : GuiI18n.text("gui-isolation-empty-detail"); color: Theme.text-muted; horizontal-alignment: center; wrap: word-wrap; }
+        HorizontalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-isolation-start-setup"); tone: "primary"; enabled: !root.busy && root.led-by == ""; hint: root.busy ? GuiI18n.text("gui-hint-busy") : GuiI18n.value("gui-isolation-led-by", root.led-by); clicked => { root.begin(); } } }
     }
     if root.phase == "setup" : HorizontalLayout {
         spacing: 14px;
@@ -234,12 +259,24 @@ export component IsolationSurface inherits Rectangle {
                         if root.unidentifiable.length > 0 : BodyText { text: GuiI18n.count("gui-isolation-unidentifiable", root.unidentifiable.length); color: Theme.warning; wrap: word-wrap; }
                         for item in root.unidentifiable : BodyText { text: item; color: Theme.text-secondary; font-size: Theme.caption-size; wrap: word-wrap; }
                         if root.linked-servers.length > 0 : BodyText { text: GuiI18n.count("gui-isolation-linked-servers", root.linked-servers.length); color: Theme.text-secondary; wrap: word-wrap; }
+                        if root.linked-servers.length > 0 : BodyText { text: GuiI18n.text("gui-isolation-sync-linked-detail"); color: Theme.text-secondary; wrap: word-wrap; }
+                        if root.sync-linked-servers && root.linked-missing.length > 0 : VerticalLayout {
+                            spacing: 4px;
+                            BodyText { text: GuiI18n.text("gui-isolation-linked-missing"); color: Theme.danger; wrap: word-wrap; }
+                            for item in root.linked-missing : BodyText { text: item; color: Theme.text-secondary; font-size: Theme.caption-size; wrap: word-wrap; }
+                        }
+                        if root.sync-linked-servers && root.linked-unrecorded.length > 0 : VerticalLayout {
+                            spacing: 4px;
+                            BodyText { text: GuiI18n.count("gui-isolation-linked-unrecorded", root.linked-unrecorded.length); color: Theme.warning; wrap: word-wrap; }
+                            for item in root.linked-unrecorded : BodyText { text: item; color: Theme.text-secondary; font-size: Theme.caption-size; wrap: word-wrap; }
+                        }
                     }
                 }
                 // Outside the scrolling warnings, so no list is long enough
                 // to hide the choices Start waits for.
-                if root.missing.length > 0 : AcknowledgementToggle { label: GuiI18n.text("gui-isolation-accept-missing"); enabled: !root.busy; checked: root.accept-missing; toggled(value) => { root.acknowledge("missing", value); } }
-                if root.unrecorded.length > 0 : AcknowledgementToggle { label: GuiI18n.text("gui-isolation-accept-unrecorded"); enabled: !root.busy; checked: root.accept-unrecorded; toggled(value) => { root.acknowledge("unrecorded", value); } }
+                if root.linked-servers.length > 0 : AcknowledgementToggle { label: GuiI18n.text("gui-isolation-sync-linked"); enabled: !root.busy; checked: root.sync-linked-servers; toggled(value) => { root.acknowledge("linked", value); } }
+                if root.needs-missing : AcknowledgementToggle { label: GuiI18n.text("gui-isolation-accept-missing"); enabled: !root.busy; checked: root.accept-missing; toggled(value) => { root.acknowledge("missing", value); } }
+                if root.needs-unrecorded : AcknowledgementToggle { label: GuiI18n.text("gui-isolation-accept-unrecorded"); enabled: !root.busy; checked: root.accept-unrecorded; toggled(value) => { root.acknowledge("unrecorded", value); } }
                 if root.error != "" : BodyText { text: root.error; color: Theme.danger; wrap: word-wrap; }
                 if root.start-requirement != "" : BodyText { text: root.start-blocked-text; color: Theme.warning; wrap: word-wrap; }
                 ActionRow {
@@ -249,7 +286,7 @@ export component IsolationSurface inherits Rectangle {
                         text: GuiI18n.text("gui-isolation-start");
                         tone: "primary";
                         enabled: !root.busy && root.start-requirement == ""; hint: root.busy ? GuiI18n.text("gui-hint-busy") : root.start-blocked-text;
-                        clicked => { root.start-session(root.accept-unrecorded, root.accept-missing); }
+                        clicked => { root.start-session(root.accept-unrecorded, root.accept-missing, root.sync-linked-servers); }
                     }
                 }
             }
@@ -267,6 +304,7 @@ export component IsolationSurface inherits Rectangle {
         }
         IsolationHistory { items: root.history; }
         if root.reduced-confidence : BodyText { text: GuiI18n.text("gui-isolation-reduced-confidence"); color: Theme.warning; wrap: word-wrap; }
+        IsolationFollowedServers { items: root.followed-servers; untested: root.untested-server-mods; }
         if root.linked-servers.length > 0 : BodyText { text: GuiI18n.text("gui-isolation-linked-unchanged"); color: Theme.text-secondary; wrap: word-wrap; }
         if root.error != "" : BodyText { text: root.error; color: Theme.danger; wrap: word-wrap; }
         ActionRow { AppButton { text: GuiI18n.text("gui-isolation-undo"); enabled: !root.busy && root.recovery == "" && root.history.length > 0; hint: root.busy ? GuiI18n.text("gui-hint-busy") : root.recovery != "" ? GuiI18n.text("gui-hint-isolation-recovery") : GuiI18n.text("gui-hint-nothing-to-undo"); clicked => { root.undo(); } } AppButton { text: GuiI18n.text("gui-isolation-cancel"); tone: "danger"; enabled: !root.busy; hint: GuiI18n.text("gui-hint-busy"); clicked => { root.cancel(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-isolation-issue-gone"); enabled: !root.busy && root.recovery == ""; hint: root.busy ? GuiI18n.text("gui-hint-busy") : GuiI18n.text("gui-hint-isolation-recovery"); clicked => { root.answer("gone"); } } AppButton { text: GuiI18n.text("gui-isolation-issue-present"); tone: "primary"; enabled: !root.busy && root.recovery == ""; hint: root.busy ? GuiI18n.text("gui-hint-busy") : GuiI18n.text("gui-hint-isolation-recovery"); clicked => { root.answer("present"); } } }
@@ -287,6 +325,7 @@ export component IsolationSurface inherits Rectangle {
         BodyText { text: GuiI18n.text(root.confidence == "one_minimal" ? "gui-isolation-one-minimal" : "gui-isolation-smallest"); wrap: word-wrap; }
         IsolationResultGroups { remaining-candidates: root.remaining-candidates; pinned: root.pinned; required-dependencies: root.required-dependencies; }
         IsolationHistory { items: root.history; }
+        IsolationFollowedServers { items: root.followed-servers; untested: root.untested-server-mods; }
         if root.reduced-confidence : BodyText { text: GuiI18n.text("gui-isolation-reduced-confidence"); color: Theme.warning; wrap: word-wrap; }
         BodyText { text: GuiI18n.text("gui-isolation-finish-snapshot"); color: Theme.text-muted; wrap: word-wrap; }
         if root.error != "" : BodyText { text: root.error; color: Theme.danger; wrap: word-wrap; }
@@ -297,6 +336,7 @@ export component IsolationSurface inherits Rectangle {
         Heading { text: GuiI18n.text("gui-isolation-finished"); font-size: Theme.section-size; }
         BodyText { text: root.summary; wrap: word-wrap; }
         IsolationResultGroups { remaining-candidates: root.remaining-candidates; pinned: root.pinned; required-dependencies: root.required-dependencies; }
+        IsolationFollowedServers { items: root.followed-servers; untested: root.untested-server-mods; }
         if root.reduced-confidence : BodyText { text: GuiI18n.text("gui-isolation-reduced-confidence"); color: Theme.warning; wrap: word-wrap; }
         BodyText { text: GuiI18n.text("gui-isolation-finished-detail"); color: Theme.text-muted; wrap: word-wrap; }
         ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-close"); tone: "primary"; clicked => { root.close(); } } }

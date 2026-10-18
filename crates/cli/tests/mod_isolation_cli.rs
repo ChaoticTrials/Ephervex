@@ -4,6 +4,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
+use ephervex_model::{APP_ID, InstanceId, ServerInstallation, ServerLaunch, ServerRelativePath};
+use ephervex_storage::{NewServer, Paths, Registry};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -39,6 +41,20 @@ impl Sandbox {
             .expect("run ephervex")
     }
 
+    /// The roots the child process resolves from the environment above.
+    fn paths(&self) -> Paths {
+        use std::os::unix::fs::MetadataExt;
+        let base = self.directory.path();
+        let uid = std::fs::metadata(base).expect("sandbox metadata").uid();
+        Paths::from_roots(
+            base.join("config").join(APP_ID),
+            base.join("data").join(APP_ID),
+            base.join("cache").join(APP_ID),
+            base.join("state").join(APP_ID),
+            base.join("tmp").join(format!("{APP_ID}-{uid}")),
+        )
+    }
+
     fn json(&self, args: &[&str]) -> serde_json::Value {
         let output = self.run(args);
         assert!(
@@ -67,14 +83,15 @@ fn create_instance(sandbox: &Sandbox, name: &str) -> (String, PathBuf) {
         "1.20.1",
     ]);
     let root = PathBuf::from(created["root"].as_str().expect("instance root"));
-    seed_mods(&root);
+    seed_mods(&root, "minecraft");
     (
         created["id"].as_str().expect("instance id").to_owned(),
         root,
     )
 }
 
-fn seed_mods(root: &Path) {
+/// Declares and writes the test mods into `<root>/<game_dir>/mods`.
+fn seed_mods(root: &Path, game_dir: &str) {
     let files = [
         ("a", vec!["shared"]),
         ("b", vec!["shared"]),
@@ -88,7 +105,7 @@ fn seed_mods(root: &Path) {
     .into_iter()
     .map(|(name, requires)| {
         write(
-            &root.join(format!("minecraft/mods/{name}.jar")),
+            &root.join(format!("{game_dir}/mods/{name}.jar")),
             name.as_bytes(),
         );
         json!({
@@ -119,7 +136,11 @@ fn write(path: &Path, bytes: &[u8]) {
 }
 
 fn enabled(root: &Path) -> Vec<String> {
-    let mut names = std::fs::read_dir(root.join("minecraft/mods"))
+    enabled_in(root, "minecraft")
+}
+
+fn enabled_in(root: &Path, game_dir: &str) -> Vec<String> {
+    let mut names = std::fs::read_dir(root.join(game_dir).join("mods"))
         .unwrap()
         .filter_map(Result::ok)
         .filter_map(|entry| entry.file_name().into_string().ok())
@@ -264,4 +285,108 @@ fn the_cli_refuses_an_answer_for_mods_the_host_no_longer_has_until_resumed() {
         "issue-gone",
     ]);
     assert_eq!(answered["value"]["index"], 2);
+}
+
+/// An installed server linked to `instance`, declaring the same mods.
+fn linked_server(sandbox: &Sandbox, instance: &str) -> (String, PathBuf) {
+    let registry = Registry::open(sandbox.paths()).expect("open the registry");
+    let client: InstanceId = instance.parse().expect("instance id");
+    let mut server = registry
+        .create_server(NewServer::linked("Linked Example", client))
+        .expect("create the server");
+    server.installation = ServerInstallation::Installed {
+        launch: ServerLaunch::Jar {
+            path: ServerRelativePath::new("server.jar").expect("relative"),
+        },
+    };
+    registry.update_server(&mut server).expect("install");
+    seed_mods(&server.root, "server");
+    (server.id.to_string(), server.root)
+}
+
+#[test]
+fn the_cli_keeps_a_named_linked_server_in_step_and_cancel_restores_it() {
+    let sandbox = Sandbox::new();
+    let (instance, root) = create_instance(&sandbox, "Isolation Linked");
+    let (server, server_root) = linked_server(&sandbox, &instance);
+    let before = enabled_in(&server_root, "server");
+
+    let started = sandbox.run(&[
+        "mod",
+        "isolate",
+        "start",
+        "--instance",
+        &instance,
+        "--linked-server",
+        &server,
+    ]);
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let printed = String::from_utf8_lossy(&started.stdout);
+    assert!(
+        printed.contains("Linked server Linked Example"),
+        "{printed}"
+    );
+    assert_ne!(enabled(&root), before);
+    assert_eq!(enabled_in(&server_root, "server"), enabled(&root));
+
+    let status = sandbox.json(&[
+        "--json",
+        "mod",
+        "isolate",
+        "status",
+        "--instance",
+        &instance,
+    ]);
+    assert_eq!(status["followed_servers"].as_array().unwrap().len(), 1);
+    assert!(
+        server_root
+            .join(".launcher/isolation-leader.json")
+            .is_file()
+    );
+
+    let refused = sandbox.run(&[
+        "mod",
+        "disable",
+        "--server",
+        &server,
+        "mods/a.jar",
+        "--only-this",
+    ]);
+    assert!(!refused.status.success());
+
+    sandbox.json(&[
+        "--json",
+        "mod",
+        "isolate",
+        "cancel",
+        "--instance",
+        &instance,
+    ]);
+    assert_eq!(enabled_in(&server_root, "server"), before);
+    assert!(!server_root.join(".launcher/isolation-leader.json").exists());
+}
+
+#[test]
+fn the_cli_refuses_a_linked_server_that_is_not_linked_to_the_client() {
+    let sandbox = Sandbox::new();
+    let (instance, root) = create_instance(&sandbox, "Isolation Unlinked");
+    let before = enabled(&root);
+
+    let refused = sandbox.run(&[
+        "mod",
+        "isolate",
+        "start",
+        "--instance",
+        &instance,
+        "--linked-server",
+        "00000000-0000-4000-8000-000000000002",
+    ]);
+
+    assert!(!refused.status.success());
+    assert_eq!(enabled(&root), before);
+    assert!(!root.join(".launcher/isolation.json").exists());
 }

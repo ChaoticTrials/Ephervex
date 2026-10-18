@@ -470,6 +470,13 @@ impl App {
         {
             return Err(IsolationError::SafetySnapshotInUse { snapshot: id }.into());
         }
+        if let InstalledHost::Server(server) = host
+            && self
+                .isolation_leader(server)?
+                .is_some_and(|leader| leader.safety_snapshot == id)
+        {
+            return Err(IsolationError::SafetySnapshotInUse { snapshot: id }.into());
+        }
         ephervex_storage::remove_tree_if_present(&directory).map_err(|source| {
             SnapshotError::Unwritable {
                 path: directory.clone(),
@@ -720,8 +727,8 @@ impl App {
         host: InstalledHost,
         owner: SnapshotRestoreOwner,
     ) -> Result<(), SnapshotError> {
-        let session = self.isolation_state(host).map_err(snapshot_core_error)?;
-        if session.is_some() && owner == SnapshotRestoreOwner::Caller {
+        let held = self.isolation_holds(host).map_err(snapshot_core_error)?;
+        if held && owner == SnapshotRestoreOwner::Caller {
             Err(SnapshotError::IsolationActive)
         } else {
             Ok(())

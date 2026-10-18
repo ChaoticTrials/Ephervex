@@ -3258,6 +3258,7 @@ fn register_isolation_actions(ui: &AppWindow, commands: &Sender<Command>, worksp
         views.update(host, |view| match what.as_str() {
             "missing" => view.isolation_accept_missing = accepted,
             "unrecorded" => view.isolation_accept_unrecorded = accepted,
+            "linked" => view.isolation_sync_linked_servers = accepted,
             _ => {}
         });
     });
@@ -3285,36 +3286,39 @@ fn register_isolation_actions(ui: &AppWindow, commands: &Sender<Command>, worksp
     let sender = commands.clone();
     let state = Rc::clone(flow);
     let weak = ui.as_weak();
-    ui.on_start_isolation(move |kind, id, accept_unrecorded, accept_missing| {
-        let Some(host) = backend::parse_mod_host(&kind, &id) else {
-            return;
-        };
-        let mut state = state.borrow_mut();
-        // Only a setup on screen can start; one that was discarded cannot.
-        let Some((generation, pinned)) = state
-            .setup(host)
-            .filter(|setup| setup.phase == "setup")
-            .map(|setup| (setup.generation, setup.pinned.iter().cloned().collect()))
-        else {
-            return;
-        };
-        let Some(request) =
-            claim_isolation_change(&weak, &mut state, host, IsolationMutation::Start)
-        else {
-            return;
-        };
-        send(
-            &sender,
-            Command::BeginIsolation {
-                host,
-                generation,
-                request,
-                pinned,
-                accept_unrecorded,
-                accept_missing,
-            },
-        );
-    });
+    ui.on_start_isolation(
+        move |kind, id, accept_unrecorded, accept_missing, sync_linked_servers| {
+            let Some(host) = backend::parse_mod_host(&kind, &id) else {
+                return;
+            };
+            let mut state = state.borrow_mut();
+            // Only a setup on screen can start; one that was discarded cannot.
+            let Some((generation, pinned)) = state
+                .setup(host)
+                .filter(|setup| setup.phase == "setup")
+                .map(|setup| (setup.generation, setup.pinned.iter().cloned().collect()))
+            else {
+                return;
+            };
+            let Some(request) =
+                claim_isolation_change(&weak, &mut state, host, IsolationMutation::Start)
+            else {
+                return;
+            };
+            send(
+                &sender,
+                Command::BeginIsolation {
+                    host,
+                    generation,
+                    request,
+                    pinned,
+                    accept_unrecorded,
+                    accept_missing,
+                    sync_linked_servers,
+                },
+            );
+        },
+    );
 
     let sender = commands.clone();
     let state = Rc::clone(flow);
@@ -7332,6 +7336,11 @@ fn apply_isolation_data(workspace: &Workspace, data: IsolationData) -> bool {
         view.isolation_unidentifiable = string_model(data.unidentifiable);
         view.isolation_missing = string_model(data.missing);
         view.isolation_linked_servers = string_model(data.linked_servers);
+        view.isolation_linked_unrecorded = string_model(data.linked_unrecorded);
+        view.isolation_linked_missing = string_model(data.linked_missing);
+        view.isolation_followed_servers = string_model(data.followed_servers);
+        view.isolation_untested_server_mods = string_model(data.untested_server_mods);
+        view.isolation_led_by = data.led_by.into();
         view.isolation_remaining_candidates = string_model(data.remaining_candidates);
         view.isolation_pinned = string_model(data.pinned);
         view.isolation_required_dependencies = string_model(data.required_dependencies);
@@ -7348,6 +7357,7 @@ fn apply_isolation_data(workspace: &Workspace, data: IsolationData) -> bool {
         if is_setup {
             view.isolation_accept_unrecorded = false;
             view.isolation_accept_missing = false;
+            view.isolation_sync_linked_servers = false;
         }
         if is_setup || is_inactive {
             view.isolation_query = SharedString::default();
@@ -11073,6 +11083,11 @@ mod tests {
             unidentifiable: Vec::new(),
             missing: Vec::new(),
             linked_servers: Vec::new(),
+            linked_unrecorded: Vec::new(),
+            linked_missing: Vec::new(),
+            followed_servers: Vec::new(),
+            untested_server_mods: Vec::new(),
+            led_by: String::new(),
             reduced_confidence: false,
             confidence: String::new(),
             remaining_candidates: Vec::new(),
@@ -11447,7 +11462,7 @@ mod tests {
                 .setup(host)
                 .is_some_and(|setup| setup.pinned.is_empty())
         );
-        ui.invoke_start_isolation(kind, id, false, false);
+        ui.invoke_start_isolation(kind, id, false, false, false);
         assert!(
             commands.try_recv().is_err(),
             "a discarded setup cannot start"
@@ -11647,8 +11662,8 @@ mod tests {
             .expect("loaded")
             .generation;
 
-        ui.invoke_start_isolation(kind.clone(), id.clone(), false, false);
-        ui.invoke_start_isolation(kind.clone(), id.clone(), false, false);
+        ui.invoke_start_isolation(kind.clone(), id.clone(), false, false, false);
+        ui.invoke_start_isolation(kind.clone(), id.clone(), false, false, false);
         ui.invoke_discard_isolation_setup(kind, id);
 
         assert_eq!(commands.try_iter().count(), 1);
@@ -12188,7 +12203,7 @@ mod tests {
         register_isolation_actions(&ui, &isolation_sender, &workspace);
         workspace.open(&ui, host, Surface::Isolation);
         apply_isolation_data(&workspace, isolation_data(&host.id(), false, "setup"));
-        ui.invoke_start_isolation("client".into(), host.id().into(), false, false);
+        ui.invoke_start_isolation("client".into(), host.id().into(), false, false, false);
         assert!(isolation_commands.try_recv().is_err());
 
         settled(&ui, &workspace, request);

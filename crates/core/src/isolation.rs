@@ -4,12 +4,15 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use ephervex_download::OperationReporter;
-use ephervex_model::SnapshotId;
+use ephervex_model::{ServerId, SnapshotId};
 use ephervex_storage::{ClientCommitWarning, ServerCommitWarning};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::dependencies::ModGraph;
+use crate::isolation_servers::{
+    IsolationFollowedServer, IsolationServerPlan, IsolationServerResult, IsolationUnreachedServer,
+};
 use crate::mods::SecondCopies;
 use crate::{
     App, CoreError, CoreResult, DependencyKnowledge, InstalledHost, ModPresence, SnapshotError,
@@ -37,11 +40,24 @@ pub struct IsolationMissingDependency {
     pub dependency: String,
 }
 
-/// A linked installation that this single-host workflow does not change.
+/// A server linked to the client being isolated.
+///
+/// A session changes it only when the request names it, and then keeps its
+/// mods in step with each round. The gaps below are the server's own: they
+/// need the same acknowledgement as the client's when the server joins.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct IsolationLinkedServer {
     pub id: String,
     pub name: String,
+    /// Only an installed server can be kept in step with a session.
+    #[serde(default)]
+    pub installed: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unrecorded: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unidentifiable: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing: Vec<IsolationMissingDependency>,
 }
 
 /// An offline plan derived entirely from the shared dependency graph.
@@ -62,6 +78,14 @@ pub struct IsolationPlan {
 }
 
 impl IsolationPlan {
+    /// Every candidate root.
+    pub(crate) fn roots(&self) -> Vec<PathBuf> {
+        self.candidates
+            .iter()
+            .map(|candidate| candidate.root.clone())
+            .collect()
+    }
+
     /// Recomputes a configuration as a union of complete required closures.
     /// A shared library stays enabled whenever any selected root requires it.
     pub fn enabled_for(&self, roots: &[PathBuf]) -> Vec<PathBuf> {
@@ -148,6 +172,11 @@ pub struct IsolationRequest {
     /// it marks the session and result as reduced confidence.
     #[serde(default)]
     pub accept_missing: bool,
+    /// Linked servers whose mods follow every round of a client session.
+    ///
+    /// A server not named here is listed and left alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub linked_servers: Vec<ServerId>,
 }
 
 /// The observation made after testing one configuration.
@@ -273,6 +302,9 @@ pub struct IsolationSession {
     pub contradiction: Option<RoundContradiction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<IsolationOutcome>,
+    /// The linked servers the session changes, each with its own safety snapshot.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub followed_servers: Vec<IsolationFollowedServer>,
     search: SearchState,
 }
 
@@ -335,6 +367,9 @@ pub struct IsolationCancel {
     pub warnings: Vec<ClientCommitWarning>,
     /// Conditions on the restored server metadata.
     pub server_warnings: Vec<ServerCommitWarning>,
+    /// Followed servers whose files could not be reached, so they were not
+    /// restored. Their safety snapshots keep their starting state.
+    pub unreached: Vec<IsolationUnreachedServer>,
 }
 
 /// Final report returned after the durable session marker is removed.
@@ -358,7 +393,15 @@ pub struct IsolationReport {
     pub unrecorded: Vec<PathBuf>,
     pub unidentifiable: Vec<PathBuf>,
     pub missing: Vec<IsolationMissingDependency>,
+    /// Linked servers the session left alone.
     pub linked_servers: Vec<IsolationLinkedServer>,
+    /// Linked servers the session kept in step, as it left them.
+    #[serde(default)]
+    pub servers: Vec<IsolationServerResult>,
+    /// Followed servers whose files could not be reached, so they were not set
+    /// to the result. Their safety snapshots keep their starting state.
+    #[serde(default)]
+    pub unreached: Vec<IsolationUnreachedServer>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -427,6 +470,12 @@ pub enum IsolationError {
     SafetySnapshotInUse { snapshot: SnapshotId },
     #[error("the isolation session belongs to {found}, not {expected}")]
     HostMismatch { expected: String, found: String },
+    #[error("{host} already belongs to an isolation session")]
+    OwnedElsewhere { host: String },
+    #[error("{server} is kept in step by the isolation session of {client}")]
+    OwnedByClient { server: String, client: String },
+    #[error("{server} is not an installed server linked to this client")]
+    ServerNotLinked { server: String },
     #[error("isolation state at {path} could not be read")]
     Unreadable {
         path: PathBuf,
@@ -469,6 +518,9 @@ impl IsolationError {
             Self::NotFinished => "error-isolation-not-finished",
             Self::SafetySnapshotInUse { .. } => "error-isolation-snapshot-in-use",
             Self::HostMismatch { .. } => "error-isolation-host-mismatch",
+            Self::OwnedElsewhere { .. } => "error-isolation-owned-elsewhere",
+            Self::OwnedByClient { .. } => "error-isolation-owned-by-client",
+            Self::ServerNotLinked { .. } => "error-isolation-server-not-linked",
             Self::Unreadable { .. } => "error-isolation-unreadable",
             Self::Unwritable { .. } => "error-isolation-unwritable",
             Self::Invalid { .. } | Self::InconsistentState => "error-isolation-invalid",
@@ -483,7 +535,12 @@ impl IsolationError {
             Self::HostRunning { host }
             | Self::AlreadyActive { host }
             | Self::NotActive { host }
+            | Self::OwnedElsewhere { host }
             | Self::NotApplied { host } => vec![("host", host.clone())],
+            Self::ServerNotLinked { server } => vec![("server", server.clone())],
+            Self::OwnedByClient { server, client } => {
+                vec![("server", server.clone()), ("client", client.clone())]
+            }
             Self::SafetySnapshotInUse { snapshot } => {
                 vec![("snapshot", snapshot.to_string())]
             }
@@ -619,16 +676,8 @@ impl App {
         plan.candidates.sort_by(|a, b| a.root.cmp(&b.root));
         plan.missing = missing.into_iter().collect();
         if let InstalledHost::Instance(id) = host {
-            plan.linked_servers = self
-                .list_servers()?
-                .into_iter()
-                .filter(|server| server.linked_client_id == Some(id))
-                .map(|server| IsolationLinkedServer {
-                    id: server.id.to_string(),
-                    name: server.name,
-                })
-                .collect();
-            plan.linked_servers.sort_by(|a, b| a.id.cmp(&b.id));
+            let participating = plan.enabled_for(&plan.roots());
+            plan.linked_servers = self.linked_server_summaries(&graph, &participating, id)?;
         }
         Ok(plan)
     }
@@ -659,35 +708,50 @@ impl App {
         cancel: &CancellationToken,
     ) -> CoreResult<IsolationRound> {
         self.refuse_isolation_while_running(host)?;
+        let servers = self.resolve_followed_servers(host, &request.linked_servers)?;
+        for (id, name) in &servers {
+            if self.server_status(*id)?.runtime.may_be_running() {
+                return Err(IsolationError::HostRunning { host: name.clone() }.into());
+            }
+        }
         // Held until the session file exists, so a mod change either finishes
         // before the safety snapshot is taken or sees the session and is
         // refused. The wait ends if the caller cancels.
         let _gate =
             crate::host_recipe_gate::hold_blocking_for_change(self.registry(), host, cancel)?;
+        let _server_gates = servers
+            .iter()
+            .map(|(id, _)| {
+                crate::host_recipe_gate::hold_blocking_for_change(
+                    self.registry(),
+                    InstalledHost::Server(*id),
+                    cancel,
+                )
+            })
+            .collect::<CoreResult<Vec<_>>>()?;
         let path = self.isolation_path(host)?;
         if path.exists() {
             return Err(IsolationError::AlreadyActive { host: host.id() }.into());
         }
+        self.refuse_owned_hosts(host, &servers)?;
         let IsolationRequest {
             pinned,
             accept_unrecorded,
             accept_missing,
+            linked_servers: _,
         } = request;
         reporter.set_stage(Some("operation-stage-planning-isolation".to_owned()));
         let plan = self.plan_isolation(host, &pinned)?;
-        if !accept_missing && !plan.missing.is_empty() {
-            return Err(IsolationError::MissingDependencies {
-                dependencies: plan.missing.clone(),
-            }
-            .into());
-        }
-        if !accept_unrecorded && !plan.unrecorded.is_empty() {
-            return Err(IsolationError::UnrecordedDependencies {
-                paths: plan.unrecorded.clone(),
-            }
-            .into());
-        }
+        let client_graph = ModGraph::build(self, host)?;
+        let participating = plan.enabled_for(&plan.roots());
+        let server_plans = servers
+            .into_iter()
+            .map(|(id, name)| self.plan_isolation_server(&client_graph, &participating, id, name))
+            .collect::<CoreResult<Vec<_>>>()?;
+        let gaps =
+            require_acknowledged_gaps(&plan, &server_plans, accept_unrecorded, accept_missing)?;
         self.refuse_second_copies(host, &plan)?;
+        self.refuse_server_second_copies(&plan, &server_plans)?;
         reporter.set_stage(Some("operation-stage-snapshot-isolation".to_owned()));
         let snapshot = self.create_snapshot(
             host,
@@ -695,52 +759,39 @@ impl App {
             SnapshotOrigin::BeforeIsolation,
             cancel,
         )?;
+        let followed_servers =
+            self.snapshot_followed_servers(host, snapshot.id, server_plans, cancel)?;
         let suspects: Vec<_> = plan
             .candidates
             .iter()
             .map(|candidate| candidate.root.clone())
             .collect();
-        let confirmation = SearchState {
-            suspects: suspects.clone(),
-            granularity: suspects.len().max(1),
-            phase: SearchPhase::Confirmation,
-            group_index: 0,
-        };
-        let mut search = SearchState {
-            suspects: suspects.clone(),
-            granularity: 2,
-            phase: SearchPhase::Subsets,
-            group_index: 0,
-        };
-        // Two or more candidates always leave a smaller dependency-closed set
-        // to test, so settling only falls back to confirmation for zero or one.
-        let current_round = match (suspects.len() > 1).then(|| settle(&plan, &[], &mut search, 1)) {
-            Some(Settled::Round(round)) => round,
-            Some(Settled::Complete(_)) | None => {
-                search = confirmation;
-                round_for(&plan, &search, 1)
-            }
-        };
+        let (search, current_round) = first_round(&plan, &suspects);
         let session = IsolationSession {
             host_kind: host.kind().to_owned(),
             host_id: host.id(),
             started_at: Utc::now(),
             safety_snapshot: snapshot.id,
-            accepted_unrecorded: accept_unrecorded && !plan.unrecorded.is_empty(),
-            accepted_missing: accept_missing && !plan.missing.is_empty(),
-            reduced_confidence: !plan.unidentifiable.is_empty()
-                || (accept_unrecorded && !plan.unrecorded.is_empty())
-                || (accept_missing && !plan.missing.is_empty()),
+            accepted_unrecorded: gaps.unrecorded,
+            accepted_missing: gaps.missing,
+            reduced_confidence: gaps.reduced_confidence,
             suspects,
             granularity: search.granularity,
             history: Vec::new(),
             current_round: Some(current_round.clone()),
             contradiction: None,
             outcome: None,
+            followed_servers,
             search,
             plan,
         };
         write_session(&path, &session)?;
+        if let Err(error) = self.write_leader_markers(host, &session) {
+            self.remove_leader_markers(&session);
+            let _ = remove_session(&path);
+            self.discard_unused_snapshots(host, session.safety_snapshot, &session.followed_servers);
+            return Err(error);
+        }
         reporter.set_stage(Some("operation-stage-applying-isolation".to_owned()));
         self.apply_isolation_configuration(host, &session, &current_round.enabled)?;
         Ok(current_round)
@@ -760,6 +811,8 @@ impl App {
     pub fn resume_isolation(&self, host: InstalledHost) -> CoreResult<IsolationStep> {
         self.refuse_isolation_while_running(host)?;
         let session = self.read_required_session(host)?;
+        self.refuse_followed_servers_running(&session)?;
+        self.write_leader_markers(host, &session)?;
         self.apply_isolation_configuration(host, &session, session.intended_enabled())?;
         Ok(step_for(&session)?)
     }
@@ -772,6 +825,7 @@ impl App {
     /// host is running and leaves the session unchanged on failure.
     pub fn reconcile_isolation(&self, host: InstalledHost) -> CoreResult<IsolationReconciliation> {
         let session = self.read_required_session(host)?;
+        self.write_leader_markers(host, &session)?;
         if self.isolation_configuration_applied(host, &session)? {
             return Ok(IsolationReconciliation::AlreadyApplied);
         }
@@ -788,6 +842,7 @@ impl App {
         self.refuse_isolation_while_running(host)?;
         let path = self.isolation_path(host)?;
         let mut session = self.read_required_session(host)?;
+        self.refuse_followed_servers_running(&session)?;
         let round = session
             .current_round
             .clone()
@@ -822,6 +877,7 @@ impl App {
         self.refuse_isolation_while_running(host)?;
         let path = self.isolation_path(host)?;
         let mut session = self.read_required_session(host)?;
+        self.refuse_followed_servers_running(&session)?;
         let record = session
             .history
             .pop()
@@ -843,23 +899,53 @@ impl App {
         self.refuse_isolation_while_running(host)?;
         let path = self.isolation_path(host)?;
         let session = self.read_required_session(host)?;
+        self.refuse_followed_servers_running(&session)?;
         let outcome = session.outcome.clone().ok_or(IsolationError::NotFinished)?;
-        self.apply_isolation_configuration(host, &session, &outcome.enabled)?;
+        // One decision about which servers can be reached serves the whole
+        // operation, so the report names exactly the ones that were skipped.
+        let unreached = self.unreached_servers(&session)?;
+        let reached: Vec<&IsolationFollowedServer> = session
+            .active_servers()
+            .filter(|followed| {
+                !unreached
+                    .iter()
+                    .any(|gone| gone.server == followed.plan.server)
+            })
+            .collect();
+        self.apply_client_isolation_configuration(host, &session, &outcome.enabled)?;
+        for followed in &reached {
+            self.apply_server_enabled(
+                &followed.plan,
+                &followed.plan.enabled_for(&outcome.enabled),
+            )?;
+        }
         // A session from before deletion was refused may have lost its snapshot;
         // the outcome is already applied, so there is nothing left to label.
-        match self.rename_snapshot(
-            host,
-            session.safety_snapshot,
-            &format!(
-                "Before mod isolation, {}",
-                session.started_at.format("%Y-%m-%d")
-            ),
-        ) {
-            Ok(_) | Err(SnapshotError::NotFound { .. }) => {}
-            Err(error) => return Err(error.into()),
+        let label = format!(
+            "Before mod isolation, {}",
+            session.started_at.format("%Y-%m-%d")
+        );
+        let labeled = std::iter::once((host, session.safety_snapshot)).chain(reached.iter().map(
+            |followed| {
+                (
+                    InstalledHost::Server(followed.plan.server),
+                    followed.safety_snapshot,
+                )
+            },
+        ));
+        for (snapshot_host, snapshot) in labeled {
+            match self.rename_snapshot(snapshot_host, snapshot, &label) {
+                Ok(_) | Err(SnapshotError::NotFound { .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
         }
-        let report = report_for(&session, &outcome);
+        let mut report = report_for(&session, &outcome);
+        report
+            .servers
+            .retain(|server| !unreached.iter().any(|gone| gone.server == server.server));
+        report.unreached = unreached;
         remove_session(&path)?;
+        self.remove_leader_markers(&session);
         Ok(report)
     }
 
@@ -871,34 +957,79 @@ impl App {
     ) -> CoreResult<IsolationCancel> {
         self.refuse_isolation_while_running(host)?;
         let path = self.isolation_path(host)?;
-        let session = self.read_required_session(host)?;
-        let (warnings, server_warnings) =
-            match self.restore_isolation_snapshot(host, session.safety_snapshot, cancel) {
-                Ok(restore) => (restore.warnings, restore.server_warnings),
-                // The snapshot was deleted before deletion was refused. Re-enabling
-                // the recorded starting mods is the closest remaining restore.
+        let mut session = self.read_required_session(host)?;
+        self.refuse_followed_servers_running(&session)?;
+        let mut warnings = Vec::new();
+        let mut server_warnings = Vec::new();
+        let unreached = self.unreached_servers(&session)?;
+        // Each server is marked released as soon as it is restored, so a cancel that
+        // fails later does not restore it again over what it has run since.
+        for index in 0..session.followed_servers.len() {
+            let followed = &session.followed_servers[index];
+            // A server judged out of reach has nothing to restore now.
+            if followed.is_released()
+                || unreached
+                    .iter()
+                    .any(|gone| gone.server == followed.plan.server)
+            {
+                continue;
+            }
+            let server_host = InstalledHost::Server(followed.plan.server);
+            match self.restore_isolation_snapshot(server_host, followed.safety_snapshot, cancel) {
+                Ok(restore) => {
+                    warnings.extend(restore.warnings);
+                    server_warnings.extend(restore.server_warnings);
+                }
                 Err(SnapshotError::NotFound { .. }) => {
-                    self.apply_isolation_configuration(
-                        host,
-                        &session,
-                        &session.plan.initially_enabled,
-                    )?;
-                    (Vec::new(), Vec::new())
+                    self.apply_server_enabled(&followed.plan, &followed.plan.initially_enabled())?;
                 }
                 Err(error) => return Err(error.into()),
-            };
+            }
+            session.followed_servers[index].mark_released();
+            write_session(&path, &session)?;
+        }
+        match self.restore_isolation_snapshot(host, session.safety_snapshot, cancel) {
+            Ok(restore) => {
+                warnings.extend(restore.warnings);
+                server_warnings.extend(restore.server_warnings);
+            }
+            // The snapshot was deleted before deletion was refused. Re-enabling
+            // the recorded starting mods is the closest remaining restore.
+            Err(SnapshotError::NotFound { .. }) => {
+                self.apply_client_isolation_configuration(
+                    host,
+                    &session,
+                    &session.plan.initially_enabled,
+                )?;
+            }
+            Err(error) => return Err(error.into()),
+        }
         remove_session(&path)?;
+        self.remove_leader_markers(&session);
         Ok(IsolationCancel {
             warnings,
             server_warnings,
+            unreached,
         })
     }
 
+    /// Reads the session an operation acts on, releasing the servers deleted
+    /// behind it so they never keep it from ending.
     fn read_required_session(&self, host: InstalledHost) -> CoreResult<IsolationSession> {
         let path = self.isolation_path(host)?;
-        let session = read_session_if_present(&path)?
+        let mut session = read_session_if_present(&path)?
             .ok_or_else(|| IsolationError::NotActive { host: host.id() })?;
         validate_session_host(host, &session)?;
+        let mut released = false;
+        for followed in &mut session.followed_servers {
+            if !followed.is_released() && !self.server_exists(followed.plan.server)? {
+                followed.mark_released();
+                released = true;
+            }
+        }
+        if released {
+            write_session(&path, &session)?;
+        }
         Ok(session)
     }
 
@@ -939,6 +1070,16 @@ impl App {
             )
             .filter(|path| !plan.initially_enabled.contains(path))
             .collect();
+        self.require_distinct_jars(host, turned_on)
+    }
+
+    /// Refuses turning on jars that declare the mod id of another jar loading
+    /// beside them.
+    pub(crate) fn require_distinct_jars(
+        &self,
+        host: InstalledHost,
+        turned_on: BTreeSet<&PathBuf>,
+    ) -> CoreResult<()> {
         if turned_on.is_empty() {
             return Ok(());
         }
@@ -958,7 +1099,8 @@ impl App {
         Ok(())
     }
 
-    /// Whether every mod the session manages is enabled exactly when intended.
+    /// Whether every mod the session manages is enabled exactly when intended,
+    /// on the host and on each server that follows it.
     fn isolation_configuration_applied(
         &self,
         host: InstalledHost,
@@ -966,7 +1108,7 @@ impl App {
     ) -> CoreResult<bool> {
         let graph = ModGraph::build(self, host)?;
         let intended: BTreeSet<_> = session.intended_enabled().iter().collect();
-        Ok(session.plan.available.iter().all(|path| {
+        let client_applied = session.plan.available.iter().all(|path| {
             graph.index_of(path).is_some_and(|index| {
                 match graph.entries[index].mod_entry.presence {
                     ModPresence::Installed => intended.contains(path),
@@ -974,10 +1116,25 @@ impl App {
                     ModPresence::Missing => false,
                 }
             })
-        }))
+        });
+        if !client_applied {
+            return Ok(false);
+        }
+        self.server_configurations_applied(session, session.intended_enabled())
     }
 
+    /// Applies a configuration to the host and to each server that follows it.
     fn apply_isolation_configuration(
+        &self,
+        host: InstalledHost,
+        session: &IsolationSession,
+        enabled: &[PathBuf],
+    ) -> CoreResult<()> {
+        self.apply_client_isolation_configuration(host, session, enabled)?;
+        self.apply_server_configurations(session, enabled)
+    }
+
+    fn apply_client_isolation_configuration(
         &self,
         host: InstalledHost,
         session: &IsolationSession,
@@ -993,6 +1150,80 @@ impl App {
         self.apply_mod_toggles(host, &changes, SecondCopies::Tolerated)?;
         Ok(())
     }
+}
+
+/// What the acknowledgements a start was given cover.
+struct AcceptedGaps {
+    unrecorded: bool,
+    missing: bool,
+    reduced_confidence: bool,
+}
+
+/// Refuses a start whose host or named servers have dependency gaps that
+/// were not acknowledged.
+fn require_acknowledged_gaps(
+    plan: &IsolationPlan,
+    servers: &[IsolationServerPlan],
+    accept_unrecorded: bool,
+    accept_missing: bool,
+) -> Result<AcceptedGaps, IsolationError> {
+    let missing: Vec<_> = plan
+        .missing
+        .iter()
+        .chain(servers.iter().flat_map(|server| &server.missing))
+        .cloned()
+        .collect();
+    let unrecorded: Vec<_> = plan
+        .unrecorded
+        .iter()
+        .chain(servers.iter().flat_map(|server| &server.unrecorded))
+        .cloned()
+        .collect();
+    let unidentifiable = !plan.unidentifiable.is_empty()
+        || servers
+            .iter()
+            .any(|server| !server.unidentifiable.is_empty());
+    if !accept_missing && !missing.is_empty() {
+        return Err(IsolationError::MissingDependencies {
+            dependencies: missing,
+        });
+    }
+    if !accept_unrecorded && !unrecorded.is_empty() {
+        return Err(IsolationError::UnrecordedDependencies { paths: unrecorded });
+    }
+    let unrecorded = accept_unrecorded && !unrecorded.is_empty();
+    let missing = accept_missing && !missing.is_empty();
+    Ok(AcceptedGaps {
+        unrecorded,
+        missing,
+        reduced_confidence: unidentifiable || unrecorded || missing,
+    })
+}
+
+/// The search state and first round of a session over `suspects`.
+fn first_round(plan: &IsolationPlan, suspects: &[PathBuf]) -> (SearchState, IsolationRound) {
+    let confirmation = SearchState {
+        suspects: suspects.to_vec(),
+        granularity: suspects.len().max(1),
+        phase: SearchPhase::Confirmation,
+        group_index: 0,
+    };
+    let mut search = SearchState {
+        suspects: suspects.to_vec(),
+        granularity: 2,
+        phase: SearchPhase::Subsets,
+        group_index: 0,
+    };
+    // Two or more candidates always leave a smaller dependency-closed set
+    // to test, so settling only falls back to confirmation for zero or one.
+    let round = match (suspects.len() > 1).then(|| settle(plan, &[], &mut search, 1)) {
+        Some(Settled::Round(round)) => round,
+        Some(Settled::Complete(_)) | None => {
+            search = confirmation;
+            round_for(plan, &search, 1)
+        }
+    };
+    (search, round)
 }
 
 fn step_for(session: &IsolationSession) -> Result<IsolationStep, IsolationError> {
@@ -1278,8 +1509,42 @@ fn report_for(session: &IsolationSession, outcome: &IsolationOutcome) -> Isolati
         unrecorded: session.plan.unrecorded.clone(),
         unidentifiable: session.plan.unidentifiable.clone(),
         missing: session.plan.missing.clone(),
-        linked_servers: session.plan.linked_servers.clone(),
+        linked_servers: session
+            .unchanged_linked_servers()
+            .into_iter()
+            .cloned()
+            .collect(),
+        servers: session
+            .active_servers()
+            .map(|followed| {
+                let enabled = followed.plan.enabled_for(&outcome.enabled);
+                IsolationServerResult {
+                    server: followed.plan.server,
+                    name: followed.plan.name.clone(),
+                    safety_snapshot: followed.safety_snapshot,
+                    disabled: followed.plan.disabled_for(&enabled),
+                    enabled,
+                    untested: followed.plan.untested(),
+                }
+            })
+            .collect(),
+        unreached: Vec::new(),
     }
+}
+
+/// Reads the session of the host rooted at `root`, without reading the host's
+/// recipe.
+pub(crate) fn read_session_at(
+    root: &Path,
+    host: InstalledHost,
+) -> Result<Option<IsolationSession>, IsolationError> {
+    let path = ephervex_storage::metadata::metadata_dir(root)
+        .join(ephervex_storage::metadata::ISOLATION_FILE);
+    let Some(session) = read_session_if_present(&path)? else {
+        return Ok(None);
+    };
+    validate_session_host(host, &session)?;
+    Ok(Some(session))
 }
 
 fn validate_session_host(
@@ -1433,6 +1698,7 @@ mod tests {
             pinned: Vec::new(),
             accept_unrecorded: false,
             accept_missing: false,
+            linked_servers: Vec::new(),
         }
     }
 

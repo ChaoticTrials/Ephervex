@@ -285,6 +285,109 @@ fn missing_dependencies_block_start_with_their_own_reason_until_acknowledged() {
 }
 
 #[test]
+fn a_linked_servers_gaps_wait_for_an_acknowledgement_only_once_it_joins_the_session() {
+    let ui = window();
+    setup_on(&ui, false, false);
+    support::update_host(&ui, 0, |view| {
+        view.isolation_linked_servers = strings(&["Linked (server-1)"]);
+        view.isolation_linked_unrecorded = strings(&["Linked: unrecorded.jar"]);
+    });
+    settle(&ui);
+    assert!(start_enabled(&ui), "a server that stays out adds no gap");
+    assert!(!visible(&ui, "Linked: unrecorded.jar"));
+
+    acknowledgement(&ui, "gui-isolation-sync-linked").invoke_accessible_default_action();
+    settle(&ui);
+
+    assert!(support::host(&ui, 0).isolation_sync_linked_servers);
+    assert!(visible(&ui, "Linked: unrecorded.jar"));
+    assert!(!start_enabled(&ui));
+    assert_eq!(
+        blockers_shown(&ui),
+        ["gui-isolation-start-blocked-unrecorded"]
+    );
+    acknowledgement(&ui, "gui-isolation-accept-unrecorded").invoke_accessible_default_action();
+    settle(&ui);
+    assert!(start_enabled(&ui));
+}
+
+#[test]
+fn starting_passes_the_choice_to_keep_linked_servers_in_step() {
+    let ui = window();
+    setup_on(&ui, false, false);
+    support::update_host(&ui, 0, |view| {
+        view.isolation_linked_servers = strings(&["Linked (server-1)"]);
+        view.isolation_sync_linked_servers = true;
+    });
+    settle(&ui);
+    let started = Rc::new(RefCell::new(None));
+    let sink = Rc::clone(&started);
+    ui.on_start_isolation(move |_, _, unrecorded, missing, linked| {
+        *sink.borrow_mut() = Some((unrecorded, missing, linked));
+    });
+
+    button(&ui, "gui-isolation-start").mock_single_click(PointerEventButton::Left);
+
+    assert_eq!(*started.borrow(), Some((false, false, true)));
+}
+
+#[test]
+fn a_round_names_what_each_followed_server_is_set_to() {
+    let ui = window();
+    client_workspace(&ui);
+    support::set_surface(&ui, 1, "Isolation");
+    support::update_host(&ui, 0, |view| {
+        view.isolation_phase = "round".into();
+        view.isolation_followed_servers = strings(&["Linked: 3 enabled, 5 disabled"]);
+    });
+    settle(&ui);
+
+    assert!(visible(&ui, &lookup("gui-isolation-followed-servers")));
+    assert!(visible(&ui, "Linked: 3 enabled, 5 disabled"));
+}
+
+#[test]
+fn a_result_names_the_server_mods_no_round_tested() {
+    let ui = window();
+    client_workspace(&ui);
+    support::set_surface(&ui, 1, "Isolation");
+    support::update_host(&ui, 0, |view| {
+        view.isolation_phase = "result".into();
+        view.isolation_followed_servers = strings(&["Linked: 1 enabled, 2 disabled"]);
+        view.isolation_untested_server_mods = strings(&["Linked: serveronly.jar"]);
+    });
+    settle(&ui);
+
+    assert!(visible(&ui, &lookup("gui-isolation-untested-server-mods")));
+    assert!(visible(&ui, "Linked: serveronly.jar"));
+}
+
+#[test]
+fn a_server_owned_by_a_client_session_cannot_start_a_setup_and_names_the_client() {
+    let ui = window();
+    server_workspace(&ui, server(false));
+    support::set_surface(&ui, 1, "Isolation");
+    support::update_host(&ui, 0, |view| {
+        view.isolation_phase = "none".into();
+        view.isolation_led_by = "Main Client".into();
+    });
+    settle(&ui);
+
+    assert!(visible(
+        &ui,
+        &lookup_args(
+            "gui-isolation-led-by",
+            [("value", Arg::from("Main Client"))]
+        )
+    ));
+    assert!(
+        !button(&ui, "gui-isolation-start-setup")
+            .accessible_enabled()
+            .expect("the setup button reports whether it is enabled")
+    );
+}
+
+#[test]
 fn a_running_host_disables_start_and_says_to_stop_it() {
     let ui = window();
     for server_host in [false, true] {

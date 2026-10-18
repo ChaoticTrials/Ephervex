@@ -120,6 +120,7 @@ fn request(pinned: &[&str]) -> IsolationRequest {
         pinned: mods(pinned),
         accept_unrecorded: false,
         accept_missing: false,
+        linked_servers: Vec::new(),
     }
 }
 
@@ -1109,6 +1110,7 @@ fn unrecorded_knowledge_requires_an_explicit_reduced_confidence_override() {
                 pinned: Vec::new(),
                 accept_unrecorded: true,
                 accept_missing: false,
+                linked_servers: Vec::new(),
             },
             &cancel,
         )
@@ -1167,6 +1169,7 @@ fn acknowledged_missing_dependencies_mark_the_session_and_result_unproven() {
             pinned: Vec::new(),
             accept_unrecorded: false,
             accept_missing: true,
+            linked_servers: Vec::new(),
         },
         &cancel,
     )

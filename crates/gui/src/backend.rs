@@ -350,6 +350,8 @@ pub enum Command {
         pinned: Vec<PathBuf>,
         accept_unrecorded: bool,
         accept_missing: bool,
+        /// Keep every installed linked server in step with the client's rounds.
+        sync_linked_servers: bool,
     },
     AnswerIsolation {
         host: InstalledHost,
@@ -1587,7 +1589,18 @@ pub struct IsolationData {
     pub unrecorded: Vec<String>,
     pub unidentifiable: Vec<String>,
     pub missing: Vec<String>,
+    /// Linked servers the session leaves alone.
     pub linked_servers: Vec<String>,
+    /// Linked servers' unrecorded and missing dependencies, which joining the
+    /// session needs acknowledged. Only a setup lists them.
+    pub linked_unrecorded: Vec<String>,
+    pub linked_missing: Vec<String>,
+    /// Each linked server the session keeps in step, with its current counts.
+    pub followed_servers: Vec<String>,
+    /// The server mods no round tests, each with its server.
+    pub untested_server_mods: Vec<String>,
+    /// The client whose session owns this server, when one does.
+    pub led_by: String,
     pub reduced_confidence: bool,
     pub confidence: String,
     pub remaining_candidates: Vec<String>,
@@ -4376,15 +4389,35 @@ fn run_worker(
                 pinned,
                 accept_unrecorded,
                 accept_missing,
+                sync_linked_servers,
             } => {
                 if refuse_while_changing(&changing, host, &events) {
                     let _ = events.send(Event::IsolationSettled { request });
                     continue;
                 }
+                // The servers that follow are rewritten too, so they are marked
+                // with the client and anything else on them is refused up front.
+                let linked_servers = if sync_linked_servers {
+                    match installed_linked_servers(&app, host) {
+                        Ok(servers) => servers,
+                        Err(error) => {
+                            send_host_error(&events, host, HostErrorSurface::Isolation, &error);
+                            let _ = events.send(Event::IsolationSettled { request });
+                            continue;
+                        }
+                    }
+                } else {
+                    Vec::new()
+                };
+                let Some(in_flight) =
+                    mark_isolation_hosts(&changing, host, &linked_servers, &events)
+                else {
+                    let _ = events.send(Event::IsolationSettled { request });
+                    continue;
+                };
                 let paths = app.paths().clone();
                 let reports = events.clone();
                 let refreshed = Arc::clone(&refreshed_mods);
-                let in_flight = HostChangeInFlight::mark(&changing, host, "gui-isolation-busy");
                 spawn_async_operation(
                     paths,
                     &events,
@@ -4404,6 +4437,7 @@ fn run_worker(
                                 pinned,
                                 accept_unrecorded,
                                 accept_missing,
+                                linked_servers,
                             },
                             &reporter,
                             &cancel,
@@ -4419,6 +4453,12 @@ fn run_worker(
                             &app, host, generation, true, None, &reports, &refreshed,
                         );
                         send_host_mods(&app, host, &reports, &refreshed, false);
+                        refresh_followed_servers(
+                            &app,
+                            &followed_server_ids(&app, host),
+                            &reports,
+                            &refreshed,
+                        );
                         Ok(OperationReport::Reported)
                     },
                 );
@@ -4429,7 +4469,7 @@ fn run_worker(
                 request,
                 answer,
             } => {
-                if refuse_while_changing(&changing, host, &events) {
+                if refuse_isolation_while_changing(&changing, &app, host, &events) {
                     let _ = events.send(Event::IsolationSettled { request });
                     continue;
                 }
@@ -4445,6 +4485,12 @@ fn run_worker(
                             &refreshed_mods,
                         );
                         send_host_mods(&app, host, &events, &refreshed_mods, false);
+                        refresh_followed_servers(
+                            &app,
+                            &followed_server_ids(&app, host),
+                            &events,
+                            &refreshed_mods,
+                        );
                     }
                     // The answer described mods the host no longer had, so it
                     // is dropped and the round is reapplied to be tested again.
@@ -4470,7 +4516,7 @@ fn run_worker(
                 generation,
                 request,
             } => {
-                if refuse_while_changing(&changing, host, &events) {
+                if refuse_isolation_while_changing(&changing, &app, host, &events) {
                     let _ = events.send(Event::IsolationSettled { request });
                     continue;
                 }
@@ -4486,6 +4532,12 @@ fn run_worker(
                             &refreshed_mods,
                         );
                         send_host_mods(&app, host, &events, &refreshed_mods, false);
+                        refresh_followed_servers(
+                            &app,
+                            &followed_server_ids(&app, host),
+                            &events,
+                            &refreshed_mods,
+                        );
                     }
                     Err(error) => {
                         send_host_error(&events, host, HostErrorSurface::Isolation, &error);
@@ -4498,10 +4550,11 @@ fn run_worker(
                 generation,
                 request,
             } => {
-                if refuse_while_changing(&changing, host, &events) {
+                if refuse_isolation_while_changing(&changing, &app, host, &events) {
                     let _ = events.send(Event::IsolationSettled { request });
                     continue;
                 }
+                let followed = followed_server_ids(&app, host);
                 match app.finish_isolation(host) {
                     Ok(report) => {
                         let _ = events.send(Event::Isolation {
@@ -4510,6 +4563,14 @@ fn run_worker(
                             data: isolation_report_data(host, &report),
                         });
                         send_host_mods(&app, host, &events, &refreshed_mods, false);
+                        refresh_followed_servers(&app, &followed, &events, &refreshed_mods);
+                        for server in &report.unreached {
+                            send_unreached_server(
+                                &events,
+                                "gui-isolation-server-not-finished",
+                                server,
+                            );
+                        }
                     }
                     Err(error) => {
                         send_host_error(&events, host, HostErrorSurface::Isolation, &error);
@@ -4526,10 +4587,18 @@ fn run_worker(
                     let _ = events.send(Event::IsolationSettled { request });
                     continue;
                 }
+                let Some(in_flight) = mark_isolation_hosts(
+                    &changing,
+                    host,
+                    &followed_server_ids(&app, host),
+                    &events,
+                ) else {
+                    let _ = events.send(Event::IsolationSettled { request });
+                    continue;
+                };
                 let paths = app.paths().clone();
                 let reports = events.clone();
                 let refreshed = Arc::clone(&refreshed_mods);
-                let in_flight = HostChangeInFlight::mark(&changing, host, "gui-isolation-busy");
                 spawn_async_operation(
                     paths,
                     &events,
@@ -4543,6 +4612,7 @@ fn run_worker(
                     },
                     move |app, _reporter, cancel| async move {
                         let _in_flight = in_flight;
+                        let followed = followed_server_ids(&app, host);
                         let canceled = app.cancel_isolation(host, &cancel)?;
                         let _ = reports.send(Event::Isolation {
                             generation,
@@ -4550,6 +4620,14 @@ fn run_worker(
                             data: inactive_isolation_data(host),
                         });
                         send_host_mods(&app, host, &reports, &refreshed, false);
+                        refresh_followed_servers(&app, &followed, &reports, &refreshed);
+                        for server in &canceled.unreached {
+                            send_unreached_server(
+                                &reports,
+                                "gui-isolation-server-not-restored",
+                                server,
+                            );
+                        }
                         send_client_commit_warnings(&reports, &canceled.warnings);
                         send_server_commit_warnings(&reports, &canceled.server_warnings);
                         Ok(OperationReport::Toast(lookup("gui-isolation-canceled")))
@@ -7845,19 +7923,40 @@ fn send_isolation_state(
 ) {
     let data = match app.isolation_state(host) {
         Ok(Some(session)) => {
+            // Read again after reconciling, which retires servers deleted behind the session.
+            let (recovery, detail) = reconcile_isolation(app, host, changing, events, refreshed);
+            let session = app.isolation_state(host).ok().flatten().unwrap_or(session);
             let mut data = isolation_session_data(&session);
-            (data.recovery, data.recovery_detail) =
-                reconcile_isolation(app, host, changing, events, refreshed);
+            (data.recovery, data.recovery_detail) = (recovery, detail);
             data
         }
-        Ok(None) if open => match app.plan_isolation(host, &[]) {
-            Ok(plan) => isolation_plan_data(host, &plan),
-            Err(error) => {
-                send_host_error(events, host, HostErrorSurface::Isolation, &error);
-                return;
+        Ok(None) => {
+            let led_by = match host {
+                InstalledHost::Server(server) => match app.isolation_leader(server) {
+                    Ok(leader) => leader.map(|leader| leader.name),
+                    Err(error) => {
+                        send_host_error(events, host, HostErrorSurface::Isolation, &error);
+                        return;
+                    }
+                },
+                InstalledHost::Instance(_) => None,
+            };
+            if let Some(client) = led_by {
+                let mut data = inactive_isolation_data(host);
+                data.led_by = client;
+                data
+            } else if open {
+                match app.plan_isolation(host, &[]) {
+                    Ok(plan) => isolation_plan_data(host, &plan),
+                    Err(error) => {
+                        send_host_error(events, host, HostErrorSurface::Isolation, &error);
+                        return;
+                    }
+                }
+            } else {
+                inactive_isolation_data(host)
             }
-        },
-        Ok(None) => inactive_isolation_data(host),
+        }
         Err(error) => {
             send_host_error(events, host, HostErrorSurface::Isolation, &error);
             return;
@@ -7868,6 +7967,119 @@ fn send_isolation_state(
         open,
         data,
     });
+}
+
+/// Tells the user a followed server could not be reached when its session ended.
+fn send_unreached_server(
+    events: &Sender<Event>,
+    message: &str,
+    server: &ephervex_core::IsolationUnreachedServer,
+) {
+    let _ = events.send(Event::Toast {
+        message: lookup_args(message, [("name", Arg::from(server.name.clone()))]),
+        error: true,
+    });
+}
+
+/// The change already rewriting a host or a server its session keeps in step.
+fn isolation_change_in_flight(
+    hosts: &ChangingHosts,
+    host: InstalledHost,
+    followed: &[ServerId],
+) -> Option<&'static str> {
+    change_in_flight(hosts, host).or_else(|| {
+        followed
+            .iter()
+            .find_map(|server| change_in_flight(hosts, InstalledHost::Server(*server)))
+    })
+}
+
+/// Like [`refuse_while_changing`], also while a followed server is being changed.
+fn refuse_isolation_while_changing(
+    hosts: &ChangingHosts,
+    app: &App,
+    host: InstalledHost,
+    events: &Sender<Event>,
+) -> bool {
+    let refusal = isolation_change_in_flight(hosts, host, &followed_server_ids(app, host));
+    if let Some(refusal) = refusal {
+        let _ = events.send(Event::Toast {
+            message: lookup(refusal),
+            error: true,
+        });
+    }
+    refusal.is_some()
+}
+
+/// Marks a host and the servers its session changes as rewriting, or tells the
+/// user which change is already doing it.
+fn mark_isolation_hosts(
+    changing: &ChangingHosts,
+    host: InstalledHost,
+    servers: &[ServerId],
+    events: &Sender<Event>,
+) -> Option<Vec<HostChangeInFlight>> {
+    let targets: Vec<_> = std::iter::once(host)
+        .chain(servers.iter().copied().map(InstalledHost::Server))
+        .collect();
+    match HostChangeInFlight::try_mark(changing, &targets, "gui-isolation-busy") {
+        Ok(marks) => Some(marks),
+        Err(existing) => {
+            let _ = events.send(Event::Toast {
+                message: lookup(existing),
+                error: true,
+            });
+            None
+        }
+    }
+}
+
+/// The installed servers linked to a client, which a session can keep in step.
+fn installed_linked_servers(app: &App, host: InstalledHost) -> CoreResult<Vec<ServerId>> {
+    let InstalledHost::Instance(client) = host else {
+        return Ok(Vec::new());
+    };
+    Ok(app
+        .list_servers()?
+        .into_iter()
+        .filter(|server| {
+            server.linked_client_id == Some(client) && server.installation.is_installed()
+        })
+        .map(|server| server.id)
+        .collect())
+}
+
+/// The servers a host's session changes, or none when it has no session.
+fn followed_server_ids(app: &App, host: InstalledHost) -> Vec<ServerId> {
+    app.isolation_state(host)
+        .ok()
+        .flatten()
+        .map(|session| {
+            session
+                .followed_servers
+                .iter()
+                .map(|followed| followed.plan.server)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Shows what a session did to its followed servers: their mods, their
+/// snapshots, and whether a session still owns them.
+fn refresh_followed_servers(
+    app: &App,
+    servers: &[ServerId],
+    events: &Sender<Event>,
+    refreshed: &RefreshedHosts,
+) {
+    for server in servers {
+        let host = InstalledHost::Server(*server);
+        send_host_mods(app, host, events, refreshed, false);
+        send_isolation_state(app, host, 0, false, None, events, refreshed);
+        if let Ok(data) = host_snapshots_data(app, host) {
+            let _ = events.send(Event::HostSnapshots(data));
+        }
+    }
 }
 
 /// Reapplies an active session's round when the host's mods differ from it,
@@ -7881,7 +8093,9 @@ fn reconcile_isolation(
 ) -> (String, String) {
     // Reapplying the round writes the host's mods and its isolation state, so
     // it waits for a change that is doing the same. The panel offers a retry.
-    if let Some(refusal) = changing.and_then(|hosts| change_in_flight(hosts, host)) {
+    if let Some(refusal) = changing
+        .and_then(|hosts| isolation_change_in_flight(hosts, host, &followed_server_ids(app, host)))
+    {
         return ("failed".to_owned(), lookup(refusal));
     }
     match app.reconcile_isolation(host) {
@@ -7892,6 +8106,7 @@ fn reconcile_isolation(
                 error: false,
             });
             send_host_mods(app, host, events, refreshed, false);
+            refresh_followed_servers(app, &followed_server_ids(app, host), events, refreshed);
             (String::new(), String::new())
         }
         Err(CoreError::Isolation(IsolationError::HostRunning { .. })) => {
@@ -7916,6 +8131,11 @@ fn inactive_isolation_data(host: InstalledHost) -> IsolationData {
         unidentifiable: Vec::new(),
         missing: Vec::new(),
         linked_servers: Vec::new(),
+        linked_unrecorded: Vec::new(),
+        linked_missing: Vec::new(),
+        followed_servers: Vec::new(),
+        untested_server_mods: Vec::new(),
+        led_by: String::new(),
         reduced_confidence: false,
         confidence: String::new(),
         remaining_candidates: Vec::new(),
@@ -7965,16 +8185,86 @@ fn isolation_plan_data(host: InstalledHost, plan: &IsolationPlan) -> IsolationDa
     data.unrecorded = isolation_mod_list(&plan.unrecorded);
     data.unidentifiable = isolation_mod_list(&plan.unidentifiable);
     data.missing = isolation_missing_list(&plan.missing);
+    // Only an installed server can be kept in step, so only those are offered.
     data.linked_servers = plan
         .linked_servers
         .iter()
+        .filter(|server| server.installed)
         .map(|server| format!("{} ({})", server.name, server.id))
+        .collect();
+    data.linked_unrecorded = plan
+        .linked_servers
+        .iter()
+        .flat_map(|server| {
+            server
+                .unrecorded
+                .iter()
+                .map(|path| format!("{}: {}", server.name, isolation_mod_display(path)))
+        })
+        .collect();
+    data.linked_missing = plan
+        .linked_servers
+        .iter()
+        .flat_map(|server| {
+            isolation_missing_list(&server.missing)
+                .into_iter()
+                .map(|row| format!("{}: {row}", server.name))
+        })
         .collect();
     data.summary = lookup_args(
         "gui-isolation-setup-summary",
         [("count", Arg::from(plan.candidates.len()))],
     );
     data
+}
+
+/// The linked servers a session lists and leaves alone.
+fn unchanged_linked_servers(session: &IsolationSession) -> Vec<String> {
+    session
+        .unchanged_linked_servers()
+        .into_iter()
+        .map(|server| format!("{} ({})", server.name, server.id))
+        .collect()
+}
+
+/// What each server a session keeps in step is set to, and the mods it leaves untested.
+fn followed_server_lines_of(session: &IsolationSession) -> (Vec<String>, Vec<String>) {
+    let servers = session.server_configurations();
+    let followed = servers
+        .iter()
+        .map(|server| {
+            followed_server_line(&server.name, server.enabled.len(), server.disabled.len())
+        })
+        .collect();
+    let untested = untested_server_lines(
+        servers
+            .into_iter()
+            .map(|server| (server.name, server.untested)),
+    );
+    (followed, untested)
+}
+
+/// The mods no round tested, each beside its server.
+fn untested_server_lines(servers: impl Iterator<Item = (String, Vec<PathBuf>)>) -> Vec<String> {
+    servers
+        .flat_map(|(name, untested)| {
+            isolation_mod_list(&untested)
+                .into_iter()
+                .map(move |path| format!("{name}: {path}"))
+        })
+        .collect()
+}
+
+/// One followed server and how many of its mods are on.
+fn followed_server_line(name: &str, enabled: usize, disabled: usize) -> String {
+    lookup_args(
+        "gui-isolation-followed-server",
+        [
+            ("name", Arg::from(name)),
+            ("enabled", Arg::from(enabled)),
+            ("disabled", Arg::from(disabled)),
+        ],
+    )
 }
 
 fn isolation_session_data(session: &IsolationSession) -> IsolationData {
@@ -8033,6 +8323,7 @@ fn isolation_session_data(session: &IsolationSession) -> IsolationData {
                 )
             },
         );
+    let (followed_servers, untested_server_mods) = followed_server_lines_of(session);
     IsolationData {
         host,
         host_kind,
@@ -8046,12 +8337,12 @@ fn isolation_session_data(session: &IsolationSession) -> IsolationData {
         unrecorded: isolation_mod_list(&session.plan.unrecorded),
         unidentifiable: isolation_mod_list(&session.plan.unidentifiable),
         missing: Vec::new(),
-        linked_servers: session
-            .plan
-            .linked_servers
-            .iter()
-            .map(|server| format!("{} ({})", server.name, server.id))
-            .collect(),
+        linked_servers: unchanged_linked_servers(session),
+        linked_unrecorded: Vec::new(),
+        linked_missing: Vec::new(),
+        followed_servers,
+        untested_server_mods,
+        led_by: String::new(),
         reduced_confidence: session.reduced_confidence,
         confidence,
         remaining_candidates,
@@ -8115,6 +8406,19 @@ fn isolation_report_data(host: InstalledHost, report: &IsolationReport) -> Isola
         .iter()
         .map(|server| format!("{} ({})", server.name, server.id))
         .collect();
+    data.followed_servers = report
+        .servers
+        .iter()
+        .map(|server| {
+            followed_server_line(&server.name, server.enabled.len(), server.disabled.len())
+        })
+        .collect();
+    data.untested_server_mods = untested_server_lines(
+        report
+            .servers
+            .iter()
+            .map(|server| (server.name.clone(), server.untested.clone())),
+    );
     data.summary = lookup_args(
         "gui-isolation-result-summary",
         [("count", Arg::from(report.remaining_candidates.len()))],
@@ -14296,6 +14600,34 @@ mod tests {
     }
 
     #[test]
+    fn a_setup_offers_only_installed_linked_servers_to_keep_in_step() {
+        let server = |name: &str, installed: bool| ephervex_core::IsolationLinkedServer {
+            id: format!("{name}-id"),
+            name: name.to_owned(),
+            installed,
+            unrecorded: Vec::new(),
+            unidentifiable: Vec::new(),
+            missing: Vec::new(),
+        };
+        let plan = IsolationPlan {
+            pinned: Vec::new(),
+            pinned_closure: Vec::new(),
+            candidates: Vec::new(),
+            available: Vec::new(),
+            initially_enabled: Vec::new(),
+            unrecorded: Vec::new(),
+            unidentifiable: Vec::new(),
+            missing: Vec::new(),
+            linked_servers: vec![server("Ready", true), server("Pending", false)],
+        };
+        let host = InstalledHost::Instance(ephervex_model::InstanceId::new());
+
+        let data = isolation_plan_data(host, &plan);
+
+        assert_eq!(data.linked_servers, ["Ready (Ready-id)"]);
+    }
+
+    #[test]
     fn a_setups_basis_follows_the_plan_it_was_computed_from() {
         let plan = |enabled: &[&str]| IsolationPlan {
             pinned: Vec::new(),
@@ -14340,6 +14672,8 @@ mod tests {
             unidentifiable: Vec::new(),
             missing: Vec::new(),
             linked_servers: Vec::new(),
+            servers: Vec::new(),
+            unreached: Vec::new(),
         };
         let data = isolation_report_data(host, &report);
         assert_eq!(data.enabled, ["a.jar", "API.jar", "b.jar"]);
@@ -15430,6 +15764,23 @@ mod tests {
     }
 
     #[test]
+    fn a_session_change_is_refused_while_a_followed_server_is_being_changed() {
+        let hosts: ChangingHosts = Arc::new(Mutex::new(HashMap::new()));
+        let client = InstalledHost::Instance(ephervex_model::InstanceId::new());
+        let server = ephervex_model::ServerId::new();
+        assert_eq!(isolation_change_in_flight(&hosts, client, &[server]), None);
+
+        let _restart =
+            HostChangeInFlight::mark(&hosts, InstalledHost::Server(server), "gui-restart-busy");
+
+        assert_eq!(
+            isolation_change_in_flight(&hosts, client, &[server]),
+            Some("gui-restart-busy")
+        );
+        assert_eq!(isolation_change_in_flight(&hosts, client, &[]), None);
+    }
+
+    #[test]
     fn a_second_change_to_a_host_is_refused_and_marks_nothing() {
         let hosts: ChangingHosts = Arc::new(Mutex::new(HashMap::new()));
         let instance = InstalledHost::Instance(ephervex_model::InstanceId::new());
@@ -15454,6 +15805,21 @@ mod tests {
         drop(second);
         assert!(change_in_flight(&hosts, instance).is_none());
         assert!(change_in_flight(&hosts, server).is_none());
+        let (events, received) = std::sync::mpsc::channel();
+        let isolation = mark_isolation_hosts(
+            &hosts,
+            instance,
+            &[ephervex_model::ServerId::new()],
+            &events,
+        )
+        .expect("idle hosts can be claimed");
+        assert_eq!(isolation.len(), 2);
+        let refused = mark_isolation_hosts(&hosts, instance, &[], &events);
+        assert!(refused.is_none(), "the client is already being rewritten");
+        assert!(matches!(
+            received.try_recv(),
+            Ok(Event::Toast { error: true, .. })
+        ));
     }
 
     #[test]

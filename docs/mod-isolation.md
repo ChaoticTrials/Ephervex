@@ -49,8 +49,29 @@ presented as the sole cause. **Finish** leaves the smallest tested configuration
 and keeps the pre-isolation snapshot in the Snapshots tab. Until the finished
 result is closed, the host's banner says the tested configuration is still
 enabled, whichever tab is shown. **Cancel isolation**
-restores the exact pre-isolation state instead. A client session never changes
-a linked server; isolate that server separately when its mods are also relevant.
+restores the exact pre-isolation state instead.
+
+A client session lists its linked servers and leaves them alone unless told
+otherwise. For a problem that needs both sides, turn on **Keep linked servers in
+step with each round** on the setup screen. Each installed linked server then
+enables a mod exactly when the round enables the same project on the client, so
+every round tests the same mods on both sides, and the Isolation tab shows what
+each server was set to. Launch the client and the server for each round. A
+server mod follows a client mod only when that client mod takes part in the
+search and the server had the mod enabled. Every other server mod, such as one
+only the server has, one whose client mod is disabled or ignored, or one the
+server had disabled, stays as it was and is not part of the search; the result
+names those mods as untested. Each server gets its own safety snapshot, and
+cancel restores every server from it. While the session is active the server
+refuses mod changes, snapshot restore, linked mod sync, and a session of its
+own, it cannot be deleted, and its Isolation tab says which client's session
+owns it. Servers whose
+dependency information is incomplete need the same acknowledgements as the
+client. A server whose folder cannot be reached when the session ends, such as
+on an unmounted drive, is skipped by cancel and finish: the session ends and
+names the server as not restored or not set to the result, and its safety
+snapshot keeps its starting state. Isolate a server that is not kept in step separately when its mods are
+also relevant.
 
 Ephervex must be stopped for the affected host before it starts, advances,
 undoes, finishes, or cancels a round. The workspace header continues to provide
@@ -96,6 +117,10 @@ ephervex mod isolate cancel --instance <id>
 
 `start` refuses refreshable unrecorded dependency information by default.
 `--accept-unrecorded` explicitly continues with a reduced-confidence result.
+`--linked-server <id>` (repeatable, client sessions only) keeps that linked
+server's mods in step with each round, as described above; every command that
+prints a round then also prints what each server was set to, and `status --json`
+includes the same in `server_configurations`.
 Pass `--json` before `mod` for structured session, round, and result output.
 
 If Ephervex or the machine stops during a session, run `status` to inspect the

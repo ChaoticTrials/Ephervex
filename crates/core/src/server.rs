@@ -635,11 +635,24 @@ impl App {
     }
 
     pub fn delete_server(&self, id: ServerId, files: FileDisposition) -> CoreResult<()> {
+        // The recipe gate first, as a session start takes it, so a deletion and
+        // a session naming this server cannot both pass their checks.
+        let _gate = crate::host_recipe_gate::hold_blocking(
+            self.registry(),
+            crate::InstalledHost::Server(id),
+        )?;
         let _claim = self
             .registry()
             .claim_host(ephervex_storage::RecordRef::Server(id))?;
         let record = self.server_for_deletion(id, files)?;
         refuse_if_running(&record)?;
+        if let Some(leader) = self.isolation_leader(id)? {
+            return Err(crate::IsolationError::OwnedByClient {
+                server: record.name,
+                client: leader.name,
+            }
+            .into());
+        }
         self.delete_claimed_server(&record, files)
     }
 

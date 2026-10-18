@@ -508,6 +508,7 @@ async fn a_server_in_an_isolation_session_refuses_an_install() {
                 pinned: Vec::new(),
                 accept_unrecorded: true,
                 accept_missing: true,
+                linked_servers: Vec::new(),
             },
             &CancellationToken::new(),
         )

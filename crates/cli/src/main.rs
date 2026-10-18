@@ -648,6 +648,15 @@ enum IsolateCommand {
         /// appears independent may have an unrecorded required dependency.
         #[arg(long)]
         accept_unrecorded: bool,
+        /// Also keep this linked server's mods in step with each round.
+        ///
+        /// The server enables a mod exactly when the client round enables the
+        /// same project, so a bug that needs both sides can be narrowed in one
+        /// session. It has its own safety snapshot, and until the session ends
+        /// its mods cannot be changed and it cannot have a session of its own.
+        /// Start it yourself to test each round. Repeat for several servers.
+        #[arg(long = "linked-server", value_name = "SERVER")]
+        linked_servers: Vec<ServerId>,
     },
     /// Show the durable session without changing its current configuration.
     Status {
@@ -4935,6 +4944,7 @@ fn run_mod_isolate(app: &App, command: &IsolateCommand, json: bool) -> anyhow::R
             host,
             pinned,
             accept_unrecorded,
+            linked_servers,
         } => {
             let round = app.begin_isolation(
                 host.host()?,
@@ -4942,15 +4952,24 @@ fn run_mod_isolate(app: &App, command: &IsolateCommand, json: bool) -> anyhow::R
                     pinned: pinned.clone(),
                     accept_unrecorded: *accept_unrecorded,
                     accept_missing: false,
+                    linked_servers: linked_servers.clone(),
                 },
                 &CancellationToken::new(),
             )?;
             print_isolation_step(IsolationStep::AwaitingAnswer(round), json)?;
+            print_followed_servers(app, host.host()?, json);
         }
         IsolateCommand::Status { host } => {
             let state = app.isolation_state(host.host()?)?;
             if json {
-                print_json(&serde_json::to_value(&state)?);
+                let mut value = serde_json::to_value(&state)?;
+                if let (Some(session), Some(object)) = (&state, value.as_object_mut()) {
+                    object.insert(
+                        "server_configurations".to_owned(),
+                        serde_json::to_value(session.server_configurations())?,
+                    );
+                }
+                print_json(&value);
             } else if let Some(state) = state {
                 print_isolation_status(&state);
             } else {
@@ -4959,50 +4978,26 @@ fn run_mod_isolate(app: &App, command: &IsolateCommand, json: bool) -> anyhow::R
         }
         IsolateCommand::Resume { host } => {
             print_isolation_step(app.resume_isolation(host.host()?)?, json)?;
+            print_followed_servers(app, host.host()?, json);
         }
         IsolateCommand::Answer { host, answer } => {
             print_isolation_step(
                 app.answer_isolation_round(host.host()?, answer.answer())?,
                 json,
             )?;
+            print_followed_servers(app, host.host()?, json);
         }
         IsolateCommand::Undo { host } => {
             let round = app.undo_isolation_round(host.host()?)?;
             print_isolation_step(IsolationStep::AwaitingAnswer(round), json)?;
+            print_followed_servers(app, host.host()?, json);
         }
         IsolateCommand::Finish { host } => {
             let report = app.finish_isolation(host.host()?)?;
             if json {
                 print_json(&serde_json::to_value(&report)?);
             } else {
-                outln!("Isolation finished after {} rounds.", report.rounds);
-                outln!("Confidence: {}", report.confidence.as_str());
-                outln!("Remaining testable candidates:");
-                for candidate in &report.remaining_candidates {
-                    outln!("  {} ({})", candidate.name, candidate.root.display());
-                }
-                if !report.pinned.is_empty() {
-                    outln!("Pinned throughout, not tested for removal:");
-                    for path in &report.pinned {
-                        outln!("  {}", path.display());
-                    }
-                }
-                if !report.pinned_dependencies.is_empty() {
-                    outln!("Required by pinned mods, not tested for removal:");
-                    for path in &report.pinned_dependencies {
-                        outln!("  {}", path.display());
-                    }
-                }
-                if !report.required_dependencies.is_empty() {
-                    outln!("Required by the remaining candidates:");
-                    for path in &report.required_dependencies {
-                        outln!("  {}", path.display());
-                    }
-                }
-                if report.reduced_confidence {
-                    outln!("Dependency information was incomplete; treat this result as unproven.");
-                }
-                outln!("Safety snapshot retained: {}", report.safety_snapshot);
+                print_isolation_report(&report);
             }
         }
         IsolateCommand::Cancel { host } => {
@@ -5014,11 +5009,26 @@ fn run_mod_isolate(app: &App, command: &IsolateCommand, json: bool) -> anyhow::R
                         .into_iter()
                         .chain(server_commit_warnings_json(&canceled.server_warnings))
                         .collect::<Vec<_>>(),
+                    "unreached": canceled.unreached,
                 }));
             } else {
-                outln!("Isolation canceled. The pre-isolation state was restored.");
+                if canceled.unreached.is_empty() {
+                    outln!("Isolation canceled. The pre-isolation state was restored.");
+                } else {
+                    outln!(
+                        "Isolation canceled. The pre-isolation state was restored, except for the linked servers below."
+                    );
+                }
                 print_client_commit_warnings(&canceled.warnings);
                 print_server_commit_warnings(&canceled.server_warnings);
+                for server in &canceled.unreached {
+                    outln!(
+                        "Linked server {} ({}) could not be reached, so it was not restored. Its safety snapshot {} keeps its state from before isolation.",
+                        server.name,
+                        server.server,
+                        server.safety_snapshot
+                    );
+                }
             }
         }
     }
@@ -5054,6 +5064,94 @@ fn print_isolation_step(step: IsolationStep, json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Prints what a finished session kept, for people rather than scripts.
+fn print_isolation_report(report: &ephervex_core::IsolationReport) {
+    outln!("Isolation finished after {} rounds.", report.rounds);
+    outln!("Confidence: {}", report.confidence.as_str());
+    outln!("Remaining testable candidates:");
+    for candidate in &report.remaining_candidates {
+        outln!("  {} ({})", candidate.name, candidate.root.display());
+    }
+    if !report.pinned.is_empty() {
+        outln!("Pinned throughout, not tested for removal:");
+        for path in &report.pinned {
+            outln!("  {}", path.display());
+        }
+    }
+    if !report.pinned_dependencies.is_empty() {
+        outln!("Required by pinned mods, not tested for removal:");
+        for path in &report.pinned_dependencies {
+            outln!("  {}", path.display());
+        }
+    }
+    if !report.required_dependencies.is_empty() {
+        outln!("Required by the remaining candidates:");
+        for path in &report.required_dependencies {
+            outln!("  {}", path.display());
+        }
+    }
+    if report.reduced_confidence {
+        outln!("Dependency information was incomplete; treat this result as unproven.");
+    }
+    outln!("Safety snapshot retained: {}", report.safety_snapshot);
+    for server in &report.servers {
+        outln!(
+            "Linked server {} ({}) was kept in step: {} enabled, {} disabled.",
+            server.name,
+            server.server,
+            server.enabled.len(),
+            server.disabled.len()
+        );
+        if !server.untested.is_empty() {
+            outln!("  These mods stayed as they were, because no round tested them:");
+            for path in &server.untested {
+                outln!("    {}", path.display());
+            }
+        }
+        outln!("  Safety snapshot retained: {}", server.safety_snapshot);
+    }
+    for server in &report.unreached {
+        outln!(
+            "Linked server {} ({}) could not be reached, so its mods were not set to the result. Its safety snapshot {} keeps its state from before isolation.",
+            server.name,
+            server.server,
+            server.safety_snapshot
+        );
+    }
+    for server in &report.linked_servers {
+        outln!(
+            "Linked server {} ({}) was not changed.",
+            server.name,
+            server.id
+        );
+    }
+}
+
+/// What each linked server was set to for the session's current configuration.
+fn print_followed_servers(app: &App, host: InstalledHost, json: bool) {
+    if json {
+        return;
+    }
+    let Ok(Some(session)) = app.isolation_state(host) else {
+        return;
+    };
+    for server in session.server_configurations() {
+        outln!(
+            "Linked server {} ({}) follows this configuration.",
+            server.name,
+            server.server
+        );
+        outln!("  Enabled:");
+        for path in &server.enabled {
+            outln!("    {}", path.display());
+        }
+        outln!("  Disabled:");
+        for path in &server.disabled {
+            outln!("    {}", path.display());
+        }
+    }
+}
+
 fn print_isolation_round(round: &IsolationRound) {
     outln!(
         "Isolation round {}: test this {} configuration ({}/{}, granularity {}).",
@@ -5084,10 +5182,18 @@ fn print_isolation_status(session: &IsolationSession) {
     if session.reduced_confidence {
         outln!("Dependency information is incomplete; the result will be unproven.");
     }
-    if !session.plan.linked_servers.is_empty() {
+    let unchanged = session.unchanged_linked_servers();
+    if !unchanged.is_empty() {
         outln!("Linked servers are not changed by this session:");
-        for server in &session.plan.linked_servers {
+        for server in unchanged {
             outln!("  {} ({})", server.name, server.id);
+        }
+    }
+    let followed = session.server_configurations();
+    if !followed.is_empty() {
+        outln!("Linked servers kept in step with each round:");
+        for server in &followed {
+            outln!("  {} ({})", server.name, server.server);
         }
     }
     if let Some(round) = &session.current_round {
