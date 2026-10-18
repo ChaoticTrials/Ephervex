@@ -152,6 +152,7 @@ fn seasonal_palette(ui: &AppWindow, theme: SeasonalTheme) -> ThemePalette {
         SeasonalTheme::Halloween => palettes.get_halloween(),
         SeasonalTheme::Christmas => palettes.get_christmas(),
         SeasonalTheme::Pride => palettes.get_pride(),
+        SeasonalTheme::AprilFools => palettes.get_april_fools(),
     }
 }
 
@@ -168,6 +169,7 @@ pub(crate) fn seasonal_label(theme: SeasonalTheme) -> String {
         SeasonalTheme::Halloween => "gui-seasonal-theme-halloween",
         SeasonalTheme::Christmas => "gui-seasonal-theme-christmas",
         SeasonalTheme::Pride => "gui-seasonal-theme-pride",
+        SeasonalTheme::AprilFools => "gui-seasonal-theme-april-fools",
     })
 }
 

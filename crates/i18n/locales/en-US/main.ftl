@@ -2905,6 +2905,7 @@ gui-seasonal-theme-shown = The { $season } theme is shown right now. Turn this o
 gui-seasonal-theme-halloween = Halloween
 gui-seasonal-theme-christmas = Christmas
 gui-seasonal-theme-pride = Pride Month
+gui-seasonal-theme-april-fools = April Fools
 gui-technical-text-size = Diagnostics and console text
 gui-technical-text-size-detail = Set the monospace size used for selectable logs, crash reports, and server console output.
 gui-text-scale-90 = 90%
