@@ -90,7 +90,12 @@ pub struct ScratchOwner {
 
 impl Drop for ScratchOwner {
     fn drop(&mut self) {
-        self.lock = None;
+        // A child spawned while the lock was held keeps its open file
+        // description until it reaches `exec`, so closing alone could leave
+        // the marker locked after the owner is gone.
+        if let Some(lock) = self.lock.take() {
+            unlock(&lock);
+        }
     }
 }
 
@@ -277,6 +282,20 @@ fn try_lock(file: &File) -> io::Result<bool> {
     }
 }
 
+#[cfg(unix)]
+fn unlock(file: &File) {
+    use rustix::fs::{FlockOperation, flock};
+
+    // An unlock on any descriptor of the open file description releases the
+    // lock for all of them.
+    if let Err(errno) = flock(file, FlockOperation::Unlock) {
+        debug!(%errno, "could not unlock a scratch marker");
+    }
+}
+
+#[cfg(not(unix))]
+fn unlock(_file: &File) {}
+
 /// Without advisory locking a claim succeeds without excluding anyone, and
 /// [`sweep_abandoned`] collects nothing.
 #[cfg(not(unix))]
@@ -337,6 +356,22 @@ mod tests {
 
         assert!(!scratch.exists());
         assert!(!root.path().join("client-7-0.owner").exists());
+    }
+
+    #[test]
+    fn a_dropped_owner_releases_its_lock_even_if_a_child_shares_the_descriptor() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let file = root.path().join("client-7-0");
+        let owner = ScratchOwner::claim(&file).expect("claim");
+        // A process spawned and not yet exec'd shares the lock's open file description.
+        let inherited = owner.lock.as_ref().expect("lock").try_clone().expect("dup");
+        std::fs::write(&file, b"partial").expect("write partial");
+        drop(owner);
+
+        assert_eq!(sweep_abandoned(root.path(), |_| true), 1);
+
+        assert!(!file.exists());
+        drop(inherited);
     }
 
     #[test]
