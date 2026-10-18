@@ -2220,15 +2220,17 @@ mod tests {
         let plan = world.plan().await;
         let shard = pack.parent().unwrap().to_path_buf();
         std::fs::set_permissions(&shard, std::fs::Permissions::from_mode(0o555)).unwrap();
-        // A process that may delete from it anyway, such as root, proves nothing.
-        let privileged = std::fs::remove_file(shard.join("probe")).map_err(|e| e.kind())
-            == Err(std::io::ErrorKind::NotFound);
+        // A process that may write to it anyway, such as root, proves nothing. Removing a
+        // missing name cannot tell, since lookup fails before permissions are checked.
+        let privileged = std::fs::File::create(shard.join("probe")).is_ok();
 
-        let outcome = world.apply(&plan).await.expect("apply");
-        std::fs::set_permissions(&shard, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Applying would succeed and prune the shard, leaving nothing to assert or restore.
         if privileged {
             return;
         }
+
+        let outcome = world.apply(&plan).await.expect("apply");
+        std::fs::set_permissions(&shard, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         assert!(!outcome.is_complete() && outcome.can_retry());
         assert_eq!(outcome.failed_entries, 1);
