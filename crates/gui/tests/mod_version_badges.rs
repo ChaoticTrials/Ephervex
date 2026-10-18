@@ -10,7 +10,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ephervex_gui::ui::{AppWindow, GuiI18n, ModVersionRow};
+use ephervex_gui::ui::{AppWindow, GuiI18n, ModVersionRow, Theme};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
 use slint::platform::PointerEventButton;
@@ -151,6 +151,52 @@ fn a_mod_without_a_project_page_offers_no_way_to_one() {
             .all(|element| element.size().width == 0.0),
         "nothing offers a project page that does not exist"
     );
+}
+
+/// Every action a pack mod can show at once has to sit inside the dialog's
+/// padding, at the default text size and at a larger one.
+#[test]
+fn the_full_set_of_mod_actions_fits_inside_the_dialogs_padding() {
+    let ui = window();
+    ui.set_mod_action_can_remove(true);
+    ui.set_mod_action_is_pack_owned(true);
+    ui.set_mod_action_pack_original_version("v3".into());
+    ui.set_mod_action_can_update(true);
+    for scale in [1.0_f32, 1.25] {
+        ui.global::<Theme>().set_text_scale(scale);
+        versions(
+            &ui,
+            &[release("v5", false, true), release("v4", true, false)],
+        );
+
+        // The dialog's own Close sits at the end of the header row, so its
+        // right edge is where the padding begins.
+        let content_edge = ElementHandle::find_by_accessible_label(&ui, &lookup("gui-close"))
+            .filter(|element| element.size().width > 0.0)
+            .min_by(|left, right| {
+                left.absolute_position()
+                    .y
+                    .total_cmp(&right.absolute_position().y)
+            })
+            .map(|header| header.absolute_position().x + header.size().width)
+            .expect("the dialog's header Close");
+
+        for id in [
+            "gui-remove",
+            "gui-mod-reset-to-pack-version",
+            "gui-mod-update",
+            "gui-mod-change-version",
+        ] {
+            let button = ElementHandle::find_by_accessible_label(&ui, &lookup(id))
+                .find(|element| element.size().width > 0.0)
+                .expect("every action of a pack mod is offered");
+            let right = button.absolute_position().x + button.size().width;
+            assert!(
+                right <= content_edge + 0.5,
+                "{id} ends at {right}px past the padding edge at {content_edge}px at text scale {scale}"
+            );
+        }
+    }
 }
 
 fn versions(ui: &AppWindow, rows: &[ModVersionRow]) {
