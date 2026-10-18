@@ -1485,6 +1485,8 @@ mod tests {
             account: Some("Alice".to_owned()),
             additional: None,
             dry_run: true,
+            hosting: Hosting::Attached,
+            return_when_running: false,
         };
         let connected = connected_launch_options(&options, target);
         assert_eq!(connected.java_path, options.java_path);

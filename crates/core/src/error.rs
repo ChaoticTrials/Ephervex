@@ -728,6 +728,9 @@ impl CoreError {
             Self::Isolation(error) => text(error.message_args()),
             Self::ModPlatform(error) => text(error.message_args()),
             Self::Server(error) => text(error.message_args()),
+            Self::Launch(LaunchError::HostedRun { detail }) => {
+                vec![("detail", Arg::from(detail.clone()))]
+            }
             Self::Connect(error) => text(error.message_args()),
             Self::ArtifactCacheLimitInvalid(error) => text(error.message_args()),
             Self::LoaderFamilyFixed { loader } => vec![("loader", Arg::from(loader.to_string()))],

@@ -81,8 +81,8 @@ pub struct RunningProcess {
     pub owner_pid: Option<u32>,
     /// When the run started, where that is recorded.
     pub since: Option<DateTime<Utc>>,
-    /// Whether commands can be sent to it. Servers only, and only while the
-    /// control channel answers.
+    /// Whether commands can be sent to it: a server while its control channel
+    /// answers, and a client launch while its runner is proven.
     pub controllable: bool,
     /// The most recent line of its output, when one could be read.
     pub last_line: Option<String>,
@@ -183,7 +183,8 @@ impl App {
                     pid: launch.state.game_pid,
                     owner_pid: Some(launch.state.owner_pid),
                     since: Some(launch.state.since),
-                    controllable: false,
+                    // Only a launch whose runner is proven can be asked to stop.
+                    controllable: launch.state.runner_is_proven(),
                     // The instance's own log, which both clients write to
                     // because they share the game directory.
                     last_line: shared_log.clone(),

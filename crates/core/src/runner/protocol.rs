@@ -7,9 +7,11 @@
 
 use std::path::PathBuf;
 
+use ephervex_minecraft::{CommandHandOff, LogRecord, OutputStream};
 use ephervex_server::{
     CaptureRetention, CapturedLine, ServerCommand, ServerError, ServerEvent, ServerExit,
 };
+use ephervex_storage::LaunchState;
 use serde::{Deserialize, Serialize};
 
 /// The only argument a frontend passes to start a runner.
@@ -28,6 +30,35 @@ pub(crate) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 #[serde(rename_all = "snake_case", tag = "host")]
 pub(crate) enum RunnerSpec {
     Server(ServerRunnerSpec),
+    Client(Box<ClientRunnerSpec>),
+}
+
+/// A prepared client launch, handed to the runner that supervises its game.
+///
+/// Holds the complete command, access token included, so it only ever travels
+/// over the runner's standard input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ClientRunnerSpec {
+    pub command: CommandHandOff,
+    pub instance_root: PathBuf,
+    /// The handle of an additional launch, or `None` for the instance's first.
+    pub additional: Option<String>,
+    /// The lock the starter holds, which the runner takes over.
+    pub previous: LaunchState,
+    /// The run id the game carries in its environment.
+    pub run: uuid::Uuid,
+    pub capture_directory: PathBuf,
+    /// The shared artifact cache the game's classpath names. The runner holds
+    /// the cache's lease for as long as the game runs.
+    pub cache_directory: PathBuf,
+}
+
+/// A request the starter makes of a runner after handing it its command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "request")]
+pub(crate) enum RunnerRequest {
+    /// End the game and everything it started.
+    Kill,
 }
 
 /// A prepared server start, handed to the runner that supervises it.
@@ -192,4 +223,110 @@ impl ServerRunnerMessage {
             Self::Settled | Self::Finished { .. } => return None,
         })
     }
+}
+
+/// Which pipe a hosted game's line arrived on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WireStream {
+    Stdout,
+    Stderr,
+}
+
+impl From<OutputStream> for WireStream {
+    fn from(stream: OutputStream) -> Self {
+        match stream {
+            OutputStream::Stdout => Self::Stdout,
+            OutputStream::Stderr => Self::Stderr,
+        }
+    }
+}
+
+impl From<WireStream> for OutputStream {
+    fn from(stream: WireStream) -> Self {
+        match stream {
+            WireStream::Stdout => Self::Stdout,
+            WireStream::Stderr => Self::Stderr,
+        }
+    }
+}
+
+/// One parsed line of a hosted game's output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WireRecord {
+    pub level: Option<String>,
+    pub logger: Option<String>,
+    pub thread: Option<String>,
+    pub message: String,
+}
+
+impl From<&LogRecord> for WireRecord {
+    fn from(record: &LogRecord) -> Self {
+        Self {
+            level: record.level.clone(),
+            logger: record.logger.clone(),
+            thread: record.thread.clone(),
+            message: record.message.clone(),
+        }
+    }
+}
+
+impl From<WireRecord> for LogRecord {
+    fn from(record: WireRecord) -> Self {
+        Self {
+            level: record.level,
+            logger: record.logger,
+            thread: record.thread,
+            message: record.message,
+        }
+    }
+}
+
+/// How a hosted game ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct GameEnd {
+    pub code: Option<i32>,
+    pub signal: Option<i32>,
+    /// What each stream printed first, for explaining a game that could not start.
+    pub early_output: Vec<String>,
+}
+
+/// Why a hosted launch failed before or while the game ran.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "failure", content = "detail")]
+pub(crate) enum HostedLaunchFailure {
+    /// The lock no longer named the starter, so the runner could not take it over.
+    LockLost {
+        path: PathBuf,
+    },
+    ProcessStart {
+        executable: PathBuf,
+        cause: String,
+    },
+    GameDirectory {
+        path: PathBuf,
+        cause: String,
+    },
+    Other(String),
+}
+
+/// One message from a runner that hosts a client's game.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "message")]
+pub(crate) enum ClientRunnerMessage {
+    /// The runner owns the launch's lock and the game is running.
+    Running {
+        pid: u32,
+    },
+    Output {
+        stream: WireStream,
+        record: WireRecord,
+    },
+    OutputDropped {
+        lines: u64,
+    },
+    /// The run is over. Always the last message.
+    Finished {
+        result: Result<GameEnd, HostedLaunchFailure>,
+    },
 }

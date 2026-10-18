@@ -3067,6 +3067,14 @@ fn run_worker(
                     KillTarget::ForceStop(launch) => {
                         force_stop_launch(&mut app, &events, instance, launch.as_deref());
                     }
+                    KillTarget::Runner(launch) => {
+                        runtime.block_on(stop_hosted_launch(
+                            &mut app,
+                            &events,
+                            instance,
+                            launch.as_deref(),
+                        ));
+                    }
                 }
             }
             Command::SaveHostRuntime {
@@ -7701,8 +7709,10 @@ fn running_data(
         .map(|process| {
             let id = process.host.id();
             let can_stop = match process.host {
+                // Or owned by a runner that is proven, which any run can ask.
                 InstalledHost::Instance(instance) => {
                     supervised.contains(&launch_key(instance, process.launch.as_deref()))
+                        || process.controllable
                 }
                 InstalledHost::Server(_) => process.controllable,
             };
@@ -8878,6 +8888,8 @@ fn launch_options(
         install_java_if_missing: true,
         account,
         additional,
+        // The game keeps running when the application quits.
+        hosting: Hosting::Detached,
         ..LaunchOptions::default()
     }
 }
@@ -10229,6 +10241,10 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
                         client,
                         server,
                         &LaunchAndConnectOptions {
+                            launch: LaunchOptions {
+                                hosting: Hosting::Detached,
+                                ..LaunchOptions::default()
+                            },
                             server_hosting: Hosting::Detached,
                             ..LaunchAndConnectOptions::default()
                         },
@@ -10774,6 +10790,9 @@ enum KillTarget {
     Cancel(Option<String>),
     /// A launch left behind by a launcher run that is gone.
     ForceStop(Option<String>),
+    /// A launch a runner owns that this process did not start, such as one
+    /// from an earlier run of the application. The runner is asked to end it.
+    Runner(Option<String>),
 }
 
 /// Picks the launch a stop request acts on.
@@ -10801,6 +10820,13 @@ fn kill_target(
         .find(|launch| supervised(launch.id.as_deref()))
     {
         return KillTarget::Cancel(launch.id.clone());
+    }
+    if let Some(launch) = launches
+        .iter()
+        .filter(named)
+        .find(|launch| launch.state.runner_is_proven())
+    {
+        return KillTarget::Runner(launch.id.clone());
     }
     match launches
         .iter()
@@ -10845,6 +10871,41 @@ fn force_stop_launch(
         }
         Err(error) => send_error(events, &error),
     }
+}
+
+/// Asks the runner that owns a launch to end its game, and reports the answer.
+async fn stop_hosted_launch(
+    app: &mut App,
+    events: &Sender<Event>,
+    instance: InstanceId,
+    launch: Option<&str>,
+) {
+    match app
+        .stop_hosted_launch(instance, launch, ephervex_core::HostedStop::Kill)
+        .await
+    {
+        Ok(
+            ephervex_core::HostedStopOutcome::Answered(ControlResponse::Refused(_))
+            | ephervex_core::HostedStopOutcome::NotRunning
+            | ephervex_core::HostedStopOutcome::NotHosted,
+        ) => {
+            let _ = events.send(Event::Toast {
+                message: lookup("gui-force-stop-nothing"),
+                error: true,
+            });
+        }
+        Ok(
+            ephervex_core::HostedStopOutcome::Answered(_)
+            | ephervex_core::HostedStopOutcome::NotEnded,
+        ) => {
+            let _ = events.send(Event::Toast {
+                message: lookup("gui-kill-instance-requested"),
+                error: false,
+            });
+        }
+        Err(error) => send_error(events, &error),
+    }
+    send_snapshot(app, events);
 }
 
 /// Stops the game this launcher started for one instance.
@@ -14316,6 +14377,7 @@ mod tests {
                 game_pid: Some(std::process::id()),
                 game_start_ticks: Some(own_start_ticks()),
                 since: chrono::Utc::now(),
+                runner: None,
             },
         }
     }
@@ -14336,6 +14398,58 @@ mod tests {
             kill_target(Some("alice"), &launches, |_| false),
             KillTarget::Cancel(Some("alice".to_owned())),
             "a launch that does not hold the instance is not force stopped"
+        );
+    }
+
+    /// A launch a runner owns: the runner (this process) is alive and proven,
+    /// and the game it started is another process.
+    fn hosted_launch(id: Option<&str>) -> ephervex_core::RunningLaunch {
+        ephervex_core::RunningLaunch {
+            id: id.map(str::to_owned),
+            state: ephervex_core::LaunchState {
+                owner_pid: std::process::id(),
+                owner_start_ticks: Some(own_start_ticks()),
+                game_pid: None,
+                game_start_ticks: None,
+                since: chrono::Utc::now(),
+                runner: Some(
+                    serde_json::from_value(serde_json::json!({
+                        "run": "7d1c2d3e-0000-4000-8000-000000000001",
+                        "control_socket": "/run/evx/control.sock",
+                    }))
+                    .expect("a runner record"),
+                ),
+            },
+        }
+    }
+
+    #[test]
+    fn a_kill_request_asks_the_runner_of_a_launch_an_earlier_run_started() {
+        let launches = [hosted_launch(None), hosted_launch(Some("bob"))];
+
+        assert_eq!(
+            kill_target(None, &launches, |_| false),
+            KillTarget::Runner(None)
+        );
+        assert_eq!(
+            kill_target(Some("bob"), &launches, |_| false),
+            KillTarget::Runner(Some("bob".to_owned()))
+        );
+        assert_eq!(
+            kill_target(Some("bob"), &launches, |launch| launch == Some("bob")),
+            KillTarget::Cancel(Some("bob".to_owned())),
+            "a launch this process started is ended by its own cancellation"
+        );
+    }
+
+    #[test]
+    fn a_runner_that_is_not_the_recorded_process_is_not_asked() {
+        let mut launch = hosted_launch(None);
+        launch.state.owner_start_ticks = Some(own_start_ticks().wrapping_add(1));
+
+        assert_eq!(
+            kill_target(None, &[launch], |_| false),
+            KillTarget::Cancel(None)
         );
     }
 

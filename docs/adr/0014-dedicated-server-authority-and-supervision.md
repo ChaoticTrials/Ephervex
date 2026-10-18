@@ -134,7 +134,7 @@ for the supervisors to finish before the process exits. A termination request
 quitting: it ends the event loop, and repeated requests during the stop are
 absorbed.
 
-> **Amended by [ADR 0054](0054-a-runner-process-hosts-a-server-past-the-launchers-exit.md):**
+> **Amended by [ADR 0054](0054-a-runner-process-hosts-a-client-or-server-past-the-launchers-exit.md):**
 > the desktop application no longer supervises servers on threads of its own
 > process. It starts each one under a runner process, so quitting leaves servers
 > running and a later start finds them as controlled. The termination request

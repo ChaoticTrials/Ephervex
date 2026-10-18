@@ -53,6 +53,7 @@ use crate::diagnosis::JavaRuntimeSummary;
 use crate::error::CoreResult;
 use crate::java_failure::JavaRuntimeFailure;
 use crate::mods::InstalledHost;
+use crate::runner::{ClientRunnerSpec, HostedGame, Hosting};
 
 /// What a caller is asking for when it launches an instance.
 #[derive(Debug, Clone, Default)]
@@ -90,6 +91,14 @@ pub struct LaunchOptions {
     /// is to show the command that *would* run - and a command whose classpath
     /// names files that were never downloaded shows something else.
     pub dry_run: bool,
+    /// Where the game's supervisor runs. A detached game has a runner process
+    /// of its own and keeps running when this process exits.
+    pub hosting: Hosting,
+    /// Return as soon as the game is running instead of when it has exited.
+    ///
+    /// Only a detached game can be left running, so this has no effect on an
+    /// attached one. The outcome then has no exit, and the game's process id.
+    pub return_when_running: bool,
 }
 
 /// What a launch did.
@@ -116,6 +125,9 @@ pub struct LaunchOutcome {
     pub authenticated: bool,
     /// How the game finished, or `None` for a dry run.
     pub exit: Option<GameExit>,
+    /// The game's process id once it was running, which a launch that returned
+    /// when the game started reports and a dry run never has.
+    pub game_pid: Option<u32>,
     /// Why the game could not run on its runtime, when it exited because the
     /// JVM refused a class compiled for a newer Java.
     pub java_failure: Option<Box<JavaRuntimeFailure>>,
@@ -328,6 +340,7 @@ impl App {
             command: Box::new(command),
             installation: Box::new(installed.installation),
             exit: None,
+            game_pid: None,
             java_failure: None,
         };
 
@@ -339,34 +352,32 @@ impl App {
             return Err(LaunchError::Canceled.into());
         }
 
-        let process = GameProcess::start(&outcome.command, observer)?;
-        // A lock this run no longer holds is refused here, and dropping the
-        // process on the way out ends the game rather than leaving it running
-        // beside the launch that holds the instance now.
-        lock.record_game_pid(process.pid()).await?;
-        observer.emit(LaunchEvent::Running { pid: process.pid() });
-
-        // Recorded before the wait, so a launch that never returns - a game
-        // that hangs, a machine that loses power - still shows as having been
-        // launched.
-        let launched_at = chrono::Utc::now();
-        if let Err(error) = self
-            .registry_for_services()
-            .modify_client(instance, |current| {
-                current.last_launched_at = Some(launched_at);
-            })
-        {
-            tracing::warn!(%error, "could not record the launch time");
-        }
-
-        info!(
-            instance = %instance,
-            version = %outcome.minecraft_version,
-            pid = process.pid(),
-            authenticated = outcome.authenticated,
-            "launched minecraft"
-        );
-        let (exit, early_output) = process.wait_with_early_output(observer, cancel).await?;
+        let (exit, early_output) = if options.hosting == Hosting::Detached {
+            let Some(ended) = self
+                .run_hosted_launch(record, options, &mut outcome, lock, observer, cancel)
+                .await?
+            else {
+                return Ok(outcome);
+            };
+            ended
+        } else {
+            let process = GameProcess::start(&outcome.command, observer)?;
+            // A lock this run no longer holds is refused here, and dropping the
+            // process on the way out ends the game rather than leaving it
+            // running beside the launch that holds the instance now.
+            lock.record_game_pid(process.pid()).await?;
+            outcome.game_pid = Some(process.pid());
+            observer.emit(LaunchEvent::Running { pid: process.pid() });
+            self.record_launch_time(instance);
+            info!(
+                instance = %instance,
+                version = %outcome.minecraft_version,
+                pid = process.pid(),
+                authenticated = outcome.authenticated,
+                "launched minecraft"
+            );
+            process.wait_with_early_output(observer, cancel).await?
+        };
         outcome.exit = Some(exit);
         if !exit.is_success() {
             outcome.java_failure = self
@@ -379,6 +390,90 @@ impl App {
                 .map(Box::new);
         }
         Ok(outcome)
+    }
+
+    /// Recorded before the wait, so a launch that never returns - a game that
+    /// hangs, a machine that loses power - still shows as having been launched.
+    fn record_launch_time(&self, instance: InstanceId) {
+        let launched_at = chrono::Utc::now();
+        if let Err(error) = self
+            .registry_for_services()
+            .modify_client(instance, |current| {
+                current.last_launched_at = Some(launched_at);
+            })
+        {
+            tracing::warn!(%error, "could not record the launch time");
+        }
+    }
+
+    /// Runs the launch under a runner. Returns how the game ended, or `None`
+    /// when the options ask to return as soon as it is running.
+    async fn run_hosted_launch(
+        &self,
+        record: &ClientRecord,
+        options: &LaunchOptions,
+        outcome: &mut LaunchOutcome,
+        lock: &mut HeldLaunch,
+        observer: &LaunchObserver,
+        cancel: &CancellationToken,
+    ) -> CoreResult<Option<(GameExit, Vec<String>)>> {
+        let game = self
+            .start_hosted_game(record, options, outcome, lock, observer, cancel)
+            .await?;
+        outcome.game_pid = Some(game.pid());
+        self.record_launch_time(record.id);
+        info!(
+            instance = %record.id,
+            version = %outcome.minecraft_version,
+            pid = game.pid(),
+            authenticated = outcome.authenticated,
+            "launched minecraft under a runner"
+        );
+        // A launch canceled on the way up has been asked to end the game, so
+        // it is followed to that end instead of being reported as running.
+        if options.return_when_running && !cancel.is_cancelled() {
+            return Ok(None);
+        }
+        Ok(Some(game.wait(observer, cancel).await?))
+    }
+
+    /// Hands the prepared launch to a runner and returns once its game runs.
+    ///
+    /// The runner takes over the instance's lock from `lock`, so releasing
+    /// `lock` afterwards leaves the runner's lock alone.
+    async fn start_hosted_game(
+        &self,
+        record: &ClientRecord,
+        options: &LaunchOptions,
+        outcome: &LaunchOutcome,
+        lock: &mut HeldLaunch,
+        observer: &LaunchObserver,
+        cancel: &CancellationToken,
+    ) -> CoreResult<HostedGame> {
+        let previous = lock
+            .state()
+            .ok_or_else(|| ephervex_storage::LockError::Lost {
+                path: lock.path.clone(),
+            })?;
+        let spec = ClientRunnerSpec {
+            command: outcome.command.hand_off(),
+            instance_root: record.root.clone(),
+            additional: options.additional.clone(),
+            previous,
+            run: uuid::Uuid::new_v4(),
+            capture_directory: self
+                .paths()
+                .client_capture_dir(record.id, options.additional.as_deref()),
+            cache_directory: self.paths().cache_dir().to_path_buf(),
+        };
+        let executable =
+            crate::runner::runner_executable().map_err(|error| LaunchError::HostedRun {
+                detail: format!("the running executable could not be found: {error}"),
+            })?;
+        let game =
+            HostedGame::start(&executable, &spec, &outcome.command, observer, cancel).await?;
+        observer.emit(LaunchEvent::Running { pid: game.pid() });
+        Ok(game)
     }
 
     /// Downloads and unpacks everything the version needs.
@@ -523,6 +618,11 @@ impl HeldLaunch {
             path: lock.path().to_path_buf(),
             lock: Some(lock),
         })
+    }
+
+    /// What the lock records, while this run still holds it.
+    fn state(&self) -> Option<LaunchState> {
+        self.lock.as_ref().map(|lock| lock.state().clone())
     }
 
     /// Records the game's process id in the lock file.

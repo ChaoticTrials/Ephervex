@@ -91,6 +91,22 @@ pub fn validate_launch_id(id: &str) -> Result<(), LockError> {
     }
 }
 
+/// The environment variable that carries a hosted launch's run id into the game.
+///
+/// With the process id and start time it is the proof that a process is the
+/// game a runner started: an unrelated process that happens to be given the
+/// same id does not carry it.
+pub const LAUNCH_RUN_VARIABLE: &str = "EPHERVEX_LAUNCH_RUN";
+
+/// The runner that hosts a launch, recorded in the lock it owns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunnerHost {
+    /// This launch's run id, which the game carries in its environment.
+    pub run: uuid::Uuid,
+    /// The runner's control socket.
+    pub control_socket: PathBuf,
+}
+
 /// One launch an instance currently holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunningLaunch {
@@ -196,6 +212,10 @@ pub struct LaunchState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub game_start_ticks: Option<u64>,
     pub since: DateTime<Utc>,
+    /// The runner that owns this launch, when one does. Its process is then
+    /// `owner_pid`, and the game carries its run id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner: Option<RunnerHost>,
 }
 
 impl LaunchState {
@@ -210,7 +230,21 @@ impl LaunchState {
         let (Some(pid), Some(recorded)) = (self.game_pid, self.game_start_ticks) else {
             return false;
         };
-        proc_filesystem_available() && process_start_ticks(pid) == Some(recorded)
+        if !proc_filesystem_available() || process_start_ticks(pid) != Some(recorded) {
+            return false;
+        }
+        // A hosted game also has to carry its run id, so a process that only
+        // matches a recorded id and start time is not taken for it.
+        self.runner
+            .as_ref()
+            .is_none_or(|runner| process_carries_run(pid, runner.run))
+    }
+
+    /// Whether a runner owns this launch and is proven to be the process that
+    /// took the lock.
+    #[must_use]
+    pub fn runner_is_proven(&self) -> bool {
+        self.runner.is_some() && self.owner_is_proven()
     }
 
     /// Whether this launch still holds its instance: its launcher run is
@@ -472,6 +506,7 @@ impl LaunchLock {
             game_pid: None,
             game_start_ticks: None,
             since: Utc::now(),
+            runner: None,
         }
     }
 
@@ -492,6 +527,52 @@ impl LaunchLock {
             return Err(already_running(&held));
         }
         Self::take_at(&ownership, path)
+    }
+
+    /// Takes over a launch lock that `previous` took, as the process that will
+    /// supervise the launch from now on, and records `runner` in it.
+    ///
+    /// For a runner: the process that prepared the launch holds the lock while it
+    /// downloads and builds the command, and hands it to the runner once the
+    /// command is ready. The lock is taken over only if the file still names
+    /// that holder, so a lock that was released or replaced in the meantime is
+    /// refused with [`LockError::Lost`] rather than overwritten. The previous
+    /// holder's handle then no longer names the file, so releasing it leaves the
+    /// new owner's lock alone.
+    pub fn take_over(
+        instance_root: &Path,
+        launch: Option<&str>,
+        previous: &LaunchState,
+        runner: RunnerHost,
+    ) -> Result<Self, LockError> {
+        let name = match launch {
+            Some(id) => additional_lock_file(id).ok_or(LockError::InvalidLaunchId)?,
+            None => LAUNCH_LOCK_FILE.to_owned(),
+        };
+        let directory = metadata_dir(instance_root);
+        let path = directory.join(name);
+        let _ownership = OwnershipGuard::take(&directory)?;
+        let names_previous = read_state(&path)?.is_some_and(|held| {
+            held.owner_pid == previous.owner_pid
+                && held.owner_start_ticks == previous.owner_start_ticks
+                && held.since == previous.since
+        });
+        if !names_previous {
+            return Err(LockError::Lost { path });
+        }
+        let state = LaunchState {
+            owner_pid: std::process::id(),
+            owner_start_ticks: process_start_ticks(std::process::id()),
+            game_pid: None,
+            game_start_ticks: None,
+            since: previous.since,
+            runner: Some(runner),
+        };
+        let body =
+            serde_json::to_vec(&state).map_err(|error| LockError::unusable(&path, error.into()))?;
+        replace_file(&path, &body).map_err(|error| LockError::unusable(&path, error))?;
+        debug!(path = %path.display(), pid = state.owner_pid, "took over a launch lock");
+        Ok(Self { path, state })
     }
 
     /// Records the game's process id, so a frontend can show it and a stuck
@@ -1090,6 +1171,20 @@ fn read_state(path: &Path) -> Result<Option<LaunchState>, LockError> {
     }
 }
 
+/// Whether the process `pid` was started with this run id in its environment.
+///
+/// Reads `/proc/<pid>/environ`, which only the process's own user can read, so a
+/// process this account cannot inspect never counts as carrying it.
+fn process_carries_run(pid: u32, run: uuid::Uuid) -> bool {
+    let Ok(environment) = std::fs::read(format!("/proc/{pid}/environ")) else {
+        return false;
+    };
+    let wanted = format!("{LAUNCH_RUN_VARIABLE}={run}");
+    environment
+        .split(|byte| *byte == 0)
+        .any(|entry| entry == wanted.as_bytes())
+}
+
 fn proc_filesystem_available() -> bool {
     Path::new("/proc/self/stat").exists()
 }
@@ -1263,6 +1358,7 @@ mod tests {
             game_pid: Some(game),
             game_start_ticks: game_ticks,
             since: Utc::now(),
+            runner: None,
         };
         plant(&metadata_dir(root).join(LAUNCH_LOCK_FILE), &state);
     }
@@ -1275,6 +1371,195 @@ mod tests {
             .expect("a child");
         let ticks = process_start_ticks(child.id()).expect("its start time");
         (child, ticks)
+    }
+
+    /// A process standing in for a game, started with `run` in its environment.
+    fn live_game_of_run(run: Option<uuid::Uuid>) -> (std::process::Child, u64) {
+        let mut command = std::process::Command::new("sleep");
+        command.arg("30");
+        if let Some(run) = run {
+            command.env(LAUNCH_RUN_VARIABLE, run.to_string());
+        }
+        let child = command.spawn().expect("a child");
+        let ticks = process_start_ticks(child.id()).expect("its start time");
+        (child, ticks)
+    }
+
+    fn hosted_state(game: &std::process::Child, ticks: u64, run: uuid::Uuid) -> LaunchState {
+        LaunchState {
+            owner_pid: std::process::id(),
+            owner_start_ticks: process_start_ticks(std::process::id()),
+            game_pid: Some(game.id()),
+            game_start_ticks: Some(ticks),
+            since: Utc::now(),
+            runner: Some(RunnerHost {
+                run,
+                control_socket: PathBuf::from("/run/evx/control.sock"),
+            }),
+        }
+    }
+
+    #[test]
+    fn a_hosted_game_is_the_process_that_carries_its_run_id() {
+        let run = uuid::Uuid::new_v4();
+        let (mut game, ticks) = live_game_of_run(Some(run));
+
+        assert!(hosted_state(&game, ticks, run).game_is_alive());
+
+        game.kill().expect("end the game");
+        game.wait().expect("reap");
+    }
+
+    #[test]
+    fn an_unrelated_process_with_the_recorded_id_and_start_time_is_not_taken_for_a_hosted_game() {
+        let run = uuid::Uuid::new_v4();
+        // Same id, same start time, no marker: not the game this launch started.
+        let (mut stranger, ticks) = live_game_of_run(None);
+        assert!(!hosted_state(&stranger, ticks, run).game_is_alive());
+        // A marker from another launch is no better.
+        let (mut other, other_ticks) = live_game_of_run(Some(uuid::Uuid::new_v4()));
+        assert!(!hosted_state(&other, other_ticks, run).game_is_alive());
+
+        for child in [&mut stranger, &mut other] {
+            child.kill().expect("end");
+            child.wait().expect("reap");
+        }
+    }
+
+    #[test]
+    fn a_hosted_game_whose_id_was_recycled_is_not_alive_even_with_the_marker_around() {
+        let run = uuid::Uuid::new_v4();
+        let (mut game, ticks) = live_game_of_run(Some(run));
+
+        assert!(!hosted_state(&game, ticks.wrapping_add(1), run).game_is_alive());
+
+        game.kill().expect("end the game");
+        game.wait().expect("reap");
+    }
+
+    fn runner_host() -> RunnerHost {
+        RunnerHost {
+            run: uuid::Uuid::new_v4(),
+            control_socket: PathBuf::from("/run/evx/control.sock"),
+        }
+    }
+
+    /// A lock a live process other than this one took, standing in for a starter.
+    fn planted_starter(root: &Path) -> (std::process::Child, LaunchState) {
+        let (child, ticks) = live_game();
+        let state = LaunchState {
+            owner_pid: child.id(),
+            owner_start_ticks: Some(ticks),
+            game_pid: None,
+            game_start_ticks: None,
+            since: Utc::now(),
+            runner: None,
+        };
+        plant(&metadata_dir(root).join(LAUNCH_LOCK_FILE), &state);
+        (child, state)
+    }
+
+    #[test]
+    fn a_runner_takes_over_the_lock_its_starter_held_and_keeps_the_launch_start_time() {
+        let root = instance();
+        let (mut starter, previous) = planted_starter(root.path());
+        let host = runner_host();
+
+        let lock = LaunchLock::take_over(root.path(), None, &previous, host.clone())
+            .expect("the lock still names the starter");
+
+        let held = running_state(root.path()).expect("the launch is still running");
+        assert_eq!(held.owner_pid, std::process::id(), "the runner owns it now");
+        assert_eq!(held.since, previous.since);
+        assert_eq!(held.runner, Some(host));
+        assert!(held.runner_is_proven());
+        assert_eq!(lock.state().owner_pid, std::process::id());
+
+        starter.kill().expect("end the starter");
+        starter.wait().expect("reap");
+        assert!(
+            running_state(root.path()).is_some(),
+            "the starter ending does not release a lock the runner owns"
+        );
+        drop(lock);
+        assert!(running_state(root.path()).is_none());
+    }
+
+    #[test]
+    fn a_runner_cannot_take_over_a_lock_that_no_longer_names_its_starter() {
+        let root = instance();
+        let (mut starter, previous) = planted_starter(root.path());
+        // Another launch replaced the starter's lock in the meantime.
+        let mut replaced = previous.clone();
+        replaced.since = previous.since + chrono::Duration::seconds(1);
+        plant(&metadata_dir(root.path()).join(LAUNCH_LOCK_FILE), &replaced);
+
+        let error = LaunchLock::take_over(root.path(), None, &previous, runner_host())
+            .expect_err("someone else holds it");
+
+        assert!(matches!(error, LockError::Lost { .. }), "{error}");
+        assert_eq!(
+            running_state(root.path()).expect("untouched").since,
+            replaced.since
+        );
+        starter.kill().expect("end the starter");
+        starter.wait().expect("reap");
+    }
+
+    #[test]
+    fn a_runner_cannot_take_over_a_lock_that_was_released() {
+        let root = instance();
+        let (mut starter, previous) = planted_starter(root.path());
+        std::fs::remove_file(metadata_dir(root.path()).join(LAUNCH_LOCK_FILE)).expect("release");
+
+        let error = LaunchLock::take_over(root.path(), None, &previous, runner_host())
+            .expect_err("nothing to take over");
+
+        assert!(matches!(error, LockError::Lost { .. }), "{error}");
+        assert!(running_state(root.path()).is_none(), "nothing was created");
+        starter.kill().expect("end the starter");
+        starter.wait().expect("reap");
+    }
+
+    #[test]
+    fn an_additional_launch_is_taken_over_under_its_own_handle() {
+        let root = instance();
+        let (mut starter, ticks) = live_game();
+        let previous = LaunchState {
+            owner_pid: starter.id(),
+            owner_start_ticks: Some(ticks),
+            game_pid: None,
+            game_start_ticks: None,
+            since: Utc::now(),
+            runner: None,
+        };
+        plant(
+            &metadata_dir(root.path()).join("launch.bob.lock"),
+            &previous,
+        );
+
+        let _runner_lock =
+            LaunchLock::take_over(root.path(), Some("bob"), &previous, runner_host())
+                .expect("bob's lock names the starter");
+
+        let launches = running_launches(root.path());
+        assert_eq!(launches.len(), 1);
+        assert_eq!(launches[0].id.as_deref(), Some("bob"));
+        assert_eq!(launches[0].state.owner_pid, std::process::id());
+        starter.kill().expect("end the starter");
+        starter.wait().expect("reap");
+    }
+
+    #[test]
+    fn a_lock_written_before_hosting_existed_still_loads_without_a_runner() {
+        let body = serde_json::json!({
+            "owner_pid": 1, "owner_start_ticks": 2, "since": "2026-01-01T00:00:00Z"
+        });
+
+        let state: LaunchState = serde_json::from_value(body).expect("an older lock");
+
+        assert!(state.runner.is_none());
+        assert!(!state.runner_is_proven());
     }
 
     #[test]
@@ -1376,6 +1661,7 @@ mod tests {
                 game_pid: None,
                 game_start_ticks: None,
                 since: Utc::now(),
+                runner: None,
             },
         );
 
@@ -1405,6 +1691,7 @@ mod tests {
                 game_pid: None,
                 game_start_ticks: None,
                 since: Utc::now(),
+                runner: None,
             },
         );
 
@@ -1593,6 +1880,7 @@ mod tests {
             game_pid: Some(game.id()),
             game_start_ticks: Some(ticks),
             since: Utc::now(),
+            runner: None,
         };
         plant(
             &metadata_dir(root.path()).join("launch.bob.lock"),
@@ -1617,6 +1905,7 @@ mod tests {
             game_pid: None,
             game_start_ticks: None,
             since: Utc::now(),
+            runner: None,
         };
         plant(&directory.join("launch.gone.lock"), &dead);
         std::fs::write(directory.join("launch.unreadable.lock"), b"not json").expect("write");
@@ -1645,6 +1934,7 @@ mod tests {
             game_pid: None,
             game_start_ticks: None,
             since: Utc::now(),
+            runner: None,
         };
         plant(&directory.join("launch.gone.lock"), &dead);
         plant(&directory.join("launch.again.lock"), &dead);
@@ -1802,6 +2092,7 @@ mod tests {
             game_pid: Some(99),
             game_start_ticks: None,
             since: Utc::now(),
+            runner: None,
         };
         std::fs::write(
             held.path(),
@@ -1831,6 +2122,7 @@ mod tests {
             game_pid: None,
             game_start_ticks: None,
             since: Utc::now(),
+            runner: None,
         };
         let path = metadata_dir(root.path()).join(LAUNCH_LOCK_FILE);
         std::fs::write(&path, serde_json::to_vec(&dead).expect("json")).expect("write");
@@ -1880,6 +2172,7 @@ mod tests {
                 game_pid: None,
                 game_start_ticks: None,
                 since: Utc::now(),
+                runner: None,
             };
             plant(&metadata_dir(root.path()).join(LAUNCH_LOCK_FILE), &dead);
             plant(&metadata_dir(root.path()).join("launch.bob.lock"), &dead);
@@ -1990,6 +2283,7 @@ mod tests {
             game_pid: None,
             game_start_ticks: None,
             since: Utc::now(),
+            runner: None,
         };
         let path = metadata_dir(root.path()).join(LAUNCH_LOCK_FILE);
         std::fs::write(&path, serde_json::to_vec(&recycled).expect("json")).expect("write");

@@ -46,6 +46,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use ephervex_model::{APP_ID, APP_VERSION, ConnectionTarget};
+use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::arguments::{ArgumentForm, ArgumentGroup};
@@ -295,6 +296,91 @@ pub struct LaunchCommand {
     /// Where the `--` between JVM arguments and game arguments falls, so a
     /// caller can show the two halves apart.
     jvm_argument_count: usize,
+    /// Variables added to the game's environment on top of the launcher's own.
+    environment: Vec<(String, String)>,
+}
+
+/// A command in a form that can be handed to another process.
+///
+/// Unlike [`LaunchCommand`], it holds every argument as the JVM receives it,
+/// including the access token, so it is for a private channel to the process
+/// that will run the game and for nothing that is logged or stored.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandHandOff {
+    java: PathBuf,
+    working_directory: PathBuf,
+    main_class: String,
+    arguments: Vec<HandedArgument>,
+    jvm_argument_count: usize,
+    environment: Vec<(String, String)>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct HandedArgument {
+    value: String,
+    sensitive: bool,
+}
+
+impl std::fmt::Debug for CommandHandOff {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CommandHandOff").finish_non_exhaustive()
+    }
+}
+
+impl LaunchCommand {
+    /// The same command with one more variable in the game's environment.
+    #[must_use]
+    pub fn with_environment(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.environment.push((name.into(), value.into()));
+        self
+    }
+
+    /// The variables added to the game's environment.
+    pub fn environment(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.environment
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+    }
+
+    /// The command, complete with its credentials, for the process that will run it.
+    #[must_use]
+    pub fn hand_off(&self) -> CommandHandOff {
+        CommandHandOff {
+            java: self.java.clone(),
+            working_directory: self.working_directory.clone(),
+            main_class: self.main_class.clone(),
+            arguments: self
+                .arguments
+                .iter()
+                .map(|argument| HandedArgument {
+                    value: argument.value.clone(),
+                    sensitive: argument.sensitive,
+                })
+                .collect(),
+            jvm_argument_count: self.jvm_argument_count,
+            environment: self.environment.clone(),
+        }
+    }
+
+    /// The command a [`CommandHandOff`] describes.
+    #[must_use]
+    pub fn from_hand_off(hand_off: CommandHandOff) -> Self {
+        Self {
+            java: hand_off.java,
+            working_directory: hand_off.working_directory,
+            main_class: hand_off.main_class,
+            arguments: hand_off
+                .arguments
+                .into_iter()
+                .map(|argument| Argument {
+                    value: argument.value,
+                    sensitive: argument.sensitive,
+                })
+                .collect(),
+            jvm_argument_count: hand_off.jvm_argument_count,
+            environment: hand_off.environment,
+        }
+    }
 }
 
 impl LaunchCommand {
@@ -480,6 +566,7 @@ pub fn build_command(
         main_class: metadata.main_class.clone(),
         arguments,
         jvm_argument_count,
+        environment: Vec::new(),
     })
 }
 
@@ -664,6 +751,7 @@ pub(crate) fn test_command(
         main_class: String::new(),
         arguments: arguments.into_iter().map(plain).collect(),
         jvm_argument_count: count,
+        environment: Vec::new(),
     }
 }
 

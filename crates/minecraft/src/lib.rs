@@ -99,8 +99,8 @@ pub use install::{
 };
 pub use language::{LANGUAGE_METADATA_OBJECT, LanguageCatalog, LanguageCatalogs, LanguageEntry};
 pub use launch::{
-    JvmOptions, LEGACY_JVM_ARGUMENTS, LaunchCommand, LaunchFeatures, LaunchSettings,
-    OFFLINE_ACCESS_TOKEN, PlayerIdentity, build_command,
+    CommandHandOff, JvmOptions, LEGACY_JVM_ARGUMENTS, LaunchCommand, LaunchFeatures,
+    LaunchSettings, OFFLINE_ACCESS_TOKEN, PlayerIdentity, build_command,
 };
 pub use library::{Artifact, ExtractRules, Library, LibraryDownloads, LibraryError};
 pub use log::{Log4jReader, LogRecord};

@@ -301,6 +301,11 @@ pub enum LaunchError {
         source: std::io::Error,
     },
 
+    /// A runner process that supervises the game failed in a way that has no
+    /// error of its own here. Only the failure's text crosses the process boundary.
+    #[error("the process supervising the game failed: {detail}")]
+    HostedRun { detail: String },
+
     /// The launch was canceled before the game started.
     #[error("the launch was canceled")]
     Canceled,
@@ -337,6 +342,7 @@ impl LaunchError {
             Self::GameDirectory { .. } => "error-launch-game-directory",
             Self::ProcessStart { .. } => "error-launch-process-start",
             Self::ProcessLost { .. } => "error-launch-process-lost",
+            Self::HostedRun { .. } => "error-launch-hosted-run",
             Self::Canceled => "error-launch-canceled",
             Self::CacheKey(_) => "error-minecraft-cache-key-invalid",
             Self::Url(_) => "error-minecraft-metadata-url-invalid",

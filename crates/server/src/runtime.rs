@@ -673,6 +673,19 @@ pub fn prepare_control_socket_path(server_root: &Path, generation: Uuid) -> Serv
     ControlDirectories::from_environment().prepare(server_root, generation)
 }
 
+/// Checks that the socket at `path` is in a directory that is still private to
+/// this account, which is what makes connecting to a recorded path safe.
+pub fn validate_control_socket_directory(path: &Path) -> ServerResult<()> {
+    let directory = path.parent().ok_or_else(|| ServerError::RuntimeState {
+        path: path.to_path_buf(),
+        source: std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "a control socket has a directory",
+        ),
+    })?;
+    validate_control_directory(directory)
+}
+
 pub fn active_control_socket_path(server_root: &Path) -> ServerResult<Option<PathBuf>> {
     let Some(evidence) = read_runtime_evidence(server_root)? else {
         return Ok(None);

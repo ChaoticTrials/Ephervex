@@ -43,6 +43,7 @@ pub mod download_watch;
 pub mod error;
 pub mod health;
 mod host_recipe_gate;
+mod hosted_launch;
 pub mod import;
 pub mod instance;
 pub mod instance_listing;
@@ -136,6 +137,7 @@ pub use health::{
     ConfigurationHealth, CredentialBackendHealth, DirectoryHealth, DirectoryState,
     InstallationHealth, JavaHealth, PlatformIdentity, installation_health,
 };
+pub use hosted_launch::{HostedStop, HostedStopOutcome};
 pub use import::{ImportRequest, ImportedPack, suggested_instance_name};
 pub use instance::{
     CreatedClient, MAX_ENTITY_NAME_CHARS, NameRefusal, PreferenceContext,
@@ -379,8 +381,8 @@ pub use ephervex_storage::{
     DuplicateClient, DuplicatedClient, EulaConfig, FileDisposition, ForcedStop, ImportSource,
     JavaConfig, LaunchState, LockDisposition, MAX_SEARCH_MATCHES, MAX_VIEW_BYTES, MissingFolder,
     NetworkAccess, NewClient, NewServer, PathError, Paths, PreferenceSetting, ReconciledRecord,
-    ReconciliationReport, RecordRef, RunningLaunch, SECRET_KEY_MARKERS, SearchMatch, SearchOptions,
-    SearchOutcome, ServerCommit, ServerCommitWarning, ServerDefaults, ServerFolder,
+    ReconciliationReport, RecordRef, RunnerHost, RunningLaunch, SECRET_KEY_MARKERS, SearchMatch,
+    SearchOptions, SearchOutcome, ServerCommit, ServerCommitWarning, ServerDefaults, ServerFolder,
     ServerNetworkSettings, ServerOperatorIdentity, ServerOperatorProfile, ServerOperatorSetup,
     ServerPortSelection, ServerRecord, ServerRootConflict, SetAsideNotice, StorageError,
     TechnicalTextSize, TextAnchor, TextView, running_state,

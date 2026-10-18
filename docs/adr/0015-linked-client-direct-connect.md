@@ -67,7 +67,7 @@ Client launch failure or client exit does not request server stop. As with all
 foreground-supervised servers, ending the owning Ephervex process ends that
 supervision according to ADR 0014.
 
-> **Amended by [ADR 0054](0054-a-runner-process-hosts-a-server-past-the-launchers-exit.md):**
+> **Amended by [ADR 0054](0054-a-runner-process-hosts-a-client-or-server-past-the-launchers-exit.md):**
 > a caller can start the server detached, under a runner of its own. Ending the
 > owning Ephervex process then ends nothing: the server keeps running and is
 > controlled by any later process. The desktop application starts it that way.

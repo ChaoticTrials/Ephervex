@@ -59,4 +59,4 @@ so the reasoning trail survives.
 | [0051](0051-server-property-defaults-fill-a-new-servers-file.md) | Server property defaults fill a new server's file | Accepted |
 | [0052](0052-menus-are-drawn-by-the-application.md) | Menus are drawn by the application | Accepted |
 | [0053](0053-storage-cleanup-removes-only-unreferenced-regenerable-entries-after-a-confirmed-preview.md) | Storage cleanup removes only unreferenced, regenerable entries after a confirmed preview | Accepted |
-| [0054](0054-a-runner-process-hosts-a-server-past-the-launchers-exit.md) | A runner process hosts a server past the launcher's exit | Accepted (amends ADR 0014 and ADR 0015) |
+| [0054](0054-a-runner-process-hosts-a-client-or-server-past-the-launchers-exit.md) | A runner process hosts a client or server past the launcher's exit | Accepted (amends ADR 0014 and ADR 0015) |

@@ -867,6 +867,8 @@ launch-exited-with-code = Minecraft exited with code { $code }.
 launch-exited-with-signal = Minecraft was stopped by signal { $signal }.
 
 launch-dry-run = Prepared the launch without starting Minecraft.
+# $pid is the Minecraft process id.
+launch-detached = Minecraft is running in the background as process { $pid }. End it with `ephervex instance stop`.
 
 # The command line is shown with the access token replaced, always
 #.
@@ -1000,6 +1002,8 @@ error-launch-game-directory = The instance's game directory could not be prepare
 error-launch-process-start = Minecraft could not be started.
 .action = Check that { $path } is a working Java runtime. `ephervex java list` shows the ones Ephervex found.
 
+error-launch-hosted-run = The process supervising Minecraft failed: { $detail }
+.action = Minecraft may still be running. Check your process list before launching again.
 error-launch-process-lost = Ephervex lost track of the Minecraft process.
 .action = Minecraft may still be running. Check your process list before launching again.
 

@@ -336,6 +336,7 @@ impl GameProcess {
         process
             .args(command.arguments())
             .current_dir(&command.working_directory)
+            .envs(command.environment())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

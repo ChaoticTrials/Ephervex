@@ -47,4 +47,5 @@ ephervex-mod-platform.workspace = true
 ephervex-storage.workspace = true
 chrono.workspace = true
 serde_json.workspace = true
+uuid.workspace = true
 tokio.workspace = true

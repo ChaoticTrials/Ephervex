@@ -35,8 +35,9 @@ pub use pending_properties::{
     apply_pending_properties, pending_properties_path, read_properties_file, save_while_running,
 };
 pub use process::{
-    ControlAction, ControlResponse, ServerCommand, ServerEvent, ServerEvents, ServerExit,
-    ServerObserver, ServerSupervisor, ServerWarning, send_control,
+    ControlAction, ControlRequest, ControlResponse, ControlSocket, ServerCommand, ServerEvent,
+    ServerEvents, ServerExit, ServerObserver, ServerSupervisor, ServerWarning, send_control,
+    send_control_to,
 };
 pub use properties::{
     EULA_KEY, MalformedEscape, NetworkProperties, ONLINE_MODE_KEY, PropertiesDocument,
@@ -49,5 +50,6 @@ pub use property_catalog::{
 pub use runtime::{
     ProcessEvidence, ProcessRole, RUNTIME_FILE, RUNTIME_LOCK_FILE, RuntimeClassification,
     RuntimeEvidence, capture_java_child, classify_runtime, clear_stale_runtime,
-    control_socket_path, read_runtime_evidence, runtime_path, write_runtime_evidence,
+    control_socket_path, read_runtime_evidence, runtime_path, validate_control_socket_directory,
+    write_runtime_evidence,
 };

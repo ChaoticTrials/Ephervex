@@ -1523,6 +1523,7 @@ mod tests {
             game_pid: None,
             game_start_ticks: None,
             since: Utc::now(),
+            runner: None,
         };
         let starting = InstancePresentation::from_record(&record, 0, 0, Some(&preparing), []);
         assert_eq!(starting.state_kind, "starting");
@@ -1572,6 +1573,7 @@ mod tests {
             game_pid: Some(std::process::id()),
             game_start_ticks: ticks,
             since: chrono::Utc::now(),
+            runner: None,
         };
         let record = client(StorageClass::Temporary, LoaderSelection::vanilla());
         let item = InstancePresentation::from_record(&record, 0, 0, Some(&state), []);

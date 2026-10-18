@@ -65,8 +65,9 @@ pub use diagnostics::{
 pub use folders::{ClientFolder, MissingFolder, ServerFolder};
 pub use index::{Index, IndexError, MIGRATIONS, Migration, MigrationOutcome, apply_migrations};
 pub use lock::{
-    ForcedStop, LAUNCH_LOCK_FILE, LaunchLock, LaunchState, LockDisposition, LockError,
-    RunningLaunch, force_release, running_launches, running_state, validate_launch_id,
+    ForcedStop, LAUNCH_LOCK_FILE, LAUNCH_RUN_VARIABLE, LaunchLock, LaunchState, LockDisposition,
+    LockError, RunnerHost, RunningLaunch, force_release, running_launches, running_state,
+    validate_launch_id,
 };
 pub use metadata::{METADATA_VERSION, MetadataError};
 pub use organization::{

@@ -8,40 +8,17 @@ use ephervex_server::{
     ControlAction, ServerError, ServerEvents, ServerObserver, ServerSupervisor,
     read_runtime_evidence, send_control,
 };
-use tokio::io::{AsyncWrite, AsyncWriteExt as _};
+use tokio::io::AsyncWrite;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 
 use super::protocol::{HostedFailure, ServerRunnerMessage, ServerRunnerSpec};
+use super::relay::Relay;
 use crate::TerminationRequests;
 
 /// How long a termination request waits for the supervisor's control channel to
 /// be published before it stops asking.
 const CONTROL_PUBLICATION_PATIENCE: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// Where the runner's messages go, and whether anyone is still reading them.
-///
-/// A starter that has exited closes the pipe. The server then runs on without
-/// being told who watches it, so a failed write ends the relay and nothing else.
-struct Relay<W> {
-    out: W,
-    open: bool,
-}
-
-impl<W: AsyncWrite + Unpin> Relay<W> {
-    async fn send(&mut self, message: &ServerRunnerMessage) {
-        if !self.open {
-            return;
-        }
-        let Ok(mut line) = serde_json::to_vec(message) else {
-            return;
-        };
-        line.push(b'\n');
-        if self.out.write_all(&line).await.is_err() || self.out.flush().await.is_err() {
-            self.open = false;
-        }
-    }
-}
 
 /// Reports to the relay that the runner has settled who owns the server's
 /// runtime lock, on every path out of taking it.
@@ -63,27 +40,13 @@ where
     // Watched before the supervisor starts, so a request that arrives while the
     // server is starting is not lost to the default disposition.
     let requests = match TerminationRequests::watch() {
-        Ok(requests) => Some(termination_channel(requests)),
+        Ok(requests) => Some(super::termination_channel(requests)),
         Err(error) => {
             tracing::warn!(%error, "termination requests are not watched by the runner");
             None
         }
     };
     host_server_until(spec, out, requests).await
-}
-
-/// Turns the process's termination requests into messages on a channel.
-fn termination_channel(mut requests: TerminationRequests) -> mpsc::UnboundedReceiver<()> {
-    let (sender, receiver) = mpsc::unbounded_channel();
-    tokio::spawn(async move {
-        loop {
-            requests.next().await;
-            if sender.send(()).is_err() {
-                return;
-            }
-        }
-    });
-    receiver
 }
 
 /// Supervises one server, treating each message on `terminations` as one
@@ -98,11 +61,7 @@ where
 {
     let (observer, events) = ServerObserver::channel();
     let (settled, settled_receiver) = oneshot::channel();
-    let relay = tokio::spawn(relay_events(
-        events,
-        settled_receiver,
-        Relay { out, open: true },
-    ));
+    let relay = tokio::spawn(relay_events(events, settled_receiver, Relay::new(out)));
     let signals = terminations.map(|requests| {
         tokio::spawn(forward_termination(
             requests,
@@ -131,6 +90,7 @@ where
             })
             .await;
     }
+    tokio::time::sleep(super::CONTROL_ANSWER_GRACE).await;
     u8::from(!succeeded)
 }
 

@@ -19,22 +19,35 @@
 //! later Ephervex process finds the host through the control channel, the
 //! runtime evidence, and the output capture on disk, as it does for any host.
 
+mod client_host;
+mod hosted_game;
 mod protocol;
+mod relay;
 mod server_host;
 
 use std::ffi::OsString;
-use std::io::Read as _;
+use std::io::{BufRead as _, Read as _};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 
 use ephervex_server::{ServerError, ServerExit, ServerObserver, ServerResult};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::process::Command;
 
+use crate::TerminationRequests;
+
+#[cfg(test)]
+pub(crate) use client_host::host_client;
+pub(crate) use hosted_game::HostedGame;
 pub use protocol::RUNNER_ARGUMENT;
-pub(crate) use protocol::{RunnerSpec, ServerRunnerMessage, ServerRunnerSpec};
+pub(crate) use protocol::{ClientRunnerSpec, RunnerSpec, ServerRunnerMessage, ServerRunnerSpec};
 
 use protocol::MAX_MESSAGE_BYTES;
+
+/// How long a runner stays up after answering its last control requests, so the
+/// answers reach the sockets they were written to before the process ends.
+pub(super) const CONTROL_ANSWER_GRACE: Duration = Duration::from_millis(250);
 
 /// Where a host runs relative to the process that started it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -69,7 +82,8 @@ fn run_runner() -> u8 {
     if let Err(error) = rustix::process::setsid() {
         tracing::debug!(%error, "the runner is already a session leader");
     }
-    let spec = match read_spec(std::io::stdin().lock()) {
+    let mut input = std::io::stdin().lock();
+    let spec = match read_spec(&mut input) {
         Ok(spec) => spec,
         Err(error) => {
             eprintln!("ephervex runner: {error}");
@@ -88,24 +102,114 @@ fn run_runner() -> u8 {
     };
     match spec {
         RunnerSpec::Server(spec) => {
+            drop(input);
             runtime.block_on(server_host::host_server(spec, tokio::io::stdout()))
+        }
+        RunnerSpec::Client(spec) => {
+            // The reading thread takes the lock itself; the input already
+            // buffered stays in the shared standard input.
+            drop(input);
+            let requests = request_channel();
+            runtime.block_on(async {
+                // Watched before the game starts, so a request that arrives
+                // while it starts is not lost to the default disposition.
+                let terminations = match TerminationRequests::watch() {
+                    Ok(requests) => Some(termination_channel(requests)),
+                    Err(error) => {
+                        tracing::warn!(%error, "termination requests are not watched by the runner");
+                        None
+                    }
+                };
+                client_host::host_client(*spec, tokio::io::stdout(), requests, terminations).await
+            })
         }
     }
 }
 
-fn read_spec(mut input: impl std::io::Read) -> Result<RunnerSpec, String> {
+/// Reads the specification, which is the first line of the runner's input.
+fn read_spec(input: &mut impl std::io::BufRead) -> Result<RunnerSpec, String> {
     let mut body = Vec::new();
     // One byte past the limit tells a specification that is too large from one
     // that is exactly that size.
     input
         .by_ref()
         .take(MAX_MESSAGE_BYTES as u64 + 1)
-        .read_to_end(&mut body)
+        .read_until(b'\n', &mut body)
         .map_err(|error| format!("the specification could not be read: {error}"))?;
     if body.len() > MAX_MESSAGE_BYTES {
         return Err("the specification is too large".to_owned());
     }
     serde_json::from_slice(&body).map_err(|error| format!("the specification is invalid: {error}"))
+}
+
+/// Turns what the starter writes after the specification into messages on a
+/// channel. The channel closes when the starter's end of the pipe does.
+fn request_channel() -> tokio::sync::mpsc::UnboundedReceiver<protocol::RunnerRequest> {
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let spawned = std::thread::Builder::new()
+        .name("runner-requests".to_owned())
+        .spawn(move || {
+            let mut input = std::io::stdin().lock();
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                let read = input
+                    .by_ref()
+                    .take(MAX_MESSAGE_BYTES as u64 + 1)
+                    .read_until(b'\n', &mut line);
+                if !matches!(read, Ok(count) if count > 0 && line.len() <= MAX_MESSAGE_BYTES) {
+                    return;
+                }
+                // A request this version does not understand is ignored.
+                if let Ok(request) = serde_json::from_slice(&line)
+                    && sender.send(request).is_err()
+                {
+                    return;
+                }
+            }
+        });
+    if let Err(error) = spawned {
+        tracing::warn!(%error, "the runner cannot be asked to stop its game");
+    }
+    receiver
+}
+
+/// Turns the process's termination requests into messages on a channel.
+fn termination_channel(
+    mut requests: TerminationRequests,
+) -> tokio::sync::mpsc::UnboundedReceiver<()> {
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        loop {
+            requests.next().await;
+            if sender.send(()).is_err() {
+                return;
+            }
+        }
+    });
+    receiver
+}
+
+/// A game that is a shell script: a runner does not care what the process is,
+/// only that it is started, supervised, and ended.
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+pub(crate) fn shell_game(
+    script: &str,
+    working_directory: &Path,
+) -> ephervex_minecraft::CommandHandOff {
+    serde_json::from_value(serde_json::json!({
+        "java": "/bin/sh",
+        "working_directory": working_directory,
+        "main_class": "",
+        "arguments": [
+            {"value": "-c", "sensitive": false},
+            {"value": script, "sensitive": false},
+        ],
+        "jvm_argument_count": 2,
+        "environment": [],
+    }))
+    .expect("a command")
 }
 
 /// What starts a runner.
@@ -198,8 +302,9 @@ pub(crate) async fn run_server<H: Send>(
         .spawn()
         .map_err(|error| hosted(format!("the runner could not be started: {error}")))?;
 
-    let specification = serde_json::to_vec(&RunnerSpec::Server(spec.clone()))
+    let mut specification = serde_json::to_vec(&RunnerSpec::Server(spec.clone()))
         .map_err(|error| hosted(error.to_string()))?;
+    specification.push(b'\n');
     if let Some(mut input) = child.stdin.take() {
         input
             .write_all(&specification)
@@ -257,7 +362,7 @@ pub(crate) async fn run_server<H: Send>(
 ///
 /// `Ok(false)` is the end of the stream. A message longer than the limit is an
 /// error rather than something to buffer.
-async fn next_message<R: AsyncBufRead + Unpin>(
+pub(super) async fn next_message<R: AsyncBufRead + Unpin>(
     reader: &mut R,
     line: &mut Vec<u8>,
 ) -> std::io::Result<bool> {
@@ -429,9 +534,9 @@ mod tests {
     #[test]
     fn a_specification_over_the_size_limit_is_refused_without_being_parsed() {
         let oversized = vec![b' '; MAX_MESSAGE_BYTES + 1];
-        let error = read_spec(oversized.as_slice()).expect_err("too large");
+        let error = read_spec(&mut oversized.as_slice()).expect_err("too large");
         assert!(error.contains("too large"), "{error}");
-        assert!(read_spec(&b"not json"[..]).is_err());
+        assert!(read_spec(&mut &b"not json"[..]).is_err());
     }
 
     #[test]

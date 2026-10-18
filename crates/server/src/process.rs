@@ -282,10 +282,30 @@ pub enum ControlResponse {
     Refused(String),
 }
 
+/// One request received on a control socket, waiting for an answer.
 #[derive(Debug)]
-struct ControlRequest {
+pub struct ControlRequest {
     action: ControlAction,
     response: oneshot::Sender<ControlResponse>,
+}
+
+impl ControlRequest {
+    #[must_use]
+    pub const fn action(&self) -> &ControlAction {
+        &self.action
+    }
+
+    /// Answers the request. A requester that has gone away is not an error.
+    pub fn respond(self, response: ControlResponse) {
+        let _ = self.response.send(response);
+    }
+
+    /// Splits the request into what was asked and where its answer goes, for a
+    /// supervisor that answers after the work behind it has finished.
+    #[must_use]
+    pub fn into_parts(self) -> (ControlAction, oneshot::Sender<ControlResponse>) {
+        (self.action, self.response)
+    }
 }
 
 /// Owns the Java child, its pipes, the runtime lock, and control socket.
@@ -451,14 +471,20 @@ struct Outstanding {
 }
 
 /// The control socket and the task accepting on it, removed together on every path.
+///
+/// The socket is keyed by the filesystem identity of `root` and a run's
+/// generation, so a supervisor of anything that owns a directory, a server or a
+/// client instance, can publish one.
 #[derive(Debug)]
-struct ControlSocket {
+pub struct ControlSocket {
     path: PathBuf,
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl ControlSocket {
-    fn open(
+    /// Binds a mode-0600 socket in a private per-user directory and starts
+    /// forwarding what it receives to `requests`.
+    pub fn open(
         server_root: &Path,
         generation: uuid::Uuid,
         requests: mpsc::UnboundedSender<ControlRequest>,
@@ -489,6 +515,11 @@ impl ControlSocket {
         )?;
         socket.task = Some(tokio::spawn(serve_control(listener, requests)));
         Ok(socket)
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 }
 
@@ -1278,6 +1309,19 @@ pub async fn send_control(
             ),
         }
     })?;
+    send_control_to(&path, action, None).await
+}
+
+/// Sends a request to the control socket at `path`.
+///
+/// `expected_peer` is the process id the socket's other end must have; a
+/// socket answered by any other process is refused before anything is sent.
+pub async fn send_control_to(
+    path: &Path,
+    action: &ControlAction,
+    expected_peer: Option<u32>,
+) -> ServerResult<ControlResponse> {
+    let path = path.to_path_buf();
     let mut stream =
         UnixStream::connect(&path)
             .await
@@ -1285,6 +1329,21 @@ pub async fn send_control(
                 path: path.clone(),
                 source,
             })?;
+    if let Some(expected) = expected_peer {
+        let peer = stream
+            .peer_cred()
+            .ok()
+            .and_then(|credentials| credentials.pid());
+        if peer.and_then(|pid| u32::try_from(pid).ok()) != Some(expected) {
+            return Err(ServerError::ControlUnavailable {
+                path,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "the control socket is not served by the recorded process",
+                ),
+            });
+        }
+    }
     let mut request =
         serde_json::to_vec(action).map_err(|_| ServerError::InvalidControlResponse)?;
     request.push(b'\n');

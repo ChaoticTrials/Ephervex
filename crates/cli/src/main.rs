@@ -32,15 +32,15 @@ use ephervex_core::{
     DependentMods, DiagnosticEntry, DiagnosticFix, DiagnosticKind, DiagnosticRequest,
     DiagnosticScope, DiagnosticSearch, DirectoryState, DuplicateClient, EULA_CONFIRMATION_PHRASE,
     EntitlementLookup, Entitlements, EulaStatus, ExpectedRuntime, FileDisposition, FindingClass,
-    FindingKind, Freshness, GameExit, GroupFilter, HostJavaInstall, HostJavaStatus, ImpactedMod,
-    ImportRequest, ImportedPack, IncompatibilityReason, InstallationHealth, InstalledHost,
-    InstalledMods, InstanceFilter, InstanceGroup, InstanceSort, Integrity, IsolationRequest,
-    IsolationRound, IsolationSession, IsolationStep, JavaCheck, JavaHealth, JavaMismatch,
-    JavaPathChoice, JavaPinIndex, JavaPlan, JavaPlanRequest, JavaRefusal, JavaRuntime,
-    JavaRuntimeFailure, JavaRuntimePins, JavaRuntimeSummary, JavaSelectionMode, JavaTarget,
-    JavaUnavailable, LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions,
-    LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver, LaunchOptions,
-    LaunchOutcome, LaunchState, LinkingState, LoginFlow, LoginOptions, LoginRequest,
+    FindingKind, Freshness, GameExit, GroupFilter, HostJavaInstall, HostJavaStatus, HostedStop,
+    HostedStopOutcome, Hosting, ImpactedMod, ImportRequest, ImportedPack, IncompatibilityReason,
+    InstallationHealth, InstalledHost, InstalledMods, InstanceFilter, InstanceGroup, InstanceSort,
+    Integrity, IsolationRequest, IsolationRound, IsolationSession, IsolationStep, JavaCheck,
+    JavaHealth, JavaMismatch, JavaPathChoice, JavaPinIndex, JavaPlan, JavaPlanRequest, JavaRefusal,
+    JavaRuntime, JavaRuntimeFailure, JavaRuntimePins, JavaRuntimeSummary, JavaSelectionMode,
+    JavaTarget, JavaUnavailable, LaunchAndConnectEvent, LaunchAndConnectObserver,
+    LaunchAndConnectOptions, LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver,
+    LaunchOptions, LaunchOutcome, LaunchState, LinkingState, LoginFlow, LoginOptions, LoginRequest,
     MAX_SEARCH_MATCHES, MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod,
     ManagedModInstallation, ManagedModSnapshot, ModInstallPlan, ModInstallRequest, ModPresence,
     ModProjectDetails, ModRelations, ModSearchQuery, ModSearchResults, NetworkAccess, NewClient,
@@ -230,6 +230,7 @@ struct LicensesArgs {
 }
 
 #[derive(Debug, Args)]
+#[allow(clippy::struct_excessive_bools)]
 struct LaunchArgs {
     /// The client instance to launch.
     id: InstanceId,
@@ -270,6 +271,14 @@ struct LaunchArgs {
     /// files that were never downloaded describes a launch that could not run.
     #[arg(long)]
     dry_run: bool,
+    /// Run Minecraft in the background and return once it is running.
+    ///
+    /// A background process supervises the game, so it keeps running after this
+    /// command, its terminal, and any Ephervex window have ended. `ephervex
+    /// running` lists it, and `ephervex instance stop` ends it. With --server, a
+    /// server this command starts is left running as well.
+    #[arg(long)]
+    detach: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1165,6 +1174,23 @@ enum InstanceCommand {
     Create(CreateInstanceArgs),
     /// Show one client instance in full.
     Show { id: InstanceId },
+    /// Stop a running launch of this instance that a background process owns.
+    ///
+    /// Works from any command after the launch started, including one started
+    /// by `ephervex launch --detach` or by the desktop application. The game is
+    /// ended at once unless --graceful asks its processes to terminate instead,
+    /// which Minecraft may answer slowly or not at all. A launch whose
+    /// background process is gone cannot be reached this way; the desktop
+    /// application's force stop handles it.
+    Stop {
+        id: InstanceId,
+        /// Which launch, for an instance running more than one alongside.
+        #[arg(long, value_name = "HANDLE")]
+        launch: Option<String>,
+        /// Ask the game to terminate instead of ending it.
+        #[arg(long)]
+        graceful: bool,
+    },
     /// Copy an instance, files and all, into a new one.
     Duplicate {
         id: InstanceId,
@@ -2475,6 +2501,36 @@ async fn run_instance_command(
             let record = app.current_client(*id)?;
             print_instance(app, &record, json)?;
         }
+        InstanceCommand::Stop {
+            id,
+            launch,
+            graceful,
+        } => {
+            let how = if *graceful {
+                HostedStop::Graceful
+            } else {
+                HostedStop::Kill
+            };
+            match app.stop_hosted_launch(*id, launch.as_deref(), how).await? {
+                HostedStopOutcome::Answered(ControlResponse::Refused(detail)) => {
+                    anyhow::bail!("the launch refused the request: {detail}")
+                }
+                HostedStopOutcome::Answered(response) => {
+                    print_launch_stop_response(&response, json);
+                }
+                HostedStopOutcome::NotEnded => anyhow::bail!(
+                    "the request was accepted but Minecraft had not exited after 30 seconds; \
+                     it may still be running"
+                ),
+                HostedStopOutcome::NotRunning => {
+                    anyhow::bail!("this instance has no such launch running")
+                }
+                HostedStopOutcome::NotHosted => anyhow::bail!(
+                    "this launch has no background process to ask; the desktop application's \
+                     force stop ends a launch whose background process is gone"
+                ),
+            }
+        }
         InstanceCommand::Duplicate {
             id,
             name,
@@ -3440,6 +3496,24 @@ fn run_instance_root(
 
 // --------------------------------------------------------------------- launch
 
+/// What `ephervex launch` asks of the launch service.
+fn launch_options(args: &LaunchArgs, features: LaunchFeatures) -> LaunchOptions {
+    LaunchOptions {
+        features,
+        java_path: args.java_path.clone(),
+        install_java_if_missing: args.install_java,
+        account: args.account.clone(),
+        additional: args.alongside.clone(),
+        dry_run: args.dry_run,
+        hosting: if args.detach {
+            Hosting::Detached
+        } else {
+            Hosting::Attached
+        },
+        return_when_running: args.detach,
+    }
+}
+
 /// Installs and launches an instance, streaming the game's log.
 ///
 /// Two streams, as everywhere else in this file: the game's own output is
@@ -3458,14 +3532,7 @@ async fn run_launch(app: &mut App, args: &LaunchArgs, json: bool) -> anyhow::Res
         features = features.custom_resolution(width, height);
     }
 
-    let options = LaunchOptions {
-        features,
-        java_path: args.java_path.clone(),
-        install_java_if_missing: args.install_java,
-        account: args.account.clone(),
-        additional: args.alongside.clone(),
-        dry_run: args.dry_run,
-    };
+    let options = launch_options(args, features);
 
     let (observer, mut events) = LaunchObserver::channel();
     let cancel = CancellationToken::new();
@@ -3518,8 +3585,18 @@ async fn run_launch(app: &mut App, args: &LaunchArgs, json: bool) -> anyhow::Res
                 &LaunchAndConnectOptions {
                     launch: options.clone(),
                     // The command's runtime ends with the command, which would
-                    // kill a server left running under it.
-                    started_server: StartedServerLifetime::StopOnReturn,
+                    // kill a server left running under it, unless the server has
+                    // a runner of its own.
+                    started_server: if args.detach {
+                        StartedServerLifetime::Detach
+                    } else {
+                        StartedServerLifetime::StopOnReturn
+                    },
+                    server_hosting: if args.detach {
+                        Hosting::Detached
+                    } else {
+                        Hosting::Attached
+                    },
                     started_server_kill: kill_server,
                     ..LaunchAndConnectOptions::default()
                 },
@@ -3867,7 +3944,8 @@ fn report_launch(outcome: &LaunchOutcome, json: bool) {
             "assets": outcome.installation.assets,
             // Never the real arguments: one of them is an access token.
             "command": outcome.command.redacted_arguments(),
-            "dry_run": outcome.exit.is_none(),
+            "dry_run": outcome.exit.is_none() && outcome.game_pid.is_none(),
+            "game_pid": outcome.game_pid,
             "exit_code": outcome.exit.and_then(|exit| exit.code),
             "exit_signal": outcome.exit.and_then(|exit| exit.signal),
             "java_failure": outcome.java_failure.as_deref().map(java_failure_json),
@@ -3876,7 +3954,12 @@ fn report_launch(outcome: &LaunchOutcome, json: bool) {
         return;
     }
 
-    if outcome.exit.is_none() {
+    if let (None, Some(pid)) = (outcome.exit, outcome.game_pid) {
+        eprintln!(
+            "{}",
+            ephervex_i18n::lookup_args("launch-detached", [("pid", MessageArg::from(pid))])
+        );
+    } else if outcome.exit.is_none() {
         eprintln!("{}", ephervex_i18n::lookup("launch-dry-run"));
         outln!("{}", outcome.command.java.display());
         for argument in outcome.command.redacted_arguments() {
@@ -10095,6 +10178,20 @@ fn control_response_result(response: &ControlResponse) -> anyhow::Result<()> {
         | ControlResponse::Accepted
         | ControlResponse::Exited(_)
         | ControlResponse::Restarted { .. } => Ok(()),
+    }
+}
+
+/// Says what a hosted launch answered to a stop, in terms of a game.
+fn print_launch_stop_response(response: &ControlResponse, json: bool) {
+    if json {
+        print_control_response(response, json);
+        return;
+    }
+    match response {
+        ControlResponse::Exited(exit) => {
+            outln!("{}", exit_message(exit.code, exit.signal));
+        }
+        _ => outln!("accepted"),
     }
 }
 
