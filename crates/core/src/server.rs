@@ -5290,6 +5290,25 @@ mod tests {
     }
 
     #[test]
+    fn deleting_a_server_removes_the_output_it_captured() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let server = scaffolded_server(&app);
+        let capture = app.paths().server_capture_dir(server.id);
+        std::fs::create_dir_all(&capture).expect("capture directory");
+        write_capture_segment(
+            &capture,
+            "capture-20260813T120000.000Z-a.jsonl",
+            &["Starting net.minecraft.server.Main"],
+        );
+
+        app.delete_server(server.id, FileDisposition::Remove)
+            .expect("delete");
+
+        assert!(!capture.exists());
+    }
+
+    #[test]
     fn deleting_a_server_removes_its_entry_after_the_game_dropped_its_hidden_id() {
         let directory = tempfile::tempdir().expect("temp dir");
         let app = test_app(directory.path());

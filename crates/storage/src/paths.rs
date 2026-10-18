@@ -406,8 +406,9 @@ impl Paths {
     /// Where one server's captured process output is kept.
     ///
     /// Under the state root rather than inside the server directory: the
-    /// capture must survive a server whose files are being reinstalled, and a
-    /// temporary server's output is worth keeping after the OS clears its root.
+    /// capture must survive a server whose files are being reinstalled. It is
+    /// removed when the server's files are deleted or its record is dropped
+    /// because they are gone.
     #[must_use]
     pub fn server_capture_dir(&self, id: ServerId) -> PathBuf {
         self.logs_dir().join("servers").join(id.to_string())

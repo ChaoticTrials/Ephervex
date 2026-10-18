@@ -1524,6 +1524,9 @@ impl Registry {
     }
 
     /// Removes a server from the index, and optionally from disk.
+    ///
+    /// Removing the files removes the server's captured process output too. A
+    /// kept server can be indexed again under the same id, so its output stays.
     pub fn delete_server(&self, id: ServerId, files: FileDisposition) -> Result<(), RegistryError> {
         let indexed = self.indexed_server(id)?;
         let record = self.following_moved_server(indexed.clone());
@@ -1540,6 +1543,7 @@ impl Registry {
             if indexed.root != record.root {
                 remove_tree(&indexed.root)?;
             }
+            remove_tree(&self.paths().server_capture_dir(id))?;
         }
 
         self.index
@@ -3514,6 +3518,49 @@ mod tests {
             .expect("delete");
 
         assert_eq!(guard_files(&registry), Vec::<String>::new());
+    }
+
+    #[test]
+    fn deleting_a_servers_files_removes_its_output_capture_and_forgetting_it_keeps_the_capture() {
+        for (files, kept) in [
+            (crate::FileDisposition::Remove, false),
+            (crate::FileDisposition::Keep, true),
+        ] {
+            let environment = TestEnvironment::new();
+            let registry = environment.registry();
+            let server = registry
+                .create_server(NewServer::new("x", "1.20.1", LoaderSelection::vanilla()))
+                .expect("create");
+            let neighbor = registry
+                .create_server(NewServer::new("y", "1.20.1", LoaderSelection::vanilla()))
+                .expect("create");
+            let capture = registry.paths().server_capture_dir(server.id);
+            let neighbor_capture = registry.paths().server_capture_dir(neighbor.id);
+            for directory in [&capture, &neighbor_capture] {
+                std::fs::create_dir_all(directory).expect("capture directory");
+                std::fs::write(directory.join("capture-a.jsonl"), b"{}\n").expect("segment");
+            }
+
+            registry.delete_server(server.id, files).expect("delete");
+
+            assert_eq!(capture.exists(), kept, "{files:?}");
+            assert!(neighbor_capture.is_dir(), "another server's capture stays");
+        }
+    }
+
+    #[test]
+    fn deleting_a_server_that_never_wrote_output_succeeds() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = registry
+            .create_server(NewServer::new("x", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+
+        registry
+            .delete_server(server.id, crate::FileDisposition::Remove)
+            .expect("delete");
+
+        assert!(!registry.paths().server_capture_dir(server.id).exists());
     }
 
     #[test]

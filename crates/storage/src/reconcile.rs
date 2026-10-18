@@ -599,6 +599,21 @@ fn reconcile_listed_servers(
     Ok(())
 }
 
+/// Removes the output capture of a server whose record was dropped because its
+/// files are gone. A capture that cannot be removed is logged, not an error:
+/// it must not stop the rest of the index from being repaired.
+fn discard_server_capture(registry: &Registry, id: ServerId) {
+    let capture = registry.paths().server_capture_dir(id);
+    if let Err(error) = crate::removal::remove_tree_if_present(&capture) {
+        tracing::warn!(
+            server_id = %id,
+            path = %capture.display(),
+            %error,
+            "could not remove the output capture of a removed server"
+        );
+    }
+}
+
 fn reconcile_server(
     registry: &Registry,
     mut record: ServerRecord,
@@ -612,6 +627,7 @@ fn reconcile_server(
         && record.root != registry.paths().server_root(record.storage, record.id)
     {
         registry.delete_server(record.id, FileDisposition::Keep)?;
+        discard_server_capture(registry, record.id);
         report.removed_stale_temporary.push(entry);
         return Ok(());
     }
@@ -648,6 +664,7 @@ fn reconcile_server(
         }
 
         registry.delete_server(record.id, FileDisposition::Keep)?;
+        discard_server_capture(registry, record.id);
         report.removed_stale_temporary.push(entry);
     } else {
         if !record.attention.contains(&AttentionReason::MissingRoot) {
@@ -1505,6 +1522,24 @@ mod tests {
 
     use crate::records::{ClientCommitWarning, NewClient, NewServer};
     use crate::test_support::TestEnvironment;
+
+    #[test]
+    fn a_temporary_server_the_os_cleared_loses_its_output_capture_with_its_record() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = registry
+            .create_server(NewServer::new("temp", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        let capture = registry.paths().server_capture_dir(server.id);
+        std::fs::create_dir_all(&capture).expect("capture directory");
+        std::fs::write(capture.join("capture-a.jsonl"), b"{}\n").expect("segment");
+        std::fs::remove_dir_all(&server.root).expect("clear temp");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.removed_stale_temporary.len(), 1);
+        assert!(!capture.exists());
+    }
 
     #[test]
     fn a_vanished_temporary_root_is_removed_silently_and_a_persistent_one_is_not() {
