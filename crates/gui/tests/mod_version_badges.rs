@@ -154,7 +154,8 @@ fn a_mod_without_a_project_page_offers_no_way_to_one() {
 }
 
 /// Every action a pack mod can show at once has to sit inside the dialog's
-/// padding, at the default text size and at a larger one.
+/// padding without covering another, at the default text size and at larger
+/// ones.
 #[test]
 fn the_full_set_of_mod_actions_fits_inside_the_dialogs_padding() {
     let ui = window();
@@ -162,7 +163,7 @@ fn the_full_set_of_mod_actions_fits_inside_the_dialogs_padding() {
     ui.set_mod_action_is_pack_owned(true);
     ui.set_mod_action_pack_original_version("v3".into());
     ui.set_mod_action_can_update(true);
-    for scale in [1.0_f32, 1.25] {
+    for scale in [1.0_f32, 1.25, 1.5] {
         ui.global::<Theme>().set_text_scale(scale);
         versions(
             &ui,
@@ -181,6 +182,7 @@ fn the_full_set_of_mod_actions_fits_inside_the_dialogs_padding() {
             .map(|header| header.absolute_position().x + header.size().width)
             .expect("the dialog's header Close");
 
+        let mut placed = Vec::new();
         for id in [
             "gui-remove",
             "gui-mod-reset-to-pack-version",
@@ -190,11 +192,22 @@ fn the_full_set_of_mod_actions_fits_inside_the_dialogs_padding() {
             let button = ElementHandle::find_by_accessible_label(&ui, &lookup(id))
                 .find(|element| element.size().width > 0.0)
                 .expect("every action of a pack mod is offered");
-            let right = button.absolute_position().x + button.size().width;
+            let (left, top) = (button.absolute_position().x, button.absolute_position().y);
+            let (right, bottom) = (left + button.size().width, top + button.size().height);
             assert!(
                 right <= content_edge + 0.5,
                 "{id} ends at {right}px past the padding edge at {content_edge}px at text scale {scale}"
             );
+            for (other, other_left, other_top, other_right, other_bottom) in &placed {
+                assert!(
+                    right <= *other_left
+                        || *other_right <= left
+                        || bottom <= *other_top
+                        || *other_bottom <= top,
+                    "{id} overlaps {other} at text scale {scale}"
+                );
+            }
+            placed.push((id, left, top, right, bottom));
         }
     }
 }
