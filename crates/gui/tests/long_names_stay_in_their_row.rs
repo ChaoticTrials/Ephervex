@@ -10,7 +10,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ephervex_gui::ui::{AppWindow, GuiI18n, InstanceRow};
+use ephervex_gui::ui::{AppWindow, GuiI18n, InstanceRow, ServerRow};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{
     AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions, mock_elapsed_time,
@@ -20,6 +20,7 @@ use slint::{ComponentHandle, ModelRc, PhysicalSize, SharedString, VecModel};
 
 /// The inspector is 360px wide whatever the window is.
 const INSPECTOR_WIDTH: f32 = 360.0;
+const WINDOW_WIDTH: u16 = 1480;
 
 const LONG_NAME: &str =
     "Garden of Glass (Questbook Edition) 1.16.5 Forge Reproduction for the Crash on World Load";
@@ -129,6 +130,45 @@ fn a_shortened_connect_button_says_its_whole_caption_on_hover() {
     );
 }
 
+/// The server inspector sits in the same 360px column as the instance one, so a
+/// name that is not cut short is drawn out through the panel's border.
+#[test]
+fn a_server_inspector_title_stays_inside_the_panel() {
+    let ui = window();
+    servers(&ui, &[long_named_server()]);
+
+    let title = inspector_title(&ui);
+
+    assert!(
+        title.size().width < INSPECTOR_WIDTH,
+        "the title is {}px inside a {INSPECTOR_WIDTH}px panel",
+        title.size().width
+    );
+    assert!(
+        title.absolute_position().x + title.size().width <= f32::from(WINDOW_WIDTH),
+        "the title reaches {}px in a window that ends at {WINDOW_WIDTH}px",
+        title.absolute_position().x + title.size().width
+    );
+}
+
+/// What the inspector cut from the server's name stays reachable on hover.
+#[test]
+fn a_shortened_server_inspector_title_says_the_whole_name_on_hover() {
+    let ui = window();
+    servers(&ui, &[long_named_server()]);
+    let before = bearing(&ui, LONG_SERVER);
+
+    inspector_title(&ui).mock_single_click(PointerEventButton::Left);
+    mock_elapsed_time(std::time::Duration::from_millis(600));
+    settle(&ui);
+
+    assert_eq!(
+        bearing(&ui, LONG_SERVER),
+        before + 1,
+        "hovering a cut title has to put the whole name on screen"
+    );
+}
+
 /// How many things on screen carry this text. A note that opens is one more.
 fn bearing(ui: &AppWindow, text: &str) -> usize {
     ElementHandle::find_by_accessible_label(ui, text)
@@ -148,6 +188,67 @@ fn card_title(ui: &AppWindow) -> ElementHandle {
                 && element.absolute_position().x < right
         })
         .expect("the card shows the name it is labeled with")
+}
+
+/// The inspector's copy of the server name, as opposed to the card's: it is
+/// the one in the rightmost column.
+fn inspector_title(ui: &AppWindow) -> ElementHandle {
+    ElementHandle::find_by_accessible_label(ui, LONG_SERVER)
+        .filter(|element| element.accessible_role() != Some(AccessibleRole::Button))
+        .filter(|element| element.size().width > 0.0)
+        .find(|element| element.absolute_position().x >= f32::from(WINDOW_WIDTH) - INSPECTOR_WIDTH)
+        .expect("the inspector shows the name of the selected server")
+}
+
+fn servers(ui: &AppWindow, rows: &[ServerRow]) {
+    ui.set_loading(false);
+    ui.set_page(1);
+    ui.set_workspace_open(false);
+    ui.set_show_inspector(true);
+    ui.set_global_servers(ModelRc::new(VecModel::from(rows.to_vec())));
+    ui.set_selected_global_server_index(0);
+    ui.set_selected_global_server_id(rows[0].id.clone());
+    settle(ui);
+}
+
+fn long_named_server() -> ServerRow {
+    ServerRow {
+        snapshot_deletion_note: SharedString::default(),
+        id: "repro-server".into(),
+        name: LONG_SERVER.into(),
+        minecraft: "1.16.5".into(),
+        loader: "Forge 36.2.0".into(),
+        loader_kind: "forge".into(),
+        storage: "Temporary".into(),
+        storage_kind: "temporary".into(),
+        relationship: "Standalone".into(),
+        linked_client_id: SharedString::default(),
+        state: "Stopped".into(),
+        state_kind: "stopped".into(),
+        state_detail: "Not running".into(),
+        address: "127.0.0.1:25565".into(),
+        restart_required: false,
+        path: "/tmp/ephervex/servers/repro-server".into(),
+        installed: true,
+        can_start: true,
+        can_stop: false,
+        can_restart: false,
+        can_kill: false,
+        can_send_command: false,
+        console_status: SharedString::default(),
+        console_completion: 0,
+        console_delivered: false,
+        can_connect: false,
+        connect_reason: SharedString::default(),
+        restart_stage: SharedString::default(),
+        needs_attention: false,
+        paired_client_id: SharedString::default(),
+        paired_client_name: SharedString::default(),
+        pair_start_together: false,
+        pair_starting: false,
+        favorite: false,
+        icon_slot: -1,
+    }
 }
 
 fn instances(ui: &AppWindow, rows: &[InstanceRow]) {
@@ -225,7 +326,8 @@ fn window() -> AppWindow {
     .expect("testing backend");
     let ui = AppWindow::new().expect("window");
     install_i18n(&ui);
-    ui.window().set_size(PhysicalSize::new(1480, 900));
+    ui.window()
+        .set_size(PhysicalSize::new(u32::from(WINDOW_WIDTH), 900));
     ui.show().expect("show");
     ui
 }

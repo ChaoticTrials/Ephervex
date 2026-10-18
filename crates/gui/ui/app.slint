@@ -28,6 +28,7 @@ import {
     ActionRow,
     BodyText,
     Divider,
+    ElidedHeading,
     Eyebrow,
     FieldLabel,
     Heading,
@@ -1231,8 +1232,8 @@ export component AppWindow inherits Window {
                             HorizontalLayout {
                                 spacing: 12px;
                                 HostIcon { slot: root.global-servers[root.selected-global-server-index].icon-slot; kind: root.global-servers[root.selected-global-server-index].loader-kind; server: true; }
-                                VerticalLayout { spacing: 4px;
-                                    Heading { text: root.global-servers[root.selected-global-server-index].name; }
+                                VerticalLayout { spacing: 4px; horizontal-stretch: 1;
+                                    ElidedHeading { text: root.global-servers[root.selected-global-server-index].name; }
                                     StatePill { state: root.global-servers[root.selected-global-server-index].state; state-kind: root.global-servers[root.selected-global-server-index].state-kind; restarting: root.global-servers[root.selected-global-server-index].restart-stage != ""; }
                                 }
                             }
