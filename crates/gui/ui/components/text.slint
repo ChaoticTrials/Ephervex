@@ -76,6 +76,8 @@ export component Divider inherits Rectangle {
 // that has the room.
 export component TooltipCard inherits Rectangle {
     in property <string> text;
+    // The widest the card grows before its text wraps.
+    in property <length> widest: 320px;
     border-radius: 6px;
     border-width: 1px;
     border-color: Theme.border;
@@ -83,7 +85,7 @@ export component TooltipCard inherits Rectangle {
     drop-shadow-color: Theme.shadow;
     drop-shadow-blur: 10px;
     drop-shadow-offset-y: 2px;
-    width: min(320px, note.preferred-width + 20px);
+    width: min(root.widest, note.preferred-width + 20px);
     height: note.preferred-height + 14px;
     note := Text {
         x: 10px;

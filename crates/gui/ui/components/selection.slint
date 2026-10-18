@@ -12,6 +12,7 @@
 
 import { ListView } from "std-widgets.slint";
 import { FocusRing } from "controls.slint";
+import { HoverNote, TooltipCard } from "text.slint";
 import { Theme } from "../theme.slint";
 
 // A dropdown over `model`, painted from the same tokens as `TextField` so a
@@ -44,6 +45,12 @@ export component ChoiceBox inherits Rectangle {
     private property <length> anchor-width: root.width;
     private property <Point> opened-at;
     private property <length> opened-width;
+    // The entry of the open list whose full text is on show because it was cut
+    // off, or -1, and where the pointer was in the list when it opened. The
+    // window's note layer is drawn under a popup, so the list shows its own.
+    private property <int> note-index: -1;
+    private property <length> note-x;
+    private property <length> note-y;
     min-width: 160px;
     min-height: Theme.control-height;
     preferred-height: Theme.control-height;
@@ -64,6 +71,8 @@ export component ChoiceBox inherits Rectangle {
 
     changed anchor => { root.close-if-displaced(); }
     changed anchor-width => { root.close-if-displaced(); }
+    changed open => { root.note-index = -1; }
+    changed model => { root.note-index = -1; }
 
     function close-if-displaced() {
         if (root.open && (root.anchor.x != root.opened-at.x || root.anchor.y != root.opened-at.y || root.anchor-width != root.opened-width)) {
@@ -91,7 +100,7 @@ export component ChoiceBox inherits Rectangle {
         }
     }
 
-    Text {
+    shown := Text {
         x: 11px;
         width: parent.width - 36px;
         height: parent.height;
@@ -132,6 +141,12 @@ export component ChoiceBox inherits Rectangle {
             keys.focus();
             root.show-list();
         }
+    }
+    HoverNote {
+        text: !root.open && shown.preferred-width > shown.width ? shown.text : "";
+        hovered: area.has-hover;
+        pointer-x: area.mouse-x;
+        pointer-y: area.mouse-y;
     }
 
     popup := PopupWindow {
@@ -211,7 +226,7 @@ export component ChoiceBox inherits Rectangle {
                             border-radius: 2px;
                             background: index == root.current-index ? Theme.accent : transparent;
                         }
-                        Text {
+                        entry-text := Text {
                             x: 12px;
                             width: parent.width - 24px;
                             height: parent.height;
@@ -222,10 +237,12 @@ export component ChoiceBox inherits Rectangle {
                             overflow: elide;
                             vertical-alignment: center;
                         }
-                        TouchArea {
+                        entry-area := TouchArea {
                             changed has-hover => {
                                 if (self.has-hover) {
                                     root.highlight = index;
+                                } else if (root.note-index == index) {
+                                    root.note-index = -1;
                                 }
                             }
                             clicked => {
@@ -233,9 +250,26 @@ export component ChoiceBox inherits Rectangle {
                                 popup.close();
                             }
                         }
+                        Timer {
+                            running: entry-area.has-hover && entry-text.preferred-width > entry-text.width && root.note-index != index;
+                            interval: 500ms;
+                            triggered => {
+                                root.note-index = index;
+                                root.note-x = entry-area.absolute-position.x + entry-area.mouse-x;
+                                root.note-y = entry-area.absolute-position.y + entry-area.mouse-y;
+                            }
+                        }
                     }
                 }
             }
+        }
+        if root.note-index >= 0 && root.note-index < root.model.length : TooltipCard {
+            text: root.model[root.note-index];
+            widest: root.width;
+            // Below the pointer, or above it when the list's end, which the
+            // window keeps inside itself, leaves no room below.
+            x: max(0px, min(root.note-x + 12px, root.width - self.width));
+            y: root.note-y + 18px + self.height <= popup.height ? root.note-y + 18px : root.note-y - self.height - 6px;
         }
     }
 }
