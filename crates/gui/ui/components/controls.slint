@@ -1,6 +1,6 @@
 // Buttons, fields, toggles, pills, navigation items, and the small panels built from them.
 
-import { BodyText, Heading, TooltipCard } from "text.slint";
+import { BodyText, Heading, HoverNote } from "text.slint";
 import { GuiI18n } from "../globals.slint";
 import { AccountRow } from "../models.slint";
 import { Theme } from "../theme.slint";
@@ -160,9 +160,7 @@ export component AppButton inherits Rectangle {
         mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.not-allowed;
         clicked => { if root.enabled { root.clicked(); } }
     }
-    if root.hover-note != "" : Tooltip {
-        TooltipCard { text: root.hover-note; }
-    }
+    HoverNote { text: root.hover-note; hovered: area.has-hover; pointer-x: area.mouse-x; pointer-y: area.mouse-y; }
 }
 
 // A star that says whether one Minecraft release is pinned, and toggles it.
@@ -210,9 +208,7 @@ export component FavoriteToggle inherits Rectangle {
         mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.not-allowed;
         clicked => { if root.enabled { root.toggled(); } }
     }
-    Tooltip {
-        TooltipCard { text: root.hover-note; }
-    }
+    HoverNote { text: root.hover-note; hovered: area.has-hover; pointer-x: area.mouse-x; pointer-y: area.mouse-y; }
 }
 
 export component IconButton inherits Rectangle {
@@ -250,9 +246,7 @@ export component IconButton inherits Rectangle {
         mouse-cursor: root.enabled ? MouseCursor.default : MouseCursor.not-allowed;
         clicked => { if root.enabled { root.clicked(); } }
     }
-    if root.hover-note != "" : Tooltip {
-        TooltipCard { text: root.hover-note; }
-    }
+    HoverNote { text: root.hover-note; hovered: area.has-hover; pointer-x: area.mouse-x; pointer-y: area.mouse-y; }
 }
 
 export component TextField inherits Rectangle {
@@ -697,9 +691,7 @@ export component LaunchAsButton inherits Rectangle {
         mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.not-allowed;
         clicked => { if root.enabled { menu.show({ x: 0, y: root.height }); } }
     }
-    if !root.enabled && root.hint != "" : Tooltip {
-        TooltipCard { text: root.hint; }
-    }
+    HoverNote { text: !root.enabled ? root.hint : ""; hovered: area.has-hover; pointer-x: area.mouse-x; pointer-y: area.mouse-y; }
 }
 
 export component Pill inherits Rectangle {
@@ -795,9 +787,7 @@ export component PillButton inherits Rectangle {
         mouse-cursor: MouseCursor.pointer;
         clicked => { root.clicked(); }
     }
-    if root.note != "" && area.has-hover : Tooltip {
-        TooltipCard { text: root.note; }
-    }
+    HoverNote { text: root.note; hovered: area.has-hover; pointer-x: area.mouse-x; pointer-y: area.mouse-y; }
 }
 
 export component NavItem inherits Rectangle {

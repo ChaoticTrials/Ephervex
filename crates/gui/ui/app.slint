@@ -34,8 +34,9 @@ import {
     Heading,
     PageIntro,
     SectionTitle,
-    SelectableText,
-    TooltipCard
+    HoverNote,
+    HoverNoteLayer,
+    SelectableText
 } from "components/text.slint";
 import { ServerFiles, ServerCommandInput } from "workspace/server-tools.slint";
 import { ModBrowser } from "workspace/mod-browser.slint";
@@ -2549,16 +2550,11 @@ export component AppWindow inherits Window {
                                 clicked => { root.open-mod-project-page(root.mod-action-project-url); }
                             }
                             }
-                            if project-link.has-hover : Tooltip {
-                                TooltipCard {
-                                    // Below and right of the pointer. The overlay
-                                    // starts at the element's own origin, which is
-                                    // the name itself, so a card left there covers
-                                    // the very thing being pointed at.
-                                    x: project-link.mouse-x + 14px;
-                                    y: project-link.mouse-y + 20px;
-                                    text: GuiI18n.text("gui-mod-open-project-page-hint");
-                                }
+                            HoverNote {
+                                text: GuiI18n.text("gui-mod-open-project-page-hint");
+                                hovered: project-link.has-hover;
+                                pointer-x: project-link.mouse-x;
+                                pointer-y: project-link.mouse-y;
                             }
                         }
                         if root.mod-action-up-to-date : Pill { text: GuiI18n.text("gui-mod-up-to-date"); tone-color: Theme.success; }
@@ -2936,4 +2932,5 @@ export component AppWindow inherits Window {
 
     dialog-end := FocusEdge { active: root.modal != ""; }
     FocusEdge { active: root.modal != ""; reached => { dialog-start.focus(); } }
+    HoverNoteLayer { width: root.width; height: root.height; }
 }

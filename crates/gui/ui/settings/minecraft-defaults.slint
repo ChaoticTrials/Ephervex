@@ -2,7 +2,7 @@
 
 import { IndexComboBox } from "../components/selection.slint";
 import { AppButton, Pill, TextField, Toggle, ValueSlider } from "../components/controls.slint";
-import { ActionRow, BodyText, Eyebrow, FieldLabel } from "../components/text.slint";
+import { ActionRow, BodyText, Eyebrow, FieldLabel, HoverNoteLayer } from "../components/text.slint";
 import { GuiI18n } from "../globals.slint";
 import { MinecraftPreferenceRow } from "../models.slint";
 import { Theme } from "../theme.slint";
@@ -424,4 +424,5 @@ export component WindowSizePreview inherits Window {
             }
         }
     }
+    HoverNoteLayer { width: root.width; height: root.height; }
 }

@@ -1,4 +1,5 @@
-// Text primitives and the tooltip card every surface writes with.
+// Text primitives, the hover card every surface writes with, and the hover
+// notes that show it.
 
 import { ScrollView } from "std-widgets.slint";
 import { GuiI18n } from "../globals.slint";
@@ -69,11 +70,9 @@ export component Divider inherits Rectangle {
 }
 
 // What a control has to say on hover: a disabled control's reason, or a
-// caption or title that did not fit and could not show the rest of
-// itself. Custom content for the built-in `Tooltip`, which renders it in
-// a real overlay above the whole window - not as an ordinary child
-// element, which whatever the layout places after it would be free to
-// paint over.
+// caption or title that did not fit and could not show the rest of itself.
+// Shown by `HoverNoteLayer` above the whole window, or in place by a row
+// that has the room.
 export component TooltipCard inherits Rectangle {
     in property <string> text;
     border-radius: 6px;
@@ -93,6 +92,103 @@ export component TooltipCard inherits Rectangle {
         color: Theme.text-secondary;
         font-size: Theme.caption-size;
         wrap: word-wrap;
+    }
+}
+
+// The note currently on screen, if any. One at a time: `HoverNote` fills it in
+// and `HoverNoteLayer` draws it.
+export global HoverNotes {
+    in-out property <string> text;
+    // The pointer when the note opened, in window coordinates.
+    in-out property <length> pointer-x;
+    in-out property <length> pointer-y;
+    in-out property <bool> open;
+    // Set by the note's owner while it lives and cleared by the layer's check.
+    // An owner that is destroyed while its note is open (its row was
+    // rebuilt) can no longer close it, so the layer closes it when the
+    // owner stops answering.
+    in-out property <bool> owner-alive;
+    public function show(note: string, x: length, y: length) {
+        HoverNotes.text = note;
+        HoverNotes.pointer-x = x;
+        HoverNotes.pointer-y = y;
+        HoverNotes.owner-alive = true;
+        HoverNotes.open = true;
+    }
+    public function hide() {
+        HoverNotes.open = false;
+    }
+}
+
+// Opens a note on hover. Placed inside a control that has a `TouchArea`, which
+// passes along its hover state and pointer, so the note follows the control
+// without the control owning any placement.
+//
+// Not the built-in `Tooltip`, which opens to the right of the pointer and is
+// never moved back inside the window.
+export component HoverNote inherits Rectangle {
+    in property <string> text;
+    in property <bool> hovered;
+    // The pointer, relative to this element, which sits on the control's own
+    // touch area.
+    in property <length> pointer-x;
+    in property <length> pointer-y;
+    private property <bool> showing;
+    private property <bool> wanted: root.hovered && root.text != "";
+    changed wanted => {
+        if !root.wanted && root.showing {
+            root.showing = false;
+            HoverNotes.hide();
+        }
+    }
+    changed text => {
+        if root.showing {
+            HoverNotes.text = root.text;
+        }
+    }
+    Timer {
+        running: root.wanted && !root.showing;
+        interval: 500ms;
+        triggered => {
+            root.showing = true;
+            HoverNotes.show(root.text, root.absolute-position.x + root.pointer-x, root.absolute-position.y + root.pointer-y);
+        }
+    }
+    Timer {
+        running: root.showing;
+        interval: 200ms;
+        triggered => { HoverNotes.owner-alive = true; }
+    }
+}
+
+// Draws the open note over the whole window, kept inside it. Goes last in a
+// window so nothing is painted over it, and takes no input, so the controls
+// below stay hoverable.
+export component HoverNoteLayer inherits Rectangle {
+    // From the window's edge a note keeps clear.
+    private property <length> edge: 8px;
+    // Below and right of the pointer, clear of the cursor image.
+    private property <length> reach-x: 12px;
+    private property <length> reach-y: 18px;
+    Timer {
+        running: HoverNotes.open;
+        interval: 450ms;
+        triggered => {
+            if HoverNotes.owner-alive {
+                HoverNotes.owner-alive = false;
+            } else {
+                HoverNotes.hide();
+            }
+        }
+    }
+    if HoverNotes.open : TooltipCard {
+        text: HoverNotes.text;
+        // Moved left when the room to the right is short, and above the
+        // pointer when the room below is.
+        x: max(root.edge, min(HoverNotes.pointer-x + root.reach-x, root.width - self.width - root.edge));
+        y: HoverNotes.pointer-y + root.reach-y + self.height + root.edge <= root.height
+            ? HoverNotes.pointer-y + root.reach-y
+            : max(root.edge, HoverNotes.pointer-y - self.height - root.edge);
     }
 }
 
@@ -124,8 +220,11 @@ export component ElidedHeading inherits Rectangle {
         clicked => { root.clicked(); }
         double-clicked => { root.double-clicked(); }
     }
-    if title.preferred-width > title.width : Tooltip {
-        TooltipCard { text: root.text; }
+    HoverNote {
+        text: title.preferred-width > title.width ? root.text : "";
+        hovered: area.has-hover;
+        pointer-x: area.mouse-x;
+        pointer-y: area.mouse-y;
     }
 }
 
