@@ -24,6 +24,7 @@ const FORCED_SEASON_ENV_VAR: &str = "SEASONS_THEME";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SeasonalTheme {
     Halloween,
+    Christmas,
 }
 
 impl SeasonalTheme {
@@ -32,6 +33,7 @@ impl SeasonalTheme {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Halloween => "halloween",
+            Self::Christmas => "christmas",
         }
     }
 }
@@ -144,11 +146,18 @@ impl ThemeSeason {
 }
 
 /// Every season. Seasons do not overlap.
-pub const THEME_SEASONS: &[ThemeSeason] = &[ThemeSeason {
-    theme: SeasonalTheme::Halloween,
-    first: MonthDay::new(10, 25),
-    last: MonthDay::new(10, 31),
-}];
+pub const THEME_SEASONS: &[ThemeSeason] = &[
+    ThemeSeason {
+        theme: SeasonalTheme::Halloween,
+        first: MonthDay::new(10, 25),
+        last: MonthDay::new(10, 31),
+    },
+    ThemeSeason {
+        theme: SeasonalTheme::Christmas,
+        first: MonthDay::new(12, 24),
+        last: MonthDay::new(12, 26),
+    },
+];
 
 /// The season `date` falls in, if any.
 #[must_use]
@@ -224,6 +233,7 @@ mod tests {
     }
 
     const HALLOWEEN: ShownTheme = ShownTheme::Seasonal(SeasonalTheme::Halloween);
+    const CHRISTMAS: ShownTheme = ShownTheme::Seasonal(SeasonalTheme::Christmas);
 
     fn dark() -> ApplicationTheme {
         ApplicationTheme::BuiltIn(ApplicationColorScheme::Dark)
@@ -250,6 +260,20 @@ mod tests {
                 shown_theme(&dark(), true, outside),
                 ShownTheme::Recorded(dark())
             );
+        }
+    }
+
+    #[test]
+    fn christmas_is_shown_over_dark_and_light_from_december_24_through_december_26() {
+        for recorded in [dark(), light()] {
+            for year in [2026, 2027, 2028] {
+                let unchanged = ShownTheme::Recorded(recorded.clone());
+                assert_eq!(shown_theme(&recorded, true, date(year, 12, 23)), unchanged);
+                for day in 24..=26 {
+                    assert_eq!(shown_theme(&recorded, true, date(year, 12, day)), CHRISTMAS);
+                }
+                assert_eq!(shown_theme(&recorded, true, date(year, 12, 27)), unchanged);
+            }
         }
     }
 

@@ -2903,6 +2903,7 @@ gui-seasonal-themes = Seasonal themes
 gui-seasonal-themes-detail = Dress Ephervex up for special days in place of Dark or Light. Your own themes are never replaced, and your chosen theme comes back afterward.
 gui-seasonal-theme-shown = The { $season } theme is shown right now. Turn this off to see { $value } again.
 gui-seasonal-theme-halloween = Halloween
+gui-seasonal-theme-christmas = Christmas
 gui-technical-text-size = Diagnostics and console text
 gui-technical-text-size-detail = Set the monospace size used for selectable logs, crash reports, and server console output.
 gui-text-scale-90 = 90%

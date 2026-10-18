@@ -90,6 +90,12 @@ also holds a commented-out `[branding]` section for use in a theme folder.
 | `overlay` | Popovers, such as dropdown lists and menus, which must read against an `elevated` card |
 | `border` | Borders and dividers |
 | `bar` | The top bar, the navigation column, and the status bar |
+| `header-ribbon-1` | The first sixth of the ribbon along the bottom of the top bar; transparent hides it |
+| `header-ribbon-2` | The second sixth of the top bar ribbon |
+| `header-ribbon-3` | The third sixth of the top bar ribbon |
+| `header-ribbon-4` | The fourth sixth of the top bar ribbon |
+| `header-ribbon-5` | The fifth sixth of the top bar ribbon |
+| `header-ribbon-6` | The final sixth of the top bar ribbon |
 | `well` | The floor of technical views: consoles, logs, crash reports |
 | `selection` | A selected row, and the highlighted entry of a menu |
 | `selection-card` | A selected card |
@@ -206,6 +212,7 @@ whichever of Dark and Light you chose.
 | Theme | Season |
 |---|---|
 | Halloween | October 25 through October 31 |
+| Christmas | December 24 through December 26 |
 
 The season follows the computer's local date. It starts at midnight on its
 first day and ends at midnight after its last day, also while Ephervex stays
@@ -221,6 +228,7 @@ choice, the Seasonal themes setting says which theme the season is showing,
 and your theme comes back when the season ends, also after a restart.
 
 A seasonal theme replaces the colors and the logo and window icon together.
+Christmas uses burgundy, red, evergreen, cream, and gold.
 The icon Ephervex was installed with does not change, as described under
 [Window and taskbar icons](#window-and-taskbar-icons). A seasonal theme is not
 a `parent` a theme file can name.
@@ -234,8 +242,9 @@ To see a seasonal theme outside its season, start Ephervex with the
 SEASONS_THEME=halloween ephervex-gui
 ```
 
-The theme is shown on every day for as long as the variable is set, also across
-restarts and the once-a-minute date check. The value is matched without regard
+Use `SEASONS_THEME=christmas` to preview Christmas. The theme is shown on every
+day for as long as the variable is set, also across restarts and the
+once-a-minute date check. The value is matched without regard
 to case. An unset or empty variable leaves the date in charge. A value that
 names no seasonal theme is ignored and the date decides; the log says which
 values are accepted.
