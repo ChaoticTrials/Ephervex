@@ -6,13 +6,19 @@
 
 #![allow(clippy::expect_used)]
 
+use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::Duration;
 
-use ephervex_gui::ui::{AppWindow, GuiI18n, InstanceRow, ServerRow};
+use ephervex_gui::ui::{AppWindow, GuiI18n, InstanceRow, MenuRow, ServerRow};
 use ephervex_i18n::{Arg, lookup, lookup_args};
-use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
+use i_slint_backend_testing::{
+    AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions,
+};
 use slint::platform::{Key, PointerEventButton, WindowEvent};
-use slint::{ComponentHandle, Model, ModelRc, PhysicalSize, SharedString, VecModel};
+use slint::{
+    ComponentHandle, LogicalPosition, Model, ModelRc, PhysicalSize, SharedString, VecModel,
+};
 
 #[test]
 fn an_open_instance_menu_never_acts_on_the_row_that_replaced_its_row() {
@@ -93,6 +99,59 @@ fn an_open_server_menu_never_acts_on_the_row_that_replaced_its_row() {
     );
 }
 
+/// The group list is a menu of its own, reached from the card's menu, and it
+/// outlives the menu it was reached from.
+#[test]
+fn an_open_group_list_never_acts_on_the_row_that_replaced_its_row() {
+    let ui = window();
+    let groups: Rc<RefCell<Vec<(String, String)>>> = Rc::default();
+    let record = Rc::clone(&groups);
+    ui.on_set_client_group(move |id, group| {
+        record
+            .borrow_mut()
+            .push((id.to_string(), group.to_string()));
+    });
+    ui.set_instance_group_entries(ModelRc::new(VecModel::from(vec![MenuRow {
+        id: "g-beta".into(),
+        label: "Beta".into(),
+        ..MenuRow::default()
+    }])));
+    ui.set_loading(false);
+    ui.set_page(0);
+    ui.set_workspace_open(false);
+    ui.set_show_inspector(false);
+    let rows = Rc::new(VecModel::from(vec![
+        instance("alpha", "Alpha"),
+        instance("bravo", "Bravo"),
+    ]));
+    ui.set_instances(ModelRc::from(Rc::clone(&rows)));
+    settle(&ui);
+
+    let card = find_card(&ui, "Alpha");
+    let origin = LogicalPosition::new(
+        card.absolute_position().x + 160.0,
+        card.absolute_position().y + card.size().height - 18.0,
+    );
+    pointer(&ui, origin, PointerEventButton::Right);
+    let set_group = find_entry(&ui, &lookup("gui-set-group")).expect("the menu leads to groups");
+    pointer(&ui, center_in(origin, &set_group), PointerEventButton::Left);
+    assert!(
+        find_entry(&ui, "Beta").is_some(),
+        "the group list opened on the Alpha card"
+    );
+
+    swap_rows(&rows);
+    settle(&ui);
+
+    if let Some(beta) = find_entry(&ui, "Beta") {
+        pointer(&ui, center_in(origin, &beta), PointerEventButton::Left);
+    }
+    assert!(
+        groups.borrow().iter().all(|(id, _)| id != "bravo"),
+        "the group list opened on Alpha must not regroup Bravo"
+    );
+}
+
 /// Exchanges the first two rows in place, which keeps the repeater's cards and
 /// gives each the other's item.
 fn swap_rows<T: Clone + 'static>(rows: &VecModel<T>) {
@@ -132,6 +191,39 @@ fn activate_last_entry_if_open(ui: &AppWindow, label: &str) {
             .dispatch_event(WindowEvent::KeyReleased { text });
         settle(ui);
     }
+}
+
+fn find_card(ui: &AppWindow, name: &str) -> ElementHandle {
+    ElementHandle::find_by_accessible_label(ui, name)
+        .find(|element| element.accessible_role() == Some(AccessibleRole::Button))
+        .expect("the list holds the card")
+}
+
+/// The row of an open themed menu carrying `label`.
+fn find_entry(ui: &AppWindow, label: &str) -> Option<ElementHandle> {
+    ElementHandle::find_by_accessible_label(ui, label).find(|element| {
+        element.accessible_role() == Some(AccessibleRole::Button) && element.size().width > 0.0
+    })
+}
+
+/// The middle of a row of a menu opened at `origin`. A popup's elements report
+/// their positions from the popup's own corner.
+fn center_in(origin: LogicalPosition, element: &ElementHandle) -> LogicalPosition {
+    LogicalPosition::new(
+        origin.x + element.absolute_position().x + element.size().width / 2.0,
+        origin.y + element.absolute_position().y + element.size().height / 2.0,
+    )
+}
+
+fn pointer(ui: &AppWindow, position: LogicalPosition, button: PointerEventButton) {
+    ui.window()
+        .dispatch_event(WindowEvent::PointerMoved { position });
+    ui.window()
+        .dispatch_event(WindowEvent::PointerPressed { position, button });
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(20));
+    ui.window()
+        .dispatch_event(WindowEvent::PointerReleased { position, button });
+    settle(ui);
 }
 
 fn settle(ui: &AppWindow) {

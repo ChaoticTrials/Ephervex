@@ -189,6 +189,11 @@ export component InstanceCard inherits Rectangle {
             }
         }
     }
+    // The repeater hands this card another row when the list changes in
+    // place, and an open menu, or the group list opened from it, would then
+    // act on that row.
+    property <string> menu-owner-id: item.id;
+    changed menu-owner-id => { menu.close(); group-menu.close(); }
     menu := PopupMenu {
         entries: [
             { id: "open-workspace", label: GuiI18n.text("gui-open-workspace") },
@@ -333,6 +338,9 @@ export component ServerCard inherits Rectangle {
             }
         }
     }
+    // See `InstanceCard`.
+    property <string> menu-owner-id: item.id;
+    changed menu-owner-id => { menu.close(); }
     menu := PopupMenu {
         entries: [
             { id: "open-workspace", label: GuiI18n.text("gui-open-server-workspace") },
