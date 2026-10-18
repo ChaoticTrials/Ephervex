@@ -1500,6 +1500,24 @@ mod tests {
     }
 
     #[test]
+    fn each_unconfirmed_server_support_refusal_keeps_its_own_next_step() {
+        let projects = vec!["Example Mod".to_owned()];
+        let install = CoreError::ModServerSupportUnconfirmed {
+            projects: projects.clone(),
+        };
+        let change = CoreError::ModChangeServerSupportUnconfirmed { projects };
+        assert_eq!(
+            ephervex_i18n::lookup_attribute(install.message_id(), "action").as_deref(),
+            Some("Confirm that you want it on this server and try again.")
+        );
+        assert_eq!(
+            ephervex_i18n::lookup_attribute(change.message_id(), "action"),
+            None,
+            "the change refusal already says to install from the catalog first"
+        );
+    }
+
+    #[test]
     fn a_blocked_credential_change_names_the_lock_a_user_can_be_pointed_at() {
         let path = PathBuf::from("/config/ephervex/credentials.lock");
         for error in [
