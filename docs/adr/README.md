@@ -19,8 +19,8 @@ so the reasoning trail survives.
 | [0011](0011-shared-launch-stores.md) | Everything a launch can re-download is launcher-level, including natives | Accepted |
 | [0012](0012-provider-neutral-pack-recipe.md) | Provider-neutral recipes are the pack import boundary | Accepted |
 | [0013](0013-managed-mods-are-recipe-entries.md) | Mods installed through a provider are recipe entries | Accepted |
-| [0014](0014-dedicated-server-authority-and-supervision.md) | Dedicated server authority and conservative supervision | Accepted |
-| [0015](0015-linked-client-direct-connect.md) | Linked client direct connection uses canonical lifecycle services | Accepted |
+| [0014](0014-dedicated-server-authority-and-supervision.md) | Dedicated server authority and conservative supervision | Accepted (amended by ADR 0054) |
+| [0015](0015-linked-client-direct-connect.md) | Linked client direct connection uses canonical lifecycle services | Accepted (amended by ADR 0054) |
 | [0016](0016-diagnostics-are-bounded-read-only-windows.md) | Diagnostics are bounded, read-only windows over launcher-owned roots | Accepted |
 | [0017](0017-options-compatibility-is-generated-data.md) | options.txt compatibility is generated data, distributed separately from the application | Accepted |
 | [0018](0018-apache-2.0-project-license.md) | Apache-2.0 project license | Accepted |
@@ -59,3 +59,4 @@ so the reasoning trail survives.
 | [0051](0051-server-property-defaults-fill-a-new-servers-file.md) | Server property defaults fill a new server's file | Accepted |
 | [0052](0052-menus-are-drawn-by-the-application.md) | Menus are drawn by the application | Accepted |
 | [0053](0053-storage-cleanup-removes-only-unreferenced-regenerable-entries-after-a-confirmed-preview.md) | Storage cleanup removes only unreferenced, regenerable entries after a confirmed preview | Accepted |
+| [0054](0054-a-runner-process-hosts-a-server-past-the-launchers-exit.md) | A runner process hosts a server past the launcher's exit | Accepted (amends ADR 0014 and ADR 0015) |

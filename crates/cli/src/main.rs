@@ -1606,11 +1606,20 @@ enum ServerCommand {
     /// longer being read stops the server gracefully; Ctrl-C or a signal again
     /// kills the server. Exits with a non-zero status when the server exits before it finished
     /// starting or ends with an error without having been asked to stop.
+    ///
+    /// With --detach the server is supervised by a background process instead:
+    /// the command returns once the server is running, and the server keeps
+    /// running after this command, its terminal, and any Ephervex window have
+    /// ended. Stop, restart, kill, console, status, and output work on it from
+    /// any later command.
     Start {
         /// The server to start.
         id: ServerId,
         #[arg(long)]
         java: Option<PathBuf>,
+        /// Run the server in the background and return once it is running.
+        #[arg(long)]
+        detach: bool,
     },
     /// Request a graceful stop and wait up to 30 seconds.
     ///
@@ -1989,6 +1998,11 @@ macro_rules! out {
 }
 
 fn main() -> ExitCode {
+    // Before the arguments are parsed: a runner is started with one no command
+    // line accepts.
+    if let Some(status) = ephervex_core::runner::run_if_requested(std::env::args_os()) {
+        return ExitCode::from(status);
+    }
     let cli = Cli::parse();
     if let Command::Completions { shell } = &cli.command {
         generate_completions(*shell);
@@ -2941,7 +2955,18 @@ async fn run_server_command(
                 print_eula_status(&app.server_eula_status(), json);
             }
         },
-        ServerCommand::Start { id, java } => {
+        ServerCommand::Start {
+            id,
+            java,
+            detach: true,
+        } => {
+            run_server_detached(app, *id, java.clone(), json).await?;
+        }
+        ServerCommand::Start {
+            id,
+            java,
+            detach: false,
+        } => {
             run_server_foreground(app, *id, java.clone(), json).await?;
         }
         ServerCommand::Stop { id } => {
@@ -9596,6 +9621,55 @@ fn print_server_event(event: ServerEvent, json: bool, progress: &mut LaunchProgr
         }
         _ => {}
     }
+}
+
+/// Starts a server under a background supervisor and returns once it runs.
+///
+/// Nothing is left supervised by this process, so the exit that follows does
+/// not touch the server. A termination request while the server is still being
+/// prepared cancels the start before anything runs.
+async fn run_server_detached(
+    app: &App,
+    id: ServerId,
+    java: Option<PathBuf>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let (observer, mut events) = ServerObserver::channel();
+    let printer = tokio::spawn(async move {
+        let mut progress = LaunchProgressPrinter::default();
+        while let Some(event) = events.recv().await {
+            print_server_event(event, json, &mut progress);
+        }
+    });
+    let cancel = CancellationToken::new();
+    let mut requests = TerminationRequests::watch()
+        .map_err(|error| anyhow::anyhow!("could not watch for termination requests: {error}"))?;
+    let started = {
+        let start = app.start_server_detached(id, java, &observer, &cancel);
+        tokio::pin!(start);
+        loop {
+            tokio::select! {
+                started = &mut start => break started,
+                () = requests.next() => cancel.cancel(),
+            }
+        }
+    };
+    drop(observer);
+    let _ = printer.await;
+    let started = started?;
+    if json {
+        print_json(&serde_json::json!({
+            "event": "detached",
+            "server": id.to_string(),
+            "pid": started.pid,
+        }));
+    } else {
+        outln!(
+            "server {id} is running in the background (pid {}); stop it with `ephervex server stop {id}`",
+            started.pid
+        );
+    }
+    stdout_result()
 }
 
 async fn run_server_foreground(

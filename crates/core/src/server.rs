@@ -33,6 +33,7 @@ use uuid::Uuid;
 
 use crate::app::{App, JavaPlanRequest, JavaTarget};
 use crate::instance::validated_entity_name;
+use crate::runner::Hosting;
 use crate::server_pack::{
     ServerArchiveEvidence, ServerArchiveInstall, ServerContentSource, archive_import_source,
     launch_reserved,
@@ -141,6 +142,14 @@ pub(super) struct PreparedServerStart {
     /// The server's claim, kept from the moment it was found stopped until its
     /// supervisor owns the runtime lock.
     claim: Option<ephervex_storage::HostClaim>,
+}
+
+/// A server running under a runner of its own, as [`App::start_server_detached`]
+/// reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DetachedServer {
+    /// The server's Java process.
+    pub pid: u32,
 }
 
 /// Forwards the downloads a server start makes into the server event stream, so
@@ -963,7 +972,7 @@ impl App {
         let prepared = self
             .prepare_server_start(id, explicit_java, observer, &CancellationToken::new())
             .await?;
-        Self::run_prepared_server(prepared, observer).await
+        Self::run_prepared_server(prepared, observer, Hosting::Attached).await
     }
 
     /// Starts in the foreground like [`App::start_server`], and ends the start
@@ -980,13 +989,91 @@ impl App {
         observer: &ServerObserver,
         cancel: &CancellationToken,
     ) -> CoreResult<ephervex_server::ServerExit> {
+        self.start_server_hosted(id, explicit_java, observer, cancel, Hosting::Attached)
+            .await
+    }
+
+    /// Starts like [`App::start_server_until_canceled`], with the supervisor
+    /// running where `hosting` says.
+    ///
+    /// A [`Hosting::Detached`] server is supervised by a runner process of its
+    /// own. This call still returns when the server ends and still stops it
+    /// when `cancel` fires, but dropping the call, or ending this process, leaves
+    /// the server running under its runner.
+    pub async fn start_server_hosted(
+        &self,
+        id: ServerId,
+        explicit_java: Option<PathBuf>,
+        observer: &ServerObserver,
+        cancel: &CancellationToken,
+        hosting: Hosting,
+    ) -> CoreResult<ephervex_server::ServerExit> {
         let prepared = Self::unless_canceled(
             self.prepare_server_start(id, explicit_java, observer, cancel),
             observer,
             cancel,
         )
         .await?;
-        Self::supervise_until_canceled(id, prepared, observer, cancel).await
+        Self::supervise_until_canceled(id, prepared, observer, cancel, hosting).await
+    }
+
+    /// Starts a server under a runner of its own and returns once its process
+    /// is running.
+    ///
+    /// Nothing about the server depends on this call, this process, or its
+    /// runtime afterwards: the runner keeps supervising it, and any later
+    /// Ephervex process controls it through its channel and reads its output
+    /// from the capture. `observer` receives the events until the process
+    /// is running.
+    pub async fn start_server_detached(
+        &self,
+        id: ServerId,
+        explicit_java: Option<PathBuf>,
+        observer: &ServerObserver,
+        cancel: &CancellationToken,
+    ) -> CoreResult<DetachedServer> {
+        let prepared = Self::unless_canceled(
+            self.prepare_server_start(id, explicit_java, observer, cancel),
+            observer,
+            cancel,
+        )
+        .await?;
+        let (tap, mut events) = ServerObserver::channel();
+        let mut run = tokio::spawn(async move {
+            Self::run_prepared_server(prepared, &tap, Hosting::Detached).await
+        });
+        loop {
+            tokio::select! {
+                event = events.recv() => match event {
+                    Some(ephervex_server::ServerEvent::Started { pid }) => {
+                        observer.emit(ephervex_server::ServerEvent::Started { pid });
+                        // The runner outlives the relay; closing the pipe is
+                        // all that ending the relay does to it.
+                        run.abort();
+                        return Ok(DetachedServer { pid });
+                    }
+                    Some(other) => observer.emit(other),
+                    None => {}
+                },
+                ended = &mut run => {
+                    // Whatever the run emitted before it ended is still queued.
+                    while let Ok(event) = events.try_recv() {
+                        observer.emit(event);
+                    }
+                    return match ended {
+                        Ok(Ok(_)) => Err(ephervex_server::ServerError::HostedRun {
+                            detail: "the server ended before it finished starting".to_owned(),
+                        }
+                        .into()),
+                        Ok(Err(error)) => Err(error),
+                        Err(_) => Err(crate::connection::ConnectError::SupervisorLost {
+                            server: id,
+                        }
+                        .into()),
+                    };
+                }
+            }
+        }
     }
 
     /// Drops an unfinished preparation when `cancel` fires, so nothing starts.
@@ -1009,13 +1096,13 @@ impl App {
         prepared: PreparedServerStart,
         observer: &ServerObserver,
         cancel: &CancellationToken,
+        hosting: Hosting,
     ) -> CoreResult<ephervex_server::ServerExit> {
         let root = prepared.root.clone();
         let supervised_observer = observer.clone();
-        let mut supervisor =
-            tokio::spawn(
-                async move { Self::run_prepared_server(prepared, &supervised_observer).await },
-            );
+        let mut supervisor = tokio::spawn(async move {
+            Self::run_prepared_server(prepared, &supervised_observer, hosting).await
+        });
         let ended = tokio::select! {
             ended = &mut supervisor => Some(ended),
             () = cancel.cancelled() => None,
@@ -1143,16 +1230,37 @@ impl App {
     pub(super) async fn run_prepared_server(
         prepared: PreparedServerStart,
         observer: &ServerObserver,
+        hosting: Hosting,
     ) -> CoreResult<ephervex_server::ServerExit> {
         let operation = prepared.operation;
-        let exit = ServerSupervisor::run_holding(
-            prepared.claim,
-            &prepared.command,
-            &prepared.root,
-            &prepared.capture,
-            observer,
-        )
-        .await;
+        let exit = match hosting {
+            Hosting::Attached => {
+                ServerSupervisor::run_holding(
+                    prepared.claim,
+                    &prepared.command,
+                    &prepared.root,
+                    &prepared.capture,
+                    observer,
+                )
+                .await
+            }
+            Hosting::Detached => {
+                let spec = crate::runner::ServerRunnerSpec {
+                    command: prepared.command,
+                    server_root: prepared.root,
+                    capture_directory: prepared.capture,
+                };
+                match crate::runner::runner_executable() {
+                    Ok(executable) => {
+                        crate::runner::run_server(&executable, &spec, prepared.claim, observer)
+                            .await
+                    }
+                    Err(error) => Err(ephervex_server::ServerError::HostedRun {
+                        detail: format!("the running executable could not be found: {error}"),
+                    }),
+                }
+            }
+        };
         match &exit {
             Ok(exit) => {
                 tracing::info!(%operation, code = ?exit.code, signal = ?exit.signal, "server exited");
@@ -2501,7 +2609,7 @@ mod tests {
                 operation: OperationReporter::silent("test-server-run").id(),
                 claim: None,
             };
-            let exit = App::run_prepared_server(prepared, &observer)
+            let exit = App::run_prepared_server(prepared, &observer, Hosting::Attached)
                 .await
                 .expect("run");
             assert_eq!(exit.code, Some(code));
@@ -2620,7 +2728,14 @@ mod tests {
         let run = tokio::spawn({
             let cancel = cancel.clone();
             async move {
-                App::supervise_until_canceled(ServerId::new(), prepared, &observer, &cancel).await
+                App::supervise_until_canceled(
+                    ServerId::new(),
+                    prepared,
+                    &observer,
+                    &cancel,
+                    Hosting::Attached,
+                )
+                .await
             }
         });
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -2655,6 +2770,7 @@ mod tests {
             prepared,
             &observer,
             &CancellationToken::new(),
+            Hosting::Attached,
         )
         .await
         .expect("exit");
@@ -2683,7 +2799,9 @@ mod tests {
             operation: OperationReporter::silent("test-server-restart").id(),
             claim: None,
         };
-        let run = tokio::spawn(async move { App::run_prepared_server(prepared, &observer).await });
+        let run = tokio::spawn(async move {
+            App::run_prepared_server(prepared, &observer, Hosting::Attached).await
+        });
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while let Some(event) = events.recv().await {
                 if matches!(event, ephervex_server::ServerEvent::Started { .. }) {
@@ -2970,7 +3088,9 @@ mod tests {
             "the prepared start holds the server"
         );
         let (observer, mut events) = ServerObserver::channel();
-        let run = tokio::spawn(async move { App::run_prepared_server(prepared, &observer).await });
+        let run = tokio::spawn(async move {
+            App::run_prepared_server(prepared, &observer, Hosting::Attached).await
+        });
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while let Some(event) = events.recv().await {
                 if matches!(event, ephervex_server::ServerEvent::Started { .. }) {
@@ -4801,7 +4921,9 @@ mod tests {
             operation: OperationReporter::silent("test-server-properties").id(),
             claim: None,
         };
-        let run = tokio::spawn(async move { App::run_prepared_server(prepared, &observer).await });
+        let run = tokio::spawn(async move {
+            App::run_prepared_server(prepared, &observer, Hosting::Attached).await
+        });
         wait_for_line(&mut events, "up").await;
         (events, run)
     }

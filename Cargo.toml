@@ -123,7 +123,7 @@ fontdb = "0.23.0"
 tar = "0.4.46"
 tempfile = "3.27.0"
 thiserror = "2.0.19"
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "sync", "time", "signal"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "fs", "process", "io-std", "io-util", "sync", "time", "signal"] }
 tokio-util = { version = "0.7.19", features = ["io"] }
 toml = "1.1.4"
 tracing = "0.1.44"

@@ -70,6 +70,7 @@ pub mod open_files;
 pub mod organization;
 pub mod pack_url;
 pub mod promotion;
+pub mod runner;
 pub mod running;
 pub mod seasonal_theme;
 pub mod server;
@@ -206,10 +207,12 @@ pub use promotion::{
     PromotableServer, PromotedServerWarning, PromotionOutcome, PromotionPlan, PromotionRequest,
     PromotionWarning,
 };
+pub use runner::Hosting;
 pub use running::{ProcessMonitor, ProcessUsage, RunningProcess};
 pub use server::{
-    CaptureSnapshot, PropertiesTakeEffect, SavedServerProperties, ServerCreateOptions,
-    ServerNetworkChange, ServerPersistenceHealth, ServerStatus, stoppable_for_deletion,
+    CaptureSnapshot, DetachedServer, PropertiesTakeEffect, SavedServerProperties,
+    ServerCreateOptions, ServerNetworkChange, ServerPersistenceHealth, ServerStatus,
+    stoppable_for_deletion,
 };
 pub use server_capture::{CaptureUpdate, ServerCaptureTail};
 pub use server_pack::{

@@ -134,6 +134,13 @@ for the supervisors to finish before the process exits. A termination request
 quitting: it ends the event loop, and repeated requests during the stop are
 absorbed.
 
+> **Amended by [ADR 0054](0054-a-runner-process-hosts-a-server-past-the-launchers-exit.md):**
+> the desktop application no longer supervises servers on threads of its own
+> process. It starts each one under a runner process, so quitting leaves servers
+> running and a later start finds them as controlled. The termination request
+> still ends the event loop, and nothing is stopped. The foreground
+> `server start` command is unchanged.
+
 A run ends when the server process exits. Output that a descendant still holds
 open is read for a short while longer and then dropped, so a lingering
 descendant never holds back the exit, a restart, or control answers. A console

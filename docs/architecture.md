@@ -259,7 +259,7 @@ exhaustion with an actionable error.
 | Snapshot restore | A durable journal names only fixed host parts. Each live part moves into the restore transaction before its staged replacement is renamed into place. | Failure rolls every published part back. The restore holds the host's claim, shared with storage moves, until it ends. On restart, reconciliation recognizes the versioned journal and restores the complete pre-restore state, but only for a host whose claim it can take, so a restore another launcher is still running is never rolled back (a filesystem with no file locking cannot show that across processes). Unknown or ambiguous staging is left untouched and receives host attention. |
 | Mod isolation round | The versioned session records the next exact configuration before the dependency-aware batch applies it. | Resume reapplies the intended configuration idempotently. Cancel restores the pre-isolation snapshot of the host and of each linked server the session kept in step, recording each server as restored so a retry never restores it twice; finish retains the snapshots and leaves the smallest tested configuration enabled. |
 | Diagnostic bundle export | A caller-selected set is written to the requested local archive. | Failure is reported against the output path. Source logs are never changed or scrubbed. |
-| Launch and server process control | A durable owner record and kernel-visible process identity establish control. | Stale ownership evidence is distinguished from a live process. A server orphan is reported and never adopted or signaled. A client game that outlived its launcher keeps its instance locked and is reported as orphaned; only the validated force stop signals it. |
+| Launch and server process control | A durable owner record and kernel-visible process identity establish control. | Stale ownership evidence is distinguished from a live process. A server orphan is reported and never adopted or signaled. A server started detached is supervised by a runner process that outlives the starter, so the starter ending produces no orphan. A client game that outlived its launcher keeps its instance locked and is reported as orphaned; only the validated force stop signals it. |
 
 Non-empty `.launcher/retired/` or `.launcher/staging/` directories are always
 suspicious after restart. Reconciliation adds host attention and leaves every
@@ -807,6 +807,18 @@ is reported as an orphan, and a machine restart proves it stale. Finding none on
 two looks a short time apart is treated as stale too, assuming the start reaches
 the Java image within that interval and the child keeps the tag. A candidate whose
 environment cannot be read keeps the state unknown-running.
+
+A server can be started detached, which hosts its supervisor in a runner: the
+same executable run again with an internal argument, in a session of its own.
+The starting process prepares the command and hands it to the runner on standard
+input, then receives the supervisor's events as JSON lines on the runner's
+standard output. The starter's claim on the server is released when the runner
+reports that it owns the runtime lock. When the starter exits, the runner stops
+writing to the closed pipe and the server keeps running under the same lock,
+socket, evidence, and capture as any supervised server, so any later process
+classifies it as controlled. A runner receiving SIGTERM, SIGINT, or SIGHUP
+stops its server gracefully, and a second request kills it. The desktop
+application starts every server detached (ADR 0054).
 
 Launcher capture is separate from Minecraft's own `server/logs/` and
 `server/crash-reports/`. A bounded memory ring feeds frontends while rotated

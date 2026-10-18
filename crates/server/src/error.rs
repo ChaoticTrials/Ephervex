@@ -58,6 +58,10 @@ pub enum ServerError {
     },
     #[error("the server may already be running")]
     AlreadyRunning,
+    /// A supervisor in another process failed to supervise the server. Only the
+    /// failure's text crosses the process boundary.
+    #[error("the server's supervisor failed: {detail}")]
+    HostedRun { detail: String },
     #[error("the server console command must be one line and must not contain NUL")]
     InvalidConsoleCommand,
     #[error("server process I/O failed")]
@@ -108,6 +112,7 @@ impl ServerError {
             Self::ProcessStart { .. } => "error-server-process-start",
             Self::RestartReplacementFailed { .. } => "error-server-restart-replacement-failed",
             Self::AlreadyRunning => "error-server-already-running",
+            Self::HostedRun { .. } => "error-server-hosted-run",
             Self::InvalidConsoleCommand => "error-server-console-invalid",
             Self::ProcessIo(_) => "error-server-process-io",
             Self::InvalidControlResponse => "error-server-control-response-invalid",
@@ -135,6 +140,7 @@ impl ServerError {
                 ("timeout_seconds", timeout_seconds.to_string()),
             ],
             Self::MalformedPropertiesEscape { line, .. } => vec![("line", line.to_string())],
+            Self::HostedRun { detail } => vec![("detail", detail.clone())],
             _ => Vec::new(),
         }
     }

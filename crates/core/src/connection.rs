@@ -13,6 +13,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::launch::{LaunchOptions, LaunchOutcome};
+use crate::runner::Hosting;
 use crate::{App, CoreError, CoreResult};
 
 /// The longest an automatic server start waits for a listening Minecraft
@@ -42,9 +43,9 @@ pub struct LaunchAndConnectAvailability {
 /// What happens to a server this operation started once the operation returns.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum StartedServerLifetime {
-    /// Supervision continues on the caller's runtime after the client exits.
-    /// The caller must keep that runtime alive for as long as the server
-    /// should run.
+    /// Supervision continues after the client exits. With attached hosting the
+    /// caller must keep its runtime alive for as long as the server should run;
+    /// a detached server has a runner of its own.
     #[default]
     Detach,
     /// The server is stopped before the operation returns, whether the client
@@ -60,6 +61,10 @@ pub struct LaunchAndConnectOptions {
     pub launch: LaunchOptions,
     pub readiness_timeout: Duration,
     pub started_server: StartedServerLifetime,
+    /// Where the supervisor of a server this operation starts runs. A detached
+    /// server keeps running under its own runner when the caller's process
+    /// exits.
+    pub server_hosting: Hosting,
     /// Canceling this while a started server is being stopped on return kills
     /// it instead of waiting out its save. Never canceled by default.
     pub started_server_kill: CancellationToken,
@@ -71,6 +76,7 @@ impl Default for LaunchAndConnectOptions {
             launch: LaunchOptions::default(),
             readiness_timeout: DEFAULT_SERVER_READINESS_TIMEOUT,
             started_server: StartedServerLifetime::default(),
+            server_hosting: Hosting::default(),
             started_server_kill: CancellationToken::new(),
         }
     }
@@ -381,8 +387,9 @@ impl App {
                 return Err(ServerError::ReadinessCanceled.into());
             }
             let server_observer = server_observer.clone();
+            let hosting = options.server_hosting;
             *started = Some(tokio::spawn(async move {
-                App::run_prepared_server(prepared, &server_observer).await
+                App::run_prepared_server(prepared, &server_observer, hosting).await
             }));
         } else if availability.server_preparation == ServerPreparation::Reuse {
             observer.emit(LaunchAndConnectEvent::ReusingServer { server: server_id });

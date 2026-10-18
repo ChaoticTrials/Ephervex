@@ -1,18 +1,17 @@
 //! Ending the desktop application from outside its window.
 //!
-//! Closing the window ends the event loop, and what runs after it stops the
-//! servers the application supervises. A termination request (a session
-//! logout, `kill`, Ctrl-C in the starting terminal, a closing terminal) would
-//! otherwise end the process without that code, and the servers, which run in
-//! process groups of their own, would keep running unsupervised.
+//! Closing the window ends the event loop, and the code after it releases what
+//! the window held, such as the launcher's name for hand-offs. A termination
+//! request (a session logout, `kill`, Ctrl-C in the starting terminal, a
+//! closing terminal) would otherwise end the process without that code.
 
 use ephervex_core::TerminationRequests;
 
 /// Calls `on_request` on the first termination request.
 ///
 /// Meant to ask the event loop to end, so the normal quit path runs. Later
-/// requests are absorbed: the quit is already under way and bounded, and
-/// ending the process sooner would orphan the servers it is still stopping.
+/// requests are absorbed: the quit is already under way, and the code that
+/// follows the event loop has not finished releasing what the window held.
 /// A hangup is left alone when the process started with it ignored, as under
 /// `nohup`.
 ///

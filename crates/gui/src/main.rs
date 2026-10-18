@@ -48,8 +48,8 @@ fn handoff_argument<'a>(startup: &Startup, arguments: &'a [String]) -> Option<&'
     }
 }
 
-/// A termination request ends the event loop, so the code after `run` that
-/// stops the supervised servers runs for it as it does for a closed window.
+/// A termination request ends the event loop, so the code after `run` runs for
+/// it as it does for a closed window.
 fn quit_event_loop_on_termination_request() {
     if let Err(error) = ephervex_gui::termination::quit_on_termination_request(|| {
         let _ = slint::invoke_from_event_loop(|| {
@@ -60,7 +60,18 @@ fn quit_event_loop_on_termination_request() {
     }
 }
 
+/// Runs as a runner and exits, when this process was started as one.
+///
+/// A runner is this executable started to supervise a game or server. It opens
+/// no window and reads none of the arguments the application accepts.
+fn exit_if_runner() {
+    if let Some(status) = ephervex_core::runner::run_if_requested(std::env::args_os()) {
+        std::process::exit(i32::from(status));
+    }
+}
+
 fn main() -> Result<(), slint::PlatformError> {
+    exit_if_runner();
     let launcher_logs = ephervex_core::Paths::from_environment()
         .ok()
         .map(|paths| paths.launcher_logs_dir());
@@ -193,9 +204,8 @@ fn main() -> Result<(), slint::PlatformError> {
     if let Some(launcher_name) = launcher_name {
         launcher_name.release();
     }
-    // Closing the window and a termination request are both quitting: the
-    // servers it started go with it.
-    controller.stop_supervised_servers();
+    // Closing the window and a termination request are both quitting. Servers
+    // run under runners of their own, so they are left as they are.
     outcome
 }
 

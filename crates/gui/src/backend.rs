@@ -12,6 +12,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use ephervex_core::ClientCommitWarning;
 use ephervex_core::ControlResponse;
+use ephervex_core::Hosting;
 use ephervex_core::ManagedModInstallation;
 use ephervex_core::ManagedMutationReport;
 use ephervex_core::ServerCommitWarning;
@@ -2294,21 +2295,16 @@ pub struct ActivityData {
 pub struct BackendHandle {
     pub commands: Sender<Command>,
     pub events: Receiver<Event>,
-    pub supervised: SupervisedServers,
 }
 
-/// How long quitting waits for the supervisors of the servers it stopped to
-/// release their runtime state, once the servers themselves are gone.
-const QUIT_SUPERVISOR_SETTLE: Duration = Duration::from_secs(10);
-
-/// The servers this process runs the supervisor of.
+/// Which servers this process delivers the output of, and in what order.
 ///
-/// A supervisor lives on a thread of this process, so a server whose supervisor
-/// is not stopped before the process exits keeps running with nobody holding
-/// its input or output. Entries come and go with the server's own events.
+/// A server is supervised by a runner process of its own, which outlives this
+/// one. While this process is the one that started a run, it also receives the
+/// run's events and delivers its output from them; otherwise the capture
+/// follower is the only source.
 #[derive(Debug, Clone, Default)]
 pub struct SupervisedServers {
-    running: Arc<Mutex<HashSet<ServerId>>>,
     /// How many forwarders of this process deliver each server's output.
     forwarding: Arc<Mutex<HashMap<ServerId, usize>>>,
     /// The ordering point between each server's capture follower and forwarders.
@@ -2421,75 +2417,12 @@ impl SupervisedServers {
             .lock()
             .is_ok_and(|forwarding| forwarding.contains_key(&server))
     }
-
-    fn note(&self, server: ServerId, event: &ServerEvent) {
-        let Ok(mut servers) = self.running.lock() else {
-            return;
-        };
-        match event {
-            ServerEvent::Started { .. } => {
-                servers.insert(server);
-            }
-            ServerEvent::Finished { .. } => {
-                servers.remove(&server);
-            }
-            _ => {}
-        }
-    }
-
-    fn running(&self) -> Vec<ServerId> {
-        self.running
-            .lock()
-            .map_or_else(|_| Vec::new(), |servers| servers.iter().copied().collect())
-    }
-
-    /// Stops every server this process supervises, gracefully and then by force,
-    /// and waits for their supervisors to finish. Blocks until then.
-    pub fn stop_all(&self) {
-        // A server that registers while others are being stopped is stopped in
-        // its turn, so one that finished preparing in the meantime is not left.
-        let mut asked = HashSet::new();
-        let mut settle_deadline = None;
-        loop {
-            let fresh: Vec<ServerId> = self
-                .running()
-                .into_iter()
-                .filter(|server| asked.insert(*server))
-                .collect();
-            if !fresh.is_empty() {
-                tracing::info!(count = fresh.len(), "stopping the supervised servers");
-                thread::scope(|scope| {
-                    for server in fresh {
-                        let spawned = thread::Builder::new()
-                            .name("ephervex-quit-stop".to_owned())
-                            .spawn_scoped(scope, move || stop_supervised_server(server));
-                        if let Err(error) = spawned {
-                            tracing::warn!(%server, %error, "could not stop a server on quit");
-                        }
-                    }
-                });
-                settle_deadline = None;
-                continue;
-            }
-            if self.running().is_empty() {
-                break;
-            }
-            // Asked to stop and still registered: its supervisor is given a
-            // moment to finish, but not forever.
-            let deadline = *settle_deadline
-                .get_or_insert_with(|| std::time::Instant::now() + QUIT_SUPERVISOR_SETTLE);
-            if std::time::Instant::now() >= deadline {
-                break;
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
-    }
 }
 
-/// A server's events as a forwarder reads them, each one recorded in the
-/// registry as it is taken off the channel.
+/// A server's events as a forwarder reads them, each one noted as it is taken
+/// off the channel.
 ///
-/// Recording belongs to reading rather than to the forwarder's own branches,
+/// Noting belongs to reading rather than to the forwarder's own branches,
 /// because a forwarder takes a burst of output and any other event that lands
 /// in it together, and a `Started` or `Finished` taken that way must count too.
 struct ObservedServerEvents {
@@ -2511,10 +2444,9 @@ impl ObservedServerEvents {
         }
     }
 
-    /// Records one event taken off the channel. A run that reuses a server
-    /// another process supervises emits no event, so it never marks the server.
+    /// Notes one event taken off the channel. A run that reuses a server that
+    /// was started elsewhere emits no event, so it never marks the server.
     fn observe(&mut self, event: &ServerEvent) {
-        self.supervised.note(self.server, event);
         match event {
             ServerEvent::Preparing { .. } | ServerEvent::Started { .. }
                 if self.forwarding.is_none() =>
@@ -2536,29 +2468,6 @@ impl ObservedServerEvents {
         let event = self.events.try_recv()?;
         self.observe(&event);
         Ok(event)
-    }
-}
-
-fn stop_supervised_server(server: ServerId) {
-    let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            tracing::warn!(%server, %error, "could not stop a server on quit");
-            return;
-        }
-    };
-    let outcome = App::open()
-        .map_err(|error| error.to_string())
-        .and_then(|app| {
-            runtime
-                .block_on(app.stop_server_or_kill(server))
-                .map_err(|error| ErrorChain(&error).to_string())
-        });
-    if let Err(error) = outcome {
-        tracing::warn!(%server, %error, "a server was not stopped on quit");
     }
 }
 
@@ -2946,7 +2855,6 @@ pub fn spawn() -> BackendHandle {
     BackendHandle {
         commands: command_tx,
         events: event_rx,
-        supervised,
     }
 }
 
@@ -9623,7 +9531,7 @@ fn spawn_server(
                     }
                 });
                 let result = app
-                    .start_server_until_canceled(server, None, &observer, &cancel)
+                    .start_server_hosted(server, None, &observer, &cancel, Hosting::Detached)
                     .await;
                 drop(observer);
                 let _ = forward.await;
@@ -10320,7 +10228,10 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
                     .launch_and_connect(
                         client,
                         server,
-                        &LaunchAndConnectOptions::default(),
+                        &LaunchAndConnectOptions {
+                            server_hosting: Hosting::Detached,
+                            ..LaunchAndConnectOptions::default()
+                        },
                         &connect_observer,
                         &server_observer,
                         &launch_observer,
@@ -10400,9 +10311,10 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
                     revision,
                 )
                 .await;
-                // If this operation started the server, its supervisor is a
-                // task on this runtime. Keep the runtime alive until that
-                // server exits instead of canceling it when the client closes.
+                // If this operation started the server, its runner keeps
+                // reporting to a task on this runtime. Keep delivering until
+                // that server exits, so its Console and result stay current
+                // after the client closes.
                 let _ = server_forward.await;
                 if let Ok(mut app) = App::open_at(paths) {
                     send_snapshot(&mut app, &events);
@@ -16992,30 +16904,6 @@ mod tests {
         }
     }
 
-    /// Quitting stops what this process supervises and nothing else, so a run
-    /// has to be known from the moment its server starts until it is over.
-    #[test]
-    fn a_server_is_supervised_from_its_start_to_the_end_of_its_run() {
-        let supervised = SupervisedServers::default();
-        let server = ServerId::new();
-        let other = ServerId::new();
-
-        supervised.note(server, &ServerEvent::Restarting);
-        assert!(supervised.running().is_empty(), "nothing started yet");
-
-        supervised.note(server, &ServerEvent::Started { pid: 1 });
-        supervised.note(other, &ServerEvent::Started { pid: 2 });
-        supervised.note(server, &ServerEvent::Restarting);
-        assert_eq!(
-            supervised.running().len(),
-            2,
-            "a restart keeps the run supervised"
-        );
-
-        supervised.note(server, &ServerEvent::Finished { exit: None });
-        assert_eq!(supervised.running(), vec![other]);
-    }
-
     #[test]
     fn queued_output_is_delivered_before_the_restart_that_follows_it() {
         fn line(text: &str) -> ephervex_core::CapturedLine {
@@ -17082,14 +16970,10 @@ mod tests {
             events.try_recv().expect("started"),
             ServerEvent::Started { .. }
         ));
-        assert_eq!(
-            supervised.running(),
-            vec![server],
-            "a start taken in a burst"
-        );
+        assert!(supervised.forwards(server), "a start taken in a burst");
         events.try_recv().expect("output");
         events.try_recv().expect("finished");
-        assert!(supervised.running().is_empty(), "an end taken in a burst");
+        assert!(!supervised.forwards(server), "an end taken in a burst");
     }
 
     /// The console of a server this process does not run follows the capture
@@ -17419,13 +17303,6 @@ mod tests {
             lock_delivery_unless_stopped(&delivery, &AtomicBool::new(false)).is_some(),
             "a running follower still takes the lock"
         );
-    }
-
-    /// With nothing supervised there is nothing to wait for, so quitting
-    /// returns at once rather than opening the launcher's data.
-    #[test]
-    fn quitting_with_no_supervised_server_stops_nothing() {
-        SupervisedServers::default().stop_all();
     }
 
     /// Runs a supervised child that never logs that it finished starting and

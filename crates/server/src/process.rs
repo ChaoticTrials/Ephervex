@@ -47,7 +47,7 @@ const ABANDONED_CHILD_REAP_TIMEOUT: Duration = Duration::from_secs(5);
 const CANCELED_CHILD_EXIT_WAIT: Duration = Duration::from_secs(2);
 
 /// A redaction-safe command for a server JVM.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerCommand {
     pub java: PathBuf,
     pub arguments: Vec<String>,
