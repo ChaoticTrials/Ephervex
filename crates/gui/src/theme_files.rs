@@ -393,6 +393,7 @@ const BUILT_IN_BRANDING: &[EmbeddedBranding<ApplicationColorScheme>] = &[];
 
 const HALLOWEEN_MASCOT: &[u8] = include_bytes!("../../../assets/themes/halloween.png");
 const CHRISTMAS_MASCOT: &[u8] = include_bytes!("../../../assets/themes/christmas.png");
+const PRIDE_MASCOT: &[u8] = include_bytes!("../../../assets/themes/pride.png");
 
 /// The Halloween pumpkin ghost is both logo and window icon.
 const SEASONAL_BRANDING: &[EmbeddedBranding<SeasonalTheme>] = &[
@@ -418,6 +419,18 @@ const SEASONAL_BRANDING: &[EmbeddedBranding<SeasonalTheme>] = &[
         SeasonalTheme::Christmas,
         BrandingRole::Icon,
         CHRISTMAS_MASCOT,
+        BrandingFormat::Png,
+    ),
+    (
+        SeasonalTheme::Pride,
+        BrandingRole::Logo,
+        PRIDE_MASCOT,
+        BrandingFormat::Png,
+    ),
+    (
+        SeasonalTheme::Pride,
+        BrandingRole::Icon,
+        PRIDE_MASCOT,
         BrandingFormat::Png,
     ),
 ];
@@ -1259,6 +1272,22 @@ mod tests {
             folder.path(),
             &mut found,
             &ShownTheme::Seasonal(SeasonalTheme::Christmas),
+        );
+        let logo = images.logo.expect("the mascot logo");
+        let icon = images.icon.expect("the mascot icon");
+        assert_eq!((logo.width(), logo.height()), (620, 620));
+        assert_eq!(logo, icon);
+        assert!(found.problems.is_empty(), "{:?}", found.problems);
+    }
+
+    #[test]
+    fn pride_shows_its_compiled_in_mascot_as_logo_and_icon() {
+        let folder = tempfile::tempdir().expect("temp dir");
+        let mut found = read_user_themes(folder.path());
+        let images = read_selected_branding(
+            folder.path(),
+            &mut found,
+            &ShownTheme::Seasonal(SeasonalTheme::Pride),
         );
         let logo = images.logo.expect("the mascot logo");
         let icon = images.icon.expect("the mascot icon");

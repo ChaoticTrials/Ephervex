@@ -151,6 +151,7 @@ fn seasonal_palette(ui: &AppWindow, theme: SeasonalTheme) -> ThemePalette {
     match theme {
         SeasonalTheme::Halloween => palettes.get_halloween(),
         SeasonalTheme::Christmas => palettes.get_christmas(),
+        SeasonalTheme::Pride => palettes.get_pride(),
     }
 }
 
@@ -166,6 +167,7 @@ pub(crate) fn seasonal_label(theme: SeasonalTheme) -> String {
     lookup(match theme {
         SeasonalTheme::Halloween => "gui-seasonal-theme-halloween",
         SeasonalTheme::Christmas => "gui-seasonal-theme-christmas",
+        SeasonalTheme::Pride => "gui-seasonal-theme-pride",
     })
 }
 
@@ -708,31 +710,34 @@ mod tests {
 
     /// Every level of text is drawn on every page floor and card.
     #[test]
-    fn halloween_text_is_readable_on_every_surface() {
+    fn seasonal_text_is_readable_on_every_surface() {
         let ui = window();
-        let palette = seasonal_palette(&ui, SeasonalTheme::Halloween);
-        for (floor, name) in [
-            (palette.background, "background"),
-            (palette.surface, "surface"),
-            (palette.field, "field"),
-            (palette.elevated, "elevated"),
-            (palette.bar, "bar"),
-            (palette.selection, "selection"),
-            (palette.selection_card, "selection-card"),
-        ] {
-            for (text, level, minimum) in [
-                (palette.text, "text", 7.0),
-                (palette.text_secondary, "secondary", 4.5),
-                (palette.text_muted, "muted", 3.0),
-                (palette.accent, "accent", 4.5),
-                (palette.warning, "warning", 4.5),
-                (palette.danger, "danger", 4.5),
+        for season in ephervex_core::seasonal_theme::THEME_SEASONS {
+            let palette = seasonal_palette(&ui, season.theme);
+            for (floor, name) in [
+                (palette.background, "background"),
+                (palette.surface, "surface"),
+                (palette.field, "field"),
+                (palette.elevated, "elevated"),
+                (palette.bar, "bar"),
+                (palette.selection, "selection"),
+                (palette.selection_card, "selection-card"),
             ] {
-                let ratio = contrast(text, floor);
-                assert!(
-                    ratio >= minimum,
-                    "{level} on {name} is {ratio:.2}:1, under {minimum}:1"
-                );
+                for (text, level, minimum) in [
+                    (palette.text, "text", 7.0),
+                    (palette.text_secondary, "secondary", 4.5),
+                    (palette.text_muted, "muted", 3.0),
+                    (palette.accent, "accent", 4.5),
+                    (palette.warning, "warning", 4.5),
+                    (palette.danger, "danger", 4.5),
+                ] {
+                    let ratio = contrast(text, floor);
+                    assert!(
+                        ratio >= minimum,
+                        "{} {level} on {name} is {ratio:.2}:1, under {minimum}:1",
+                        season.theme.as_str()
+                    );
+                }
             }
         }
     }

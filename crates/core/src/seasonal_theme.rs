@@ -25,6 +25,7 @@ const FORCED_SEASON_ENV_VAR: &str = "SEASONS_THEME";
 pub enum SeasonalTheme {
     Halloween,
     Christmas,
+    Pride,
 }
 
 impl SeasonalTheme {
@@ -34,6 +35,7 @@ impl SeasonalTheme {
         match self {
             Self::Halloween => "halloween",
             Self::Christmas => "christmas",
+            Self::Pride => "pride",
         }
     }
 }
@@ -157,6 +159,11 @@ pub const THEME_SEASONS: &[ThemeSeason] = &[
         first: MonthDay::new(12, 24),
         last: MonthDay::new(12, 26),
     },
+    ThemeSeason {
+        theme: SeasonalTheme::Pride,
+        first: MonthDay::new(6, 1),
+        last: MonthDay::new(6, 30),
+    },
 ];
 
 /// The season `date` falls in, if any.
@@ -234,6 +241,7 @@ mod tests {
 
     const HALLOWEEN: ShownTheme = ShownTheme::Seasonal(SeasonalTheme::Halloween);
     const CHRISTMAS: ShownTheme = ShownTheme::Seasonal(SeasonalTheme::Christmas);
+    const PRIDE: ShownTheme = ShownTheme::Seasonal(SeasonalTheme::Pride);
 
     fn dark() -> ApplicationTheme {
         ApplicationTheme::BuiltIn(ApplicationColorScheme::Dark)
@@ -273,6 +281,20 @@ mod tests {
                     assert_eq!(shown_theme(&recorded, true, date(year, 12, day)), CHRISTMAS);
                 }
                 assert_eq!(shown_theme(&recorded, true, date(year, 12, 27)), unchanged);
+            }
+        }
+    }
+
+    #[test]
+    fn pride_is_shown_over_dark_and_light_throughout_june() {
+        for recorded in [dark(), light()] {
+            for year in [2026, 2027, 2028] {
+                let unchanged = ShownTheme::Recorded(recorded.clone());
+                assert_eq!(shown_theme(&recorded, true, date(year, 5, 31)), unchanged);
+                for day in 1..=30 {
+                    assert_eq!(shown_theme(&recorded, true, date(year, 6, day)), PRIDE);
+                }
+                assert_eq!(shown_theme(&recorded, true, date(year, 7, 1)), unchanged);
             }
         }
     }

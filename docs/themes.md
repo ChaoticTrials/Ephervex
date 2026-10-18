@@ -213,6 +213,7 @@ whichever of Dark and Light you chose.
 |---|---|
 | Halloween | October 25 through October 31 |
 | Christmas | December 24 through December 26 |
+| Pride Month | June 1 through June 30 |
 
 The season follows the computer's local date. It starts at midnight on its
 first day and ends at midnight after its last day, also while Ephervex stays
@@ -228,7 +229,8 @@ choice, the Seasonal themes setting says which theme the season is showing,
 and your theme comes back when the season ends, also after a restart.
 
 A seasonal theme replaces the colors and the logo and window icon together.
-Christmas uses burgundy, red, evergreen, cream, and gold.
+Christmas uses burgundy, red, evergreen, cream, and gold. Pride Month adds a
+six-color rainbow along the top bar and through its group colors.
 The icon Ephervex was installed with does not change, as described under
 [Window and taskbar icons](#window-and-taskbar-icons). A seasonal theme is not
 a `parent` a theme file can name.
@@ -242,12 +244,12 @@ To see a seasonal theme outside its season, start Ephervex with the
 SEASONS_THEME=halloween ephervex-gui
 ```
 
-Use `SEASONS_THEME=christmas` to preview Christmas. The theme is shown on every
-day for as long as the variable is set, also across restarts and the
-once-a-minute date check. The value is matched without regard
-to case. An unset or empty variable leaves the date in charge. A value that
-names no seasonal theme is ignored and the date decides; the log says which
-values are accepted.
+Use `SEASONS_THEME=christmas` or `SEASONS_THEME=pride` to preview another
+season. The theme is shown on every day for as long as the variable is set,
+also across restarts and the once-a-minute date check. The value is matched
+without regard to case. An unset or empty variable leaves the date in charge.
+A value that names no seasonal theme is ignored and the date decides; the log
+says which values are accepted.
 
 The variable replaces only the date. A theme of your own is still never
 replaced, turning off Settings > General > Seasonal themes still shows the theme
