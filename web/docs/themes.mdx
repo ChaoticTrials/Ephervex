@@ -29,7 +29,7 @@ The CLI has no theme selector. Use the desktop app to choose a theme.
 
 From October 25 through October 31, by the computer's local date, a
 Halloween theme with its own colors and pumpkin-ghost logo replaces **Dark**
-or **Light**. It is not in the theme list and cannot be chosen. A custom
+or **Light**. It is not in the theme list and cannot be chosen there. A custom
 theme is never replaced.
 
 Turn off **Settings > General > Seasonal themes** to see your chosen theme
@@ -37,6 +37,11 @@ again. While a season's theme is shown, that setting names it. Your theme
 setting is never changed, and your theme comes back when the season ends.
 
 <ThemeScreenshot state="settings-general" theme="halloween" alt="General settings in the Halloween theme, with the pumpkin-ghost logo and a note under Seasonal themes naming the Halloween theme" />
+
+To preview Halloween outside those dates, start the desktop app with
+`SEASONS_THEME=halloween ephervex-gui`. This changes only which date-based
+theme is shown. **Seasonal themes** must still be on, and a custom theme still
+takes precedence. Remove the variable to return to the calendar's choice.
 
 ## Add a custom theme
 
@@ -128,10 +133,10 @@ A theme that sets `accent`, `background`, or `text` and leaves out
 `toggle-knob`, `field`, or `on-primary` respectively gives that token the
 color it set. Otherwise, omitted colors come from the parent.
 
-Dropdowns, sliders, and spinners use the colors above. Scroll bars, lists, and
-the context menus opened by a right-click or a "Launch as" button take no
-theme colors. They follow only the light or dark look of the parent, so a
-theme with a very different palette can leave them looking out of place.
+Dropdowns, sliders, spinners, and menus use the colors above, including menus
+opened by a right-click or a "Launch as" button. Scroll bars and lists follow
+only the light or dark look of the parent and take no theme colors, so a theme
+with a very different palette can leave them looking out of place.
 
 ## Add a logo and window icon
 
