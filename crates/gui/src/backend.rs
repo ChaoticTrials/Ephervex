@@ -13,6 +13,7 @@ use chrono::{DateTime, Utc};
 use ephervex_core::ClientCommitWarning;
 use ephervex_core::ControlResponse;
 use ephervex_core::Hosting;
+use ephervex_core::ImportedPack;
 use ephervex_core::ManagedModInstallation;
 use ephervex_core::ManagedMutationReport;
 use ephervex_core::ServerCommitWarning;
@@ -1755,6 +1756,14 @@ pub enum Event {
     },
     /// An install for a host ended, whichever way.
     HostJavaInstallSettled(InstalledHost),
+    /// An import committed its instance and is now creating that instance's
+    /// linked server. The pending card stops standing in for a second instance
+    /// and its progress moves onto the instance's own row.
+    ImportLinkedServerStarted {
+        request_id: String,
+        instance: String,
+        server_name: String,
+    },
     /// How a creation shown as a pending card is getting on.
     CreationProgress {
         request_id: String,
@@ -12243,7 +12252,7 @@ fn spawn_import_submission(
                 request_id: setup_request_id,
             });
         },
-        move |app, events, runtime| {
+        move |mut app, events, runtime| {
             let sink = Arc::new(UiProgressSink {
                 events: events.clone(),
                 entity,
@@ -12262,7 +12271,6 @@ fn spawn_import_submission(
                 request = request.named(name);
             }
             let result = runtime.block_on(app.import_pack(&request, &reporter, &cancel));
-            remove_cancellation(&cancellations, &reporter);
             // Closing the modal is not decided here: a receiver only closes
             // its own still-current attempt, which this thread cannot know.
             // `Event::ImportSubmissionFinished` carries `succeeded` so the
@@ -12270,40 +12278,37 @@ fn spawn_import_submission(
             let succeeded = match result {
                 Ok(pack) => {
                     // Part of the same operation, so the card the user is
-                    // already watching reports it too. A server that fails
-                    // leaves the imported instance alone and says so on its
-                    // own: the import the user asked for did happen.
-                    if create_linked_server {
-                        let request = NewServer::linked(
-                            suggested_server_name(&pack.record.name),
-                            pack.record.id,
-                        )
-                        .with_storage(pack.record.storage);
-                        let options = ServerCreateOptions {
-                            install_java_if_missing: true,
-                            content: server_pack.map_or(ServerContentSource::Recipe, |path| {
-                                ServerContentSource::Archive { path }
-                            }),
-                            reporter: Some(reporter.clone()),
-                            ..ServerCreateOptions::default()
+                    // already watching reports it too, and canceling it
+                    // covers the server. A server that fails leaves the
+                    // imported instance alone and says so on its own: the
+                    // import the user asked for did happen.
+                    let linked = create_linked_server.then(|| {
+                        let run = LinkedServerRun {
+                            runtime: &runtime,
+                            events: &events,
+                            reporter: &reporter,
+                            cancel: &cancel,
+                            request_id: &request_id,
                         };
-                        if let Err(error) =
-                            runtime.block_on(app.create_server(request, &options, &cancel))
-                        {
-                            send_error(&events, &error);
-                        }
-                    }
+                        create_imported_pack_server(&mut app, &run, &pack, server_pack)
+                    });
+                    let (message, error) = match linked {
+                        Some(Err(message)) => (message, true),
+                        _ => (
+                            localized_value("gui-imported-pack", &pack.record.name),
+                            false,
+                        ),
+                    };
+                    remove_cancellation(&cancellations, &reporter);
                     reporter.finish(OperationStatus::Completed);
                     let _ = events.send(Event::ClientCreated {
                         instance: pack.record.id.to_string(),
                     });
-                    let _ = events.send(Event::Toast {
-                        message: localized_value("gui-imported-pack", &pack.record.name),
-                        error: false,
-                    });
+                    let _ = events.send(Event::Toast { message, error });
                     true
                 }
                 Err(error) => {
+                    remove_cancellation(&cancellations, &reporter);
                     if error.is_cancellation() {
                         reporter.finish(OperationStatus::Canceled);
                         let _ = events.send(Event::Toast {
@@ -12327,6 +12332,65 @@ fn spawn_import_submission(
             }
         },
     );
+}
+
+/// What the linked-server step of an import shares with the import around it.
+struct LinkedServerRun<'a> {
+    runtime: &'a tokio::runtime::Runtime,
+    events: &'a Sender<Event>,
+    reporter: &'a OperationReporter,
+    cancel: &'a CancellationToken,
+    request_id: &'a str,
+}
+
+/// Creates the server linked to a freshly imported instance. The instance is
+/// listed first and the import's pending card hands over to its row, so the
+/// work never looks like a second instance. A failure comes back as the text
+/// to show, which names the instance that did import.
+fn create_imported_pack_server(
+    app: &mut App,
+    run: &LinkedServerRun<'_>,
+    pack: &ImportedPack,
+    server_pack: Option<PathBuf>,
+) -> Result<(), String> {
+    let server_name = suggested_server_name(&pack.record.name);
+    send_snapshot(app, run.events);
+    let _ = run.events.send(Event::ImportLinkedServerStarted {
+        request_id: run.request_id.to_owned(),
+        instance: pack.record.id.to_string(),
+        server_name: server_name.clone(),
+    });
+    let request = NewServer::linked(server_name, pack.record.id).with_storage(pack.record.storage);
+    let options = ServerCreateOptions {
+        install_java_if_missing: true,
+        content: server_pack.map_or(ServerContentSource::Recipe, |path| {
+            ServerContentSource::Archive { path }
+        }),
+        reporter: Some(run.reporter.clone()),
+        ..ServerCreateOptions::default()
+    };
+    let Err(error) = run
+        .runtime
+        .block_on(app.create_server(request, &options, run.cancel))
+    else {
+        return Ok(());
+    };
+    if error.is_cancellation() {
+        return Err(localized_value(
+            "gui-imported-pack-server-canceled",
+            &pack.record.name,
+        ));
+    }
+    tracing::warn!(
+        message_id = error.message_id(),
+        detail = %ErrorChain(&error),
+        "linked server creation after import failed"
+    );
+    Err(localized_values(
+        "gui-imported-pack-server-failed",
+        &pack.record.name,
+        &localized_error(&error),
+    ))
 }
 
 #[derive(Debug)]

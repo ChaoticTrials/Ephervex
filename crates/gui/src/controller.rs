@@ -914,6 +914,27 @@ impl CreationTracker {
         }
     }
 
+    /// Re-identifies an import's card as the linked server it is now creating
+    /// for `instance`, so the work is shown on that instance's row instead of
+    /// as a second entry beside it. The request, and with it the key that
+    /// refuses a repeated click on the archive, stays the same.
+    fn hand_off_to_linked_server(&mut self, request_id: &str, instance: &str, server_name: &str) {
+        let Some(pending) = self
+            .pending
+            .iter_mut()
+            .find(|pending| pending.request_id == request_id)
+        else {
+            return;
+        };
+        pending.server = true;
+        instance.clone_into(&mut pending.linked_client_id);
+        server_name.clone_into(&mut pending.name);
+        pending.target = lookup("gui-linked-client");
+        pending.detail.clear();
+        pending.progress = 0.0;
+        pending.indeterminate = true;
+    }
+
     fn finish(&mut self, request_id: &str) {
         if let Some(index) = self
             .pending
@@ -8192,6 +8213,16 @@ fn apply_event(
             creations
                 .borrow_mut()
                 .progressed(&request_id, detail, progress, indeterminate);
+            apply_pending_creations(ui, &creations.borrow());
+        }
+        Event::ImportLinkedServerStarted {
+            request_id,
+            instance,
+            server_name,
+        } => {
+            creations
+                .borrow_mut()
+                .hand_off_to_linked_server(&request_id, &instance, &server_name);
             apply_pending_creations(ui, &creations.borrow());
         }
         Event::MinecraftReleases(versions) => {
@@ -16673,6 +16704,182 @@ mod tests {
             ui.get_instances()
                 .iter()
                 .all(|row| row.creating_server_detail.is_empty())
+        );
+    }
+
+    fn import_key(archive: &str) -> CreationKey {
+        CreationKey::Import {
+            archive: archive.to_owned(),
+        }
+    }
+
+    fn start_import(tracker: &mut CreationTracker, archive: &str) -> String {
+        let key = import_key(archive);
+        tracker
+            .accept(key.clone(), pending_creation(&key, false))
+            .expect("a new archive is accepted")
+    }
+
+    fn pending_instance_ids(ui: &AppWindow) -> Vec<String> {
+        ui.get_pending_instances()
+            .iter()
+            .map(|row| row.id.to_string())
+            .collect()
+    }
+
+    /// Once an import has created its instance, the remaining linked-server
+    /// work is that instance's, so the import's own card must not stay beside
+    /// it as a second entry.
+    #[test]
+    fn an_import_creating_its_linked_server_stops_showing_a_card_of_its_own() {
+        let ui = test_window();
+        ui.set_show_linked_servers(true);
+        let mut tracker = CreationTracker::default();
+        let request = start_import(&mut tracker, "/packs/gta.mrpack");
+        apply_pending_creations(&ui, &tracker);
+        assert_eq!(pending_instance_ids(&ui), std::slice::from_ref(&request));
+
+        ui.set_instances(model(vec![InstanceRow {
+            id: "client-a".into(),
+            ..InstanceRow::default()
+        }]));
+        tracker.hand_off_to_linked_server(&request, "client-a", "GTA Server");
+        apply_pending_creations(&ui, &tracker);
+
+        assert!(
+            pending_instance_ids(&ui).is_empty(),
+            "the instance exists, so no second top-level entry is left"
+        );
+        let row = ui.get_instances().row_data(0).expect("instance row");
+        assert_eq!(
+            row.creating_server_detail,
+            lookup("gui-creating-linked-server"),
+            "the instance's row says its server is still being prepared"
+        );
+        assert!(row.creating_server_indeterminate);
+    }
+
+    #[test]
+    fn linked_server_progress_after_an_import_follows_the_instance_it_belongs_to() {
+        let ui = test_window();
+        let mut tracker = CreationTracker::default();
+        let request = start_import(&mut tracker, "/packs/gta.mrpack");
+        ui.set_instances(model(vec![
+            InstanceRow {
+                id: "client-a".into(),
+                ..InstanceRow::default()
+            },
+            InstanceRow {
+                id: "client-b".into(),
+                ..InstanceRow::default()
+            },
+        ]));
+        tracker.hand_off_to_linked_server(&request, "client-a", "GTA Server");
+        tracker.progressed(
+            &request,
+            "Installing the linked server | 1.18.2 server_mappings".to_owned(),
+            0.4,
+            false,
+        );
+        apply_pending_creations(&ui, &tracker);
+
+        let rows: Vec<_> = ui.get_instances().iter().collect();
+        assert_eq!(
+            rows[0].creating_server_detail,
+            "Installing the linked server | 1.18.2 server_mappings"
+        );
+        assert!((rows[0].creating_server_progress - 0.4).abs() < f32::EPSILON);
+        assert!(
+            rows[1].creating_server_detail.is_empty(),
+            "an unrelated instance carries nothing of this import"
+        );
+    }
+
+    /// A linked server that fails or is canceled ends the import's request the
+    /// same way a success does, and nothing is left on the row.
+    #[test]
+    fn a_finished_import_leaves_neither_a_card_nor_progress_on_its_instance() {
+        let ui = test_window();
+        let mut tracker = CreationTracker::default();
+        let request = start_import(&mut tracker, "/packs/gta.mrpack");
+        ui.set_instances(model(vec![InstanceRow {
+            id: "client-a".into(),
+            ..InstanceRow::default()
+        }]));
+        tracker.hand_off_to_linked_server(&request, "client-a", "GTA Server");
+        apply_pending_creations(&ui, &tracker);
+        assert!(
+            !ui.get_instances()
+                .row_data(0)
+                .expect("row")
+                .creating_server_detail
+                .is_empty()
+        );
+
+        tracker.finish(&request);
+        apply_pending_creations(&ui, &tracker);
+
+        assert!(pending_instance_ids(&ui).is_empty());
+        assert_eq!(ui.get_linked_pending_servers().row_count(), 0);
+        assert!(
+            ui.get_instances()
+                .row_data(0)
+                .expect("row")
+                .creating_server_detail
+                .is_empty()
+        );
+        assert!(
+            tracker
+                .accept(
+                    import_key("/packs/gta.mrpack"),
+                    pending_creation(&import_key("/packs/gta.mrpack"), false)
+                )
+                .is_some(),
+            "the archive can be imported again"
+        );
+    }
+
+    #[test]
+    fn an_import_without_a_linked_server_keeps_its_card_until_it_finishes() {
+        let ui = test_window();
+        let mut tracker = CreationTracker::default();
+        let request = start_import(&mut tracker, "/packs/plain.mrpack");
+        apply_pending_creations(&ui, &tracker);
+        assert_eq!(pending_instance_ids(&ui), std::slice::from_ref(&request));
+        assert_eq!(ui.get_linked_pending_servers().row_count(), 0);
+
+        tracker.finish(&request);
+        apply_pending_creations(&ui, &tracker);
+        assert!(pending_instance_ids(&ui).is_empty());
+    }
+
+    #[test]
+    fn concurrent_imports_hand_off_independently() {
+        let ui = test_window();
+        let mut tracker = CreationTracker::default();
+        let first = start_import(&mut tracker, "/packs/first.mrpack");
+        let second = start_import(&mut tracker, "/packs/second.mrpack");
+        ui.set_instances(model(vec![InstanceRow {
+            id: "client-a".into(),
+            ..InstanceRow::default()
+        }]));
+        tracker.hand_off_to_linked_server(&first, "client-a", "First Server");
+        apply_pending_creations(&ui, &tracker);
+
+        assert_eq!(
+            pending_instance_ids(&ui),
+            std::slice::from_ref(&second),
+            "the other import keeps its own card"
+        );
+        tracker.progressed(&second, "Resolving".to_owned(), 0.5, false);
+        apply_pending_creations(&ui, &tracker);
+        assert_ne!(
+            ui.get_instances()
+                .row_data(0)
+                .expect("row")
+                .creating_server_detail,
+            "Resolving",
+            "the second import's progress does not reach the first instance"
         );
     }
 
