@@ -82,7 +82,7 @@ pub struct LoaderChoices {
 
 /// Narrows the loader choice to the loaders a Minecraft release ever had.
 ///
-/// NeoForge's first build is for Minecraft 1.20.2, so offering it for anything
+/// NeoForge's first build is for Minecraft 1.20.1, so offering it for anything
 /// older leads to a build list that never fills in and a Create button that
 /// never enables, with nothing on screen saying why.
 #[must_use]
@@ -1501,9 +1501,14 @@ mod tests {
         assert_eq!(modern.selected, "NeoForge");
         assert!(!modern.reset);
 
-        // 1.20.1 is the last release before NeoForge's first build, so it is
+        // NeoForge's first build is for 1.20.1, so the release before it is
         // the edge the rule has to get right.
-        let legacy = loader_choices("1.20.1", "NeoForge");
+        let first = loader_choices("1.20.1", "NeoForge");
+        assert_eq!(first.options, ["Vanilla", "Forge", "NeoForge"]);
+        assert_eq!(first.selected, "NeoForge");
+        assert!(!first.reset);
+
+        let legacy = loader_choices("1.20", "NeoForge");
         assert_eq!(legacy.options, ["Vanilla", "Forge"]);
         assert_eq!(legacy.selected, "Vanilla");
         assert!(legacy.reset);

@@ -227,7 +227,10 @@ impl ServerArchiveEvidence {
             loaders
                 .iter()
                 .map(|loader| match loader.kind {
-                    LoaderKind::NeoForge => ephervex_loaders::neoforge_minecraft(&loader.version),
+                    LoaderKind::NeoForge => loader
+                        .minecraft_version
+                        .clone()
+                        .or_else(|| ephervex_loaders::neoforge_minecraft(&loader.version)),
                     LoaderKind::Forge | LoaderKind::Vanilla => loader.minecraft_version.clone(),
                 })
                 .chain(evidence.unattributed_minecraft.iter().cloned().map(Some))

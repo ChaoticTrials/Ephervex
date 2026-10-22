@@ -554,6 +554,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_loaders_offered_for_a_release_agree_with_the_ones_it_accepts() {
+        for minecraft in ["1.20", "1.20.1", "1.20.2", "1.21.1"] {
+            for kind in [LoaderKind::Vanilla, LoaderKind::Forge, LoaderKind::NeoForge] {
+                assert_eq!(
+                    App::available_loaders(minecraft).contains(&kind),
+                    App::require_published_loader(kind, minecraft).is_ok(),
+                    "{kind} for {minecraft}"
+                );
+            }
+        }
+        assert!(App::available_loaders("1.20.1").contains(&LoaderKind::NeoForge));
+        assert!(!App::available_loaders("1.20").contains(&LoaderKind::NeoForge));
+    }
+
+    #[test]
+    fn an_instance_on_neoforge_for_minecraft_1_20_1_is_a_published_combination() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let record = app
+            .create_client_for_test(NewClient::new(
+                "Imported",
+                "1.20.1",
+                LoaderSelection::exact(LoaderKind::NeoForge, "47.1.106"),
+            ))
+            .expect("create");
+
+        App::require_published_loader(record.loader.kind, &record.minecraft_version)
+            .expect("the displayed combination is one the build selection accepts");
+    }
+
     #[tokio::test]
     async fn a_failed_change_leaves_the_recorded_build_alone() {
         // The candidate is not a build any catalog offers, so planning refuses

@@ -146,9 +146,10 @@ pub fn read_server_pack_evidence(
 pub struct ArchiveLoader {
     pub kind: LoaderKind,
     pub version: String,
-    /// The Minecraft release the name spells out. Forge coordinates carry one;
-    /// NeoForge's encode it in the build number instead, and reading it from
-    /// there is the loader catalog's rule rather than this crate's.
+    /// The Minecraft release the name spells out. Forge coordinates carry one,
+    /// and so do NeoForge's `net.neoforged:forge` ones; other NeoForge names
+    /// encode it in the build number instead, and reading it from there is the
+    /// loader catalog's rule rather than this crate's.
     pub minecraft_version: Option<String>,
 }
 
@@ -283,37 +284,28 @@ fn is_neoforge_forge_named_build(minecraft: &str, build: &str) -> bool {
 }
 
 /// The loader a library directory names, below `libraries/`:
-/// `net/neoforged/neoforge/<version>/` or `net/minecraftforge/forge/<minecraft>-<version>/`,
-/// the Maven coordinates each loader's own installer writes.
+/// `net/neoforged/neoforge/<version>/`, `net/neoforged/forge/<minecraft>-<version>/`
+/// or `net/minecraftforge/forge/<minecraft>-<version>/`, the Maven coordinates
+/// each loader's own installer writes.
 ///
 /// A version component counts only when something sits beneath it or the entry
 /// is the directory itself, so a stray file with a version-like name is not
 /// read as a library directory.
 fn library_loader(path: &[String], directory: bool) -> Option<ArchiveLoader> {
-    let (kind, version, beneath) = match path {
-        [net, group, artifact, version, beneath @ ..]
-            if net.as_str() == "net"
-                && group.as_str() == "neoforged"
-                && artifact.as_str() == "neoforge" =>
-        {
-            (LoaderKind::NeoForge, version, beneath)
-        }
-        [net, group, artifact, version, beneath @ ..]
-            if net.as_str() == "net"
-                && group.as_str() == "minecraftforge"
-                && artifact.as_str() == "forge" =>
-        {
-            (LoaderKind::Forge, version, beneath)
-        }
-        _ => return None,
+    let [net, group, artifact, version, beneath @ ..] = path else {
+        return None;
     };
-    if beneath.is_empty() && !directory {
+    if net.as_str() != "net" || (beneath.is_empty() && !directory) {
         return None;
     }
-    match kind {
-        LoaderKind::NeoForge => neoforge_build(version),
-        LoaderKind::Forge => forge_coordinate(version),
-        LoaderKind::Vanilla => None,
+    match (group.as_str(), artifact.as_str()) {
+        ("neoforged", "neoforge") => neoforge_build(version),
+        ("neoforged", "forge") => forge_coordinate(version).map(|coordinate| ArchiveLoader {
+            kind: LoaderKind::NeoForge,
+            ..coordinate
+        }),
+        ("minecraftforge", "forge") => forge_coordinate(version),
+        _ => None,
     }
 }
 
@@ -953,6 +945,44 @@ mod tests {
         ]);
 
         assert_eq!(read.loaders, [neoforge("26.1.2.94")]);
+    }
+
+    #[test]
+    fn a_neoforge_library_directory_for_minecraft_1_20_1_names_its_release() {
+        let read = evidence(&[(
+            "libraries/net/neoforged/forge/1.20.1-47.1.106/forge-1.20.1-47.1.106-server.jar",
+            b"server",
+        )]);
+
+        assert_eq!(
+            read.loaders,
+            [ArchiveLoader {
+                kind: LoaderKind::NeoForge,
+                version: "47.1.106".to_owned(),
+                minecraft_version: Some("1.20.1".to_owned()),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_neoforge_library_directory_settles_the_kind_of_an_ambiguous_installer() {
+        let read = evidence(&[
+            ("forge-1.20.1-47.1.106-installer.jar", b"installer"),
+            (
+                "libraries/net/neoforged/forge/1.20.1-47.1.106/forge-1.20.1-47.1.106-server.jar",
+                b"server",
+            ),
+        ]);
+
+        assert_eq!(
+            read.loaders,
+            [ArchiveLoader {
+                kind: LoaderKind::NeoForge,
+                version: "47.1.106".to_owned(),
+                minecraft_version: Some("1.20.1".to_owned()),
+            }]
+        );
+        assert_eq!(read.unattributed_minecraft, ["1.20.1"]);
     }
 
     #[test]

@@ -6,6 +6,7 @@ retained; full installer binaries are not redistributed.
 - `forge-promotions.json`: https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json
 - `forge-maven-metadata.xml`: https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml
 - `neoforge-maven-metadata.xml`: https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml
+- `neoforge-forge-artifact-maven-metadata.xml`: https://maven.neoforged.net/releases/net/neoforged/forge/maven-metadata.xml, the artifact NeoForge's Minecraft 1.20.1 builds are published under; reduced to three of its versions
 - Forge 1.12.2 installer: `forge-1.12.2-14.23.5.2859-installer.jar`, SHA-1 `6b3d5be8b58d5385fda9c4d285367f4cb6e697b2`
 - Forge 1.16.3 installer: `forge-1.16.3-34.1.42-installer.jar`, SHA-1 `10e3c85aa71f9f3b92a2c129c66f312e74e0c6df`
 - Forge 1.20.1 installer: `forge-1.20.1-47.4.10-installer.jar`, SHA-1 `66bfea9963bfa60d88bab6b2750e74a958392715`

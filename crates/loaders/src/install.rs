@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument};
 use zip::ZipArchive;
 
-use crate::discovery::require_supported_installer_format;
+use crate::discovery::{neoforge_uses_forge_artifact, require_supported_installer_format};
 use crate::profile::{InstallProfile, InstallSide, Processor, ProfileArtifact};
 use crate::{LoaderError, LoaderResult};
 
@@ -446,6 +446,10 @@ impl InstallerEngine {
         }
         let correct_version = match kind {
             LoaderKind::Forge => {
+                bundle.profile.version == format!("{minecraft}-forge-{exact}")
+                    && bundle.child.id == bundle.profile.version
+            }
+            LoaderKind::NeoForge if neoforge_uses_forge_artifact(minecraft) => {
                 bundle.profile.version == format!("{minecraft}-forge-{exact}")
                     && bundle.child.id == bundle.profile.version
             }
@@ -1312,8 +1316,11 @@ fn installer_location(
             Ok((coordinate, format!("{FORGE_MAVEN}/{}", relative.display())))
         }
         LoaderKind::NeoForge => {
-            let coordinate =
-                MavenCoordinate::parse(&format!("net.neoforged:neoforge:{exact}:installer"))?;
+            let coordinate = MavenCoordinate::parse(&if neoforge_uses_forge_artifact(minecraft) {
+                format!("net.neoforged:forge:{minecraft}-{exact}:installer")
+            } else {
+                format!("net.neoforged:neoforge:{exact}:installer")
+            })?;
             let relative = coordinate.relative_path();
             Ok((
                 coordinate,
@@ -2000,6 +2007,9 @@ fn modern_server_argfile(kind: LoaderKind, minecraft: &str, exact: &str) -> Path
         LoaderKind::Forge => {
             format!("net/minecraftforge/forge/{minecraft}-{exact}/unix_args.txt")
         }
+        LoaderKind::NeoForge if neoforge_uses_forge_artifact(minecraft) => {
+            format!("net/neoforged/forge/{minecraft}-{exact}/unix_args.txt")
+        }
         LoaderKind::NeoForge => {
             format!("net/neoforged/neoforge/{exact}/unix_args.txt")
         }
@@ -2157,6 +2167,42 @@ mod tests {
             .expect("neoforge coordinate");
         assert_eq!(neo.version(), "26.1.2.94");
         assert!(url.ends_with("neoforge-26.1.2.94-installer.jar"));
+    }
+
+    #[test]
+    fn neoforge_for_minecraft_1_20_1_installs_from_the_forge_named_artifact() {
+        let (neo, url) = installer_location(LoaderKind::NeoForge, "1.20.1", "47.1.106")
+            .expect("neoforge coordinate");
+        assert_eq!(neo.version(), "1.20.1-47.1.106");
+        assert!(
+            url.ends_with(
+                "/net/neoforged/forge/1.20.1-47.1.106/forge-1.20.1-47.1.106-installer.jar"
+            )
+        );
+        assert_eq!(
+            modern_server_argfile(LoaderKind::NeoForge, "1.20.1", "47.1.106"),
+            PathBuf::from("libraries/net/neoforged/forge/1.20.1-47.1.106/unix_args.txt")
+        );
+    }
+
+    #[test]
+    fn neoforge_for_minecraft_1_20_1_is_identified_by_the_forge_style_profile() {
+        let root = tempfile::tempdir().expect("root");
+        let bundle = bundle_declaring(root.path(), "", &[]);
+        let validate = |exact: &str| {
+            InstallerEngine::validate_bundle(
+                LoaderKind::NeoForge,
+                "1.20.1",
+                exact,
+                &bundle,
+                &RuleContext::new(Platform::host()),
+            )
+        };
+        validate("47.4.10").expect("the profile names forge-47.4.10 for 1.20.1");
+        assert!(matches!(
+            validate("47.4.11"),
+            Err(LoaderError::IdentityMismatch { .. })
+        ));
     }
 
     #[test]

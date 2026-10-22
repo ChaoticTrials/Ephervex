@@ -1,0 +1,9 @@
+<metadata>
+  <groupId>net.neoforged</groupId>
+  <artifactId>forge</artifactId>
+  <versioning><versions>
+    <version>1.20.1-47.1.5</version>
+    <version>1.20.1-47.1.105</version>
+    <version>1.20.1-47.1.106</version>
+  </versions></versioning>
+</metadata>

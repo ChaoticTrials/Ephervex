@@ -19861,26 +19861,26 @@ mod tests {
         recompute_create_name(&ui);
         assert_eq!(ui.get_create_name_suggestion(), "1.21.1-NeoForge-21.1.249");
 
-        // 1.20.1 predates NeoForge's first build, so choosing it resets the
+        // 1.19.4 predates NeoForge's first build, so choosing it resets the
         // loader. The suggestion has to follow, or the dialog offers a name
         // describing a loader it no longer holds.
-        ui.set_create_minecraft("1.20.1".into());
-        apply_minecraft_selection(&ui, "client", "1.20.1");
+        ui.set_create_minecraft("1.19.4".into());
+        apply_minecraft_selection(&ui, "client", "1.19.4");
 
         assert_eq!(ui.get_create_loader(), "Vanilla");
         assert_eq!(ui.get_create_loader_version(), "");
         // A vanilla instance is named after its release alone.
-        assert_eq!(ui.get_create_name_suggestion(), "1.20.1");
+        assert_eq!(ui.get_create_name_suggestion(), "1.19.4");
     }
 
     #[test]
     fn a_name_the_user_typed_is_never_replaced_by_a_suggestion() {
         let ui = test_window();
 
-        ui.set_create_minecraft("1.20.1".into());
+        ui.set_create_minecraft("1.19.4".into());
         ui.set_create_loader("NeoForge".into());
         ui.set_create_name("Crash repro".into());
-        apply_minecraft_selection(&ui, "client", "1.20.1");
+        apply_minecraft_selection(&ui, "client", "1.19.4");
 
         assert_eq!(ui.get_create_loader(), "Vanilla");
         assert_eq!(
@@ -19888,7 +19888,7 @@ mod tests {
             "Crash repro",
             "the suggestion is a placeholder, so it can never overwrite the field"
         );
-        assert_eq!(ui.get_create_name_suggestion(), "1.20.1");
+        assert_eq!(ui.get_create_name_suggestion(), "1.19.4");
     }
 
     #[test]

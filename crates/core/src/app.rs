@@ -1090,7 +1090,7 @@ impl App {
     ///
     /// A fact about each loader's own history rather than about what a catalog
     /// serves today, so it is answerable offline and instantly. NeoForge did not
-    /// exist before Minecraft 1.20.2, and offering it for an older release only
+    /// exist before Minecraft 1.20.1, and offering it for an older release only
     /// leads to a build list that never fills in.
     #[must_use]
     pub fn available_loaders(minecraft: &str) -> Vec<LoaderKind> {

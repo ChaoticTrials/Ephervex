@@ -25,7 +25,8 @@ use std::path::{Path, PathBuf};
 
 use ephervex_download::{CacheLayout, ContentStore, FileExtension, MetadataCache, MetadataKey};
 use ephervex_loaders::{
-    FORGE_MAVEN_METADATA_URL, FORGE_PROMOTIONS_URL, NEOFORGE_MAVEN_METADATA_URL,
+    FORGE_MAVEN_METADATA_URL, FORGE_PROMOTIONS_URL, NEOFORGE_FORGE_ARTIFACT_MAVEN_METADATA_URL,
+    NEOFORGE_MAVEN_METADATA_URL,
 };
 use ephervex_minecraft::{VERSION_MANIFEST_CACHE_KEY, VERSION_MANIFEST_URL, VersionManifest};
 
@@ -67,7 +68,7 @@ fn seed_minecraft(layout: &CacheLayout) {
 
 /// The loader catalogs a `--loader` selection is resolved against.
 ///
-/// Two of the three are XML rather than JSON, which the cache carries as a JSON
+/// Three of the four are XML rather than JSON, which the cache carries as a JSON
 /// string; `CachedMetadata::text` is the other side of that, so writing them
 /// this way is what the launcher itself does.
 fn seed_loaders(layout: &CacheLayout) {
@@ -88,6 +89,12 @@ fn seed_loaders(layout: &CacheLayout) {
             "neoforge-maven-metadata",
             NEOFORGE_MAVEN_METADATA_URL,
             "neoforge-maven-metadata.xml",
+            true,
+        ),
+        (
+            "neoforge-forge-artifact-maven-metadata",
+            NEOFORGE_FORGE_ARTIFACT_MAVEN_METADATA_URL,
+            "neoforge-forge-artifact-maven-metadata.xml",
             true,
         ),
     ] {

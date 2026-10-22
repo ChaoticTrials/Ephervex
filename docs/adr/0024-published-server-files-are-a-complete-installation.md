@@ -41,13 +41,14 @@ untrusted, but some of them say what the server needs: jars in `mods/` need a
 mod loader, and a loader installer at the root
 (`neoforge-<version>-installer.jar`, `forge-<minecraft>-<version>-installer.jar`)
 or a loader library directory (`libraries/net/neoforged/neoforge/<version>/`,
+`libraries/net/neoforged/forge/<minecraft>-<version>/`,
 `libraries/net/minecraftforge/forge/<minecraft>-<version>/`) names an exact
 loader build and, through it, a Minecraft release. A NeoForge build's release
-is read from its number by the same rule the loader catalog lists builds by.
-A `forge-1.20.1-47.1.<build>-installer.jar` is also the name NeoForge published
-its Minecraft 1.20.1 installers under, so it names the release only and leaves
-the loader to the other entries and the user. Only what every such name agrees
-on counts. A selection that contradicts it is
+is read from its number by the same rule the loader catalog lists builds by,
+unless the name spells it out. A `forge-1.20.1-47.1.<build>-installer.jar` is
+also the name NeoForge published its Minecraft 1.20.1 installers under, so it
+names the release only and leaves the loader to the other entries and the user.
+Only what every such name agrees on counts. A selection that contradicts it is
 refused before Java is probed or the loader installed, for a linked and a
 standalone server alike, and never adjusted to fit: a server whose loader cannot
 load the archive's mods would install and start without them and look like it
