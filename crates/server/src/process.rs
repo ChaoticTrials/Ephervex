@@ -20,7 +20,7 @@ use crate::pending_properties::apply_pending_properties;
 use crate::properties::SERVER_PROPERTIES_FILE;
 use crate::runtime::{
     ProcessEvidence, RuntimeEvidence, RuntimeLock, SERVER_RUN_VARIABLE, active_control_socket_path,
-    capture_java_child, prepare_control_socket_path, read_runtime_evidence,
+    capture_java_child, prepare_control_socket_path, read_runtime_evidence, read_stat,
     remove_per_run_control_directory, runtime_lock_path, runtime_path, write_runtime_evidence,
 };
 use crate::{ServerError, ServerResult};
@@ -710,13 +710,10 @@ async fn abandon_child(
 
 /// Whether `pid` names a process that has not yet exited. A zombie has.
 fn process_is_running(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat")).map_or_else(
-        |error| error.kind() != std::io::ErrorKind::NotFound,
-        |stat| {
-            stat.rsplit_once(") ")
-                .is_none_or(|(_, rest)| !rest.starts_with(['Z', 'X']))
-        },
-    )
+    match read_stat(pid) {
+        Ok(stat) => !matches!(stat.state, 'Z' | 'X'),
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+    }
 }
 
 type ReaderTask = tokio::task::JoinHandle<()>;
@@ -2708,6 +2705,26 @@ mod tests {
         let pid = child.id().expect("pid");
         child.wait().await.expect("reaped");
         assert!(!process_is_running(pid));
+    }
+
+    #[test]
+    fn an_exited_process_with_a_name_that_is_not_utf8_is_not_running() {
+        let directory = tempfile::tempdir().expect("directory");
+        let program = directory
+            .path()
+            .join(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(b"tr\xffue"));
+        crate::test_support::copy_executable(Path::new("/bin/true"), &program);
+        // Not waited for, so it stays a zombie.
+        let mut child = std::process::Command::new(&program).spawn().expect("spawn");
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while process_is_running(child.id()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the exited process still counts as running"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        child.wait().expect("reap");
     }
 
     /// The pid a script announced as `descendant:<pid>`.

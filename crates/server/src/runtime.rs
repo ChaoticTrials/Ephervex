@@ -283,26 +283,35 @@ fn tagged_with_run(pid: u32, uid: u32, evidence: &RuntimeEvidence) -> std::io::R
 }
 
 /// The fields of `/proc/<pid>/stat` that process lookups use.
-struct ProcessStat {
-    state: char,
+pub(crate) struct ProcessStat {
+    pub(crate) state: char,
     process_group: u32,
     session: u32,
     flags: u64,
-    start_ticks: u64,
+    pub(crate) start_ticks: u64,
 }
 
-fn read_stat(pid: u32) -> std::io::Result<ProcessStat> {
-    let malformed = || std::io::Error::new(std::io::ErrorKind::InvalidData, "malformed stat");
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
-    let (_, tail) = stat.rsplit_once(") ").ok_or_else(malformed)?;
+/// Reads `/proc/<pid>/stat` as bytes: the process name it opens with is whatever
+/// the executable file was called, so it need not be valid UTF-8.
+pub(crate) fn read_stat(pid: u32) -> std::io::Result<ProcessStat> {
+    let stat = std::fs::read(format!("/proc/{pid}/stat"))?;
+    parse_stat(&stat)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "malformed stat"))
+}
+
+/// Parses the fields after the parenthesized name, which may itself contain
+/// parentheses, so the last `") "` ends it.
+fn parse_stat(stat: &[u8]) -> Option<ProcessStat> {
+    let end = stat.windows(2).rposition(|pair| pair == b") ")?;
+    let tail = std::str::from_utf8(&stat[end + 2..]).ok()?;
     let fields: Vec<&str> = tail.split_whitespace().collect();
-    let field = |index: usize| fields.get(index).copied().ok_or_else(malformed);
-    Ok(ProcessStat {
-        state: field(0)?.chars().next().ok_or_else(malformed)?,
-        process_group: field(2)?.parse().map_err(|_| malformed())?,
-        session: field(3)?.parse().map_err(|_| malformed())?,
-        flags: field(6)?.parse().map_err(|_| malformed())?,
-        start_ticks: field(19)?.parse().map_err(|_| malformed())?,
+    let field = |index: usize| fields.get(index).copied();
+    Some(ProcessStat {
+        state: field(0)?.chars().next()?,
+        process_group: field(2)?.parse().ok()?,
+        session: field(3)?.parse().ok()?,
+        flags: field(6)?.parse().ok()?,
+        start_ticks: field(19)?.parse().ok()?,
     })
 }
 
@@ -1078,15 +1087,7 @@ fn read_boot_id() -> std::io::Result<String> {
 }
 
 fn read_start_ticks(pid: u32) -> std::io::Result<u64> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
-    let (_, tail) = stat
-        .rsplit_once(')')
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "malformed stat"))?;
-    tail.split_whitespace()
-        .nth(19)
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "missing start time"))?
-        .parse()
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    read_stat(pid).map(|stat| stat.start_ticks)
 }
 
 fn control_socket_responds(server_root: &Path, evidence: &RuntimeEvidence) -> bool {
@@ -1664,6 +1665,57 @@ mod tests {
             RuntimeClassification::ProvenStale { .. }
         ));
         drop(early);
+    }
+
+    /// Spawns a process whose name is not valid UTF-8 and returns once `/proc` shows it.
+    fn spawn_with_non_utf8_name(directory: &Path) -> KillOnDrop {
+        let program = directory.join(std::ffi::OsStr::from_bytes(b"sl\xffeep"));
+        copy_executable(Path::new("/bin/sleep"), &program);
+        let child = KillOnDrop(
+            std::process::Command::new(&program)
+                .arg("60")
+                .spawn()
+                .expect("spawn"),
+        );
+        let stat = format!("/proc/{}/stat", child.0.id());
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !std::fs::read(&stat).is_ok_and(|bytes| bytes.contains(&0xff)) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the process never showed its name"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        child
+    }
+
+    #[test]
+    fn a_process_with_a_name_that_is_not_utf8_does_not_make_the_pending_child_scan_unverifiable() {
+        let root = root();
+        let bin = tempfile::tempdir().expect("bin dir");
+        let mut evidence = write_dead_pending_start(root.path());
+        let odd = spawn_with_non_utf8_name(bin.path());
+        evidence.supervisor.start_ticks = u64::MAX;
+        write_runtime_evidence(root.path(), &evidence).expect("write");
+
+        assert!(read_stat(odd.0.id()).is_ok());
+        assert!(matches!(
+            classify_runtime(root.path()).expect("classify"),
+            RuntimeClassification::ProvenStale { .. }
+        ));
+    }
+
+    #[test]
+    fn the_process_state_is_read_past_a_name_with_parentheses_and_invalid_utf8() {
+        let stat = b"42 (a) S (\xff) Z) R 1 7 9 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 12345 0";
+        let parsed = parse_stat(stat).expect("a name does not end the line");
+        assert_eq!(parsed.state, 'R');
+        assert_eq!(parsed.process_group, 7);
+        assert_eq!(parsed.session, 9);
+        assert_eq!(parsed.flags, 4_194_560);
+        assert_eq!(parsed.start_ticks, 12_345);
+        assert!(parse_stat(b"42 (short) R 1 7").is_none());
+        assert!(parse_stat(b"no name at all").is_none());
     }
 
     /// A tagged process that leads a session of its own and whose environment this user cannot read.
