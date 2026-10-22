@@ -164,6 +164,10 @@ pub struct ServerPackEvidence {
     /// Every distinct loader build the archive names, in archive order. More
     /// than one means the archive contradicts itself.
     pub loaders: Vec<ArchiveLoader>,
+    /// Minecraft releases named by an installer jar whose file name does not say
+    /// which loader published it: NeoForge's Minecraft 1.20.1 builds carry
+    /// Forge's name. Evidence of the release only, never of a loader or build.
+    pub unattributed_minecraft: Vec<String>,
 }
 
 impl ServerPackEvidence {
@@ -173,6 +177,7 @@ impl ServerPackEvidence {
         let wrapper = wrapper_to_strip(pack);
         let mut carries_mods = false;
         let mut loaders: Vec<ArchiveLoader> = Vec::new();
+        let mut unattributed_minecraft: Vec<String> = Vec::new();
         for name in pack.entry_names() {
             let Some(mut parts) = entry_components(name) else {
                 continue;
@@ -188,7 +193,15 @@ impl ServerPackEvidence {
                 [mods, jar] if !directory && mods.as_str() == MODS_DIR && is_jar(jar) => {
                     carries_mods = true;
                 }
-                [file] if !directory => add_distinct(&mut loaders, installer_loader(file)),
+                [file] if !directory => match installer_evidence(file) {
+                    Some(InstallerEvidence::Loader(loader)) => {
+                        add_distinct(&mut loaders, Some(loader));
+                    }
+                    Some(InstallerEvidence::Minecraft(release)) => {
+                        add_distinct_release(&mut unattributed_minecraft, release);
+                    }
+                    None => {}
+                },
                 [libraries, rest @ ..] if libraries.as_str() == LIBRARIES_DIR => {
                     add_distinct(&mut loaders, library_loader(rest, directory));
                 }
@@ -198,6 +211,7 @@ impl ServerPackEvidence {
         Self {
             carries_mods,
             loaders,
+            unattributed_minecraft,
         }
     }
 }
@@ -216,16 +230,30 @@ fn add_distinct(loaders: &mut Vec<ArchiveLoader>, found: Option<ArchiveLoader>) 
     }
 }
 
+fn add_distinct_release(releases: &mut Vec<String>, release: String) {
+    if releases.len() < MAX_ARCHIVE_LOADERS && !releases.contains(&release) {
+        releases.push(release);
+    }
+}
+
 fn is_jar(name: &str) -> bool {
     Path::new(name)
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("jar"))
 }
 
-/// The loader an installer jar at the archive root is named for:
+/// What an installer jar's file name says.
+enum InstallerEvidence {
+    Loader(ArchiveLoader),
+    /// The name fits both Forge and NeoForge, so only its Minecraft release is
+    /// evidence.
+    Minecraft(String),
+}
+
+/// The evidence an installer jar at the archive root is named for:
 /// `neoforge-<version>-installer.jar` or `forge-<minecraft>-<version>-installer.jar`,
 /// the names both projects publish their installers under.
-fn installer_loader(file: &str) -> Option<ArchiveLoader> {
+fn installer_evidence(file: &str) -> Option<InstallerEvidence> {
     const SUFFIX: &str = "-installer.jar";
     let stem_len = file.len().checked_sub(SUFFIX.len())?;
     if !file.is_char_boundary(stem_len) || !file[stem_len..].eq_ignore_ascii_case(SUFFIX) {
@@ -233,9 +261,25 @@ fn installer_loader(file: &str) -> Option<ArchiveLoader> {
     }
     let stem = &file[..stem_len];
     if let Some(version) = strip_prefix_ignore_case(stem, "neoforge-") {
-        return neoforge_build(version);
+        return neoforge_build(version).map(InstallerEvidence::Loader);
     }
-    strip_prefix_ignore_case(stem, "forge-").and_then(forge_coordinate)
+    let forge = strip_prefix_ignore_case(stem, "forge-").and_then(forge_coordinate)?;
+    Some(match forge.minecraft_version.clone() {
+        Some(minecraft) if is_neoforge_forge_named_build(&minecraft, &forge.version) => {
+            InstallerEvidence::Minecraft(minecraft)
+        }
+        _ => InstallerEvidence::Loader(forge),
+    })
+}
+
+/// Whether a Forge-shaped coordinate is also one NeoForge published.
+///
+/// NeoForge's Minecraft 1.20.1 builds are the `net.neoforged:forge` artifact,
+/// named `forge-<minecraft>-<build>` like Forge's own and numbered `47.1.x`,
+/// which Forge's `47.1.x` builds share. No other NeoForge release is published
+/// under Forge's name.
+fn is_neoforge_forge_named_build(minecraft: &str, build: &str) -> bool {
+    minecraft == "1.20.1" && build.starts_with("47.1.")
 }
 
 /// The loader a library directory names, below `libraries/`:
@@ -855,6 +899,50 @@ mod tests {
                 minecraft_version: Some("1.20.1".to_owned()),
             }]
         );
+    }
+
+    #[test]
+    fn a_forge_named_installer_for_a_build_neoforge_also_published_names_only_a_release() {
+        let read = evidence(&[("forge-1.20.1-47.1.106-installer.jar", b"installer")]);
+
+        assert!(read.loaders.is_empty());
+        assert_eq!(read.unattributed_minecraft, ["1.20.1"]);
+    }
+
+    #[test]
+    fn a_forge_named_installer_outside_neoforges_published_builds_is_forge_evidence() {
+        for name in [
+            "forge-1.20.1-47.2.0-installer.jar",
+            "forge-1.20.1-47.4.10-installer.jar",
+            "forge-1.19.2-47.1.0-installer.jar",
+        ] {
+            let read = evidence(&[(name, b"installer")]);
+
+            assert_eq!(read.loaders.len(), 1, "{name}");
+            assert_eq!(read.loaders[0].kind, LoaderKind::Forge, "{name}");
+            assert!(read.unattributed_minecraft.is_empty(), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_forge_library_directory_settles_the_kind_of_an_ambiguous_installer() {
+        let read = evidence(&[
+            ("forge-1.20.1-47.1.106-installer.jar", b"installer"),
+            (
+                "libraries/net/minecraftforge/forge/1.20.1-47.1.106/forge-1.20.1-47.1.106-server.jar",
+                b"server",
+            ),
+        ]);
+
+        assert_eq!(
+            read.loaders,
+            [ArchiveLoader {
+                kind: LoaderKind::Forge,
+                version: "47.1.106".to_owned(),
+                minecraft_version: Some("1.20.1".to_owned()),
+            }]
+        );
+        assert_eq!(read.unattributed_minecraft, ["1.20.1"]);
     }
 
     #[test]

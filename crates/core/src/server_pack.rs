@@ -112,7 +112,8 @@ pub struct ServerPackOutcome {
 /// loader it was built for.
 ///
 /// Read from entry names alone (ADR 0024): a jar in `mods/`, a loader
-/// installer at the root, or a loader library directory. A field is known only
+/// installer at the root, or a loader library directory. An installer whose name
+/// both Forge and NeoForge published names only the release. A field is known only
 /// when every piece of evidence in the archive agrees on it, so a contradictory
 /// archive constrains nothing it contradicts itself about. Nothing here is ever
 /// a guess: an unknown field stays unknown and is left to the user.
@@ -229,6 +230,7 @@ impl ServerArchiveEvidence {
                     LoaderKind::NeoForge => ephervex_loaders::neoforge_minecraft(&loader.version),
                     LoaderKind::Forge | LoaderKind::Vanilla => loader.minecraft_version.clone(),
                 })
+                .chain(evidence.unattributed_minecraft.iter().cloned().map(Some))
                 .collect(),
         );
         Self {
@@ -1241,6 +1243,7 @@ mod tests {
         let evidence = ServerArchiveEvidence::from_archive(&ServerPackEvidence {
             carries_mods: true,
             loaders: vec![named(LoaderKind::NeoForge, "26.1.2.94", None)],
+            ..ServerPackEvidence::default()
         });
 
         assert_eq!(
@@ -1262,6 +1265,7 @@ mod tests {
                 named(LoaderKind::NeoForge, "21.1.77", None),
                 named(LoaderKind::NeoForge, "21.1.80", None),
             ],
+            ..ServerPackEvidence::default()
         });
         assert_eq!(two_builds.loader, Some(LoaderKind::NeoForge));
         assert_eq!(two_builds.loader_version, None);
@@ -1273,6 +1277,7 @@ mod tests {
                 named(LoaderKind::NeoForge, "21.1.77", None),
                 named(LoaderKind::Forge, "47.2.0", Some("1.20.1")),
             ],
+            ..ServerPackEvidence::default()
         });
         assert_eq!(
             two_loaders,
@@ -1305,6 +1310,7 @@ mod tests {
                 "26.2.0.1-beta+snapshot-3",
                 None,
             )],
+            ..ServerPackEvidence::default()
         });
 
         assert_eq!(evidence.minecraft_version, None);
@@ -1312,5 +1318,59 @@ mod tests {
             evidence.loader_version.as_deref(),
             Some("26.2.0.1-beta+snapshot-3")
         );
+    }
+
+    #[test]
+    fn a_forge_named_installer_for_minecraft_1_20_1_does_not_settle_the_loader() {
+        let evidence = ServerArchiveEvidence::from_archive(&ServerPackEvidence {
+            unattributed_minecraft: vec!["1.20.1".to_owned()],
+            ..ServerPackEvidence::default()
+        });
+
+        assert_eq!(
+            evidence,
+            ServerArchiveEvidence {
+                minecraft_version: Some("1.20.1".to_owned()),
+                ..ServerArchiveEvidence::default()
+            }
+        );
+        for selected in [
+            LoaderSelection::exact(LoaderKind::NeoForge, "47.1.106"),
+            LoaderSelection::exact(LoaderKind::Forge, "47.1.106"),
+        ] {
+            assert_eq!(evidence.conflict("1.20.1", &selected), None);
+        }
+        assert!(matches!(
+            evidence.conflict(
+                "1.21.1",
+                &LoaderSelection::exact(LoaderKind::NeoForge, "21.1.77")
+            ),
+            Some(ServerArchiveConflict::MinecraftVersion { .. })
+        ));
+    }
+
+    #[test]
+    fn a_settled_loader_keeps_its_kind_beside_an_installer_that_names_only_a_release() {
+        let evidence = ServerArchiveEvidence::from_archive(&ServerPackEvidence {
+            loaders: vec![named(LoaderKind::Forge, "47.4.0", Some("1.20.1"))],
+            unattributed_minecraft: vec!["1.20.1".to_owned()],
+            ..ServerPackEvidence::default()
+        });
+
+        assert_eq!(evidence.loader, Some(LoaderKind::Forge));
+        assert_eq!(evidence.loader_version.as_deref(), Some("47.4.0"));
+        assert_eq!(evidence.minecraft_version.as_deref(), Some("1.20.1"));
+    }
+
+    #[test]
+    fn an_installer_naming_another_release_than_the_loader_leaves_the_release_unknown() {
+        let evidence = ServerArchiveEvidence::from_archive(&ServerPackEvidence {
+            loaders: vec![named(LoaderKind::NeoForge, "21.1.77", None)],
+            unattributed_minecraft: vec!["1.20.1".to_owned()],
+            ..ServerPackEvidence::default()
+        });
+
+        assert_eq!(evidence.loader, Some(LoaderKind::NeoForge));
+        assert_eq!(evidence.minecraft_version, None);
     }
 }
