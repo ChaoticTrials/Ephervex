@@ -118,7 +118,9 @@ export component LiveLogViewer inherits Rectangle {
                 AppButton { text: GuiI18n.text("gui-copy-selection"); enabled: root.has-selection; hint: GuiI18n.text("gui-hint-copy-selection"); clicked => { root.copy-selection(); } }
                 AppButton { text: GuiI18n.text("gui-copy-retained"); enabled: root.has-content; hint: GuiI18n.text("gui-hint-copy-retained"); clicked => { root.copy(); } }
                 Rectangle { horizontal-stretch: 1; }
-                if root.pending-lines > 0 : BodyText { text: GuiI18n.count("gui-new-log-lines", root.pending-lines); color: Theme.accent; font-size: Theme.caption-size; }
+                // Output that arrived below the view while it is not following. Pressing it
+                // resumes following, which takes the view to the newest output.
+                if root.pending-lines > 0 : AppButton { text: GuiI18n.count("gui-new-log-lines", root.pending-lines); tone: "primary"; clicked => { root.follow-changed(true); } }
             }
         }
         if root.status != "" || root.history-truncated : Rectangle {
@@ -156,6 +158,14 @@ export component LiveLogViewer inherits Rectangle {
             horizontal-scrollbar-policy: root.wrap-lines ? ScrollBarPolicy.always-off : ScrollBarPolicy.always-on;
             private property <int> observed-revision: root.revision;
             changed observed-revision => {
+                if root.follow {
+                    self.viewport-y = min(0px, self.visible-height - self.viewport-height);
+                }
+            }
+            // Resuming following does not change any row, because the rows that
+            // arrived meanwhile are already drawn, so the view is taken to the end here.
+            private property <bool> observed-follow: root.follow;
+            changed observed-follow => {
                 if root.follow {
                     self.viewport-y = min(0px, self.visible-height - self.viewport-height);
                 }

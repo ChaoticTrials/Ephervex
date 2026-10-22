@@ -334,7 +334,6 @@ impl LiveViewerState {
                 LiveLogLine::File(line) => self.history.append_line(line),
             }
         }
-        self.pending_lines = self.pending_lines.saturating_add(added);
         if reset {
             // A source's whole content, not growth: this is what a file being
             // opened looks like, and it has to be drawn whether or not the
@@ -355,8 +354,8 @@ enum LiveLogChange {
     /// Nothing to draw: the update was for a source this view is not on, or it
     /// carried no lines.
     Nothing,
-    /// The source grew. A view that is following redraws; one the user has
-    /// scrolled away from counts the new lines instead.
+    /// The source grew. Every view redraws; one the user has scrolled away
+    /// from also counts the rows that appeared below its position.
     Grew,
     /// A source's whole content arrived. Always drawn.
     Reset,
@@ -515,7 +514,31 @@ fn same_chunk(left: &LogChunk, right: &LogChunk) -> bool {
     left.text == right.text && left.level == right.level
 }
 
-fn sync_log_chunks(model: &VecModel<LogChunk>, chunks: Vec<LogChunk>) -> bool {
+/// What bringing the rows to a new set of chunks did to them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ChunkChange {
+    /// Rows removed from the front, which moved every row that is left up by
+    /// as many.
+    dropped_front: usize,
+    /// The first row, counted after the rows were dropped, that is not the
+    /// row it was before. Rows from here on are new or changed.
+    first_changed: usize,
+    /// How many rows there are now.
+    rows: usize,
+}
+
+impl ChunkChange {
+    /// The rows that appeared or changed at the end.
+    const fn new_rows(&self) -> usize {
+        self.rows.saturating_sub(self.first_changed)
+    }
+}
+
+/// Brings the rows to `chunks`, and says what changed, or `None` when nothing
+/// did. Rows before `first_changed` are exactly as they were, apart from
+/// moving up by `dropped_front`, so a selection that stays among them still
+/// names the same text.
+fn sync_log_chunks(model: &VecModel<LogChunk>, chunks: Vec<LogChunk>) -> Option<ChunkChange> {
     let current = (0..model.row_count())
         .filter_map(|index| model.row_data(index))
         .collect::<Vec<_>>();
@@ -525,7 +548,7 @@ fn sync_log_chunks(model: &VecModel<LogChunk>, chunks: Vec<LogChunk>) -> bool {
             .zip(&chunks)
             .all(|(left, right)| same_chunk(left, right))
     {
-        return false;
+        return None;
     }
 
     if let Some(first) = chunks.first() {
@@ -546,7 +569,11 @@ fn sync_log_chunks(model: &VecModel<LogChunk>, chunks: Vec<LogChunk>) -> bool {
                 for chunk in chunks.into_iter().skip(overlap) {
                     model.push(chunk);
                 }
-                return true;
+                return Some(ChunkChange {
+                    dropped_front: start,
+                    first_changed: overlap,
+                    rows: model.row_count(),
+                });
             }
         }
     }
@@ -562,7 +589,11 @@ fn sync_log_chunks(model: &VecModel<LogChunk>, chunks: Vec<LogChunk>) -> bool {
     for chunk in chunks.into_iter().skip(common_prefix) {
         model.push(chunk);
     }
-    true
+    Some(ChunkChange {
+        dropped_front: 0,
+        first_changed: common_prefix,
+        rows: model.row_count(),
+    })
 }
 
 /// Whether a character belongs to the middle of a log's idea of a word.
@@ -14768,6 +14799,7 @@ mod tests {
         };
         let update = LiveLogUpdate {
             source: LiveLogSource::Server(id),
+            generation: None,
             reset: false,
             missing: false,
             source_truncated: false,
@@ -14811,9 +14843,13 @@ mod tests {
         ui.invoke_launch_client(client.id().into());
 
         assert!(
-            !commands
-                .try_iter()
-                .any(|command| matches!(command, Command::OpenLiveLog(LiveLogSource::Server(_)))),
+            !commands.try_iter().any(|command| matches!(
+                command,
+                Command::OpenLiveLog {
+                    source: LiveLogSource::Server(_),
+                    ..
+                }
+            )),
             "a snapshot taken before the run writes can only be the run before"
         );
         deliver_server_line(&workspace, server, "new run");
@@ -14851,7 +14887,7 @@ mod tests {
         assert!(
             commands
                 .try_iter()
-                .any(|command| matches!(command, Command::OpenLiveLog(LiveLogSource::Server(opened)) if opened == id)),
+                .any(|command| matches!(command, Command::OpenLiveLog { source: LiveLogSource::Server(opened), .. } if opened == id)),
             "the console reads the capture because no run is coming"
         );
     }
@@ -20612,6 +20648,7 @@ mod tests {
         assert_eq!(
             state.apply(LiveLogUpdate {
                 source: source.clone(),
+                generation: None,
                 reset: true,
                 missing: false,
                 source_truncated: false,
@@ -20623,6 +20660,7 @@ mod tests {
         assert_eq!(
             state.apply(LiveLogUpdate {
                 source: source.clone(),
+                generation: None,
                 reset: false,
                 missing: false,
                 source_truncated: false,
@@ -20634,6 +20672,7 @@ mod tests {
         assert_eq!(
             state.apply(LiveLogUpdate {
                 source: LiveLogSource::Client(ephervex_model::InstanceId::new()),
+                generation: None,
                 reset: true,
                 missing: false,
                 source_truncated: false,
@@ -20668,6 +20707,7 @@ mod tests {
             assert_ne!(
                 state.apply(LiveLogUpdate {
                     source: source.clone(),
+                    generation: None,
                     reset: batch == 0,
                     missing: false,
                     source_truncated: false,

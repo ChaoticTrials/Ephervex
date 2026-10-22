@@ -347,8 +347,14 @@ so every pane on a host reads the same state. A host's lifecycle state is drawn
 in the same tone wherever it is shown: changing or needing a look, running,
 failed, or settled. What a single pane is looking at
 stays with the pane: each Logs or Console pane has its own log viewer, and the
-worker follows each client's log for as long as a pane reads it. The
-single-flight guards (the isolation change, the diagnosis or fix, a host's
+worker follows each client's log for as long as a pane reads it. Panes on the
+same log share one reader: the first pane asks the worker to open it, a pane
+that joins takes the content the others already hold, and the reader closes
+when the last pane leaves. Every request for a reader carries a generation that
+its updates return, so an update from a reader that was replaced or closed is
+dropped. Following decides only where a pane scrolls to: new records are drawn
+either way, and a pane that is not following counts the ones below its position.
+The single-flight guards (the isolation change, the diagnosis or fix, a host's
 restart, the host-change claim) stay in the controller and the worker,
 so two panes on one host cannot start the same work twice. A pane whose host is
 deleted stays in place, says so, and can be pointed at another host or closed.

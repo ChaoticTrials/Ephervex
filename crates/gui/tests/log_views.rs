@@ -75,6 +75,133 @@ fn a_log_that_fits_offers_nothing_to_scroll_to() {
     );
 }
 
+#[test]
+fn resuming_following_takes_a_log_scrolled_up_to_its_end() {
+    let ui = window();
+    server_logs(&ui);
+    set_view(&ui, |view| {
+        view.chunks = chunks(400);
+        view.has_content = true;
+        view.follow = false;
+    });
+    settle(&ui);
+    assert!(
+        !shows_line(&ui, "line 399"),
+        "the log starts away from its end"
+    );
+
+    // The rows were drawn as they arrived, so resuming changes no row and the
+    // view has to be taken to the end by the switch itself. The row is updated
+    // in place, as the controller does, which keeps the viewer's list alive.
+    let views = ui.get_log_views();
+    let mut view = views.row_data(0).expect("the viewer's row");
+    view.follow = true;
+    views.set_row_data(0, view);
+    settle(&ui);
+
+    assert!(
+        shows_line(&ui, "line 399"),
+        "a view that follows again is at the newest output"
+    );
+}
+
+#[test]
+fn a_log_scrolled_up_keeps_its_place_while_old_rows_leave_the_front() {
+    let ui = window();
+    server_logs(&ui);
+    let rows: Rc<VecModel<LogChunk>> = Rc::new(VecModel::from(
+        (0..400)
+            .map(|index| LogChunk {
+                text: format!("[12:00:00] [Server thread/INFO]: line {index}").into(),
+                level: "info".into(),
+            })
+            .collect::<Vec<_>>(),
+    ));
+    let shared = Rc::clone(&rows);
+    set_view(&ui, move |view| {
+        view.chunks = ModelRc::from(shared);
+        view.has_content = true;
+        view.follow = false;
+    });
+    settle(&ui);
+    let first = console_rows(&ui).first().expect("a row is built").clone();
+    let anchor = LogicalPosition::new(
+        first.absolute_position().x + 60.0,
+        first.absolute_position().y + 20.0,
+    );
+    ui.window().dispatch_event(WindowEvent::PointerScrolled {
+        position: anchor,
+        delta_x: 0.0,
+        delta_y: -1500.0,
+    });
+    settle(&ui);
+    let position_of = |ui: &AppWindow, text: &str| {
+        console_rows(ui)
+            .iter()
+            .find(|row| {
+                row.accessible_value()
+                    .is_some_and(|value| value.ends_with(text))
+            })
+            .map(|row| row.absolute_position().y)
+    };
+    let (_, watched) = console_rows(&ui)
+        .iter()
+        .filter_map(ElementHandle::accessible_value)
+        .enumerate()
+        .nth(3)
+        .expect("a row is on screen after scrolling");
+    let watched = watched
+        .rsplit(": ")
+        .next()
+        .expect("a line label")
+        .to_owned();
+    let before = position_of(&ui, &watched).expect("the watched line is on screen");
+    assert_ne!(watched, "line 3", "the log was scrolled away from its top");
+
+    // The retained log is full: the oldest rows leave as new ones arrive.
+    rows.remove(0);
+    rows.remove(0);
+    rows.push(LogChunk {
+        text: "[12:00:01] [Server thread/INFO]: newest".into(),
+        level: "info".into(),
+    });
+    settle(&ui);
+
+    assert_eq!(
+        position_of(&ui, &watched),
+        Some(before),
+        "the text being read stays where it was"
+    );
+}
+
+#[test]
+fn the_new_lines_indicator_resumes_following_when_pressed() {
+    let ui = window();
+    let followed: Rc<RefCell<Vec<bool>>> = Rc::default();
+    let record = Rc::clone(&followed);
+    ui.on_log_follow(move |_, follow| record.borrow_mut().push(follow));
+
+    server_logs(&ui);
+    set_view(&ui, |view| {
+        view.chunks = chunks(400);
+        view.has_content = true;
+        view.follow = false;
+        view.pending_lines = 3;
+    });
+    settle(&ui);
+
+    let indicator = ElementHandle::find_by_accessible_label(
+        &ui,
+        &lookup_args("gui-new-log-lines", [("count", Arg::Count(3))]),
+    )
+    .find(|element| element.size().width > 0.0)
+    .expect("output that arrived below the view is announced");
+    indicator.mock_single_click(PointerEventButton::Left);
+    settle(&ui);
+
+    assert_eq!(followed.borrow().as_slice(), [true]);
+}
+
 /// The three ways one entity's logs are read, on one tab.
 #[test]
 fn server_logs_distinguish_captured_output_from_saved_files_and_crash_reports() {
@@ -738,6 +865,15 @@ fn key(ui: &AppWindow, text: &str) {
         .dispatch_event(WindowEvent::KeyPressed { text: text.into() });
     ui.window()
         .dispatch_event(WindowEvent::KeyReleased { text: text.into() });
+}
+
+/// Whether a row ending in `text` is currently built, which in a virtualized
+/// list means it is on screen.
+fn shows_line(ui: &AppWindow, text: &str) -> bool {
+    console_rows(ui).iter().any(|row| {
+        row.accessible_value()
+            .is_some_and(|value| value.ends_with(text))
+    })
 }
 
 /// The console's rows, in order.

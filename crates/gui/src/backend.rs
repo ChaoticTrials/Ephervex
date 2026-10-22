@@ -700,8 +700,12 @@ pub enum Command {
         name: String,
     },
     /// Starts, or restarts from the beginning, one log source. Every view on
-    /// that source receives what it sends.
-    OpenLiveLog(LiveLogSource),
+    /// that source receives what it sends, tagged with `generation` so that
+    /// updates from a reader this request replaced can be told apart.
+    OpenLiveLog {
+        source: LiveLogSource,
+        generation: LiveLogGeneration,
+    },
     /// Stops following a source no view reads any more.
     CloseLiveLog(LiveLogSource),
     SaveServerProperties {
@@ -882,9 +886,27 @@ pub enum LiveLogLine {
     File(String),
 }
 
+/// Names one reader of a live-log source.
+///
+/// Each request to read a source carries a new generation, and every update
+/// that reader sends carries it back. A reader that has been replaced or closed
+/// can still deliver one last update, and the generation is what lets the
+/// receiver drop it instead of appending stale or duplicate records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LiveLogGeneration(u64);
+
+impl LiveLogGeneration {
+    pub(crate) const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LiveLogUpdate {
     pub source: LiveLogSource,
+    /// The reader that produced this update, or `None` for output a forwarder
+    /// delivers directly, which no reader's replacement can make stale.
+    pub generation: Option<LiveLogGeneration>,
     pub reset: bool,
     pub missing: bool,
     pub source_truncated: bool,
@@ -5923,10 +5945,11 @@ fn run_worker(
                 }
                 delete_mod(&app, host, &path, name, &events, &refreshed_mods);
             }
-            Command::OpenLiveLog(source) => {
+            Command::OpenLiveLog { source, generation } => {
                 open_live_log(
                     &app,
                     source,
+                    generation,
                     &events,
                     &supervised,
                     &mut client_tails,
@@ -8552,6 +8575,7 @@ fn send_server_workspace(app: &App, server: ServerId, events: &Sender<Event>) {
 fn open_live_log(
     app: &App,
     source: LiveLogSource,
+    generation: LiveLogGeneration,
     events: &Sender<Event>,
     supervised: &SupervisedServers,
     client_tails: &mut HashMap<InstanceId, Arc<AtomicBool>>,
@@ -8565,6 +8589,7 @@ fn open_live_log(
                 Ok(view) => {
                     let _ = events.send(Event::LiveLog(LiveLogUpdate {
                         source,
+                        generation: Some(generation),
                         reset: true,
                         missing: false,
                         // A window rather than the whole file, exactly as the
@@ -8581,9 +8606,11 @@ fn open_live_log(
             }
         }
         LiveLogSource::Server(server) => {
-            follow_server_capture(app, supervised, server, events, server_tails);
+            follow_server_capture(app, supervised, server, generation, events, server_tails);
         }
-        LiveLogSource::Client(instance) => follow_client_log(app, instance, events, client_tails),
+        LiveLogSource::Client(instance) => {
+            follow_client_log(app, instance, generation, events, client_tails);
+        }
     }
 }
 
@@ -8592,6 +8619,7 @@ fn open_live_log(
 fn follow_client_log(
     app: &App,
     instance: InstanceId,
+    generation: LiveLogGeneration,
     events: &Sender<Event>,
     client_tails: &mut HashMap<InstanceId, Arc<AtomicBool>>,
 ) {
@@ -8602,8 +8630,9 @@ fn follow_client_log(
             return;
         }
     };
-    // A second open of the same client restarts its tail, so every
-    // view on it receives the whole log again.
+    // Opening a client that already has a tail replaces it, so every view on
+    // it receives the whole log again. The views ask only when none of them
+    // holds the log already.
     let stop = Arc::new(AtomicBool::new(false));
     if let Some(previous) = client_tails.insert(instance, Arc::clone(&stop)) {
         previous.store(true, Ordering::Relaxed);
@@ -8635,9 +8664,12 @@ fn follow_client_log(
                             || update.reset
                             || !update.lines.is_empty()
                             || update.skipped_bytes > 0;
-                        if has_update {
+                        // Stopped while it polled: its replacement has already
+                        // read the log from the start.
+                        if has_update && !stop.load(Ordering::Relaxed) {
                             let _ = events.send(Event::LiveLog(LiveLogUpdate {
                                 source: LiveLogSource::Client(instance),
+                                generation: Some(generation),
                                 reset: first || update.reset,
                                 missing: update.missing,
                                 source_truncated: update.skipped_bytes > 0,
@@ -8671,6 +8703,7 @@ fn follow_server_capture(
     app: &App,
     supervised: &SupervisedServers,
     server: ServerId,
+    generation: LiveLogGeneration,
     events: &Sender<Event>,
     server_tails: &mut HashMap<ServerId, Arc<AtomicBool>>,
 ) {
@@ -8681,8 +8714,9 @@ fn follow_server_capture(
             return;
         }
     };
-    // A second open of the same server restarts its tail, so every view on it
-    // receives the whole run again.
+    // Opening a server that already has a tail replaces it, so every view on
+    // it receives the whole run again. The views ask only when none of them
+    // holds the console already.
     let stop = Arc::new(AtomicBool::new(false));
     if let Some(previous) = server_tails.insert(server, Arc::clone(&stop)) {
         previous.store(true, Ordering::Relaxed);
@@ -8717,7 +8751,13 @@ fn follow_server_capture(
                         was_forwarding = forwarding;
                         first = false;
                         if let Some(update) = update {
-                            send_followed_capture(&events, &mut delivery, server, update);
+                            send_followed_capture(
+                                &events,
+                                &mut delivery,
+                                server,
+                                Some(generation),
+                                update,
+                            );
                         }
                     }
                     Err(error) => {
@@ -8758,11 +8798,13 @@ fn send_followed_capture(
     events: &Sender<Event>,
     delivery: &mut ConsoleDelivery,
     server: ServerId,
+    generation: Option<LiveLogGeneration>,
     update: ephervex_core::CaptureUpdate,
 ) {
     delivery.note_sent(&update);
     let _ = events.send(Event::LiveLog(LiveLogUpdate {
         source: LiveLogSource::Server(server),
+        generation,
         reset: update.reset,
         missing: false,
         source_truncated: update.truncated,
@@ -9782,6 +9824,7 @@ fn send_server_lines(
     }
     let _ = events.send(Event::LiveLog(LiveLogUpdate {
         source: LiveLogSource::Server(server),
+        generation: None,
         reset: false,
         missing: false,
         source_truncated: false,
@@ -9792,6 +9835,7 @@ fn send_server_lines(
 fn send_server_truncation(events: &Sender<Event>, server: ServerId) {
     let _ = events.send(Event::LiveLog(LiveLogUpdate {
         source: LiveLogSource::Server(server),
+        generation: None,
         reset: false,
         missing: false,
         source_truncated: true,
@@ -17437,6 +17481,7 @@ mod tests {
             &events,
             &mut delivery.lock().expect("delivery"),
             server,
+            None,
             supervisor.snapshot(),
         );
         send_server_lines(&events, &delivery, server, vec![one, two]);
@@ -17462,6 +17507,7 @@ mod tests {
             &events,
             &mut delivery.lock().expect("delivery"),
             server,
+            None,
             supervisor.snapshot(),
         );
         send_server_lines(&events, &delivery, server, vec![two]);
@@ -17482,6 +17528,7 @@ mod tests {
             &events,
             &mut delivery.lock().expect("delivery"),
             server,
+            None,
             supervisor.snapshot(),
         );
         send_server_lines(&events, &delivery, server, vec![one, three]);
@@ -17502,6 +17549,7 @@ mod tests {
             &events,
             &mut delivery.lock().expect("delivery"),
             server,
+            None,
             supervisor.snapshot(),
         );
         // The forwarder finished its run after the snapshot was read, so it is
@@ -17511,6 +17559,7 @@ mod tests {
             &events,
             &mut delivery.lock().expect("delivery"),
             server,
+            None,
             ephervex_core::CaptureUpdate {
                 lines: vec![captured_line_of(&two)],
                 reset: false,
@@ -17537,6 +17586,7 @@ mod tests {
             &events,
             &mut delivery.lock().expect("delivery"),
             server,
+            None,
             snapshot,
         );
         send_server_lines(&events, &delivery, server, vec![old, kept]);

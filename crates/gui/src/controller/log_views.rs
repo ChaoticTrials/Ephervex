@@ -15,11 +15,12 @@ use ephervex_i18n::{Arg, lookup_args};
 use slint::{ComponentHandle as _, Model as _, ModelRc, SharedString, VecModel};
 
 use super::{
-    LiveLogChange, LiveViewerState, build_log_presentation, diagnostic_rows, expand_tabs,
-    parse_log_level_name, send, sync_log_chunks, to_i32,
+    LiveLogChange, LiveViewerState, LogSelection, SelectionPoint, build_log_presentation,
+    diagnostic_rows, expand_tabs, parse_log_level_name, send, sync_log_chunks, to_i32,
 };
 use crate::backend::{
-    self, Command, DiagnosticContent, DiagnosticData, LiveLogSource, LiveLogUpdate,
+    self, Command, DiagnosticContent, DiagnosticData, LiveLogGeneration, LiveLogSource,
+    LiveLogUpdate,
 };
 use crate::ui::{AppWindow, LogView};
 use crate::workspace_layout::{PaneId, Surface};
@@ -119,6 +120,12 @@ pub(super) struct LogViews {
     /// Sources a viewer was opened on while they were starting, whose live log
     /// is opened once the wait ends.
     deferred: HashSet<LiveLogSource>,
+    /// The reader the backend was last asked to run for each source in use.
+    /// Viewers opened on a source that has one subscribe to it instead of
+    /// asking for another, and an update from any other reader is stale.
+    readers: HashMap<LiveLogSource, LiveLogGeneration>,
+    /// The generation the next requested reader is given.
+    next_generation: u64,
 }
 
 impl LogViews {
@@ -129,6 +136,8 @@ impl LogViews {
             commands,
             starting: HashSet::new(),
             deferred: HashSet::new(),
+            readers: HashMap::new(),
+            next_generation: 0,
         }
     }
 
@@ -183,10 +192,7 @@ impl LogViews {
             };
             self.open_live(slot);
         }
-        let after = self.sources();
-        for source in before.difference(&after) {
-            send(&self.commands, Command::CloseLiveLog(source.clone()));
-        }
+        self.close_unread(&before);
     }
 
     /// Every source some viewer reads.
@@ -198,7 +204,7 @@ impl LogViews {
             .collect()
     }
 
-    /// Points a viewer at its host's live log and asks for all of it.
+    /// Points a viewer at its host's live log and shows all of it.
     fn open_live(&mut self, slot: usize) {
         let Some(viewer) = self.slots[slot].as_mut() else {
             return;
@@ -209,12 +215,56 @@ impl LogViews {
         viewer.follow = true;
         let source = viewer.live_source();
         viewer.live.activate(source.clone());
+        if self.subscribe(slot, &source) {
+            return;
+        }
         self.render(slot);
         if self.starting.contains(&source) {
             self.deferred.insert(source);
         } else {
-            send(&self.commands, Command::OpenLiveLog(source));
+            self.request_reader(source);
         }
+    }
+
+    /// Gives a viewer the content of the reader its source already has, instead
+    /// of restarting that reader for every viewer on it. Says whether it could:
+    /// without another viewer holding the content there is nothing to copy.
+    fn subscribe(&mut self, slot: usize, source: &LiveLogSource) -> bool {
+        if !self.readers.contains_key(source) {
+            return false;
+        }
+        let Some(holder) = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|&(other, _)| other != slot)
+            .find_map(|(_, viewer)| {
+                viewer
+                    .as_ref()
+                    .filter(|viewer| viewer.live.active.as_ref() == Some(source))
+            })
+        else {
+            return false;
+        };
+        let history = holder.live.history.clone();
+        let truncated = holder.live.source_truncated;
+        if let Some(viewer) = self.slots[slot].as_mut() {
+            viewer.live.history = history;
+            viewer.live.source_truncated = truncated;
+            viewer.live.pending_lines = 0;
+        }
+        self.render(slot);
+        true
+    }
+
+    /// Asks the backend to read `source` from the start, replacing any reader
+    /// it had. The new generation is what makes the replaced one's late
+    /// updates recognizable.
+    fn request_reader(&mut self, source: LiveLogSource) {
+        self.next_generation += 1;
+        let generation = LiveLogGeneration::from_raw(self.next_generation);
+        self.readers.insert(source.clone(), generation);
+        send(&self.commands, Command::OpenLiveLog { source, generation });
     }
 
     /// Opens the live log of a source whose viewers were opened while it was
@@ -227,7 +277,7 @@ impl LogViews {
                 .flatten()
                 .any(|viewer| viewer.live.active.as_ref() == Some(source))
         {
-            send(&self.commands, Command::OpenLiveLog(source.clone()));
+            self.request_reader(source.clone());
         }
     }
 
@@ -252,9 +302,17 @@ impl LogViews {
 
     /// Ends the wait for a started run's first line: from here on its
     /// capture holds the run, so a viewer opened later may read it.
+    ///
+    /// A wait that ends before any line arrived leaves the viewers on the
+    /// source empty, so the capture is read for all of them.
     pub(super) fn settle_start(&mut self, source: &LiveLogSource) {
-        self.starting.remove(source);
-        self.open_deferred(source);
+        if !self.starting.remove(source) {
+            return;
+        }
+        self.deferred.remove(source);
+        if self.sources().contains(source) {
+            self.request_reader(source.clone());
+        }
     }
 
     /// Takes one update for every viewer on its source.
@@ -263,6 +321,14 @@ impl LogViews {
         update: &LiveLogUpdate,
         changes: &mut HashMap<usize, LiveLogChange>,
     ) {
+        // A reader that was replaced or closed can still deliver one last
+        // update; it must not reach a viewer of the reader that took its place.
+        if update
+            .generation
+            .is_some_and(|generation| self.readers.get(&update.source) != Some(&generation))
+        {
+            return;
+        }
         if self.starting.contains(&update.source) {
             // A whole-source update can only be a snapshot taken before the
             // run began, which is the output being left behind.
@@ -288,19 +354,14 @@ impl LogViews {
     /// Draws what one poll's updates did to each viewer.
     pub(super) fn settle(&mut self, changes: HashMap<usize, LiveLogChange>) {
         for (slot, change) in changes {
-            let Some(viewer) = self.slots.get(slot).and_then(Option::as_ref) else {
+            if self.slots.get(slot).and_then(Option::as_ref).is_none() {
                 continue;
-            };
-            match change {
-                // A saved log opens with following off, because a finished log
-                // has nothing to follow; its content is drawn all the same.
-                LiveLogChange::Reset => self.render(slot),
-                LiveLogChange::Grew if viewer.follow => self.render(slot),
-                LiveLogChange::Grew => {
-                    let pending = to_i32(viewer.live.pending_lines);
-                    self.update_row(slot, |row| row.pending_lines = pending);
-                }
-                LiveLogChange::Nothing => {}
+            }
+            // New records are drawn whether or not the viewer follows: following
+            // decides only where the view scrolls to, and a viewer that is not
+            // following counts what arrived below its position as unseen.
+            if change != LiveLogChange::Nothing {
+                self.draw(slot, change == LiveLogChange::Grew);
             }
         }
     }
@@ -314,10 +375,21 @@ impl LogViews {
 
     /// Writes one viewer into its row.
     fn render(&mut self, slot: usize) {
+        self.draw(slot, false);
+    }
+
+    /// Writes one viewer into its row. `grown` says the source grew, so a viewer
+    /// that is not following counts the rows that appeared as unseen.
+    fn draw(&mut self, slot: usize, grown: bool) {
         let Some(viewer) = self.slots.get_mut(slot).and_then(Option::as_mut) else {
             return;
         };
+        let follow = viewer.follow;
         let state = &mut viewer.live;
+        if follow {
+            // A following view is always at the newest output.
+            state.pending_lines = 0;
+        }
         let presentation = build_log_presentation(state);
         let status = if state.search_query.is_empty() {
             lookup_args(
@@ -330,14 +402,35 @@ impl LogViews {
                 [("count", Arg::from(presentation.match_count))],
             )
         };
-        let chunks_changed = sync_log_chunks(&state.chunks, presentation.chunks);
-        if chunks_changed {
-            // Rows are addressed by index, and the indices just moved. Keeping
-            // the highlight would mean highlighting different text than was
-            // selected.
-            state.selection = None;
+        let change = sync_log_chunks(&state.chunks, presentation.chunks);
+        let chunks_changed = change.is_some();
+        if let Some(change) = change {
+            if grown && !follow {
+                // Counted from the rows, because that is what the pane shows:
+                // a filter or search hides lines, and a stack trace is one
+                // record of many rows.
+                state.pending_lines = state.pending_lines.saturating_add(change.new_rows());
+            }
+            // Rows are addressed by index. A selection among the rows that
+            // were kept moves up with them; one that touches a row that was
+            // dropped or changed would highlight different text than was
+            // selected, so it goes.
+            state.selection = state.selection.and_then(|selection| {
+                let (start, end) = selection.ordered();
+                let kept = start.row >= change.dropped_front
+                    && end.row - change.dropped_front < change.first_changed;
+                kept.then(|| LogSelection {
+                    anchor: SelectionPoint {
+                        row: selection.anchor.row - change.dropped_front,
+                        ..selection.anchor
+                    },
+                    focus: SelectionPoint {
+                        row: selection.focus.row - change.dropped_front,
+                        ..selection.focus
+                    },
+                })
+            });
         }
-        state.pending_lines = 0;
         let mut row = self.model.row_data(slot).unwrap_or_default();
         row.mode = viewer.mode.id().into();
         row.file = viewer.file.as_str().into();
@@ -347,7 +440,7 @@ impl LogViews {
         row.has_content = !state.history.is_empty();
         row.status = status.into();
         row.history_truncated = state.source_truncated || state.history.history_truncated();
-        row.pending_lines = 0;
+        row.pending_lines = to_i32(state.pending_lines);
         row.content_columns = to_i32(presentation.content_columns.min(100_000));
         row.query = state.search_query.as_str().into();
         row.wrap_lines = viewer.wrap;
@@ -403,9 +496,11 @@ impl LogViews {
         }
     }
 
-    fn close_unread(&self, before: &HashSet<LiveLogSource>) {
+    /// Stops reading every source that was in `before` and no viewer reads now.
+    fn close_unread(&mut self, before: &HashSet<LiveLogSource>) {
         let after = self.sources();
         for source in before.difference(&after) {
+            self.readers.remove(source);
             send(&self.commands, Command::CloseLiveLog(source.clone()));
         }
     }
@@ -431,9 +526,11 @@ impl LogViews {
                 // The view still opens at the end, which is where a log is
                 // read from.
                 viewer.follow = false;
+                // A saved file is read afresh on every open, because the file
+                // may have grown since another pane read it.
                 self.render(slot);
                 self.close_unread(&before);
-                send(&self.commands, Command::OpenLiveLog(source));
+                self.request_reader(source);
             }
             LogMode::Crashes => {
                 viewer.report.clear();
@@ -558,12 +655,16 @@ impl LogViews {
             } else if let Some(level) = parse_log_level_name(level) {
                 viewer.live.filter.set(level, enabled);
             }
+            // The rows shown changed, so the count of unseen ones no longer
+            // refers to them.
+            viewer.live.pending_lines = 0;
         });
     }
 
     pub(super) fn search(&mut self, pane: PaneId, query: &str) {
         self.with_viewer(pane, |viewer| {
             query.clone_into(&mut viewer.live.search_query);
+            viewer.live.pending_lines = 0;
         });
     }
 
@@ -571,8 +672,9 @@ impl LogViews {
         self.with_viewer(pane, |viewer| viewer.wrap = wrap);
     }
 
-    /// Following resumes by drawing what arrived while it was off; turning it
-    /// off only stops counting what is already on screen as new.
+    /// Following controls only where the view scrolls to: new records are
+    /// drawn either way. Resuming it takes the view to the newest output and
+    /// counts everything as seen.
     pub(super) fn set_follow(&mut self, pane: PaneId, follow: bool) {
         self.with_viewer(pane, |viewer| viewer.follow = follow);
     }
@@ -757,6 +859,7 @@ mod tests {
     fn client_update(instance: InstanceId, text: &str) -> LiveLogUpdate {
         LiveLogUpdate {
             source: LiveLogSource::Client(instance),
+            generation: None,
             reset: false,
             missing: false,
             source_truncated: false,
@@ -777,7 +880,7 @@ mod tests {
         commands
             .try_iter()
             .map(|command| match command {
-                Command::OpenLiveLog(source) => format!("open {}", source.kind()),
+                Command::OpenLiveLog { source, .. } => format!("open {}", source.kind()),
                 Command::CloseLiveLog(source) => format!("close {}", source.kind()),
                 Command::LoadDiagnostics { .. } => "list".to_owned(),
                 _ => "other".to_owned(),
@@ -869,7 +972,10 @@ mod tests {
             "a console opened meanwhile follows the capture once the run settles"
         );
         views.sync(&[(A, host, Surface::Console), (B, host, Surface::Logs)]);
-        assert_eq!(sent(&commands), ["open server"]);
+        assert!(
+            sent(&commands).is_empty(),
+            "a second viewer reads the console that is already open"
+        );
     }
 
     #[test]
@@ -898,6 +1004,7 @@ mod tests {
         views.reopen(&source);
         let update = crate::backend::LiveLogUpdate {
             source: source.clone(),
+            generation: None,
             reset: true,
             missing: false,
             source_truncated: false,
@@ -926,6 +1033,7 @@ mod tests {
         views.sync(&[(A, host, Surface::Console)]);
         let update = crate::backend::LiveLogUpdate {
             source,
+            generation: None,
             reset: false,
             missing: false,
             source_truncated: false,
@@ -941,7 +1049,7 @@ mod tests {
         assert_eq!(sent(&commands), ["open server"]);
 
         views.sync(&[(A, host, Surface::Console), (B, host, Surface::Logs)]);
-        assert_eq!(sent(&commands), ["open server"]);
+        assert!(sent(&commands).is_empty());
     }
 
     #[test]
@@ -949,7 +1057,11 @@ mod tests {
         let (mut views, commands) = views();
         let host = InstalledHost::Instance(InstanceId::new());
         views.sync(&[(A, host, Surface::Logs), (B, host, Surface::Logs)]);
-        assert_eq!(sent(&commands), ["open client", "open client"]);
+        assert_eq!(
+            sent(&commands),
+            ["open client"],
+            "the second pane reads the log the first one opened"
+        );
 
         views.sync(&[(A, host, Surface::Logs), (B, host, Surface::Overview)]);
         assert!(sent(&commands).is_empty(), "A still reads it");
@@ -957,6 +1069,363 @@ mod tests {
 
         views.sync(&[(A, host, Surface::Mods)]);
         assert_eq!(sent(&commands), ["close client"]);
+    }
+
+    fn log_line(level: &str, text: &str) -> String {
+        format!("[12:00:00] [main/{level}]: {text}")
+    }
+
+    /// An update from the reader the views last asked for, as the backend
+    /// tags it.
+    fn from_reader(views: &LogViews, source: &LiveLogSource, lines: &[String]) -> LiveLogUpdate {
+        LiveLogUpdate {
+            source: source.clone(),
+            generation: views.readers.get(source).copied(),
+            reset: false,
+            missing: false,
+            source_truncated: false,
+            lines: lines
+                .iter()
+                .map(|text| {
+                    LiveLogLine::Client(TailedLine {
+                        text: text.clone(),
+                        truncation: None,
+                    })
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_pane_opened_on_a_log_that_is_already_read_shows_it_whole_without_a_new_reader() {
+        let (mut views, commands) = views();
+        let host = InstanceId::new();
+        let source = LiveLogSource::Client(host);
+        views.sync(&[(A, InstalledHost::Instance(host), Surface::Logs)]);
+        let mut snapshot = from_reader(
+            &views,
+            &source,
+            &[log_line("INFO", "first"), log_line("INFO", "second")],
+        );
+        snapshot.reset = true;
+        deliver(&mut views, &snapshot);
+        let reader = views.readers.get(&source).copied();
+        sent(&commands);
+
+        views.sync(&[
+            (A, InstalledHost::Instance(host), Surface::Logs),
+            (B, InstalledHost::Instance(host), Surface::Logs),
+        ]);
+
+        assert!(sent(&commands).is_empty(), "the reader is not restarted");
+        assert_eq!(views.readers.get(&source).copied(), reader);
+        assert_eq!(lines(&views, B), lines(&views, A));
+        assert_eq!(lines(&views, B).len(), 2);
+
+        let next = from_reader(&views, &source, &[log_line("INFO", "third")]);
+        deliver(&mut views, &next);
+        assert_eq!(lines(&views, A).len(), 3);
+        assert_eq!(lines(&views, B).len(), 3, "every pane receives new records");
+    }
+
+    #[test]
+    fn a_pane_that_joins_before_the_first_snapshot_arrives_receives_it() {
+        let (mut views, commands) = views();
+        let host = InstanceId::new();
+        let source = LiveLogSource::Client(host);
+        views.sync(&[(A, InstalledHost::Instance(host), Surface::Logs)]);
+        views.sync(&[
+            (A, InstalledHost::Instance(host), Surface::Logs),
+            (B, InstalledHost::Instance(host), Surface::Logs),
+        ]);
+        assert_eq!(sent(&commands), ["open client"]);
+
+        let mut snapshot = from_reader(&views, &source, &[log_line("INFO", "opened")]);
+        snapshot.reset = true;
+        deliver(&mut views, &snapshot);
+
+        assert_eq!(lines(&views, A).len(), 1);
+        assert_eq!(lines(&views, B).len(), 1);
+    }
+
+    #[test]
+    fn leaving_a_log_with_a_pane_still_on_it_keeps_the_reader_until_the_last_pane_leaves() {
+        let (mut views, commands) = views();
+        let instance = InstanceId::new();
+        let host = InstalledHost::Instance(instance);
+        let source = LiveLogSource::Client(instance);
+        views.sync(&[(A, host, Surface::Logs), (B, host, Surface::Logs)]);
+        sent(&commands);
+
+        views.sync(&[(B, host, Surface::Logs)]);
+        assert!(sent(&commands).is_empty());
+        assert!(views.readers.contains_key(&source));
+
+        views.sync(&[]);
+        assert_eq!(sent(&commands), ["close client"]);
+        assert!(!views.readers.contains_key(&source));
+    }
+
+    #[test]
+    fn an_update_from_a_reader_that_was_closed_never_reaches_the_one_that_replaced_it() {
+        let (mut views, _) = views();
+        let host = InstanceId::new();
+        let source = LiveLogSource::Client(host);
+        let pane = [(A, InstalledHost::Instance(host), Surface::Logs)];
+        views.sync(&pane);
+        let retired = from_reader(&views, &source, &[log_line("INFO", "from the old reader")]);
+
+        views.sync(&[]);
+        views.sync(&pane);
+        assert_ne!(
+            views.readers.get(&source).copied(),
+            retired.generation,
+            "a reader asked for again is a new one"
+        );
+        deliver(&mut views, &retired);
+        assert!(lines(&views, A).is_empty(), "the stale update is dropped");
+
+        let current = from_reader(&views, &source, &[log_line("INFO", "from the new reader")]);
+        deliver(&mut views, &current);
+        assert_eq!(lines(&views, A), [log_line("INFO", "from the new reader")]);
+    }
+
+    #[test]
+    fn an_update_from_a_reader_that_was_closed_is_dropped_while_nothing_reads_the_source() {
+        let (mut views, _) = views();
+        let host = InstanceId::new();
+        let source = LiveLogSource::Client(host);
+        views.sync(&[(A, InstalledHost::Instance(host), Surface::Logs)]);
+        let retired = from_reader(&views, &source, &[log_line("INFO", "late")]);
+        views.sync(&[]);
+
+        let mut changes = HashMap::new();
+        views.apply(&retired, &mut changes);
+
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn new_records_are_drawn_at_once_when_a_pane_is_not_following() {
+        let (mut views, _) = views();
+        let host = InstanceId::new();
+        let source = LiveLogSource::Client(host);
+        views.sync(&[(A, InstalledHost::Instance(host), Surface::Logs)]);
+        let mut snapshot = from_reader(&views, &source, &[log_line("INFO", "before")]);
+        snapshot.reset = true;
+        deliver(&mut views, &snapshot);
+        assert_eq!(row(&views, A).pending_lines, 0);
+
+        views.set_follow(A, false);
+        let revision = row(&views, A).revision;
+        let next = from_reader(
+            &views,
+            &source,
+            &[log_line("INFO", "after"), log_line("WARN", "later")],
+        );
+        deliver(&mut views, &next);
+
+        assert_eq!(
+            lines(&views, A),
+            [
+                log_line("INFO", "before"),
+                log_line("INFO", "after"),
+                log_line("WARN", "later"),
+            ],
+            "the records are in the viewer before it follows again"
+        );
+        assert!(!row(&views, A).follow);
+        assert_eq!(row(&views, A).pending_lines, 2);
+        assert!(row(&views, A).revision > revision);
+
+        let more = from_reader(&views, &source, &[log_line("INFO", "and more")]);
+        deliver(&mut views, &more);
+        assert_eq!(row(&views, A).pending_lines, 3, "the count keeps growing");
+
+        views.set_follow(A, true);
+        assert_eq!(row(&views, A).pending_lines, 0);
+        assert_eq!(lines(&views, A).len(), 4);
+    }
+
+    #[test]
+    fn only_records_the_pane_shows_count_as_new_lines() {
+        let (mut views, _) = views();
+        let host = InstanceId::new();
+        let source = LiveLogSource::Client(host);
+        views.sync(&[(A, InstalledHost::Instance(host), Surface::Logs)]);
+        views.set_level(A, "info", false);
+        views.set_follow(A, false);
+
+        let next = from_reader(
+            &views,
+            &source,
+            &[log_line("INFO", "hidden"), log_line("ERROR", "shown")],
+        );
+        deliver(&mut views, &next);
+
+        assert_eq!(lines(&views, A), [log_line("ERROR", "shown")]);
+        assert_eq!(row(&views, A).pending_lines, 1);
+    }
+
+    #[test]
+    fn one_pane_following_does_not_change_what_another_pane_counts_as_new() {
+        let (mut views, _) = views();
+        let host = InstanceId::new();
+        let source = LiveLogSource::Client(host);
+        views.sync(&[
+            (A, InstalledHost::Instance(host), Surface::Logs),
+            (B, InstalledHost::Instance(host), Surface::Logs),
+        ]);
+        views.set_follow(A, false);
+
+        let next = from_reader(&views, &source, &[log_line("INFO", "arrived")]);
+        deliver(&mut views, &next);
+
+        assert_eq!(row(&views, A).pending_lines, 1);
+        assert_eq!(row(&views, B).pending_lines, 0);
+        assert!(row(&views, B).follow);
+        assert_eq!(lines(&views, A), lines(&views, B));
+    }
+
+    #[test]
+    fn a_selection_above_new_records_survives_their_arrival() {
+        let (mut views, _) = views();
+        let host = InstanceId::new();
+        let source = LiveLogSource::Client(host);
+        views.sync(&[(A, InstalledHost::Instance(host), Surface::Logs)]);
+        let mut snapshot = from_reader(
+            &views,
+            &source,
+            &[log_line("INFO", "one"), log_line("INFO", "two")],
+        );
+        snapshot.reset = true;
+        deliver(&mut views, &snapshot);
+        views.set_follow(A, false);
+        views.select_at(A, 0, 0, false);
+        views.select_at(A, 1, 4, true);
+        assert!(row(&views, A).has_selection);
+
+        let next = from_reader(&views, &source, &[log_line("INFO", "three")]);
+        deliver(&mut views, &next);
+
+        assert!(
+            row(&views, A).has_selection,
+            "records appended below do not move the selected text"
+        );
+        assert_eq!(lines(&views, A).len(), 3);
+    }
+
+    #[test]
+    fn a_selection_survives_new_records_pushing_old_ones_out_of_a_full_log() {
+        let (mut views, _) = views();
+        let host = InstanceId::new();
+        let source = LiveLogSource::Client(host);
+        views.sync(&[(A, InstalledHost::Instance(host), Surface::Logs)]);
+        let slot = views.slot(A).expect("viewer");
+        // A log at its retention cap drops its oldest record with every new one.
+        views.slots[slot].as_mut().expect("viewer").live.history =
+            ephervex_core::live_diagnostics::RetainedLog::new(3, usize::MAX);
+        let mut snapshot = from_reader(
+            &views,
+            &source,
+            &[
+                log_line("INFO", "one"),
+                log_line("INFO", "two"),
+                log_line("INFO", "three"),
+            ],
+        );
+        snapshot.reset = true;
+        deliver(&mut views, &snapshot);
+        views.set_follow(A, false);
+        views.select_at(A, 1, 0, false);
+        views.select_at(A, 1, 100, true);
+        let selected = views.selected_text(A);
+        assert_eq!(selected.as_deref(), Some(log_line("INFO", "two").as_str()));
+
+        let next = from_reader(&views, &source, &[log_line("INFO", "four")]);
+        deliver(&mut views, &next);
+
+        assert_eq!(lines(&views, A).len(), 3);
+        assert_eq!(
+            views.selected_text(A),
+            selected,
+            "the selection moved up with its text"
+        );
+        assert_eq!(row(&views, A).pending_lines, 1);
+
+        let more = from_reader(&views, &source, &[log_line("INFO", "five")]);
+        deliver(&mut views, &more);
+        assert_eq!(
+            views.selected_text(A),
+            None,
+            "the selected record was pushed out"
+        );
+    }
+
+    #[test]
+    fn the_new_line_count_follows_the_rows_a_filtered_stack_trace_adds() {
+        let (mut views, _) = views();
+        let host = InstanceId::new();
+        let source = LiveLogSource::Client(host);
+        views.sync(&[(A, InstalledHost::Instance(host), Surface::Logs)]);
+        views.set_level(A, "all", false);
+        views.set_level(A, "error", true);
+        views.set_follow(A, false);
+
+        let trace = from_reader(
+            &views,
+            &source,
+            &[
+                log_line("ERROR", "boom"),
+                "\tat example.Main.run(Main.java:1)".to_owned(),
+                log_line("INFO", "unrelated"),
+            ],
+        );
+        deliver(&mut views, &trace);
+
+        assert_eq!(lines(&views, A).len(), 2, "the error and its trace line");
+        assert_eq!(row(&views, A).pending_lines, 2);
+    }
+
+    #[test]
+    fn a_saved_file_opened_in_a_second_pane_is_read_again() {
+        let (mut views, commands) = views();
+        let host = InstanceId::new();
+        let host = InstalledHost::Instance(host);
+        views.sync(&[(A, host, Surface::Logs), (B, host, Surface::Logs)]);
+        for pane in [A, B] {
+            views.show(pane, LogMode::Files);
+        }
+        sent(&commands);
+
+        views.open_file(A, "latest.log");
+        views.open_file(B, "latest.log");
+
+        assert_eq!(
+            sent(&commands),
+            ["open file", "open file"],
+            "the file may have grown since the other pane read it"
+        );
+    }
+
+    #[test]
+    fn a_console_left_empty_by_an_abandoned_start_reads_the_capture_when_the_wait_ends() {
+        let (mut views, commands) = views();
+        let server = ServerId::new();
+        let host = InstalledHost::Server(server);
+        let source = LiveLogSource::Server(server);
+        views.sync(&[(A, host, Surface::Console)]);
+        views.reopen(&source);
+        sent(&commands);
+
+        views.settle_start(&source);
+        assert_eq!(sent(&commands), ["open server"]);
+
+        views.sync(&[(A, host, Surface::Console), (B, host, Surface::Logs)]);
+        assert!(
+            sent(&commands).is_empty(),
+            "the second pane takes what the first one now holds"
+        );
     }
 
     #[test]
