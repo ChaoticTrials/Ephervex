@@ -25,7 +25,10 @@ A field that the index has no column for stays in the host's metadata alone
 until migration 2 is available after 1.0.0. A server's
 `allow_pack_mod_version_changes` is one: reading the index reports it off, and
 every read for showing or changing the server, and reconciliation, take it from
-the metadata.
+the metadata. A client's optional `issue_link` is another: reading the index
+reports it absent, and every read for showing or changing the client, and
+reconciliation, take it from the metadata. Both are additive fields of metadata
+version 1.
 
 ## Persisted enum compatibility
 

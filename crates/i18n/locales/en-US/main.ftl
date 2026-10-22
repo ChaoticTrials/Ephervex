@@ -1161,6 +1161,12 @@ error-change-isolation-active = This host's mods cannot be changed while an isol
 error-name-empty = A name cannot be blank.
 error-name-too-long = That name is too long. Use at most { $limit } characters.
 error-name-control-characters = A name cannot contain control characters.
+error-issue-link-too-long = That issue link is too long. Use at most { $limit } bytes.
+error-issue-link-invalid-characters = An issue link cannot contain spaces, control characters, or invisible characters.
+error-issue-link-not-an-address = An issue link must be a full web address starting with http:// or https://.
+error-issue-link-unsupported-scheme = An issue link must start with http:// or https://.
+error-issue-link-missing-host = That issue link names no website. Include a host such as github.com.
+error-issue-link-credentials = An issue link cannot contain a user name or password.
 
 error-mod-catalog-preference-unrecognized = "{ $catalog }" is not a mod catalog this version of Ephervex knows.
 .action = Choose a catalog in Settings, or name one for this command. The stored value is left alone.

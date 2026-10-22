@@ -1359,6 +1359,22 @@ enum InstanceCommand {
         #[arg(long, conflicts_with = "path")]
         clear: bool,
     },
+    /// Show, set, or remove the issue link of an instance.
+    ///
+    /// The link points at the bug report or issue the instance reproduces, and
+    /// the desktop application shows it with the instance. With no options,
+    /// prints the current link. A link is a full http:// or https:// address
+    /// without a user name or password, at most 2048 bytes long. It is stored
+    /// exactly as given. `--json` reports it as `issue_link`.
+    Issue {
+        id: InstanceId,
+        /// The issue address, such as https://github.com/owner/repo/issues/42.
+        #[arg(conflicts_with = "clear")]
+        url: Option<String>,
+        /// Remove the issue link.
+        #[arg(long)]
+        clear: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -2634,8 +2650,37 @@ async fn run_instance_command(
         | InstanceCommand::Unfavorite { .. }
         | InstanceCommand::Group { .. }
         | InstanceCommand::Icon { .. } => run_instance_organization_command(app, command, json)?,
+        InstanceCommand::Issue { id, url, clear } => {
+            run_instance_issue(app, *id, url.as_deref(), *clear, json)?;
+        }
     }
     Ok(())
+}
+
+/// Shows the issue link of an instance, or sets or clears it.
+fn run_instance_issue(
+    app: &App,
+    id: InstanceId,
+    url: Option<&str>,
+    clear: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    if url.is_none() && !clear {
+        let record = app.current_client(id)?;
+        if json {
+            print_json(&serde_json::json!({
+                "id": record.id.to_string(),
+                "issue_link": record.issue_link,
+            }));
+        } else if let Some(link) = &record.issue_link {
+            outln!("{link}");
+        } else {
+            outln!("no issue link is set");
+        }
+        return Ok(());
+    }
+    app.set_client_issue_link(id, url.filter(|_| !clear))?;
+    print_instance(app, &app.current_client(id)?, json)
 }
 
 fn run_instance_organization_command(
@@ -4753,6 +4798,13 @@ fn print_instance_list(app: &App, args: &InstanceListArgs, json: bool) -> anyhow
     let organized = Organized::load(app)?;
 
     if json {
+        // The index rows lack the issue link, which only the metadata holds.
+        for record in records.values_mut() {
+            record.issue_link = app
+                .current_client(record.id)
+                .ok()
+                .and_then(|current| current.issue_link);
+        }
         let values: Vec<_> = listed
             .iter()
             .filter_map(|facts| records.get(&facts.id))
@@ -9045,6 +9097,9 @@ fn print_instance(app: &App, record: &ClientRecord, json: bool) -> anyhow::Resul
         outln!("loader:    {}", record.loader);
         outln!("root:      {}", record.root.display());
         let view = app.organization_or_empty();
+        if let Some(link) = &record.issue_link {
+            outln!("issue:     {link}");
+        }
         if view.is_favorite_client(record.id) {
             outln!("favorite:  yes");
         }
@@ -10447,6 +10502,7 @@ fn instance_json(app: &App, record: &ClientRecord) -> anyhow::Result<serde_json:
 }
 
 /// `icon` is the stored image file, or null when there is none or it is gone.
+/// `issue_link` is the address the user attached, or null.
 fn instance_json_with(
     app: &App,
     record: &ClientRecord,
@@ -10474,6 +10530,7 @@ fn instance_json_with(
                 "version": record.loader.version,
             },
             "root": json_path(&record.root),
+            "issue_link": record.issue_link,
             "source": record.source,
             "attention": record.attention,
             "needs_attention": record.needs_attention(),

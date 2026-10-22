@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use crate::instance::{CreatedClient, PreferenceContext, validated_entity_name};
+use crate::issue_link::validated_issue_link;
 use ephervex_download::{
     CacheLayout, DownloadManager, DownloaderConfig, MetadataCacheError, OperationReporter,
 };
@@ -605,6 +606,12 @@ impl App {
         // Before the catalog lookups, since a refused name costs nothing to
         // find out and nothing is published until it passes.
         request.name = validated_entity_name(&request.name)?;
+        request.issue_link = request
+            .issue_link
+            .as_deref()
+            .map(validated_issue_link)
+            .transpose()?
+            .flatten();
         let validation = self.validate_client_target(&request).await;
         let preferences = after_successful_validation(
             validation,

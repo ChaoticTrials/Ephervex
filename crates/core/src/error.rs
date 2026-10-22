@@ -26,6 +26,7 @@ use ephervex_storage::StorageError;
 use crate::ConnectError;
 use crate::instance::NameRefusal;
 use crate::isolation::IsolationError;
+use crate::issue_link::IssueLinkRefusal;
 use crate::snapshot::SnapshotError;
 use crate::verify::RepairRefusal;
 
@@ -436,6 +437,10 @@ pub enum CoreError {
     #[error("that name cannot be used: {reason}")]
     EntityNameInvalid { reason: NameRefusal },
 
+    /// An issue link the user typed cannot be stored as it stands.
+    #[error("that issue link cannot be used: {reason}")]
+    IssueLinkInvalid { reason: IssueLinkRefusal },
+
     /// A group already has this name. Names compare without regard to case.
     #[error("a group named `{name}` already exists")]
     GroupNameTaken { name: String },
@@ -694,6 +699,7 @@ impl CoreError {
             }
             Self::ModFileNotAdded { .. } => "error-mod-file-not-added",
             Self::EntityNameInvalid { reason } => reason.message_id(),
+            Self::IssueLinkInvalid { reason } => reason.message_id(),
             Self::GroupNameTaken { .. } => "error-group-name-taken",
             Self::GroupNotFound { .. } => "error-group-not-found",
             Self::IconRefused { reason, .. } => reason.message_id(),
@@ -788,6 +794,12 @@ impl CoreError {
             } => vec![(
                 "limit",
                 Arg::from(crate::instance::MAX_ENTITY_NAME_CHARS.to_string()),
+            )],
+            Self::IssueLinkInvalid {
+                reason: IssueLinkRefusal::TooLong,
+            } => vec![(
+                "limit",
+                Arg::from(crate::issue_link::MAX_ISSUE_LINK_BYTES.to_string()),
             )],
             Self::JavaSettingsInvalid {
                 minimum_mib,
@@ -1026,6 +1038,7 @@ impl CoreError {
             | Self::ModFileNotDeleted { .. }
             | Self::ModFileNotAdded { .. }
             | Self::EntityNameInvalid { .. }
+            | Self::IssueLinkInvalid { .. }
             | Self::GroupNameTaken { .. }
             | Self::GroupNotFound { .. }
             | Self::IconRefused { .. }
@@ -1137,6 +1150,7 @@ impl CoreError {
             | Self::UrlHandlerUnavailable { .. }
             | Self::SingleInstanceUnavailable { .. }
             | Self::EntityNameInvalid { .. }
+            | Self::IssueLinkInvalid { .. }
             | Self::GroupNameTaken { .. }
             | Self::GroupNotFound { .. }
             | Self::RepairRefused { .. }

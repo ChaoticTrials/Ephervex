@@ -232,6 +232,7 @@ impl Registry {
             // so its mods are the user's from the start. An imported one
             // starts off: see the field's own documentation.
             allow_pack_mod_version_changes: request.source.is_manual(),
+            issue_link: request.issue_link,
             source: request.source,
             java_override: None,
             jvm_override: None,
@@ -555,6 +556,7 @@ impl Registry {
             java_override: original.java_override,
             jvm_override: original.jvm_override,
             allow_pack_mod_version_changes: original.allow_pack_mod_version_changes,
+            issue_link: original.issue_link,
             attention: original.attention,
             created_at: now,
             updated_at: now,
@@ -801,6 +803,27 @@ impl Registry {
         change: impl FnOnce(&mut ClientRecord),
     ) -> Result<ClientCommit<ClientRecord>, RegistryError> {
         let claim = self.claim_host(RecordRef::Client(id))?;
+        self.modify_client_committed_claimed(id, &claim, change)
+    }
+
+    /// [`Self::modify_client_committed`] for a change only the instance's own
+    /// metadata can hold, which the index has no column for.
+    ///
+    /// Refused with [`RegistryError::RootMissing`] while the root is missing:
+    /// the edit would reach the index alone and be undone by the metadata the
+    /// next time they are reconciled.
+    pub fn modify_client_metadata_committed(
+        &self,
+        id: InstanceId,
+        change: impl FnOnce(&mut ClientRecord),
+    ) -> Result<ClientCommit<ClientRecord>, RegistryError> {
+        let claim = self.claim_host(RecordRef::Client(id))?;
+        let followed = self.client(id)?;
+        if !followed.root.is_dir() {
+            return Err(RegistryError::RootMissing {
+                path: followed.root,
+            });
+        }
         self.modify_client_committed_claimed(id, &claim, change)
     }
 
@@ -1671,6 +1694,8 @@ fn client_from_row(row: &Row<'_>) -> rusqlite::Result<Result<ClientRecord, Index
                 "instances.jvm_override",
             )?,
             allow_pack_mod_version_changes,
+            // Held in the instance's metadata alone; see `ClientRecord`.
+            issue_link: None,
             attention: from_json::<Vec<AttentionReason>>(&attention, "instances.attention")?,
             created_at: timestamp_from_sql(&created_at, "instances.created_at")?,
             updated_at: timestamp_from_sql(&updated_at, "instances.updated_at")?,
@@ -1938,6 +1963,8 @@ fn client_with_newer_row(row: ClientRecord, mut canonical: ClientRecord) -> Clie
         returned
             .attention
             .retain(|reason| reason != &AttentionReason::MissingRoot);
+        // The index never holds it, so the metadata's answer stands.
+        returned.issue_link = canonical.issue_link;
         return returned;
     }
     canonical.root = row.root;
@@ -5037,6 +5064,35 @@ mod tests {
             Some(JavaOverride::new("/opt/jdk/bin/java"))
         );
         assert!(!current.attention.contains(&AttentionReason::MissingRoot));
+    }
+
+    #[test]
+    fn a_newer_index_row_leaves_the_issue_link_to_the_metadata() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let link = "https://example.invalid/issues/1";
+        let client = registry
+            .create_published_client(
+                NewClient::new("before", "1.20.1", LoaderSelection::vanilla())
+                    .with_issue_link(link),
+            )
+            .expect("create");
+        let older = metadata::read_client_metadata(&client.root).expect("metadata");
+        assert_eq!(older.issue_link.as_deref(), Some(link));
+        std::fs::remove_dir_all(&client.root).expect("remove root");
+        registry
+            .modify_client(client.id, |record| {
+                record.add_attention(AttentionReason::MissingRoot);
+                record.name = "renamed".to_owned();
+            })
+            .expect("index-only change");
+        std::fs::create_dir_all(&client.root).expect("restore root");
+        metadata::write_client_metadata(&client.root, &older).expect("restore metadata");
+
+        let current = registry.current_client(client.id).expect("current");
+
+        assert_eq!(current.name, "renamed");
+        assert_eq!(current.issue_link.as_deref(), Some(link));
     }
 
     #[test]

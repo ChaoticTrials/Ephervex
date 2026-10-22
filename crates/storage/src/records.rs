@@ -140,6 +140,11 @@ pub struct ClientRecord {
     /// decided where it is created, from its own source.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_pack_mod_version_changes: bool,
+    /// The issue or bug report this instance reproduces, as an http(s) address
+    /// exactly as the user gave it. Kept in the instance's metadata alone: the
+    /// index has no column for it before 1.0.0 (ADR 0033).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_link: Option<String>,
     /// Why this instance is not straightforwardly runnable, if it is not. The
     /// launcher never presents an approximation as faithful.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -268,6 +273,9 @@ pub struct NewClient {
     pub loader: LoaderSelection,
     pub source: ImportSource,
     pub attention: Vec<AttentionReason>,
+    /// The issue address to record on the new instance, already validated by
+    /// the caller.
+    pub issue_link: Option<String>,
 }
 
 impl NewClient {
@@ -284,6 +292,7 @@ impl NewClient {
             loader,
             source: ImportSource::manual(),
             attention: Vec::new(),
+            issue_link: None,
         }
     }
 
@@ -302,6 +311,12 @@ impl NewClient {
     #[must_use]
     pub fn with_attention(mut self, attention: Vec<AttentionReason>) -> Self {
         self.attention = attention;
+        self
+    }
+
+    #[must_use]
+    pub fn with_issue_link(mut self, issue_link: impl Into<String>) -> Self {
+        self.issue_link = Some(issue_link.into());
         self
     }
 }
@@ -605,6 +620,7 @@ mod tests {
                 ..JvmSettings::default()
             }),
             allow_pack_mod_version_changes: false,
+            issue_link: Some("https://example.invalid/issues/42".to_owned()),
             attention: Vec::new(),
             created_at: now,
             updated_at: now,

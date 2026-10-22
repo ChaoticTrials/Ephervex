@@ -520,6 +520,9 @@ fn reconcile_present_client(
             } else {
                 let recorded_root_differs = canonical.root != record.root;
                 canonical.root.clone_from(&record.root);
+                // Held in the metadata alone, so the row never disagrees about
+                // it and never carries it back over the metadata.
+                record.issue_link.clone_from(&canonical.issue_link);
                 if client_index_is_newer(&record, &canonical) {
                     adopted = true;
                 } else {
