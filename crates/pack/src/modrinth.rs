@@ -109,6 +109,7 @@ fn present_layers(archive: &PackArchive) -> Vec<OverrideLayer> {
         archive_prefix: prefix.to_owned(),
         retained_at: None,
         files: 0,
+        auxiliary_entries: Vec::new(),
     })
     .collect()
 }

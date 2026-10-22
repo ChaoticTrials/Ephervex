@@ -69,6 +69,7 @@ pub mod mods;
 pub mod mutation;
 pub mod open_files;
 pub mod organization;
+pub mod pack_content;
 pub mod pack_url;
 pub mod promotion;
 pub mod runner;
@@ -201,6 +202,9 @@ pub use mutation::{
     MutationRestriction, PlannedFile, PlannedOutcome, effective_mutability,
 };
 pub use organization::{IconRefusal, InstanceGroup, OrganizationView, take_organization_notices};
+pub use pack_content::{
+    PackContentEntry, PackContentOrigin, PackContentPresence, PackContentSnapshot,
+};
 pub use pack_url::{
     HostConsent, LAUNCHER_URL_SCHEME, LauncherUrl, LauncherUrlError, MAX_LAUNCHER_URL_BYTES,
     MAX_PACK_ARCHIVE_BYTES, PackConsents, PackSource, StagedPack,
@@ -358,13 +362,13 @@ pub use ephervex_options::{
     ReleaseSupport, SkipReason, SkippedPreference, WindowSize,
 };
 pub use ephervex_pack::{
-    AppliedLayer, BlockedProviderFile, DuplicateFileReason, DuplicateProviderFile,
-    ExtractionLimits, InstalledStandIn, ManagedMod, ManagedModInstallation, ManagedMutationReport,
-    MaterializedFiles, MaterializedPack, MaterializedServerRecipe, ModIdentity, ModOrigin,
-    OptionalComponent, OptionalSelection, OverrideLayer, OverrideScope, PackAnalysis, PackError,
-    PackFileRecipe, PackFormat, PackPolicy, PackRecipe, PackSide, ProviderFileIdentity,
-    ProviderRecipeMetadata, RecordedMod, ServerReconstructionPlan, SidePlan, SideRequirement,
-    UnknownServerFiles,
+    AppliedLayer, AuxiliaryKind, BlockedProviderFile, DataPackOwner, DuplicateFileReason,
+    DuplicateProviderFile, ExtractionLimits, InstalledStandIn, ManagedMod, ManagedModInstallation,
+    ManagedMutationReport, MaterializedFiles, MaterializedPack, MaterializedServerRecipe,
+    ModIdentity, ModOrigin, OptionalComponent, OptionalSelection, OverrideLayer, OverrideScope,
+    PackAnalysis, PackError, PackFileRecipe, PackFormat, PackPolicy, PackRecipe, PackSide,
+    ProviderFileIdentity, ProviderRecipeMetadata, RecordedMod, ServerReconstructionPlan, SidePlan,
+    SideRequirement, UnknownServerFiles,
 };
 pub use ephervex_server::{
     CaptureHealth, CaptureRetention, CapturedLine, ControlAction, ControlResponse,

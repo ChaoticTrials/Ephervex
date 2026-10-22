@@ -19,18 +19,19 @@ use ephervex_core::ManagedMutationReport;
 use ephervex_core::ServerCommitWarning;
 use ephervex_core::live_diagnostics::TailedLine;
 use ephervex_core::{
-    App, AuthEvent, AuthObserver, CancellationToken, ClientFolder, ClientModOutcome, ClientModPlan,
-    ConnectionTarget, CoreError, CoreResult, CrashReview, CredentialOutcome, CredentialPresence,
-    DeclaredProject, DiagnosisRequest, DiagnosticFix, DiagnosticKind, DiagnosticRequest,
-    DiagnosticScope, ErrorChain, EulaStatus, ImportRequest, IncompatibilityReason, InstalledHost,
-    IsolationError, IsolationPlan, IsolationReconciliation, IsolationReport, IsolationRequest,
-    IsolationSession, LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions,
-    LaunchEvent, LaunchFeatures, LaunchObserver, LaunchOptions, LinkedModOutcome, LinkedModPlan,
-    LinkedModRequest, LinkedStart, LinkedTargetPlan, LinkedTargetResult, LinkedTargetState,
-    LocalModOffer, LocalModPlan, LocalModReport, LoginOptions, ManagedModEntry, ManagedModSnapshot,
-    MetadataAvailability, ModInstallPlan, ModInstallRequest, ModMutability, ModMutation,
-    ModMutationPlan, ModPresence, ModSearchHit, ModSearchQuery, ModVersionChoice,
-    MutationRestriction, NewClient, NewServer, OperationReporter, OptionalSelection, PackAnalysis,
+    App, AuthEvent, AuthObserver, AuxiliaryKind, CancellationToken, ClientFolder, ClientModOutcome,
+    ClientModPlan, ConnectionTarget, CoreError, CoreResult, CrashReview, CredentialOutcome,
+    CredentialPresence, DataPackOwner, DeclaredProject, DiagnosisRequest, DiagnosticFix,
+    DiagnosticKind, DiagnosticRequest, DiagnosticScope, ErrorChain, EulaStatus, ImportRequest,
+    IncompatibilityReason, InstalledHost, IsolationError, IsolationPlan, IsolationReconciliation,
+    IsolationReport, IsolationRequest, IsolationSession, LaunchAndConnectEvent,
+    LaunchAndConnectObserver, LaunchAndConnectOptions, LaunchEvent, LaunchFeatures, LaunchObserver,
+    LaunchOptions, LinkedModOutcome, LinkedModPlan, LinkedModRequest, LinkedStart,
+    LinkedTargetPlan, LinkedTargetResult, LinkedTargetState, LocalModOffer, LocalModPlan,
+    LocalModReport, LoginOptions, ManagedModEntry, ManagedModSnapshot, MetadataAvailability,
+    ModInstallPlan, ModInstallRequest, ModMutability, ModMutation, ModMutationPlan, ModPresence,
+    ModSearchHit, ModSearchQuery, ModVersionChoice, MutationRestriction, NewClient, NewServer,
+    OperationReporter, OptionalSelection, PackAnalysis, PackContentOrigin, PackContentPresence,
     Paths, PlannedOutcome, ProcessMonitor, ProgressSink, ProviderFileIdentity, RoundAnswer,
     SearchOptions, ServerArchiveEvidence, ServerCommit, ServerContentSource, ServerCreateOptions,
     ServerEvent, ServerEvents, ServerFolder, ServerNetworkSettings, ServerObserver, ServerRecord,
@@ -322,6 +323,7 @@ pub enum Command {
     },
     LoadInstanceWorkspace(InstanceId),
     LoadSnapshots(InstalledHost),
+    LoadPackContent(InstalledHost),
     CreateSnapshot {
         host: InstalledHost,
         label: String,
@@ -1541,6 +1543,27 @@ pub struct SnapshotData {
     pub uses_full_space: bool,
 }
 
+/// One resource pack, shader pack, or data pack, already localized.
+#[derive(Debug, Clone)]
+pub struct PackContentData {
+    pub kind: String,
+    pub name: String,
+    pub path: String,
+    /// The owning world of a data pack; empty for every other kind.
+    pub owner: String,
+    pub origin: String,
+    pub status: String,
+    /// Whether the pack is expected in the game folder and is not there.
+    pub missing: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct HostPackContentData {
+    pub host: String,
+    pub host_kind: String,
+    pub rows: Vec<PackContentData>,
+}
+
 #[derive(Debug, Clone)]
 pub struct HostSnapshotsData {
     pub host: String,
@@ -1920,6 +1943,7 @@ pub enum Event {
         message: String,
     },
     HostSnapshots(HostSnapshotsData),
+    HostPackContent(HostPackContentData),
     Isolation {
         generation: u64,
         open: bool,
@@ -4103,6 +4127,12 @@ fn run_worker(
             Command::LoadSnapshots(host) => match host_snapshots_data(&app, host) {
                 Ok(data) => {
                     let _ = events.send(Event::HostSnapshots(data));
+                }
+                Err(error) => send_error(&events, &error),
+            },
+            Command::LoadPackContent(host) => match host_pack_content_data(&app, host) {
+                Ok(data) => {
+                    let _ = events.send(Event::HostPackContent(data));
                 }
                 Err(error) => send_error(&events, &error),
             },
@@ -7780,6 +7810,65 @@ fn format_usage(usage: Option<ephervex_core::ProcessUsage>) -> String {
             ("memory", Arg::from(format_bytes(usage.memory_bytes))),
         ],
     )
+}
+
+fn host_pack_content_data(app: &App, host: InstalledHost) -> CoreResult<HostPackContentData> {
+    let snapshot = app.host_pack_content(host)?;
+    let rows = snapshot
+        .entries
+        .into_iter()
+        .map(|entry| {
+            let kind = lookup(match entry.kind {
+                AuxiliaryKind::ResourcePack => "pack-content-kind-resource-pack",
+                AuxiliaryKind::ShaderPack => "pack-content-kind-shader-pack",
+                AuxiliaryKind::DataPack => "pack-content-kind-data-pack",
+            });
+            let owner = entry
+                .owner
+                .as_ref()
+                .map_or_else(String::new, |owner| match owner {
+                    DataPackOwner::SavedWorld(world) => lookup_args(
+                        "pack-content-owner-saved-world",
+                        [("world", Arg::from(world.as_str()))],
+                    ),
+                    DataPackOwner::ServerWorld => lookup("pack-content-owner-server-world"),
+                    DataPackOwner::NoWorld => lookup("pack-content-owner-no-world"),
+                });
+            let origin = match &entry.origin {
+                PackContentOrigin::Declared {
+                    provider: Some(provider),
+                    project_id: Some(project),
+                    ..
+                } => lookup_args(
+                    "pack-content-origin-declared-provider",
+                    [
+                        ("provider", Arg::from(provider.as_str())),
+                        ("project", Arg::from(project.as_str())),
+                    ],
+                ),
+                PackContentOrigin::Declared { .. } => lookup("pack-content-origin-declared"),
+                PackContentOrigin::Shipped { .. } => lookup("pack-content-origin-shipped"),
+            };
+            PackContentData {
+                kind,
+                name: entry.name(),
+                path: entry.logical_path.to_string_lossy().into_owned(),
+                owner,
+                origin,
+                status: lookup(match entry.presence {
+                    PackContentPresence::Present => "pack-content-presence-present",
+                    PackContentPresence::Absent => "pack-content-presence-absent",
+                    PackContentPresence::NotSelected => "pack-content-presence-not-selected",
+                }),
+                missing: entry.presence == PackContentPresence::Absent,
+            }
+        })
+        .collect();
+    Ok(HostPackContentData {
+        host: host.id(),
+        host_kind: host_kind(host).to_owned(),
+        rows,
+    })
 }
 
 fn host_snapshots_data(app: &App, host: InstalledHost) -> CoreResult<HostSnapshotsData> {

@@ -829,7 +829,7 @@ pub struct InstancePackSource {
 }
 
 impl InstancePackSource {
-    fn from_recipe(recipe: &PackRecipe) -> Self {
+    pub(crate) fn from_recipe(recipe: &PackRecipe) -> Self {
         Self {
             kind: recipe.source_kind,
             name: recipe.original_name.clone(),

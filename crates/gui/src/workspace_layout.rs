@@ -13,6 +13,7 @@ pub enum Surface {
     Overview,
     Console,
     Mods,
+    Packs,
     Isolation,
     Settings,
     Properties,
@@ -21,9 +22,10 @@ pub enum Surface {
     Diagnostics,
 }
 
-const CLIENT_SURFACES: [Surface; 7] = [
+const CLIENT_SURFACES: [Surface; 8] = [
     Surface::Overview,
     Surface::Mods,
+    Surface::Packs,
     Surface::Isolation,
     Surface::Settings,
     Surface::Snapshots,
@@ -31,10 +33,11 @@ const CLIENT_SURFACES: [Surface; 7] = [
     Surface::Diagnostics,
 ];
 
-const SERVER_SURFACES: [Surface; 9] = [
+const SERVER_SURFACES: [Surface; 10] = [
     Surface::Overview,
     Surface::Console,
     Surface::Mods,
+    Surface::Packs,
     Surface::Isolation,
     Surface::Settings,
     Surface::Properties,
@@ -80,6 +83,7 @@ impl Surface {
             Self::Overview => "Overview",
             Self::Console => "Console",
             Self::Mods => "Mods",
+            Self::Packs => "Packs",
             Self::Isolation => "Isolation",
             Self::Settings => "Settings",
             Self::Properties => "Properties",
@@ -105,6 +109,7 @@ impl Surface {
             Self::Overview => "gui-instance-tab-overview",
             Self::Console => "gui-server-tab-console",
             Self::Mods => "gui-instance-tab-mods",
+            Self::Packs => "gui-packs-tab",
             Self::Isolation => "gui-isolation-tab",
             Self::Settings => "gui-instance-tab-settings",
             Self::Properties => "gui-server-tab-properties",

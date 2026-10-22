@@ -1155,8 +1155,9 @@ pub(crate) fn copy_into_instance(source: &Path, destination: &Path) -> PackResul
 pub struct AppliedLayer {
     pub layer: OverrideLayer,
     pub files: u64,
-    /// The `mods/*.jar` entries this layer placed, and the files it placed over
-    /// ones the recipe declares, relative to the game directory. The pack
+    /// The `mods/*.jar` entries and the resource, shader, and data pack files
+    /// this layer placed, and the files it placed over ones the recipe
+    /// declares, relative to the game directory. The pack
     /// shipped these bytes rather than a reference to them, so the recipe
     /// learns them here or never.
     pub shipped_files: Vec<PathBuf>,
@@ -2135,12 +2136,14 @@ mod tests {
                     archive_prefix: "client-overrides".to_owned(),
                     retained_at: None,
                     files: 0,
+                    auxiliary_entries: Vec::new(),
                 },
                 OverrideLayer {
                     scope: OverrideScope::Common,
                     archive_prefix: "overrides".to_owned(),
                     retained_at: None,
                     files: 0,
+                    auxiliary_entries: Vec::new(),
                 },
             ],
             provider_metadata: ProviderRecipeMetadata::new(ImportSourceKind::ModrinthPack, None),
@@ -2222,6 +2225,7 @@ mod tests {
             archive_prefix: "server-overrides".to_owned(),
             retained_at: Some(PathBuf::from("modrinth/server-overrides")),
             files: 1,
+            auxiliary_entries: Vec::new(),
         };
         let retained = client_source.join("modrinth/server-overrides");
         std::fs::create_dir_all(&retained).unwrap();

@@ -283,6 +283,7 @@ fn overrides_layer(declared: Option<&str>) -> PackResult<OverrideLayer> {
         archive_prefix: name,
         retained_at: None,
         files: 0,
+        auxiliary_entries: Vec::new(),
     })
 }
 

@@ -475,6 +475,20 @@ export struct SnapshotRow {
     uses-full-space: bool,
 }
 
+// One resource pack, shader pack, or data pack a host's pack placed, with
+// every label already localized.
+export struct PackContentRow {
+    kind: string,
+    name: string,
+    path: string,
+    // The world a data pack belongs to; empty for every other kind.
+    owner: string,
+    origin: string,
+    status: string,
+    // Expected in the game folder and not there.
+    missing: bool,
+}
+
 export struct RunningRow {
     // "client" or "server", which decides where every action goes.
     kind: string,
@@ -712,6 +726,7 @@ export struct HostView {
     snapshots: [SnapshotRow],
     snapshot-total: string,
     snapshots-have-plain-copies: bool,
+    pack-content: [PackContentRow],
     // A client's runtime settings as stored. Empty where it follows the
     // global setting.
     runtime-memory-min: string,

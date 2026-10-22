@@ -169,6 +169,87 @@ fn an_overrides_only_import_retains_a_server_recipe_after_the_archive_is_deleted
 }
 
 #[test]
+fn packs_lists_what_the_pack_placed_with_each_data_packs_owning_world() {
+    let sandbox = Sandbox::new();
+    let pack = sandbox.base().join("auxiliary.mrpack");
+    let index = br#"{
+        "formatVersion": 1,
+        "game": "minecraft",
+        "versionId": "offline-1",
+        "name": "Offline Packs",
+        "files": [],
+        "dependencies": { "minecraft": "1.20.1" }
+    }"#;
+    archive(
+        &pack,
+        index,
+        &[
+            ("overrides/resourcepacks/Faithful.zip", b"resources"),
+            ("overrides/shaderpacks/Complementary.zip", b"shaders"),
+            ("overrides/saves/Repro/datapacks/tweaks.zip", b"data"),
+            ("overrides/datapacks/loose.zip", b"loose"),
+            ("overrides/saves/Repro/datapacks/ignored.txt", b"not a pack"),
+        ],
+    );
+    let imported = sandbox.json(&[
+        "--json",
+        "import",
+        pack.to_str().expect("UTF-8 path"),
+        "--persistent",
+    ]);
+    let id = imported["id"].as_str().expect("instance id");
+
+    let listed = sandbox.json(&["--json", "packs", "--instance", id]);
+    let packs = listed["packs"].as_array().expect("packs");
+    let summary: Vec<(&str, &str, Option<&str>, &str)> = packs
+        .iter()
+        .map(|pack| {
+            (
+                pack["kind"].as_str().unwrap(),
+                pack["path"].as_str().unwrap(),
+                pack["world"].as_str(),
+                pack["origin"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            (
+                "resource-pack",
+                "resourcepacks/Faithful.zip",
+                None,
+                "shipped"
+            ),
+            (
+                "shader-pack",
+                "shaderpacks/Complementary.zip",
+                None,
+                "shipped"
+            ),
+            (
+                "data-pack",
+                "saves/Repro/datapacks/tweaks.zip",
+                Some("Repro"),
+                "shipped"
+            ),
+            ("data-pack", "datapacks/loose.zip", None, "shipped"),
+        ]
+    );
+    assert_eq!(packs[3]["owner"], "no-world");
+
+    let text = sandbox.run(&["packs", "--instance", id]);
+    assert!(text.status.success(), "{text:?}");
+    let text = String::from_utf8(text.stdout).expect("UTF-8 output");
+    assert!(
+        text.contains("Resource pack: resourcepacks/Faithful.zip (installed)"),
+        "{text}"
+    );
+    assert!(text.contains("Data pack for the world \"Repro\""), "{text}");
+    assert!(text.contains("belongs to no world"), "{text}");
+}
+
+#[test]
 fn text_output_escapes_control_characters_in_archive_supplied_pack_text() {
     let sandbox = Sandbox::new();
     let pack = sandbox.base().join("spoofed.mrpack");

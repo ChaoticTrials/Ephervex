@@ -71,7 +71,7 @@ release, because the headless tests find elements by it.
 | `globals.slint` | `GuiI18n` and `PropertyRules`, globals whose answers Rust supplies |
 | `models.slint` | The row and view structs Rust fills models with |
 | `components/` | Text primitives, controls, and artwork shared by every surface |
-| `workspace/` | A host workspace's chrome and its surfaces: mods, logs, isolation, diagnostics, snapshots, and host settings |
+| `workspace/` | A host workspace's chrome and its surfaces: mods, packs, logs, isolation, diagnostics, snapshots, and host settings |
 | `home/` | The client and server cards, the inspector, and the Running and Activity cards |
 | `settings/` | Application settings panels and the Minecraft defaults screen with its window size picker |
 
@@ -1118,6 +1118,12 @@ Parsing and analysis do not write an instance. Materialization begins only
 after the recipe and optional selections are valid. The normalized recipe is
 stored under `.launcher/source/recipe.json`; provider metadata and the override
 layers needed to reproduce the other side are retained explicitly.
+
+Resource packs, shader packs, and data packs are not mods. A declared one is an
+ordinary recipe file, and one shipped in an override layer is listed on that
+layer. The mod list never includes them; `App::host_pack_content` lists them
+with the world that owns each data pack, and a data pack is never moved out of
+the world folder the pack placed it in (ADR 0055).
 
 The recipe is the operational boundary shared by import formats. Provider
 field names, archive conventions, and IDs remain nested provider metadata.

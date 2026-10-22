@@ -1,0 +1,79 @@
+// The Packs surface: the resource packs, shader packs, and data packs a host's
+// pack placed.
+
+import { ScrollView } from "std-widgets.slint";
+import { Pill } from "../components/controls.slint";
+import { BodyText, ElidedHeading, HoverNote, SectionTitle, Heading } from "../components/text.slint";
+import { GuiI18n } from "../globals.slint";
+import { PackContentRow } from "../models.slint";
+import { Theme } from "../theme.slint";
+
+// One line of a card that says the whole thing on hover when it had to be cut.
+component PackLine inherits Rectangle {
+    in property <string> text;
+    in property <color> text-color: Theme.text-muted;
+    height: line.preferred-height;
+    line := Text {
+        width: parent.width;
+        text: root.text;
+        color: root.text-color;
+        font-size: Theme.caption-size;
+        overflow: elide;
+        vertical-alignment: center;
+    }
+    area := TouchArea {}
+    HoverNote {
+        text: line.preferred-width > line.width ? root.text : "";
+        hovered: area.has-hover;
+        pointer-x: area.mouse-x;
+        pointer-y: area.mouse-y;
+    }
+}
+
+export component PackContentCard inherits Rectangle {
+    in property <PackContentRow> item;
+    height: content.preferred-height + 26px;
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: root.item.missing ? Theme.warning : Theme.border;
+    background: Theme.surface;
+    content := VerticalLayout {
+        x: 13px;
+        y: 13px;
+        width: parent.width - 26px;
+        spacing: 4px;
+        HorizontalLayout {
+            spacing: 10px;
+            ElidedHeading { text: root.item.name; font-size: Theme.row-heading-size; }
+            Pill { text: root.item.kind; tone-color: Theme.accent-secondary; }
+            Pill { text: root.item.status; tone-color: root.item.missing ? Theme.warning : Theme.text-secondary; }
+        }
+        PackLine { text: root.item.path; }
+        if root.item.owner != "" : PackLine { text: root.item.owner; text-color: Theme.text-secondary; }
+        PackLine { text: root.item.origin; }
+    }
+}
+
+export component PackContentPanel inherits Rectangle {
+    in property <[PackContentRow]> items;
+    VerticalLayout {
+        spacing: 12px;
+        SectionTitle { title: GuiI18n.text("gui-packs"); detail: GuiI18n.text("gui-packs-detail"); }
+        if root.items.length == 0 : Rectangle {
+            vertical-stretch: 1;
+            VerticalLayout {
+                alignment: center;
+                spacing: 8px;
+                Heading { text: GuiI18n.text("gui-packs-none"); horizontal-alignment: center; }
+                BodyText { text: GuiI18n.text("gui-packs-none-detail"); color: Theme.text-muted; wrap: word-wrap; horizontal-alignment: center; }
+            }
+        }
+        if root.items.length > 0 : ScrollView {
+            viewport-width: self.width;
+            VerticalLayout {
+                spacing: 9px;
+                for item in root.items : PackContentCard { item: item; }
+            }
+        }
+    }
+}

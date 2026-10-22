@@ -507,8 +507,9 @@ async fn retain_and_record(
 /// A modpack's overrides are often the bulk of its bytes, so the layer already
 /// installed for this side is not duplicated.
 ///
-/// Returns the mod jars and declared files the retained layers place, for the
-/// recipe to record together with the applied layers' files.
+/// Returns the mod jars, declared files, and resource, shader, and data pack
+/// files the retained layers place, for the recipe to record together with the
+/// applied layers' files.
 fn retain_source(
     archive: &mut PackArchive,
     recipe: &mut PackRecipe,

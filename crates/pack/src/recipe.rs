@@ -105,7 +105,9 @@ impl LayerPathFilter {
     /// Whether the recipe has to be told that a layer places this path.
     #[must_use]
     pub(crate) fn selects(&self, path: &Path) -> bool {
-        is_mod_file_path(path) || self.declared.contains(path)
+        is_mod_file_path(path)
+            || self.declared.contains(path)
+            || crate::auxiliary::classify_shipped(path).is_some()
     }
 }
 
@@ -894,6 +896,11 @@ pub struct OverrideLayer {
     /// How many files the layer contained when it was imported. Display only.
     #[serde(default)]
     pub files: u64,
+    /// The resource packs, shader packs, and data packs the layer placed, each
+    /// as the file or directory that is the pack, relative to the game
+    /// directory. Sorted, so re-importing a pack records the same list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auxiliary_entries: Vec<PathBuf>,
 }
 
 impl OverrideLayer {
@@ -1319,6 +1326,9 @@ impl PackRecipe {
     /// override jar has none: the pack shipped the file rather than a
     /// reference to a catalog entry, and none can be invented from a file name.
     ///
+    /// The resource packs, shader packs, and data packs a layer ships are
+    /// listed on that layer, once each, and not in the recipe's files.
+    ///
     /// Side requirements follow the layers, which are the only thing the pack
     /// said about where the file belongs. A path shipped by several layers is
     /// required on every side one of them applies to. Import has already refused
@@ -1382,6 +1392,20 @@ impl PackRecipe {
             });
             if shadowed {
                 return Err(PackError::OverrideShadowsDeclaredFile { path: path.clone() });
+            }
+        }
+
+        for (path, scope) in shipped {
+            let Some(placement) = crate::auxiliary::classify_shipped(path) else {
+                continue;
+            };
+            if let Some(layer) = self
+                .override_layers
+                .iter_mut()
+                .find(|layer| layer.scope == *scope)
+                && let Err(position) = layer.auxiliary_entries.binary_search(&placement.entry)
+            {
+                layer.auxiliary_entries.insert(position, placement.entry);
             }
         }
 
@@ -1906,6 +1930,47 @@ mod tests {
     }
 
     #[test]
+    fn a_layer_lists_each_pack_it_ships_once_and_in_order() {
+        let mut recipe = recipe();
+        recipe.files.clear();
+        let shipped = [
+            ("resourcepacks/B.zip", OverrideScope::Common),
+            ("resourcepacks/A/assets/x.json", OverrideScope::Common),
+            ("resourcepacks/A/pack.mcmeta", OverrideScope::Common),
+            ("saves/W/datapacks/d.zip", OverrideScope::Server),
+            ("shaderpacks/S.zip.txt", OverrideScope::Common),
+        ]
+        .map(|(path, scope)| (PathBuf::from(path), scope));
+
+        recipe.record_layer_files(&shipped).unwrap();
+        recipe.record_layer_files(&shipped).unwrap();
+
+        let entries = |scope| {
+            recipe
+                .override_layers
+                .iter()
+                .find(|layer| layer.scope == scope)
+                .map(|layer| layer.auxiliary_entries.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            entries(OverrideScope::Common),
+            [
+                PathBuf::from("resourcepacks/A"),
+                PathBuf::from("resourcepacks/B.zip")
+            ]
+        );
+        assert_eq!(
+            entries(OverrideScope::Server),
+            [PathBuf::from("saves/W/datapacks/d.zip")]
+        );
+        assert!(
+            recipe.files.is_empty(),
+            "shipped packs are not recipe files"
+        );
+    }
+
+    #[test]
     fn a_layer_replacing_a_client_only_declared_file_keeps_the_sides_it_applies_to() {
         let mut recipe = recipe();
         recipe.files.clear();
@@ -2108,7 +2173,7 @@ mod tests {
     }
 
     #[test]
-    fn the_layer_path_filter_selects_mod_jars_and_declared_files_only() {
+    fn the_layer_path_filter_selects_mod_jars_declared_files_and_shipped_packs_only() {
         let mut recipe = recipe();
         recipe.files.clear();
         recipe.files.push(file(
@@ -2120,6 +2185,7 @@ mod tests {
 
         assert!(filter.selects(Path::new("mods/new.jar")));
         assert!(filter.selects(Path::new("resourcepacks/x.zip")));
+        assert!(filter.selects(Path::new("shaderpacks/shipped.zip")));
         assert!(!filter.selects(Path::new("config/other.toml")));
         assert!(!filter.selects(Path::new("mods/README.txt")));
     }
@@ -2252,18 +2318,21 @@ mod tests {
                     archive_prefix: "overrides".to_owned(),
                     retained_at: Some(PathBuf::from("modrinth/overrides")),
                     files: 2,
+                    auxiliary_entries: Vec::new(),
                 },
                 OverrideLayer {
                     scope: OverrideScope::Client,
                     archive_prefix: "client-overrides".to_owned(),
                     retained_at: None,
                     files: 1,
+                    auxiliary_entries: Vec::new(),
                 },
                 OverrideLayer {
                     scope: OverrideScope::Server,
                     archive_prefix: "server-overrides".to_owned(),
                     retained_at: Some(PathBuf::from("modrinth/server-overrides")),
                     files: 1,
+                    auxiliary_entries: Vec::new(),
                 },
             ],
             provider_metadata: ProviderRecipeMetadata::new(

@@ -584,7 +584,7 @@ fn tabs_that_do_not_fit_wait_under_more() {
         placed(1, CLIENT, "Overview", 0, 0, false),
         placed(2, SERVER, "Diagnostics", 1, 0, false),
     ];
-    panes[1].surface_choice = 8;
+    panes[1].surface_choice = 9;
     split(&ui, panes);
 
     let tab = |label: &str| in_pane(&ui, 2, &lookup(label), AccessibleRole::Button).len();
@@ -633,7 +633,7 @@ fn the_list_under_more_closes_when_the_window_is_resized() {
             placed(1, CLIENT, "Overview", 0, 0, false),
             placed(2, SERVER, "Diagnostics", 1, 0, false),
         ];
-        panes[1].surface_choice = 8;
+        panes[1].surface_choice = 9;
         panes
     };
     for (pane, hidden, panes) in [

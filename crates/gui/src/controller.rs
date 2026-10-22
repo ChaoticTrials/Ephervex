@@ -43,9 +43,9 @@ use crate::ui::{
     AccountRow, ActivityRow, AppWindow, BlockedFileRow, DiagnosticRow, DiskUsageRow, GuiI18n,
     HostView, ImpactRow, ImportDuplicateRow, ImportOptionRow, InstanceRow, IsolationCandidateRow,
     JavaRow, LicenseRow, LinkedTargetRow, LocalModClashRow, LogChunk, MenuRow, ModRow,
-    ModSearchRow, ModVersionRow, NameRules, PendingEntityRow, PromoteServerRow, PropertyRules,
-    RelationRow, RunningRow, ServerPackRules, ServerPropertyGroup, ServerPropertyRow, ServerRow,
-    SnapshotRow, Theme, WindowSizePreview, WorkflowActionRow,
+    ModSearchRow, ModVersionRow, NameRules, PackContentRow, PendingEntityRow, PromoteServerRow,
+    PropertyRules, RelationRow, RunningRow, ServerPackRules, ServerPropertyGroup,
+    ServerPropertyRow, ServerRow, SnapshotRow, Theme, WindowSizePreview, WorkflowActionRow,
 };
 use crate::window_aspect;
 use crate::workspace_layout::{PaneId, Revealed, Surface, WorkspaceLayout};
@@ -3153,6 +3153,13 @@ fn register_snapshot_actions(ui: &AppWindow, commands: &Sender<Command>) {
     });
 
     let sender = commands.clone();
+    ui.on_load_pack_content(move |kind, id| {
+        if let Some(host) = backend::parse_mod_host(&kind, &id) {
+            send(&sender, Command::LoadPackContent(host));
+        }
+    });
+
+    let sender = commands.clone();
     ui.on_create_snapshot(move |kind, id, label| {
         if let Some(host) = backend::parse_mod_host(&kind, &id) {
             send(
@@ -5446,6 +5453,7 @@ fn apply_pane_change(ui: &AppWindow, workspace: &Workspace, change: PaneChange) 
     let id = SharedString::from(host.id());
     match surface {
         Surface::Snapshots => ui.invoke_load_snapshots(host.kind().into(), id),
+        Surface::Packs => ui.invoke_load_pack_content(host.kind().into(), id),
         Surface::Diagnostics => diagnosis_flow::open(workspace, &workspace.commands, host),
         Surface::Mods if matches!(host, InstalledHost::Server(_)) => {
             ui.invoke_load_server_mods(id);
@@ -8368,6 +8376,25 @@ fn apply_event(
                 .borrow_mut()
                 .apply_report_unavailable(pane, scope, &name, &message);
             ui.set_status_message(lookup("gui-diagnostic-disappeared").into());
+        }
+        Event::HostPackContent(data) => {
+            if let Some(host) = backend::parse_mod_host(&data.host_kind, &data.host) {
+                let rows = model(
+                    data.rows
+                        .into_iter()
+                        .map(|pack| PackContentRow {
+                            kind: pack.kind.into(),
+                            name: pack.name.into(),
+                            path: pack.path.into(),
+                            owner: pack.owner.into(),
+                            origin: pack.origin.into(),
+                            status: pack.status.into(),
+                            missing: pack.missing,
+                        })
+                        .collect(),
+                );
+                workspace.update(host, |view| view.pack_content = rows);
+            }
         }
         Event::HostSnapshots(data) => {
             if let Some(host) = backend::parse_mod_host(&data.host_kind, &data.host) {

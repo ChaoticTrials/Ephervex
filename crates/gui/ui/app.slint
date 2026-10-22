@@ -90,6 +90,7 @@ import { HostPickerCard, HostWorkspace, WorkspaceTab } from "workspace/host-work
 import { IsolationSurface } from "workspace/isolation.slint";
 import { CrashNotice, DiagnosticFileList, LiveLogViewer } from "workspace/logs.slint";
 import { ImpactList, LinkedTargetsPanel, ManagedModsPanel, RelationList } from "workspace/mods.slint";
+import { PackContentPanel } from "workspace/packs.slint";
 import { SnapshotPanel } from "workspace/snapshots.slint";
 
 export { GuiI18n } from "globals.slint";
@@ -916,6 +917,7 @@ export component AppWindow inherits Window {
     callback revoke-eula();
     callback open-eula-reference();
     callback load-snapshots(string, string);
+    callback load-pack-content(string, string);
     callback create-snapshot(string, string, string);
     in-out property <string> snapshot-label-suggestion;
     callback recompute-snapshot-label();
@@ -1575,6 +1577,9 @@ export component AppWindow inherits Window {
                                     restore(id, label) => { root.snapshot-host-kind = host.kind; root.snapshot-host-id = host.id; root.snapshot-action-id = id; root.snapshot-action-label = label; root.snapshot-safety-copy = true; root.modal-error = ""; root.modal = "snapshot-restore"; }
                                     rename(id, label) => { root.snapshot-host-kind = host.kind; root.snapshot-host-id = host.id; root.snapshot-action-id = id; root.snapshot-action-label = label; root.modal-error = ""; root.modal = "snapshot-rename"; }
                                     delete(id, label) => { root.snapshot-host-kind = host.kind; root.snapshot-host-id = host.id; root.snapshot-action-id = id; root.snapshot-action-label = label; root.modal-error = ""; root.modal = "snapshot-delete"; }
+                                }
+                                if host.available && pane.surface == "Packs" : PackContentPanel {
+                                    items: host.pack-content;
                                 }
                                 if host.available && pane.surface == "Diagnostics" : DiagnosticsSurface {
                                     host: host;

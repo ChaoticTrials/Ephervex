@@ -60,3 +60,4 @@ so the reasoning trail survives.
 | [0052](0052-menus-are-drawn-by-the-application.md) | Menus are drawn by the application | Accepted |
 | [0053](0053-storage-cleanup-removes-only-unreferenced-regenerable-entries-after-a-confirmed-preview.md) | Storage cleanup removes only unreferenced, regenerable entries after a confirmed preview | Accepted |
 | [0054](0054-a-runner-process-hosts-a-client-or-server-past-the-launchers-exit.md) | A runner process hosts a client or server past the launcher's exit | Accepted (amends ADR 0014 and ADR 0015) |
+| [0055](0055-resource-shader-and-data-packs-are-recognized-by-location-and-kept-out-of-the-mod-list.md) | Resource packs, shader packs, and data packs are recognized by location and kept out of the mod list | Accepted |

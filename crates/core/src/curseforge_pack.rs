@@ -1354,6 +1354,10 @@ mod tests {
     /// will in this suite: it stands in for "a known but unsupported class".
     const WORLDS_CLASS_ID: u32 = 17;
 
+    /// The numeric id this test fixture's loopback server uses for the Data
+    /// Packs class. Arbitrary, on the same terms as [`MODS_CLASS_ID`].
+    const DATA_PACKS_CLASS_ID: u32 = 6945;
+
     /// The documented shape of `GET /v1/categories?classesOnly=true`, naming
     /// the Mods, Resource Packs, and Shader Packs classes by their own ids
     /// and one decoy class beside them, so a test proves the right one was
@@ -1368,7 +1372,8 @@ mod tests {
                         {{"id":{MODS_CLASS_ID},"gameId":432,"name":"Mods","slug":"mc-mods","isClass":true}},
                         {{"id":{RESOURCE_PACKS_CLASS_ID},"gameId":432,"name":"Resource Packs","slug":"texture-packs","isClass":true}},
                         {{"id":{SHADER_PACKS_CLASS_ID},"gameId":432,"name":"Shaders","slug":"shaders","isClass":true}},
-                        {{"id":{WORLDS_CLASS_ID},"gameId":432,"name":"Worlds","slug":"worlds","isClass":true}}
+                        {{"id":{WORLDS_CLASS_ID},"gameId":432,"name":"Worlds","slug":"worlds","isClass":true}},
+                        {{"id":{DATA_PACKS_CLASS_ID},"gameId":432,"name":"Data Packs","slug":"data-packs","isClass":true}}
                     ]}}"#
                 ),
                 "application/json",
@@ -2483,6 +2488,33 @@ mod tests {
             RESOURCE_PACK_BODY,
             "the retained resource pack reconstructs back under resourcepacks/"
         );
+    }
+
+    #[tokio::test]
+    async fn a_declared_data_pack_project_is_refused_because_its_manifest_names_no_world() {
+        let server = MockServer::start().await;
+        serve_project_classes(&server).await;
+        serve_project_class(&server, REQUIRED_PROJECT, "Actual Mod", MODS_CLASS_ID).await;
+        serve_project_class(&server, OPTIONAL_PROJECT, "Tweaks", DATA_PACKS_CLASS_ID).await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_at(dir.path(), "repro.zip");
+        let app = app_against(dir.path(), &server);
+
+        let error = import(&app, &archive).await.expect_err("must refuse");
+        assert_eq!(
+            error.message_id(),
+            "error-pack-provider-content-unsupported"
+        );
+        assert!(
+            error.message_args().contains(&(
+                "project_type",
+                ephervex_i18n::Arg::from("Data Packs".to_owned())
+            )),
+            "the refusal names the Data Packs class instead of putting the pack in a guessed \
+             world or in a global folder"
+        );
+        assert!(app.list_clients().expect("list").is_empty());
     }
 
     #[tokio::test]

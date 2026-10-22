@@ -23,32 +23,34 @@ use clap::{Args, CommandFactory as _, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use ephervex_core::{
     AccountRemoval, AccountStatus, AccountSummary, ApiSettings, App, ArgumentForm, Artifact,
-    ArtifactCacheHealth, AssetIndexRef, AuthEvent, AuthObserver, BundleContents, BundleSelection,
-    BundledDocumentHealth, CancellationToken, CaptureHealth, CapturedLine, ClientCommit,
-    ClientCommitWarning, ClientFolder, ClientRecord, CloneMethod, Compatibility, Config,
-    ConfigurationHealth, ControlResponse, CoreError, CrashReview, CreatedClient,
+    ArtifactCacheHealth, AssetIndexRef, AuthEvent, AuthObserver, AuxiliaryKind, BundleContents,
+    BundleSelection, BundledDocumentHealth, CancellationToken, CaptureHealth, CapturedLine,
+    ClientCommit, ClientCommitWarning, ClientFolder, ClientRecord, CloneMethod, Compatibility,
+    Config, ConfigurationHealth, ControlResponse, CoreError, CrashReview, CreatedClient,
     CredentialBackendHealth, CredentialOutcome, CredentialPresence, CredentialStorage,
-    DEFAULT_DIAGNOSTIC_BYTES, DEFAULT_SEARCH_LIMIT, DependencyKnowledge, DependencyRefreshReport,
-    DependentMods, DiagnosticEntry, DiagnosticFix, DiagnosticKind, DiagnosticRequest,
-    DiagnosticScope, DiagnosticSearch, DirectoryState, DuplicateClient, EULA_CONFIRMATION_PHRASE,
-    EntitlementLookup, Entitlements, EulaStatus, ExpectedRuntime, FileDisposition, FindingClass,
-    FindingKind, Freshness, GameExit, GroupFilter, HostJavaInstall, HostJavaStatus, HostedStop,
-    HostedStopOutcome, Hosting, ImpactedMod, ImportRequest, ImportedPack, IncompatibilityReason,
-    InstallationHealth, InstalledHost, InstalledMods, InstanceFilter, InstanceGroup, InstanceSort,
-    Integrity, IsolationRequest, IsolationRound, IsolationSession, IsolationStep, JavaCheck,
-    JavaHealth, JavaMismatch, JavaPathChoice, JavaPinIndex, JavaPlan, JavaPlanRequest, JavaRefusal,
-    JavaRuntime, JavaRuntimeFailure, JavaRuntimePins, JavaRuntimeSummary, JavaSelectionMode,
-    JavaTarget, JavaUnavailable, LaunchAndConnectEvent, LaunchAndConnectObserver,
-    LaunchAndConnectOptions, LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver,
-    LaunchOptions, LaunchOutcome, LaunchState, LinkingState, LoginFlow, LoginOptions, LoginRequest,
+    DEFAULT_DIAGNOSTIC_BYTES, DEFAULT_SEARCH_LIMIT, DataPackOwner, DependencyKnowledge,
+    DependencyRefreshReport, DependentMods, DiagnosticEntry, DiagnosticFix, DiagnosticKind,
+    DiagnosticRequest, DiagnosticScope, DiagnosticSearch, DirectoryState, DuplicateClient,
+    EULA_CONFIRMATION_PHRASE, EntitlementLookup, Entitlements, EulaStatus, ExpectedRuntime,
+    FileDisposition, FindingClass, FindingKind, Freshness, GameExit, GroupFilter, HostJavaInstall,
+    HostJavaStatus, HostedStop, HostedStopOutcome, Hosting, ImpactedMod, ImportRequest,
+    ImportedPack, IncompatibilityReason, InstallationHealth, InstalledHost, InstalledMods,
+    InstanceFilter, InstanceGroup, InstanceSort, Integrity, IsolationRequest, IsolationRound,
+    IsolationSession, IsolationStep, JavaCheck, JavaHealth, JavaMismatch, JavaPathChoice,
+    JavaPinIndex, JavaPlan, JavaPlanRequest, JavaRefusal, JavaRuntime, JavaRuntimeFailure,
+    JavaRuntimePins, JavaRuntimeSummary, JavaSelectionMode, JavaTarget, JavaUnavailable,
+    LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions,
+    LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver, LaunchOptions,
+    LaunchOutcome, LaunchState, LinkingState, LoginFlow, LoginOptions, LoginRequest,
     MAX_SEARCH_MATCHES, MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod,
     ManagedModInstallation, ManagedModSnapshot, ModInstallPlan, ModInstallRequest, ModPresence,
     ModProjectDetails, ModRelations, ModSearchQuery, ModSearchResults, NetworkAccess, NewClient,
     NewServer, OperationReporter, OptionalCandidate, OptionalSelection, OptionalStatus,
-    OrganizationView, OutputLine, PackAnalysis, PackRecipe, PackSide, Paths, PlanWarning,
-    PlannedMod, PreferenceApplication, PreferenceId, PreferenceKey, ProcessMonitor,
-    PromotionRequest, PromotionWarning, ReconciliationReport, RefusedJavaChoice, RelatedMod,
-    ReleaseListing, RequiredMods, RequirementBasis, RoundAnswer, RunFilter, RuntimeClassification,
+    OrganizationView, OutputLine, PackAnalysis, PackContentOrigin, PackContentPresence,
+    PackContentSnapshot, PackRecipe, PackSide, Paths, PlanWarning, PlannedMod,
+    PreferenceApplication, PreferenceId, PreferenceKey, ProcessMonitor, PromotionRequest,
+    PromotionWarning, ReconciliationReport, RefusedJavaChoice, RelatedMod, ReleaseListing,
+    RequiredMods, RequirementBasis, RoundAnswer, RunFilter, RuntimeClassification,
     RuntimeInventory, SearchOptions, SecretString, ServerCommitWarning, ServerContentSource,
     ServerCreateOptions, ServerEvent, ServerExit, ServerFolder, ServerNetworkChange,
     ServerObserver, ServerPersistenceHealth, ServerRecord, ServerWarning, Session,
@@ -159,6 +161,17 @@ enum Command {
     Mod {
         #[command(subcommand)]
         command: ModCommand,
+    },
+    /// List the resource packs, shader packs, and data packs a modpack placed.
+    ///
+    /// Shows what the pack installed for a client or a server, where each one
+    /// sits, and which world owns each data pack. Reads the instance's saved
+    /// pack record and its game folder, changes nothing, and contacts no
+    /// provider. An instance imported before this record existed lists only
+    /// the files its pack named until it is imported again.
+    Packs {
+        #[command(flatten)]
+        host: HostArgs,
     },
     /// Capture and restore local client or server state.
     Snapshot {
@@ -2285,6 +2298,10 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
             // executor, for the same reason the Minecraft commands do.
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(run_mod_command(&mut app, command, cli.json))
+        }
+        Command::Packs { host } => {
+            print_pack_content(&open_app()?.host_pack_content(host.host()?)?, cli.json);
+            Ok(())
         }
         Command::Snapshot { command } => run_snapshot_command(&open_app()?, command, cli.json),
         Command::Logs { command } => {
@@ -6822,6 +6839,128 @@ fn print_host_mods(snapshot: &ManagedModSnapshot, json: bool) {
             ]
         )
     );
+}
+
+/// Lists the resource packs, shader packs, and data packs one host's pack placed.
+fn print_pack_content(snapshot: &PackContentSnapshot, json: bool) {
+    if json {
+        print_json(&serde_json::json!({
+            "host": snapshot.host.id(),
+            "host_kind": snapshot.host.kind(),
+            "packs": snapshot.entries.iter().map(|entry| {
+                let (origin, provider, project_id, version_id, layer) = match &entry.origin {
+                    PackContentOrigin::Declared { provider, project_id, version_id, .. } => (
+                        "declared",
+                        provider.map(ModProvider::as_str),
+                        project_id.as_deref(),
+                        version_id.as_deref(),
+                        None,
+                    ),
+                    PackContentOrigin::Shipped { layer } => {
+                        ("shipped", None, None, None, Some(layer.as_str()))
+                    }
+                };
+                serde_json::json!({
+                    "kind": entry.kind.as_str(),
+                    "path": json_path(&entry.logical_path),
+                    "name": entry.name(),
+                    "owner": entry.owner.as_ref().map(DataPackOwner::as_str),
+                    "world": entry.owner.as_ref().and_then(DataPackOwner::world_name),
+                    "origin": origin,
+                    "provider": provider,
+                    "project_id": project_id,
+                    "version_id": version_id,
+                    "layer": layer,
+                    "presence": entry.presence.as_str(),
+                })
+            }).collect::<Vec<_>>(),
+        }));
+        return;
+    }
+
+    if snapshot.entries.is_empty() {
+        outln!(
+            "{}",
+            ephervex_i18n::lookup(match snapshot.host {
+                InstalledHost::Instance(_) => "pack-content-empty",
+                InstalledHost::Server(_) => "pack-content-empty-server",
+            })
+        );
+        return;
+    }
+    for entry in &snapshot.entries {
+        outln!(
+            "{}",
+            ephervex_i18n::lookup_args(
+                "pack-content-line",
+                [
+                    (
+                        "kind",
+                        MessageArg::from(pack_content_kind_label(entry.kind))
+                    ),
+                    (
+                        "path",
+                        MessageArg::from(
+                            terminal_safe(&entry.logical_path.to_string_lossy()).as_ref()
+                        )
+                    ),
+                    (
+                        "presence",
+                        MessageArg::from(pack_content_presence_label(entry.presence))
+                    ),
+                ]
+            )
+        );
+        if let Some(owner) = &entry.owner {
+            outln!("  {}", pack_content_owner_label(owner));
+        }
+        outln!("  {}", pack_content_origin_label(&entry.origin));
+    }
+}
+
+fn pack_content_kind_label(kind: AuxiliaryKind) -> String {
+    ephervex_i18n::lookup(match kind {
+        AuxiliaryKind::ResourcePack => "pack-content-kind-resource-pack",
+        AuxiliaryKind::ShaderPack => "pack-content-kind-shader-pack",
+        AuxiliaryKind::DataPack => "pack-content-kind-data-pack",
+    })
+}
+
+fn pack_content_presence_label(presence: PackContentPresence) -> String {
+    ephervex_i18n::lookup(match presence {
+        PackContentPresence::Present => "pack-content-presence-present",
+        PackContentPresence::Absent => "pack-content-presence-absent",
+        PackContentPresence::NotSelected => "pack-content-presence-not-selected",
+    })
+}
+
+fn pack_content_owner_label(owner: &DataPackOwner) -> String {
+    match owner {
+        DataPackOwner::SavedWorld(name) => ephervex_i18n::lookup_args(
+            "pack-content-owner-saved-world",
+            [("world", MessageArg::from(terminal_safe(name).as_ref()))],
+        ),
+        DataPackOwner::ServerWorld => ephervex_i18n::lookup("pack-content-owner-server-world"),
+        DataPackOwner::NoWorld => ephervex_i18n::lookup("pack-content-owner-no-world"),
+    }
+}
+
+fn pack_content_origin_label(origin: &PackContentOrigin) -> String {
+    match origin {
+        PackContentOrigin::Declared {
+            provider: Some(provider),
+            project_id: Some(project),
+            ..
+        } => ephervex_i18n::lookup_args(
+            "pack-content-origin-declared-provider",
+            [
+                ("provider", MessageArg::from(provider.as_str())),
+                ("project", MessageArg::from(terminal_safe(project).as_ref())),
+            ],
+        ),
+        PackContentOrigin::Declared { .. } => ephervex_i18n::lookup("pack-content-origin-declared"),
+        PackContentOrigin::Shipped { .. } => ephervex_i18n::lookup("pack-content-origin-shipped"),
+    }
 }
 
 /// What a crash report says about which mods to try without.

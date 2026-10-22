@@ -331,6 +331,7 @@ fn curseforge_recipe() -> PackRecipe {
             archive_prefix: "overrides".to_owned(),
             retained_at: Some(PathBuf::from("curseforge/overrides")),
             files: 1,
+            auxiliary_entries: Vec::new(),
         }],
         provider_metadata: ProviderRecipeMetadata::new(
             ImportSourceKind::CurseForgePack,

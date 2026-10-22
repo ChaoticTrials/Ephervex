@@ -67,6 +67,21 @@ fn write(path: &Path, body: &[u8]) {
     std::fs::write(path, body).expect("write");
 }
 
+fn layer(
+    scope: OverrideScope,
+    archive_prefix: &str,
+    retained_at: Option<&str>,
+    files: u64,
+) -> OverrideLayer {
+    OverrideLayer {
+        scope,
+        archive_prefix: archive_prefix.to_owned(),
+        retained_at: retained_at.map(PathBuf::from),
+        files,
+        auxiliary_entries: Vec::new(),
+    }
+}
+
 fn recipe() -> (PackRecipe, Vec<Vec<u8>>) {
     let bodies = vec![
         b"required".to_vec(),
@@ -141,24 +156,19 @@ fn recipe() -> (PackRecipe, Vec<Vec<u8>>) {
             loader: LoaderSelection::exact(LoaderKind::Forge, "47.2.0"),
             files,
             override_layers: vec![
-                OverrideLayer {
-                    scope: OverrideScope::Client,
-                    archive_prefix: "client-overrides".to_owned(),
-                    retained_at: None,
-                    files: 1,
-                },
-                OverrideLayer {
-                    scope: OverrideScope::Server,
-                    archive_prefix: "server-overrides".to_owned(),
-                    retained_at: Some(PathBuf::from("modrinth/server-overrides")),
-                    files: 3,
-                },
-                OverrideLayer {
-                    scope: OverrideScope::Common,
-                    archive_prefix: "overrides".to_owned(),
-                    retained_at: Some(PathBuf::from("modrinth/overrides")),
-                    files: 1,
-                },
+                layer(OverrideScope::Client, "client-overrides", None, 1),
+                layer(
+                    OverrideScope::Server,
+                    "server-overrides",
+                    Some("modrinth/server-overrides"),
+                    3,
+                ),
+                layer(
+                    OverrideScope::Common,
+                    "overrides",
+                    Some("modrinth/overrides"),
+                    1,
+                ),
             ],
             provider_metadata: ProviderRecipeMetadata::new(
                 ImportSourceKind::ModrinthPack,
