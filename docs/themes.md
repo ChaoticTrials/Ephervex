@@ -110,7 +110,7 @@ also holds a commented-out `[branding]` section for use in a theme folder.
 | `header-ribbon-4` | Kept so existing theme files stay valid; the window has no header ribbon, so it paints nothing |
 | `header-ribbon-5` | Kept so existing theme files stay valid; the window has no header ribbon, so it paints nothing |
 | `header-ribbon-6` | Kept so existing theme files stay valid; the window has no header ribbon, so it paints nothing |
-| `well` | The floor of technical views: consoles, logs, crash reports. A disabled field is drawn on it too. |
+| `well` | The floor of technical views: consoles, logs, crash reports. A disabled field and the cache meter's track are drawn on it too. |
 | `selection` | The highlighted entry of a menu, a dropdown list, or the tab bar's More list, and a hovered row of the license list |
 | `selection-card` | A selected card |
 | `selection-strong` | A selected filter chip. `text` is drawn on it. |
@@ -120,7 +120,7 @@ also holds a commented-out `[branding]` section for use in a theme folder.
 | `accent` | Links, focus, and the main accent |
 | `accent-secondary` | A second accent for secondary highlights |
 | `success` | Success states and messages |
-| `warning` | Warnings |
+| `warning` | Warnings, and the filled segments of a cache over its budget |
 | `danger` | Errors and destructive actions |
 | `primary-fill` | A primary button. Its caption is `on-primary`, so keep them apart. |
 | `primary-fill-hover` | A primary button under the pointer. Workbench keeps it equal to `primary-fill`, because the button rises instead. |
@@ -150,7 +150,7 @@ also holds a commented-out `[branding]` section for use in a theme folder.
 | `border-strong` | The outline around a card, button, chip, or panel |
 | `accent-primary` | The fill of the selected navigation, settings and workspace tab items, of an icon button under the pointer and of a slider, and the ring around the selected card. The main button reads `primary-fill`. |
 | `on-accent` | A caption on an accent or state fill, such as `accent-primary` or `state-running` |
-| `state-running` | The fill of the tag of a host that is running, of a success button and toast, and of the strip down a running client's card and a finished activity's card on Home |
+| `state-running` | The fill of the tag of a host that is running, of a success button and toast, and of the strip down a running client's card and a finished activity's card on Home, and of the filled segments of the cache meter |
 | `state-building` | The fill of the tag of a host that is starting, stopping, or restarting, of a lavender button, and of the strip down an activity card in progress |
 | `state-attention` | The fill of the tag of a host that failed or needs recovery, of the mark on a problem on Home, and of the strip down a failed activity's card and a card of a host that needs a fix |
 | `state-stopped` | The fill of an info button, and of the strip down the card of a host that is stopped |

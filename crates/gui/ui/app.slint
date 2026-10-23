@@ -53,11 +53,14 @@ import { ServerStatisticsCard } from "workspace/server-statistics.slint";
 import { ModBrowser } from "workspace/mod-browser.slint";
 import { GuiI18n, NameRules, ServerHints, ServerPackRules } from "globals.slint";
 import { HomePage } from "home/home-page.slint";
+import { StorageCard } from "home/storage-card.slint";
+import { TipsCard } from "home/tips-card.slint";
 import { PendingCard } from "host-list/host-card.slint";
 import { HostList } from "host-list/host-list.slint";
 import { AccountFooter } from "shell/account-footer.slint";
 import { AppShell } from "shell/app-shell.slint";
 import { BrandBar } from "shell/brand-bar.slint";
+import { RightColumn } from "shell/right-column.slint";
 import {
     AccountRow,
     ActivityRow,
@@ -682,6 +685,12 @@ export component AppWindow inherits Window {
     in-out property <bool> artifact-cache-usage-known;
     in-out property <bool> artifact-cache-usage-exact: true;
     in-out property <bool> artifact-cache-over-budget;
+    // How much of the budget is used, from 0 to 1, and whether there is no
+    // budget. Meaningful once the usage is known.
+    in-out property <float> artifact-cache-fill;
+    in-out property <bool> artifact-cache-unlimited;
+    // The cache could not be measured, so there is nothing to show yet.
+    in-out property <bool> artifact-cache-unreadable;
     in-out property <int> application-text-scale: 100;
     in-out property <int> technical-text-size: 12;
     // The chosen theme by its recorded name, and the theme list: labels to
@@ -2281,6 +2290,25 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
+            }
+
+            // Beside Home only. The other pages take this width, so the page
+            // grows by the column and its gap when it is left.
+            if root.shows-home : RightColumn {
+                StorageCard {
+                    temporary: root.home-temporary-count;
+                    persistent: root.home-persistent-count;
+                    servers: root.home-server-count;
+                    cache-known: root.artifact-cache-usage-known;
+                    cache-unreadable: root.artifact-cache-unreadable;
+                    cache-used: root.artifact-cache-used;
+                    cache-total: root.artifact-cache-total;
+                    cache-exact: root.artifact-cache-usage-exact;
+                    cache-over-budget: root.artifact-cache-over-budget;
+                    cache-unlimited: root.artifact-cache-unlimited;
+                    cache-fill: root.artifact-cache-fill;
+                }
+                TipsCard { }
             }
         }
 

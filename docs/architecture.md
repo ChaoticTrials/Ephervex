@@ -78,7 +78,7 @@ release, because the headless tests find elements by it.
 | `settings/` | Application settings panels and the Minecraft defaults screen with its window size picker |
 
 The window has three columns: the host list, the page, and a right column that
-only appears when it has panels to hold. The list is always on screen and lists
+stands beside Home only; the settings and a host take its width and its gap. The list is always on screen and lists
 every instance and server; pressing a card opens that host in the workspace.
 The page is the settings when `settings-open` is set, otherwise the host panes
 when Rust has opened a workspace, otherwise Home. `settings-open` and the
@@ -95,6 +95,16 @@ a fix: ADR 0043), the hosts that ran last, and the launcher's activity. The card
 sit in as many columns as the page's own width allows, each at least
 `Theme.home-card-min-width` wide. Sections with nothing to say keep a muted line,
 except the hosts to continue with, which is left out.
+
+Beside Home, the right column holds a storage card and the tips. The card counts
+temporary instances, persistent instances, and servers from the same rows Home is
+built from, and shows the shared download cache as the settings measure it: the
+core's cache status (used bytes, the configured budget, whether the walk was
+complete) formatted once in the backend, so both screens print the same figures.
+The measurement walks the cache, so it runs the first time Home appears and again
+when the Storage settings ask. Until it arrives the card says it is measuring and
+shows no figures; when it fails it says so (the error is a toast); an unlimited
+budget has no meter; a cache over its budget fills the meter in the warning tone.
 
 Rust sees only what `app.slint` exports: the globals and windows by name and the
 row structs through `export * from "models.slint"`. A new type Rust needs is

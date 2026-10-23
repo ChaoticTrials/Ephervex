@@ -2271,6 +2271,8 @@ pub enum Event {
     },
     WatchedFolderPicked(PathBuf),
     ArtifactCacheStatus(ArtifactCacheStatusData),
+    /// The cache could not be measured; the error itself goes out as a toast.
+    ArtifactCacheUnreadable,
 }
 
 /// The reusable artifact cache as the storage settings show it.
@@ -2284,6 +2286,11 @@ pub struct ArtifactCacheStatusData {
     /// bound, and the view says so rather than presenting it as exact.
     pub exact: bool,
     pub over_budget: bool,
+    /// How much of the budget is used, in thousandths and at most 1000. Zero
+    /// when there is no budget to fill.
+    pub fill_permille: u16,
+    /// Whether the cache has no budget.
+    pub unlimited: bool,
 }
 
 /// What the shared-store maintenance operations report back.
@@ -6242,7 +6249,10 @@ fn run_worker(
                                 artifact_cache_status_data(&status),
                             ));
                         }
-                        Err(error) => send_error(&events, &error),
+                        Err(error) => {
+                            let _ = events.send(Event::ArtifactCacheUnreadable);
+                            send_error(&events, &error);
+                        }
                     },
                 );
             }
@@ -6950,6 +6960,15 @@ fn artifact_cache_status_data(
         ),
         exact: status.complete,
         over_budget: status.is_over_budget(),
+        fill_permille: status
+            .limit
+            .bytes()
+            .filter(|limit| *limit > 0)
+            .map_or(0, |limit| {
+                let permille = u128::from(status.used_bytes) * 1000 / u128::from(limit);
+                u16::try_from(permille.min(1000)).unwrap_or(1000)
+            }),
+        unlimited: status.limit.bytes().is_none(),
     }
 }
 
@@ -14229,6 +14248,38 @@ mod tests {
     use std::cell::RefCell;
 
     use super::*;
+
+    fn cache_status(
+        used: u64,
+        limit: ephervex_core::ArtifactCacheLimit,
+    ) -> ArtifactCacheStatusData {
+        artifact_cache_status_data(&ephervex_core::ArtifactCacheStatus {
+            used_bytes: used,
+            entries: 1,
+            complete: true,
+            limit,
+        })
+    }
+
+    #[test]
+    fn the_cache_fill_is_the_used_share_of_the_budget_and_stops_at_full() {
+        const MIB: u64 = 1024 * 1024;
+        let limit = ephervex_core::ArtifactCacheLimit::from_bytes(100 * MIB).expect("a limit");
+        assert_eq!(cache_status(0, limit).fill_permille, 0);
+        assert_eq!(cache_status(31 * MIB, limit).fill_permille, 310);
+        let over = cache_status(250 * MIB, limit);
+        assert_eq!(over.fill_permille, 1000);
+        assert!(over.over_budget);
+        assert!(!over.unlimited);
+    }
+
+    #[test]
+    fn an_unlimited_cache_has_no_budget_to_fill() {
+        let status = cache_status(5_000_000_000, ephervex_core::ArtifactCacheLimit::Unlimited);
+        assert!(status.unlimited);
+        assert_eq!(status.fill_permille, 0);
+        assert!(!status.over_budget);
+    }
 
     #[test]
     fn last_run_reads_in_the_largest_unit_and_is_empty_when_a_host_never_ran() {

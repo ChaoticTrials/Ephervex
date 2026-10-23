@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use ephervex_gui::ui::{ActivityRow, AppWindow, AttentionRow, ResumeRow, RunningRow, Theme};
 use ephervex_i18n::{Arg, lookup, lookup_args};
-use i_slint_backend_testing::ElementHandle;
+use i_slint_backend_testing::{AccessibleRole, ElementHandle};
 use slint::platform::PointerEventButton;
 use slint::{ComponentHandle, ModelRc, VecModel};
 
@@ -270,6 +270,60 @@ fn no_card_shadow_reaches_past_the_edge_of_the_page() {
         assert!(
             edge <= right,
             "a {card}'s shadow reaches {edge}px past {right}px"
+        );
+    }
+}
+
+/// At the smallest window and the largest text the quick actions all stay
+/// reachable and the cards keep their minimum width.
+#[test]
+fn the_quick_actions_and_cards_fit_the_page_at_the_smallest_window_and_largest_text() {
+    let ui = home();
+    support::set_minimum_size(&ui);
+    ui.global::<Theme>().set_text_scale(1.25);
+    ui.set_home_greeting("Good afternoon, QuietBlock".into());
+    ui.set_running(model(vec![RunningRow {
+        kind: "client".into(),
+        id: "a".into(),
+        name: "Running".into(),
+        ..RunningRow::default()
+    }]));
+    settle(&ui);
+
+    let page = ElementHandle::find_by_element_type_name(&ui, "HomePage")
+        .next()
+        .expect("Home is on screen");
+    let (left, right) = (
+        page.absolute_position().x,
+        page.absolute_position().x + page.size().width,
+    );
+    for key in [
+        "gui-modal-new-instance",
+        "gui-import-modpack",
+        "gui-modal-new-server",
+    ] {
+        let button = ElementHandle::find_by_accessible_label(&ui, &lookup(key))
+            .find(|element| {
+                element.accessible_role() == Some(AccessibleRole::Button)
+                    && element.absolute_position().x > left
+            })
+            .unwrap_or_else(|| panic!("Home offers {key}"));
+        let edge = button.absolute_position().x + button.size().width;
+        assert!(
+            button.size().width > 0.0
+                && edge <= right - ui.global::<Theme>().get_strong_border_width(),
+            "{key} reaches {edge}px on a page that ends at {right}px"
+        );
+    }
+
+    let floor = ui.global::<Theme>().get_home_card_min_width();
+    for card in ElementHandle::find_by_element_type_name(&ui, "RunningCard")
+        .filter(|element| element.size().width > 0.0)
+    {
+        assert!(
+            card.size().width >= floor,
+            "a card is {}px wide",
+            card.size().width
         );
     }
 }

@@ -8267,6 +8267,7 @@ fn apply_event(
             apply_minecraft_event(ui, event, minecraft, commands);
         }
         Event::ArtifactCacheStatus(status) => apply_artifact_cache_status(ui, status),
+        Event::ArtifactCacheUnreadable => apply_artifact_cache_unreadable(ui),
         Event::HostRuntime(runtime) => {
             // Kept with the host it belongs to, so a late answer lands in its
             // own view and never in the fields of another host.
@@ -9491,11 +9492,20 @@ fn index_for_view(index: usize) -> i32 {
     i32::try_from(index).unwrap_or(-1)
 }
 
+/// A measurement failed. The last good figures stay for the settings, which
+/// say how old they are by being measured again; Home shows only the failure.
+fn apply_artifact_cache_unreadable(ui: &AppWindow) {
+    ui.set_artifact_cache_unreadable(true);
+}
+
 fn apply_artifact_cache_status(ui: &AppWindow, status: ArtifactCacheStatusData) {
     ui.set_artifact_cache_used(status.used.into());
     ui.set_artifact_cache_total(status.total.into());
     ui.set_artifact_cache_usage_exact(status.exact);
     ui.set_artifact_cache_over_budget(status.over_budget);
+    ui.set_artifact_cache_fill(f32::from(status.fill_permille) / 1000.0);
+    ui.set_artifact_cache_unlimited(status.unlimited);
+    ui.set_artifact_cache_unreadable(false);
     ui.set_artifact_cache_usage_known(true);
 }
 
@@ -13734,6 +13744,38 @@ mod tests {
             element.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::Button)
                 && element.size().width > 0.0
         })
+    }
+
+    #[test]
+    fn a_failed_measurement_after_a_good_one_marks_the_cache_unreadable_until_the_next_good_one() {
+        let ui = test_window();
+        assert!(!ui.get_artifact_cache_usage_known());
+        let status = |unlimited| ArtifactCacheStatusData {
+            used: "3.1 GiB".to_owned(),
+            total: "10 GiB".to_owned(),
+            exact: true,
+            over_budget: false,
+            fill_permille: 310,
+            unlimited,
+        };
+
+        apply_artifact_cache_status(&ui, status(false));
+        assert!(ui.get_artifact_cache_usage_known());
+        assert!((ui.get_artifact_cache_fill() - 0.31).abs() < 0.001);
+        assert!(!ui.get_artifact_cache_unlimited());
+        assert!(!ui.get_artifact_cache_unreadable());
+
+        // The settings keep the last figures; Home shows only the failure.
+        apply_artifact_cache_unreadable(&ui);
+        assert!(ui.get_artifact_cache_unreadable());
+        assert!(ui.get_artifact_cache_usage_known());
+
+        apply_artifact_cache_status(&ui, status(true));
+        assert!(
+            !ui.get_artifact_cache_unreadable(),
+            "a measurement clears it"
+        );
+        assert!(ui.get_artifact_cache_unlimited());
     }
 
     #[test]

@@ -2019,6 +2019,23 @@ gui-home-open-host = Open { $value }
 gui-home-stop-host = Stop { $value }
 gui-home-more-host = More actions for { $value }
 gui-home-cancel-operation = Cancel { $value }
+
+# The Home page's right column: how many hosts there are, how full the shared download cache is, and two tips.
+gui-home-storage = Storage
+gui-home-storage-temporary = Temporary
+gui-home-storage-persistent = Persistent
+gui-home-storage-servers = Servers
+gui-home-cache-title = Shared download cache
+gui-home-cache-usage = { $first } / { $second }
+gui-home-cache-usage-approximate = at least { $first } / { $second }
+gui-home-cache-unlimited = { $value } used, no limit
+gui-home-cache-unlimited-approximate = at least { $value } used, no limit
+gui-home-cache-unreadable = Size could not be read.
+gui-home-cache-note = Temporary instances remain until the system clears its temporary storage. Removing cached downloads only costs a re-download.
+gui-home-tips = Tips
+gui-home-tip-open = Press a card in the list to open it.
+gui-home-tip-pair = Use { $value } on an instance with a linked server to see both side by side.
+
 gui-more-actions = More actions
 gui-home-summary-running = { $count } running
 gui-home-summary-problems = { $count ->

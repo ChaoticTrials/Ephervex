@@ -67,7 +67,7 @@ export component HomePage inherits Panel {
             spacing: 26px;
             VerticalLayout {
                 spacing: 4px;
-                DisplayHeading { text: root.greeting; font-size: Theme.greeting-size; overflow: elide; }
+                DisplayHeading { text: root.greeting; font-size: Theme.greeting-size; wrap: word-wrap; }
                 BodyText { text: root.summary; font-size: Theme.row-heading-size; overflow: elide; }
                 // The buttons raise a hard shadow to the right and below.
                 HorizontalLayout {

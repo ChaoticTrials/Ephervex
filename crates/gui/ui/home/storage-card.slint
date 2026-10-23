@@ -1,0 +1,114 @@
+// How many hosts there are and how full the shared download cache is.
+
+import { Outlined } from "../components/surface.slint";
+import { Chip } from "../components/controls.slint";
+import { BodyText, DisplayHeading } from "../components/text.slint";
+import { GuiI18n } from "../globals.slint";
+import { Theme } from "../theme.slint";
+import { SideCard } from "side-card.slint";
+
+// One count of hosts of a kind, large, over its name.
+component CountTile inherits Outlined {
+    in property <string> caption;
+    in property <int> count;
+    height: 62px * Theme.text-scale;
+    // Never narrower than its caption, whatever the text size.
+    min-width: caption-text.preferred-width + 6px;
+    preferred-width: 1px;
+    horizontal-stretch: 1;
+    radius: Theme.small-radius;
+    outline-width: Theme.strong-border-width;
+    accessible-role: AccessibleRole.text;
+    accessible-label: "\{root.count} " + root.caption;
+    VerticalLayout {
+        alignment: center;
+        spacing: 2px;
+        DisplayHeading {
+            text: "\{root.count}";
+            font-size: Theme.stat-size;
+            horizontal-alignment: center;
+        }
+        caption-text := Text {
+            text: root.caption.to-uppercase();
+            color: Theme.text-secondary;
+            font-size: Theme.caption-size;
+            font-weight: 600;
+            overflow: elide;
+            horizontal-alignment: center;
+        }
+    }
+}
+
+// A bar of equal segments, filled from the left in proportion to `fill`.
+component SegmentedMeter inherits Outlined {
+    in property <float> portion;
+    in property <brush> tone: Theme.state-running;
+    private property <int> segments: 24;
+    // Any use at all lights the first segment.
+    private property <float> lit: Math.min(root.segments, Math.max(root.portion > 0 ? 1 : 0, Math.ceil(root.portion * root.segments)));
+    height: Theme.progress-bar-height + 8px;
+    radius: Theme.chip-radius;
+    outline-width: Theme.chip-border-width;
+    fill: Theme.well;
+    HorizontalLayout {
+        padding: 3px;
+        spacing: 2px;
+        for index in root.segments : Rectangle {
+            border-radius: 2px;
+            background: index < root.lit ? root.tone : transparent;
+        }
+    }
+}
+
+export component StorageCard inherits SideCard {
+    in property <int> temporary;
+    in property <int> persistent;
+    in property <int> servers;
+    // The cache as the settings measure it: formatted sizes, and the fraction
+    // of the budget in use.
+    in property <bool> cache-known;
+    in property <bool> cache-unreadable;
+    in property <string> cache-used;
+    in property <string> cache-total;
+    in property <bool> cache-exact: true;
+    in property <bool> cache-over-budget;
+    in property <bool> cache-unlimited;
+    in property <float> cache-fill;
+    // Figures are shown only while the newest measurement is one that worked.
+    private property <bool> figures: root.cache-known && !root.cache-unreadable;
+    DisplayHeading { text: GuiI18n.text("gui-home-storage"); font-size: Theme.item-title-size; }
+    HorizontalLayout {
+        spacing: 6px;
+        CountTile { caption: GuiI18n.text("gui-home-storage-temporary"); count: root.temporary; }
+        CountTile { caption: GuiI18n.text("gui-home-storage-persistent"); count: root.persistent; }
+        CountTile { caption: GuiI18n.text("gui-home-storage-servers"); count: root.servers; }
+    }
+    VerticalLayout {
+        spacing: 6px;
+        BodyText { text: GuiI18n.text("gui-home-cache-title"); color: Theme.text; font-weight: 700; overflow: elide; }
+        if root.cache-unreadable : BodyText { text: GuiI18n.text("gui-home-cache-unreadable"); color: Theme.text-muted; overflow: elide; }
+        if !root.cache-unreadable && !root.cache-known : BodyText { text: GuiI18n.text("gui-artifact-cache-measuring"); color: Theme.text-muted; overflow: elide; }
+        if root.figures : VerticalLayout {
+            spacing: 6px;
+            BodyText {
+                text: root.cache-unlimited ? (root.cache-exact ? GuiI18n.value("gui-home-cache-unlimited", root.cache-used) : GuiI18n.value("gui-home-cache-unlimited-approximate", root.cache-used))
+                    : root.cache-exact ? GuiI18n.values("gui-home-cache-usage", root.cache-used, root.cache-total)
+                    : GuiI18n.values("gui-home-cache-usage-approximate", root.cache-used, root.cache-total);
+                color: Theme.text;
+                font-family: Theme.mono-family;
+                font-size: Theme.label-size;
+                font-weight: 600;
+                overflow: elide;
+            }
+            if root.cache-over-budget : HorizontalLayout {
+                alignment: start;
+                Chip { text: GuiI18n.text("gui-artifact-cache-over-budget"); tone: "attention"; }
+            }
+        }
+        if root.figures && !root.cache-unlimited : SegmentedMeter {
+            portion: root.cache-over-budget ? 1 : root.cache-fill;
+            tone: root.cache-over-budget ? Theme.warning : Theme.state-running;
+        }
+    }
+    BodyText { text: GuiI18n.text("gui-home-cache-note"); font-size: Theme.label-size; color: Theme.text-secondary; wrap: word-wrap; }
+}
