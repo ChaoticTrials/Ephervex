@@ -83,7 +83,7 @@ export component FocusRing inherits Rectangle {
 // rather than focusable and inert. Every other key is left to bubble, so
 // shortcuts held by a scope further out keep working while a button is
 // focused.
-component KeyboardFocus inherits FocusScope {
+export component KeyboardFocus inherits FocusScope {
     in property <length> ring-radius: 6px;
     callback activated();
     key-pressed(event) => {
@@ -811,8 +811,10 @@ export component Pill inherits Rectangle {
     // with a bound width is fixed at it.
     in property <length> min-content-width: 0px;
     in property <length> content-height: 24px;
+    // The widest a pill grows; a longer label is elided.
+    in property <length> max-content-width: 10000px;
     height: root.content-height;
-    width: max(root.min-content-width, label.preferred-width + 18px);
+    width: min(root.max-content-width, max(root.min-content-width, label.preferred-width + 18px));
     horizontal-stretch: 0;
     accessible-role: AccessibleRole.text;
     accessible-label: root.text;
@@ -821,23 +823,28 @@ export component Pill inherits Rectangle {
     border-color: Theme.border-strong;
     background: root.fill;
     label := Text {
+        x: 9px;
+        width: root.width - 18px;
         text: root.text;
         color: root.caption;
         font-size: Theme.caption-size;
         font-weight: 700;
+        overflow: elide;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
 }
 
 // A small tag in the fixed-width family, for versions and other values read
-// letter by letter. `tone` is neutral, server, running, building, attention
-// or danger.
+// letter by letter. `tone` is neutral, server, running, building, attention,
+// danger, or a loader: forge, neoforge, or vanilla.
 export component Chip inherits Rectangle {
     in property <string> text;
     in property <string> tone: "neutral";
+    // The width the whole text needs. A chip given less elides its text.
+    out property <length> natural-width: label.preferred-width + 14px;
     height: Theme.chip-height;
-    width: label.preferred-width + 14px;
+    width: root.natural-width;
     horizontal-stretch: 0;
     accessible-role: AccessibleRole.text;
     accessible-label: root.text;
@@ -849,13 +856,19 @@ export component Chip inherits Rectangle {
         : root.tone == "building" ? Theme.state-building
         : root.tone == "attention" ? Theme.state-attention
         : root.tone == "danger" ? Theme.danger-fill
+        : root.tone == "forge" ? Theme.chip-forge
+        : root.tone == "neoforge" ? Theme.chip-neoforge
+        : root.tone == "vanilla" ? Theme.chip-vanilla
         : Theme.surface;
     label := Text {
+        x: 7px;
+        width: root.width - 14px;
         text: root.text;
         color: root.tone == "server" || root.tone == "running" || root.tone == "building" || root.tone == "attention" ? Theme.on-accent : root.tone == "danger" ? Theme.on-danger : Theme.text;
         font-family: Theme.mono-family;
         font-size: Theme.caption-size;
         font-weight: 600;
+        overflow: elide;
         horizontal-alignment: center;
         vertical-alignment: center;
     }

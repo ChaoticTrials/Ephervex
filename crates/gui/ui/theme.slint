@@ -150,6 +150,10 @@ export global Theme {
     out property <color> state-attention: palette.state-attention;
     out property <color> state-stopped: palette.state-stopped;
     out property <color> state-server: palette.state-server;
+    // The fills of the chip that names a host's loader, one per loader.
+    out property <color> chip-forge: palette.chip-forge;
+    out property <color> chip-neoforge: palette.chip-neoforge;
+    out property <color> chip-vanilla: palette.chip-vanilla;
     // The paper of the workflow banner and of a favorite star that is on.
     out property <color> note-fill: palette.note-fill;
     // The fill of a problem box, which carries `danger` text.
@@ -250,4 +254,8 @@ export global Theme {
     out property <length> window-min-height: 760px;
     // The height of a chip.
     out property <length> chip-height: 22px * text-scale;
+    // The count badge on a card's top-right corner, and how far it overhangs the
+    // corner, which a scrolling list pads for.
+    out property <length> corner-badge-size: 22px * text-scale;
+    out property <length> corner-badge-overhang: 9px;
 }

@@ -2331,6 +2331,17 @@ gui-sort-name = Name
 gui-sort-minecraft = Minecraft version
 gui-sort-loader = Loader
 gui-filter-hosts = Filter instances and servers...
+# The chip on a client card that has linked servers.
+gui-host-card-servers = { $count ->
+    [one] server
+   *[other] { $count } servers
+}
+# The state line of a host that is still being created.
+gui-host-card-building = Building
+gui-host-card-building-percent = Building { $value }%
+# The empty section lines of the host list.
+gui-host-list-no-instances = No instances to show
+gui-host-list-no-servers = No servers to show
 gui-favorite-host = Mark { $value } as a favorite
 gui-unfavorite-host = Remove { $value } from favorites
 gui-add-favorite = Add to favorites

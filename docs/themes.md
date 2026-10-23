@@ -162,15 +162,18 @@ also holds a commented-out `[branding]` section for use in a theme folder.
 | `on-terminal` | Text on `terminal` |
 | `on-terminal-muted` | Quieter text on `terminal`, such as times and sources |
 | `terminal-error` | An error line on `terminal` |
+| `chip-forge` | The fill of a host card's Forge loader chip. `text` is drawn on it. |
+| `chip-neoforge` | The fill of a host card's NeoForge loader chip. `text` is drawn on it. |
+| `chip-vanilla` | The fill of a host card's Vanilla loader chip. `text` is drawn on it. |
 
 Keep text readable: `text`, `text-secondary` and `text-muted` are drawn on
 `background`, `surface`, `field` and `elevated`, and captions on the button fills.
 
 The built-in Workbench theme is held to the same bar, and so is the example
 theme. Every caption is readable on the fill it is drawn on: `text` on
-`surface`, `selection`, `selection-strong` and `note-fill`, `on-accent` on `accent-primary` and each `state-` fill, `on-primary` on
-`primary-fill` and `primary-fill-hover`, and `on-danger` on `danger-fill` and
-`danger-fill-hover`. A switch's knob is told apart from its track by its own
+`surface`, `selection`, `selection-strong`, `note-fill` and each `chip-` fill, `on-accent` on `accent-primary` and each `state-` fill,
+`on-primary` on `primary-fill` and `primary-fill-hover`, and `on-danger` on `danger-fill` and
+`danger-fill-hover`, and `surface` on `danger` and on `border-strong` (the counts on a card's problem badge and on a list section's heading). A switch's knob is told apart from its track by its own
 color or by the `border-strong` outline. The scrim dims the page firmly.
 
 The tones drawn as text (`accent`, `accent-secondary`, `success`, `warning`, `danger`, the marks, and the group

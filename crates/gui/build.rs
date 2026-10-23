@@ -12,6 +12,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // the compiler kept its debug info. Release builds do not need it and
         // should not carry it, so it is kept for every other profile.
         .with_debug_info(std::env::var("PROFILE").as_deref() != Ok("release"));
+    // The tests that compile a probe window with `slint::slint!` query its
+    // elements too, so the macro keeps the same debug information.
+    if std::env::var("PROFILE").as_deref() != Ok("release") {
+        println!("cargo:rustc-env=SLINT_EMIT_DEBUG_INFO=1");
+    }
     slint_build::compile_with_config("ui/app.slint", config)?;
     write_ui_sources()
 }

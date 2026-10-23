@@ -72,6 +72,7 @@ release, because the headless tests find elements by it.
 | `models.slint` | The row and view structs Rust fills models with |
 | `components/` | Text primitives, controls, surfaces (the hard-shadow `Plate` and the `GridFloor` grid), and artwork shared by every surface |
 | `workspace/` | A host workspace's chrome and its surfaces: mods, packs, logs, isolation, diagnostics, snapshots, and host settings |
+| `host-list/` | The host list: its search and filter panel, the client, server, and pending cards, and the scrolling list that holds them |
 | `home/` | The client and server cards, the inspector, and the Running and Activity cards |
 | `settings/` | Application settings panels and the Minecraft defaults screen with its window size picker |
 

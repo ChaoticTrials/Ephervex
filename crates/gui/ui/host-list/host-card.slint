@@ -1,0 +1,446 @@
+// The cards of the host list: one face, drawn for a client, a server, or a host still being created.
+
+import { Outlined, Plate } from "../components/surface.slint";
+import { Chip, FavoriteToggle, Pill, StateTone } from "../components/controls.slint";
+import { ContextTouchArea, PopupMenu } from "../components/menus.slint";
+import { ElidedHeading } from "../components/text.slint";
+import { GuiI18n } from "../globals.slint";
+import { InstanceRow, MenuRow, PendingEntityRow, ServerRow } from "../models.slint";
+import { Theme } from "../theme.slint";
+
+// The color of the strip down a card's left edge, from what the host is doing.
+export global HostStrip {
+    pure public function of(state-kind: string, restarting: bool, needs-attention: bool, server: bool) -> color {
+        let fill = StateTone.fill-of(restarting ? "restarting" : state-kind);
+        if fill != Theme.surface {
+            return fill;
+        }
+        if needs-attention {
+            return Theme.state-attention;
+        }
+        return server ? Theme.state-server : Theme.state-stopped;
+    }
+}
+
+// What every list card shares: the state strip, the name with its group and
+// favorite star, the version chips, and a line for the host's state.
+//
+// Every line is one elided line of text, so every card is as tall as the
+// text size makes it, and the height is read from the layout rather than
+// declared. The container pads the left and top by `Theme.selection-outline-width`
+// for the selection ring, the right by `Theme.corner-badge-overhang` for the
+// problem badge, and the bottom and right for the hard shadow.
+export component HostCardFace inherits Rectangle {
+    in property <string> name;
+    // A card that is not a host yet has no star to press.
+    in property <bool> favorable: true;
+    in property <bool> favorite;
+    in property <string> group-name;
+    in property <int> group-tone;
+    in property <string> minecraft;
+    in property <string> loader;
+    in property <string> loader-kind;
+    // A third chip, such as the linked servers or the address. Empty for none.
+    in property <string> extra-chip;
+    in property <color> strip: Theme.state-stopped;
+    // How many recorded reasons say the host needs attention.
+    in property <int> problems;
+    in property <string> state-line;
+    in property <color> state-line-color: Theme.text;
+    // Shown at the right of the state line when it is not empty.
+    in property <string> trailing;
+    // How far through the work is, from 0 to 1, or -1 for no bar.
+    in property <float> progress: -1;
+    // Whether a pane shows this host, which draws the selection style.
+    in property <bool> open;
+    in property <bool> hovered;
+    // A press on the title or the star, which take presses themselves.
+    callback title-pressed();
+    callback star-pressed();
+    // A press of the secondary button over a part that takes presses itself.
+    callback menu-requested(x: length, y: length);
+    private property <length> ink: Theme.strong-border-width;
+    private property <length> chip-gap: 5px;
+    // The width comes from the container, never from the text inside.
+    min-width: 0px;
+    preferred-width: 1px;
+    max-width: 10000px;
+    height: body.preferred-height;
+    if root.open : Rectangle {
+        x: -Theme.selection-outline-width;
+        y: -Theme.selection-outline-width;
+        width: root.width + 2 * Theme.selection-outline-width;
+        height: root.height + 2 * Theme.selection-outline-width;
+        border-radius: Theme.card-radius + Theme.selection-outline-width;
+        background: Theme.accent-primary;
+    }
+    Plate {
+        width: root.width;
+        height: root.height;
+        fill: root.open ? Theme.selection-card : root.hovered ? Theme.elevated : Theme.surface;
+        // First, so the card's own touch area is under everything drawn here.
+        @children
+        Rectangle {
+            x: 6px + root.ink;
+            y: 9px + root.ink;
+            width: 4px;
+            height: parent.height - 2 * (9px + root.ink);
+            border-radius: 3px;
+            border-width: Theme.chip-border-width;
+            border-color: Theme.border-strong;
+            background: root.strip;
+        }
+        body := VerticalLayout {
+            padding-top: 10px + root.ink;
+            padding-bottom: 10px + root.ink;
+            padding-left: 16px + root.ink;
+            padding-right: 11px + root.ink;
+            spacing: 7px;
+            HorizontalLayout {
+                height: max(26px, title.preferred-height);
+                spacing: 6px;
+                alignment: stretch;
+                title := ElidedHeading {
+                    text: root.name;
+                    font-size: Theme.row-heading-size;
+                    clicked => { root.title-pressed(); }
+                    context-requested(x, y) => { root.menu-requested(x, y); }
+                }
+                if root.group-name != "" : VerticalLayout {
+                    alignment: center;
+                    Pill { text: root.group-name; tone-color: Theme.group-tone(root.group-tone); content-height: Theme.chip-height; max-content-width: 96px; }
+                }
+                if root.favorable : VerticalLayout {
+                    alignment: center;
+                    FavoriteToggle {
+                        size: 26px;
+                        host-name: root.name;
+                        favorite: root.favorite;
+                        toggled => { root.star-pressed(); }
+                        context-requested(x, y) => { root.menu-requested(x, y); }
+                    }
+                }
+            }
+            // Placed by hand: a chip given less room than its text needs
+            // elides it, and the row clips whatever still does not fit.
+            Rectangle {
+                height: Theme.chip-height;
+                clip: true;
+                minecraft-chip := Chip {
+                    x: 0px;
+                    text: root.minecraft;
+                    visible: root.minecraft != "";
+                    width: root.minecraft != "" ? min(self.natural-width, parent.width) : 0px;
+                }
+                loader-chip := Chip {
+                    x: minecraft-chip.width + (minecraft-chip.width > 0px ? root.chip-gap : 0px);
+                    text: root.loader;
+                    tone: root.loader-kind;
+                    visible: root.loader != "";
+                    width: root.loader != "" ? max(0px, min(self.natural-width, parent.width - self.x - (root.extra-chip != "" ? extra.natural-width + root.chip-gap : 0px))) : 0px;
+                }
+                extra := Chip {
+                    x: loader-chip.x + loader-chip.width + (loader-chip.width > 0px ? root.chip-gap : 0px);
+                    text: root.extra-chip;
+                    tone: "server";
+                    visible: root.extra-chip != "";
+                    width: root.extra-chip != "" ? max(0px, min(self.natural-width, parent.width - self.x)) : 0px;
+                }
+            }
+            if root.progress >= 0 : Outlined {
+                height: 10px;
+                radius: 5px;
+                snap-size: true;
+                outline-width: Theme.chip-border-width;
+                fill: Theme.well;
+                progress: root.progress;
+            }
+            HorizontalLayout {
+                height: max(state-text.preferred-height, trailing-text.preferred-height);
+                Rectangle {
+                    horizontal-stretch: 1;
+                    state-text := Text {
+                        width: parent.width;
+                        text: root.state-line;
+                        color: root.state-line-color;
+                        font-size: Theme.label-size;
+                        font-weight: 700;
+                        overflow: elide;
+                        vertical-alignment: center;
+                    }
+                }
+                Rectangle {
+                    // Capped, so a long detail never takes the state line's room.
+                    width: root.trailing != "" ? min(trailing-text.preferred-width, 120px * Theme.text-scale) + 8px : 0px;
+                    trailing-text := Text {
+                        x: 8px;
+                        width: parent.width - 8px;
+                        text: root.trailing;
+                        color: Theme.text-secondary;
+                        font-family: Theme.mono-family;
+                        font-size: Theme.caption-size;
+                        font-weight: 600;
+                        overflow: elide;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+    if root.problems > 0 : Rectangle {
+        x: root.width - Theme.corner-badge-size + Theme.corner-badge-overhang;
+        y: -Theme.corner-badge-overhang;
+        width: Theme.corner-badge-size;
+        height: Theme.corner-badge-size;
+        border-radius: self.width / 2;
+        border-width: Theme.strong-border-width;
+        border-color: Theme.border-strong;
+        background: Theme.danger;
+        accessible-role: AccessibleRole.text;
+        accessible-label: GuiI18n.count("gui-home-summary-problems", root.problems);
+        Text {
+            text: root.problems > 99 ? "99+" : "\{root.problems}";
+            color: Theme.surface;
+            font-family: Theme.heading-family;
+            font-size: Theme.label-size;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// A host that is still being created: the same face, filled in as the work goes.
+export component PendingCard inherits HostCardFace {
+    in property <PendingEntityRow> item;
+    name: root.item.name;
+    favorable: false;
+    minecraft: root.item.target;
+    strip: Theme.state-building;
+    state-line: root.item.indeterminate ? GuiI18n.text("gui-host-card-building") : GuiI18n.value("gui-host-card-building-percent", "\{round(root.item.progress * 100)}");
+    trailing: root.item.detail;
+    progress: root.item.indeterminate ? -1 : root.item.progress;
+}
+
+// A client in the list. Pressing it asks to open it; the secondary button and
+// the star on it offer the rest.
+export component ClientCard inherits HostCardFace {
+    in property <InstanceRow> item;
+    // One row per group the instance can be put in, its id the group's.
+    in property <[MenuRow]> group-entries;
+    callback open-requested(string);
+    callback toggle-favorite(string, bool);
+    callback set-group(string, string);
+    callback new-group(string);
+    callback pick-icon(string);
+    callback clear-icon(string);
+    callback launch(string);
+    callback kill(string);
+    callback open-folder(string);
+    callback create-server(string, string);
+    callback duplicate(string);
+    callback make-persistent(string);
+    callback rename(string, string);
+    callback delete(InstanceRow);
+    // Where the menu was last opened, so the group list it leads to opens in
+    // its place.
+    private property <length> menu-x;
+    private property <length> menu-y;
+    // Whether the line already says when the instance last ran, so the right
+    // side does not say it twice.
+    private property <bool> line-says-last-run: root.item.restart-stage == "" && !root.item.needs-attention
+        && root.item.state-kind != "running" && root.item.state-kind != "starting" && root.item.state-kind != "orphaned";
+    accessible-role: button;
+    accessible-label: root.item.name;
+    accessible-action-default => { root.open-requested(root.item.id); }
+    function open-menu(x: length, y: length) {
+        root.menu-x = x;
+        root.menu-y = y;
+        menu.show-at-window(x, y);
+    }
+    // First, so it is under the star and the title rather than over them.
+    card-area := ContextTouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.open-requested(root.item.id); }
+        context-requested(x, y) => { root.open-menu(x, y); }
+    }
+    name: root.item.name;
+    favorite: root.item.favorite;
+    group-name: root.item.group-name;
+    group-tone: root.item.group-tone;
+    minecraft: root.item.minecraft;
+    loader: root.item.loader;
+    loader-kind: root.item.loader-kind;
+    extra-chip: root.item.linked-servers > 0 ? GuiI18n.count("gui-host-card-servers", root.item.linked-servers) : "";
+    strip: HostStrip.of(root.item.state-kind, root.item.restart-stage != "", root.item.needs-attention, false);
+    problems: root.item.problems;
+    state-line: root.item.creating-server-detail != "" ? root.item.creating-server-detail : root.item.state-line;
+    state-line-color: root.item.creating-server-detail != "" ? Theme.accent : Theme.text;
+    trailing: root.line-says-last-run || root.item.creating-server-detail != "" ? "" : root.item.last-run;
+    progress: root.item.creating-server-detail != "" && !root.item.creating-server-indeterminate ? root.item.creating-server-progress : -1;
+    open: root.item.open;
+    hovered: card-area.has-hover;
+    title-pressed => { root.open-requested(root.item.id); }
+    menu-requested(x, y) => { root.open-menu(x, y); }
+    star-pressed => { root.toggle-favorite(root.item.id, !root.item.favorite); }
+    // The repeater hands this card another row when the list changes in
+    // place, and an open menu, or the group list opened from it, would then
+    // act on that row.
+    property <string> menu-owner-id: root.item.id;
+    changed menu-owner-id => { menu.close(); group-menu.close(); }
+    menu := PopupMenu {
+        entries: [
+            { id: "open", label: GuiI18n.text("gui-open-workspace") },
+            { id: "launch", label: GuiI18n.text("gui-launch"), disabled: !root.item.can-launch },
+            { id: "kill", label: GuiI18n.text("gui-kill-instance"), disabled: !root.item.can-kill },
+            { id: "open-folder", label: GuiI18n.text("gui-open-folder") },
+            { id: "create-server", label: GuiI18n.text("gui-create-linked-server") },
+            { separator: true },
+            { id: "favorite", label: root.item.favorite ? GuiI18n.text("gui-remove-favorite") : GuiI18n.text("gui-add-favorite") },
+            { id: "set-group", label: GuiI18n.text("gui-set-group"), submenu: true },
+            { id: "choose-icon", label: GuiI18n.text("gui-choose-icon-ellipsis") },
+            { id: "remove-icon", label: GuiI18n.text("gui-remove-icon"), hidden: root.item.icon-slot < 0 },
+            { separator: true },
+            { id: "rename", label: GuiI18n.text("gui-rename") },
+            // Only a temporary instance has anywhere to go, and only a
+            // stopped one can be moved out from under itself.
+            // A menu entry has nowhere to put a hint, so a disabled one
+            // says why in its own label rather than graying out silently.
+            { id: "make-persistent", label: root.item.can-kill ? GuiI18n.text("gui-make-persistent-while-running") : GuiI18n.text("gui-make-persistent"), disabled: root.item.can-kill, hidden: root.item.storage-kind != "temporary" },
+            { id: "duplicate", label: root.item.can-kill ? GuiI18n.text("gui-duplicate-instance-while-running") : GuiI18n.text("gui-duplicate-instance"), disabled: root.item.can-kill },
+            { id: "delete", label: root.item.can-kill ? GuiI18n.text("gui-delete-instance-while-running") : GuiI18n.text("gui-delete-instance"), disabled: root.item.can-kill },
+        ];
+        activated(id) => {
+            if (id == "open") {
+                root.open-requested(root.item.id);
+            } else if (id == "launch") {
+                root.launch(root.item.id);
+            } else if (id == "kill") {
+                root.kill(root.item.id);
+            } else if (id == "open-folder") {
+                root.open-folder(root.item.id);
+            } else if (id == "create-server") {
+                root.create-server(root.item.id, root.item.name);
+            } else if (id == "favorite") {
+                root.toggle-favorite(root.item.id, !root.item.favorite);
+            } else if (id == "set-group") {
+                group-menu.show-at-window(root.menu-x, root.menu-y);
+            } else if (id == "choose-icon") {
+                root.pick-icon(root.item.id);
+            } else if (id == "remove-icon") {
+                root.clear-icon(root.item.id);
+            } else if (id == "rename") {
+                root.rename(root.item.id, root.item.name);
+            } else if (id == "make-persistent") {
+                root.make-persistent(root.item.id);
+            } else if (id == "duplicate") {
+                root.duplicate(root.item.id);
+            } else if (id == "delete") {
+                root.delete(root.item);
+            }
+        }
+    }
+    group-menu := PopupMenu {
+        choices: root.group-entries;
+        entries: [
+            // Below the rule, so no group's name can pass for it.
+            { separator: true, hidden: root.group-entries.length == 0 },
+            { id: "new-group", label: GuiI18n.text("gui-new-group-ellipsis") },
+            { id: "no-group", label: GuiI18n.text("gui-remove-from-group"), disabled: root.item.group-id == "" },
+        ];
+        chosen(id) => { root.set-group(root.item.id, id); }
+        activated(id) => {
+            if (id == "new-group") {
+                root.new-group(root.item.id);
+            } else {
+                root.set-group(root.item.id, "");
+            }
+        }
+    }
+}
+
+// A server in the list, standalone or linked to a client.
+export component ServerCard inherits HostCardFace {
+    in property <ServerRow> item;
+    callback open-requested(string);
+    callback toggle-favorite(string, bool);
+    callback pick-icon(string);
+    callback clear-icon(string);
+    callback start(string);
+    callback stop(string);
+    callback open-folder(string);
+    callback restart(string);
+    callback kill(string, string);
+    callback rename(string, string);
+    callback delete(ServerRow);
+    accessible-role: button;
+    accessible-label: root.item.name;
+    accessible-action-default => { root.open-requested(root.item.id); }
+    function open-menu(x: length, y: length) { menu.show-at-window(x, y); }
+    // Under the star and the title, not over them. See `ClientCard`.
+    card-area := ContextTouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.open-requested(root.item.id); }
+        context-requested(x, y) => { root.open-menu(x, y); }
+    }
+    name: root.item.name;
+    favorite: root.item.favorite;
+    minecraft: root.item.minecraft;
+    loader: root.item.loader;
+    loader-kind: root.item.loader-kind;
+    strip: HostStrip.of(root.item.state-kind, root.item.restart-stage != "", root.item.needs-attention, true);
+    problems: root.item.problems;
+    state-line: root.item.state-line;
+    trailing: root.item.relationship;
+    open: root.item.open;
+    hovered: card-area.has-hover;
+    title-pressed => { root.open-requested(root.item.id); }
+    menu-requested(x, y) => { root.open-menu(x, y); }
+    star-pressed => { root.toggle-favorite(root.item.id, !root.item.favorite); }
+    // See `ClientCard`.
+    property <string> menu-owner-id: root.item.id;
+    changed menu-owner-id => { menu.close(); }
+    menu := PopupMenu {
+        entries: [
+            { id: "open", label: GuiI18n.text("gui-open-server-workspace") },
+            { id: "primary", label: root.item.can-start ? GuiI18n.text("gui-start") : GuiI18n.text("gui-stop"), disabled: !root.item.can-start && !root.item.can-stop },
+            { id: "restart", label: GuiI18n.text("gui-restart"), disabled: !root.item.can-restart || root.item.restart-stage != "" },
+            { id: "open-folder", label: GuiI18n.text("gui-open-folder") },
+            { separator: true },
+            { id: "favorite", label: root.item.favorite ? GuiI18n.text("gui-remove-favorite") : GuiI18n.text("gui-add-favorite") },
+            { id: "choose-icon", label: GuiI18n.text("gui-choose-icon-ellipsis") },
+            { id: "remove-icon", label: GuiI18n.text("gui-remove-icon"), hidden: root.item.icon-slot < 0 },
+            { separator: true },
+            { id: "rename", label: GuiI18n.text("gui-rename") },
+            { id: "force-kill", label: GuiI18n.text("gui-force-kill"), disabled: !root.item.can-kill },
+            { id: "delete", label: GuiI18n.text("gui-delete-server") },
+        ];
+        activated(id) => {
+            if (id == "open") {
+                root.open-requested(root.item.id);
+            } else if (id == "primary") {
+                if (root.item.can-start) {
+                    root.start(root.item.id);
+                } else {
+                    root.stop(root.item.id);
+                }
+            } else if (id == "restart") {
+                root.restart(root.item.id);
+            } else if (id == "open-folder") {
+                root.open-folder(root.item.id);
+            } else if (id == "favorite") {
+                root.toggle-favorite(root.item.id, !root.item.favorite);
+            } else if (id == "choose-icon") {
+                root.pick-icon(root.item.id);
+            } else if (id == "remove-icon") {
+                root.clear-icon(root.item.id);
+            } else if (id == "rename") {
+                root.rename(root.item.id, root.item.name);
+            } else if (id == "force-kill") {
+                root.kill(root.item.id, root.item.name);
+            } else if (id == "delete") {
+                root.delete(root.item);
+            }
+        }
+    }
+}

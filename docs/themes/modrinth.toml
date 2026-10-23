@@ -116,3 +116,8 @@ terminal = "#0e0f12"
 on-terminal = "#d6dde5"
 on-terminal-muted = "#7c8591"
 terminal-error = "#ff7a93"
+
+# The loader chip on a host card, with `text` drawn on it.
+chip-forge = "#4a3626"
+chip-neoforge = "#52301f"
+chip-vanilla = "#2f4a26"
