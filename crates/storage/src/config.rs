@@ -434,9 +434,6 @@ pub struct ApplicationDisplayConfig {
     /// Ephervex wrote costs this build that one setting, not the whole file.
     /// Resolved by [`Self::theme`].
     pub color_scheme: String,
-    /// Whether a seasonal theme may stand in for a built-in theme during its
-    /// season. The recorded theme is never changed by it.
-    pub seasonal_themes: bool,
     /// Whether linked servers also appear in the global Servers list.
     pub show_linked_servers: bool,
     /// The key the instance list is ordered by, by its recorded name.
@@ -455,7 +452,6 @@ impl Default for ApplicationDisplayConfig {
             text_scale: ApplicationTextScale::default(),
             technical_text_size: TechnicalTextSize::default(),
             color_scheme: ApplicationColorScheme::default().as_str().to_owned(),
-            seasonal_themes: true,
             show_linked_servers: false,
             instance_sort: DEFAULT_INSTANCE_SORT.to_owned(),
             unknown: toml::Table::new(),
@@ -1929,7 +1925,6 @@ persistent_instance_root = ""
 [display]
 text_scale = "default"
 technical_text_size = "default"
-seasonal_themes = true
 show_linked_servers = false
 
 [java]
@@ -2041,8 +2036,6 @@ reference = ""
         assert_eq!(config.language, "en-US");
         assert_eq!(config.display.text_scale.percent(), 100);
         assert_eq!(config.display.technical_text_size.pixels(), 12);
-        // A season's theme shows unless the user turns it off.
-        assert!(config.display.seasonal_themes);
         // Test servers are for testing mods, not for being reachable.
         assert!(!config.server_defaults.online_mode);
         assert_eq!(
@@ -2097,7 +2090,6 @@ reference = ""
                     "[display]"
                         | "text_scale = \"default\""
                         | "technical_text_size = \"default\""
-                        | "seasonal_themes = true"
                         | "show_linked_servers = false"
                 )
             })
@@ -2107,7 +2099,6 @@ reference = ""
         let parsed = Config::from_toml_str(&legacy).expect("legacy configuration parses");
         assert_eq!(parsed.display, ApplicationDisplayConfig::default());
         assert!(!parsed.display.show_linked_servers);
-        assert!(parsed.display.seasonal_themes);
         assert!(parsed.server_defaults.make_default_account_operator);
         assert_eq!(parsed.server_defaults.operator_permission_level.value(), 4);
     }
@@ -2118,7 +2109,6 @@ reference = ""
         config.display.text_scale = ApplicationTextScale::Large;
         config.display.technical_text_size = TechnicalTextSize::Comfortable;
         config.display.show_linked_servers = true;
-        config.display.seasonal_themes = false;
         config.server_defaults.make_default_account_operator = false;
         config.server_defaults.operator_permission_level =
             OperatorPermissionLevel::from_value(2).expect("valid level");
@@ -2460,6 +2450,29 @@ reference = ""
             "future_server_option",
         ] {
             assert!(rewritten.contains(key));
+        }
+    }
+
+    #[test]
+    fn a_display_key_from_a_removed_setting_loads_and_survives_a_save() {
+        for value in ["true", "false"] {
+            let text = DEFAULT_CONFIG_EXAMPLE.replace(
+                "show_linked_servers = false",
+                &format!("seasonal_themes = {value}\nshow_linked_servers = false"),
+            );
+            let config = Config::from_toml_str(&text).expect("a removed setting's key loads");
+            assert_eq!(
+                config
+                    .display
+                    .unknown
+                    .get("seasonal_themes")
+                    .and_then(toml::Value::as_bool),
+                Some(value == "true")
+            );
+            assert!(!config.display.show_linked_servers);
+            let rewritten = Config::from_toml_str(&config.to_toml_string().expect("serialize"))
+                .expect("re-parse");
+            assert_eq!(rewritten.display, config.display);
         }
     }
 

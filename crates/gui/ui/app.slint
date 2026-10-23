@@ -681,12 +681,6 @@ export component AppWindow inherits Window {
     in-out property <[string]> theme-labels: [GuiI18n.text("gui-color-scheme-dark"), GuiI18n.text("gui-color-scheme-light")];
     in-out property <[string]> theme-ids: ["dark", "light"];
     in-out property <int> theme-index: 0;
-    // Whether a season's theme may stand in for Dark or Light, the name of
-    // the theme painted now, and what the page says while a season's theme
-    // is shown. Written from the stored value only.
-    in-out property <bool> seasonal-themes: true;
-    in-out property <string> shown-theme: "dark";
-    in-out property <string> seasonal-theme-note;
     // Where theme files go, and what was wrong with the ones found there.
     in-out property <string> themes-folder;
     in-out property <[string]> theme-problems;
@@ -1017,7 +1011,6 @@ export component AppWindow inherits Window {
     // answers on this screen: it is one recorded decision, not a form.
     callback set-dependency-warning(bool);
     callback set-dependency-following(bool);
-    callback set-seasonal-themes(bool);
     // What the Java settings page asks for when it opens, against the
     // cached inventory. `refresh-java` is the page's own button, which
     // rescans because the cache cannot notice a JDK installed since.
@@ -1901,15 +1894,6 @@ export component AppWindow inherits Window {
                                 }
                                 SettingCard {
                                     row: root.settings-two-columns ? 3 : 7;
-                                    col: root.settings-two-columns ? 1 : 0;
-                                    width: root.settings-two-columns ? (parent.width - 14px) / 2 : parent.width;
-                                    title: GuiI18n.text("gui-seasonal-themes");
-                                    detail: GuiI18n.text("gui-seasonal-themes-detail");
-                                    note: root.seasonal-theme-note;
-                                    Toggle { accessible-name: GuiI18n.text("gui-seasonal-themes"); sets-its-own-position: false; checked: root.seasonal-themes; toggled(value) => { root.set-seasonal-themes(value); } }
-                                }
-                                SettingCard {
-                                    row: root.settings-two-columns ? 4 : 8;
                                     col: root.settings-two-columns ? 1 : 0;
                                     width: root.settings-two-columns ? (parent.width - 14px) / 2 : parent.width;
                                     title: GuiI18n.text("gui-technical-text-size");

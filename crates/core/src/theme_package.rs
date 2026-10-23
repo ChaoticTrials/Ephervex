@@ -372,20 +372,6 @@ fn refusal(parent: &OwnedFd, name: &str, errno: Errno) -> ThemePackageError {
     }
 }
 
-/// Decodes an image compiled into the application, such as a built-in theme's
-/// branding, under the same bounds as one read from a theme folder.
-///
-/// # Errors
-///
-/// When `bytes` is not a bounded image in `format`.
-pub fn decode_branding_image(
-    bytes: &[u8],
-    format: BrandingFormat,
-    role: BrandingRole,
-) -> Result<BrandingImage, ThemePackageError> {
-    decode(bytes, format, role)
-}
-
 /// A decoder for `bytes` that can never allocate past [`MAX_DECODE_BYTES`],
 /// including while it reads the header.
 fn bounded_decoder(
@@ -753,18 +739,6 @@ mod tests {
         assert!(matches!(
             read(folder.path(), "profile.png"),
             Ok(_) | Err(ThemePackageError::DecodeLimit)
-        ));
-    }
-
-    #[test]
-    fn a_compiled_in_image_is_decoded_under_the_same_bounds() {
-        let logo = include_bytes!("../../../assets/logo.png");
-        let image = decode_branding_image(logo, BrandingFormat::Png, BrandingRole::Logo)
-            .expect("the shipped logo is valid branding");
-        assert_eq!((image.width(), image.height()), (620, 620));
-        assert!(matches!(
-            decode_branding_image(logo, BrandingFormat::Jpeg, BrandingRole::Logo),
-            Err(ThemePackageError::FormatMismatch)
         ));
     }
 
