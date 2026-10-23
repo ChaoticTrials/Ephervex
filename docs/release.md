@@ -714,7 +714,11 @@ tools/licenses/generate.sh --check  # fail if the committed ones are stale
 `cargo-about` reads `Cargo.lock` and each crate's own license file;
 [`tools/licenses/inventory.py`](../tools/licenses/inventory.py) turns that into
 the two committed documents. [`about.toml`](../about.toml) says which licenses
-are acceptable and resolves the one dependency offered under several.
+are acceptable and resolves the one dependency offered under several. The
+fonts the desktop application bundles are not crates, so the builder reads them
+from `crates/gui/ui/fonts/fonts.toml` and lists each family beside the crates,
+under its own full license text. Any font file (`.ttf`, `.otf`, or `.ttc`) under
+`crates/gui/ui` that is missing from that manifest stops generation.
 
 Two outputs, one builder, so they cannot disagree:
 

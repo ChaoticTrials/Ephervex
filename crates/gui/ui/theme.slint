@@ -9,11 +9,13 @@ export global Theme {
     in-out property <ThemePalette> palette: BuiltInPalettes.dark;
     // The scheme the shipped widgets paint in to match.
     out property <ColorScheme> widget-scheme: palette.widget-scheme;
-    // The fixed-width family this machine actually has, resolved once at
-    // startup. `font-family` is matched as a literal family name, so the
-    // generic "monospace" written here matches nothing and only stands
-    // until the real name is set. See the `monospace` module.
-    in-out property <string> mono-family: "monospace";
+    // Interface text, including the shipped widgets. The three families are
+    // bundled static fonts matched by name; weight comes from `font-weight`.
+    out property <string> body-family: "Space Grotesk";
+    // Headings.
+    out property <string> heading-family: "Pixelify Sans";
+    // Logs, versions, paths, and other technical text.
+    out property <string> mono-family: "IBM Plex Mono";
     out property <length> caption-size: 11px * text-scale;
     out property <length> label-size: 12px * text-scale;
     out property <length> body-size: 13px * text-scale;

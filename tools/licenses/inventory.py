@@ -41,6 +41,15 @@ names, and the digest is checked here as well. That is a general rule rather
 than a case for one crate, and it never invents anything: the terms still come
 from the crate, verified against a digest recorded in a reviewed file.
 
+**Fonts are not crates.** The desktop application embeds its fonts in the
+binary, so they are shipped third-party works with terms of their own. They are
+read from `crates/gui/ui/fonts/fonts.toml` and listed beside the crates under
+the name `<family> (font)`, each with its own full license text so that its
+copyright line, and a Reserved Font Name statement where it has one, ship with
+it. Any font file (`.ttf`, `.otf`, or `.ttc`, in any letter case) anywhere under
+`crates/gui/ui` that the manifest does not list stops generation, so a font the
+markup can import cannot be bundled without being accounted for.
+
     usage: tools/licenses/inventory.py --from-cargo-about <file>
                --about-config <about.toml> [--check]
 
@@ -67,18 +76,24 @@ EXCERPT_CONTEXT = 60
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INVENTORY_PATH = REPO_ROOT / "crates" / "core" / "data" / "third-party-licenses.json"
 DOCUMENT_PATH = REPO_ROOT / "THIRD-PARTY-LICENSES.md"
+FONT_DIRECTORY = REPO_ROOT / "crates" / "gui" / "ui" / "fonts"
+# Where the markup can import a font from, which is wider than where fonts live.
+FONT_SEARCH_ROOT = REPO_ROOT / "crates" / "gui" / "ui"
+FONT_SUFFIXES = {".ttf", ".otf", ".ttc"}
 
 DOCUMENT_PREAMBLE = """\
 # Third-party licenses
 
 Ephervex is licensed under Apache-2.0; its own terms are in `LICENSE`. It is
-built on the open-source crates listed here, each under its own terms, and this
-document carries the full text of every one of them.
+built on the open-source crates listed here and bundles the fonts marked
+"(font)", each under its own terms, and this document carries the full text of
+every one of them.
 
-Generated from `Cargo.lock` by `tools/licenses/generate.sh`. It is not written
-or edited by hand: a dependency change that is not regenerated fails the build.
-The same data is compiled into the binaries, so `ephervex licenses` and the
-desktop application's "About & Licenses" screen answer from it too.
+Generated from `Cargo.lock` and the bundled font manifest by
+`tools/licenses/generate.sh`. It is not written or edited by hand: a dependency
+or font change that is not regenerated fails the build. The same data is
+compiled into the binaries, so `ephervex licenses` and the desktop
+application's "About & Licenses" screen answer from it too.
 """
 
 
@@ -126,7 +141,69 @@ def clarified_texts(name: str, crate_dir: Path, config: dict) -> list[tuple[str,
     return found
 
 
-def build_inventory(raw: dict, config: dict) -> dict:
+def bundled_fonts(directory: Path, search_root: Path | None = None) -> list[dict]:
+    """The fonts bundled in `directory`, as inventory entries.
+
+    Each entry is a name, a version, a license identifier and name, and that
+    font's own license text, read exactly as it was committed (decoded, never
+    normalized, because the text carries a copyright line and line endings the
+    author wrote). Every font file under `search_root` (default `directory`),
+    whatever its extension case or depth, has to belong to exactly one manifest
+    entry and every file the manifest names has to exist, so a font is neither
+    bundled unlisted nor listed unbundled.
+    """
+    search_root = search_root or directory
+    manifest = directory / "fonts.toml"
+    try:
+        entries = tomllib.loads(manifest.read_text(encoding="utf-8")).get("font", [])
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        fail(f"could not read {manifest}: {error}")
+
+    listed: list[str] = []
+    fonts = []
+    for entry in entries:
+        family = entry.get("family")
+        if not family:
+            fail(f"{manifest} has a font with no family")
+        for key in ("version", "license", "license-name", "license-file", "files"):
+            if not entry.get(key):
+                fail(f"the font {family} in {manifest} has no {key}")
+        for name in entry["files"]:
+            if not (directory / name).is_file():
+                fail(f"the font {family} lists {name}, which is not in {directory}")
+        listed.extend(entry["files"])
+        try:
+            text = (directory / entry["license-file"]).read_bytes().decode("utf-8")
+        except (OSError, UnicodeDecodeError) as error:
+            fail(f"the license text of the font {family} could not be read: {error}")
+        if not text.strip():
+            fail(f"the license text of the font {family} is empty")
+        fonts.append({
+            "name": f"{family} (font)",
+            "version": entry["version"],
+            "license": entry["license"],
+            "license_name": entry["license-name"],
+            "text": text,
+        })
+
+    duplicated = sorted({name for name in listed if listed.count(name) > 1})
+    if duplicated:
+        fail(f"{manifest} lists a font file under two families: {', '.join(duplicated)}")
+    known = {(directory / name).resolve() for name in listed}
+    unlisted = sorted(
+        str(path.relative_to(search_root))
+        for path in search_root.rglob("*")
+        if path.is_file() and path.suffix.lower() in FONT_SUFFIXES and path.resolve() not in known
+    )
+    if unlisted:
+        fail(
+            f"{', '.join(unlisted)} is under {search_root} but not listed in {manifest}. "
+            f"A font ships with its license text, so add it to the manifest."
+        )
+    return fonts
+
+
+def build_inventory(raw: dict, config: dict, fonts: list[dict] | None = None) -> dict:
     """The committed inventory, from what cargo-about reported.
 
     `raw["licenses"]` is one entry per (license, text) pair with the crates
@@ -185,6 +262,16 @@ def build_inventory(raw: dict, config: dict) -> dict:
             })
             used.setdefault((name, version), set()).add((identifier, text))
 
+    # Bundled fonts, each covered by the one text its author shipped.
+    for font in fonts or []:
+        key = (font["license"], font["text"])
+        texts.setdefault(key, {
+            "id": font["license"],
+            "name": font["license_name"],
+            "text": font["text"],
+        })
+        used.setdefault((font["name"], font["version"]), set()).add(key)
+
     licenses = sorted(
         texts.values(),
         key=lambda item: (item["id"], hashlib.sha256(item["text"].encode()).hexdigest()),
@@ -219,6 +306,15 @@ def build_inventory(raw: dict, config: dict) -> dict:
             "texts": sorted(index_of[key] for key in keys),
         })
 
+    for font in fonts or []:
+        keys = used[(font["name"], font["version"])]
+        crates.append({
+            "name": font["name"],
+            "version": font["version"],
+            "license": font["license"],
+            "texts": sorted(index_of[key] for key in keys),
+        })
+
     crates.sort(key=lambda item: (item["name"], item["version"]))
     return {"version": INVENTORY_VERSION, "licenses": licenses, "crates": crates}
 
@@ -240,11 +336,11 @@ def render_document(inventory: dict) -> str:
     crates = inventory["crates"]
 
     lines = [DOCUMENT_PREAMBLE, ""]
-    lines.append(f"{len(crates)} crates, under {len(licenses)} license texts.")
+    lines.append(f"{len(crates)} packages, under {len(licenses)} license texts.")
     lines.append("")
     lines.append("## Dependencies")
     lines.append("")
-    lines.append("| Crate | Version | License |")
+    lines.append("| Package | Version | License |")
     lines.append("| --- | --- | --- |")
     for crate in crates:
         lines.append(f"| {crate['name']} | {crate['version']} | {crate['license']} |")
@@ -402,7 +498,7 @@ def main() -> None:
     except (OSError, tomllib.TOMLDecodeError) as error:
         fail(f"could not read {args.about_config}: {error}")
 
-    inventory = build_inventory(raw, config)
+    inventory = build_inventory(raw, config, bundled_fonts(FONT_DIRECTORY, FONT_SEARCH_ROOT))
     # Bytes rather than text from here on. At least one dependency's license
     # file uses CRLF, and its text ships exactly as that crate wrote it; reading
     # a generated file back in text mode would translate those line endings and
@@ -434,7 +530,7 @@ def main() -> None:
             )
             sys.exit(1)
         print(
-            f"inventory: up to date, {len(inventory['crates'])} crates under "
+            f"inventory: up to date, {len(inventory['crates'])} packages under "
             f"{len(inventory['licenses'])} license texts"
         )
         return
@@ -443,7 +539,7 @@ def main() -> None:
         path.write_bytes(content)
         print(f"inventory: wrote {path.relative_to(REPO_ROOT)}")
     print(
-        f"inventory: {len(inventory['crates'])} crates under "
+        f"inventory: {len(inventory['crates'])} packages under "
         f"{len(inventory['licenses'])} license texts"
     )
 

@@ -4,3 +4,9 @@
 # contributor's `core.autocrlf`, which both rewrites somebody else's license
 # text and makes the staleness check in CI fail on a tree nobody changed.
 THIRD-PARTY-LICENSES.md -text
+
+# Bundled fonts are binary, and their license texts are shipped exactly as the
+# font's author wrote them (some use CRLF), so neither may be re-encoded or
+# have line endings rewritten on checkout.
+crates/gui/ui/fonts/*.ttf binary
+crates/gui/ui/fonts/licenses/* -text

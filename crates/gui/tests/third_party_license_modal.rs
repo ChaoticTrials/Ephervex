@@ -72,6 +72,28 @@ fn the_slint_terms_the_application_is_built_under_are_on_the_screen() {
 }
 
 #[test]
+fn the_bundled_fonts_are_on_the_screen_with_their_notices() {
+    let ui = window();
+    ephervex_gui::controller::show_third_party_licenses(&ui);
+
+    let packages = ui.get_third_party_packages();
+    for (font, notice) in [
+        ("Pixelify Sans (font)", "The Pixelify Sans Project Authors"),
+        ("Space Grotesk (font)", "The Space Grotesk Project Authors"),
+        ("IBM Plex Mono (font)", "Reserved Font Name \"Plex\""),
+    ] {
+        let row = (0..packages.row_count())
+            .filter_map(|index| packages.row_data(index))
+            .find(|package| package.name == font);
+        assert!(row.is_some(), "{font} is bundled but not listed");
+        assert!(
+            row.expect("checked above").text.contains(notice),
+            "{font} is listed without its own notice"
+        );
+    }
+}
+
+#[test]
 fn the_slint_attribution_widget_is_on_the_about_screen() {
     // The license condition itself, not a nicety. The widget lives on the
     // About & Licenses tab, which the sidebar reaches in one step.

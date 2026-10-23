@@ -51,8 +51,7 @@ export component LiveLogViewer inherits Rectangle {
     callback follow-changed(bool);
     callback wrap-changed(bool);
     // Ten characters wide divided by ten. Exact in a fixed-width family,
-    // and the reason the monospace family has to resolve before a column
-    // can be worked out from a pointer position.
+    // which is what lets a column be worked out from a pointer position.
     private property <length> advance: probe.preferred-width / 10;
     // Every row is one physical line, so they are all this tall, which is
     // what lets the row under the pointer be counted rather than searched

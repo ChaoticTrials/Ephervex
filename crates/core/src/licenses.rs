@@ -240,6 +240,31 @@ mod tests {
     }
 
     #[test]
+    fn the_bundled_inventory_lists_the_fonts_with_their_own_license_texts() {
+        let inventory = LicenseInventory::bundled().expect("the bundled inventory must parse");
+        for (font, notice) in [
+            ("Pixelify Sans (font)", "The Pixelify Sans Project Authors"),
+            ("Space Grotesk (font)", "The Space Grotesk Project Authors"),
+            ("IBM Plex Mono (font)", "Reserved Font Name \"Plex\""),
+        ] {
+            let dependency = inventory
+                .dependencies()
+                .iter()
+                .find(|dependency| dependency.name == font);
+            assert!(dependency.is_some(), "{font} is bundled but not listed");
+            let dependency = dependency.expect("checked above");
+            assert_eq!(dependency.license, "OFL-1.1");
+            assert!(
+                inventory
+                    .texts_for(dependency)
+                    .iter()
+                    .any(|text| text.id == "OFL-1.1" && text.text.contains(notice)),
+                "{font} is listed without its own notice"
+            );
+        }
+    }
+
+    #[test]
     fn a_dependency_names_the_texts_that_cover_it() {
         let inventory = LicenseInventory::parse(ONE_CRATE).expect("parses");
         let alpha = &inventory.dependencies()[0];

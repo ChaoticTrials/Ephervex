@@ -1,0 +1,35 @@
+# The bundled fonts, read by tools/licenses/inventory.py so each one appears in
+# the third-party license inventory. Provenance is in SOURCES.md.
+
+[[font]]
+family = "Pixelify Sans"
+version = "1.000"
+license = "OFL-1.1"
+license-name = "SIL Open Font License 1.1"
+license-file = "licenses/OFL-PixelifySans.txt"
+files = ["PixelifySans-Regular.ttf", "PixelifySans-SemiBold.ttf"]
+
+[[font]]
+family = "Space Grotesk"
+version = "2.000"
+license = "OFL-1.1"
+license-name = "SIL Open Font License 1.1"
+license-file = "licenses/OFL-SpaceGrotesk.txt"
+files = [
+    "SpaceGrotesk-Regular.ttf",
+    "SpaceGrotesk-Medium.ttf",
+    "SpaceGrotesk-SemiBold.ttf",
+    "SpaceGrotesk-Bold.ttf",
+]
+
+[[font]]
+family = "IBM Plex Mono"
+version = "2.005"
+license = "OFL-1.1"
+license-name = "SIL Open Font License 1.1"
+license-file = "licenses/OFL-IBMPlexMono.txt"
+files = [
+    "IBMPlexMono-Regular.ttf",
+    "IBMPlexMono-Medium.ttf",
+    "IBMPlexMono-SemiBold.ttf",
+]

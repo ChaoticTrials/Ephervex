@@ -122,7 +122,7 @@ The controller checks the local date once a minute and asks for a new snapshot
 only when the date changes the theme that should be shown, at most once per
 date.
 
-Text sizes, the resolved monospace family, and the shared measurements stay in
+Text sizes, the font families, and the shared measurements stay in
 `Theme` outside the palette. Several of them are layout invariants (fixed row
 heights that virtualized lists and scroll arithmetic depend on, pane and tab
 geometry), and a palette never changes them.
@@ -130,6 +130,20 @@ geometry), and a palette never changes them.
 A theme can set colors, and a theme folder also its logo and window icon.
 Token names are part of its format, so a token can be added but never renamed
 or removed.
+
+The desktop frontend bundles its fonts instead of relying on what the system
+has installed: Pixelify Sans for headings (`Theme.heading-family`), Space
+Grotesk for interface text (`Theme.body-family`, also the window's
+`default-font-family`), and IBM Plex Mono for logs, versions, and paths
+(`Theme.mono-family`). They are static TTFs under `crates/gui/ui/fonts/`,
+imported by `app.slint` and embedded in the binary, so every package format
+ships them with no install step; the renderer ignores variable-font axes, so
+variable fonts are not used. IBM Plex Mono declares a Reserved Font Name and is
+therefore kept byte-identical to upstream; the other two are modified (a
+ligature feature removed, one weight instanced) and say how in
+`crates/gui/ui/fonts/SOURCES.md`, which also records upstream commits and
+hashes. All three are under the SIL Open Font License 1.1 and are listed with
+their full texts in the third-party license inventory.
 
 ## Instance and shared-storage model
 

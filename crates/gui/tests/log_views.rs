@@ -1042,7 +1042,7 @@ fn long_chunks(count: usize) -> ModelRc<LogChunk> {
 }
 
 /// One unwrapped row's height, measured from the view itself rather than
-/// assumed, because it follows the resolved monospace family.
+/// assumed, because it follows the bundled monospace family.
 fn one_line_height(ui: &AppWindow) -> f32 {
     set_view(ui, |view| view.wrap_lines = false);
     settle(ui);

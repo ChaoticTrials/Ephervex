@@ -2,6 +2,15 @@
 // invokes, the navigation shell, its pages, and its modals.
 
 import { AboutSlint, ListView, Palette, ScrollView } from "std-widgets.slint";
+import "fonts/PixelifySans-Regular.ttf";
+import "fonts/PixelifySans-SemiBold.ttf";
+import "fonts/SpaceGrotesk-Regular.ttf";
+import "fonts/SpaceGrotesk-Medium.ttf";
+import "fonts/SpaceGrotesk-SemiBold.ttf";
+import "fonts/SpaceGrotesk-Bold.ttf";
+import "fonts/IBMPlexMono-Regular.ttf";
+import "fonts/IBMPlexMono-Medium.ttf";
+import "fonts/IBMPlexMono-SemiBold.ttf";
 import { ChoiceBox, IndexComboBox, LabeledChoice, ValueComboBox } from "components/selection.slint";
 import { HostIcon, LoaderGlyph, ModArtwork } from "components/artwork.slint";
 import {
@@ -110,6 +119,7 @@ export component AppWindow inherits Window {
     min-width: 980px;
     min-height: 680px;
     background: Theme.background;
+    default-font-family: Theme.body-family;
     default-font-size: Theme.body-size;
 
     // The shipped widgets paint from their own palette, which is writable
