@@ -351,7 +351,7 @@ export component HostWorkspace inherits Rectangle {
         }
         if !root.compact : HorizontalLayout {
             spacing: 12px;
-            AppButton { text: root.back-label; clicked => { root.back(); } }
+            if root.back-label != "" : AppButton { text: root.back-label; clicked => { root.back(); } }
             Heading { text: root.title; font-size: Theme.workspace-title-size; overflow: elide; }
             VerticalLayout { alignment: center; StatePill { state: root.status; state-kind: root.status-kind; restarting: root.restart-stage != ""; } }
             if root.restart-required : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-server-restart-required"); tone-color: Theme.warning; } }

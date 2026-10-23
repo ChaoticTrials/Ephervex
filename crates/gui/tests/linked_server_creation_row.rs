@@ -15,6 +15,9 @@ use slint::{ComponentHandle, ModelRc, PhysicalSize, SharedString, VecModel};
 /// The gap the overview puts between two cards, from `Theme.card-gap`.
 const CARD_GAP: f32 = 12.0;
 
+/// What a card says while a server is being built for it.
+const CREATING_DETAIL: &str = "Installing the linked server | 1.20.1 server_mappings";
+
 #[test]
 fn the_instance_being_built_for_says_so_on_its_own_row() {
     let ui = overview(&[
@@ -23,7 +26,7 @@ fn the_instance_being_built_for_says_so_on_its_own_row() {
     ]);
 
     assert!(
-        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-state-creating-server"))
+        ElementHandle::find_by_accessible_label(&ui, CREATING_DETAIL)
             .any(|element| element.size().width > 0.0),
         "the instance's own row has to say a server is being built for it"
     );
@@ -51,14 +54,15 @@ fn an_instance_nothing_is_being_built_for_keeps_its_ordinary_gap() {
     );
 }
 
-/// Carrying the work must not make the row a different size from the rows
-/// around it, which is the whole reason it goes here rather than above.
+/// Carrying work that cannot say how far along it is must not make the row a
+/// different size from the rows around it, which is the whole reason it goes
+/// here rather than above. Work that can say shows a progress bar and is
+/// taller by exactly that.
 #[test]
 fn the_row_is_the_same_size_whether_a_server_is_being_built_or_not() {
-    let ui = overview(&[
-        creating("cavestone", "CaveStone"),
-        instance("all-the-mods", "All the Mods 11"),
-    ]);
+    let mut indeterminate = creating("cavestone", "CaveStone");
+    indeterminate.creating_server_indeterminate = true;
+    let ui = overview(&[indeterminate, instance("all-the-mods", "All the Mods 11")]);
 
     let building = card(&ui, "CaveStone").expect("the first instance is listed");
     let idle = card(&ui, "All the Mods 11").expect("the second instance is listed");
@@ -74,7 +78,6 @@ fn the_row_is_the_same_size_whether_a_server_is_being_built_or_not() {
 fn overview(instances: &[InstanceRow]) -> AppWindow {
     let ui = window();
     ui.set_loading(false);
-    ui.set_page(0);
     ui.set_workspace_open(false);
     ui.set_instance_filter("all".into());
     ui.set_instances(ModelRc::new(VecModel::from(instances.to_vec())));
@@ -139,7 +142,7 @@ fn instance(id: &str, name: &str) -> InstanceRow {
 fn creating(id: &str, name: &str) -> InstanceRow {
     InstanceRow {
         snapshot_deletion_note: "Deleting files also deletes 2 retained snapshots.".into(),
-        creating_server_detail: "Installing the linked server | 1.20.1 server_mappings".into(),
+        creating_server_detail: CREATING_DETAIL.into(),
         creating_server_progress: 0.82,
         creating_server_indeterminate: false,
         restart_stage: SharedString::default(),

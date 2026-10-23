@@ -849,13 +849,16 @@ fn the_missing_key_notice_opens_the_provider_settings() {
         settle(&ui);
 
         let host = if server { "server" } else { "client" };
-        assert_eq!(ui.get_page(), 4, "a {host}'s notice opens Settings");
+        assert!(ui.get_settings_open(), "a {host}'s notice opens Settings");
         assert_eq!(
             ui.get_settings_tab(),
             "Providers & APIs",
             "a {host}'s notice opens the providers"
         );
-        assert!(!ui.get_workspace_open(), "a {host}'s workspace closes");
+        assert!(
+            ui.get_workspace_open(),
+            "a {host}'s workspace stays open behind the settings for Back"
+        );
     }
 }
 

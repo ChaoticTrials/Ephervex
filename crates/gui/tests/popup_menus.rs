@@ -7,22 +7,19 @@
 
 #![allow(clippy::expect_used)]
 
+mod support;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
 use ephervex_gui::ui::{
-    AppWindow, BuiltInPalettes, GuiI18n, InstanceRow, MenuRow, PendingEntityRow, ServerRow, Theme,
+    AppWindow, BuiltInPalettes, InstanceRow, MenuRow, PendingEntityRow, ServerRow, Theme,
 };
 use ephervex_i18n::{Arg, lookup, lookup_args};
-use i_slint_backend_testing::{
-    AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions,
-};
+use i_slint_backend_testing::{AccessibleRole, ElementHandle};
 use slint::platform::{Key, PointerEventButton, WindowEvent};
-use slint::{
-    Color, ComponentHandle, LogicalPosition, ModelRc, PhysicalSize, Rgba8Pixel, SharedString,
-    VecModel,
-};
+use slint::{Color, ComponentHandle, LogicalPosition, ModelRc, Rgba8Pixel, SharedString, VecModel};
 
 #[test]
 fn a_card_menu_is_painted_from_the_active_palette() {
@@ -143,9 +140,6 @@ fn a_menu_closes_when_its_card_moves_out_from_under_it() {
         ..instance()
     };
     ui.set_loading(false);
-    ui.set_page(0);
-    ui.set_workspace_open(false);
-    ui.set_show_inspector(false);
     ui.set_instances(ModelRc::new(VecModel::from(vec![
         instance(),
         second.clone(),
@@ -206,32 +200,68 @@ fn a_disabled_entry_cannot_be_chosen_with_the_pointer() {
     );
 }
 
+/// A running instance offers a stop where a ready one offers a launch, and the
+/// two are not each other's negation.
 #[test]
-fn a_right_click_on_a_card_button_opens_the_menu_without_pressing_the_button() {
+fn a_running_instances_menu_kills_it_and_cannot_launch_it() {
     let ui = window();
+    let killed: Rc<RefCell<Vec<String>>> = Rc::default();
     let launched: Rc<RefCell<Vec<String>>> = Rc::default();
+    let record = Rc::clone(&killed);
+    ui.on_kill_instance(move |id, _| record.borrow_mut().push(id.to_string()));
     let record = Rc::clone(&launched);
     ui.on_launch_client(move |id| record.borrow_mut().push(id.to_string()));
 
+    let mut running = instance();
+    running.can_launch = false;
+    running.can_kill = true;
+    running.state_kind = "running".into();
+    show_instance(&ui, running);
+    let origin = card_point(&ui, "Repro Client");
+    right_click(&ui, origin);
+
+    let launch = entry(&ui, &lookup("gui-launch")).expect("Launch is listed");
+    click(&ui, center_in(origin, &launch));
+    assert!(
+        launched.borrow().is_empty(),
+        "a running instance is not launchable"
+    );
+    let kill = entry(&ui, &lookup("gui-kill-instance")).expect("Kill instance is listed");
+    click(&ui, center_in(origin, &kill));
+
+    assert_eq!(killed.borrow().as_slice(), ["repro-client"]);
+}
+
+#[test]
+fn a_right_click_on_a_card_star_opens_the_menu_without_toggling_the_favorite() {
+    let ui = window();
+    let toggled: Rc<RefCell<Vec<String>>> = Rc::default();
+    let record = Rc::clone(&toggled);
+    ui.on_set_favorite(move |_, id, _| record.borrow_mut().push(id.to_string()));
+
     show_instance(&ui, instance());
-    let launch = ElementHandle::find_by_accessible_label(&ui, &lookup("gui-launch"))
+    let star_label = lookup_args(
+        "gui-favorite-host",
+        [("value", Arg::from("Repro Client".to_owned()))],
+    );
+    let star = ElementHandle::find_by_accessible_label(&ui, &star_label)
         .find(|element| element.size().width > 0.0)
-        .expect("the card offers Launch");
-    right_click(&ui, center(&launch));
+        .expect("the card has a star");
+    right_click(&ui, center(&star));
 
     assert!(
         entry(&ui, &lookup("gui-rename")).is_some(),
         "a card offers its menu wherever it is pressed"
     );
-    assert!(launched.borrow().is_empty());
+    assert!(toggled.borrow().is_empty());
 }
 
 #[test]
 fn a_right_click_on_a_card_title_opens_the_menu() {
     let ui = window();
     show_instance(&ui, instance());
-    // The title has no label of its own to find; the star before it does, and
-    // the title starts just after.
+    // The title has no label of its own to find; the star after it does, and
+    // the title ends just before.
     let star_label = lookup_args(
         "gui-favorite-host",
         [("value", Arg::from("Repro Client".to_owned()))],
@@ -242,10 +272,7 @@ fn a_right_click_on_a_card_title_opens_the_menu() {
     let position = star.absolute_position();
     right_click(
         &ui,
-        LogicalPosition::new(
-            position.x + star.size().width + 40.0,
-            position.y + star.size().height / 2.0,
-        ),
+        LogicalPosition::new(position.x - 40.0, position.y + star.size().height / 2.0),
     );
 
     assert!(entry(&ui, &lookup("gui-rename")).is_some());
@@ -304,8 +331,7 @@ fn the_group_entry_leads_to_the_groups_to_choose_from() {
 fn a_server_card_offers_its_own_menu() {
     let ui = window();
     show_instance(&ui, instance());
-    ui.set_page(1);
-    ui.set_global_servers(ModelRc::new(VecModel::from(vec![server()])));
+    ui.set_listed_servers(ModelRc::new(VecModel::from(vec![server()])));
     settle(&ui);
 
     let origin = card_point(&ui, "Repro Server");
@@ -327,13 +353,7 @@ fn launch_as_lists_the_accounts_and_launches_as_the_one_chosen() {
             .push((id.to_string(), account.to_string(), alongside));
     });
 
-    ui.set_loading(false);
-    ui.set_page(0);
-    ui.set_workspace_open(false);
-    ui.set_show_inspector(true);
-    ui.set_instances(ModelRc::new(VecModel::from(vec![instance()])));
-    ui.set_selected_instance_index(0);
-    ui.set_selected_instance_id("repro-client".into());
+    support::show_client(&ui, instance(), "Overview");
     ui.set_account_launch_entries(ModelRc::new(VecModel::from(vec![
         menu_row("alice-id", "Alice"),
         menu_row("bob-id", "Bob"),
@@ -342,7 +362,7 @@ fn launch_as_lists_the_accounts_and_launches_as_the_one_chosen() {
 
     let button = ElementHandle::find_by_accessible_label(&ui, &lookup("gui-launch-as"))
         .find(|element| element.size().width > 0.0)
-        .expect("the inspector offers Launch as");
+        .expect("the host header offers Launch as");
     click(&ui, center(&button));
 
     // The list opens under the button, from its left edge.
@@ -373,9 +393,6 @@ fn menu_row(id: &str, label: &str) -> MenuRow {
 
 fn show_instance(ui: &AppWindow, row: InstanceRow) {
     ui.set_loading(false);
-    ui.set_page(0);
-    ui.set_workspace_open(false);
-    ui.set_show_inspector(false);
     ui.set_instances(ModelRc::new(VecModel::from(vec![row])));
     settle(ui);
 }
@@ -461,38 +478,7 @@ fn settle(ui: &AppWindow) {
 }
 
 fn window() -> AppWindow {
-    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
-        renderer_name: Some("software".into()),
-        mock_time: true,
-        threading: false,
-    })))
-    .expect("testing backend");
-    let ui = AppWindow::new().expect("window");
-    install_i18n(&ui);
-    ui.window().set_size(PhysicalSize::new(1480, 900));
-    ui.show().expect("show");
-    ui
-}
-
-fn install_i18n(ui: &AppWindow) {
-    let global = ui.global::<GuiI18n>();
-    global.on_text(|id| lookup(id.as_str()).into());
-    global.on_count(|id, count| {
-        lookup_args(id.as_str(), [("count", Arg::Count(i64::from(count)))]).into()
-    });
-    global.on_value(|id, value| {
-        lookup_args(id.as_str(), [("value", Arg::from(value.to_string()))]).into()
-    });
-    global.on_values(|id, first, second| {
-        lookup_args(
-            id.as_str(),
-            [
-                ("first", Arg::from(first.to_string())),
-                ("second", Arg::from(second.to_string())),
-            ],
-        )
-        .into()
-    });
+    support::test_window()
 }
 
 fn instance() -> InstanceRow {

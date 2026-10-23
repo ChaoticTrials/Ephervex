@@ -877,7 +877,6 @@ launch-dry-run = Prepared the launch without starting Minecraft.
 launch-detached = Minecraft is running in the background as process { $pid }. End it with `ephervex instance stop`.
 
 # The command line is shown with the access token replaced, always
-#.
 launch-command-redacted = The access token is not shown.
 launch-connect-starting-server = Starting linked server { $server }...
 launch-connect-reusing-server = Reusing linked server { $server }.
@@ -1961,7 +1960,6 @@ mod-install-completed = Installed { $name }.
 crash-none = This server has no crash reports.
 running-nothing = Nothing is running.
 gui-running = Running
-gui-running-detail = Everything Ephervex is running right now. Client instances with a live launch, and servers this launcher is supervising.
 gui-nothing-running = Nothing is running.
 gui-nothing-running-detail = Launch an instance or start a server and it will appear here.
 gui-uptime-seconds = { $count ->
@@ -2264,19 +2262,14 @@ gui-new-instance = + New Instance
 gui-new-server = + New Server
 gui-refresh = Refresh
 gui-instances = Instances
-gui-instances-detail = Exact client environments for focused reproduction work.
 gui-servers = Servers
-gui-servers-detail = Standalone and linked dedicated servers managed by Ephervex.
 gui-logs = Logs
 gui-activity = Activity
 gui-settings = Settings
 gui-settings-detail = Application, runtime, account, provider, and storage defaults.
 gui-creation-already-running = This creation request is already in progress.
-gui-creation-pending-detail = Validation and preparation are in progress. The finished environment will appear here automatically.
 gui-reset = Reset
 gui-state-creating = Creating
-# The badge an instance carries while a linked server is being built for it.
-gui-state-creating-server = Creating server
 # The row's own line before the work reports anything more specific. Kept
 # to one short line, because it stands where the instance's source line does.
 gui-creating-linked-server = Preparing the linked server
@@ -2287,15 +2280,9 @@ gui-tagline = Spawn. Reproduce. Despawn.
 gui-all = All
 gui-temporary = Temporary
 gui-persistent = Persistent
-gui-filter-instances = Filter instances...
 gui-loading-instances = Loading instances...
 gui-no-client-instances = No client instances yet
 gui-no-client-instances-detail = Create an exact Vanilla, Forge, or NeoForge environment, or import a supported modpack.
-gui-client-instances-count = { $count ->
-    [one] 1 client instance
-   *[other] { $count } client instances
-}
-gui-instances-shown-of-total = { $first } of { $second } instances
 gui-favorites = Favorites
 gui-favorites-only = Show only favorites
 gui-more-filters = Filters
@@ -2346,17 +2333,13 @@ gui-favorite-host = Mark { $value } as a favorite
 gui-unfavorite-host = Remove { $value } from favorites
 gui-add-favorite = Add to favorites
 gui-remove-favorite = Remove from favorites
-gui-organization = Organization
 gui-group = Group
 gui-remove-from-group = Remove from group
-gui-not-in-a-group = Not in a group
-gui-hint-not-in-a-group = This instance is not in a group.
 gui-set-group = Set group
 gui-new-group = New group
 gui-new-group-ellipsis = New group...
 gui-create-group = Create
 gui-delete-group = Delete
-gui-manage-groups-ellipsis = Manage groups...
 gui-groups = Groups
 gui-modal-groups = Groups
 gui-modal-new-group = New group
@@ -2375,16 +2358,6 @@ gui-choose-icon = Choose icon
 gui-choose-icon-ellipsis = Choose icon...
 gui-remove-icon = Remove icon
 gui-icon-images = PNG and JPEG images
-gui-attention = ATTENTION
-gui-managed-mods-count = { $count ->
-    [one] 1 managed mod
-   *[other] { $count } managed mods
-}
-gui-linked-servers-count = { $count ->
-    [one] 1 linked server
-   *[other] { $count } linked servers
-}
-gui-source-instance = { $value } instance
 gui-launch = Launch
 gui-launch-as = Launch as
 gui-add-account = Add account...
@@ -2392,23 +2365,12 @@ gui-launch-unavailable = Launch unavailable
 gui-start = Start
 gui-stop = Stop
 gui-unavailable = Unavailable
-gui-no-instance-selected = No instance selected
-gui-select-instance = Select an instance to inspect it.
 gui-open = Open
-gui-overview = OVERVIEW
-gui-status = Status
 gui-minecraft = Minecraft
 gui-loader = Loader
-gui-source = Source
-gui-mods = Mods
-gui-managed-count = { $count } managed
 gui-storage = Storage
-gui-actions = ACTIONS
-gui-needs-attention = Needs attention
-gui-ready = Ready
 gui-ready-to-launch = Ready to launch
 gui-busy = Busy
-gui-launch-connect = Launch & Connect to { $value }
 gui-open-workspace = Open Workspace
 gui-create-linked-server = Create Linked Server
 gui-open-folder = Open Folder
@@ -2494,9 +2456,14 @@ gui-notification-repeat = x{ $count }
 gui-fov-normal = Normal
 gui-fov-quake-pro = Quake Pro
 gui-select-all = Select All
-gui-diagnostics = DIAGNOSTICS
-gui-view-logs-crash-reports = View Logs & Crash Reports
-gui-back-instances = Back to Instances
+# Leaving a split of panes for the start page.
+gui-back-home = Back to Home
+gui-home = Home
+# Leaving the settings for the page they were opened over.
+gui-settings-back = Back
+gui-account-switch = Choose the default account
+gui-account-current = Default account { $value }. Choose another
+gui-account-manage = Manage accounts
 # A workspace pane whose client or server was deleted while it was shown.
 gui-workspace-host-gone = No longer installed
 gui-workspace-host-gone-detail = This client or server was removed. Choose another host for this pane or close it.
@@ -2662,11 +2629,7 @@ gui-allow-pack-mod-changes-server-toggle = Let me change and remove this server'
 gui-instance-settings-unavailable = Instance-owned Minecraft settings
 gui-instance-settings-unavailable-detail = The current core safely applies known Vanilla defaults when an instance is created, but does not expose a typed editor for an existing instance. Unknown and mod-added options remain untouched.
 gui-open-global-defaults = Open Global Defaults
-gui-filter-servers = Filter servers...
-gui-loading-servers = Loading servers...
-gui-no-servers = No servers yet
 gui-no-servers-detail = Create a standalone exact server or create one linked to a client reproduction environment.
-gui-no-standalone-servers-detail = No standalone servers are shown. Linked servers remain available from their client workspaces.
 gui-linked-server = Linked Server
 gui-paired = Paired
 gui-paired-with = Paired with
@@ -2696,21 +2659,14 @@ gui-repair-server = Repair
 gui-server-repaired = Cleared the stale runtime state. The server can be started again.
 gui-server-needs-attention = This server needs attention before it can be started reliably.
 gui-back-instance = Back to Instance
-gui-no-server-selected = No server selected
-gui-select-server = Select a server to inspect its runtime.
 gui-state = State
-gui-target = Target
-gui-relation = Relation
-gui-address = Address
 gui-open-server-workspace = Open Server Workspace
 gui-launch-client-connect = Launch Client & Connect
 gui-force-kill = Force Kill...
-gui-back-servers = Back to Servers
 gui-server = Server
 gui-restart = Restart
 gui-server-tab-console = Console
 gui-server-tab-properties = Properties
-gui-server-run = Server run
 gui-server-run-detail = Runtime state, exact target, network endpoint, and linked client relationship.
 gui-dedicated-server = Dedicated Server
 gui-exact-target = Exact target
@@ -2923,8 +2879,6 @@ gui-live-log-search-matches = { $count ->
 gui-live-latest-log = Live / Latest Log
 gui-crash-reports = Crash Reports
 gui-log-files = Log Files
-gui-activity-detail = Current and recent work while Ephervex is running. Activity is not persisted across application restarts.
-gui-no-recent-activity = No recent activity
 gui-no-recent-activity-detail = Creation, imports, installations, launches, and server work will appear here.
 gui-cancel = Cancel
 gui-open-in-browser = Open in Browser
@@ -3319,7 +3273,6 @@ gui-hint-restart-server-stopped = Restart is available while the server is runni
 gui-hint-needs-attention = This instance needs attention before it can launch.
 gui-hint-stop-host-first = This is available only while the host is stopped. Stop it first.
 gui-hint-force-kill-server = Force kill is available while the server is running.
-gui-hint-restart-in-progress = A restart is already under way.
 gui-hint-restart-client-stopped = Restart is available while the game is running.
 gui-hint-restart-server-unavailable = Restart is available while the server is running and no start, stop, or command is under way.
 gui-hint-stop-server-uncontrolled = Ephervex has no live control channel to this server, so it cannot stop it from here.
@@ -3425,11 +3378,6 @@ gui-third-party-detail = Ephervex depends on open-source software with its own l
 gui-third-party-licenses = Third-Party Licenses
 # How far through a stage that counts in whole things rather than bytes.
 gui-operation-item-count = { $current } of { $total }
-gui-active-operations = { $count ->
-    [one] 1 active operation
-   *[other] { $count } active operations
-}
-gui-no-active-tasks = No active tasks
 gui-activity-minecraft-running = Minecraft is running
 gui-kill-instance = Kill Instance
 gui-kill-instance-requested = Stopping Minecraft.

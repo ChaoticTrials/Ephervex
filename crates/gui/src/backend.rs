@@ -1180,7 +1180,7 @@ pub struct LocalModRefusalData {
     pub reason: String,
 }
 
-/// One thing this launcher is running, as the Running page shows it.
+/// One thing this launcher is running, as Home's Running section shows it.
 #[derive(Debug, Clone)]
 pub struct RunningData {
     /// `"client"` or `"server"`, which decides where every action goes.
@@ -9646,8 +9646,7 @@ fn forward_launch_event(
             // The same row, still active, now saying what it is actually doing.
             // Preparation is over and the game is running; without this the
             // activity list describes a download for as long as the session
-            // lasts, and the status bar's count is the only sign anything is
-            // happening at all.
+            // lasts, and nothing else says anything is happening at all.
             if let Ok(observed) = observed_operation.lock()
                 && let Some(operation) = observed.clone()
             {

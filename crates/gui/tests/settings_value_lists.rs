@@ -78,8 +78,7 @@ fn a_watched_folder_row_is_inset_and_capped_like_a_favorite_version_row() {
     let remove = remove.first().expect("the folder can be removed");
     let width = remove.absolute_position().x + remove.size().width - left;
 
-    ui.set_page(4);
-    ui.set_settings_tab("General".into());
+    ui.invoke_open_settings("General".into());
     ui.set_favorite_minecraft_versions(["1.21.1"].map(SharedString::from).as_slice().into());
     settle(&ui);
     let version = shown(&ui, "1.21.1").expect("the version has a row");
@@ -112,8 +111,7 @@ fn buttons_labeled(ui: &AppWindow, id: &str) -> Vec<ElementHandle> {
 
 fn storage_settings(ui: &AppWindow) {
     ui.set_loading(false);
-    ui.set_page(4);
-    ui.set_settings_tab("Storage".into());
+    ui.invoke_open_settings("Storage".into());
     // Settings pages are long, and an assertion about what is on screen has to
     // be given a screen to be on.
     ui.window().set_size(PhysicalSize::new(1480, 1600));

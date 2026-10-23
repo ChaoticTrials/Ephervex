@@ -1,0 +1,19 @@
+// The frame of the window: the grid floor with the columns laid over it.
+
+import { GridFloor } from "../components/surface.slint";
+import { Theme } from "../theme.slint";
+
+// Children are the columns, left to right. Each column sizes itself: the list
+// and the side column by their theme widths, the middle one by what is left.
+export component AppShell inherits Rectangle {
+    background: Theme.background;
+    GridFloor {
+        width: root.width;
+        height: root.height;
+    }
+    HorizontalLayout {
+        padding: Theme.shell-padding;
+        spacing: Theme.shell-gap;
+        @children
+    }
+}

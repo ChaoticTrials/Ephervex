@@ -123,49 +123,6 @@ fn launch_as_offers_every_account_and_a_way_to_add_one() {
     );
 }
 
-/// Launch as has to be reachable from the list, not only from a workspace
-/// somebody has already opened. The inspector is where an instance's other
-/// actions live, and it sits beside the Launch that the card offers.
-#[test]
-fn launch_as_is_offered_beside_launch_on_the_instances_page() {
-    let ui = window();
-
-    ui.set_loading(false);
-    ui.set_page(0);
-    ui.set_workspace_open(false);
-    ui.set_show_inspector(true);
-    ui.set_instances(ModelRc::new(VecModel::from(vec![instance()])));
-    ui.set_selected_instance_index(0);
-    ui.set_selected_instance_id("repro-client".into());
-    ui.set_accounts(ModelRc::new(VecModel::from(vec![
-        account("alice-id", "Alice", true),
-        account("bob-id", "Bob", false),
-    ])));
-    settle(&ui);
-
-    let launch_as = widest(&ui, &lookup("gui-launch-as"))
-        .expect("the instances page offers a way to launch as somebody else");
-    let launch =
-        widest(&ui, &lookup("gui-launch")).expect("and plain Launch is still the one beside it");
-
-    // The pair splits its row evenly, like the Open Workspace / Open Folder
-    // row beneath it. A fixed width on one of them makes the other absorb the
-    // slack, which reads as two unrelated controls rather than a pair.
-    assert!(
-        (launch.size().width - launch_as.size().width).abs() < 1.0,
-        "Launch and Launch as must share their row evenly ({} against {})",
-        launch.size().width,
-        launch_as.size().width
-    );
-    for label in ["gui-open-workspace", "gui-open-folder"] {
-        let other = widest(&ui, &lookup(label)).expect("the row below");
-        assert!(
-            (launch.size().width - other.size().width).abs() < 1.0,
-            "every paired row in the block shares one column width ({label})"
-        );
-    }
-}
-
 /// A running instance can still be launched as somebody else -- that is a
 /// second client beside the first, which is the whole point of the control.
 /// What it cannot do is start again as the same account.
@@ -176,12 +133,7 @@ fn a_running_instance_can_still_be_launched_as_someone_else() {
     running.can_launch = false;
     running.can_kill = true;
 
-    ui.set_loading(false);
-    ui.set_page(0);
-    ui.set_workspace_open(false);
-    ui.set_show_inspector(true);
-    ui.set_instances(ModelRc::new(VecModel::from(vec![running])));
-    ui.set_selected_instance_index(0);
+    support::show_client(&ui, running, "Overview");
     ui.set_accounts(ModelRc::new(VecModel::from(vec![account(
         "alice-id", "Alice", true,
     )])));
@@ -189,14 +141,14 @@ fn a_running_instance_can_still_be_launched_as_someone_else() {
 
     let launch_as =
         widest(&ui, &lookup("gui-launch-as")).expect("a second account is still launchable");
-    let kill = widest(&ui, &lookup("gui-kill-instance")).expect("and the running client stoppable");
+    assert!(launch_as.size().width > 0.0);
+    assert!(
+        widest(&ui, &lookup("gui-stop-game")).is_some(),
+        "and the running client stoppable"
+    );
     assert!(
         widest(&ui, &lookup("gui-launch")).is_none(),
         "plain Launch would be a second client as the same account"
-    );
-    assert!(
-        (launch_as.size().width - kill.size().width).abs() < 1.0,
-        "the pair still splits its row evenly"
     );
 }
 
@@ -253,10 +205,7 @@ fn widest(ui: &AppWindow, label: &str) -> Option<ElementHandle> {
 }
 
 fn accounts_page(ui: &AppWindow) {
-    ui.set_loading(false);
-    ui.set_page(4);
-    ui.set_workspace_open(false);
-    ui.set_settings_tab("Accounts".into());
+    support::open_settings(ui, "Accounts");
     ui.set_accounts(ModelRc::new(VecModel::from(vec![
         account("alice-id", "Alice", true),
         account("bob-id", "Bob", false),

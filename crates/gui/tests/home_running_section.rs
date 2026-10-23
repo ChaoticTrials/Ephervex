@@ -1,54 +1,81 @@
-//! What the Running page offers, and which control each action reaches.
+//! What Home's Running section offers, and which control each action reaches.
 //!
-//! A running game is not an operation, so it does not belong on the Activity
-//! page and gets its own. What is worth proving here is that the card's own
-//! area does not swallow its buttons, that the two ways to end a client launch
-//! stay distinct, and that a server is offered a console where a client is not.
+//! A running game is not an operation, so it is listed apart from the activity.
+//! What is worth proving here is that the card's own area does not swallow its
+//! buttons, that the two ways to end a client launch stay distinct, and that a
+//! server is offered a console where a client is not.
 
 #![allow(clippy::expect_used)]
+
+mod support;
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ephervex_gui::ui::{AppWindow, GuiI18n, RunningRow};
-use ephervex_i18n::{Arg, lookup, lookup_args};
-use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
+use ephervex_gui::ui::{AppWindow, RunningRow};
+use ephervex_i18n::lookup;
+use i_slint_backend_testing::ElementHandle;
 use slint::platform::PointerEventButton;
-use slint::{ComponentHandle, ModelRc, PhysicalSize, SharedString, VecModel};
+use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 #[test]
-fn the_running_page_is_its_own_entry_and_asks_for_the_list_when_opened() {
+fn home_asks_for_what_is_running_each_time_it_appears_and_measures_the_cache_once() {
     let ui = window();
     let asked: Rc<RefCell<usize>> = Rc::default();
     let record = Rc::clone(&asked);
     ui.on_load_running(move || *record.borrow_mut() += 1);
+    let measured: Rc<RefCell<usize>> = Rc::default();
+    let record = Rc::clone(&measured);
+    ui.on_measure_artifact_cache(move || *record.borrow_mut() += 1);
 
-    ui.set_loading(false);
-    ui.set_page(0);
-    ui.set_workspace_open(false);
+    support::open_settings(&ui, "General");
     settle(&ui);
-
-    ElementHandle::find_by_accessible_label(&ui, &lookup("gui-running"))
-        .find(|element| element.size().width > 0.0)
-        .expect("Running is offered in the navigation")
-        .mock_single_click(PointerEventButton::Left);
-
-    assert_eq!(ui.get_page(), 2);
     assert_eq!(
         *asked.borrow(),
-        1,
-        "opening the page asks for what is running"
+        0,
+        "the settings do not read what is running"
     );
+
+    support::open_home(&ui);
+    settle(&ui);
+    assert_eq!(*asked.borrow(), 1, "Home asks for what is running");
+    assert_eq!(*measured.borrow(), 1);
+
+    support::open_settings(&ui, "General");
+    settle(&ui);
+    let after_settings = *measured.borrow();
+    support::open_home(&ui);
+    settle(&ui);
+    assert_eq!(*asked.borrow(), 2, "every visit asks again");
+    assert_eq!(
+        *measured.borrow(),
+        after_settings,
+        "the cache is not measured again on a later visit"
+    );
+}
+
+#[test]
+fn home_is_shown_when_neither_the_settings_nor_a_host_is_open() {
+    let ui = window();
+    support::open_home(&ui);
+    assert!(ui.get_shows_home());
+
+    support::open_settings(&ui, "General");
+    assert!(!ui.get_shows_home());
+
+    ui.invoke_open_home();
+    assert!(!ui.get_settings_open());
+    assert!(ui.get_shows_home());
 }
 
 #[test]
 fn an_idle_launcher_says_so_rather_than_showing_an_empty_list() {
     let ui = window();
-    running_page(&ui, Vec::new());
+    running_section(&ui, Vec::new());
     settle(&ui);
 
     assert!(
-        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-nothing-running"))
+        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-nothing-running-detail"))
             .next()
             .is_some()
     );
@@ -71,7 +98,7 @@ fn a_clients_two_ways_to_stop_are_offered_separately() {
     let record = Rc::clone(&opened);
     ui.on_open_workspace(move |_kind, id, _surface| record.borrow_mut().push(id.to_string()));
 
-    running_page(&ui, vec![client()]);
+    running_section(&ui, vec![client()]);
     settle(&ui);
 
     ElementHandle::find_by_accessible_label(&ui, &lookup("gui-stop-game"))
@@ -108,7 +135,7 @@ fn an_unsupervised_launch_cannot_be_stopped_the_ordinary_way() {
 
     let mut orphan = client();
     orphan.can_stop = false;
-    running_page(&ui, vec![orphan]);
+    running_section(&ui, vec![orphan]);
     settle(&ui);
 
     ElementHandle::find_by_accessible_label(&ui, &lookup("gui-stop-game"))
@@ -119,10 +146,9 @@ fn an_unsupervised_launch_cannot_be_stopped_the_ordinary_way() {
         killed.borrow().is_empty(),
         "canceling a launch this run does not own would do nothing"
     );
-    assert_eq!(
-        ui.get_page(),
-        2,
-        "a press on a greyed-out control must not navigate away from the page"
+    assert!(
+        ui.get_shows_home(),
+        "a press on a greyed-out control must not navigate away from Home"
     );
     assert!(
         ElementHandle::find_by_accessible_label(&ui, &lookup("gui-force-stop"))
@@ -135,7 +161,7 @@ fn an_unsupervised_launch_cannot_be_stopped_the_ordinary_way() {
 #[test]
 fn only_a_server_is_offered_a_console() {
     let ui = window();
-    running_page(&ui, vec![client()]);
+    running_section(&ui, vec![client()]);
     settle(&ui);
     assert!(
         ElementHandle::find_by_accessible_label(&ui, &lookup("gui-open-console"))
@@ -147,7 +173,7 @@ fn only_a_server_is_offered_a_console() {
     let record = Rc::clone(&stopped);
     ui.on_server_stop(move |id| record.borrow_mut().push(id.to_string()));
 
-    running_page(&ui, vec![server()]);
+    running_section(&ui, vec![server()]);
     settle(&ui);
     assert!(
         ElementHandle::find_by_accessible_label(&ui, &lookup("gui-open-console"))
@@ -178,7 +204,7 @@ fn opening_a_runs_log_opens_its_own_workspace_on_logs() {
             .push((kind.to_string(), id.to_string(), surface.to_string()));
     });
 
-    running_page(&ui, vec![server()]);
+    running_section(&ui, vec![server()]);
     settle(&ui);
 
     ElementHandle::find_by_accessible_label(&ui, &lookup("gui-open-log"))
@@ -202,7 +228,7 @@ fn opening_a_runs_log_opens_its_own_workspace_on_logs() {
 #[test]
 fn a_rows_badge_sits_above_its_buttons_against_the_same_edge() {
     let ui = window();
-    running_page(&ui, vec![server()]);
+    running_section(&ui, vec![server()]);
     settle(&ui);
 
     let badge = ElementHandle::find_by_accessible_label(&ui, &lookup("gui-server"))
@@ -226,10 +252,8 @@ fn a_rows_badge_sits_above_its_buttons_against_the_same_edge() {
     );
 }
 
-fn running_page(ui: &AppWindow, rows: Vec<RunningRow>) {
-    ui.set_loading(false);
-    ui.set_page(2);
-    ui.set_workspace_open(false);
+fn running_section(ui: &AppWindow, rows: Vec<RunningRow>) {
+    support::open_home(ui);
     ui.set_running(ModelRc::new(VecModel::from(rows)));
 }
 
@@ -271,36 +295,5 @@ fn settle(ui: &AppWindow) {
 }
 
 fn window() -> AppWindow {
-    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
-        renderer_name: Some("software".into()),
-        mock_time: true,
-        threading: false,
-    })))
-    .expect("testing backend");
-    let ui = AppWindow::new().expect("window");
-    install_i18n(&ui);
-    ui.window().set_size(PhysicalSize::new(1480, 900));
-    ui.show().expect("show");
-    ui
-}
-
-fn install_i18n(ui: &AppWindow) {
-    let global = ui.global::<GuiI18n>();
-    global.on_text(|id| lookup(id.as_str()).into());
-    global.on_count(|id, count| {
-        lookup_args(id.as_str(), [("count", Arg::Count(i64::from(count)))]).into()
-    });
-    global.on_value(|id, value| {
-        lookup_args(id.as_str(), [("value", Arg::from(value.to_string()))]).into()
-    });
-    global.on_values(|id, first, second| {
-        lookup_args(
-            id.as_str(),
-            [
-                ("first", Arg::from(first.to_string())),
-                ("second", Arg::from(second.to_string())),
-            ],
-        )
-        .into()
-    });
+    support::test_window()
 }

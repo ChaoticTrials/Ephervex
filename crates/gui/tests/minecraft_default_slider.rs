@@ -205,8 +205,7 @@ fn window_with_slider(value: f32) -> (AppWindow, Reports) {
     ui.window().set_size(PhysicalSize::new(1600, 1600));
     ui.show().expect("show");
     ui.set_loading(false);
-    ui.set_page(4);
-    ui.set_settings_tab("Minecraft".into());
+    ui.invoke_open_settings("Minecraft".into());
     let row = MinecraftPreferenceRow {
         id: "fov".into(),
         label: "Field of view".into(),

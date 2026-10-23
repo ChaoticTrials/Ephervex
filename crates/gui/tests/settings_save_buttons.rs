@@ -31,7 +31,7 @@ fn enabled(ui: &AppWindow, message: &str) -> Vec<bool> {
 fn open(tab: &str) -> AppWindow {
     let ui = window();
     ui.set_loading(false);
-    ui.set_page(4);
+    ui.set_settings_open(true);
     ui.set_settings_tab(tab.into());
     // Tall enough that the whole page is on screen, since a control below the
     // fold is not part of what the window reports.

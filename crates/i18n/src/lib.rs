@@ -331,6 +331,19 @@ mod tests {
     }
 
     #[test]
+    fn every_bundled_resource_parses_without_leftover_text() {
+        // A removed message that leaves its closing brace behind is junk to
+        // the parser, which logs an error at every start and drops the text.
+        for name in Localizations::iter() {
+            let file = Localizations::get(&name).expect("an embedded file exists");
+            let source = std::str::from_utf8(&file.data).expect("resources are UTF-8");
+            if let Err((_, errors)) = fluent_syntax::parser::parse(source) {
+                panic!("{name} does not parse cleanly: {errors:?}");
+            }
+        }
+    }
+
+    #[test]
     fn messages_are_resolvable_before_any_language_is_selected() {
         // The eager fallback load in `LANGUAGE_LOADER` is what makes this true,
         // and errors raised before configuration is read depend on it.

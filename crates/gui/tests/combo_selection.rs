@@ -8,7 +8,7 @@
 
 #![allow(clippy::expect_used)]
 
-use ephervex_gui::ui::{AppWindow, GuiI18n, MinecraftPreferenceRow};
+use ephervex_gui::ui::{AppWindow, GuiI18n, MinecraftPreferenceRow, Theme};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{
     AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions,
@@ -181,8 +181,7 @@ fn a_dropdown_shows_nothing_for_a_value_that_is_in_none_of_its_entries() {
 fn the_results_per_page_and_cache_unit_dropdowns_show_their_stored_values() {
     let ui = window();
     ui.set_loading(false);
-    ui.set_page(4);
-    ui.set_settings_tab("Storage".into());
+    ui.invoke_open_settings("Storage".into());
     ui.window().set_size(PhysicalSize::new(1600, 1600));
     ui.set_artifact_cache_units(strings(&["MiB", "GiB"]));
     ui.set_artifact_cache_custom_unit("GiB".into());
@@ -202,8 +201,7 @@ fn the_results_per_page_and_cache_unit_dropdowns_show_their_stored_values() {
 fn a_general_settings_dropdown_follows_the_stored_value_after_the_user_picked() {
     let ui = window();
     ui.set_loading(false);
-    ui.set_page(4);
-    ui.set_settings_tab("General".into());
+    ui.invoke_open_settings("General".into());
     ui.window().set_size(PhysicalSize::new(1600, 1600));
     ui.set_operator_permission_level(1);
     settle(&ui);
@@ -224,8 +222,7 @@ fn a_general_settings_dropdown_follows_the_stored_value_after_the_user_picked() 
 fn a_minecraft_default_dropdown_follows_the_stored_choice_after_the_user_picked() {
     let ui = window();
     ui.set_loading(false);
-    ui.set_page(4);
-    ui.set_settings_tab("Minecraft".into());
+    ui.invoke_open_settings("Minecraft".into());
     ui.window().set_size(PhysicalSize::new(1600, 1600));
     let row = MinecraftPreferenceRow {
         id: "difficulty".into(),
@@ -338,7 +335,7 @@ fn an_open_list_closes_when_the_window_is_resized_under_it() {
     // The dialog stays centered, so the dropdown moves with the window while
     // the list would stay where it was drawn.
     let before = dropdown(&ui, &target).absolute_position();
-    ui.window().set_size(PhysicalSize::new(1100, 900));
+    ui.window().set_size(PhysicalSize::new(1300, 900));
     settle(&ui);
     assert_ne!(dropdown(&ui, &target).absolute_position(), before);
 
@@ -369,32 +366,37 @@ fn an_open_list_stays_open_while_nothing_moves() {
 fn clicking_a_dropdown_cut_off_by_the_page_edge_opens_its_list_and_keeps_it_open() {
     let ui = window();
     ui.set_loading(false);
-    ui.set_page(4);
-    ui.set_settings_tab("General".into());
-    let label = lookup("gui-default-operator-level");
+    ui.invoke_open_settings("General".into());
 
-    // The page draws only what is in view, so the dropdown first exists once
-    // the window is tall enough to show its top edge. A little more height
-    // leaves a sliver of it showing above the page's edge.
-    let mut height = 400;
-    let found = |ui: &AppWindow| {
-        ElementHandle::find_by_accessible_label(ui, &label)
-            .any(|element| element.accessible_role() == Some(AccessibleRole::Combobox))
-    };
-    while {
-        ui.window().set_size(PhysicalSize::new(1600, height));
-        settle(&ui);
-        !found(&ui)
-    } {
-        height += 1;
-        assert!(height < 1600, "the dropdown never appears");
-    }
-    ui.window().set_size(PhysicalSize::new(1600, height + 12));
+    // One column at the smallest height the window may have, where the page's
+    // last dropdown sits across the bottom edge of the page.
+    let theme = ui.global::<Theme>();
+    let (width, height) = (
+        theme.get_window_min_width() + 60.0,
+        theme.get_window_min_height(),
+    );
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    ui.window()
+        .set_size(PhysicalSize::new(width as u32, height as u32));
     settle(&ui);
+    let lowest = |ui: &AppWindow| {
+        ElementHandle::find_by_element_type_name(ui, "ChoiceBox")
+            .filter(|element| element.size().width > 0.0)
+            .max_by(|left, right| {
+                left.absolute_position()
+                    .y
+                    .total_cmp(&right.absolute_position().y)
+            })
+            .expect("the page has a dropdown")
+    };
 
-    // Focusing the dropdown scrolls it into view, which moves it.
-    let box_ = dropdown(&ui, &label);
+    let box_ = lowest(&ui);
     let (at, size) = (box_.absolute_position(), box_.size());
+    let page_bottom = height - theme.get_shell_padding() - theme.get_strong_border_width();
+    assert!(
+        at.y + size.height > page_bottom,
+        "the last dropdown is not cut off by the page edge: {at:?}"
+    );
     let position = slint::LogicalPosition::new(at.x + size.width / 2.0, at.y + 2.0);
     ui.window()
         .dispatch_event(WindowEvent::PointerMoved { position });
@@ -409,8 +411,9 @@ fn clicking_a_dropdown_cut_off_by_the_page_edge_opens_its_list_and_keeps_it_open
     settle(&ui);
     settle(&ui);
 
-    assert_eq!(dropdown(&ui, &label).accessible_expanded(), Some(true));
-    assert_ne!(dropdown(&ui, &label).absolute_position(), at);
+    // Focusing the dropdown scrolls it into view, which moves it.
+    assert_eq!(lowest(&ui).accessible_expanded(), Some(true));
+    assert_ne!(lowest(&ui).absolute_position(), at);
 }
 
 /// The dropdown carrying `label`, not the text beside it that reads the same.

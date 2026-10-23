@@ -1974,9 +1974,6 @@ fn stamp_host_lifecycle(ui: &AppWindow, lifecycle: &HostLifecycle) {
     stamp_rows(&ui.get_instances(), |row: &mut InstanceRow| {
         lifecycle.stamp_client(row)
     });
-    stamp_rows(&ui.get_global_servers(), |row: &mut ServerRow| {
-        lifecycle.stamp_server(row)
-    });
     stamp_rows(&ui.get_listed_servers(), |row: &mut ServerRow| {
         lifecycle.stamp_server(row)
     });
@@ -2042,7 +2039,6 @@ fn stamp_open_hosts(ui: &AppWindow) {
         let now = shown("server", &row.id);
         std::mem::replace(&mut row.open, now) != now
     };
-    stamp_rows(&ui.get_global_servers(), stamp_server);
     stamp_rows(&ui.get_listed_servers(), stamp_server);
 }
 
@@ -2467,8 +2463,13 @@ enum ModsListsOnScreen {
     Several,
 }
 
+/// Whether the host panes are what the page shows, not Home or the settings.
+fn host_panes_on_screen(ui: &AppWindow) -> bool {
+    ui.get_workspace_open() && !ui.get_settings_open()
+}
+
 fn mods_lists_on_screen(ui: &AppWindow, workspace: &WorkspaceState) -> ModsListsOnScreen {
-    if !ui.get_workspace_open() || !matches!(ui.get_page(), INSTANCES_PAGE | SERVERS_PAGE) {
+    if !host_panes_on_screen(ui) {
         return ModsListsOnScreen::None;
     }
     let Some(layout) = workspace.layout() else {
@@ -2630,6 +2631,8 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         &workspace,
         keys,
     );
+    // Home is the first page, and nothing else announces that it appeared.
+    ui.invoke_home_appeared();
 
     let weak = ui.as_weak();
     let poll_receiver = Rc::clone(&receiver);
@@ -2649,16 +2652,6 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         let Some(ui) = weak.upgrade() else {
             return;
         };
-        let window = ui.window();
-        let logical_width = f64::from(window.size().width) / f64::from(window.scale_factor());
-        let show_inspector = logical_width >= 1180.0;
-        let compact_layout = !show_inspector;
-        if ui.get_show_inspector() != show_inspector {
-            ui.set_show_inspector(show_inspector);
-        }
-        if ui.get_compact_layout() != compact_layout {
-            ui.set_compact_layout(compact_layout);
-        }
         let mut log_changes = HashMap::new();
         let mut worker_gone = take_worker_stopped();
         loop {
@@ -2702,7 +2695,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
     });
 
     // A second is enough for uptime and for CPU to read smoothly, and it costs
-    // nothing while the page is closed, which is nearly always.
+    // nothing while Home is not on screen.
     let running_weak = ui.as_weak();
     let running_commands = backend.commands.clone();
     let running_timer = Timer::default();
@@ -2710,7 +2703,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         let Some(ui) = running_weak.upgrade() else {
             return;
         };
-        if ui.get_page() == RUNNING_PAGE && !ui.get_workspace_open() {
+        if ui.get_shows_home() {
             send(&running_commands, Command::LoadRunning);
         }
     });
@@ -2754,22 +2747,6 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         workspace: workspace.state,
     }
 }
-
-/// The navigation entry that lists client instances.
-///
-/// Both workspaces hang off a page, so navigating to one means setting the page
-/// as well. Named for the same reason as the others: a bare number in that
-/// assignment would say nothing about where the user is being sent.
-const INSTANCES_PAGE: i32 = 0;
-
-/// The navigation entry that lists servers, and hosts the server workspace.
-const SERVERS_PAGE: i32 = 1;
-
-/// The navigation entry that lists what is running.
-///
-/// Named because the poll that feeds it has to know when it is on screen, and a
-/// bare number in that check would say nothing about which screen it is.
-const RUNNING_PAGE: i32 = 2;
 
 /// How often the stack is asked what has been shown for long enough.
 ///
@@ -3140,7 +3117,13 @@ fn register_callbacks(
     workspace: &Workspace,
     keys: &BindingCapture,
 ) {
-    register_instance_list(ui, commands, instance_list, lifecycle);
+    register_instance_list(
+        ui,
+        commands,
+        instance_list,
+        &workspace.server_list,
+        lifecycle,
+    );
     register_catalog_actions(ui, commands);
     register_client_actions(ui, commands, creations);
     register_mod_actions(ui, commands, workspace);
@@ -3148,9 +3131,6 @@ fn register_callbacks(
     register_import_flow(ui, commands, import_flow, creations);
     register_server_pack_choice(ui, commands);
     register_create_server(ui, commands, Rc::clone(creations));
-
-    let sender = commands.clone();
-    ui.on_select_server(move |_| send(&sender, Command::Refresh));
 
     register_server_actions(ui, commands, workspace);
     register_workspace(ui, workspace);
@@ -3793,21 +3773,23 @@ fn next_launch_handle() -> String {
     )
 }
 
-/// The Instances page's list controls, and the favorite, group and icon
-/// actions on hosts.
+/// The host list's controls, and the favorite, group and icon actions on hosts.
 fn register_instance_list(
     ui: &AppWindow,
     commands: &Sender<Command>,
     list: &Rc<RefCell<InstanceListState>>,
+    servers: &Rc<RefCell<ServerListState>>,
     lifecycle: &Rc<RefCell<HostLifecycle>>,
 ) {
     attach_icon_pool(ui);
     let weak = ui.as_weak();
     let shown = Rc::clone(list);
+    let shown_servers = Rc::clone(servers);
     let stamped = Rc::clone(lifecycle);
     ui.on_instance_view_changed(move || {
         if let Some(ui) = weak.upgrade() {
             shown.borrow().render(&ui);
+            shown_servers.borrow().render(&ui);
             stamp_host_lifecycle(&ui, &stamped.borrow());
         }
     });
@@ -3916,8 +3898,6 @@ fn register_client_actions(
             },
         );
     });
-
-    register_instance_selection(ui, commands);
 
     let sender = commands.clone();
     ui.on_kill_instance(move |id, launch| {
@@ -4677,26 +4657,6 @@ fn register_loader_change(ui: &AppWindow, commands: &Sender<Command>) {
     });
 }
 
-fn register_instance_selection(ui: &AppWindow, commands: &Sender<Command>) {
-    let sender = commands.clone();
-    // What this handler last acted on. The markup assigns `selected-instance-id`
-    // before calling in, so the property cannot tell a new selection from a
-    // repeat of the current one.
-    let selected = Rc::new(RefCell::new(String::new()));
-    ui.on_select_instance(move |id| {
-        let repeat = *selected.borrow() == id.as_str();
-        if !repeat {
-            id.as_str().clone_into(&mut selected.borrow_mut());
-        }
-        // Clicking the already-selected card changes nothing that a snapshot
-        // would answer, and asking for one anyway is what used to rebuild the
-        // list between the two halves of a double click.
-        if !repeat {
-            send(&sender, Command::Refresh);
-        }
-    });
-}
-
 /// Which mods a host has, and whether each one loads.
 ///
 /// Its own registration rather than part of the server actions: the same two
@@ -5255,16 +5215,6 @@ impl Workspace {
             .render(ui, &self.lifecycle.borrow(), &logs);
         drop(logs);
         self.follow_hosts(ui, &entered);
-        let state = self.state.borrow();
-        // A single pane is the workspace of its host's page; a split belongs to
-        // the page it was opened from.
-        if let Some((host, _)) = state.single_content() {
-            ui.set_page(match host {
-                InstalledHost::Instance(_) => INSTANCES_PAGE,
-                InstalledHost::Server(_) => SERVERS_PAGE,
-            });
-        }
-        drop(state);
         if let Some(change) = change {
             apply_pane_change(ui, self, change);
         }
@@ -5342,6 +5292,8 @@ impl Workspace {
     }
 
     fn open(&self, ui: &AppWindow, host: InstalledHost, surface: Surface) {
+        // The panes are not drawn under the settings.
+        ui.set_settings_open(false);
         let change = self.state.borrow_mut().open(host, surface);
         self.present(ui, Some(change));
     }
@@ -5369,6 +5321,7 @@ impl Workspace {
     /// Back returns to the client that started it. A split is the user's own
     /// arrangement and is left as it is.
     fn show_console(&self, ui: &AppWindow, server: InstalledHost) {
+        ui.set_settings_open(false);
         let content = self.state.borrow().single_content();
         let layout_open = self.state.borrow().layout().is_some();
         match content {
@@ -5486,6 +5439,7 @@ impl Workspace {
     /// from it is added beside the other where the layout has room, the
     /// server on its console.
     fn show_pair(&self, ui: &AppWindow, client: InstalledHost, server: InstalledHost) {
+        ui.set_settings_open(false);
         if self.state.borrow().layout().is_none() {
             self.open(ui, client, Surface::DEFAULT);
         }
@@ -8062,7 +8016,7 @@ fn apply_local_mod_plan(
     };
     // A list still on screen, not merely the one they dropped onto: a plan
     // that arrives after they have navigated away has nowhere to land.
-    if !ui.get_workspace_open() || !workspace.shows(host, Surface::Mods) {
+    if !host_panes_on_screen(ui) || !workspace.shows(host, Surface::Mods) {
         return;
     }
 
@@ -8495,7 +8449,7 @@ fn apply_event(
                 .logs
                 .borrow_mut()
                 .apply_report_unavailable(pane, scope, &name, &message);
-            ui.set_status_message(lookup("gui-diagnostic-disappeared").into());
+            ui.invoke_present_toast(lookup("gui-diagnostic-disappeared").into(), true);
         }
         Event::HostPackContent(data) => {
             if let Some(host) = backend::parse_mod_host(&data.host_kind, &data.host) {
@@ -8765,9 +8719,7 @@ fn apply_event(
         } => apply_host_error(workspace, host, surface, message),
         Event::BackendUnavailable(message) => apply_backend_unavailable(ui, message),
         Event::CloseModal(scope) => close_modal_for(ui, scope),
-        // A new instance is what the user was just looking at the dialog for,
-        // so it is what they are looking at now. The snapshot that follows this
-        // keeps the selection, because it keeps whatever was selected.
+        // A new instance is what the user was just looking at the dialog for, so its card is scrolled into view.
         Event::ClientCreated { instance } => {
             reveal_instance(ui, &instance);
         }
@@ -8926,22 +8878,19 @@ fn import_submission_action(
     }
 }
 
-/// Selects one instance and puts its card in front of the user.
+/// Puts one instance's card in front of the user.
 ///
 /// The list can be filtered or searched down to something the new instance is
-/// not in, and a selection nothing shows is no selection at all, so a filter
-/// that would hide it is cleared rather than left to hide it.
+/// not in, so a filter that would hide it is cleared rather than left to hide it.
 fn reveal_instance(ui: &AppWindow, instance: &str) {
-    ui.set_selected_instance_id(instance.into());
     ui.set_instance_filter("all".into());
-    ui.set_instance_query(SharedString::default());
+    ui.set_list_query(SharedString::default());
     ui.set_instance_favorites_only(false);
     ui.set_instance_minecraft_index(0);
     ui.set_instance_loader_index(0);
     ui.set_instance_run_index(0);
     ui.set_instance_linking_index(0);
     ui.set_instance_group_index(0);
-    ui.invoke_select_instance(instance.into());
     // Where the card sits is not known until the list holding it has arrived,
     // so the scroll waits for the snapshot rather than happening here.
     ui.set_pending_reveal_instance(instance.into());
@@ -9830,6 +9779,14 @@ fn apply_snapshot(
             .find(|account| account.is_default)
             .map(|account| account.name.clone()),
     );
+    ui.set_default_account_name(
+        accounts
+            .iter()
+            .find(|account| account.is_default)
+            .map(|account| account.name.as_str())
+            .unwrap_or_default()
+            .into(),
+    );
     ui.set_account_launch_entries(model(account_launch_entries(&accounts)));
     ui.set_accounts(model(account_rows(accounts)));
     // A refresh happens for reasons unrelated to this screen, so the model
@@ -9875,7 +9832,6 @@ fn apply_snapshot(
     ui.set_eula_accepted(eula.accepted);
     ui.set_eula_status(eula.status.into());
     ui.set_loading(false);
-    ui.set_status_message(lookup("gui-ready").into());
     (clients, servers)
 }
 
@@ -10001,56 +9957,27 @@ fn apply_instance_snapshot(
     let pending = ui.get_pending_reveal_instance();
     if !pending.is_empty() {
         ui.set_pending_reveal_instance(SharedString::default());
-        if ui.get_selected_instance_index() >= 0 && ui.get_selected_instance_id() == pending {
-            ui.set_reveal_selected_instance(ui.get_reveal_selected_instance().saturating_add(1));
+        if ui.get_instances().iter().any(|row| row.id == pending) {
+            ui.set_reveal_host_id(pending);
+            ui.set_reveal_token(ui.get_reveal_token().saturating_add(1));
         }
     }
     all_rows
 }
 
-/// Fills the server lists, and returns every server's row.
+/// Fills the server list, and returns every server's row.
 fn apply_server_snapshot(
     ui: &AppWindow,
     servers: Vec<crate::presentation::ServerPresentation>,
     list: &mut ServerListState,
     home: &mut HomeState,
 ) -> Vec<ServerRow> {
-    let previous_global_server = ui.get_selected_global_server_id();
     let now = chrono::Utc::now();
     home.set_servers(servers.iter().filter_map(HomeHost::from_server).collect());
     let server_rows = servers
         .into_iter()
         .map(|item| server_row(item, now))
         .collect::<Vec<_>>();
-    let mut global_rows = server_rows
-        .iter()
-        .filter(|row| server_is_globally_visible(row, ui.get_show_linked_servers()))
-        .cloned()
-        .collect::<Vec<_>>();
-    let query = ui.get_server_query().to_ascii_lowercase();
-    global_rows.retain(|row| {
-        row_matches(
-            &query,
-            [
-                &row.name,
-                &row.minecraft,
-                &row.loader,
-                &row.relationship,
-                &row.address,
-            ],
-        )
-    });
-    // Favorites first, and otherwise the list's own order.
-    global_rows.sort_by_key(|row| !row.favorite);
-    let global_index = global_selection_index(&global_rows, &previous_global_server);
-    if let Some(index) = global_index {
-        ui.set_selected_global_server_id(global_rows[index].id.clone());
-        ui.set_selected_global_server_index(to_i32(index));
-    } else {
-        ui.set_selected_global_server_id(SharedString::default());
-        ui.set_selected_global_server_index(-1);
-    }
-    ui.set_global_servers(reconciled(&ui.get_global_servers(), global_rows));
     list.replace(ui, server_rows.clone());
     stamp_open_hosts(ui);
     server_rows
@@ -10058,14 +9985,6 @@ fn apply_server_snapshot(
 
 fn server_is_globally_visible(row: &ServerRow, show_linked_servers: bool) -> bool {
     show_linked_servers || row.linked_client_id.is_empty()
-}
-
-fn global_selection_index(rows: &[ServerRow], previous: &str) -> Option<usize> {
-    if previous.is_empty() {
-        (!rows.is_empty()).then_some(0)
-    } else {
-        rows.iter().position(|row| row.id == previous)
-    }
 }
 
 fn server_row(
@@ -10186,7 +10105,10 @@ fn apply_diagnostic_content(ui: &AppWindow, logs: &mut LogViews, content: &Diagn
         (false, true, None) => lookup("gui-diagnostic-file-lossy"),
         (false, false, None) => lookup("gui-diagnostic-loaded"),
     };
-    ui.set_status_message(status.into());
+    // The plain "loaded" outcome needs no word: the report is on screen.
+    if content.truncated || content.lossy || content.matches.is_some() {
+        ui.invoke_present_toast(status.into(), false);
+    }
 }
 
 fn upsert_activity(activities: &mut Vec<ActivityData>, activity: ActivityData) {
@@ -10222,7 +10144,6 @@ fn apply_activities(ui: &AppWindow, activities: &[ActivityData]) {
             cancellable: activity.item.cancellable,
         })
         .collect::<Vec<_>>();
-    ui.set_active_operations(to_i32(rows.iter().filter(|row| row.active).count()));
     ui.set_activities(model(rows));
 }
 
@@ -11139,13 +11060,6 @@ fn java_rows(rows: Vec<JavaData>) -> Vec<JavaRow> {
             pinning: row.pinned_by.unwrap_or_default().into(),
         })
         .collect()
-}
-
-fn row_matches<'a>(query: &str, values: impl IntoIterator<Item = &'a SharedString>) -> bool {
-    query.is_empty()
-        || values
-            .into_iter()
-            .any(|value| value.to_ascii_lowercase().contains(query))
 }
 
 fn model<T: Clone + 'static>(rows: Vec<T>) -> ModelRc<T> {
@@ -13544,6 +13458,29 @@ mod tests {
         );
     }
 
+    /// A Mods list behind the settings is not on screen, so a dropped jar is
+    /// not meant for it.
+    #[test]
+    fn a_dropped_jar_does_not_go_to_a_mods_list_the_settings_cover() {
+        let ui = test_window();
+        let workspace = test_workspace(&ui);
+        let client = client_host();
+        ui.set_modal(SharedString::default());
+        workspace.open(&ui, client, Surface::Mods);
+        assert_eq!(
+            drop_intent(&ui, &workspace.state.borrow()),
+            DropIntent::Mods(client)
+        );
+
+        ui.invoke_open_settings("General".into());
+
+        assert!(ui.get_workspace_open());
+        assert_eq!(
+            drop_intent(&ui, &workspace.state.borrow()),
+            DropIntent::Import
+        );
+    }
+
     /// The two dialogs keep separate choices, and neither shows the other's.
     #[test]
     fn a_chosen_archive_fills_only_the_field_that_asked_for_it() {
@@ -15245,6 +15182,36 @@ mod tests {
     }
 
     #[test]
+    fn launching_a_pair_while_the_settings_are_open_leaves_them_for_the_panes() {
+        let ui = test_window();
+        let (workspace, _, client, server) = paired_workspace(&ui);
+        ui.invoke_open_settings("General".into());
+
+        ui.invoke_launch_and_connect(client.id().into(), server.id().into());
+
+        assert!(!ui.get_settings_open());
+        assert!(ui.get_workspace_open());
+        assert_eq!(
+            shown(&workspace),
+            [(client, Surface::Overview), (server, Surface::Console)]
+        );
+    }
+
+    #[test]
+    fn starting_a_server_while_the_settings_are_open_leaves_them_for_its_console() {
+        let ui = test_window();
+        let workspace = test_workspace(&ui);
+        ui.invoke_open_settings("General".into());
+        let server = server_host();
+
+        workspace.show_console(&ui, server);
+
+        assert!(!ui.get_settings_open());
+        assert!(ui.get_workspace_open());
+        assert_eq!(shown(&workspace), [(server, Surface::Console)]);
+    }
+
+    #[test]
     fn launch_and_connect_leaves_a_full_workspace_as_it_is() {
         let ui = test_window();
         let toasts = toasts(&ui);
@@ -15391,18 +15358,22 @@ mod tests {
         );
         assert_eq!(
             ui.get_workspace_back_label(),
-            lookup("gui-back-instances").as_str(),
-            "a split leaves for the page it was opened from"
+            lookup("gui-back-home").as_str(),
+            "a split leaves for Home"
         );
 
         ui.invoke_choose_pane_host(2, "client".into(), client.id().into());
         ui.invoke_show_pane_surface(2, "Overview".into());
         assert_eq!(ui.get_host_views().row_count(), 1);
+
+        ui.invoke_workspace_back();
+        assert!(!ui.get_workspace_open());
+        assert!(ui.get_shows_home());
     }
 
     /// The host picker lists running hosts first, a client ranked by what runs
     /// on its card, offers each client's linked servers on its card, and lists
-    /// a linked server on its own only when the Servers page would.
+    /// a linked server on its own only when the host list would.
     #[test]
     fn the_host_picker_lists_running_hosts_first_and_linked_servers_on_their_client() {
         let ui = test_window();
@@ -15722,11 +15693,7 @@ mod tests {
 
         assert_eq!(shown(&workspace), [(server, Surface::Console)]);
         assert!(ui.get_workspace_open());
-        assert_eq!(
-            ui.get_page(),
-            SERVERS_PAGE,
-            "a single server's workspace belongs to the servers page"
-        );
+        assert!(!ui.get_shows_home());
         let console = ui
             .get_log_views()
             .row_data(0)
@@ -15750,25 +15717,23 @@ mod tests {
         workspace.show_console(&ui, server);
 
         assert_eq!(shown(&workspace), [(server, Surface::Console)]);
-        assert_eq!(ui.get_page(), SERVERS_PAGE);
         assert_eq!(ui.get_workspace_back_label(), lookup("gui-back-instance"));
         ui.invoke_workspace_back();
         assert_eq!(shown(&workspace), [(client, Surface::Overview)]);
-        assert_eq!(ui.get_page(), INSTANCES_PAGE);
         assert!(ui.get_workspace_open());
     }
 
-    /// Started from the servers list there is no client to go back to, so
-    /// Back leaves the workspace.
+    /// Started from the list there is no client to go back to, so the pane
+    /// offers no Back.
     #[test]
-    fn starting_a_server_from_the_servers_list_has_no_way_back() {
+    fn starting_a_server_from_the_list_has_no_back_button() {
         let ui = test_window();
         let workspace = test_workspace(&ui);
 
         workspace.show_console(&ui, server_host());
-        assert_eq!(ui.get_workspace_back_label(), lookup("gui-back-servers"));
-        ui.invoke_workspace_back();
+        assert_eq!(ui.get_workspace_back_label(), "");
 
+        ui.invoke_workspace_back();
         assert!(!ui.get_workspace_open());
         assert!(shown(&workspace).is_empty());
     }
@@ -16754,7 +16719,7 @@ mod tests {
             can_restart: true,
             ..ServerRow::default()
         };
-        ui.set_global_servers(model(vec![server_row]));
+        ui.set_listed_servers(model(vec![server_row]));
         let (sender, commands) = std::sync::mpsc::channel();
         let lifecycle = Rc::new(RefCell::new(HostLifecycle::default()));
         register_restart_actions(&ui, &sender, &lifecycle);
@@ -16791,7 +16756,7 @@ mod tests {
         let (ui, commands, lifecycle, _client, server) = restart_window();
         ui.set_host_views(model(vec![HostView {
             kind: "server".into(),
-            server: ui.get_global_servers().row_data(0).expect("row"),
+            server: ui.get_listed_servers().row_data(0).expect("row"),
             ..HostView::default()
         }]));
         ui.invoke_server_restart(server.to_string().into());
@@ -16800,7 +16765,7 @@ mod tests {
         };
         let stages = |ui: &AppWindow| -> Vec<String> {
             [
-                ui.get_global_servers().row_data(0).expect("row"),
+                ui.get_listed_servers().row_data(0).expect("row"),
                 ui.get_host_views().row_data(0).expect("view").server,
             ]
             .iter()
@@ -17147,15 +17112,6 @@ mod tests {
     }
 
     #[test]
-    fn row_filtering_is_case_insensitive_and_searches_exact_metadata() {
-        let name = SharedString::from("Vanilla Repro");
-        let loader = SharedString::from("Minecraft 1.21.1 | Vanilla");
-        assert!(row_matches("repro", [&name, &loader]));
-        assert!(row_matches("1.21.1", [&name, &loader]));
-        assert!(!row_matches("forge", [&name, &loader]));
-    }
-
-    #[test]
     fn java_memory_input_requires_digits_and_an_ordered_nonzero_range() {
         assert_eq!(parse_java_memory("512", "4096"), Ok((512, 4096)));
         assert!(parse_java_memory("512 MiB", "4096").is_err());
@@ -17233,11 +17189,11 @@ mod tests {
     }
 
     #[test]
-    fn modrinth_search_does_not_reuse_the_server_filter() {
+    fn modrinth_search_does_not_reuse_the_host_list_search() {
         let source = ui_markup();
         assert!(source.contains("root.search(root.host.browser-provider, self.text)"));
-        assert!(source.contains("text <=> root.server-query"));
-        assert!(!source.contains("root.server-query)"));
+        assert!(source.contains("list-query <=> root.list-query"));
+        assert!(!source.contains("search(root.list-query"));
     }
 
     /// What a Properties save of a running server sends after the form was
@@ -17616,7 +17572,7 @@ mod tests {
     }
 
     #[test]
-    fn context_menus_expose_entity_actions_without_redundant_inspector_deletion() {
+    fn context_menus_expose_entity_actions() {
         let source = ui_markup();
         for label in [
             "gui-open-workspace",
@@ -20256,13 +20212,12 @@ mod tests {
     }
 
     #[test]
-    fn card_workspace_actions_select_the_target_before_opening_it() {
+    fn a_card_press_opens_its_host_on_the_overview_surface() {
         let source = ui_markup();
+        assert!(source.contains("open-client(id) => { root.open-host(\"client\", id); }"));
+        assert!(source.contains("open-server(id) => { root.open-host(\"server\", id); }"));
         assert!(source.contains(
-            "open-workspace(id) => { root.selected-instance-id = id; root.selected-instance-index = index; root.select-instance(id); root.open-workspace(\"client\", id, \"Overview\");"
-        ));
-        assert!(source.contains(
-            "open-workspace(id) => { root.selected-global-server-id = id; root.selected-global-server-index = index; root.select-server(id); root.open-workspace(\"server\", id, \"Overview\");"
+            "function open-host(kind: string, id: string) {\n        root.open-host-surface(kind, id, \"Overview\");"
         ));
         // A card's own touch area has to be declared before the layout holding
         // its buttons, so that it sits under them. Slint resolves a pointer
@@ -20270,15 +20225,19 @@ mod tests {
         // the press first and the button never sees it. What that costs the
         // user is proven in `tests/card_pointer_targets.rs`; this only keeps the
         // arrangement visible where it is written.
-        for component in ["component InstanceCard", "component ServerCard"] {
+        let face = ui_declaration(source, "component HostCardFace").expect("the card face");
+        assert!(
+            face.find("@children").expect("the card's own children")
+                < face
+                    .find("body := VerticalLayout")
+                    .expect("the card layout"),
+            "the face puts the card's touch area under its buttons"
+        );
+        for component in ["component ClientCard", "component ServerCard"] {
             let card = ui_declaration(source, component).expect("the card component");
-            let area = card
-                .find("card-area := ContextTouchArea")
-                .expect("a card touch area");
-            let layout = card.find("HorizontalLayout {").expect("the card layout");
             assert!(
-                area < layout,
-                "{component}'s touch area is over its buttons"
+                card.contains("card-area := ContextTouchArea"),
+                "{component} has a touch area of its own"
             );
         }
     }
@@ -20321,13 +20280,9 @@ mod tests {
     }
 
     #[test]
-    fn global_navigation_keeps_diagnostics_contextual() {
+    fn logs_are_a_surface_of_each_host_workspace() {
         let source = ui_markup();
-        let logs = "gui-logs";
-        assert!(!source.contains(&format!(
-            r#"label: GuiI18n.text("{logs}"); selected: root.page == 2"#
-        )));
-        // Logs is a surface of each host's workspace, read through that pane's viewer.
+        // Read through that pane's viewer, not a page of their own.
         assert!(source.contains("if host.available && pane.surface == \"Logs\""));
         assert!(source.contains("root.log-show(pane.id, \"files\")"));
     }
@@ -21033,11 +20988,6 @@ mod tests {
         assert!(server_is_globally_visible(&standalone, false));
         assert!(!server_is_globally_visible(&linked, false));
         assert!(server_is_globally_visible(&linked, true));
-        assert_eq!(
-            global_selection_index(std::slice::from_ref(&standalone), "linked"),
-            None,
-            "a hidden selected linked server must not retain a stale index"
-        );
     }
 
     /// A name that opens a web page has to look like one before it is pressed.
@@ -21069,7 +21019,7 @@ mod tests {
         // Scoped by the model it renders rather than by hiding rows, which
         // would leave the room they would have taken behind them.
         assert!(source.contains("for pending in host.pending-servers"));
-        assert!(source.contains("NameRules.linked-server-name(name)"));
+        assert!(source.contains("NameRules.linked-server-name(client-name)"));
     }
 
     #[test]
@@ -22296,7 +22246,7 @@ mod tests {
     }
 
     #[test]
-    fn leaving_the_page_that_shows_the_capturing_row_ends_the_capture() {
+    fn leaving_the_settings_that_show_the_capturing_row_ends_the_capture() {
         let markup = ui_markup();
         let changed = |property: &str| {
             let start = markup
@@ -22307,7 +22257,7 @@ mod tests {
             body.contains("minecraft-cancel-capture")
         };
         assert!(changed("settings-tab"));
-        assert!(changed("page"));
+        assert!(changed("settings-open"));
     }
 
     /// Tall enough to put every row of a category on screen, which is where a
@@ -22431,8 +22381,7 @@ mod tests {
 
             ui.window()
                 .set_size(slint::PhysicalSize::new(1480, SCREEN_HEIGHT));
-            ui.set_page(4);
-            ui.set_settings_tab("Minecraft".into());
+            ui.invoke_open_settings("Minecraft".into());
             ui.show().expect("show");
             slint::platform::update_timers_and_animations();
             Self {
@@ -22869,7 +22818,7 @@ mod tests {
     }
 
     #[test]
-    fn the_server_list_shows_the_servers_the_servers_page_shows_for_the_same_search() {
+    fn the_server_list_shows_the_servers_the_linked_setting_and_the_search_allow() {
         let ui = test_window();
         let owner = ephervex_model::InstanceId::new();
         let servers = || {
@@ -22880,25 +22829,33 @@ mod tests {
                 server_item("Linked favorite", Some(owner), true),
             ]
         };
-        // Both read the same snapshot, so the ids line up between the two lists.
-        let ids = |rows: ModelRc<ServerRow>| {
-            rows.iter()
-                .map(|row| row.id.to_string())
-                .collect::<Vec<_>>()
-        };
-        for show_linked in [false, true] {
-            for query in ["", "creative", "SURV", "linked", "1.20", "localhost", "zzz"] {
-                ui.set_show_linked_servers(show_linked);
-                ui.set_server_query(query.into());
-                ui.set_list_query(query.into());
-                let mut list = ServerListState::default();
-                apply_server_snapshot(&ui, servers(), &mut list, &mut HomeState::default());
-                assert_eq!(
-                    ids(ui.get_listed_servers()),
-                    ids(ui.get_global_servers()),
-                    "show linked: {show_linked}, search: {query:?}"
-                );
-            }
+        let cases: [(bool, &str, &[&str]); 7] = [
+            (false, "", &["Survival", "Creative"]),
+            (
+                true,
+                "",
+                &["Survival", "Linked favorite", "Creative", "Linked build"],
+            ),
+            (false, "creative", &["Creative"]),
+            (false, "SURV", &["Survival"]),
+            (true, "linked", &["Linked favorite", "Linked build"]),
+            (false, "linked", &[]),
+            (true, "zzz", &[]),
+        ];
+        for (show_linked, query, expected) in cases {
+            ui.set_show_linked_servers(show_linked);
+            ui.set_list_query(query.into());
+            let mut list = ServerListState::default();
+            apply_server_snapshot(&ui, servers(), &mut list, &mut HomeState::default());
+            let names: Vec<String> = ui
+                .get_listed_servers()
+                .iter()
+                .map(|row| row.name.to_string())
+                .collect();
+            assert_eq!(
+                names, expected,
+                "show linked: {show_linked}, search: {query:?}"
+            );
         }
     }
 
@@ -22985,12 +22942,6 @@ mod tests {
                 .filter(|row| row.open)
                 .map(|row| row.name.to_string())
                 .collect();
-            names.extend(
-                ui.get_global_servers()
-                    .iter()
-                    .filter(|row| row.open)
-                    .map(|row| row.name.to_string()),
-            );
             names.extend(
                 ui.get_listed_servers()
                     .iter()
@@ -23080,7 +23031,6 @@ mod tests {
         let ui = test_window();
         let workspace = test_workspace(&ui);
         ui.set_list_query("no host is called this".into());
-        ui.set_instance_query("no host is called this".into());
         apply_hosts(
             &ui,
             &workspace,

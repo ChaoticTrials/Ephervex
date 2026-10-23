@@ -663,7 +663,7 @@ fn every_action_on_the_server_failure_notice_dismisses_it() {
 #[test]
 fn the_server_failure_notice_stays_inside_its_pane_at_the_smallest_split() {
     let ui = window();
-    ui.window().set_size(PhysicalSize::new(980, 3000));
+    support::set_minimum_width(&ui, 3000);
     for scale in [1.0, 1.5] {
         ui.global::<Theme>().set_text_scale(scale);
         failed_server(&ui, "crash-2026-09-27_12.00.00-server.txt");
@@ -729,7 +729,7 @@ fn every_action_stays_inside_its_pane_at_the_smallest_split() {
     let ui = window();
     // Only as wide as the window may be, and tall enough that a 1.5x surface
     // is still on screen for the testing backend to find.
-    ui.window().set_size(PhysicalSize::new(980, 3000));
+    support::set_minimum_width(&ui, 3000);
     for scale in [1.0, 1.5] {
         ui.global::<Theme>().set_text_scale(scale);
         for (server_host, kind, _) in host_kinds() {
@@ -1052,7 +1052,7 @@ fn window() -> AppWindow {
     // Tall enough that the whole surface is on screen: the testing backend
     // finds only what is within the window, and the bundle choice sits below
     // the findings.
-    ui.window().set_size(PhysicalSize::new(1480, 1400));
+    ui.window().set_size(PhysicalSize::new(1800, 1400));
     ui.show().expect("show");
     ui
 }

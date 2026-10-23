@@ -1,0 +1,77 @@
+// The start page: a greeting, the ways to make something new, what is running,
+// and what the launcher has been doing.
+
+import { ScrollView } from "std-widgets.slint";
+import { AppButton } from "../components/controls.slint";
+import { Panel } from "../components/surface.slint";
+import { BodyText, DisplayHeading, PageIntro } from "../components/text.slint";
+import { GuiI18n } from "../globals.slint";
+import { ActivityRow, RunningRow } from "../models.slint";
+import { Theme } from "../theme.slint";
+import { ActivityCard, RunningCard } from "activity-cards.slint";
+
+// A heading over one block of the page.
+component SectionHeading inherits DisplayHeading {
+    font-size: Theme.section-size;
+}
+
+export component HomePage inherits Panel {
+    in property <string> greeting;
+    in property <string> summary;
+    in property <[RunningRow]> running;
+    in property <[ActivityRow]> activities;
+    callback new-instance();
+    callback import-modpack();
+    callback new-server();
+    callback open-log(string, string);
+    callback open-console(string);
+    callback open-workspace(string, string);
+    // (kind, id, launch)
+    callback stop(string, string, string);
+    callback force-stop(string, string);
+    callback cancel-operation(string);
+    lift: Theme.shadow-offset-card;
+    ScrollView {
+        width: parent.width;
+        height: parent.height;
+        viewport-width: self.width;
+        VerticalLayout {
+            alignment: start;
+            padding: 28px;
+            spacing: 22px;
+            PageIntro { title: root.greeting; subtitle: root.summary; }
+            // The buttons raise a hard shadow to the right and below.
+            HorizontalLayout {
+                spacing: 14px;
+                alignment: start;
+                padding-right: Theme.shadow-room;
+                padding-bottom: Theme.shadow-room;
+                AppButton { text: GuiI18n.text("gui-new-instance"); tone: "primary"; clicked => { root.new-instance(); } }
+                AppButton { text: GuiI18n.text("gui-import-modpack"); tone: "success"; clicked => { root.import-modpack(); } }
+                AppButton { text: GuiI18n.text("gui-new-server"); tone: "info"; clicked => { root.new-server(); } }
+            }
+            // What is running, which is a different question from what the
+            // launcher is doing: an operation has a progress fraction and a
+            // Cancel, and a running game has neither.
+            SectionHeading { text: GuiI18n.text("gui-running"); }
+            if root.running.length == 0 : BodyText { text: GuiI18n.text("gui-nothing-running-detail"); color: Theme.text-muted; wrap: word-wrap; }
+            VerticalLayout {
+                spacing: 10px;
+                for item in root.running : RunningCard {
+                    item: item;
+                    open-log(kind, id) => { root.open-log(kind, id); }
+                    open-console(id) => { root.open-console(id); }
+                    open-workspace(kind, id) => { root.open-workspace(kind, id); }
+                    stop(kind, id) => { root.stop(kind, id, item.launch); }
+                    force-stop(id, launch) => { root.force-stop(id, launch); }
+                }
+            }
+            SectionHeading { text: GuiI18n.text("gui-activity"); }
+            if root.activities.length == 0 : BodyText { text: GuiI18n.text("gui-no-recent-activity-detail"); color: Theme.text-muted; wrap: word-wrap; }
+            VerticalLayout {
+                spacing: 10px;
+                for item in root.activities : ActivityCard { item: item; cancel(id) => { root.cancel-operation(id); } }
+            }
+        }
+    }
+}

@@ -25,21 +25,51 @@ use slint::{
 const TAB_LIMIT: usize = 400;
 
 #[test]
-fn tab_reaches_a_navigation_entry_and_enter_opens_its_page() {
+fn tab_reaches_the_settings_button_and_enter_opens_the_settings() {
     let ui = window();
-    assert_eq!(ui.get_page(), 0);
+    assert!(ui.get_shows_home());
 
-    let servers = control(&ui, &lookup("gui-servers"));
-    assert!(tab_to(&ui, &servers), "Tab never reached the Servers entry");
+    let settings = control(&ui, &lookup("gui-settings"));
+    assert!(
+        tab_to(&ui, &settings),
+        "Tab never reached the Settings button"
+    );
     press(&ui, Key::Return);
 
-    assert_eq!(ui.get_page(), 1);
+    assert!(ui.get_settings_open());
+    assert_eq!(ui.get_settings_tab(), "General");
+}
+
+#[test]
+fn tab_reaches_the_home_button_and_enter_leaves_the_settings() {
+    let ui = window();
+    ui.invoke_open_settings("Java".into());
+    settle(&ui);
+
+    let home = control(&ui, &lookup("gui-home"));
+    assert!(tab_to(&ui, &home), "Tab never reached the Home button");
+    press(&ui, Key::Return);
+
+    assert!(!ui.get_settings_open());
+    assert!(ui.get_shows_home());
+}
+
+#[test]
+fn escape_leaves_the_settings_for_the_page_they_were_opened_over() {
+    let ui = window();
+    ui.invoke_open_settings("General".into());
+    settle(&ui);
+    assert!(ui.get_settings_open());
+
+    press(&ui, Key::Escape);
+
+    assert!(!ui.get_settings_open());
 }
 
 #[test]
 fn space_activates_the_focused_settings_navigation_entry() {
     let ui = window();
-    ui.set_page(4);
+    ui.set_settings_open(true);
     settle(&ui);
 
     let java = control(&ui, &lookup("gui-settings-java"));
@@ -168,8 +198,8 @@ fn a_control_that_is_disabled_while_focused_ignores_the_keyboard() {
 fn tab_stays_inside_an_open_dialog_in_both_directions() {
     let ui = window();
     let behind = [
-        control(&ui, &lookup("gui-instances")),
-        control(&ui, &lookup("gui-servers")),
+        control(&ui, &lookup("gui-home")),
+        control(&ui, &lookup("gui-settings")),
         control(&ui, &lookup("gui-new-instance")),
     ]
     .map(|control| geometry(&control));
@@ -193,7 +223,7 @@ fn tab_stays_inside_an_open_dialog_in_both_directions() {
             "{key:?} reached a control on the page behind the dialog"
         );
     }
-    assert_eq!(ui.get_page(), 0);
+    assert!(ui.get_shows_home());
     assert_eq!(ui.get_modal(), "create-instance");
 }
 
@@ -223,8 +253,8 @@ fn only_the_focused_control_draws_the_focus_outline() {
         "nothing has focus until Tab is pressed"
     );
 
-    let instances = control(&ui, &lookup("gui-instances"));
-    assert!(tab_to(&ui, &instances));
+    let home = control(&ui, &lookup("gui-home"));
+    assert!(tab_to(&ui, &home));
     assert_eq!(focus_outlines(&ui).len(), 1);
 }
 

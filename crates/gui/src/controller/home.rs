@@ -42,10 +42,10 @@ pub(super) struct HomeHost {
 pub(super) enum RunState {
     Idle,
     /// Something this launcher supervises is starting or running, or may be,
-    /// which is what the Running page lists.
+    /// which is what Home's Running section lists.
     Active,
     /// The supervisor is proven gone but the process lives: a recovery case,
-    /// kept out of "running" as the Running page keeps it out.
+    /// kept out of "running" as Home's Running section keeps it out.
     Orphaned,
 }
 

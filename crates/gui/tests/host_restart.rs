@@ -120,13 +120,10 @@ fn a_restart_under_way_shows_its_stage_as_progress_and_holds_the_host_actions() 
 fn a_server_restart_shows_on_its_card_as_well_as_in_its_workspace() {
     let ui = window();
     ui.set_loading(false);
-    ui.set_page(1);
-    ui.set_workspace_open(false);
-    ui.set_global_servers(ModelRc::new(VecModel::from(vec![restarting_server(
-        "stopping",
-    )])));
-    ui.set_selected_global_server_index(0);
-    ui.set_selected_global_server_id("server".into());
+    let mut row = restarting_server("stopping");
+    // What the controller stamps on every row that shows the host.
+    row.state_line = lookup("gui-state-restarting").into();
+    ui.set_listed_servers(ModelRc::new(VecModel::from(vec![row])));
     settle(&ui);
     assert!(visible(&ui, &lookup("gui-state-restarting")));
 }
@@ -338,15 +335,12 @@ fn a_disabled_force_kill_says_why() {
 fn a_disabled_connect_shows_the_reason_its_server_row_carries() {
     let ui = window();
     let mut row = server(true);
-    row.linked_client_id = "client".into();
+    row.linked_client_id = "host".into();
     row.can_connect = false;
     row.connect_reason = "The client is already running.".into();
-    ui.set_loading(false);
-    ui.set_page(1);
-    ui.set_workspace_open(false);
-    ui.set_global_servers(ModelRc::new(VecModel::from(vec![row])));
-    ui.set_selected_global_server_index(0);
-    ui.set_selected_global_server_id("server".into());
+    let mut view = support::client_view(instance());
+    view.linked_servers = ModelRc::new(VecModel::from(vec![row]));
+    support::show(&ui, vec![view], vec![support::pane(1, 0, "Overview")]);
     settle(&ui);
 
     assert!(!enabled(&ui, "gui-launch-client-connect"));

@@ -7,10 +7,12 @@
 
 #![allow(clippy::expect_used)]
 
+mod support;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ephervex_gui::ui::{AppWindow, GuiI18n, ServerPackRules};
+use ephervex_gui::ui::{AppWindow, GuiI18n, InstanceRow, ServerPackRules};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
 use slint::platform::WindowEvent;
@@ -367,7 +369,7 @@ fn the_import_dialog_keeps_its_server_files_row_above_its_buttons() {
 #[test]
 fn a_long_import_error_stays_clear_of_the_buttons() {
     let ui = window();
-    ui.window().set_size(PhysicalSize::new(560, 900));
+    support::set_minimum_width(&ui, 900);
     open_import(&ui, true);
     let error = "The pack could not be read because one of the files it lists is missing \
                  from the archive and no provider offers a download for it either";
@@ -392,7 +394,7 @@ fn a_long_import_error_stays_clear_of_the_buttons() {
 #[test]
 fn a_long_pack_summary_stays_clear_of_the_rows_below_it() {
     let ui = window();
-    ui.window().set_size(PhysicalSize::new(560, 900));
+    support::set_minimum_width(&ui, 900);
     open_import(&ui, false);
     ui.set_import_pack_header("Pack".into());
     ui.set_import_minecraft_line("Minecraft 1.20.1".into());
@@ -443,10 +445,15 @@ fn summary_and_next_row(ui: &AppWindow, counts: &str) -> (f32, f32) {
 }
 
 fn open_import(ui: &AppWindow, create_server: bool) {
-    ui.set_loading(false);
-    // Away from the instances page, whose own "Import Modpack" button carries
-    // the same label as the dialog's confirm and would be found instead.
-    ui.set_page(1);
+    // Over the settings with one instance listed: Home and the empty list each
+    // have an "Import Modpack" button with the dialog's label, which would be
+    // found instead of the dialog's own.
+    support::open_settings(ui, "General");
+    ui.set_instances(ModelRc::new(VecModel::from(vec![InstanceRow {
+        id: "listed".into(),
+        name: "Listed".into(),
+        ..InstanceRow::default()
+    }])));
     ui.set_import_create_server(create_server);
     ui.set_import_server_pack(SharedString::default());
     ui.set_import_server_pack_name(SharedString::default());

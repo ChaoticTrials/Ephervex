@@ -39,7 +39,7 @@ name, the folder is used and the file is reported. A folder that cannot be used
 does not hide the file.
 
 Themes are read when Ephervex starts and whenever the settings are refreshed,
-for example with the Refresh button in the top bar.
+for example with the Refresh button above the host list.
 
 ## Format
 
@@ -103,13 +103,13 @@ also holds a commented-out `[branding]` section for use in a theme folder.
 | `elevated` | A raised card, such as one under the pointer |
 | `overlay` | Popovers, such as dropdown lists and menus, which must read against an `elevated` card |
 | `border` | Borders and dividers |
-| `bar` | The top bar, the navigation column, the status bar, and the track of a switch that is off |
-| `header-ribbon-1` | The first sixth of the ribbon along the bottom of the top bar; transparent hides it |
-| `header-ribbon-2` | The second sixth of the top bar ribbon |
-| `header-ribbon-3` | The third sixth of the top bar ribbon |
-| `header-ribbon-4` | The fourth sixth of the top bar ribbon |
-| `header-ribbon-5` | The fifth sixth of the top bar ribbon |
-| `header-ribbon-6` | The final sixth of the top bar ribbon |
+| `bar` | The track of a switch that is off |
+| `header-ribbon-1` | Kept so existing theme files stay valid; the window has no header ribbon, so it paints nothing |
+| `header-ribbon-2` | Kept so existing theme files stay valid; the window has no header ribbon, so it paints nothing |
+| `header-ribbon-3` | Kept so existing theme files stay valid; the window has no header ribbon, so it paints nothing |
+| `header-ribbon-4` | Kept so existing theme files stay valid; the window has no header ribbon, so it paints nothing |
+| `header-ribbon-5` | Kept so existing theme files stay valid; the window has no header ribbon, so it paints nothing |
+| `header-ribbon-6` | Kept so existing theme files stay valid; the window has no header ribbon, so it paints nothing |
 | `well` | The floor of technical views: consoles, logs, crash reports. A disabled field is drawn on it too. |
 | `selection` | The highlighted entry of a menu, a dropdown list, or the tab bar's More list, and a hovered row of the license list |
 | `selection-card` | A selected card |
@@ -188,7 +188,7 @@ A theme folder can name two images under `[branding]`:
 
 | Key | Replaces |
 |---|---|
-| `logo` | The logo in the top bar and on the About page |
+| `logo` | The logo above the host list and on the About page |
 | `icon` | The window icon, where the desktop takes it from the window |
 
 Both are optional, and each one falls back to the Ephervex logo on its own:

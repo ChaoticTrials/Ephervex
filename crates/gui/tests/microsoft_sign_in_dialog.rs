@@ -143,7 +143,6 @@ fn closing_the_dialog_stops_the_sign_in_too() {
 /// The dialog as the controller opens it.
 fn sign_in_dialog(ui: &AppWindow) {
     ui.set_loading(false);
-    ui.set_page(0);
     ui.set_microsoft_sign_in_code(CODE.into());
     ui.set_microsoft_sign_in_address(ADDRESS.into());
     ui.set_microsoft_sign_in_address_openable(true);

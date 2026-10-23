@@ -95,7 +95,6 @@ fn shapes() -> [(&'static str, Vec<WorkspacePaneRow>); 4] {
 fn split(ui: &AppWindow, panes: Vec<WorkspacePaneRow>) {
     support::show(
         ui,
-        0,
         vec![
             support::client_view(instance(false)),
             support::server_view(server(false)),
@@ -196,7 +195,12 @@ fn every_shape_places_its_panes_apart_and_inside_the_window() {
         theme.get_workspace_pane_min_width(),
         theme.get_workspace_pane_min_height(),
     );
-    for (width, height) in [(1480_u16, 900_u16), (980, 680)] {
+    let (minimum_width, minimum_height) = support::minimum_size(&ui);
+    let minimum = (
+        u16::try_from(minimum_width).expect("a width"),
+        u16::try_from(minimum_height).expect("a height"),
+    );
+    for (width, height) in [(1480_u16, 900_u16), minimum] {
         ui.window()
             .set_size(PhysicalSize::new(u32::from(width), u32::from(height)));
         let window = LogicalSize::new(f32::from(width), f32::from(height));
@@ -331,7 +335,7 @@ fn each_panes_header_stays_inside_the_pane() {
 #[test]
 fn a_panes_tab_row_stays_inside_the_pane_on_the_smallest_window() {
     let ui = window();
-    ui.window().set_size(PhysicalSize::new(980, 680));
+    support::set_minimum_size(&ui);
     for (shape, panes) in shapes() {
         let placed: Vec<(i32, i32, bool)> = panes
             .iter()
@@ -578,7 +582,7 @@ fn a_panes_tabs_switch_only_that_pane() {
 #[test]
 fn tabs_that_do_not_fit_wait_under_more() {
     let ui = window();
-    ui.window().set_size(PhysicalSize::new(980, 680));
+    support::set_minimum_size(&ui);
     let surfaces = support::follow_surface_requests(&ui);
     let mut panes = vec![
         placed(1, CLIENT, "Overview", 0, 0, false),
@@ -636,11 +640,13 @@ fn the_list_under_more_closes_when_the_window_is_resized() {
         panes[1].surface_choice = 9;
         panes
     };
-    for (pane, hidden, panes) in [
-        (1, "gui-instance-tab-logs", beside()),
-        (2, "gui-server-tab-console", beside()),
+    // How much wider the window gets: the left pane's More moves only once
+    // another whole tab fits, while the right one moves with the column.
+    for (pane, hidden, panes, wider) in [
+        (1, "gui-instance-tab-logs", beside(), 240),
+        (2, "gui-server-tab-console", beside(), 120),
     ] {
-        ui.window().set_size(PhysicalSize::new(980, 680));
+        support::set_minimum_size(&ui);
         split(&ui, panes);
         let hidden = lookup(hidden);
         let listed = |ui: &AppWindow| {
@@ -660,7 +666,9 @@ fn the_list_under_more_closes_when_the_window_is_resized() {
         settle(&ui);
         assert!(listed(&ui), "pane {pane}: More lists {hidden}");
 
-        ui.window().set_size(PhysicalSize::new(1100, 680));
+        let (minimum_width, minimum_height) = support::minimum_size(&ui);
+        ui.window()
+            .set_size(PhysicalSize::new(minimum_width + wider, minimum_height));
         settle(&ui);
         let after = more(&ui).expect("More is still needed").absolute_position();
         assert_ne!(after, before, "pane {pane}: More did not move");
@@ -856,7 +864,6 @@ fn properties_rows_report_their_edits_for_the_panes_host() {
     ui.window().set_size(PhysicalSize::new(2400, 2400));
     support::show(
         &ui,
-        0,
         vec![
             properties_host("aaaa", "Server A", "25565", true),
             properties_host("bbbb", "Server B", "25570", false),
@@ -930,7 +937,6 @@ fn a_panes_runtime_form_follows_the_host_the_pane_shows() {
     };
     support::show(
         &ui,
-        0,
         vec![runtime_host("aaaa", "1024"), runtime_host("bbbb", "2048")],
         panes(),
     );
@@ -960,7 +966,6 @@ fn a_runtime_form_follows_the_host_after_the_pane_before_it_closes() {
     let ui = window();
     support::show(
         &ui,
-        0,
         vec![runtime_host("aaaa", "1024"), runtime_host("bbbb", "2048")],
         vec![
             placed(1, 0, "Settings", 0, 0, false),
@@ -992,7 +997,6 @@ fn a_servers_settings_save_its_own_runtime_beside_a_clients() {
     server_view.runtime_revision = 1;
     support::show(
         &ui,
-        0,
         vec![runtime_host("aaaa", "1024"), server_view],
         vec![
             placed(1, 0, "Settings", 0, 0, false),
@@ -1049,7 +1053,6 @@ fn a_panes_properties_form_follows_the_host_the_pane_shows() {
     ui.window().set_size(PhysicalSize::new(2400, 2400));
     support::show(
         &ui,
-        0,
         vec![
             properties_host("aaaa", "Server A", "25565", true),
             properties_host("bbbb", "Server B", "25570", false),
@@ -1109,7 +1112,7 @@ fn header_actions_act_on_their_panes_host() {
 #[test]
 fn a_panes_host_and_actions_stay_inside_the_pane_and_apart() {
     let ui = window();
-    for (width, height) in [(1480_u32, 900_u32), (980, 680)] {
+    for (width, height) in [(1480_u32, 900_u32), support::minimum_size(&ui)] {
         ui.window().set_size(PhysicalSize::new(width, height));
         // The default text size, then the largest one offered.
         for (scale, default_text) in [(1.0, true), (1.25, false)] {
@@ -1120,7 +1123,6 @@ fn a_panes_host_and_actions_stay_inside_the_pane_and_apart() {
                         panes.iter().map(|pane| (pane.id, pane.host)).collect();
                     support::show(
                         &ui,
-                        0,
                         vec![
                             support::client_view(instance(running)),
                             support::server_view(server(running)),
@@ -1223,12 +1225,12 @@ fn a_split_leaves_from_its_toolbar() {
     let backs = Rc::new(RefCell::new(0));
     let sink = Rc::clone(&backs);
     ui.on_workspace_back(move || *sink.borrow_mut() += 1);
-    ui.set_workspace_back_label(lookup("gui-back-instances").into());
+    ui.set_workspace_back_label(lookup("gui-back-home").into());
     let (_, panes) = shapes().into_iter().next().expect("the 1:1 shape");
     split(&ui, panes);
 
     let back: Vec<ElementHandle> =
-        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-back-instances"))
+        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-back-home"))
             .filter(|element| element.accessible_role() == Some(AccessibleRole::Button))
             .collect();
     assert_eq!(

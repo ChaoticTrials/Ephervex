@@ -153,7 +153,7 @@ fn the_mods_panel_notice_opens_the_report_the_marks_come_from() {
 #[test]
 fn the_crash_notice_actions_stay_inside_their_pane_and_apart() {
     let ui = window();
-    for width in [1480_u32, 980] {
+    for width in [1480_u32, support::minimum_width(&ui)] {
         // Tall enough that nothing is scrolled out of the pane.
         ui.window().set_size(PhysicalSize::new(width, 3000));
         // The default text size, then the largest one offered.
@@ -336,7 +336,7 @@ fn crashed_server_workspace(ui: &AppWindow) {
         "java.lang.NoClassDefFoundError: net/minecraft/client/multiplayer/ClientLevel".into();
     view.crash_client_code_on_server = true;
     view.crash_suggested = 1;
-    support::show(ui, 1, vec![view], vec![support::pane(1, 0, "Overview")]);
+    support::show(ui, vec![view], vec![support::pane(1, 0, "Overview")]);
 }
 
 /// Where the panes were sent: surfaces, log modes, and files opened, by pane.

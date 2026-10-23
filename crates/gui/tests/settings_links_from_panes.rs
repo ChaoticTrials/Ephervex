@@ -114,9 +114,12 @@ fn a_java_finding_opens_the_java_settings() {
 }
 
 fn assert_left_for(ui: &AppWindow, tab: &str) {
-    assert_eq!(ui.get_page(), 4, "the button opens Settings");
+    assert!(ui.get_settings_open(), "the button opens Settings");
     assert_eq!(ui.get_settings_tab(), tab, "the button opens its tab");
-    assert!(!ui.get_workspace_open(), "the workspace closes");
+    assert!(
+        ui.get_workspace_open(),
+        "the workspace stays open behind the settings for Back"
+    );
 }
 
 /// The largest element showing this text, which is the control rather than the

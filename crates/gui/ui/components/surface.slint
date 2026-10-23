@@ -88,6 +88,20 @@ export component Plate inherits Rectangle {
     }
 }
 
+// A face whose children stay inside its outline and its rounded corners, for a
+// page that scrolls or paints its own backgrounds.
+export component Panel inherits Plate {
+    Rectangle {
+        x: root.outline-width;
+        y: root.outline-width;
+        width: root.inner-width;
+        height: root.inner-height;
+        border-radius: max(0px, root.radius - root.outline-width);
+        clip: true;
+        @children
+    }
+}
+
 // The face of a button. It rises one pixel toward the pointer with a longer
 // shadow and sinks onto its shadow while pressed. A control that cannot be
 // used holds still, flat, and fades.

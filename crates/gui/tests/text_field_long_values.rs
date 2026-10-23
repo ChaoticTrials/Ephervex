@@ -194,8 +194,7 @@ fn input_of(field: &ElementHandle) -> ElementHandle {
 
 fn storage_settings(ui: &AppWindow) {
     ui.set_loading(false);
-    ui.set_page(4);
-    ui.set_settings_tab("Storage".into());
+    ui.invoke_open_settings("Storage".into());
     settle(ui);
 }
 

@@ -42,12 +42,9 @@ export global Theme {
     // because hovering it is what raised the popover.
     out property <color> overlay: palette.overlay;
     out property <color> border: palette.border;
-    // One step under `background`, for the chrome that frames a page:
-    // the top bar, the navigation column and the status bar, and the track of
-    // a switch that is off.
+    // The track of a switch that is off.
     out property <color> bar: palette.bar;
-    // Six equal segments along the top bar. Transparent colors leave the
-    // ribbon absent without changing the height or the other page chrome.
+    // Kept for theme-file compatibility; nothing is drawn with them.
     out property <color> header-ribbon-1: palette.header-ribbon-1;
     out property <color> header-ribbon-2: palette.header-ribbon-2;
     out property <color> header-ribbon-3: palette.header-ribbon-3;
@@ -210,9 +207,6 @@ export global Theme {
     out property <length> focus-ring-width: 2px;
     // The clear gap between a control's own edge and its focus outline.
     out property <length> focus-ring-offset: 1px;
-    // The primary navigation column. Named because the page bodies beside
-    // it have to know how much of the window is left.
-    out property <length> sidebar-width: 218px;
     // One entity card's height and the gap under it. Named because the
     // cards and the arithmetic that scrolls one into view have to agree,
     // and a list of fixed-height rows is the only reason that arithmetic
@@ -236,6 +230,10 @@ export global Theme {
     // gap, and a text column wide enough for all four badges at the longest
     // status. Narrower rows stack.
     out property <length> preference-row-split-width: preference-control-column-width + 400px * text-scale + 34px;
+    // One row of a popup menu and the padding around its rows. Named because
+    // a menu opened upward has to know how tall it will be.
+    out property <length> menu-row-height: 30px * text-scale;
+    out property <length> menu-frame-padding: 4px;
     // One host surface tab. Every tab is this wide so a tab bar can tell
     // how many fit before the rest move under More.
     out property <length> workspace-tab-width: 112px * text-scale;

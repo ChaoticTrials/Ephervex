@@ -52,7 +52,7 @@ fn row(id: &str, label: &str, size: &str, fraction: f32, locations: &[&str]) -> 
 
 fn settings(ui: &AppWindow, tab: &str) {
     ui.set_loading(false);
-    ui.set_page(4);
+    ui.set_settings_open(true);
     ui.set_workspace_open(false);
     ui.set_settings_tab(tab.into());
     settle(ui);

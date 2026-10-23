@@ -65,16 +65,29 @@ release, because the headless tests find elements by it.
 
 | Module | Holds |
 |---|---|
-| `app.slint` | `AppWindow`: the properties and callbacks Rust reads and invokes, the navigation shell, its pages, and its modals |
+| `app.slint` | `AppWindow`: the properties and callbacks Rust reads and invokes, the three-column shell, the settings pages, and its modals |
 | `theme.slint` | The `Theme` global: the color tokens every surface reads, text sizes, and shared measurements |
 | `palettes.slint` | `ThemePalette` and the built-in palettes, the one place colors are written |
 | `globals.slint` | `GuiI18n` and `PropertyRules`, globals whose answers Rust supplies |
 | `models.slint` | The row and view structs Rust fills models with |
 | `components/` | Text primitives, controls, surfaces (the hard-shadow `Plate` and the `GridFloor` grid), and artwork shared by every surface |
 | `workspace/` | A host workspace's chrome and its surfaces: mods, packs, logs, isolation, diagnostics, snapshots, and host settings |
+| `shell/` | The window frame: the grid floor and three columns, the brand bar, the account footer, and the right column's container |
 | `host-list/` | The host list: its search and filter panel, the client, server, and pending cards, and the scrolling list that holds them |
-| `home/` | The client and server cards, the inspector, and the Running and Activity cards |
+| `home/` | The Home page and the Running and Activity cards it lists |
 | `settings/` | Application settings panels and the Minecraft defaults screen with its window size picker |
+
+The window has three columns: the host list, the page, and a right column that
+only appears when it has panels to hold. The list is always on screen and lists
+every instance and server; pressing a card opens that host in the workspace.
+The page is the settings when `settings-open` is set, otherwise the host panes
+when Rust has opened a workspace, otherwise Home. `settings-open` and the
+workspace are independent, so Back from the settings returns to the host that
+was open. Home is what shows when neither is open (`shows-home`): it asks for
+what is running each time it appears and measures the artifact cache the first
+time. Any code that opens a settings page goes through `open-settings(tab)`,
+which also reads what the page shows. Errors that have no row to sit on reach
+the user as toasts.
 
 Rust sees only what `app.slint` exports: the globals and windows by name and the
 row structs through `export * from "models.slint"`. A new type Rust needs is
@@ -251,11 +264,12 @@ missing or will not load, draws its loader symbol.
 
 Searching, filtering and ordering are pure functions over a small facts record
 per instance, in core. The desktop list, the split workspace's host picker and
-`ephervex instances list` all use them. The Instances page keeps its filters as
-positions in option lists it writes, and keeps its selection by id, so a re-sort
-or a filter that hides the selected instance never moves the selection to
-another one. The workspace and its picker are handed every host, whatever the
-page's filters hide.
+`ephervex instances list` all use them. The host list keeps its filters as
+positions in option lists it writes, and its one search box narrows instances
+and servers together. A card is marked open by the pane that shows its host, not
+selected: there is no selection to move, so a re-sort or a filter never changes
+what is open. The workspace and its picker are handed every host, whatever the
+list's filters hide.
 
 ## Mutation and interruption recovery
 
@@ -347,17 +361,18 @@ Overview. Each pane of a split carries a compact header: the host, its state,
 its Restart and primary action on one row, and the surface tabs, the host's
 folder, and the layout controls on the next. A pane too narrow for the host and
 its actions on one row moves the actions to a row of their own under the host.
-The host opens a picker of cards like the home screen:
-every client, with its linked servers on its card, and the servers the Servers
-page lists, running hosts first. Clients rank by what runs on their card: the
+The host opens a picker of cards like the list's own:
+every client, with its linked servers on its card, and the servers the host
+list shows, running hosts first. Clients rank by what runs on their card: the
 client and a linked server, the client alone, a linked server alone, nothing. Surface tabs that do not fit wait under More,
 and the selected surface always keeps a tab. A workflow's banner is left to the
 pane showing the workflow's own surface, so a round shown in Isolation is not
 repeated above the host's other panes. A pane's accessible label names its
 position, host, and surface, so two panes on one host are never announced
-alike. The split has one Back, above the panes, which leaves for the page the
-split was opened from. The workspace is not persisted: opening a host from a
-list replaces the layout with a single pane.
+alike. The split has one Back, above the panes, which leaves for Home. A single pane
+has no Back unless it was followed from a client, in which case Back returns to
+that client. The workspace is not persisted: opening a host from the list
+replaces the layout with a single pane.
 
 The layout owns composition only (see ADR 0039). The controller renders one
 host view per shown host and one row per pane pointing at it, and every feature

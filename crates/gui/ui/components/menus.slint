@@ -32,7 +32,7 @@ component MenuRowView inherits Rectangle {
     callback hovered();
     callback unhovered();
     callback picked();
-    height: root.entry.hidden ? 0px : root.entry.separator ? 9px : 30px * Theme.text-scale;
+    height: root.entry.hidden ? 0px : root.entry.separator ? 9px : Theme.menu-row-height;
     preferred-width: root.entry.hidden || root.entry.separator ? 0px : label.preferred-width + (root.entry.submenu ? 44px : 24px);
     visible: !root.entry.hidden;
     border-radius: Theme.chip-radius;
@@ -107,7 +107,7 @@ export component PopupMenu inherits Rectangle {
     height: 0px;
     private property <length> anchor-x;
     private property <length> anchor-y;
-    private property <length> frame-padding: 4px;
+    private property <length> frame-padding: Theme.menu-frame-padding;
     // The row a picking key would choose, or -1 for none.
     private property <int> highlight: -1;
     private property <int> count: root.choices.length + root.entries.length;

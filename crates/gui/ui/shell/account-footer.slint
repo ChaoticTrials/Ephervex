@@ -1,0 +1,41 @@
+// The account that launches use and the way to change it, with Settings beside.
+
+import { AppButton, IconButton } from "../components/controls.slint";
+import { PopupMenu } from "../components/menus.slint";
+import { GuiI18n } from "../globals.slint";
+import { MenuRow } from "../models.slint";
+import { Theme } from "../theme.slint";
+
+export component AccountFooter inherits HorizontalLayout {
+    // The default account's name, or empty when there is none.
+    in property <string> account-name;
+    // One row per account, its id the account's.
+    in property <[MenuRow]> account-entries;
+    callback choose-account(string);
+    callback manage-accounts();
+    callback open-settings();
+    spacing: 12px;
+    // The buttons raise a hard shadow to the right and below.
+    padding-right: Theme.shadow-room;
+    padding-bottom: Theme.shadow-room;
+    AppButton {
+        text: root.account-name != "" ? root.account-name : GuiI18n.text("gui-no-accounts");
+        accessible-name: root.account-name != "" ? GuiI18n.value("gui-account-current", root.account-name) : GuiI18n.text("gui-account-switch");
+        horizontal-stretch: 1;
+        clicked => {
+            // Opens upward, since the footer is at the bottom of the window.
+            menu.show({ x: 0px, y: -((root.account-entries.length + 1) * Theme.menu-row-height + 2 * Theme.menu-frame-padding + Theme.shadow-offset-card + 4px) });
+        }
+        menu := PopupMenu {
+            choices: root.account-entries;
+            entries: [{ id: "manage", label: GuiI18n.text("gui-account-manage") }];
+            chosen(id) => { root.choose-account(id); }
+            activated(id) => { root.manage-accounts(); }
+        }
+    }
+    IconButton {
+        icon: @image-url("../../../../assets/icons/nav-settings.svg");
+        accessible-name: GuiI18n.text("gui-settings");
+        clicked => { root.open-settings(); }
+    }
+}

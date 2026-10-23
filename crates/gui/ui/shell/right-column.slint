@@ -1,0 +1,22 @@
+// The column to the right of the page: a stack of panels that scrolls on its own.
+
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+
+// Children are the panels, top to bottom. The column pads its right and bottom
+// edges for the hard shadow of each panel.
+export component RightColumn inherits Rectangle {
+    width: Theme.side-column-width;
+    ScrollView {
+        width: root.width;
+        height: root.height;
+        viewport-width: self.width;
+        VerticalLayout {
+            padding-right: Theme.shadow-room;
+            padding-bottom: Theme.shadow-room;
+            spacing: Theme.shell-gap;
+            alignment: start;
+            @children
+        }
+    }
+}

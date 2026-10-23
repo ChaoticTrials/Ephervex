@@ -168,8 +168,7 @@ fn open_binding_editor() -> Session {
         ..MinecraftPreferenceRow::default()
     };
     ui.set_minecraft_preference_rows(ModelRc::new(VecModel::from(vec![row])));
-    ui.set_page(4);
-    ui.set_settings_tab("Minecraft".into());
+    ui.invoke_open_settings("Minecraft".into());
     settle(&ui);
     Session {
         ui,

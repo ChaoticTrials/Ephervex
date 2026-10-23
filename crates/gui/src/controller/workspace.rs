@@ -13,8 +13,8 @@ use ephervex_core::{InstalledHost, SearchQuery};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use slint::{Model as _, ModelRc, SharedString, VecModel};
 
+use super::HostLifecycle;
 use super::log_views::LogViews;
-use super::{HostLifecycle, SERVERS_PAGE};
 use crate::backend;
 use crate::ui::{
     AppWindow, HostView, InstanceRow, PendingEntityRow, ServerRow, WorkspaceHostChoice,
@@ -38,7 +38,7 @@ pub(super) struct WorkspaceState {
     host_views: Rc<VecModel<HostView>>,
     panes: Rc<VecModel<WorkspacePaneRow>>,
     /// What a pane's host picker offers: every client, and the servers the
-    /// Servers page lists. A linked server is also offered on its client.
+    /// host list shows. A linked server is also offered on its client.
     client_choices: Rc<VecModel<WorkspaceHostChoice>>,
     server_choices: Rc<VecModel<WorkspaceHostChoice>>,
     /// Each host kind's navigation, built once so a re-rendered host view
@@ -358,9 +358,11 @@ impl WorkspaceState {
         sync_rows(&self.host_views, views);
         sync_rows(&self.panes, panes);
         super::stamp_open_hosts(ui);
-        let back = back_label(ui, layout, &hosts);
+        let back = back_label(layout);
         self.shown = hosts;
-        ui.set_workspace_back_label(lookup(back).into());
+        ui.set_workspace_back_label(
+            back.map_or_else(SharedString::default, |key| lookup(key).into()),
+        );
         ui.set_workspace_open(true);
         entered
     }
@@ -423,7 +425,7 @@ impl WorkspaceState {
     }
 
     /// What the host picker offers: every client with its linked servers, and
-    /// the servers the Servers page lists, running hosts first. A client
+    /// the servers the host list shows, running hosts first. A client
     /// ranks by what runs on its card: itself and a linked server, then
     /// itself, then only a linked server, then nothing. Within a rank,
     /// favorites come first and the lists' own order decides the rest.
@@ -589,20 +591,15 @@ fn index(position: Option<usize>) -> i32 {
         .unwrap_or(-1)
 }
 
-/// Where Back leaves for. A split leaves for the page it was opened from,
-/// whichever hosts it shows; a single workspace for its host's list, or for
-/// the client it was followed from.
-fn back_label(ui: &AppWindow, layout: &WorkspaceLayout, hosts: &[InstalledHost]) -> &'static str {
-    if layout.shape() == Shape::Single {
-        match hosts.first() {
-            Some(InstalledHost::Server(_)) if layout.way_back().is_some() => "gui-back-instance",
-            Some(InstalledHost::Server(_)) => "gui-back-servers",
-            _ => "gui-back-instances",
-        }
-    } else if ui.get_page() == SERVERS_PAGE {
-        "gui-back-servers"
+/// Where Back leaves for: the client a single pane was followed from, or Home
+/// for a split. A single pane opened from the list has no Back.
+fn back_label(layout: &WorkspaceLayout) -> Option<&'static str> {
+    if layout.shape() != Shape::Single {
+        Some("gui-back-home")
+    } else if layout.way_back().is_some() {
+        Some("gui-back-instance")
     } else {
-        "gui-back-instances"
+        None
     }
 }
 
@@ -870,7 +867,7 @@ mod tests {
 
     #[test]
     fn the_picker_is_offered_every_host_whatever_the_instance_list_hides() {
-        // The workspace is given the rows before the Instances page's filters,
+        // The workspace is given the rows before the host list's filters,
         // so a filter there cannot hide a host from a pane.
         let state = state(
             vec![

@@ -957,38 +957,6 @@ export component PillButton inherits Rectangle {
     HoverNote { text: root.note; hovered: area.has-hover; pointer-x: area.mouse-x; pointer-y: area.mouse-y; }
 }
 
-export component NavItem inherits Rectangle {
-    in property <image> icon;
-    in property <string> label;
-    in property <bool> selected;
-    callback clicked();
-    height: 46px;
-    accessible-role: button;
-    accessible-label: label;
-    accessible-action-default => { root.clicked(); }
-    Plate {
-        width: root.width;
-        height: root.height;
-        radius: Theme.small-radius;
-        lift: root.selected ? Theme.shadow-offset-small : 0px;
-        outline: root.selected ? Theme.border-strong : transparent;
-        fill: root.selected ? Theme.accent-primary : area.has-hover ? Theme.elevated : transparent;
-    }
-    HorizontalLayout {
-        // `alignment` is the main axis only. Without the cross-axis rule a
-        // fixed-size image is pinned to the top of the row while the label,
-        // which has no fixed height, stretches and centers itself inside it.
-        cross-axis-alignment: center;
-        padding-left: 16px; padding-right: 12px; spacing: 13px;
-        // Colorized here rather than in the file, so the glyph follows the
-        // selected state along with the label.
-        Image { source: root.icon; width: 22px; height: 22px; image-fit: contain; colorize: root.selected ? Theme.on-accent : Theme.text-secondary; }
-        Text { text: root.label; color: root.selected ? Theme.on-accent : Theme.text-secondary; font-size: Theme.row-heading-size; font-weight: 700; vertical-alignment: center; }
-    }
-    KeyboardFocus { width: root.width; height: root.height; ring-radius: Theme.small-radius; activated => { root.clicked(); } }
-    area := TouchArea { clicked => { root.clicked(); } }
-}
-
 export component SettingsNavItem inherits Rectangle {
     in property <string> label;
     in property <bool> selected;

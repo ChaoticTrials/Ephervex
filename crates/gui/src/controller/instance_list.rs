@@ -1,4 +1,4 @@
-//! What the Instances page shows: search, filters and order over the rows the
+//! What the instance list shows: search, filters and order over the rows the
 //! newest snapshot described (ADR 0048).
 //!
 //! The window holds each filter as a position in an option list this module
@@ -119,35 +119,6 @@ pub(super) struct InstanceListState {
     /// Position 0 is any group and position 1 is ungrouped.
     group_options: Vec<GroupFilter>,
     written: WrittenOptions,
-}
-
-/// Which row is selected after the list changed.
-#[derive(Debug, PartialEq, Eq)]
-pub(super) enum Selection {
-    Row(usize),
-    /// The instance exists but the filters hide it. The selection stays with
-    /// it, and nothing else is selected in its place.
-    Hidden,
-    Nothing,
-}
-
-/// Keeps the selection by id across a re-sort or a re-filter.
-pub(super) fn selection(rows: &[InstanceRow], previous: &str, exists: bool) -> Selection {
-    let first = || {
-        if rows.is_empty() {
-            Selection::Nothing
-        } else {
-            Selection::Row(0)
-        }
-    };
-    if previous.is_empty() {
-        return first();
-    }
-    match rows.iter().position(|row| row.id == previous) {
-        Some(index) => Selection::Row(index),
-        None if exists => Selection::Hidden,
-        None => first(),
-    }
 }
 
 fn labels(ids: &[&str]) -> Vec<String> {
@@ -312,12 +283,6 @@ impl InstanceListState {
             ]),
             AppWindow::set_instance_sort_options,
         );
-        ui.set_instance_group_names(model(
-            self.groups
-                .iter()
-                .map(|group| SharedString::from(group.name.as_str()))
-                .collect(),
-        ));
         ui.set_instance_sort_index(to_i32(
             InstanceSort::ALL
                 .iter()
@@ -330,7 +295,7 @@ impl InstanceListState {
     fn filter(&self, ui: &AppWindow) -> InstanceFilter {
         let pick = |index: i32| usize::try_from(index).unwrap_or(0);
         InstanceFilter {
-            query: ui.get_instance_query().to_string(),
+            query: ui.get_list_query().to_string(),
             storage: match ui.get_instance_filter().as_str() {
                 "temporary" => Some(StorageClass::Temporary),
                 "persistent" => Some(StorageClass::Persistent),
@@ -384,21 +349,6 @@ impl InstanceListState {
             .filter_map(|facts| by_id.get(&facts.id.to_string()).map(|row| (*row).clone()))
             .collect();
 
-        let previous = ui.get_selected_instance_id();
-        let exists = by_id.contains_key(previous.as_str());
-        match selection(&rows, previous.as_str(), exists) {
-            Selection::Row(index) => {
-                if ui.get_selected_instance_id() != rows[index].id {
-                    ui.set_selected_instance_id(rows[index].id.clone());
-                }
-                ui.set_selected_instance_index(to_i32(index));
-            }
-            Selection::Hidden => ui.set_selected_instance_index(-1),
-            Selection::Nothing => {
-                ui.set_selected_instance_id(SharedString::default());
-                ui.set_selected_instance_index(-1);
-            }
-        }
         let query_active = !SearchQuery::new(&filter.query).is_empty();
         ui.set_instance_total(to_i32(self.listed.len()));
         ui.set_instance_filters_active(to_i32(filter.active_count() + usize::from(query_active)));
@@ -425,13 +375,6 @@ mod tests {
     use chrono::{DateTime, Utc};
     use ephervex_core::InstanceFacts;
     use ephervex_model::{GroupId, InstanceId, LoaderSelection};
-
-    fn row(id: &str) -> InstanceRow {
-        InstanceRow {
-            id: id.into(),
-            ..InstanceRow::default()
-        }
-    }
 
     fn window() -> AppWindow {
         let _ =
@@ -495,31 +438,6 @@ mod tests {
     }
 
     #[test]
-    fn the_selection_follows_its_instance_to_a_new_position() {
-        let rows = [row("b"), row("a")];
-        assert_eq!(selection(&rows, "a", true), Selection::Row(1));
-    }
-
-    #[test]
-    fn a_selection_the_filters_hide_stays_with_its_instance() {
-        let rows = [row("b")];
-        assert_eq!(selection(&rows, "a", true), Selection::Hidden);
-    }
-
-    #[test]
-    fn a_selection_whose_instance_is_gone_moves_to_the_first_row() {
-        let rows = [row("b"), row("c")];
-        assert_eq!(selection(&rows, "a", false), Selection::Row(0));
-        assert_eq!(selection(&[], "a", false), Selection::Nothing);
-    }
-
-    #[test]
-    fn nothing_selected_starts_on_the_first_row() {
-        assert_eq!(selection(&[row("a")], "", false), Selection::Row(0));
-        assert_eq!(selection(&[], "", false), Selection::Nothing);
-    }
-
-    #[test]
     fn the_default_order_is_favorites_first_then_newest_first() {
         let ui = window();
         let mut state = InstanceListState::default();
@@ -556,7 +474,7 @@ mod tests {
         assert_eq!(names(&ui).len(), 2);
         assert_eq!(ui.get_instance_total(), 2);
 
-        ui.set_instance_query("BISECT".into());
+        ui.set_list_query("BISECT".into());
         state.render(&ui);
         assert_eq!(names(&ui), ["repro"]);
         assert_eq!(ui.get_instance_filters_active(), 1);
@@ -571,12 +489,12 @@ mod tests {
         ui.set_instance_favorites_only(false);
 
         // A search of only spaces narrows nothing and is not counted.
-        ui.set_instance_query("   ".into());
+        ui.set_list_query("   ".into());
         state.render(&ui);
         assert_eq!(names(&ui).len(), 2);
         assert_eq!(ui.get_instance_filters_active(), 0);
 
-        ui.set_instance_query(SharedString::default());
+        ui.set_list_query(SharedString::default());
         state.render(&ui);
         assert_eq!(names(&ui).len(), 2);
         assert_eq!(ui.get_instance_filters_active(), 0);
@@ -615,32 +533,28 @@ mod tests {
     }
 
     #[test]
-    fn the_selection_survives_a_re_sort_and_a_hiding_filter() {
+    fn a_re_sort_reorders_the_rows_and_a_hiding_search_empties_them_without_losing_the_total() {
         let ui = window();
         let mut state = InstanceListState::default();
-        let wanted = listed("b", "1.20.1", 1);
-        let wanted_id = wanted.row.id.clone();
         show(
             &ui,
             &mut state,
-            vec![listed("a", "1.20.1", 0), wanted, listed("c", "1.20.1", 2)],
+            vec![
+                listed("a", "1.20.1", 0),
+                listed("b", "1.20.1", 1),
+                listed("c", "1.20.1", 2),
+            ],
             InstanceSort::Name,
         );
-        ui.set_selected_instance_id(wanted_id.clone());
-        state.render(&ui);
-        assert_eq!(ui.get_selected_instance_index(), 1);
+        assert_eq!(names(&ui), ["a", "b", "c"]);
 
         state.set_sort(&ui, InstanceSort::Favorite);
-        assert_eq!(ui.get_selected_instance_id(), wanted_id);
-        assert_eq!(
-            usize::try_from(ui.get_selected_instance_index()).ok(),
-            names(&ui).iter().position(|name| name == "b")
-        );
+        assert_eq!(names(&ui).len(), 3);
 
-        ui.set_instance_query("zzz".into());
+        ui.set_list_query("zzz".into());
         state.render(&ui);
-        assert_eq!(ui.get_selected_instance_id(), wanted_id);
-        assert_eq!(ui.get_selected_instance_index(), -1);
+        assert!(names(&ui).is_empty());
+        assert_eq!(ui.get_instance_total(), 3);
     }
 
     #[test]
@@ -702,8 +616,9 @@ mod tests {
             VersionOrder::default(),
         );
         let choices: Vec<String> = ui
-            .get_instance_group_names()
+            .get_instance_group_options()
             .iter()
+            .skip(2)
             .map(|name| name.to_string())
             .collect();
         assert_eq!(choices, ["No group", "Render bugs"]);
@@ -760,7 +675,7 @@ mod tests {
     fn revealing_an_instance_clears_every_filter_so_nothing_can_hide_it() {
         let ui = window();
         ui.set_instance_filter("temporary".into());
-        ui.set_instance_query("zzz".into());
+        ui.set_list_query("zzz".into());
         ui.set_instance_favorites_only(true);
         ui.set_instance_minecraft_index(2);
         ui.set_instance_loader_index(1);
@@ -770,9 +685,9 @@ mod tests {
 
         super::super::reveal_instance(&ui, "wanted");
 
-        assert_eq!(ui.get_selected_instance_id(), "wanted");
+        assert_eq!(ui.get_pending_reveal_instance(), "wanted");
         assert_eq!(ui.get_instance_filter(), "all");
-        assert_eq!(ui.get_instance_query(), "");
+        assert_eq!(ui.get_list_query(), "");
         assert!(!ui.get_instance_favorites_only());
         assert_eq!(ui.get_instance_minecraft_index(), 0);
         assert_eq!(ui.get_instance_loader_index(), 0);

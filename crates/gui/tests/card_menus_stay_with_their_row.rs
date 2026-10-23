@@ -6,25 +6,22 @@
 
 #![allow(clippy::expect_used)]
 
+mod support;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use ephervex_gui::ui::{AppWindow, GuiI18n, InstanceRow, MenuRow, ServerRow};
-use ephervex_i18n::{Arg, lookup, lookup_args};
-use i_slint_backend_testing::{
-    AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions,
-};
+use ephervex_gui::ui::{AppWindow, InstanceRow, MenuRow, ServerRow};
+use ephervex_i18n::lookup;
+use i_slint_backend_testing::{AccessibleRole, ElementHandle};
 use slint::platform::{Key, PointerEventButton, WindowEvent};
-use slint::{
-    ComponentHandle, LogicalPosition, Model, ModelRc, PhysicalSize, SharedString, VecModel,
-};
+use slint::{ComponentHandle, LogicalPosition, Model, ModelRc, SharedString, VecModel};
 
 #[test]
 fn an_open_instance_menu_never_acts_on_the_row_that_replaced_its_row() {
     let ui = window();
     ui.set_loading(false);
-    ui.set_page(0);
     ui.set_workspace_open(false);
     let rows = Rc::new(VecModel::from(vec![
         instance("alpha", "Alpha"),
@@ -56,7 +53,6 @@ fn an_open_instance_menu_never_acts_on_the_row_that_replaced_its_row() {
 fn the_delete_entry_of_an_untouched_menu_acts_on_its_own_row() {
     let ui = window();
     ui.set_loading(false);
-    ui.set_page(0);
     ui.set_workspace_open(false);
     ui.set_instances(ModelRc::new(VecModel::from(vec![
         instance("alpha", "Alpha"),
@@ -74,12 +70,11 @@ fn the_delete_entry_of_an_untouched_menu_acts_on_its_own_row() {
 fn an_open_server_menu_never_acts_on_the_row_that_replaced_its_row() {
     let ui = window();
     ui.set_loading(false);
-    ui.set_page(1);
     let rows = Rc::new(VecModel::from(vec![
         server("alpha", "Alpha"),
         server("bravo", "Bravo"),
     ]));
-    ui.set_global_servers(ModelRc::from(Rc::clone(&rows)));
+    ui.set_listed_servers(ModelRc::from(Rc::clone(&rows)));
     settle(&ui);
 
     open_menu(&ui, "Alpha");
@@ -117,9 +112,7 @@ fn an_open_group_list_never_acts_on_the_row_that_replaced_its_row() {
         ..MenuRow::default()
     }])));
     ui.set_loading(false);
-    ui.set_page(0);
     ui.set_workspace_open(false);
-    ui.set_show_inspector(false);
     let rows = Rc::new(VecModel::from(vec![
         instance("alpha", "Alpha"),
         instance("bravo", "Bravo"),
@@ -232,38 +225,7 @@ fn settle(ui: &AppWindow) {
 }
 
 fn window() -> AppWindow {
-    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
-        renderer_name: Some("software".into()),
-        mock_time: true,
-        threading: false,
-    })))
-    .expect("testing backend");
-    let ui = AppWindow::new().expect("window");
-    install_i18n(&ui);
-    ui.window().set_size(PhysicalSize::new(1480, 900));
-    ui.show().expect("show");
-    ui
-}
-
-fn install_i18n(ui: &AppWindow) {
-    let global = ui.global::<GuiI18n>();
-    global.on_text(|id| lookup(id.as_str()).into());
-    global.on_count(|id, count| {
-        lookup_args(id.as_str(), [("count", Arg::Count(i64::from(count)))]).into()
-    });
-    global.on_value(|id, value| {
-        lookup_args(id.as_str(), [("value", Arg::from(value.to_string()))]).into()
-    });
-    global.on_values(|id, first, second| {
-        lookup_args(
-            id.as_str(),
-            [
-                ("first", Arg::from(first.to_string())),
-                ("second", Arg::from(second.to_string())),
-            ],
-        )
-        .into()
-    });
+    support::test_window()
 }
 
 fn instance(id: &str, name: &str) -> InstanceRow {

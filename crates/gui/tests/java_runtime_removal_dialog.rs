@@ -97,8 +97,7 @@ fn runtime_row(ui: &AppWindow, pinned_by: String, pinning: &str, pins_known: boo
         pins_known,
         pinning: pinning.into(),
     }])));
-    ui.set_page(4);
-    ui.set_settings_tab("Java".into());
+    ui.invoke_open_settings("Java".into());
     settle(ui);
 }
 
