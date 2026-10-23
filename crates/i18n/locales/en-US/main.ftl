@@ -1973,6 +1973,50 @@ gui-uptime-minutes = { $count ->
        *[other] { $count }m
     }
 gui-uptime-hours = { $hours }h { $minutes }m
+# How long ago a host last ran, lowercase because it ends a sentence or a card line.
+gui-last-run-just-now = just now
+gui-last-run-minutes = { $count ->
+    [one] 1 minute ago
+   *[other] { $count } minutes ago
+}
+gui-last-run-hours = { $count ->
+    [one] 1 hour ago
+   *[other] { $count } hours ago
+}
+gui-last-run-days = { $count ->
+    [one] 1 day ago
+   *[other] { $count } days ago
+}
+gui-last-run-on = on { $date }
+# The single state line of a host card.
+gui-state-line-needs-fix = Needs fix
+gui-state-line-not-yet = Not yet
+gui-state-line-last-run = Last run { $when }
+gui-state-line-server = { $state } | { $address }
+# Why a record says a host needs attention, one message per recorded reason.
+gui-attention-unsupported-loader = The source uses a loader Ephervex does not support: { $detail }
+gui-attention-unsupported-launch-customization = The source uses launch settings that cannot be reproduced: { $detail }
+gui-attention-ignored-unsafe-customization = A { $detail } from the source was not run
+gui-attention-missing-root = The instance folder is missing
+gui-attention-best-effort-server-conversion = This server was converted on a best-effort basis and may contain client-only mods
+gui-attention-manual-download-required = { $detail } must be downloaded manually
+gui-attention-unknown-server-applicability = { $detail } declares no server side and was left out
+gui-attention-interrupted-mutation = An interrupted change left files that need review
+gui-attention-unknown = A newer Ephervex recorded a problem this version cannot describe
+# The Home page's greeting by time of day, and the same without an account name.
+gui-home-greeting-morning = Good morning
+    .named = Good morning, { $name }
+gui-home-greeting-afternoon = Good afternoon
+    .named = Good afternoon, { $name }
+gui-home-greeting-evening = Good evening
+    .named = Good evening, { $name }
+gui-home-summary-running = { $count } running
+gui-home-summary-problems = { $count ->
+    [one] 1 problem
+   *[other] { $count } problems
+}
+gui-home-summary-building = { $count } building
+gui-home-summary-separator = { " | " }
 gui-process-usage = { $cpu }% CPU | { $memory }
 gui-stop-game = Stop Game
 gui-force-stop = Force Stop

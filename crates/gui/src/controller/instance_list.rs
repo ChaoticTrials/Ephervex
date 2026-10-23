@@ -18,7 +18,7 @@ use ephervex_i18n::lookup;
 use ephervex_model::{LoaderKind, StorageClass};
 use slint::{ComponentHandle as _, Image, Model as _, ModelRc, SharedString, VecModel};
 
-use super::{attach_creating_servers, model, reconciled, to_i32};
+use super::{attach_creating_servers, model, reconciled, stamp_open_hosts, to_i32};
 use crate::ui::{AppWindow, GroupRow, HostIcons, InstanceRow, MenuRow};
 
 /// The images icons are drawn from, which rows name by position.
@@ -406,6 +406,7 @@ impl InstanceListState {
         // A render rebuilds the rows from records that know nothing of a
         // server being built for them.
         attach_creating_servers(ui);
+        stamp_open_hosts(ui);
     }
 
     /// Orders the list by `sort` from now on.

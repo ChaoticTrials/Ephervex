@@ -52,18 +52,22 @@ use crate::window_aspect;
 use crate::workspace_layout::{PaneId, Revealed, Surface, WorkspaceLayout};
 
 mod diagnosis_flow;
+mod home;
 mod instance_list;
 mod java_runtime;
 mod log_views;
 mod mod_views;
+mod server_list;
 mod server_tools;
 mod storage_maintenance;
 mod workspace;
 
 use diagnosis_flow::DiagnosisFlowState;
+use home::{HomeHost, HomeState};
 use instance_list::{InstanceListState, Listed, attach_icon_pool, host_icon_slot};
 use log_views::LogViews;
 use mod_views::ModViews;
+use server_list::ServerListState;
 use server_tools::{LinkedClaim, LinkedRefusal, ServerAction, ServerTools};
 use workspace::{PaneChange, WorkspaceState};
 
@@ -1836,12 +1840,20 @@ impl HostLifecycle {
         let stage = self.stage_of(host);
         let can_restart = self.restartable.contains(&instance.to_string());
         let pair_starting = self.pair_starting(host);
+        let state_line = presentation::client_state_line(
+            &row.state_kind,
+            stage,
+            row.needs_attention,
+            &row.last_run,
+        );
         let changed = row.restart_stage != stage
             || row.can_restart != can_restart
-            || row.pair_starting != pair_starting;
+            || row.pair_starting != pair_starting
+            || row.state_line != state_line;
         row.restart_stage = stage.into();
         row.can_restart = can_restart;
         row.pair_starting = pair_starting;
+        row.state_line = state_line.into();
         changed
     }
 
@@ -1965,6 +1977,9 @@ fn stamp_host_lifecycle(ui: &AppWindow, lifecycle: &HostLifecycle) {
     stamp_rows(&ui.get_global_servers(), |row: &mut ServerRow| {
         lifecycle.stamp_server(row)
     });
+    stamp_rows(&ui.get_listed_servers(), |row: &mut ServerRow| {
+        lifecycle.stamp_server(row)
+    });
     let views = ui.get_host_views();
     stamp_rows(&views, |view: &mut HostView| {
         if view.kind == "client" {
@@ -2005,6 +2020,42 @@ fn apply_pair_start_settled(
     {
         stamp_host_lifecycle(ui, &lifecycle.borrow());
     }
+}
+
+/// Marks each list row whose host a pane currently shows, in every list that
+/// has one, and clears the mark on the rest.
+fn stamp_open_hosts(ui: &AppWindow) {
+    let views = ui.get_host_views();
+    let open: Vec<(SharedString, SharedString)> = (0..views.row_count())
+        .filter_map(|index| views.row_data(index))
+        .map(|view| (view.kind, view.id))
+        .collect();
+    let shown = |kind: &str, id: &SharedString| {
+        open.iter()
+            .any(|(open_kind, open_id)| open_kind == kind && open_id == id)
+    };
+    stamp_rows(&ui.get_instances(), |row: &mut InstanceRow| {
+        let now = shown("client", &row.id);
+        std::mem::replace(&mut row.open, now) != now
+    });
+    let stamp_server = |row: &mut ServerRow| {
+        let now = shown("server", &row.id);
+        std::mem::replace(&mut row.open, now) != now
+    };
+    stamp_rows(&ui.get_global_servers(), stamp_server);
+    stamp_rows(&ui.get_listed_servers(), stamp_server);
+}
+
+/// How many creations are in progress, from what the window lists.
+fn building_count(ui: &AppWindow) -> usize {
+    let standalone_servers = ui
+        .get_pending_servers()
+        .iter()
+        .filter(|row| row.linked_client_id.is_empty())
+        .count();
+    ui.get_pending_instances().row_count()
+        + standalone_servers
+        + ui.get_linked_pending_servers().row_count()
 }
 
 fn stamp_rows<T: Clone + 'static>(list: &ModelRc<T>, mut stamp: impl FnMut(&mut T) -> bool) {
@@ -2560,6 +2611,8 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         plan_requests: Rc::default(),
         properties: Rc::default(),
         commands: backend.commands.clone(),
+        server_list: Rc::default(),
+        home: Rc::default(),
     };
     register_i18n(ui);
     register_toasts(ui);
@@ -2645,6 +2698,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
             report_worker_stopped(&ui);
         }
         poll_workspace.logs.borrow_mut().settle(log_changes);
+        poll_workspace.publish_home_when_due(&ui);
     });
 
     // A second is enough for uptime and for CPU to read smoothly, and it costs
@@ -5173,6 +5227,10 @@ struct Workspace {
     properties: Rc<RefCell<server_property_form::ServerPropertyForms>>,
     /// What a surface asks the worker for when a pane opens it.
     commands: Sender<Command>,
+    /// The servers the host list shows.
+    server_list: Rc<RefCell<ServerListState>>,
+    /// The Home page's data, including failed runs of hosts no pane shows.
+    home: Rc<RefCell<HomeState>>,
 }
 
 impl Workspace {
@@ -5210,6 +5268,24 @@ impl Workspace {
         if let Some(change) = change {
             apply_pane_change(ui, self, change);
         }
+    }
+
+    /// Writes the Home page from what the controller currently knows.
+    fn publish_home(&self, ui: &AppWindow) {
+        let mut home = self.home.borrow_mut();
+        home.set_building(building_count(ui));
+        home.publish(
+            ui,
+            chrono::Utc::now(),
+            chrono::Timelike::hour(&chrono::Local::now()),
+        );
+    }
+
+    /// Writes the Home page when something changed or a minute has passed.
+    fn publish_home_when_due(&self, ui: &AppWindow) {
+        let mut home = self.home.borrow_mut();
+        home.set_building(building_count(ui));
+        home.publish_when_due(ui);
     }
 
     /// Redraws every host view from the newest rows, as a snapshot requires.
@@ -7632,6 +7708,7 @@ fn string_model(values: Vec<String>) -> ModelRc<SharedString> {
 /// here, because a refreshed baseline can change both what the draft is and
 /// what a release would do with it.
 /// Applies a snapshot, handing back every host's row for the workspace.
+#[allow(clippy::too_many_arguments)]
 fn apply_snapshot_event(
     ui: &AppWindow,
     snapshot: Snapshot,
@@ -7639,6 +7716,7 @@ fn apply_snapshot_event(
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
     settings_drafts: &Rc<RefCell<SettingsDrafts>>,
     instance_list: &Rc<RefCell<InstanceListState>>,
+    workspace: &Workspace,
     commands: &Sender<Command>,
 ) -> (Vec<InstanceRow>, Vec<ServerRow>) {
     let rows = apply_snapshot(
@@ -7647,6 +7725,8 @@ fn apply_snapshot_event(
         minecraft,
         &mut settings_drafts.borrow_mut(),
         &mut instance_list.borrow_mut(),
+        &mut workspace.server_list.borrow_mut(),
+        &mut workspace.home.borrow_mut(),
     );
     apply_pending_creations(ui, &creations.borrow());
     request_minecraft_preview(ui, minecraft, commands);
@@ -8113,6 +8193,17 @@ fn apply_run_failure(
         _ => true,
     };
     if current {
+        // Kept for every host, shown or not: Home lists the failure with a
+        // way to open the host.
+        workspace.home.borrow_mut().note_run_failure(
+            host,
+            diagnosis_flow::run_failure_title(
+                host,
+                view.as_ref()
+                    .is_some_and(|view| view.crash_report.is_some()),
+            ),
+            failure.clone(),
+        );
         diagnosis_flow::apply_run_failed(
             workspace,
             &mut workspace.diagnosis.borrow_mut(),
@@ -8192,11 +8283,13 @@ fn apply_event(
                 minecraft,
                 settings_drafts,
                 instance_list,
+                workspace,
                 commands,
             );
             lifecycle.borrow_mut().servers.observe(&servers);
             workspace.state.borrow_mut().set_rows(clients, servers);
             workspace.refresh(ui);
+            workspace.publish_home(ui);
             // A snapshot rebuilds the rows from records that know nothing of
             // restarts, so their stages are stamped again.
             stamp_host_lifecycle(ui, &lifecycle.borrow());
@@ -8597,7 +8690,10 @@ fn apply_event(
             remedy,
             view,
             revision,
-        } => apply_run_failure(workspace, lifecycle, host, failure, remedy, view, revision),
+        } => {
+            apply_run_failure(workspace, lifecycle, host, failure, remedy, view, revision);
+            workspace.publish_home(ui);
+        }
         Event::BundlePlanned { host, parts } => {
             diagnosis_flow::apply_bundle_plan(
                 workspace,
@@ -9683,6 +9779,8 @@ fn apply_snapshot(
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
     drafts: &mut SettingsDrafts,
     list: &mut InstanceListState,
+    server_list: &mut ServerListState,
+    home: &mut HomeState,
 ) -> (Vec<InstanceRow>, Vec<ServerRow>) {
     let Snapshot {
         instances,
@@ -9716,9 +9814,22 @@ fn apply_snapshot(
             true,
         );
     }
-    let clients =
-        apply_instance_snapshot(ui, instances, groups, instance_sort, version_order, list);
-    let servers = apply_server_snapshot(ui, servers);
+    let clients = apply_instance_snapshot(
+        ui,
+        instances,
+        groups,
+        instance_sort,
+        version_order,
+        list,
+        home,
+    );
+    let servers = apply_server_snapshot(ui, servers, server_list, home);
+    home.set_default_account(
+        accounts
+            .iter()
+            .find(|account| account.is_default)
+            .map(|account| account.name.clone()),
+    );
     ui.set_account_launch_entries(model(account_launch_entries(&accounts)));
     ui.set_accounts(model(account_rows(accounts)));
     // A refresh happens for reasons unrelated to this screen, so the model
@@ -9768,6 +9879,101 @@ fn apply_snapshot(
     (clients, servers)
 }
 
+/// One instance as the list holds it.
+fn listed_instance(
+    item: crate::presentation::InstancePresentation,
+    groups: &[ephervex_core::InstanceGroup],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Listed {
+    let group = item.facts.group.as_ref();
+    let group_index = group
+        .and_then(|group| groups.iter().position(|candidate| candidate.id == group.id))
+        .map_or(-1, to_i32);
+    let last_run = backend::format_last_run(item.last_launched_at, now);
+    let row = InstanceRow {
+        snapshot_deletion_note: item.snapshot_deletion_note.into(),
+        id: item.id.into(),
+        name: item.name.into(),
+        minecraft: item.minecraft.into(),
+        loader: item.loader.into(),
+        loader_kind: item.loader_kind.into(),
+        storage: item.storage.into(),
+        storage_kind: item.storage_kind.into(),
+        source: item.source.into(),
+        path: item.path.into(),
+        updated: lookup("gui-available").into(),
+        linked_servers: to_i32(item.linked_servers),
+        stoppable_linked_servers: to_i32(item.stoppable_linked_servers),
+        unstoppable_linked_servers: to_i32(item.unstoppable_linked_servers),
+        mods: to_i32(item.managed_mods),
+        needs_attention: item.needs_attention,
+        state: item.state.into(),
+        state_kind: item.state_kind.into(),
+        can_launch: item.can_launch,
+        can_kill: item.can_kill,
+        connect_server_id: item
+            .launch_and_connect
+            .first()
+            .map_or_else(SharedString::default, |connect| {
+                connect.server_id.clone().into()
+            }),
+        connect_server_name: item
+            .launch_and_connect
+            .first()
+            .map_or_else(SharedString::default, |connect| {
+                connect.server_name.clone().into()
+            }),
+        can_connect: item
+            .launch_and_connect
+            .first()
+            .is_some_and(|connect| connect.enabled),
+        connect_reason: item
+            .launch_and_connect
+            .first()
+            .map_or_else(SharedString::default, |connect| {
+                connect.reason.clone().into()
+            }),
+        // Filled in from the creation tracker, which a snapshot knows
+        // nothing about.
+        creating_server_detail: SharedString::default(),
+        creating_server_progress: 0.0,
+        creating_server_indeterminate: false,
+        restart_stage: SharedString::default(),
+        can_restart: false,
+        paired_server_id: item
+            .pair
+            .as_ref()
+            .map_or_else(SharedString::default, |pair| pair.id.clone().into()),
+        paired_server_name: item
+            .pair
+            .as_ref()
+            .map_or_else(SharedString::default, |pair| pair.name.clone().into()),
+        pair_start_together: item.pair.as_ref().is_some_and(|pair| pair.start_together),
+        // Stamped from the lifecycle, which a snapshot knows nothing about.
+        pair_starting: false,
+        favorite: item.facts.favorite,
+        group_id: group.map_or_else(SharedString::default, |group| group.id.to_string().into()),
+        group_name: group.map_or_else(SharedString::default, |group| group.name.as_str().into()),
+        group_index,
+        group_tone: group.map_or(0, |group| i32::from(group.tone)),
+        icon_slot: host_icon_slot(item.icon.as_deref()),
+        problems: to_i32(item.attention.len()),
+        state_line: presentation::client_state_line(
+            item.state_kind,
+            "",
+            item.needs_attention,
+            &last_run,
+        )
+        .into(),
+        last_run: last_run.into(),
+        open: false,
+    };
+    Listed {
+        row,
+        facts: item.facts,
+    }
+}
+
 /// Fills the instance list, and returns every instance's row, filtered or not.
 fn apply_instance_snapshot(
     ui: &AppWindow,
@@ -9776,89 +9982,18 @@ fn apply_instance_snapshot(
     sort: ephervex_core::InstanceSort,
     order: ephervex_core::VersionOrder,
     list: &mut InstanceListState,
+    home: &mut HomeState,
 ) -> Vec<InstanceRow> {
+    let now = chrono::Utc::now();
+    home.set_clients(
+        instances
+            .iter()
+            .filter_map(HomeHost::from_instance)
+            .collect(),
+    );
     let listed = instances
         .into_iter()
-        .map(|item| {
-            let group = item.facts.group.as_ref();
-            let group_index = group
-                .and_then(|group| groups.iter().position(|candidate| candidate.id == group.id))
-                .map_or(-1, to_i32);
-            let row = InstanceRow {
-                snapshot_deletion_note: item.snapshot_deletion_note.into(),
-                id: item.id.into(),
-                name: item.name.into(),
-                minecraft: item.minecraft.into(),
-                loader: item.loader.into(),
-                loader_kind: item.loader_kind.into(),
-                storage: item.storage.into(),
-                storage_kind: item.storage_kind.into(),
-                source: item.source.into(),
-                path: item.path.into(),
-                updated: lookup("gui-available").into(),
-                linked_servers: to_i32(item.linked_servers),
-                stoppable_linked_servers: to_i32(item.stoppable_linked_servers),
-                unstoppable_linked_servers: to_i32(item.unstoppable_linked_servers),
-                mods: to_i32(item.managed_mods),
-                needs_attention: item.needs_attention,
-                state: item.state.into(),
-                state_kind: item.state_kind.into(),
-                can_launch: item.can_launch,
-                can_kill: item.can_kill,
-                connect_server_id: item
-                    .launch_and_connect
-                    .first()
-                    .map_or_else(SharedString::default, |connect| {
-                        connect.server_id.clone().into()
-                    }),
-                connect_server_name: item
-                    .launch_and_connect
-                    .first()
-                    .map_or_else(SharedString::default, |connect| {
-                        connect.server_name.clone().into()
-                    }),
-                can_connect: item
-                    .launch_and_connect
-                    .first()
-                    .is_some_and(|connect| connect.enabled),
-                connect_reason: item
-                    .launch_and_connect
-                    .first()
-                    .map_or_else(SharedString::default, |connect| {
-                        connect.reason.clone().into()
-                    }),
-                // Filled in from the creation tracker, which a snapshot knows
-                // nothing about.
-                creating_server_detail: SharedString::default(),
-                creating_server_progress: 0.0,
-                creating_server_indeterminate: false,
-                restart_stage: SharedString::default(),
-                can_restart: false,
-                paired_server_id: item
-                    .pair
-                    .as_ref()
-                    .map_or_else(SharedString::default, |pair| pair.id.clone().into()),
-                paired_server_name: item
-                    .pair
-                    .as_ref()
-                    .map_or_else(SharedString::default, |pair| pair.name.clone().into()),
-                pair_start_together: item.pair.as_ref().is_some_and(|pair| pair.start_together),
-                // Stamped from the lifecycle, which a snapshot knows nothing about.
-                pair_starting: false,
-                favorite: item.facts.favorite,
-                group_id: group
-                    .map_or_else(SharedString::default, |group| group.id.to_string().into()),
-                group_name: group
-                    .map_or_else(SharedString::default, |group| group.name.as_str().into()),
-                group_index,
-                group_tone: group.map_or(0, |group| i32::from(group.tone)),
-                icon_slot: host_icon_slot(item.icon.as_deref()),
-            };
-            Listed {
-                row,
-                facts: item.facts,
-            }
-        })
+        .map(|item| listed_instance(item, &groups, now))
         .collect::<Vec<_>>();
     let all_rows = list.replace(ui, listed, groups, sort, order);
     // The list a pending reveal was waiting for. Cleared whether or not the
@@ -9877,9 +10012,16 @@ fn apply_instance_snapshot(
 fn apply_server_snapshot(
     ui: &AppWindow,
     servers: Vec<crate::presentation::ServerPresentation>,
+    list: &mut ServerListState,
+    home: &mut HomeState,
 ) -> Vec<ServerRow> {
     let previous_global_server = ui.get_selected_global_server_id();
-    let server_rows = servers.into_iter().map(server_row).collect::<Vec<_>>();
+    let now = chrono::Utc::now();
+    home.set_servers(servers.iter().filter_map(HomeHost::from_server).collect());
+    let server_rows = servers
+        .into_iter()
+        .map(|item| server_row(item, now))
+        .collect::<Vec<_>>();
     let mut global_rows = server_rows
         .iter()
         .filter(|row| server_is_globally_visible(row, ui.get_show_linked_servers()))
@@ -9909,6 +10051,8 @@ fn apply_server_snapshot(
         ui.set_selected_global_server_index(-1);
     }
     ui.set_global_servers(reconciled(&ui.get_global_servers(), global_rows));
+    list.replace(ui, server_rows.clone());
+    stamp_open_hosts(ui);
     server_rows
 }
 
@@ -9924,7 +10068,11 @@ fn global_selection_index(rows: &[ServerRow], previous: &str) -> Option<usize> {
     }
 }
 
-fn server_row(item: crate::presentation::ServerPresentation) -> ServerRow {
+fn server_row(
+    item: crate::presentation::ServerPresentation,
+    now: chrono::DateTime<chrono::Utc>,
+) -> ServerRow {
+    let state_line = presentation::server_state_line(&item.state, &item.address);
     ServerRow {
         snapshot_deletion_note: item.snapshot_deletion_note.into(),
         id: item.id.into(),
@@ -9972,6 +10120,10 @@ fn server_row(item: crate::presentation::ServerPresentation) -> ServerRow {
         pair_starting: false,
         favorite: item.favorite,
         icon_slot: host_icon_slot(item.icon.as_deref()),
+        problems: to_i32(item.attention.len()),
+        state_line: state_line.into(),
+        last_run: backend::format_last_run(item.last_started_at, now).into(),
+        open: false,
     }
 }
 
@@ -13647,6 +13799,8 @@ mod tests {
             plan_requests: Rc::default(),
             properties: Rc::default(),
             commands: sender,
+            server_list: Rc::default(),
+            home: Rc::default(),
         };
         register_workspace(ui, &workspace);
         log_views::register(ui, &workspace.logs);
@@ -22651,5 +22805,335 @@ mod tests {
             screen.key_changes(&following),
             "Tab out of the field left no control to take keys"
         );
+    }
+
+    fn server_item(
+        name: &str,
+        linked_client: Option<ephervex_model::InstanceId>,
+        favorite: bool,
+    ) -> crate::presentation::ServerPresentation {
+        let mut status = crate::presentation::samples::server_status(
+            ephervex_core::RuntimeClassification::Stopped,
+        );
+        status.record.name = name.to_owned();
+        status.record.linked_client_id = linked_client;
+        let mut item = crate::presentation::ServerPresentation::from_status(&status);
+        item.favorite = favorite;
+        item
+    }
+
+    fn client_item(
+        name: &str,
+        launched_ago: Option<chrono::TimeDelta>,
+        attention: &[ephervex_model::AttentionReason],
+    ) -> crate::presentation::InstancePresentation {
+        let mut record = crate::presentation::samples::client_record(
+            ephervex_model::StorageClass::Temporary,
+            ephervex_model::LoaderSelection::vanilla(),
+        );
+        record.name = name.to_owned();
+        record.last_launched_at = launched_ago.map(|ago| chrono::Utc::now() - ago);
+        for reason in attention {
+            record.add_attention(reason.clone());
+        }
+        crate::presentation::InstancePresentation::from_record(&record, 0, 0, None, [])
+    }
+
+    fn apply_hosts(
+        ui: &AppWindow,
+        workspace: &Workspace,
+        clients: Vec<crate::presentation::InstancePresentation>,
+        servers: Vec<crate::presentation::ServerPresentation>,
+    ) -> (Vec<InstanceRow>, Vec<ServerRow>) {
+        let clients = apply_instance_snapshot(
+            ui,
+            clients,
+            Vec::new(),
+            ephervex_core::InstanceSort::default(),
+            ephervex_core::VersionOrder::default(),
+            &mut InstanceListState::default(),
+            &mut workspace.home.borrow_mut(),
+        );
+        let servers = apply_server_snapshot(
+            ui,
+            servers,
+            &mut workspace.server_list.borrow_mut(),
+            &mut workspace.home.borrow_mut(),
+        );
+        let rows = (clients, servers);
+        workspace
+            .state
+            .borrow_mut()
+            .set_rows(rows.0.clone(), rows.1.clone());
+        rows
+    }
+
+    #[test]
+    fn the_server_list_shows_the_servers_the_servers_page_shows_for_the_same_search() {
+        let ui = test_window();
+        let owner = ephervex_model::InstanceId::new();
+        let servers = || {
+            vec![
+                server_item("Creative", None, false),
+                server_item("Survival", None, true),
+                server_item("Linked build", Some(owner), false),
+                server_item("Linked favorite", Some(owner), true),
+            ]
+        };
+        // Both read the same snapshot, so the ids line up between the two lists.
+        let ids = |rows: ModelRc<ServerRow>| {
+            rows.iter()
+                .map(|row| row.id.to_string())
+                .collect::<Vec<_>>()
+        };
+        for show_linked in [false, true] {
+            for query in ["", "creative", "SURV", "linked", "1.20", "localhost", "zzz"] {
+                ui.set_show_linked_servers(show_linked);
+                ui.set_server_query(query.into());
+                ui.set_list_query(query.into());
+                let mut list = ServerListState::default();
+                apply_server_snapshot(&ui, servers(), &mut list, &mut HomeState::default());
+                assert_eq!(
+                    ids(ui.get_listed_servers()),
+                    ids(ui.get_global_servers()),
+                    "show linked: {show_linked}, search: {query:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_server_list_follows_the_search_without_a_new_snapshot() {
+        let ui = test_window();
+        let mut list = ServerListState::default();
+        apply_server_snapshot(
+            &ui,
+            vec![
+                server_item("Creative", None, false),
+                server_item("Survival", None, false),
+            ],
+            &mut list,
+            &mut HomeState::default(),
+        );
+        assert_eq!(ui.get_listed_servers().row_count(), 2);
+        ui.set_list_query("surv".into());
+        list.render(&ui);
+        let names: Vec<_> = ui.get_listed_servers().iter().map(|row| row.name).collect();
+        assert_eq!(names, ["Survival"]);
+    }
+
+    #[test]
+    fn list_rows_carry_their_state_line_problem_count_and_last_run() {
+        let ui = test_window();
+        let workspace = test_workspace(&ui);
+        let broken = [
+            ephervex_model::AttentionReason::MissingRoot,
+            ephervex_model::AttentionReason::InterruptedMutation,
+        ];
+        let (clients, servers) = apply_hosts(
+            &ui,
+            &workspace,
+            vec![
+                client_item("Fresh", None, &[]),
+                client_item("Used", Some(chrono::TimeDelta::hours(2)), &[]),
+                client_item("Broken", Some(chrono::TimeDelta::days(3)), &broken),
+            ],
+            vec![server_item("Server", None, false)],
+        );
+        let line = |name: &str| {
+            let row = clients.iter().find(|row| row.name == name).expect("row");
+            (
+                row.state_line.to_string(),
+                row.last_run.to_string(),
+                row.problems,
+            )
+        };
+        assert_eq!(line("Fresh"), ("Not yet".to_owned(), String::new(), 0));
+        assert_eq!(
+            line("Used"),
+            (
+                "Last run 2 hours ago".to_owned(),
+                "2 hours ago".to_owned(),
+                0
+            )
+        );
+        assert_eq!(
+            line("Broken"),
+            ("Needs fix".to_owned(), "3 days ago".to_owned(), 2)
+        );
+        assert_eq!(servers[0].problems, 0);
+        assert!(servers[0].state_line.starts_with(servers[0].state.as_str()));
+        assert!(servers[0].state_line.ends_with(servers[0].address.as_str()));
+        assert_eq!(servers[0].last_run, "");
+    }
+
+    #[test]
+    fn a_pane_showing_a_host_marks_its_card_in_every_list_and_closing_clears_it() {
+        let ui = test_window();
+        let workspace = test_workspace(&ui);
+        let clients_before = vec![client_item("A", None, &[]), client_item("B", None, &[])];
+        let (clients, servers) = apply_hosts(
+            &ui,
+            &workspace,
+            clients_before.clone(),
+            vec![server_item("S", None, false)],
+        );
+        let open_names = |ui: &AppWindow| {
+            let mut names: Vec<String> = ui
+                .get_instances()
+                .iter()
+                .filter(|row| row.open)
+                .map(|row| row.name.to_string())
+                .collect();
+            names.extend(
+                ui.get_global_servers()
+                    .iter()
+                    .filter(|row| row.open)
+                    .map(|row| row.name.to_string()),
+            );
+            names.extend(
+                ui.get_listed_servers()
+                    .iter()
+                    .filter(|row| row.open)
+                    .map(|row| row.name.to_string()),
+            );
+            names
+        };
+        assert!(open_names(&ui).is_empty());
+
+        let first = backend::parse_instance_id(clients[0].id.as_str()).expect("an id");
+        workspace.open(&ui, InstalledHost::Instance(first), Surface::Overview);
+        assert_eq!(open_names(&ui), [clients[0].name.to_string()]);
+
+        // A snapshot rebuilds the rows from records, which do not know a pane
+        // shows one of them.
+        apply_hosts(&ui, &workspace, clients_before, Vec::new());
+        workspace.refresh(&ui);
+        assert_eq!(ui.get_instances().iter().filter(|row| row.open).count(), 1);
+
+        let server = backend::parse_server_id(servers[0].id.as_str()).expect("an id");
+        workspace.open(&ui, InstalledHost::Server(server), Surface::Overview);
+        assert!(ui.get_instances().iter().all(|row| !row.open));
+
+        workspace.close(&ui);
+        assert!(open_names(&ui).is_empty());
+    }
+
+    #[test]
+    fn a_failed_run_of_a_host_no_pane_shows_reaches_home_until_it_starts_again() {
+        let ui = test_window();
+        let workspace = test_workspace(&ui);
+        let (clients, _) = apply_hosts(
+            &ui,
+            &workspace,
+            vec![client_item("Crashy", None, &[])],
+            Vec::new(),
+        );
+        let host = InstalledHost::Instance(
+            backend::parse_instance_id(clients[0].id.as_str()).expect("an id"),
+        );
+        assert!(!workspace.state.borrow().shown().contains(&host));
+
+        fail_client_run(&workspace, host, 0);
+        workspace.publish_home(&ui);
+        let attention = ui.get_home_attention();
+        assert_eq!(attention.row_count(), 1);
+        let row = attention.row_data(0).expect("a row");
+        assert_eq!(
+            (row.kind.as_str(), row.id.as_str(), row.host_name.as_str()),
+            ("client", host.id().as_str(), "Crashy")
+        );
+        assert_eq!(row.title, lookup("gui-run-failed-client"));
+        assert_eq!(row.surface, "Diagnostics");
+        assert_eq!(ui.get_home_summary(), "1 problem");
+
+        workspace.forget_last_run(host);
+        workspace.publish_home(&ui);
+        assert_eq!(ui.get_home_attention().row_count(), 0);
+    }
+
+    #[test]
+    fn dismissing_a_run_failure_removes_it_from_home() {
+        let ui = test_window();
+        let workspace = test_workspace(&ui);
+        diagnosis_flow::register(&ui, &workspace.commands, &workspace);
+        let (clients, _) = apply_hosts(
+            &ui,
+            &workspace,
+            vec![client_item("Crashy", None, &[])],
+            Vec::new(),
+        );
+        let host = InstalledHost::Instance(
+            backend::parse_instance_id(clients[0].id.as_str()).expect("an id"),
+        );
+        fail_client_run(&workspace, host, 0);
+        workspace.publish_home(&ui);
+        assert_eq!(ui.get_home_attention().row_count(), 1);
+
+        ui.invoke_dismiss_run_failure("client".into(), host.id().into());
+        workspace.publish_home_when_due(&ui);
+        assert_eq!(ui.get_home_attention().row_count(), 0);
+    }
+
+    #[test]
+    fn home_counts_hosts_before_any_list_filter() {
+        let ui = test_window();
+        let workspace = test_workspace(&ui);
+        ui.set_list_query("no host is called this".into());
+        ui.set_instance_query("no host is called this".into());
+        apply_hosts(
+            &ui,
+            &workspace,
+            vec![client_item("A", None, &[]), client_item("B", None, &[])],
+            vec![server_item("S", None, false)],
+        );
+        workspace.publish_home(&ui);
+        assert_eq!(ui.get_home_temporary_count(), 2);
+        assert_eq!(ui.get_home_persistent_count(), 0);
+        assert_eq!(ui.get_home_server_count(), 1);
+    }
+
+    #[test]
+    fn a_clients_state_line_follows_its_restart_stage() {
+        let host = client_host();
+        let mut lifecycle = HostLifecycle::default();
+        let mut row = InstanceRow {
+            id: host.id().into(),
+            state_kind: "running".into(),
+            state_line: "Running".into(),
+            ..InstanceRow::default()
+        };
+        assert!(!lifecycle.stamp_client(&mut row));
+        let request = lifecycle.request(host).expect("a restart request");
+        assert!(lifecycle.stamp_client(&mut row));
+        assert_eq!(row.state_line, "Stopping");
+        lifecycle.apply(host, request, Some(backend::RestartStage::Starting));
+        assert!(lifecycle.stamp_client(&mut row));
+        assert_eq!(row.state_line, "Starting");
+        lifecycle.apply(host, request, None);
+        assert!(lifecycle.stamp_client(&mut row));
+        assert_eq!(row.state_line, "Running");
+    }
+
+    #[test]
+    fn a_servers_state_line_follows_its_restart_stage() {
+        let host = server_host();
+        let mut lifecycle = HostLifecycle::default();
+        let mut row = ServerRow {
+            id: host.id().into(),
+            state: "Running".into(),
+            state_kind: "running".into(),
+            address: "localhost:25565".into(),
+            ..ServerRow::default()
+        };
+        lifecycle.servers.observe(std::slice::from_ref(&row));
+        lifecycle.stamp_server(&mut row);
+        assert_eq!(row.state_line, "Running | localhost:25565");
+        let request = lifecycle.request(host).expect("a restart request");
+        assert!(lifecycle.stamp_server(&mut row));
+        assert_eq!(row.state_line, "Restarting | localhost:25565");
+        lifecycle.apply(host, request, None);
+        lifecycle.stamp_server(&mut row);
+        assert_eq!(row.state_line, "Running | localhost:25565");
     }
 }

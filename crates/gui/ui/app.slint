@@ -65,6 +65,7 @@ import {
 import {
     AccountRow,
     ActivityRow,
+    AttentionRow,
     BlockedFileRow,
     BundlePartRow,
     DiskUsageRow,
@@ -85,6 +86,7 @@ import {
     PendingEntityRow,
     PromoteServerRow,
     RelationRow,
+    ResumeRow,
     RunningRow,
     ServerPropertyGroup,
     ServerRow,
@@ -150,6 +152,19 @@ export component AppWindow inherits Window {
     in-out property <int> page: 0;
     in-out property <[InstanceRow]> instances;
     in-out property <[ServerRow]> global-servers;
+    // Every server the combined list search and the linked-servers setting let
+    // through, favorites first, written by Rust from `list-query`.
+    in-out property <[ServerRow]> listed-servers;
+    // The one search text that narrows instances and servers together.
+    in-out property <string> list-query;
+    // The Home page, written by Rust.
+    in-out property <string> home-greeting;
+    in-out property <string> home-summary;
+    in-out property <[AttentionRow]> home-attention;
+    in-out property <[ResumeRow]> home-resume;
+    in-out property <int> home-temporary-count: 0;
+    in-out property <int> home-persistent-count: 0;
+    in-out property <int> home-server-count: 0;
     // What the launcher is running right now. Polled only while the page
     // showing it is open.
     in-out property <[RunningRow]> running;

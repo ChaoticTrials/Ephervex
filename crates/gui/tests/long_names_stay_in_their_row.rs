@@ -248,6 +248,10 @@ fn long_named_server() -> ServerRow {
         pair_starting: false,
         favorite: false,
         icon_slot: -1,
+        problems: 0,
+        state_line: "".into(),
+        last_run: "".into(),
+        open: false,
     }
 }
 
@@ -303,6 +307,10 @@ fn connectable() -> InstanceRow {
         group_index: 0,
         group_tone: 0,
         icon_slot: -1,
+        problems: 0,
+        state_line: "".into(),
+        last_run: "".into(),
+        open: false,
     }
 }
 

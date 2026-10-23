@@ -683,6 +683,15 @@ pub(super) fn apply_activity(
     }
 }
 
+/// What a failed run of `host` is called, wherever the failure is listed.
+pub(super) fn run_failure_title(host: InstalledHost, crashed: bool) -> String {
+    lookup(match host {
+        InstalledHost::Server(_) => "gui-run-failed-server",
+        InstalledHost::Instance(_) if crashed => "gui-run-crashed",
+        InstalledHost::Instance(_) => "gui-run-failed-client",
+    })
+}
+
 /// Shows beside a shown host that its run failed, and what a quick diagnosis
 /// made of it. Never navigates: the notice offers the way to Diagnostics.
 pub(super) fn apply_run_failed(
@@ -718,11 +727,7 @@ pub(super) fn apply_run_failed(
         )
     });
     surface.run = Some(RunNotice {
-        title: lookup(match host {
-            InstalledHost::Server(_) => "gui-run-failed-server",
-            InstalledHost::Instance(_) if crashed => "gui-run-crashed",
-            InstalledHost::Instance(_) => "gui-run-failed-client",
-        }),
+        title: run_failure_title(host, crashed),
         failure: failure.clone(),
         likely,
         report: view.as_ref().and_then(|view| view.crash_report.clone()),
@@ -772,8 +777,10 @@ pub(super) fn apply_start_refused(
     render(workspace, state, host);
 }
 
-/// Forgets a failed run's notice once the host is launched again.
+/// Forgets a failed run's notice once the host is launched again, or the user
+/// dismisses it.
 pub(super) fn forget_run(workspace: &Workspace, host: InstalledHost) {
+    workspace.home.borrow_mut().clear_run_failure(host);
     let mut state = workspace.diagnosis.borrow_mut();
     if let Some(surface) = state.host_mut(host)
         && surface.run.take().is_some()

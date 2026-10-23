@@ -498,5 +498,9 @@ fn server() -> ServerRow {
         pair_starting: false,
         favorite: false,
         icon_slot: -1,
+        problems: 0,
+        state_line: "".into(),
+        last_run: "".into(),
+        open: false,
     }
 }

@@ -87,6 +87,14 @@ export struct InstanceRow {
     // drawn instead. A position rather than an image, so a row still compares
     // equal to itself.
     icon-slot: int,
+    // How many recorded reasons say the instance needs attention.
+    problems: int,
+    // The one line a list card shows for the host's state, without live uptime.
+    state-line: string,
+    // When the instance last ran, as relative text, empty when it never has.
+    last-run: string,
+    // Whether a pane currently shows this host.
+    open: bool,
 }
 
 // One entry of a popup menu. A field left out of a literal is its default, so
@@ -154,6 +162,35 @@ export struct ServerRow {
     pair-starting: bool,
     favorite: bool,
     icon-slot: int,
+    // How many recorded reasons say the server needs attention.
+    problems: int,
+    // The state and the address, as the one line a list card shows.
+    state-line: string,
+    // When the server last started, as relative text, empty when it never has.
+    last-run: string,
+    // Whether a pane currently shows this host.
+    open: bool,
+}
+
+// One problem on the Home page: a recorded reason a host needs attention, or
+// a failed run this session. `kind` is "client" or "server" and `surface` is
+// the host surface that explains it.
+export struct AttentionRow {
+    kind: string,
+    id: string,
+    host-name: string,
+    title: string,
+    detail: string,
+    surface: string,
+}
+
+// A host the Home page offers to continue with.
+export struct ResumeRow {
+    kind: string,
+    id: string,
+    host-name: string,
+    last-run: string,
+    can-launch: bool,
 }
 
 export struct ImpactRow {

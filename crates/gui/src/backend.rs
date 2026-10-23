@@ -7814,6 +7814,38 @@ fn format_uptime(seconds: Option<i64>) -> String {
     }
 }
 
+/// How long ago a host last ran, in the largest unit that says it, or nothing
+/// when it never has. A time in the future reads as just now.
+pub(crate) fn format_last_run(last_run: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
+    let Some(last_run) = last_run else {
+        return String::new();
+    };
+    let seconds = now.signed_duration_since(last_run).num_seconds().max(0);
+    let count = |value: i64| usize::try_from(value).unwrap_or(0);
+    if seconds < 60 {
+        lookup("gui-last-run-just-now")
+    } else if seconds < 3_600 {
+        localized_count("gui-last-run-minutes", count(seconds / 60))
+    } else if seconds < 86_400 {
+        localized_count("gui-last-run-hours", count(seconds / 3_600))
+    } else if seconds < 30 * 86_400 {
+        localized_count("gui-last-run-days", count(seconds / 86_400))
+    } else {
+        lookup_args(
+            "gui-last-run-on",
+            [(
+                "date",
+                Arg::from(
+                    last_run
+                        .with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d")
+                        .to_string(),
+                ),
+            )],
+        )
+    }
+}
+
 /// Live CPU and memory, or nothing on the first sample of a process.
 fn format_usage(usage: Option<ephervex_core::ProcessUsage>) -> String {
     let Some(usage) = usage else {
@@ -14198,6 +14230,30 @@ mod tests {
     use std::cell::RefCell;
 
     use super::*;
+
+    #[test]
+    fn last_run_reads_in_the_largest_unit_and_is_empty_when_a_host_never_ran() {
+        let now = DateTime::from_timestamp(1_700_000_000, 0).expect("a timestamp");
+        let ago =
+            |seconds: i64| format_last_run(Some(now - chrono::TimeDelta::seconds(seconds)), now);
+
+        assert_eq!(format_last_run(None, now), "");
+        assert_eq!(ago(10), "just now");
+        assert_eq!(ago(-120), "just now");
+        assert_eq!(ago(60), "1 minute ago");
+        assert_eq!(ago(59 * 60), "59 minutes ago");
+        assert_eq!(ago(3_600), "1 hour ago");
+        assert_eq!(ago(23 * 3_600 + 59 * 60), "23 hours ago");
+        assert_eq!(ago(86_400), "1 day ago");
+        assert_eq!(ago(47 * 3_600), "1 day ago");
+        assert_eq!(ago(3 * 86_400 + 5), "3 days ago");
+        let old = now - chrono::TimeDelta::days(30);
+        let local_date = old
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d")
+            .to_string();
+        assert_eq!(ago(30 * 86_400), format!("on {local_date}"));
+    }
 
     /// Keeps a test that builds a snapshot from reaching the desktop keyring,
     /// which a temporary root does not isolate.

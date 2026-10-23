@@ -319,6 +319,7 @@ impl WorkspaceState {
             self.shown.clear();
             sync_rows(&self.panes, Vec::new());
             sync_rows(&self.host_views, Vec::new());
+            super::stamp_open_hosts(ui);
             return Vec::new();
         };
         let hosts = layout.hosts();
@@ -356,6 +357,7 @@ impl WorkspaceState {
         sync_rows(&self.server_choices, servers);
         sync_rows(&self.host_views, views);
         sync_rows(&self.panes, panes);
+        super::stamp_open_hosts(ui);
         let back = back_label(ui, layout, &hosts);
         self.shown = hosts;
         ui.set_workspace_back_label(lookup(back).into());
@@ -523,7 +525,7 @@ impl WorkspaceState {
     }
 }
 
-fn target_summary(minecraft: &str, loader: &str) -> SharedString {
+pub(super) fn target_summary(minecraft: &str, loader: &str) -> SharedString {
     lookup_args(
         "gui-target-summary",
         [
