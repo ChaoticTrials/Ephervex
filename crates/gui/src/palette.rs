@@ -12,9 +12,9 @@ use slint::{Color, ComponentHandle};
 use crate::theme_files::UserTheme;
 use crate::ui::{AppWindow, BuiltInPalettes, Theme, ThemePalette};
 
-/// The built-in schemes in the order the theme list offers them.
-const BUILT_IN: [ApplicationColorScheme; 2] =
-    [ApplicationColorScheme::Dark, ApplicationColorScheme::Light];
+/// The built-in schemes in the order the theme list offers them. `Dark` and
+/// `Light` are accepted names that paint as Workbench, so they are not offered.
+const BUILT_IN: [ApplicationColorScheme; 1] = [ApplicationColorScheme::Workbench];
 
 /// Every color token a theme file may set, by its `Theme` name.
 pub(crate) const PALETTE_COLORS: &[&str] = &[
@@ -67,6 +67,22 @@ pub(crate) const PALETTE_COLORS: &[&str] = &[
     "group-tone-6",
     "shadow",
     "scrim",
+    "shadow-hard",
+    "border-strong",
+    "accent-primary",
+    "on-accent",
+    "state-running",
+    "state-building",
+    "state-attention",
+    "state-stopped",
+    "state-server",
+    "note-fill",
+    "danger-soft",
+    "grid-line",
+    "terminal",
+    "on-terminal",
+    "on-terminal-muted",
+    "terminal-error",
 ];
 
 /// Tokens that were once the color of another token. A theme file written
@@ -130,6 +146,22 @@ fn color_mut<'a>(palette: &'a mut ThemePalette, token: &str) -> Option<&'a mut C
         "group-tone-6" => &mut palette.group_tone_6,
         "shadow" => &mut palette.shadow,
         "scrim" => &mut palette.scrim,
+        "shadow-hard" => &mut palette.shadow_hard,
+        "border-strong" => &mut palette.border_strong,
+        "accent-primary" => &mut palette.accent_primary,
+        "on-accent" => &mut palette.on_accent,
+        "state-running" => &mut palette.state_running,
+        "state-building" => &mut palette.state_building,
+        "state-attention" => &mut palette.state_attention,
+        "state-stopped" => &mut palette.state_stopped,
+        "state-server" => &mut palette.state_server,
+        "note-fill" => &mut palette.note_fill,
+        "danger-soft" => &mut palette.danger_soft,
+        "grid-line" => &mut palette.grid_line,
+        "terminal" => &mut palette.terminal,
+        "on-terminal" => &mut palette.on_terminal,
+        "on-terminal-muted" => &mut palette.on_terminal_muted,
+        "terminal-error" => &mut palette.terminal_error,
         _ => return None,
     })
 }
@@ -138,15 +170,17 @@ fn color_mut<'a>(palette: &'a mut ThemePalette, token: &str) -> Option<&'a mut C
 fn built_in_palette(ui: &AppWindow, scheme: ApplicationColorScheme) -> ThemePalette {
     let palettes = ui.global::<BuiltInPalettes>();
     match scheme {
-        ApplicationColorScheme::Dark => palettes.get_dark(),
-        ApplicationColorScheme::Light => palettes.get_light(),
+        ApplicationColorScheme::Workbench
+        | ApplicationColorScheme::Dark
+        | ApplicationColorScheme::Light => palettes.get_workbench(),
     }
 }
 
 fn built_in_label(scheme: ApplicationColorScheme) -> String {
     lookup(match scheme {
-        ApplicationColorScheme::Dark => "gui-color-scheme-dark",
-        ApplicationColorScheme::Light => "gui-color-scheme-light",
+        ApplicationColorScheme::Workbench
+        | ApplicationColorScheme::Dark
+        | ApplicationColorScheme::Light => "gui-color-scheme-workbench",
     })
 }
 
@@ -235,7 +269,14 @@ mod tests {
     use super::*;
     use crate::test_support::{ui_declaration, ui_markup};
 
-    const SCHEMES: [ApplicationColorScheme; 2] = BUILT_IN;
+    const SCHEMES: [ApplicationColorScheme; 1] = BUILT_IN;
+
+    /// Every name a theme can record or name as its parent.
+    const NAMES: [ApplicationColorScheme; 3] = [
+        ApplicationColorScheme::Workbench,
+        ApplicationColorScheme::Dark,
+        ApplicationColorScheme::Light,
+    ];
 
     fn window() -> AppWindow {
         i_slint_backend_testing::init_no_event_loop();
@@ -287,9 +328,18 @@ mod tests {
             assert_eq!(resolved(&theme), named(&palette), "{scheme:?}");
             assert_eq!(theme.get_widget_scheme(), palette.widget_scheme);
         }
-        let dark = built_in_palette(&ui, ApplicationColorScheme::Dark);
-        let light = built_in_palette(&ui, ApplicationColorScheme::Light);
-        assert_ne!(dark, light, "two schemes that paint the same");
+    }
+
+    /// Dark and light are recorded names that stay valid, and each paints as
+    /// the one built-in palette.
+    #[test]
+    fn the_dark_and_light_names_paint_as_workbench() {
+        let ui = window();
+        let workbench = ui.global::<BuiltInPalettes>().get_workbench();
+        for scheme in NAMES {
+            apply_theme(&ui, &ApplicationTheme::BuiltIn(scheme), &[]);
+            assert_eq!(ui.global::<Theme>().get_palette(), workbench, "{scheme:?}");
+        }
     }
 
     fn user(
@@ -379,6 +429,30 @@ mod tests {
         );
     }
 
+    /// A theme file leaves most tokens out, and a token added after it was
+    /// written is one of them: it comes from the parent, never from nothing.
+    #[test]
+    fn a_user_theme_inherits_the_tokens_it_leaves_unset_from_workbench() {
+        let ui = window();
+        let marker = Color::from_argb_u8(255, 1, 2, 3);
+        let workbench = ui.global::<BuiltInPalettes>().get_workbench();
+        let themes = NAMES.map(|parent| user(parent.as_str(), parent, &[("border", marker)]));
+        for parent in NAMES {
+            apply_theme(
+                &ui,
+                &ApplicationTheme::User(parent.as_str().to_owned()),
+                &themes,
+            );
+            let palette = ui.global::<Theme>().get_palette();
+            let mut expected = workbench.clone();
+            expected.border = marker;
+            assert_eq!(palette, expected, "parent {parent:?}");
+            assert_ne!(palette.shadow_hard.alpha(), 0);
+            assert_ne!(palette.terminal.alpha(), 0);
+            assert_ne!(palette.state_running.alpha(), 0);
+        }
+    }
+
     #[test]
     fn a_user_theme_whose_file_is_gone_paints_in_the_default_scheme() {
         let ui = window();
@@ -395,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn the_theme_list_offers_the_built_ins_then_the_users_themes() {
+    fn the_theme_list_offers_workbench_then_the_users_themes() {
         let themes = [user("mine", ApplicationColorScheme::Dark, &[])];
         let choices = theme_choices(&themes);
         let offered: Vec<ApplicationTheme> =
@@ -403,20 +477,34 @@ mod tests {
         assert_eq!(
             offered,
             [
-                ApplicationTheme::BuiltIn(ApplicationColorScheme::Dark),
-                ApplicationTheme::BuiltIn(ApplicationColorScheme::Light),
+                ApplicationTheme::BuiltIn(ApplicationColorScheme::Workbench),
                 ApplicationTheme::User("mine".to_owned()),
             ]
         );
-        assert_eq!(choices[2].label, "MINE");
+        assert_eq!(choices[0].label, lookup("gui-color-scheme-workbench"));
+        assert_eq!(choices[1].label, "MINE");
         assert_eq!(
             choice_index(&choices, &ApplicationTheme::User("mine".to_owned())),
-            2
+            1
         );
         assert_eq!(
             choice_index(&choices, &ApplicationTheme::User("gone".to_owned())),
             choice_index(&choices, &ApplicationTheme::default())
         );
+    }
+
+    /// A recorded dark or light shows Workbench as the chosen entry, since that
+    /// is what it paints, and the list has no entry of its own for it.
+    #[test]
+    fn a_recorded_dark_or_light_shows_workbench_selected() {
+        let choices = theme_choices(&[]);
+        for scheme in [ApplicationColorScheme::Dark, ApplicationColorScheme::Light] {
+            let chosen = choice_index(&choices, &ApplicationTheme::BuiltIn(scheme));
+            assert_eq!(
+                choices[chosen].theme,
+                ApplicationTheme::BuiltIn(ApplicationColorScheme::Workbench)
+            );
+        }
     }
 
     /// A theme file names tokens the way `Theme` does, so the list a file is
@@ -646,6 +734,155 @@ mod tests {
                 "{scheme}: scrim alpha {}",
                 palette.scrim.alpha()
             );
+        }
+    }
+
+    /// Every opaque fill text is read on.
+    fn text_surfaces(palette: &ThemePalette) -> [(&'static str, Color); 12] {
+        [
+            ("background", palette.background),
+            ("surface", palette.surface),
+            ("field", palette.field),
+            ("elevated", palette.elevated),
+            ("overlay", palette.overlay),
+            ("bar", palette.bar),
+            ("well", palette.well),
+            ("selection", palette.selection),
+            ("selection-card", palette.selection_card),
+            ("selection-strong", palette.selection_strong),
+            ("note-fill", palette.note_fill),
+            ("danger-soft", palette.danger_soft),
+        ]
+    }
+
+    #[test]
+    fn text_is_readable_on_every_surface() {
+        for (scheme, palette) in built_ins() {
+            for (surface, fill) in text_surfaces(&palette) {
+                for (name, color, minimum) in [
+                    ("text", palette.text, 7.0),
+                    ("text-secondary", palette.text_secondary, 4.5),
+                    ("text-muted", palette.text_muted, 4.5),
+                ] {
+                    let ratio = contrast(color, fill);
+                    assert!(
+                        ratio >= minimum,
+                        "{scheme}: {name} on {surface} is {ratio:.2}:1, under {minimum}:1"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Accent, state, and mark tones are drawn as text in pills and links.
+    #[test]
+    fn tones_drawn_as_text_are_readable_on_every_surface() {
+        for (scheme, palette) in built_ins() {
+            for (name, tone) in [
+                ("accent", palette.accent),
+                ("accent-secondary", palette.accent_secondary),
+                ("success", palette.success),
+                ("warning", palette.warning),
+                ("danger", palette.danger),
+                ("log-error", palette.log_error),
+                ("server", palette.server),
+                ("modrinth", palette.modrinth),
+                ("curseforge", palette.curseforge),
+                ("vanilla", palette.vanilla),
+                ("forge", palette.forge),
+                ("neoforge", palette.neoforge),
+                ("group-tone-1", palette.group_tone_1),
+                ("group-tone-2", palette.group_tone_2),
+                ("group-tone-3", palette.group_tone_3),
+                ("group-tone-4", palette.group_tone_4),
+                ("group-tone-5", palette.group_tone_5),
+                ("group-tone-6", palette.group_tone_6),
+            ] {
+                for (surface, fill) in text_surfaces(&palette) {
+                    // A problem box carries `danger` and the text colors only.
+                    if surface == "danger-soft" {
+                        continue;
+                    }
+                    let ratio = contrast(tone, fill);
+                    assert!(
+                        ratio >= 4.5,
+                        "{scheme}: {name} on {surface} is {ratio:.2}:1"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn danger_text_is_readable_on_a_problem_box() {
+        for (scheme, palette) in built_ins() {
+            for (name, color) in [("danger", palette.danger), ("log-error", palette.log_error)] {
+                let ratio = contrast(color, palette.danger_soft);
+                assert!(
+                    ratio >= 4.5,
+                    "{scheme}: {name} on a problem box is {ratio:.2}:1"
+                );
+            }
+        }
+    }
+
+    /// The pastel fills carry meaning and take a dark caption.
+    #[test]
+    fn a_caption_is_readable_on_every_accent_and_state_fill() {
+        for (scheme, palette) in built_ins() {
+            for (name, fill) in [
+                ("accent-primary", palette.accent_primary),
+                ("state-running", palette.state_running),
+                ("state-building", palette.state_building),
+                ("state-attention", palette.state_attention),
+                ("state-stopped", palette.state_stopped),
+                ("state-server", palette.state_server),
+                ("primary-fill", palette.primary_fill),
+                ("danger-fill", palette.danger_fill),
+            ] {
+                let ratio = contrast(palette.on_accent, fill);
+                assert!(ratio >= 7.0, "{scheme}: caption on {name} is {ratio:.2}:1");
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_text_is_readable_on_the_terminal() {
+        for (scheme, palette) in built_ins() {
+            for (name, color, minimum) in [
+                ("on-terminal", palette.on_terminal, 7.0),
+                ("on-terminal-muted", palette.on_terminal_muted, 4.5),
+                ("terminal-error", palette.terminal_error, 4.5),
+                ("accent-primary", palette.accent_primary, 4.5),
+                ("state-running", palette.state_running, 4.5),
+                ("state-server", palette.state_server, 4.5),
+            ] {
+                let ratio = contrast(color, palette.terminal);
+                assert!(
+                    ratio >= minimum,
+                    "{scheme}: {name} on the terminal is {ratio:.2}:1, under {minimum}:1"
+                );
+            }
+        }
+    }
+
+    /// Only the header ribbon is meant to be absent. Any other token painted
+    /// fully transparent is one a palette forgot.
+    #[test]
+    fn no_built_in_token_but_the_header_ribbon_is_transparent() {
+        for (scheme, palette) in built_ins() {
+            for field in palette_fields(ui_markup())
+                .into_iter()
+                .filter(|field| *field != "widget-scheme")
+            {
+                let color = *color_mut(&mut palette.clone(), field).expect("a known token");
+                assert_eq!(
+                    color.alpha() == 0,
+                    field.starts_with("header-ribbon-"),
+                    "{scheme}: `{field}` has alpha {}",
+                    color.alpha()
+                );
+            }
         }
     }
 }

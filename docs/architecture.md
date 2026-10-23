@@ -91,11 +91,13 @@ the colors (ADR 0041). Each token reads the field of the same name on
 the shipped widgets paint in. Components read tokens and never the palette, so
 none of them knows which palette is active.
 
-The Dark and Light palettes live in the `BuiltInPalettes` global.
-The theme preference is a separate value: `crates/gui/src/palette.rs` resolves
-it to one complete palette and writes it to `Theme`, and is the only place that
-chooses one. Adding a built-in palette is a `BuiltInPalettes` entry, a scheme
-that resolves to it, and its label in the theme list.
+The one built-in palette, Workbench, lives in the `BuiltInPalettes` global
+(ADR 0057). The theme preference is a separate value:
+`crates/gui/src/palette.rs` resolves it to one complete palette and writes it to
+`Theme`, and is the only place that chooses one. The recorded names `dark` and
+`light` stay valid, resolve to Workbench there, and are not offered in the theme
+list. Adding a built-in palette is a `BuiltInPalettes` entry, a scheme that
+resolves to it, and its label in the theme list.
 
 User themes are TOML files or theme folders in the `themes` folder under the
 configuration directory (ADR 0042, ADR 0047, format in `docs/themes.md`).
@@ -114,7 +116,9 @@ default palette, and the recorded choice stays.
 Text sizes, the font families, and the shared measurements stay in
 `Theme` outside the palette. Several of them are layout invariants (fixed row
 heights that virtualized lists and scroll arithmetic depend on, pane and tab
-geometry), and a palette never changes them.
+geometry), and a palette never changes them. The shape of the look (outline
+width, corner radii, hard shadow offsets, grid size, button heights) is among
+them.
 
 A theme can set colors, and a theme folder also its logo and window icon.
 Token names are part of its format, so a token can be added but never renamed
@@ -1851,13 +1855,13 @@ cannot resolve, which a newer Ephervex may have written. The third is reported
 as itself and written back unchanged rather than read as one of the values this
 build does know, and it costs the user that one setting instead of the whole
 file. The preferred mod catalog under `[mods]` is stored this way. The
-interface theme under `[display]` (`color_scheme`, holding `dark`, `light`, or
-`user:<id>` for a theme file) is stored as text for the same reason, so a theme
-added later does not make an older build refuse the file. It
-always records a name older builds read, so nothing recorded and the default
-scheme are the same value there. A name this build cannot resolve paints in the
-default palette and is written back unchanged until the user picks another
-theme.
+interface theme under `[display]` (`color_scheme`, holding `workbench`, `dark`,
+`light`, or `user:<id>` for a theme file) is stored as text for the same reason,
+so a theme added later does not make an older build refuse the file. A recorded
+`dark` or `light` is a valid choice that paints as Workbench, and it is written
+back as read until the user picks another theme. A name this build cannot
+resolve paints in the default palette and is written back unchanged until the
+user picks another theme.
 
 Errors are typed by domain and composed through `CoreError`. User-visible text
 uses Fluent message IDs and typed arguments, while paths, versions, hashes, and

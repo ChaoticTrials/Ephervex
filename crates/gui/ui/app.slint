@@ -677,9 +677,9 @@ export component AppWindow inherits Window {
     in-out property <int> technical-text-size: 12;
     // The chosen theme by its recorded name, and the theme list: labels to
     // show, recorded names in the same order, and where the choice sits.
-    in-out property <string> application-theme: "dark";
-    in-out property <[string]> theme-labels: [GuiI18n.text("gui-color-scheme-dark"), GuiI18n.text("gui-color-scheme-light")];
-    in-out property <[string]> theme-ids: ["dark", "light"];
+    in-out property <string> application-theme: "workbench";
+    in-out property <[string]> theme-labels: [GuiI18n.text("gui-color-scheme-workbench")];
+    in-out property <[string]> theme-ids: ["workbench"];
     in-out property <int> theme-index: 0;
     // Where theme files go, and what was wrong with the ones found there.
     in-out property <string> themes-folder;

@@ -4,13 +4,15 @@
 # "Modrinth" under Settings > General > Interface theme. See docs/themes.md
 # for the format.
 #
+# Scroll bars and lists are drawn light under every parent.
+#
 # Every color is set here so the file also lists what a theme can change.
 # A theme of your own only needs the colors it changes; the rest come from
 # its parent.
 
 format_version = 1
 name = "Modrinth"
-parent = "dark"
+parent = "workbench"
 
 # A theme folder can also replace the logo and the window icon. A single file
 # has no branding folder, so this section is commented out. To use it, move
@@ -88,3 +90,29 @@ group-tone-6 = "#3fd6c6"
 # What is drawn over the window.
 shadow = "#00000099"
 scrim = "#000000a6"
+
+# Outlines and hard shadows, and the grid over the window floor.
+shadow-hard = "#000000"
+border-strong = "#ecf9fb"
+grid-line = "#ffffff09"
+
+# The main action, and a caption on any accent or state fill.
+accent-primary = "#1bd96a"
+on-accent = "#0e0f12"
+
+# What a host is doing.
+state-running = "#1bd96a"
+state-building = "#c78aff"
+state-attention = "#ff496e"
+state-stopped = "#4f9cff"
+state-server = "#4f9cff"
+
+# Sticky notes and warnings, and problem boxes.
+note-fill = "#3a3320"
+danger-soft = "#4a1f2a"
+
+# Consoles and logs drawn on their own dark floor.
+terminal = "#0e0f12"
+on-terminal = "#d6dde5"
+on-terminal-muted = "#7c8591"
+terminal-error = "#ff7a93"

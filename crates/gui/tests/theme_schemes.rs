@@ -13,52 +13,37 @@ use slint::language::ColorScheme;
 use slint::{Color, ComponentHandle};
 
 #[test]
-fn the_light_scheme_lifts_every_surface_and_darkens_every_foreground() {
+fn an_untouched_install_paints_the_light_workbench_page() {
     let ui = window();
     let theme = ui.global::<Theme>();
     let palettes = ui.global::<BuiltInPalettes>();
     assert_eq!(
         theme.get_palette(),
-        palettes.get_dark(),
-        "dark is what an untouched install gets"
+        palettes.get_workbench(),
+        "workbench is what an untouched install gets"
     );
-    assert_eq!(theme.get_widget_scheme(), ColorScheme::Dark);
-
-    let surfaces = |theme: &Theme<'_>| {
-        [
-            ("background", theme.get_background()),
-            ("surface", theme.get_surface()),
-            ("elevated", theme.get_elevated()),
-            ("bar", theme.get_bar()),
-            ("well", theme.get_well()),
-            ("border", theme.get_border()),
-        ]
-    };
-    let foregrounds = |theme: &Theme<'_>| {
-        [
-            ("text", theme.get_text()),
-            ("text-secondary", theme.get_text_secondary()),
-        ]
-    };
-
-    let (dark_surfaces, dark_foregrounds) = (surfaces(&theme), foregrounds(&theme));
-    theme.set_palette(palettes.get_light());
     assert_eq!(theme.get_widget_scheme(), ColorScheme::Light);
-    let (light_surfaces, light_foregrounds) = (surfaces(&theme), foregrounds(&theme));
 
-    for ((name, dark), (_, light)) in dark_surfaces.iter().zip(&light_surfaces) {
-        assert!(
-            luminance(*light) > luminance(*dark),
-            "{name} reads {} dark and {} light, so it never changed scheme",
-            luminance(*dark),
-            luminance(*light)
-        );
-    }
-    for ((name, dark), (_, light)) in dark_foregrounds.iter().zip(&light_foregrounds) {
-        assert!(
-            luminance(*light) < luminance(*dark),
-            "{name} stays light on a light page"
-        );
+    let surfaces = [
+        ("background", theme.get_background()),
+        ("surface", theme.get_surface()),
+        ("field", theme.get_field()),
+        ("elevated", theme.get_elevated()),
+        ("bar", theme.get_bar()),
+        ("well", theme.get_well()),
+    ];
+    let foregrounds = [
+        ("text", theme.get_text()),
+        ("text-secondary", theme.get_text_secondary()),
+        ("text-muted", theme.get_text_muted()),
+    ];
+    for (surface, page) in surfaces {
+        for (foreground, ink) in foregrounds {
+            assert!(
+                luminance(ink) < luminance(page),
+                "{foreground} is not darker than {surface}, so the widgets' light scheme would not read"
+            );
+        }
     }
 }
 

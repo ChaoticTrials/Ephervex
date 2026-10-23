@@ -6,7 +6,7 @@ export global Theme {
     in-out property <float> text-scale: 1;
     // The palette every color below reads, chosen from the user's
     // preference. Components read the tokens, never the palette.
-    in-out property <ThemePalette> palette: BuiltInPalettes.dark;
+    in-out property <ThemePalette> palette: BuiltInPalettes.workbench;
     // The scheme the shipped widgets paint in to match.
     out property <ColorScheme> widget-scheme: palette.widget-scheme;
     // Interface text, including the shipped widgets. The three families are
@@ -127,10 +127,62 @@ export global Theme {
     // and the wash that puts a modal in front of everything else.
     out property <color> shadow: palette.shadow;
     out property <color> scrim: palette.scrim;
+    // The offset shadow of a card, button, dialog, or panel, kept hard-edged.
+    out property <color> shadow-hard: palette.shadow-hard;
+    // The outline drawn around a card, button, chip, or panel.
+    out property <color> border-strong: palette.border-strong;
+    // The fill of the main action and the outline of the selected card.
+    out property <color> accent-primary: palette.accent-primary;
+    // A caption on an accent or state fill, held apart from `text` so it stays
+    // readable when `text` changes with the page.
+    out property <color> on-accent: palette.on-accent;
+    // What a host is doing, as the strip and stamp that say so: running, being
+    // built, needing a fix, stopped, and the mark of a server.
+    out property <color> state-running: palette.state-running;
+    out property <color> state-building: palette.state-building;
+    out property <color> state-attention: palette.state-attention;
+    out property <color> state-stopped: palette.state-stopped;
+    out property <color> state-server: palette.state-server;
+    // The paper of a sticky note and of a warning box.
+    out property <color> note-fill: palette.note-fill;
+    // The fill of a problem box, which carries `danger` text.
+    out property <color> danger-soft: palette.danger-soft;
+    // The hairline grid drawn over the window floor.
+    out property <color> grid-line: palette.grid-line;
+    // A console or log that is drawn dark on any page, its text, the quieter
+    // text of times and sources on it, and an error line on it.
+    out property <color> terminal: palette.terminal;
+    out property <color> on-terminal: palette.on-terminal;
+    out property <color> on-terminal-muted: palette.on-terminal-muted;
+    out property <color> terminal-error: palette.terminal-error;
     // Every control that can share a toolbar row is this tall, so a row
     // that mixes a button, a chip and a field lines up without each caller
     // having to know what the others chose.
     out property <length> control-height: 36px;
+    // The width of the outline around a card, button, chip, or panel.
+    out property <length> strong-border-width: 2px;
+    // The width of a chip's outline, which is lighter than a card's.
+    out property <length> chip-border-width: 1.5px;
+    // The width of the accent outline around the selected card.
+    out property <length> selection-outline-width: 3px;
+    // Corner radii of a card or panel, a small control, a chip, and a button.
+    out property <length> card-radius: 12px;
+    out property <length> small-radius: 9px;
+    out property <length> chip-radius: 6px;
+    out property <length> button-radius: 11px;
+    // How far the hard shadow falls, down and to the right: under a card, under
+    // a small button, and under a dialog or the quick view.
+    out property <length> shadow-offset-card: 4px;
+    out property <length> shadow-offset-small: 3px;
+    out property <length> shadow-offset-dialog: 8px;
+    // The side of one square of the grid over the window floor.
+    out property <length> grid-size: 32px;
+    // Button heights: small, default, and big.
+    out property <length> button-height-small: 30px;
+    out property <length> button-height: 38px;
+    out property <length> button-height-big: 48px;
+    // The tilt of the status stamp on a page header.
+    out property <angle> stamp-angle: -4deg;
     // The outline drawn around a control that has keyboard focus. Every
     // focusable control draws the same one, so the focused control is the
     // same thing to find wherever Tab lands.

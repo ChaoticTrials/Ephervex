@@ -332,24 +332,23 @@ impl TechnicalTextSize {
 }
 
 /// Which of Ephervex's own color schemes the interface paints in.
+///
+/// Workbench is the one built-in look. `Dark` and `Light` stay valid recorded
+/// names and theme-file parents, and the interface paints them as Workbench.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ApplicationColorScheme {
     #[default]
+    Workbench,
     Dark,
     Light,
 }
 
 impl ApplicationColorScheme {
-    /// Whether this scheme is the dark one.
-    #[must_use]
-    pub const fn is_dark(self) -> bool {
-        matches!(self, Self::Dark)
-    }
-
     /// A stable identifier for `--json` output and frontend state.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Workbench => "workbench",
             Self::Dark => "dark",
             Self::Light => "light",
         }
@@ -359,6 +358,7 @@ impl ApplicationColorScheme {
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
+            "workbench" => Some(Self::Workbench),
             "dark" => Some(Self::Dark),
             "light" => Some(Self::Light),
             _ => None,
@@ -2320,9 +2320,13 @@ reference = ""
         let missing = Config::from_toml_str(DEFAULT_CONFIG_EXAMPLE).expect("parse");
         assert_eq!(
             missing.display.theme(),
-            ApplicationTheme::BuiltIn(ApplicationColorScheme::Dark)
+            ApplicationTheme::BuiltIn(ApplicationColorScheme::Workbench)
         );
         for (line, theme) in [
+            (
+                "color_scheme = \"workbench\"",
+                ApplicationTheme::BuiltIn(ApplicationColorScheme::Workbench),
+            ),
             (
                 "color_scheme = \"dark\"",
                 ApplicationTheme::BuiltIn(ApplicationColorScheme::Dark),
@@ -2343,9 +2347,13 @@ reference = ""
     #[test]
     fn every_theme_is_written_by_a_name_that_round_trips() {
         let default = Config::default().to_toml_string().expect("serialize");
-        assert!(default.contains("color_scheme = \"dark\""));
+        assert!(default.contains("color_scheme = \"workbench\""));
 
         for (theme, written) in [
+            (
+                ApplicationTheme::BuiltIn(ApplicationColorScheme::Dark),
+                "color_scheme = \"dark\"",
+            ),
             (
                 ApplicationTheme::BuiltIn(ApplicationColorScheme::Light),
                 "color_scheme = \"light\"",
@@ -2359,6 +2367,32 @@ reference = ""
             let parsed = Config::from_toml_str(&text).expect("re-parse");
             assert_eq!(parsed.display.theme(), theme);
             assert_eq!(parsed.display, config.display);
+        }
+    }
+
+    /// The dark and light names are accepted themes of their own, so saving the
+    /// other display settings leaves them as recorded until another theme is
+    /// picked.
+    #[test]
+    fn a_recorded_dark_or_light_theme_survives_a_rewrite_until_another_is_picked() {
+        for name in ["dark", "light"] {
+            let text = with_color_scheme(&format!("color_scheme = \"{name}\""));
+            let mut config = Config::from_toml_str(&text).expect("parse");
+            let recorded = config.display.theme();
+            config.display.set_theme(&recorded);
+
+            let rewritten = config.to_toml_string().expect("serialize");
+            assert!(
+                rewritten.contains(&format!("color_scheme = \"{name}\"")),
+                "{rewritten}"
+            );
+            let reloaded = Config::from_toml_str(&rewritten).expect("re-parse");
+            assert_eq!(reloaded.display.theme(), recorded);
+
+            config.display.set_theme(&ApplicationTheme::BuiltIn(
+                ApplicationColorScheme::Workbench,
+            ));
+            assert_eq!(config.display.color_scheme, "workbench");
         }
     }
 

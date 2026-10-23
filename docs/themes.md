@@ -1,8 +1,8 @@
 # Themes
 
-Ephervex ships a Dark and a Light theme. You can add your own as TOML files or
-theme folders, and they appear in Settings > General > Interface theme next to
-the built-in ones. A theme changes colors, and a theme folder can also replace
+Ephervex ships one built-in theme, Workbench. You can add your own as TOML files
+or theme folders, and they appear in Settings > General > Interface theme next
+to it. A theme changes colors, and a theme folder can also replace
 the logo and the window icon. Text size is its own setting, and fonts and layout
 cannot be changed by a theme.
 
@@ -46,30 +46,45 @@ for example with the Refresh button in the top bar.
 ```toml
 format_version = 1
 name = "My Theme"
-parent = "dark"
+parent = "workbench"
 
 [branding]
 logo = "logo.png"
 icon = "icon.png"
 
 [colors]
-accent = "#1bd96a"
-background = "#16181c"
+accent = "#0d7143"
+background = "#e6f4ec"
 ```
 
 | Key | Required | Meaning |
 |---|---|---|
 | `format_version` | No, defaults to `1` | The theme format. A file with a newer version than this Ephervex reads is skipped. |
 | `name` | No, defaults to the file name | What the theme list shows. At most 64 characters are kept. |
-| `parent` | No, defaults to `"dark"` | The built-in theme to start from: `"dark"` or `"light"`. |
+| `parent` | No, defaults to `"workbench"` | The built-in theme to start from. See [Parents](#parents). |
 | `[colors]` | No | The colors to change, by token name. |
 | `[branding]` | No | Images that replace the logo and window icon. Theme folders only. |
 
-Every color you leave out is the parent's, with one exception: a theme that
-sets `accent`, `background` or `text` and leaves out `toggle-knob`, `field` or
-`on-primary` respectively gets the color it set, as it did before those could
-be set on their own. The parent also decides whether the standard scroll bars
-and lists are drawn dark or light, so pick the parent closest to your theme.
+Every color you leave out is the parent's, including any token added after
+your file was written, so a theme never ends up with a missing color. There is
+one exception: a theme that sets `accent`, `background` or `text` and leaves out
+`toggle-knob`, `field` or `on-primary` respectively gets the color it set, as it
+did before those could be set on their own. The standard scroll bars and lists
+are drawn light under every parent; see
+[What a theme does not reach](#what-a-theme-does-not-reach).
+
+### Parents
+
+| `parent` | Starts from |
+|---|---|
+| `"workbench"` | The Workbench theme: a light page with ink outlines and pastel fills |
+| `"dark"` | Workbench. The name stays valid so existing themes and recorded choices keep loading. |
+| `"light"` | Workbench. The name stays valid so existing themes and recorded choices keep loading. |
+
+`"dark"` and `"light"` are accepted wherever a theme is named, and they paint as
+Workbench. A theme that sets all of its colors paints the same under any
+parent. No parent produces a dark page or dark scroll bars and lists: every
+parent is Workbench's light look.
 
 Colors are written as `"#rrggbb"`, or `"#rrggbbaa"` with an alpha channel, in
 hexadecimal. Nothing looser is accepted.
@@ -131,17 +146,33 @@ also holds a commented-out `[branding]` section for use in a theme folder.
 | `group-tone-6` | The sixth color instance groups are told apart by |
 | `shadow` | A popover's shadow; usually a translucent black |
 | `scrim` | The wash behind a dialog; usually a translucent black |
+| `shadow-hard` | The hard-edged offset shadow under a card, button, dialog, or panel |
+| `border-strong` | The outline around a card, button, chip, or panel |
+| `accent-primary` | The fill of the main action and the outline of the selected card |
+| `on-accent` | A caption on an accent or state fill, such as `accent-primary` or `state-running` |
+| `state-running` | The strip and stamp of a host that is running |
+| `state-building` | The strip and stamp of a host that is being built |
+| `state-attention` | The strip and stamp of a host that needs a fix |
+| `state-stopped` | The strip and stamp of a host that is stopped |
+| `state-server` | The mark of a server |
+| `note-fill` | The paper of a sticky note and of a warning box |
+| `danger-soft` | The fill of a problem box. `danger` text is drawn on it. |
+| `grid-line` | The hairline grid over the window floor; usually a faint translucent line |
+| `terminal` | The floor of a console or log that is drawn dark on any page |
+| `on-terminal` | Text on `terminal` |
+| `on-terminal-muted` | Quieter text on `terminal`, such as times and sources |
+| `terminal-error` | An error line on `terminal` |
 
 Keep text readable: `text`, `text-secondary` and `text-muted` are drawn on
 `background`, `surface`, `field` and `elevated`, and captions on the button fills.
 
-The built-in Light theme is held to the same hierarchy as Dark. A switch that is
-on keeps its knob apart from its track, button captions keep a readable ratio on
-their fills, and the scrim dims the page as firmly. The selection tints (the
-selected row, card, chip and navigation entry), the row fills and `warning`
-text are the same roles in both themes: `warning` is about 5:1 on `surface` in
-Light, and the selection tints read clearly against the surface under them. A
-disabled button has no fill, only a border and a muted caption, so it reads as
+The built-in Workbench theme is held to the same bar. A switch that is on keeps
+its knob apart from its track, button captions keep a readable ratio on their
+fills, and the scrim dims the page firmly. The tones drawn as text (`accent`,
+`accent-secondary`, `success`, `warning`, `danger`, the marks, and the group
+tones) are held at 4.5:1 or more on every surface, so they are darker than the
+pastel fills of the same hue. `on-accent` is dark on every accent and state fill.
+A disabled button has no fill, only a border and a muted caption, so it reads as
 inactive rather than as a secondary button.
 
 ## Branding
@@ -154,8 +185,8 @@ A theme folder can name two images under `[branding]`:
 | `icon` | The window icon, where the desktop takes it from the window |
 
 Both are optional, and each one falls back to the Ephervex logo on its own:
-a theme that sets only `logo` keeps the default window icon. Dark and Light
-use the Ephervex logo and window icon.
+a theme that sets only `logo` keeps the default window icon. Workbench uses the
+Ephervex logo and window icon.
 
 Each value is a file name inside the theme's own `branding/` folder, such as
 `"logo.png"` or `"icons/app.webp"`. Do not write `branding/` in front of it.
@@ -204,9 +235,9 @@ takes the icon from the window:
 
 Dropdowns, sliders, spinners and menus, including the one a right-click or a
 "Launch as" button opens, are drawn from the colors above. Scroll bars and lists
-are the toolkit's own controls: they follow the parent's light or dark look but
-take no colors from a theme, so a theme with a very different palette can leave
-them looking out of place.
+are the toolkit's own controls: they take no colors from a theme and are drawn
+light for every theme, whatever its parent. A theme with a dark background
+leaves them looking out of place.
 
 ## When a file has a problem
 
@@ -214,7 +245,7 @@ The theme setting says how many problems were found, and Show problems lists
 them, one line per file:
 
 - A file is skipped when it is not valid TOML, uses a newer `format_version`,
-  names a `parent` that is not a built-in theme, gives a key the wrong type, or
+  names a `parent` other than `"workbench"`, `"dark"` or `"light"`, gives a key the wrong type, or
   writes a color any other way than `#rrggbb` or `#rrggbbaa`.
 - A color token or key Ephervex does not know is ignored and reported, and the
   rest of the theme is used. Check the spelling when you see one.
@@ -228,5 +259,5 @@ them, one line per file:
 - At most 100 themes, files and folders together, are read, and a theme file
   may be at most 64 KiB.
 
-If the theme you chose can no longer be read, Ephervex paints in the Dark
+If the theme you chose can no longer be read, Ephervex paints in the Workbench
 theme and keeps your choice, so fixing the file brings the theme back.

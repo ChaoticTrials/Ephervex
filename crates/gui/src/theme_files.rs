@@ -621,13 +621,31 @@ mod tests {
         );
     }
 
+    /// Dark and light stay valid parents, so a theme written for either keeps
+    /// loading.
+    #[test]
+    fn every_built_in_name_is_a_valid_parent() {
+        for (name, parent) in [
+            ("workbench", ApplicationColorScheme::Workbench),
+            ("dark", ApplicationColorScheme::Dark),
+            ("light", ApplicationColorScheme::Light),
+        ] {
+            let (theme, problems) = parse_theme("mine", &format!("parent = \"{name}\"\n"));
+            assert!(problems.is_empty(), "{name}: {problems:?}");
+            assert_eq!(theme.expect("usable").parent, parent, "{name}");
+        }
+        let (theme, problems) = parse_theme("mine", "parent = \"solarized\"\n");
+        assert!(theme.is_none());
+        assert_eq!(problems, [Problem::UnknownParent("solarized".to_owned())]);
+    }
+
     #[test]
     fn an_empty_file_is_the_default_parent_under_its_file_name() {
         let (theme, problems) = parse_theme("plain", "");
         assert!(problems.is_empty());
         let theme = theme.expect("usable");
         assert_eq!(theme.name, "plain");
-        assert_eq!(theme.parent, ApplicationColorScheme::default());
+        assert_eq!(theme.parent, ApplicationColorScheme::Workbench);
         assert!(theme.colors.is_empty());
     }
 
@@ -1129,7 +1147,11 @@ mod tests {
     fn a_built_in_theme_shows_the_default_logo_and_icon() {
         let folder = tempfile::tempdir().expect("temp dir");
         let mut found = read_user_themes(folder.path());
-        for scheme in [ApplicationColorScheme::Dark, ApplicationColorScheme::Light] {
+        for scheme in [
+            ApplicationColorScheme::Workbench,
+            ApplicationColorScheme::Dark,
+            ApplicationColorScheme::Light,
+        ] {
             assert_eq!(
                 read_selected_branding(
                     folder.path(),

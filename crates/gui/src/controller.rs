@@ -15924,15 +15924,11 @@ mod tests {
         let labels: Vec<SharedString> = ui.get_theme_labels().iter().collect();
         assert_eq!(
             labels,
-            [
-                lookup("gui-color-scheme-dark"),
-                lookup("gui-color-scheme-light"),
-                "Modrinth".to_owned()
-            ]
+            [lookup("gui-color-scheme-workbench"), "Modrinth".to_owned()]
         );
         let ids: Vec<SharedString> = ui.get_theme_ids().iter().collect();
-        assert_eq!(ids, ["dark", "light", "user:modrinth"]);
-        assert_eq!(ui.get_theme_index(), 2);
+        assert_eq!(ids, ["workbench", "user:modrinth"]);
+        assert_eq!(ui.get_theme_index(), 1);
         assert_eq!(ui.get_application_theme(), "user:modrinth");
         assert_eq!(ui.get_themes_folder(), "/config/themes");
         let problems: Vec<SharedString> = ui.get_theme_problems().iter().collect();

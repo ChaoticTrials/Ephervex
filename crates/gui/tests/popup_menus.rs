@@ -65,7 +65,7 @@ fn a_card_menu_is_painted_from_the_active_palette() {
     );
 
     let palettes = ui.global::<BuiltInPalettes>();
-    theme.set_palette(palettes.get_light());
+    theme.set_palette(palettes.get_workbench());
     settle(&ui);
     ui.window().dispatch_event(WindowEvent::PointerMoved {
         position: LogicalPosition::new(0.0, 0.0),

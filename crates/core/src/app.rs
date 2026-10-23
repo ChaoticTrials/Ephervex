@@ -3410,7 +3410,7 @@ mod tests {
             ApplicationDisplaySettings {
                 text_scale: ApplicationTextScale::Default,
                 technical_text_size: TechnicalTextSize::Default,
-                theme: ApplicationTheme::BuiltIn(ApplicationColorScheme::Dark),
+                theme: ApplicationTheme::BuiltIn(ApplicationColorScheme::Workbench),
                 show_linked_servers: false,
             }
         );
@@ -3433,6 +3433,31 @@ mod tests {
                 show_linked_servers: false,
             }
         );
+    }
+
+    /// The dark and light names are still the user's recorded choice, so saving
+    /// the other display settings must not rewrite them to the built-in name.
+    #[test]
+    fn saving_display_settings_keeps_a_recorded_dark_or_light_theme() {
+        for name in ["dark", "light"] {
+            let base = tempfile::tempdir().expect("temp dir");
+            let mut app = app_rooted_at(base.path());
+            app.mutate_config(|config| name.clone_into(&mut config.display.color_scheme))
+                .expect("record the theme");
+            let recorded = app.application_display_settings().theme;
+            assert_ne!(recorded, ApplicationTheme::default(), "{name}");
+
+            app.set_application_display_settings(
+                ApplicationTextScale::Large,
+                TechnicalTextSize::Default,
+                &recorded,
+            )
+            .expect("save display settings");
+
+            let reopened = app_rooted_at(base.path());
+            assert_eq!(reopened.config().display.color_scheme, name);
+            assert_eq!(reopened.application_display_settings().theme, recorded);
+        }
     }
 
     /// The settings page saves every display choice together, so changing the
