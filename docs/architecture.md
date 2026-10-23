@@ -70,7 +70,7 @@ release, because the headless tests find elements by it.
 | `palettes.slint` | `ThemePalette` and the built-in palettes, the one place colors are written |
 | `globals.slint` | `GuiI18n` and `PropertyRules`, globals whose answers Rust supplies |
 | `models.slint` | The row and view structs Rust fills models with |
-| `components/` | Text primitives, controls, and artwork shared by every surface |
+| `components/` | Text primitives, controls, surfaces (the hard-shadow `Plate` and the `GridFloor` grid), and artwork shared by every surface |
 | `workspace/` | A host workspace's chrome and its surfaces: mods, packs, logs, isolation, diagnostics, snapshots, and host settings |
 | `home/` | The client and server cards, the inspector, and the Running and Activity cards |
 | `settings/` | Application settings panels and the Minecraft defaults screen with its window size picker |
@@ -119,7 +119,8 @@ Text sizes, the font families, and the shared measurements stay in
 heights that virtualized lists and scroll arithmetic depend on, pane and tab
 geometry), and a palette never changes them. The shape of the look (outline
 width, corner radii, hard shadow offsets, grid size, button heights) is among
-them.
+them, as are the shell measurements (column widths, shell padding and gap, the
+minimum window size).
 
 A theme can set colors, and a theme folder also its logo and window icon.
 Token names are part of its format, so a token can be added but never renamed

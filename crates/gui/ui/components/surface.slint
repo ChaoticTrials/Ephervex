@@ -1,0 +1,59 @@
+// Surfaces: the face with a hard offset shadow and the grid drawn over the window floor.
+
+import { Theme } from "../theme.slint";
+
+// A face with a hard shadow offset to the right and down, drawn as a second
+// rectangle behind the face because the software renderer has no drop shadow.
+//
+// The component is the size of the face. The shadow overflows its right and
+// bottom edges by `lift`, so a container pads those sides by the lift and a
+// ScrollView clips it. Callers bind `lift` on hover and press.
+export component Plate inherits Rectangle {
+    in property <length> lift: Theme.shadow-offset-card;
+    in property <brush> fill: Theme.surface;
+    in property <brush> outline: Theme.border-strong;
+    in property <length> radius: Theme.card-radius;
+    in property <length> outline-width: Theme.strong-border-width;
+    // The room inside the outline, for content that sizes itself to the face.
+    out property <length> inner-width: max(0px, root.width - 2 * root.outline-width);
+    out property <length> inner-height: max(0px, root.height - 2 * root.outline-width);
+    shadow := Rectangle {
+        x: root.lift;
+        y: root.lift;
+        width: root.width;
+        height: root.height;
+        border-radius: root.radius;
+        background: Theme.shadow-hard;
+    }
+    face := Rectangle {
+        width: root.width;
+        height: root.height;
+        border-radius: root.radius;
+        border-width: root.outline-width;
+        border-color: root.outline;
+        background: root.fill;
+        @children
+    }
+}
+
+// Hairlines every `Theme.grid-size`, filling the element it is placed in. The
+// line count is capped so a very large window cannot create thousands of
+// elements.
+export component GridFloor inherits Rectangle {
+    private property <int> max-lines: 200;
+    private property <int> columns: min(root.max-lines, Math.ceil(root.width / Theme.grid-size));
+    private property <int> rows: min(root.max-lines, Math.ceil(root.height / Theme.grid-size));
+    clip: true;
+    for column in root.columns : Rectangle {
+        x: column * Theme.grid-size;
+        width: 1px;
+        height: root.height;
+        background: Theme.grid-line;
+    }
+    for row in root.rows : Rectangle {
+        y: row * Theme.grid-size;
+        width: root.width;
+        height: 1px;
+        background: Theme.grid-line;
+    }
+}

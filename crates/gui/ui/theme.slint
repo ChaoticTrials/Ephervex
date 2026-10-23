@@ -221,4 +221,16 @@ export global Theme {
     // The narrowest a surface tab gets, in a bar too narrow for two tabs
     // at full width.
     out property <length> workspace-tab-min-width: 90px * text-scale;
+    // The width of the list column on the left of the shell.
+    out property <length> list-column-width: 300px;
+    // The width of the column on the right of the shell.
+    out property <length> side-column-width: 296px;
+    // The padding around the shell's content and the gap between its columns.
+    out property <length> shell-padding: 20px;
+    out property <length> shell-gap: 22px;
+    // The smallest the window can be resized to.
+    out property <length> window-min-width: 1240px;
+    out property <length> window-min-height: 760px;
+    // The height of a chip.
+    out property <length> chip-height: 22px * text-scale;
 }
