@@ -163,9 +163,10 @@ fn attention_texts(reasons: &[AttentionReason]) -> Vec<String> {
 }
 
 /// The one line a client's list card shows for its state: a restart under way,
-/// else what it is doing now, else that it needs fixing, else when it last
-/// ran. `restart_stage` is "stopping", "starting" or empty, and `last_run` is
-/// empty for an instance that never launched.
+/// else what it is doing now, else that it needs fixing, else whether it has
+/// run. When it last ran is the card's own field beside the line, so the line
+/// does not say it. `restart_stage` is "stopping", "starting" or empty, and
+/// `last_run` is empty for an instance that never launched.
 #[must_use]
 pub fn client_state_line(
     state_kind: &str,
@@ -184,7 +185,7 @@ pub fn client_state_line(
         "orphaned" => lookup("gui-state-orphaned"),
         _ if needs_attention => lookup("gui-state-line-needs-fix"),
         _ if last_run.is_empty() => lookup("gui-state-line-not-yet"),
-        _ => lookup_args("gui-state-line-last-run", [("when", Arg::from(last_run))]),
+        _ => lookup("gui-state-line-idle"),
     }
 }
 
@@ -1760,7 +1761,7 @@ mod tests {
     }
 
     #[test]
-    fn a_client_state_line_prefers_what_it_is_doing_then_its_problems_then_its_last_run() {
+    fn a_client_state_line_prefers_what_it_is_doing_then_its_problems_then_whether_it_has_run() {
         assert_eq!(
             client_state_line("running", "", true, "just now"),
             "Running"
@@ -1782,7 +1783,7 @@ mod tests {
         );
         assert_eq!(
             client_state_line("ready", "", false, "2 hours ago"),
-            "Last run 2 hours ago"
+            "Ready"
         );
     }
 

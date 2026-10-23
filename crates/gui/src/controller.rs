@@ -9767,14 +9767,7 @@ fn apply_snapshot(
             .find(|account| account.is_default)
             .map(|account| account.name.clone()),
     );
-    ui.set_default_account_name(
-        accounts
-            .iter()
-            .find(|account| account.is_default)
-            .map(|account| account.name.as_str())
-            .unwrap_or_default()
-            .into(),
-    );
+    show_default_account(ui, &accounts);
     ui.set_account_launch_entries(model(account_launch_entries(&accounts)));
     ui.set_accounts(model(account_rows(accounts)));
     // A refresh happens for reasons unrelated to this screen, so the model
@@ -10167,6 +10160,30 @@ fn apply_activities(ui: &AppWindow, activities: &[ActivityData]) {
         })
         .collect::<Vec<_>>();
     ui.set_activities(reconciled(&ui.get_activities(), rows));
+}
+
+/// Writes the default account's name, initial, and kind for the account chip.
+fn show_default_account(ui: &AppWindow, accounts: &[AccountData]) {
+    let default_account = accounts.iter().find(|account| account.is_default);
+    ui.set_default_account_name(
+        default_account
+            .map(|account| account.name.as_str())
+            .unwrap_or_default()
+            .into(),
+    );
+    ui.set_default_account_initial(
+        default_account
+            .and_then(|account| account.name.chars().next())
+            .map(|first| first.to_uppercase().collect::<String>())
+            .unwrap_or_default()
+            .into(),
+    );
+    ui.set_default_account_kind(
+        default_account
+            .map(|account| account.kind.as_str())
+            .unwrap_or_default()
+            .into(),
+    );
 }
 
 /// The accounts a launch can be made as, for the Launch as menu.
@@ -13744,6 +13761,33 @@ mod tests {
             element.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::Button)
                 && element.size().width > 0.0
         })
+    }
+
+    #[test]
+    fn the_account_chip_gets_the_default_accounts_name_initial_and_kind() {
+        let ui = test_window();
+        let account = |name: &str, kind: &str, is_default: bool| AccountData {
+            id: name.to_owned(),
+            name: name.to_owned(),
+            kind: kind.to_owned(),
+            is_default,
+            credential_state: String::new(),
+        };
+        show_default_account(
+            &ui,
+            &[
+                account("steve", "Offline", false),
+                account("\u{e9}lan", "Microsoft", true),
+            ],
+        );
+        assert_eq!(ui.get_default_account_name(), "\u{e9}lan");
+        assert_eq!(ui.get_default_account_initial(), "\u{c9}");
+        assert_eq!(ui.get_default_account_kind(), "Microsoft");
+
+        show_default_account(&ui, &[]);
+        assert_eq!(ui.get_default_account_name(), "");
+        assert_eq!(ui.get_default_account_initial(), "");
+        assert_eq!(ui.get_default_account_kind(), "");
     }
 
     #[test]
@@ -23065,11 +23109,7 @@ mod tests {
         assert_eq!(line("Fresh"), ("Not yet".to_owned(), String::new(), 0));
         assert_eq!(
             line("Used"),
-            (
-                "Last run 2 hours ago".to_owned(),
-                "2 hours ago".to_owned(),
-                0
-            )
+            ("Ready".to_owned(), "2 hours ago".to_owned(), 0)
         );
         assert_eq!(
             line("Broken"),

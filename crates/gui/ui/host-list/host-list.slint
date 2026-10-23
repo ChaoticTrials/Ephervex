@@ -108,7 +108,10 @@ export component HostList inherits Rectangle {
     // rather than a flag, so asking for the same host again scrolls again.
     in property <string> reveal-host-id;
     in property <int> reveal-token: 0;
+    // Whether Home is the page, which the Home button then shows.
+    in property <bool> home-selected;
 
+    callback open-home();
     callback list-query-changed();
     callback instance-view-changed();
     callback choose-instance-sort(int);
@@ -162,17 +165,29 @@ export component HostList inherits Rectangle {
             spacing: 12px;
             HorizontalLayout {
                 spacing: 8px;
+                AppButton {
+                    text: GuiI18n.text("gui-home");
+                    icon: @image-url("../../../../assets/icons/home.svg");
+                    tone: root.home-selected ? "primary" : "secondary";
+                    clicked => { root.open-home(); }
+                }
                 TextField {
                     text <=> root.list-query;
-                    placeholder: GuiI18n.text("gui-filter-hosts");
+                    placeholder: GuiI18n.text("gui-search-hosts");
+                    accessible-name: GuiI18n.text("gui-filter-hosts");
+                    icon: @image-url("../../../../assets/icons/search.svg");
                     input-type: InputType.search;
+                    rest-lift: Theme.shadow-offset-small;
                     horizontal-stretch: 1;
                     edited(text) => { root.list-query-changed(); }
                     accepted => { root.list-query-changed(); }
                 }
-                AppButton {
-                    text: root.panel-filters > 0 ? GuiI18n.value("gui-more-filters-active", "\{root.panel-filters}") : GuiI18n.text("gui-more-filters");
-                    tone: root.instance-filters-open || root.panel-filters > 0 ? "primary" : "secondary";
+                IconButton {
+                    lift: Theme.shadow-offset-small;
+                    icon: @image-url("../../../../assets/icons/filter.svg");
+                    accessible-name: root.panel-filters > 0 ? GuiI18n.value("gui-more-filters-active", "\{root.panel-filters}") : GuiI18n.text("gui-more-filters");
+                    active: root.instance-filters-open || root.panel-filters > 0;
+                    badge: root.panel-filters;
                     clicked => { root.instance-filters-open = !root.instance-filters-open; }
                 }
             }
@@ -186,6 +201,8 @@ export component HostList inherits Rectangle {
             message: GuiI18n.text("gui-no-client-instances-detail");
             primary-text: GuiI18n.text("gui-modal-new-instance");
             secondary-text: GuiI18n.text("gui-import-modpack");
+            // The column is too narrow for the two side by side.
+            stack-buttons: true;
             primary => { root.create-instance(); }
             secondary => { root.import-modpack(); }
         }

@@ -6809,7 +6809,7 @@ fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
         .map(|account| AccountData {
             id: account.id.to_string(),
             name: account.name,
-            kind: account.kind.to_string(),
+            kind: account_kind_name(account.kind),
             is_default: account.is_default,
             credential_state: match account.credential {
                 CredentialPresence::Stored => lookup("gui-credential-stored"),
@@ -6946,6 +6946,11 @@ fn application_settings(app: &App) -> Result<SettingsData, CoreError> {
             ephervex_core::format_binary_bytes,
         ),
     })
+}
+
+/// The account kind as a user reads it, never the stable identifier used in config and logs.
+fn account_kind_name(kind: ephervex_model::AccountKind) -> String {
+    lookup(kind.message_id())
 }
 
 /// The measured cache, formatted for the storage settings.
@@ -12674,7 +12679,7 @@ struct UiProgressSink {
     entity: String,
     allow_cancel: bool,
     /// A pending card standing in for this work in a list, which is shown
-    /// where the user is looking rather than on the activity page they would
+    /// where the user is looking rather than in the activity list they would
     /// have to go and find.
     pending: Option<String>,
 }
@@ -14259,6 +14264,18 @@ mod tests {
             complete: true,
             limit,
         })
+    }
+
+    #[test]
+    fn an_account_kind_reads_as_its_localized_name_not_its_identifier() {
+        assert_eq!(
+            account_kind_name(ephervex_model::AccountKind::Microsoft),
+            "Microsoft"
+        );
+        assert_eq!(
+            account_kind_name(ephervex_model::AccountKind::Offline),
+            "Offline"
+        );
     }
 
     #[test]

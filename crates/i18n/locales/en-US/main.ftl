@@ -1989,6 +1989,7 @@ gui-last-run-on = on { $date }
 gui-state-line-needs-fix = Needs fix
 gui-state-line-not-yet = Not yet
 gui-state-line-last-run = Last run { $when }
+gui-state-line-idle = Ready
 gui-state-line-server = { $state } | { $address }
 # Why a record says a host needs attention, one message per recorded reason.
 gui-attention-unsupported-loader = The source uses a loader Ephervex does not support: { $detail }
@@ -2036,7 +2037,6 @@ gui-home-tips = Tips
 gui-home-tip-open = Press a card in the list to open it.
 gui-home-tip-pair = Use { $value } on an instance with a linked server to see both side by side.
 
-gui-more-actions = More actions
 gui-home-summary-running = { $count } running
 gui-home-summary-problems = { $count ->
     [one] 1 problem
@@ -2290,7 +2290,6 @@ gui-import-modpack = Import Modpack
 gui-refresh = Refresh
 gui-instances = Instances
 gui-servers = Servers
-gui-logs = Logs
 gui-activity = Activity
 gui-settings = Settings
 gui-settings-detail = Application, runtime, account, provider, and storage defaults.
@@ -2345,6 +2344,7 @@ gui-sort-name = Name
 gui-sort-minecraft = Minecraft version
 gui-sort-loader = Loader
 gui-filter-hosts = Filter instances and servers...
+gui-search-hosts = Search...
 # The chip on a client card that has linked servers.
 gui-host-card-servers = { $count ->
     [one] server
@@ -2983,8 +2983,8 @@ gui-favorite-versions-detail = Releases you reproduce against often. They are of
 gui-no-favorite-versions = No favorites yet. Star a release in the New Instance dialog to pin it here.
 gui-linked-server-defaults = Linked server defaults
 gui-linked-server-defaults-detail = Control where linked servers appear and how new development servers configure the selected account.
-gui-show-linked-servers = Show linked servers in Servers
-gui-show-linked-servers-detail = List a server built from an instance on the Servers page as well, rather than only under the instance it belongs to.
+gui-show-linked-servers = Show linked servers in the list
+gui-show-linked-servers-detail = List a server built from an instance on its own in the host list as well, rather than only through the instance it belongs to.
 gui-default-account-operator = Make the default account an operator
 gui-default-account-operator-detail = Applies to new servers, and only where the account's identity is compatible with the server.
 gui-default-operator-level = Default operator permission level

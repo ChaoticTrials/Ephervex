@@ -359,6 +359,9 @@ export component AppWindow inherits Window {
     in-out property <[AccountRow]> accounts;
     // The default account's name, or empty when there is none.
     in-out property <string> default-account-name;
+    // The first letter of that name, and what sort of account it is.
+    in-out property <string> default-account-initial;
+    in-out property <string> default-account-kind;
     // The same accounts as menu rows, for the Launch as menu.
     in-out property <[MenuRow]> account-launch-entries;
     in-out property <[JavaRow]> java-runtimes;
@@ -1173,21 +1176,13 @@ export component AppWindow inherits Window {
                 spacing: 14px;
                 BrandBar {
                     logo: root.logo;
+                    version: root.app-version;
                     refresh => { root.refresh(); }
-                }
-                // The button raises a hard shadow to the right and below.
-                HorizontalLayout {
-                    padding-right: Theme.shadow-room;
-                    padding-bottom: Theme.shadow-room;
-                    AppButton {
-                        text: GuiI18n.text("gui-home");
-                        tone: root.shows-home ? "primary" : "secondary";
-                        horizontal-stretch: 1;
-                        clicked => { root.open-home(); }
-                    }
                 }
                 HostList {
                     vertical-stretch: 1;
+                    home-selected: root.shows-home;
+                    open-home => { root.open-home(); }
                     instances: root.instances;
                     servers: root.listed-servers;
                     pending-instances: root.pending-instances;
@@ -1251,6 +1246,8 @@ export component AppWindow inherits Window {
                 }
                 AccountFooter {
                     account-name: root.default-account-name;
+                    account-initial: root.default-account-initial;
+                    account-kind: root.default-account-kind;
                     account-entries: root.account-launch-entries;
                     choose-account(id) => { root.set-default-account(id); }
                     manage-accounts => { root.open-settings("Accounts"); }

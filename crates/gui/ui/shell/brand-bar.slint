@@ -1,4 +1,4 @@
-// The logo and wordmark above the list, and the refresh button.
+// The logo, the wordmark with the version under it, and the refresh button.
 
 import { IconButton } from "../components/controls.slint";
 import { DisplayHeading } from "../components/text.slint";
@@ -7,23 +7,35 @@ import { Theme } from "../theme.slint";
 
 export component BrandBar inherits HorizontalLayout {
     in property <image> logo;
+    // The application's version, small and muted under the wordmark.
+    in property <string> version;
     callback refresh();
     spacing: 12px;
+    // The refresh button raises a hard shadow to the right and below.
+    padding-right: Theme.shadow-room;
     // No `alignment`: under anything but the default every cell is given its
     // preferred size, which would collapse the stretch cell below.
     cross-axis-alignment: center;
     Image { source: root.logo; width: 40px; height: 40px; image-fit: contain; accessible-label: GuiI18n.text("gui-logo-accessible"); }
-    DisplayHeading {
-        text: "Ephervex".to-uppercase();
-        font-size: Theme.brand-size;
-        letter-spacing: 1px;
+    VerticalLayout {
+        alignment: center;
+        DisplayHeading {
+            text: "Ephervex".to-uppercase();
+            font-size: Theme.brand-size;
+            letter-spacing: 1px;
+        }
+        Text {
+            text: root.version;
+            color: Theme.text-muted;
+            font-size: Theme.caption-size;
+            overflow: elide;
+        }
     }
     Rectangle { horizontal-stretch: 1; }
-    // The hard shadow of the button falls outside it.
     IconButton {
+        lift: Theme.shadow-offset-small;
         icon: @image-url("../../../../assets/icons/refresh.svg");
         accessible-name: GuiI18n.text("gui-refresh");
         clicked => { root.refresh(); }
     }
-    Rectangle { width: Theme.shadow-room; }
 }

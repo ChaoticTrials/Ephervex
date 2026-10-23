@@ -94,7 +94,7 @@ and the search start cleared. Whether a client is paired is derived from the
 linked pairs (ADR 0040), so each client falls into exactly one of paired,
 linked servers without a pair, or no linked servers.
 
-**The workspace is unaffected.** The Instances page's filters narrow that page
+**The workspace is unaffected.** The host list's filters narrow that list
 only. A split workspace and its host picker are given every host (ADR 0039),
 and the picker ranks favorites first within its existing running-first order.
 

@@ -234,8 +234,8 @@ export component FavoriteToggle inherits Rectangle {
     accessible-checked: root.favorite;
     accessible-description: !root.enabled ? root.hint : "";
     accessible-action-default => { if root.enabled { root.toggled(); } }
-    // Flat like the mockup's star button. The star that is on is `warning`,
-    // darker than the mockup's gold so it stays readable on the note fill.
+    // Flat, like the other icon buttons. The star that is on is `warning`,
+    // darker than a pale gold so it stays readable on the note fill.
     Plate {
         width: root.width;
         height: root.height;
@@ -268,6 +268,16 @@ export component IconButton inherits Rectangle {
     // carry context the eye already has, such as which pane it belongs to.
     in property <string> tooltip: root.accessible-name;
     in property <bool> enabled: true;
+    // Drawn in the main action's color, for a button that stands for a state
+    // that is on.
+    in property <bool> active: false;
+    // A count over the button's top right corner, when it is above zero.
+    in property <int> badge: 0;
+    // The hard shadow under the button; flat unless the caller leaves room for it.
+    in property <length> lift: 0px;
+    // The glyph's size, centered in the button; zero fills the button less an
+    // 8px margin.
+    in property <length> glyph-size: 0px;
     // Why this button cannot be pressed, shown on hover while it is
     // disabled.
     in property <string> hint;
@@ -285,15 +295,33 @@ export component IconButton inherits Rectangle {
     accessible-description: !root.enabled ? root.hint : "";
     accessible-enabled: enabled;
     accessible-action-default => { if root.enabled { root.clicked(); } }
-    // Flat, and filled with the main action's color under the pointer.
+    // Filled with the main action's color under the pointer.
     Plate {
         width: root.width;
         height: root.height;
-        lift: 0px;
+        lift: root.lift;
         radius: Theme.small-radius;
-        fill: area.has-hover && root.enabled ? Theme.accent-primary : Theme.surface;
+        fill: (area.has-hover && root.enabled) || root.active ? Theme.accent-primary : Theme.surface;
         opacity: root.enabled ? 1 : Theme.disabled-opacity;
-        Image { x: 8px; y: 8px; width: parent.width - 16px; height: parent.height - 16px; source: root.icon; image-fit: contain; colorize: area.has-hover && root.enabled ? Theme.on-accent : Theme.text; }
+        Image { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; width: root.glyph-size > 0px ? root.glyph-size : parent.width - 16px; height: root.glyph-size > 0px ? root.glyph-size : parent.height - 16px; source: root.icon; image-fit: contain; colorize: (area.has-hover && root.enabled) || root.active ? Theme.on-accent : Theme.text; }
+    }
+    if root.badge > 0 : Rectangle {
+        x: root.width - self.width + Theme.corner-badge-overhang;
+        y: -Theme.corner-badge-overhang;
+        width: max(Theme.corner-badge-size, count-text.preferred-width + 10px);
+        height: Theme.corner-badge-size;
+        border-radius: self.height / 2;
+        border-width: Theme.chip-border-width;
+        border-color: Theme.border-strong;
+        background: Theme.border-strong;
+        count-text := Text {
+            text: "\{root.badge}";
+            color: Theme.surface;
+            font-family: Theme.heading-family;
+            font-size: Theme.label-size;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
     }
     KeyboardFocus { width: root.width; height: root.height; enabled: root.enabled; ring-radius: Theme.small-radius; activated => { root.clicked(); } }
     // Always enabled, so a disabled button still reports hover and can
@@ -313,28 +341,43 @@ export component TextField inherits Rectangle {
     in property <bool> enabled: true;
     in property <bool> invalid: false;
     in property <InputType> input-type: InputType.text;
+    // A glyph before the text, such as the magnifier of a search field.
+    in property <image> icon;
+    // The hard shadow the field keeps while it is not focused.
+    in property <length> rest-lift: 0px;
     callback accepted();
     callback edited(string);
     callback focus-lost();
+    // Where the text starts, past the glyph when there is one.
+    private property <length> text-left: root.icon.width > 0 ? 11px + Theme.button-icon-size + 7px : 11px;
     height: Theme.control-height;
     min-width: 120px;
     accessible-role: text-input;
     accessible-label: accessible-name;
     accessible-enabled: enabled;
-    // The shadow appears while the field has focus, which is how focus shows.
+    // The shadow grows while the field has focus, which is how focus shows.
     Plate {
         width: root.width;
         height: root.height;
         radius: Theme.small-radius;
-        lift: input.has-focus ? Theme.shadow-offset-small : 0px;
+        lift: input.has-focus ? Theme.shadow-offset-small + (root.rest-lift > 0px ? 1px : 0px) : root.rest-lift;
         outline: root.invalid ? Theme.danger : Theme.border-strong;
         fill: root.enabled ? Theme.field : Theme.well;
         animate lift { duration: 80ms; }
     }
     // The input does not scroll itself, so a value longer than the field is
     // clipped here and the viewport follows the caret.
+    if root.icon.width > 0 : Image {
+        x: 11px;
+        y: (parent.height - self.height) / 2;
+        width: Theme.button-icon-size;
+        height: Theme.button-icon-size;
+        source: root.icon;
+        image-fit: contain;
+        colorize: Theme.text-muted;
+    }
     scroller := Flickable {
-        x: 11px; width: parent.width - 22px; height: parent.height;
+        x: root.text-left; width: parent.width - root.text-left - 11px; height: parent.height;
         interactive: false;
         viewport-width: max(self.width, input.preferred-width + 2px);
         input := TextInput {
@@ -360,7 +403,7 @@ export component TextField inherits Rectangle {
         }
     }
     if root.text == "" : Text {
-        x: 11px; width: parent.width - 22px; height: parent.height;
+        x: root.text-left; width: parent.width - root.text-left - 11px; height: parent.height;
         text: root.placeholder;
         color: Theme.text-muted;
         font-size: Theme.body-size;
@@ -1022,6 +1065,8 @@ export component EmptyState inherits VerticalLayout {
     callback secondary();
     in property <string> primary-text;
     in property <string> secondary-text;
+    // One button over the other, for a column too narrow to hold both.
+    in property <bool> stack-buttons: false;
     alignment: center;
     spacing: 10px;
     padding: 32px;
@@ -1036,10 +1081,15 @@ export component EmptyState inherits VerticalLayout {
         DisplayHeading { text: root.title; horizontal-alignment: center; }
         BodyText { text: root.message; horizontal-alignment: center; wrap: word-wrap; }
         Rectangle { height: 5px; }
-        HorizontalLayout {
+        if !root.stack-buttons : HorizontalLayout {
             alignment: center; spacing: 8px;
             if root.secondary-text != "" : AppButton { text: root.secondary-text; clicked => { root.secondary(); } }
             if root.primary-text != "" : AppButton { text: root.primary-text; tone: "primary"; clicked => { root.primary(); } }
+        }
+        if root.stack-buttons : VerticalLayout {
+            spacing: 10px;
+            if root.primary-text != "" : HorizontalLayout { alignment: center; AppButton { text: root.primary-text; tone: "primary"; clicked => { root.primary(); } } }
+            if root.secondary-text != "" : HorizontalLayout { alignment: center; AppButton { text: root.secondary-text; clicked => { root.secondary(); } } }
         }
         }
     }

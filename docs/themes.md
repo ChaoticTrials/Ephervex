@@ -122,9 +122,9 @@ also holds a commented-out `[branding]` section for use in a theme folder.
 | `success` | Success states and messages |
 | `warning` | Warnings, and the filled segments of a cache over its budget |
 | `danger` | Errors and destructive actions |
-| `primary-fill` | A primary button. Its caption is `on-primary`, so keep them apart. |
+| `primary-fill` | A primary button, and the tile behind the initial on the account chip. Its caption is `on-primary`, so keep them apart. |
 | `primary-fill-hover` | A primary button under the pointer. Workbench keeps it equal to `primary-fill`, because the button rises instead. |
-| `on-primary` | The caption of a primary button |
+| `on-primary` | The caption of a primary button, and the initial on the account chip |
 | `danger-fill` | A destructive button. Its caption is `on-danger`, so keep them apart. |
 | `danger-fill-hover` | A destructive button under the pointer. Workbench keeps it equal to `danger-fill`. |
 | `text` | Primary text |
@@ -148,7 +148,7 @@ also holds a commented-out `[branding]` section for use in a theme folder.
 | `scrim` | The wash behind a dialog; usually a translucent black |
 | `shadow-hard` | The hard-edged offset shadow under a card, button, dialog, or panel |
 | `border-strong` | The outline around a card, button, chip, or panel |
-| `accent-primary` | The fill of the selected navigation, settings and workspace tab items, of an icon button under the pointer and of a slider, and the ring around the selected card. The main button reads `primary-fill`. |
+| `accent-primary` | The fill of the selected navigation, settings and workspace tab items, of an icon button under the pointer or standing for something that is on, and of a slider, and the ring around the selected card. The main button reads `primary-fill`. |
 | `on-accent` | A caption on an accent or state fill, such as `accent-primary` or `state-running` |
 | `state-running` | The fill of the tag of a host that is running, of a success button and toast, and of the strip down a running client's card and a finished activity's card on Home, and of the filled segments of the cache meter |
 | `state-building` | The fill of the tag of a host that is starting, stopping, or restarting, of a lavender button, and of the strip down an activity card in progress |

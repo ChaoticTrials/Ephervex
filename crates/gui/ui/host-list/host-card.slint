@@ -246,10 +246,9 @@ export component ClientCard inherits HostCardFace {
     // its place.
     private property <length> menu-x;
     private property <length> menu-y;
-    // Whether the line already says when the instance last ran, so the right
-    // side does not say it twice.
-    private property <bool> line-says-last-run: root.item.restart-stage == "" && !root.item.needs-attention
-        && root.item.state-kind != "running" && root.item.state-kind != "starting" && root.item.state-kind != "orphaned";
+    // Whether a launch is under way, which the line says without a time beside it.
+    private property <bool> in-motion: root.item.restart-stage != ""
+        || root.item.state-kind == "running" || root.item.state-kind == "starting" || root.item.state-kind == "orphaned";
     accessible-role: button;
     accessible-label: root.item.name;
     accessible-action-default => { root.open-requested(root.item.id); }
@@ -276,7 +275,7 @@ export component ClientCard inherits HostCardFace {
     problems: root.item.problems;
     state-line: root.item.creating-server-detail != "" ? root.item.creating-server-detail : root.item.state-line;
     state-line-color: root.item.creating-server-detail != "" ? Theme.accent : Theme.text;
-    trailing: root.line-says-last-run || root.item.creating-server-detail != "" ? "" : root.item.last-run;
+    trailing: root.in-motion || root.item.creating-server-detail != "" ? "" : root.item.last-run;
     progress: root.item.creating-server-detail != "" && !root.item.creating-server-indeterminate ? root.item.creating-server-progress : -1;
     open: root.item.open;
     hovered: card-area.has-hover;

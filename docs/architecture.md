@@ -72,7 +72,7 @@ release, because the headless tests find elements by it.
 | `models.slint` | The row and view structs Rust fills models with |
 | `components/` | Text primitives, controls, surfaces (the hard-shadow `Plate` and the `GridFloor` grid), and artwork shared by every surface |
 | `workspace/` | A host workspace's chrome and its surfaces: mods, packs, logs, isolation, diagnostics, snapshots, and host settings |
-| `shell/` | The window frame: the grid floor and three columns, the brand bar, the account footer, and the right column's container |
+| `shell/` | The window frame: the grid floor and three columns, the brand bar, the account chip, and the right column's container |
 | `host-list/` | The host list: its search and filter panel, the client, server, and pending cards, and the scrolling list that holds them |
 | `home/` | The Home page: its running, problem, resume, and activity cards and the face they share |
 | `settings/` | Application settings panels and the Minecraft defaults screen with its window size picker |
@@ -88,6 +88,13 @@ what is running each time it appears and measures the artifact cache the first
 time. Any code that opens a settings page goes through `open-settings(tab)`,
 which also reads what the page shows. Errors that have no row to sit on reach
 the user as toasts.
+
+The left column is the brand bar (logo, wordmark, the application's version, and
+the refresh button), one row with the Home button, the search field, and the
+filter toggle (a funnel with the count of choices that are set, which opens the
+panel at the top of the list), the host list, and the account chip. The chip
+shows the default account's initial, name, and kind, and opens a menu to choose
+another default or to manage accounts; the gear opens the settings.
 
 Home lists what is running, each problem the launcher recorded or a run of this
 session reported (with a way to the host and the surface that explains it, never
