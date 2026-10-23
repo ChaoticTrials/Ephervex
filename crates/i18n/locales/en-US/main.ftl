@@ -1959,7 +1959,6 @@ mod-install-completed = Installed { $name }.
 # from, which outranks one that was only inferred to be involved.
 crash-none = This server has no crash reports.
 running-nothing = Nothing is running.
-gui-running = Running
 gui-nothing-running = Nothing is running.
 gui-nothing-running-detail = Launch an instance or start a server and it will appear here.
 gui-uptime-seconds = { $count ->
@@ -2008,6 +2007,19 @@ gui-home-greeting-afternoon = Good afternoon
     .named = Good afternoon, { $name }
 gui-home-greeting-evening = Good evening
     .named = Good evening, { $name }
+# The Home page's sections and the names its buttons carry for assistive technology.
+gui-home-running-now = Running now
+gui-home-attention = Needs your attention
+gui-home-attention-empty = Nothing needs your attention.
+gui-home-attention-mark = Needs attention
+gui-home-attention-open = Open { $value }
+gui-home-continue = Continue where you left off
+gui-home-launch-host = Launch { $value }
+gui-home-open-host = Open { $value }
+gui-home-stop-host = Stop { $value }
+gui-home-more-host = More actions for { $value }
+gui-home-cancel-operation = Cancel { $value }
+gui-more-actions = More actions
 gui-home-summary-running = { $count } running
 gui-home-summary-problems = { $count ->
     [one] 1 problem
@@ -2258,8 +2270,6 @@ error-connect-supervisor-lost = Supervision for server { $server } ended unexpec
 ## Desktop interface
 
 gui-import-modpack = Import Modpack
-gui-new-instance = + New Instance
-gui-new-server = + New Server
 gui-refresh = Refresh
 gui-instances = Instances
 gui-servers = Servers
@@ -2492,7 +2502,6 @@ gui-pane-split-below-tooltip = Add a pane below
 gui-pane-close-tooltip = Close pane
 # A host action inside one pane, named with the pane: (action, pane).
 gui-pane-action = { $first } ({ $second })
-gui-instance = Instance
 gui-instance-tab-overview = Overview
 gui-instance-tab-mods = Mods
 gui-instance-tab-settings = Settings

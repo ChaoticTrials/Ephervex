@@ -13,8 +13,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use ephervex_gui::ui::{AppWindow, RunningRow};
-use ephervex_i18n::lookup;
-use i_slint_backend_testing::ElementHandle;
+use ephervex_i18n::{Arg, lookup, lookup_args};
+use i_slint_backend_testing::{AccessibleRole, ElementHandle};
 use slint::platform::PointerEventButton;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
@@ -81,8 +81,8 @@ fn an_idle_launcher_says_so_rather_than_showing_an_empty_list() {
     );
 }
 
-/// The card carries its own click target and four buttons, and the pointer has
-/// to reach the button rather than the card underneath it.
+/// The card carries its own press area, two buttons and a menu, and the
+/// pointer has to reach the control rather than the card underneath it.
 #[test]
 fn a_clients_two_ways_to_stop_are_offered_separately() {
     let ui = window();
@@ -101,7 +101,7 @@ fn a_clients_two_ways_to_stop_are_offered_separately() {
     running_section(&ui, vec![client()]);
     settle(&ui);
 
-    ElementHandle::find_by_accessible_label(&ui, &lookup("gui-stop-game"))
+    ElementHandle::find_by_accessible_label(&ui, &named("gui-home-stop-host", CLIENT))
         .find(|element| element.size().width > 0.0)
         .expect("a supervised launch can be stopped")
         .mock_single_click(PointerEventButton::Left);
@@ -115,10 +115,10 @@ fn a_clients_two_ways_to_stop_are_offered_separately() {
         "the card's own area must not sit over its buttons"
     );
 
-    ElementHandle::find_by_accessible_label(&ui, &lookup("gui-force-stop"))
-        .find(|element| element.size().width > 0.0)
+    open_more(&ui, CLIENT);
+    menu_entry(&ui, "gui-force-stop")
         .expect("a launch nobody is supervising still has to be endable")
-        .mock_single_click(PointerEventButton::Left);
+        .invoke_accessible_default_action();
     assert_eq!(forced.borrow().as_slice(), ["repro-client"]);
 }
 
@@ -138,10 +138,11 @@ fn an_unsupervised_launch_cannot_be_stopped_the_ordinary_way() {
     running_section(&ui, vec![orphan]);
     settle(&ui);
 
-    ElementHandle::find_by_accessible_label(&ui, &lookup("gui-stop-game"))
+    let stop = ElementHandle::find_by_accessible_label(&ui, &named("gui-home-stop-host", CLIENT))
         .find(|element| element.size().width > 0.0)
-        .expect("the control is shown, so its state is readable")
-        .mock_single_click(PointerEventButton::Left);
+        .expect("the control is shown, so its state is readable");
+    assert_eq!(stop.accessible_enabled(), Some(false));
+    stop.mock_single_click(PointerEventButton::Left);
     assert!(
         killed.borrow().is_empty(),
         "canceling a launch this run does not own would do nothing"
@@ -150,9 +151,9 @@ fn an_unsupervised_launch_cannot_be_stopped_the_ordinary_way() {
         ui.get_shows_home(),
         "a press on a greyed-out control must not navigate away from Home"
     );
+    open_more(&ui, CLIENT);
     assert!(
-        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-force-stop"))
-            .any(|element| element.size().width > 0.0),
+        menu_entry(&ui, "gui-force-stop").is_some(),
         "which is exactly when the bigger hammer is the only way out"
     );
 }
@@ -163,29 +164,47 @@ fn only_a_server_is_offered_a_console() {
     let ui = window();
     running_section(&ui, vec![client()]);
     settle(&ui);
+    open_more(&ui, CLIENT);
     assert!(
-        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-open-console"))
-            .all(|element| element.size().width == 0.0),
+        menu_entry(&ui, "gui-open-console").is_none(),
         "a client has no console"
     );
+    assert!(menu_entry(&ui, "gui-open-log").is_some());
 
     let stopped: Rc<RefCell<Vec<String>>> = Rc::default();
     let record = Rc::clone(&stopped);
     ui.on_server_stop(move |id| record.borrow_mut().push(id.to_string()));
+    let consoles: Rc<RefCell<Vec<(String, String, String)>>> = Rc::default();
+    let record = Rc::clone(&consoles);
+    ui.on_open_workspace(move |kind, id, surface| {
+        record
+            .borrow_mut()
+            .push((kind.to_string(), id.to_string(), surface.to_string()));
+    });
 
     running_section(&ui, vec![server()]);
     settle(&ui);
+    open_more(&ui, SERVER);
     assert!(
-        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-open-console"))
-            .any(|element| element.size().width > 0.0)
-    );
-    assert!(
-        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-force-stop"))
-            .all(|element| element.size().width == 0.0),
+        menu_entry(&ui, "gui-force-stop").is_none(),
         "a server is supervised through its own control channel, not a launch lock"
     );
+    menu_entry(&ui, "gui-open-console")
+        .expect("a server has a console")
+        .invoke_accessible_default_action();
+    settle(&ui);
+    assert_eq!(
+        consoles.borrow().as_slice(),
+        [(
+            "server".to_owned(),
+            "repro-server".to_owned(),
+            "Console".to_owned()
+        )]
+    );
 
-    ElementHandle::find_by_accessible_label(&ui, &lookup("gui-stop"))
+    running_section(&ui, vec![server()]);
+    settle(&ui);
+    ElementHandle::find_by_accessible_label(&ui, &named("gui-home-stop-host", SERVER))
         .find(|element| element.size().width > 0.0)
         .expect("a controlled server can be stopped")
         .mock_single_click(PointerEventButton::Left);
@@ -206,11 +225,10 @@ fn opening_a_runs_log_opens_its_own_workspace_on_logs() {
 
     running_section(&ui, vec![server()]);
     settle(&ui);
-
-    ElementHandle::find_by_accessible_label(&ui, &lookup("gui-open-log"))
-        .find(|element| element.size().width > 0.0)
+    open_more(&ui, SERVER);
+    menu_entry(&ui, "gui-open-log")
         .expect("every run offers its log")
-        .mock_single_click(PointerEventButton::Left);
+        .invoke_accessible_default_action();
 
     assert_eq!(
         opened.borrow().as_slice(),
@@ -222,34 +240,99 @@ fn opening_a_runs_log_opens_its_own_workspace_on_logs() {
     );
 }
 
-/// The badge says what the row is and the buttons say what can be done to it.
-/// Read on one line they compete for the same corner, so the badge sits above
-/// the buttons and against the same right edge.
+/// Open, and a press anywhere else on the card, open the host on its Overview.
 #[test]
-fn a_rows_badge_sits_above_its_buttons_against_the_same_edge() {
+fn open_and_a_press_on_the_card_open_the_host() {
     let ui = window();
-    running_section(&ui, vec![server()]);
+    let opened: Rc<RefCell<Vec<(String, String, String)>>> = Rc::default();
+    let record = Rc::clone(&opened);
+    ui.on_open_workspace(move |kind, id, surface| {
+        record
+            .borrow_mut()
+            .push((kind.to_string(), id.to_string(), surface.to_string()));
+    });
+    running_section(&ui, vec![client()]);
+    settle(&ui);
+    let overview = (
+        "client".to_owned(),
+        "repro-client".to_owned(),
+        "Overview".to_owned(),
+    );
+
+    ElementHandle::find_by_accessible_label(&ui, &named("gui-home-open-host", CLIENT))
+        .find(|element| element.size().width > 0.0)
+        .expect("a run can be opened")
+        .mock_single_click(PointerEventButton::Left);
+    assert_eq!(opened.borrow().len(), 1);
+
+    ElementHandle::find_by_accessible_label(&ui, "pid 48213  |  214% CPU | 6.1 GiB")
+        .find(|element| element.size().width > 0.0)
+        .expect("the card shows what it knows of the process")
+        .mock_single_click(PointerEventButton::Left);
+    assert_eq!(opened.borrow().as_slice(), [overview.clone(), overview]);
+}
+
+/// The card says what it runs and for how long, and nothing it has no data for.
+#[test]
+fn a_card_shows_its_versions_uptime_and_process() {
+    let ui = window();
+    running_section(&ui, vec![client()]);
     settle(&ui);
 
-    let badge = ElementHandle::find_by_accessible_label(&ui, &lookup("gui-server"))
-        .find(|element| element.size().width > 0.0)
-        .expect("a server row says it is a server");
-    let stop = ElementHandle::find_by_accessible_label(&ui, &lookup("gui-stop"))
-        .find(|element| element.size().width > 0.0)
-        .expect("a running server can be stopped");
+    for text in [
+        "1.20.1",
+        "Forge 47.3.0",
+        "12m",
+        "pid 48213  |  214% CPU | 6.1 GiB",
+    ] {
+        assert!(
+            ElementHandle::find_by_accessible_label(&ui, text)
+                .any(|element| element.size().width > 0.0),
+            "the card shows {text}"
+        );
+    }
+}
 
-    let badge_bottom = badge.absolute_position().y + badge.size().height;
-    assert!(
-        badge_bottom <= stop.absolute_position().y,
-        "the badge ends at {badge_bottom}px, below the buttons at {}px",
-        stop.absolute_position().y
-    );
-    let badge_right = badge.absolute_position().x + badge.size().width;
-    let stop_right = stop.absolute_position().x + stop.size().width;
-    assert!(
-        (badge_right - stop_right).abs() < 1.0,
-        "the badge ends at {badge_right}px and the buttons at {stop_right}px"
-    );
+/// The process line puts its separator between two parts only.
+#[test]
+fn the_process_line_has_no_dangling_separator() {
+    let ui = window();
+    let mut first = client();
+    first.usage = SharedString::default();
+    let mut second = server();
+    second.pid = SharedString::default();
+    running_section(&ui, vec![first, second]);
+    settle(&ui);
+
+    for text in ["pid 48213", "61% CPU | 2.4 GiB"] {
+        assert!(
+            ElementHandle::find_by_accessible_label(&ui, text)
+                .any(|element| element.size().width > 0.0),
+            "the line is {text} and nothing more"
+        );
+    }
+}
+
+const CLIENT: &str = "All the Mods 11";
+const SERVER: &str = "All the Mods 11 Server";
+
+fn open_more(ui: &AppWindow, host: &str) {
+    ElementHandle::find_by_accessible_label(ui, &named("gui-home-more-host", host))
+        .find(|element| element.size().width > 0.0)
+        .expect("a run offers more actions")
+        .mock_single_click(PointerEventButton::Left);
+    settle(ui);
+}
+
+fn named(key: &str, host: &str) -> String {
+    lookup_args(key, [("value", Arg::from(host.to_owned()))])
+}
+
+/// The row of an open menu carrying the label of `key`.
+fn menu_entry(ui: &AppWindow, key: &str) -> Option<ElementHandle> {
+    ElementHandle::find_by_accessible_label(ui, &lookup(key)).find(|element| {
+        element.accessible_role() == Some(AccessibleRole::Button) && element.size().width > 0.0
+    })
 }
 
 fn running_section(ui: &AppWindow, rows: Vec<RunningRow>) {
@@ -261,9 +344,12 @@ fn client() -> RunningRow {
     RunningRow {
         icon_slot: -1,
         kind: "client".into(),
+        minecraft: "1.20.1".into(),
+        loader: "Forge 47.3.0".into(),
+        loader_kind: "forge".into(),
         id: "repro-client".into(),
         launch: SharedString::default(),
-        name: "All the Mods 11".into(),
+        name: CLIENT.into(),
         pid: "48213".into(),
         uptime: "12m".into(),
         usage: "214% CPU | 6.1 GiB".into(),
@@ -277,9 +363,12 @@ fn server() -> RunningRow {
     RunningRow {
         icon_slot: -1,
         kind: "server".into(),
+        minecraft: "1.20.1".into(),
+        loader: "Forge 47.3.0".into(),
+        loader_kind: "forge".into(),
         id: "repro-server".into(),
         launch: SharedString::default(),
-        name: "All the Mods 11 Server".into(),
+        name: SERVER.into(),
         pid: "48999".into(),
         uptime: "2h1m".into(),
         usage: "61% CPU | 2.4 GiB".into(),

@@ -8351,29 +8351,7 @@ fn apply_event(
                 });
             }
         }
-        Event::Running(running) => {
-            ui.set_running(ModelRc::new(VecModel::from(
-                running
-                    .into_iter()
-                    .map(|process| RunningRow {
-                        icon_slot: workspace
-                            .state
-                            .borrow()
-                            .icon_slot(&process.kind, &process.id),
-                        kind: process.kind.into(),
-                        id: process.id.into(),
-                        launch: process.launch.into(),
-                        name: process.name.into(),
-                        pid: process.pid.into(),
-                        uptime: process.uptime.into(),
-                        usage: process.usage.into(),
-                        last_line: process.last_line.into(),
-                        controllable: process.controllable,
-                        can_stop: process.can_stop,
-                    })
-                    .collect::<Vec<_>>(),
-            )));
-        }
+        Event::Running(running) => apply_running(ui, workspace, running),
         Event::ModVersions(data) => apply_mod_versions(ui, data),
         Event::ModAcquisitionRequired(data) => apply_mod_acquisition(ui, data, workspace),
         Event::ModAcquisitionEnded { id } => end_mod_acquisition(ui, id, workspace),
@@ -10127,6 +10105,40 @@ fn upsert_activity(activities: &mut Vec<ActivityData>, activity: ActivityData) {
     }
 }
 
+/// Shows what is running, once a second while Home is open. Written into the
+/// existing model so a card, and a menu open on it, survives the next poll.
+fn apply_running(ui: &AppWindow, workspace: &Workspace, running: Vec<backend::RunningData>) {
+    let rows = running
+        .into_iter()
+        .map(|process| {
+            let (minecraft, loader, loader_kind) = workspace
+                .state
+                .borrow()
+                .host_target(&process.kind, &process.id);
+            RunningRow {
+                minecraft,
+                loader,
+                loader_kind,
+                icon_slot: workspace
+                    .state
+                    .borrow()
+                    .icon_slot(&process.kind, &process.id),
+                kind: process.kind.into(),
+                id: process.id.into(),
+                launch: process.launch.into(),
+                name: process.name.into(),
+                pid: process.pid.into(),
+                uptime: process.uptime.into(),
+                usage: process.usage.into(),
+                last_line: process.last_line.into(),
+                controllable: process.controllable,
+                can_stop: process.can_stop,
+            }
+        })
+        .collect::<Vec<_>>();
+    ui.set_running(reconciled(&ui.get_running(), rows));
+}
+
 fn apply_activities(ui: &AppWindow, activities: &[ActivityData]) {
     let rows = activities
         .iter()
@@ -10144,7 +10156,7 @@ fn apply_activities(ui: &AppWindow, activities: &[ActivityData]) {
             cancellable: activity.item.cancellable,
         })
         .collect::<Vec<_>>();
-    ui.set_activities(model(rows));
+    ui.set_activities(reconciled(&ui.get_activities(), rows));
 }
 
 /// The accounts a launch can be made as, for the Launch as menu.
@@ -13662,6 +13674,108 @@ mod tests {
 
     fn test_workspace(ui: &AppWindow) -> Workspace {
         test_workspace_sending(ui).0
+    }
+
+    fn running_process(kind: &str, id: &str, name: &str) -> backend::RunningData {
+        backend::RunningData {
+            kind: kind.to_owned(),
+            id: id.to_owned(),
+            launch: String::new(),
+            name: name.to_owned(),
+            pid: "4242".to_owned(),
+            uptime: "1m".to_owned(),
+            usage: String::new(),
+            last_line: String::new(),
+            controllable: kind == "server",
+            can_stop: true,
+        }
+    }
+
+    /// A window drawn by the software renderer, showing Home with `running`
+    /// polled in and the More menu of the card named `host` open.
+    fn running_home_with_open_menu(
+        running: &[backend::RunningData],
+        host: &str,
+    ) -> (AppWindow, Workspace) {
+        let _ =
+            slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
+                i_slint_backend_testing::TestingBackendOptions {
+                    renderer_name: Some("software".into()),
+                    mock_time: true,
+                    threading: false,
+                },
+            )));
+        let ui = test_window();
+        register_i18n(&ui);
+        ui.window().set_size(slint::PhysicalSize::new(1480, 900));
+        ui.show().expect("show");
+        let workspace = test_workspace(&ui);
+        apply_running(&ui, &workspace, running.to_vec());
+        settle_window(&ui);
+        let more = lookup_args(
+            "gui-home-more-host",
+            [("value", Arg::from(host.to_owned()))],
+        );
+        ElementHandle::find_by_accessible_label(&ui, &more)
+            .find(|element| element.size().width > 0.0)
+            .expect("the card offers more actions")
+            .mock_single_click(slint::platform::PointerEventButton::Left);
+        settle_window(&ui);
+        (ui, workspace)
+    }
+
+    fn settle_window(ui: &AppWindow) {
+        slint::platform::update_timers_and_animations();
+        ui.window().take_snapshot().expect("render");
+    }
+
+    fn open_log_entry(ui: &AppWindow) -> Option<ElementHandle> {
+        ElementHandle::find_by_accessible_label(ui, &lookup("gui-open-log")).find(|element| {
+            element.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::Button)
+                && element.size().width > 0.0
+        })
+    }
+
+    #[test]
+    fn a_menu_open_on_a_running_card_survives_the_next_poll() {
+        let processes = [
+            running_process("client", "a", "Alpha"),
+            running_process("client", "b", "Bravo"),
+        ];
+        let (ui, workspace) = running_home_with_open_menu(&processes, "Bravo");
+        let logs: Rc<RefCell<Vec<String>>> = Rc::default();
+        let record = Rc::clone(&logs);
+        ui.on_open_workspace(move |_, id, surface| {
+            record.borrow_mut().push(format!("{id}/{surface}"));
+        });
+        assert!(open_log_entry(&ui).is_some());
+
+        // The same run, polled again a second later.
+        apply_running(&ui, &workspace, processes.to_vec());
+        settle_window(&ui);
+
+        let entry = open_log_entry(&ui).expect("the menu is still open");
+        entry.invoke_accessible_default_action();
+        assert_eq!(logs.borrow().as_slice(), ["b/Logs"]);
+    }
+
+    #[test]
+    fn a_menu_closes_when_its_card_is_given_another_run() {
+        let processes = [
+            running_process("client", "a", "Alpha"),
+            running_process("client", "b", "Bravo"),
+        ];
+        let (ui, workspace) = running_home_with_open_menu(&processes, "Alpha");
+        assert!(open_log_entry(&ui).is_some());
+
+        // Alpha ends and Bravo moves up into its card.
+        apply_running(&ui, &workspace, vec![processes[1].clone()]);
+        settle_window(&ui);
+
+        assert!(
+            open_log_entry(&ui).is_none(),
+            "a menu left open would act on the run that took its place"
+        );
     }
 
     /// A start plans its Java before it can fail, and may have installed a
@@ -20274,9 +20388,10 @@ mod tests {
     #[test]
     fn activity_details_wrap_in_cards_with_content_driven_height() {
         let source = ui_markup();
-        assert!(source.contains("component ActivityCard inherits Rectangle"));
-        assert!(source.contains("height: max(102px, detail-text.preferred-height + 82px)"));
-        assert!(source.contains("detail-text := BodyText { text: item.detail; visible: item.detail != \"\"; wrap: word-wrap; }"));
+        let card = ui_declaration(source, "component ActivityCard inherits HomeCard")
+            .expect("the activity card");
+        assert!(card.contains("detail.preferred-height"));
+        assert!(card.contains("wrap: word-wrap"));
     }
 
     #[test]

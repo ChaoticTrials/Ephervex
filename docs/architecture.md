@@ -74,7 +74,7 @@ release, because the headless tests find elements by it.
 | `workspace/` | A host workspace's chrome and its surfaces: mods, packs, logs, isolation, diagnostics, snapshots, and host settings |
 | `shell/` | The window frame: the grid floor and three columns, the brand bar, the account footer, and the right column's container |
 | `host-list/` | The host list: its search and filter panel, the client, server, and pending cards, and the scrolling list that holds them |
-| `home/` | The Home page and the Running and Activity cards it lists |
+| `home/` | The Home page: its running, problem, resume, and activity cards and the face they share |
 | `settings/` | Application settings panels and the Minecraft defaults screen with its window size picker |
 
 The window has three columns: the host list, the page, and a right column that
@@ -88,6 +88,13 @@ what is running each time it appears and measures the artifact cache the first
 time. Any code that opens a settings page goes through `open-settings(tab)`,
 which also reads what the page shows. Errors that have no row to sit on reach
 the user as toasts.
+
+Home lists what is running, each problem the launcher recorded or a run of this
+session reported (with a way to the host and the surface that explains it, never
+a fix: ADR 0043), the hosts that ran last, and the launcher's activity. The cards
+sit in as many columns as the page's own width allows, each at least
+`Theme.home-card-min-width` wide. Sections with nothing to say keep a muted line,
+except the hosts to continue with, which is left out.
 
 Rust sees only what `app.slint` exports: the globals and windows by name and the
 row structs through `export * from "models.slint"`. A new type Rust needs is

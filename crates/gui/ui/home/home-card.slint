@@ -1,0 +1,84 @@
+// What the cards on Home share: the face with its hard shadow, the state strip
+// down the left edge, and a column for the lines.
+
+import { Plate } from "../components/surface.slint";
+import { Chip } from "../components/controls.slint";
+import { Theme } from "../theme.slint";
+
+// The version and loader of a host as two chips, hugging their text and
+// clipped to the row rather than spilling out of the card.
+export component VersionChips inherits Rectangle {
+    in property <string> minecraft;
+    in property <string> loader;
+    in property <string> loader-kind;
+    private property <length> chip-gap: 5px;
+    // The width both chips need, for a row that wants them to hug their text.
+    out property <length> natural-width: (root.minecraft != "" ? minecraft-chip.natural-width : 0px)
+        + (root.minecraft != "" && root.loader != "" ? root.chip-gap : 0px) + (root.loader != "" ? loader-chip.natural-width : 0px);
+    height: Theme.chip-height;
+    // Hugs the chips where there is room and is clipped where there is not.
+    preferred-width: root.natural-width;
+    max-width: root.natural-width;
+    min-width: 0px;
+    horizontal-stretch: 0;
+    clip: true;
+    minecraft-chip := Chip {
+        x: 0px;
+        text: root.minecraft;
+        visible: root.minecraft != "";
+        width: root.minecraft != "" ? min(self.natural-width, parent.width) : 0px;
+    }
+    loader-chip := Chip {
+        x: minecraft-chip.width + (minecraft-chip.width > 0px ? root.chip-gap : 0px);
+        text: root.loader;
+        tone: root.loader-kind;
+        visible: root.loader != "";
+        width: root.loader != "" ? max(0px, min(self.natural-width, parent.width - self.x)) : 0px;
+    }
+}
+
+// A card as tall as its lines, as wide as the cell it is placed in. Pressing
+// it asks to open its host; what sits on it takes presses of its own.
+export component HomeCard inherits Rectangle {
+    in property <color> strip: Theme.state-stopped;
+    // The height of the lines; a card with wrapped text gives its own.
+    in property <length> content-height: body.preferred-height;
+    // Whether pressing the card does anything.
+    in property <bool> pressable: true;
+    callback open-requested();
+    private property <length> ink: Theme.strong-border-width;
+    min-width: 0px;
+    preferred-width: 1px;
+    max-width: 10000px;
+    horizontal-stretch: 1;
+    height: root.content-height;
+    Plate {
+        width: root.width;
+        height: root.height;
+        fill: area.has-hover ? Theme.elevated : Theme.surface;
+        // First, so it is under every control placed on the card.
+        area := TouchArea {
+            enabled: root.pressable;
+            mouse-cursor: MouseCursor.pointer;
+            clicked => { root.open-requested(); }
+        }
+        Rectangle {
+            x: 6px + root.ink;
+            y: 9px + root.ink;
+            width: 4px;
+            height: parent.height - 2 * (9px + root.ink);
+            border-radius: 3px;
+            border-width: Theme.chip-border-width;
+            border-color: Theme.border-strong;
+            background: root.strip;
+        }
+        body := VerticalLayout {
+            padding-top: 12px + root.ink;
+            padding-bottom: 12px + root.ink;
+            padding-left: 18px + root.ink;
+            padding-right: 14px + root.ink;
+            spacing: 8px;
+            @children
+        }
+    }
+}

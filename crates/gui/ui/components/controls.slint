@@ -115,8 +115,10 @@ export component AppButton inherits Rectangle {
     // to be unambiguous on its own. Two "Browse..." buttons in one dialog
     // read identically otherwise.
     in property <string> accessible-name: root.text;
-    // How the button is filled: secondary, primary, danger, success or info.
+    // How the button is filled: secondary, primary, danger, success, info or lavender.
     in property <string> tone: "secondary";
+    // A glyph before the caption, drawn in the caption's color.
+    in property <image> icon;
     // The shorter button, for a row of small controls.
     in property <bool> compact: false;
     in property <bool> enabled: true;
@@ -137,12 +139,18 @@ export component AppButton inherits Rectangle {
         : root.tone == "danger" ? (root.pointed ? Theme.danger-fill-hover : Theme.danger-fill)
         : root.tone == "success" ? Theme.state-running
         : root.tone == "info" ? Theme.state-stopped
+        : root.tone == "lavender" ? Theme.state-building
         : Theme.surface;
     private property <color> caption: root.tone == "primary" ? Theme.on-primary
         : root.tone == "danger" ? Theme.on-danger
-        : root.tone == "success" || root.tone == "info" ? Theme.on-accent
+        : root.tone == "success" || root.tone == "info" || root.tone == "lavender" ? Theme.on-accent
         : Theme.text;
-    min-width: max(88px, label.preferred-width + 28px);
+    // The room the glyph takes before the caption.
+    private property <length> icon-extent: root.icon.width > 0 ? Theme.button-icon-size + 6px : 0px;
+    // The caption's width, held to what is left of the button.
+    private property <length> label-used: min(label.preferred-width, root.width - 28px - root.icon-extent);
+    private property <length> content-start: (root.width - root.icon-extent - root.label-used) / 2;
+    min-width: max(88px, label.preferred-width + 28px + root.icon-extent);
     height: root.compact ? Theme.button-height-small : Theme.button-height;
     horizontal-stretch: 0;
     accessible-role: button;
@@ -159,14 +167,24 @@ export component AppButton inherits Rectangle {
         radius: root.compact ? Theme.small-radius : Theme.button-radius;
         rest-lift: root.compact ? Theme.shadow-offset-small : Theme.shadow-offset-card;
         fill: root.face-fill;
+        if root.icon.width > 0 : Image {
+            x: root.content-start;
+            y: (parent.height - self.height) / 2;
+            width: Theme.button-icon-size;
+            height: Theme.button-icon-size;
+            source: root.icon;
+            image-fit: contain;
+            colorize: root.caption;
+        }
         // Held to the button's own width and elided there. `min-width` asks
         // for room for the whole caption, but a layout that has none gives
         // less, and a Rectangle does not clip what overflows it. The full text
         // stays in `accessible-name`.
         label := Text {
-            text: root.text;
-            width: root.width - 28px;
+            x: root.icon.width > 0 ? root.content-start + root.icon-extent : 14px;
+            width: root.icon.width > 0 ? root.label-used : root.width - 28px;
             overflow: elide;
+            text: root.text;
             color: root.caption;
             font-size: root.compact ? Theme.label-size : Theme.body-size;
             font-weight: 700;

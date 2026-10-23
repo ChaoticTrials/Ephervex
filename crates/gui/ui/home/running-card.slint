@@ -1,0 +1,115 @@
+// One thing the launcher is running: a client with a live launch or a server it supervises.
+
+import { AppButton, IconButton } from "../components/controls.slint";
+import { PopupMenu } from "../components/menus.slint";
+import { BodyText, DisplayHeading, ElidedHeading } from "../components/text.slint";
+import { GuiI18n } from "../globals.slint";
+import { RunningRow } from "../models.slint";
+import { Theme } from "../theme.slint";
+import { HomeCard, VersionChips } from "home-card.slint";
+
+// Not an activity card: that one describes an operation with a progress
+// fraction and a Cancel. A running game has neither, and the two answer
+// different questions.
+export component RunningCard inherits HomeCard {
+    in property <RunningRow> item;
+    callback open-log(string, string);
+    callback open-console(string);
+    callback open-workspace(string, string);
+    callback stop(string, string);
+    callback force-stop(string, string);
+    // The repeater hands this card another row when the list shifts in place,
+    // and an open menu would then act on that row.
+    private property <string> menu-owner: root.item.kind + "/" + root.item.id + "/" + root.item.launch;
+    changed menu-owner => { more.close(); }
+    strip: root.item.kind == "server" ? Theme.state-server : Theme.state-running;
+    open-requested => { root.open-workspace(root.item.kind, root.item.id); }
+    HorizontalLayout {
+        spacing: 8px;
+        ElidedHeading {
+            min-width: 80px;
+            text: root.item.name;
+            font-size: Theme.row-heading-size;
+            clicked => { root.open-workspace(root.item.kind, root.item.id); }
+        }
+        VerticalLayout {
+            alignment: center;
+            VersionChips {
+                minecraft: root.item.minecraft;
+                loader: root.item.loader;
+                loader-kind: root.item.loader-kind;
+            }
+        }
+    }
+    DisplayHeading {
+        text: root.item.uptime;
+        font-size: Theme.stat-size;
+        overflow: elide;
+    }
+    // Exact, because a pid is what a developer chases outside the launcher
+    // and a rounded one would be useless.
+    BodyText {
+        text: (root.item.pid != "" ? "pid " + root.item.pid : "") + (root.item.pid != "" && root.item.usage != "" ? "  |  " : "") + root.item.usage;
+        color: Theme.text-secondary;
+        font-family: Theme.mono-family;
+        font-size: Theme.caption-size;
+        overflow: elide;
+    }
+    BodyText {
+        text: root.item.last-line;
+        color: Theme.text-muted;
+        font-family: Theme.mono-family;
+        font-size: Theme.caption-size;
+        overflow: elide;
+    }
+    // The buttons raise a hard shadow to the right and below.
+    HorizontalLayout {
+        spacing: 8px;
+        padding-right: Theme.shadow-room;
+        padding-bottom: Theme.shadow-room;
+        alignment: start;
+        AppButton {
+            compact: true;
+            text: GuiI18n.text("gui-stop");
+            accessible-name: GuiI18n.value("gui-home-stop-host", root.item.name);
+            icon: @image-url("../../../../assets/icons/stop.svg");
+            tone: "danger";
+            enabled: root.item.can-stop;
+            hint: root.item.kind == "server" ? GuiI18n.text("gui-hint-stop-server-uncontrolled") : GuiI18n.text("gui-hint-stop-client-unsupervised");
+            clicked => { root.stop(root.item.kind, root.item.id); }
+        }
+        AppButton {
+            compact: true;
+            text: GuiI18n.text("gui-open");
+            accessible-name: GuiI18n.value("gui-home-open-host", root.item.name);
+            icon: @image-url("../../../../assets/icons/chevron-right.svg");
+            clicked => { root.open-workspace(root.item.kind, root.item.id); }
+        }
+        // What else can be done to a run: its log, a server's console, and
+        // for a client the bigger hammer, which a launch left by another run
+        // of the launcher needs because nobody is supervising it.
+        IconButton {
+            width: Theme.button-height-small;
+            height: Theme.button-height-small;
+            icon: @image-url("../../../../assets/icons/more.svg");
+            accessible-name: GuiI18n.value("gui-home-more-host", root.item.name);
+            clicked => { more.show({ x: 0px, y: self.height + 4px }); }
+            more := PopupMenu {
+                entries: [
+                    { id: "open-log", label: GuiI18n.text("gui-open-log") },
+                    { id: "open-console", label: GuiI18n.text("gui-open-console"), hidden: root.item.kind != "server" },
+                    { id: "force-stop", label: GuiI18n.text("gui-force-stop"), hidden: root.item.kind != "client" },
+                ];
+                activated(id) => {
+                    if (id == "open-log") {
+                        root.open-log(root.item.kind, root.item.id);
+                    } else if (id == "open-console") {
+                        root.open-console(root.item.id);
+                    } else {
+                        root.force-stop(root.item.id, root.item.launch);
+                    }
+                }
+            }
+        }
+    }
+}

@@ -190,6 +190,13 @@ export struct ResumeRow {
     id: string,
     host-name: string,
     last-run: string,
+    // The line under the chips: when the host last ran.
+    state-line: string,
+    minecraft: string,
+    loader: string,
+    loader-kind: string,
+    state-kind: string,
+    needs-attention: bool,
     can-launch: bool,
 }
 
@@ -540,6 +547,11 @@ export struct RunningRow {
     // and there is nothing yet to compare against.
     usage: string,
     last-line: string,
+    // The host's version and loader as its list card shows them, empty when
+    // the host is not one the launcher lists.
+    minecraft: string,
+    loader: string,
+    loader-kind: string,
     // The host's icon in `HostIcons.images`, or -1 when it has none or the
     // host is not one the launcher lists.
     icon-slot: int,

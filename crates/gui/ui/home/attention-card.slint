@@ -1,0 +1,75 @@
+// One thing on Home that needs a look: what is wrong, where, and a way to the host.
+
+import { Plate } from "../components/surface.slint";
+import { AppButton } from "../components/controls.slint";
+import { BodyText, Heading } from "../components/text.slint";
+import { GuiI18n } from "../globals.slint";
+import { AttentionRow } from "../models.slint";
+import { Theme } from "../theme.slint";
+
+export component AttentionCard inherits Rectangle {
+    in property <AttentionRow> item;
+    // The host and the surface that explains the problem.
+    callback open(string, string, string);
+    private property <length> mark-size: 34px;
+    private property <length> inset: 12px;
+    height: max(root.mark-size, title.preferred-height + 2px + detail.preferred-height) + 2 * root.inset + 2 * Theme.strong-border-width;
+    Plate {
+        width: root.width;
+        height: root.height;
+        lift: Theme.shadow-offset-small;
+        HorizontalLayout {
+            padding: root.inset + Theme.strong-border-width;
+            spacing: 12px;
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: root.mark-size;
+                    height: root.mark-size;
+                    border-radius: Theme.small-radius;
+                    border-width: Theme.strong-border-width;
+                    border-color: Theme.border-strong;
+                    background: Theme.state-attention;
+                    accessible-role: AccessibleRole.text;
+                    accessible-label: GuiI18n.text("gui-home-attention-mark");
+                    Image {
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        width: 18px;
+                        height: 18px;
+                        source: @image-url("../../../../assets/icons/alert.svg");
+                        image-fit: contain;
+                        colorize: Theme.on-accent;
+                    }
+                }
+            }
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 2px;
+                alignment: center;
+                title := Heading {
+                    text: root.item.title;
+                    font-size: Theme.row-heading-size;
+                    overflow: elide;
+                }
+                detail := BodyText {
+                    text: root.item.host-name + " | " + root.item.detail;
+                    font-size: Theme.label-size;
+                    wrap: word-wrap;
+                }
+            }
+            // The button raises a hard shadow to the right and below.
+            VerticalLayout {
+                alignment: center;
+                padding-right: Theme.shadow-room;
+                AppButton {
+                    compact: true;
+                    text: GuiI18n.text("gui-open");
+                    accessible-name: GuiI18n.value("gui-home-attention-open", root.item.host-name);
+                    icon: @image-url("../../../../assets/icons/chevron-right.svg");
+                    clicked => { root.open(root.item.kind, root.item.id, root.item.surface); }
+                }
+            }
+        }
+    }
+}

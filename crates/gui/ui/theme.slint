@@ -141,7 +141,8 @@ export global Theme {
     out property <color> on-accent: palette.on-accent;
     // The fills of the tags that say what a host is doing: running, in
     // progress, needing attention. Running also fills a success button and
-    // toast, and stopped fills an info button. A server tag takes its own.
+    // toast, in progress a lavender button, and stopped an info button. A
+    // server tag takes its own.
     out property <color> state-running: palette.state-running;
     out property <color> state-building: palette.state-building;
     out property <color> state-attention: palette.state-attention;
@@ -199,6 +200,16 @@ export global Theme {
     out property <length> button-height-small: 30px;
     out property <length> button-height: 38px;
     out property <length> button-height-big: 48px;
+    // The side of the glyph a button draws before its caption.
+    out property <length> button-icon-size: 15px;
+    // The height of a progress bar on a card.
+    out property <length> progress-bar-height: 10px;
+    // The greeting at the top of Home, and the large readout on a Home card.
+    out property <length> greeting-size: 32px * text-scale;
+    out property <length> stat-size: 26px * text-scale;
+    // The narrowest a Home card is laid out at; the grid of cards drops a
+    // column rather than going below it.
+    out property <length> home-card-min-width: 340px;
     // The tilt of the status stamp on a page header.
     out property <angle> stamp-angle: -4deg;
     // The outline drawn around a control that has keyboard focus. Every

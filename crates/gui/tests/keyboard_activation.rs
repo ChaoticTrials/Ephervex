@@ -55,6 +55,33 @@ fn tab_reaches_the_home_button_and_enter_leaves_the_settings() {
 }
 
 #[test]
+fn tab_reaches_a_home_card_button_and_enter_presses_it() {
+    let ui = window();
+    let launched: Rc<RefCell<Vec<String>>> = Rc::default();
+    let record = Rc::clone(&launched);
+    ui.on_launch_client(move |id| record.borrow_mut().push(id.to_string()));
+    ui.set_home_resume(ModelRc::new(VecModel::from(vec![
+        ephervex_gui::ui::ResumeRow {
+            kind: "client".into(),
+            id: "repro-client".into(),
+            host_name: "Repro".into(),
+            can_launch: true,
+            ..ephervex_gui::ui::ResumeRow::default()
+        },
+    ])));
+    settle(&ui);
+
+    let launch = control(
+        &ui,
+        &lookup_args("gui-home-launch-host", [("value", Arg::from("Repro"))]),
+    );
+    assert!(tab_to(&ui, &launch), "Tab never reached Launch");
+    press(&ui, Key::Return);
+
+    assert_eq!(launched.borrow().as_slice(), ["repro-client"]);
+}
+
+#[test]
 fn escape_leaves_the_settings_for_the_page_they_were_opened_over() {
     let ui = window();
     ui.invoke_open_settings("General".into());
@@ -200,7 +227,7 @@ fn tab_stays_inside_an_open_dialog_in_both_directions() {
     let behind = [
         control(&ui, &lookup("gui-home")),
         control(&ui, &lookup("gui-settings")),
-        control(&ui, &lookup("gui-new-instance")),
+        new_instance_on_home(&ui),
     ]
     .map(|control| geometry(&control));
     open_create_instance(&ui);
@@ -230,7 +257,7 @@ fn tab_stays_inside_an_open_dialog_in_both_directions() {
 #[test]
 fn the_focus_outline_is_drawn_outside_a_primary_button_whose_own_border_is_accent() {
     let ui = window();
-    let button = control(&ui, &lookup("gui-new-instance"));
+    let button = new_instance_on_home(&ui);
     let (x, y, _, height) = geometry(&button);
     // A point in the outline's band, left of the button's own border.
     let (column, row) = (x - 2, y + height / 2);
@@ -332,6 +359,13 @@ fn pixel_at(ui: &AppWindow, column: i32, row: i32) -> Rgba8Pixel {
     let index = usize::try_from(row).expect("row") * snapshot.width() as usize
         + usize::try_from(column).expect("column");
     snapshot.as_slice()[index]
+}
+
+/// Home's New Instance button, not the one the empty list offers.
+fn new_instance_on_home(ui: &AppWindow) -> ElementHandle {
+    ElementHandle::find_by_accessible_label(ui, &lookup("gui-modal-new-instance"))
+        .find(|element| element.absolute_position().x > 340.0)
+        .expect("Home offers New Instance")
 }
 
 fn control(ui: &AppWindow, label: &str) -> ElementHandle {

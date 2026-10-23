@@ -150,11 +150,11 @@ also holds a commented-out `[branding]` section for use in a theme folder.
 | `border-strong` | The outline around a card, button, chip, or panel |
 | `accent-primary` | The fill of the selected navigation, settings and workspace tab items, of an icon button under the pointer and of a slider, and the ring around the selected card. The main button reads `primary-fill`. |
 | `on-accent` | A caption on an accent or state fill, such as `accent-primary` or `state-running` |
-| `state-running` | The fill of the tag of a host that is running, and of a success button and toast |
-| `state-building` | The fill of the tag of a host that is starting, stopping, or restarting |
-| `state-attention` | The fill of the tag of a host that failed or needs recovery |
-| `state-stopped` | The fill of an info button |
-| `state-server` | The fill of a server tag |
+| `state-running` | The fill of the tag of a host that is running, of a success button and toast, and of the strip down a running client's card and a finished activity's card on Home |
+| `state-building` | The fill of the tag of a host that is starting, stopping, or restarting, of a lavender button, and of the strip down an activity card in progress |
+| `state-attention` | The fill of the tag of a host that failed or needs recovery, of the mark on a problem on Home, and of the strip down a failed activity's card and a card of a host that needs a fix |
+| `state-stopped` | The fill of an info button, and of the strip down the card of a host that is stopped |
+| `state-server` | The fill of a server tag, and of the strip down a server's card |
 | `note-fill` | The fill of the workflow banner and of a favorite star that is on |
 | `danger-soft` | The fill of a problem box. `danger` text is drawn on it. |
 | `grid-line` | The hairline grid over the window floor; usually a faint translucent line |

@@ -123,6 +123,35 @@ impl WorkspaceState {
         .unwrap_or(-1)
     }
 
+    /// A host's Minecraft version, loader, and loader kind as its card shows
+    /// them, or empty strings for a host the launcher does not list.
+    pub(super) fn host_target(
+        &self,
+        kind: &str,
+        id: &str,
+    ) -> (SharedString, SharedString, SharedString) {
+        let target = |row: Option<(&SharedString, &SharedString, &SharedString)>| {
+            row.map_or_else(Default::default, |(minecraft, loader, kind)| {
+                (minecraft.clone(), loader.clone(), kind.clone())
+            })
+        };
+        match kind {
+            "client" => target(
+                self.clients
+                    .iter()
+                    .find(|row| row.id == id)
+                    .map(|row| (&row.minecraft, &row.loader, &row.loader_kind)),
+            ),
+            "server" => target(
+                self.servers
+                    .iter()
+                    .find(|row| row.id == id)
+                    .map(|row| (&row.minecraft, &row.loader, &row.loader_kind)),
+            ),
+            _ => Default::default(),
+        }
+    }
+
     /// Takes the newest rows of every host.
     pub(super) fn set_rows(&mut self, clients: Vec<InstanceRow>, servers: Vec<ServerRow>) {
         self.clients = clients;

@@ -1264,13 +1264,16 @@ export component AppWindow inherits Window {
                     greeting: root.home-greeting;
                     summary: root.home-summary;
                     running: root.running;
+                    attention: root.home-attention;
+                    resume: root.home-resume;
                     activities: root.activities;
                     new-instance => { root.open-create-instance-modal(); }
                     import-modpack => { root.open-import-modal(); }
                     new-server => { root.open-create-server(); }
+                    open-host(kind, id, surface) => { root.open-host-surface(kind, id, surface); }
                     open-log(kind, id) => { root.open-host-surface(kind, id, "Logs"); }
                     open-console(id) => { root.open-host-surface("server", id, "Console"); }
-                    open-workspace(kind, id) => { root.open-host(kind, id); }
+                    launch(kind, id) => { if kind == "server" { root.server-start(id); } else { root.launch-client(id); } }
                     stop(kind, id, launch) => { if kind == "server" { root.server-stop(id); } else { root.kill-instance(id, launch); } }
                     force-stop(id, launch) => { root.force-stop-launch(id, launch); }
                     cancel-operation(id) => { root.cancel-operation(id); }

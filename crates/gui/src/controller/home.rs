@@ -30,6 +30,11 @@ pub(super) struct HomeHost {
     /// Minecraft version and loader as one line.
     pub target: String,
     pub persistent: bool,
+    pub minecraft: String,
+    pub loader: String,
+    pub loader_kind: String,
+    pub state_kind: String,
+    pub needs_attention: bool,
     pub run: RunState,
     pub can_launch: bool,
     pub last_run: Option<DateTime<Utc>>,
@@ -66,6 +71,11 @@ impl HomeHost {
             name: item.name.clone(),
             target: target_summary(&item.minecraft, &item.loader).to_string(),
             persistent: item.storage_kind == "persistent",
+            minecraft: item.minecraft.clone(),
+            loader: item.loader.clone(),
+            loader_kind: item.loader_kind.to_owned(),
+            state_kind: item.state_kind.to_owned(),
+            needs_attention: item.needs_attention,
             run: RunState::of(item.state_kind),
             can_launch: item.can_launch,
             last_run: item.last_launched_at,
@@ -79,6 +89,11 @@ impl HomeHost {
             name: item.name.clone(),
             target: target_summary(&item.minecraft, &item.loader).to_string(),
             persistent: item.storage_kind == "persistent",
+            minecraft: item.minecraft.clone(),
+            loader: item.loader.clone(),
+            loader_kind: item.loader_kind.to_owned(),
+            state_kind: item.state_kind.to_owned(),
+            needs_attention: item.needs_attention,
             run: RunState::of(item.state_kind),
             can_launch: item.can_start,
             last_run: item.last_started_at,
@@ -276,7 +291,20 @@ impl HomeState {
                 kind: host.host.kind().into(),
                 id: host.host.id().into(),
                 host_name: host.name.as_str().into(),
+                state_line: lookup_args(
+                    "gui-state-line-last-run",
+                    [(
+                        "when",
+                        Arg::from(backend::format_last_run(Some(last_run), now)),
+                    )],
+                )
+                .into(),
                 last_run: backend::format_last_run(Some(last_run), now).into(),
+                minecraft: host.minecraft.as_str().into(),
+                loader: host.loader.as_str().into(),
+                loader_kind: host.loader_kind.as_str().into(),
+                state_kind: host.state_kind.as_str().into(),
+                needs_attention: host.needs_attention,
                 can_launch: host.can_launch,
             })
             .collect()
@@ -349,6 +377,11 @@ mod tests {
             name: name.to_owned(),
             target: "Minecraft 1.20.1 | Forge".to_owned(),
             persistent: false,
+            minecraft: "1.20.1".to_owned(),
+            loader: "Forge 47.3.0".to_owned(),
+            loader_kind: "forge".to_owned(),
+            state_kind: "ready".to_owned(),
+            needs_attention: false,
             run: RunState::Idle,
             can_launch: true,
             last_run: ago.map(|ago| now() - ago),
@@ -540,6 +573,28 @@ mod tests {
         let rows = home.view(now(), 9).attention;
         assert!(rows[0].detail.chars().count() <= ATTENTION_TEXT_LIMIT);
         assert!(rows[0].detail.ends_with("..."));
+    }
+
+    #[test]
+    fn a_host_to_continue_carries_what_its_card_draws() {
+        let mut blocked = client("Blocked", Some(TimeDelta::hours(2)));
+        blocked.needs_attention = true;
+        blocked.state_kind = "needs-attention".to_owned();
+        let rows = state(
+            vec![blocked],
+            vec![server("Srv", Some(TimeDelta::hours(1)))],
+        )
+        .view(now(), 9)
+        .resume;
+        assert_eq!(rows[0].host_name.as_str(), "Srv");
+        assert_eq!(rows[0].kind.as_str(), "server");
+        assert_eq!(rows[0].state_line.as_str(), "Last run 1 hour ago");
+        assert_eq!(rows[0].minecraft.as_str(), "1.20.1");
+        assert_eq!(rows[0].loader.as_str(), "Forge 47.3.0");
+        assert_eq!(rows[0].loader_kind.as_str(), "forge");
+        assert!(!rows[0].needs_attention);
+        assert!(rows[1].needs_attention);
+        assert_eq!(rows[1].state_kind.as_str(), "needs-attention");
     }
 
     #[test]
