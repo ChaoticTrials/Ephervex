@@ -81,7 +81,8 @@ exported there. Rust owns application and feature state; the markup renders it
 and reports what the user asked for.
 
 Tests that read the markup as text go through `test_support::UI_SOURCES`, which
-a test keeps in step with the files on disk.
+`build.rs` generates from every `.slint` file under `crates/gui/ui`, so a new
+module is covered without being registered.
 
 ### Theme and palettes
 

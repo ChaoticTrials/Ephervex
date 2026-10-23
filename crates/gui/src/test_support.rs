@@ -18,102 +18,10 @@ pub(crate) fn process_evidence() -> ephervex_core::ProcessEvidence {
 }
 
 /// Every standalone `.slint` module of the desktop interface, by its path
-/// under `crates/gui/ui`.
-///
-/// Listed by hand because `include_str!` takes a literal path. The list is
-/// checked against the directory, so a module cannot be left out of the tests
-/// that read the markup.
-pub(crate) const UI_SOURCES: &[(&str, &str)] = &[
-    ("app.slint", include_str!("../ui/app.slint")),
-    (
-        "components/artwork.slint",
-        include_str!("../ui/components/artwork.slint"),
-    ),
-    (
-        "components/controls.slint",
-        include_str!("../ui/components/controls.slint"),
-    ),
-    (
-        "components/menus.slint",
-        include_str!("../ui/components/menus.slint"),
-    ),
-    (
-        "components/selection.slint",
-        include_str!("../ui/components/selection.slint"),
-    ),
-    (
-        "components/text.slint",
-        include_str!("../ui/components/text.slint"),
-    ),
-    ("globals.slint", include_str!("../ui/globals.slint")),
-    (
-        "home/activity-cards.slint",
-        include_str!("../ui/home/activity-cards.slint"),
-    ),
-    (
-        "home/host-cards.slint",
-        include_str!("../ui/home/host-cards.slint"),
-    ),
-    ("models.slint", include_str!("../ui/models.slint")),
-    ("palettes.slint", include_str!("../ui/palettes.slint")),
-    (
-        "settings/application.slint",
-        include_str!("../ui/settings/application.slint"),
-    ),
-    (
-        "settings/minecraft-defaults.slint",
-        include_str!("../ui/settings/minecraft-defaults.slint"),
-    ),
-    (
-        "settings/server-defaults.slint",
-        include_str!("../ui/settings/server-defaults.slint"),
-    ),
-    ("theme.slint", include_str!("../ui/theme.slint")),
-    (
-        "workspace/diagnostics.slint",
-        include_str!("../ui/workspace/diagnostics.slint"),
-    ),
-    (
-        "workspace/host-settings.slint",
-        include_str!("../ui/workspace/host-settings.slint"),
-    ),
-    (
-        "workspace/host-workspace.slint",
-        include_str!("../ui/workspace/host-workspace.slint"),
-    ),
-    (
-        "workspace/isolation.slint",
-        include_str!("../ui/workspace/isolation.slint"),
-    ),
-    (
-        "workspace/logs.slint",
-        include_str!("../ui/workspace/logs.slint"),
-    ),
-    (
-        "workspace/mod-browser.slint",
-        include_str!("../ui/workspace/mod-browser.slint"),
-    ),
-    (
-        "workspace/mods.slint",
-        include_str!("../ui/workspace/mods.slint"),
-    ),
-    (
-        "workspace/packs.slint",
-        include_str!("../ui/workspace/packs.slint"),
-    ),
-    (
-        "workspace/server-statistics.slint",
-        include_str!("../ui/workspace/server-statistics.slint"),
-    ),
-    (
-        "workspace/server-tools.slint",
-        include_str!("../ui/workspace/server-tools.slint"),
-    ),
-    (
-        "workspace/snapshots.slint",
-        include_str!("../ui/workspace/snapshots.slint"),
-    ),
-];
+/// under `crates/gui/ui`, sorted. `build.rs` generates the list from the
+/// directory, so a new module is read by the markup tests without being
+/// registered.
+pub(crate) const UI_SOURCES: &[(&str, &str)] = include!(concat!(env!("OUT_DIR"), "/ui_sources.rs"));
 
 /// The whole interface markup as one text, for tests that read the markup
 /// rather than drive a window.
@@ -150,31 +58,9 @@ pub(crate) fn ui_declaration<'a>(source: &'a str, opening: &str) -> Option<&'a s
 }
 
 #[test]
-#[allow(clippy::expect_used)]
-fn every_slint_module_is_read_by_the_markup_tests() {
-    fn collect(directory: &std::path::Path, root: &std::path::Path, found: &mut Vec<String>) {
-        for entry in std::fs::read_dir(directory).expect("the markup directory") {
-            let path = entry.expect("a directory entry").path();
-            if path.is_dir() {
-                collect(&path, root, found);
-            } else if path
-                .extension()
-                .is_some_and(|extension| extension == "slint")
-            {
-                let relative = path.strip_prefix(root).expect("under the markup root");
-                found.push(relative.to_string_lossy().replace('\\', "/"));
-            }
-        }
-    }
-
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
-    let mut on_disk = Vec::new();
-    collect(&root, &root, &mut on_disk);
-    on_disk.sort();
-    let mut listed: Vec<String> = UI_SOURCES
-        .iter()
-        .map(|(path, _)| (*path).to_owned())
-        .collect();
-    listed.sort();
-    assert_eq!(listed, on_disk);
+fn the_markup_sources_include_the_window_and_the_theme() {
+    let names: Vec<&str> = UI_SOURCES.iter().map(|(name, _)| *name).collect();
+    assert!(names.contains(&"app.slint"));
+    assert!(names.contains(&"theme.slint"));
+    assert!(names.windows(2).all(|pair| pair[0] < pair[1]));
 }
