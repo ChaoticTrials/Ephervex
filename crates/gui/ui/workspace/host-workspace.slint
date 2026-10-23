@@ -1,7 +1,7 @@
 // A host workspace's chrome: pane header, surface tabs, workflow banner, and the pane host picker.
 
 import { HostIcon, LoaderGlyph } from "../components/artwork.slint";
-import { AppButton, BusySpinner, IconButton, LaunchAsButton, Pill, PillButton, StatePill, StateTone } from "../components/controls.slint";
+import { AppButton, BusySpinner, Chip, IconButton, KeyboardFocus, LaunchAsButton, Pill, PillButton, StatePill, StateTone } from "../components/controls.slint";
 import { BodyText, Divider, Heading } from "../components/text.slint";
 import { GuiI18n, HostIcons } from "../globals.slint";
 import {
@@ -10,7 +10,7 @@ import {
     WorkspaceHostChoice,
     WorkspaceSurfaceRow
 } from "../models.slint";
-import { Plate } from "../components/surface.slint";
+import { Panel, Plate } from "../components/surface.slint";
 import { Theme } from "../theme.slint";
 
 // A host's Java at a glance: the runtime it would run with, in a tone that
@@ -60,6 +60,7 @@ export component WorkspaceTab inherits Rectangle {
         vertical-alignment: center;
         overflow: elide;
     }
+    KeyboardFocus { width: root.width; height: root.height; ring-radius: Theme.small-radius; activated => { root.clicked(); } }
     area := TouchArea { clicked => { root.clicked(); } }
 }
 
@@ -88,6 +89,7 @@ export component PaneHostButton inherits Rectangle {
         Text { text: root.name; color: Theme.text; font-size: Theme.body-size; font-weight: 600; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
         Path { width: 8px; height: 5px; y: (parent.height - self.height) / 2; commands: "M 0 0 L 4 4 L 8 0"; stroke: Theme.text-secondary; stroke-width: 1.5px; fill: transparent; }
     }
+    KeyboardFocus { width: root.width; height: root.height; ring-radius: Theme.small-radius; activated => { root.clicked(); } }
     area := TouchArea { clicked => { root.clicked(); } }
 }
 
@@ -110,6 +112,24 @@ export component SurfaceTabs inherits Rectangle {
     // Placed by hand rather than laid out: how many tabs fit depends on
     // this bar's width, which a layout would in turn take from the tabs.
     property <int> leading: root.fitting - (root.selected-hidden ? 1 : 0);
+    // The entry the keyboard is on in the More list, or -1.
+    property <int> highlight: -1;
+    // An entry of the More list: a surface without a tab of its own.
+    function usable(index: int) -> bool {
+        return index >= root.leading && index < root.surfaces.length && index != root.selected-index;
+    }
+    function first-usable() -> int {
+        return root.usable(root.leading) ? root.leading : root.leading + 1;
+    }
+    function last-usable() -> int {
+        let last = root.surfaces.length - 1;
+        return root.usable(last) ? last : last - 1;
+    }
+    function step(from: int, direction: int) -> int {
+        let next = from + direction;
+        let skipped = next == root.selected-index ? next + direction : next;
+        return root.usable(skipped) ? skipped : from;
+    }
     for surface[index] in root.surfaces : WorkspaceTab {
         property <bool> shown: index == root.selected-index || index < root.leading;
         x: (index < root.leading ? index : root.leading) * root.tab-width;
@@ -121,10 +141,14 @@ export component SurfaceTabs inherits Rectangle {
         selected: root.selected == surface.id;
         clicked => { root.chosen(surface.id); }
     }
-    if !root.all-fit : Rectangle {
+    if !root.all-fit : more-host := Rectangle {
         // The list is placed when it opens, so More moving or resizing would
         // leave it behind.
         property <Point> anchor: self.absolute-position;
+        function open-more() {
+            root.highlight = root.first-usable();
+            menu.show();
+        }
         changed anchor => { menu.close(); }
         changed width => { menu.close(); }
         x: root.fitting * root.tab-width;
@@ -135,8 +159,8 @@ export component SurfaceTabs inherits Rectangle {
             accessible-role: button;
             accessible-label: GuiI18n.text("gui-workspace-more-surfaces");
             accessible-expandable: true;
-            accessible-action-default => { menu.show(); }
-            accessible-action-expand => { menu.show(); }
+            accessible-action-default => { more-host.open-more(); }
+            accessible-action-expand => { more-host.open-more(); }
             Plate {
                 x: 2px;
                 y: 1px;
@@ -152,7 +176,8 @@ export component SurfaceTabs inherits Rectangle {
                 Text { text: GuiI18n.text("gui-workspace-more-surfaces"); color: Theme.text; font-size: Theme.body-size; font-weight: 700; vertical-alignment: center; }
                 Path { width: 8px; height: 5px; y: (parent.height - self.height) / 2; commands: "M 0 0 L 4 4 L 8 0"; stroke: Theme.text-secondary; stroke-width: 1.5px; fill: transparent; }
             }
-            more-area := TouchArea { clicked => { menu.show(); } }
+            KeyboardFocus { width: parent.width; height: parent.height; ring-radius: Theme.small-radius; activated => { more-host.open-more(); } }
+            more-area := TouchArea { clicked => { more-host.open-more(); } }
     }
     menu := PopupWindow {
         x: 0px;
@@ -160,25 +185,50 @@ export component SurfaceTabs inherits Rectangle {
         // The hard shadow falls outside the list.
         width: max(root.tab-width * 1.5, 180px) + Theme.shadow-offset-card;
         height: menu-list.preferred-height + Theme.shadow-offset-card;
-        Plate {
-            width: parent.width - Theme.shadow-offset-card;
-            height: parent.height - Theme.shadow-offset-card;
-            lift: Theme.shadow-offset-card;
-            radius: Theme.button-radius;
-            fill: Theme.overlay;
-            menu-list := VerticalLayout {
-                padding: 4px;
-                for surface[index] in root.surfaces : Rectangle {
-                    property <bool> hidden: !(index == root.selected-index || index < root.leading);
-                    height: self.hidden ? 34px : 0px;
-                    visible: self.hidden;
-                    border-radius: Theme.chip-radius;
-                    background: entry-area.has-hover ? Theme.selection : transparent;
-                    accessible-role: button;
-                    accessible-label: surface.label;
-                    accessible-action-default => { root.chosen(surface.id); }
-                    Text { x: 10px; text: surface.label; color: Theme.text; font-size: Theme.body-size; font-weight: 600; vertical-alignment: center; height: parent.height; }
-                    entry-area := TouchArea { clicked => { root.chosen(surface.id); } }
+        close-policy: close-on-click-outside;
+        forward-focus: keys;
+        keys := FocusScope {
+            key-pressed(event) => {
+                if (event.text == Key.DownArrow) {
+                    root.highlight = root.step(root.highlight, 1);
+                } else if (event.text == Key.UpArrow) {
+                    root.highlight = root.step(root.highlight, -1);
+                } else if (event.text == Key.Home) {
+                    root.highlight = root.first-usable();
+                } else if (event.text == Key.End) {
+                    root.highlight = root.last-usable();
+                } else if (event.text == Key.Return || event.text == " ") {
+                    if (root.usable(root.highlight)) {
+                        menu.close();
+                        root.chosen(root.surfaces[root.highlight].id);
+                    }
+                } else if (event.text == Key.Escape) {
+                    menu.close();
+                } else {
+                    return reject;
+                }
+                return accept;
+            }
+            Plate {
+                width: parent.width - Theme.shadow-offset-card;
+                height: parent.height - Theme.shadow-offset-card;
+                lift: Theme.shadow-offset-card;
+                radius: Theme.button-radius;
+                fill: Theme.overlay;
+                menu-list := VerticalLayout {
+                    padding: 4px;
+                    for surface[index] in root.surfaces : Rectangle {
+                        property <bool> listed: root.usable(index);
+                        height: self.listed ? 34px : 0px;
+                        visible: self.listed;
+                        border-radius: Theme.chip-radius;
+                        background: entry-area.has-hover || index == root.highlight ? Theme.selection : transparent;
+                        accessible-role: button;
+                        accessible-label: surface.label;
+                        accessible-action-default => { root.chosen(surface.id); }
+                        Text { x: 10px; text: surface.label; color: Theme.text; font-size: Theme.body-size; font-weight: 600; vertical-alignment: center; height: parent.height; }
+                        entry-area := TouchArea { clicked => { root.chosen(surface.id); } }
+                    }
                 }
             }
         }
@@ -279,6 +329,16 @@ export component HostWorkspace inherits Rectangle {
     callback open-java();
     // A server's address and port, beside its name; empty for a client.
     in property <string> address;
+    // What the page header's chips say about the host; an empty text or a
+    // negative count hides its chip.
+    in property <string> minecraft;
+    in property <string> loader;
+    in property <string> loader-kind;
+    in property <string> storage;
+    in property <int> mods: -1;
+    // The other side of a linked pair, by name, and the chip tone of that side.
+    in property <string> linked-name;
+    in property <string> linked-tone: "server";
     // Properties were saved that the running server reads once restarted.
     in property <bool> restart-required;
     property <color> pair-tone: StateTone.of-or(root.pair-state-kind, Theme.accent);
@@ -286,141 +346,172 @@ export component HostWorkspace inherits Rectangle {
     callback split-beside();
     callback split-below();
     callback close-pane();
-    background: Theme.background;
-    border-width: root.compact ? Theme.strong-border-width : 0px;
-    border-color: Theme.border-strong;
-    border-radius: root.compact ? Theme.card-radius : 0px;
-    clip: true;
     accessible-role: groupbox;
     accessible-label: root.pane-label;
-    VerticalLayout {
-        padding: root.compact ? 12px : 22px;
-        spacing: root.compact ? 10px : 14px;
-        // The host on one row: which it is, its state, and its actions.
-        // The view below: which surface, and the layout controls.
-        if root.compact : VerticalLayout {
-            spacing: 8px;
-            // Placed by hand rather than laid out: the actions move under
-            // the host when one row cannot hold both, and a layout would
-            // take that row's width from the actions it decides about.
-            Rectangle {
-                property <length> gap: 8px;
-                property <bool> one-row: host-row.min-width + self.gap + actions.min-width <= self.width;
-                height: self.one-row ? Theme.control-height : 2 * Theme.control-height + self.gap;
-                host-row := HorizontalLayout {
-                    x: 0px;
-                    y: 0px;
-                    width: parent.one-row ? parent.width - actions.width - parent.gap : parent.width;
-                    height: Theme.control-height;
-                    spacing: parent.gap;
-                    PaneHostButton {
-                        name: root.title;
-                        kind: root.host-kind-label;
-                        accessible-name: GuiI18n.value("gui-pane-host", root.pane-label);
-                        clicked => { root.choose-host(); }
-                    }
-                    VerticalLayout { alignment: center; StatePill { state: root.status; state-kind: root.status-kind; restarting: root.restart-stage != ""; } }
-                    if root.restart-required : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-server-restart-required"); tone-color: Theme.warning; } }
-                    if root.paired && root.width >= 520px : VerticalLayout { alignment: center; Pill { text: root.pair-label; tone-color: root.pair-tone; } }
-                    if root.address != "" && root.width >= 760px : VerticalLayout { alignment: center; Pill { text: root.address; } }
-                    if root.java-summary != "" && root.width >= 640px : VerticalLayout { alignment: center; JavaRuntimePill { summary: root.java-summary; origin: root.java-origin; tone: root.java-tone; tone-label: root.java-tone-label; clicked => { root.open-java(); } } }
+    Panel {
+        radius: root.compact ? Theme.card-radius : Theme.dialog-radius;
+        VerticalLayout {
+            // The header runs edge to edge over the page color; the
+            // body under it keeps its own padding.
+            if !root.compact : Rectangle {
+                height: head.preferred-height;
+                background: Theme.background;
+                Rectangle {
+                    y: parent.height - self.height;
+                    height: Theme.strong-border-width;
+                    background: Theme.border-strong;
                 }
-                actions := HorizontalLayout {
-                    x: parent.width - self.width;
-                    y: parent.one-row ? 0px : Theme.control-height + parent.gap;
-                    width: self.min-width;
-                    height: Theme.control-height;
-                    spacing: parent.gap;
-                    if root.kill-visible : AppButton { text: GuiI18n.text("gui-kill"); accessible-name: GuiI18n.values("gui-pane-action", GuiI18n.text("gui-kill"), root.pane-label); tone: "danger"; enabled: root.kill-enabled; hint: root.kill-hint; clicked => { root.kill(); } }
-                    if root.restart-visible : AppButton { text: GuiI18n.text("gui-restart"); accessible-name: GuiI18n.values("gui-pane-action", GuiI18n.text("gui-restart"), root.pane-label); enabled: root.restart-enabled && !root.occupied; hint: root.restart-reason; clicked => { root.restart(); } }
-                    AppButton { text: root.primary-label; accessible-name: GuiI18n.values("gui-pane-action", root.primary-label, root.pane-label); tone: root.primary-tone; enabled: root.primary-enabled && !root.primary-waits; hint: root.primary-reason; clicked => { root.primary(); } }
+                head := VerticalLayout {
+                    padding-top: 18px; padding-bottom: 18px; padding-left: 22px; padding-right: 22px;
+                    spacing: 10px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        if root.back-label != "" : AppButton { text: root.back-label; clicked => { root.back(); } }
+                        VerticalLayout { alignment: center; Text { text: root.host-kind-label; color: Theme.text-muted; font-size: Theme.caption-size; font-weight: 700; } }
+                        VerticalLayout { alignment: center; StatePill { state: root.status; state-kind: root.status-kind; restarting: root.restart-stage != ""; } }
+                        if root.restart-required : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-server-restart-required"); tone-color: Theme.warning; } }
+                        if root.paired : VerticalLayout { alignment: center; Pill { text: root.pair-label; tone-color: root.pair-tone; } }
+                        if root.java-summary != "" : VerticalLayout { alignment: center; JavaRuntimePill { summary: root.java-summary; origin: root.java-origin; tone: root.java-tone; tone-label: root.java-tone-label; clicked => { root.open-java(); } } }
+                        Rectangle { horizontal-stretch: 1; }
+                        HorizontalLayout {
+                            spacing: 12px;
+                            if root.can-split-beside : IconButton { icon: @image-url("../../../../assets/icons/split-beside.svg"); accessible-name: GuiI18n.text("gui-workspace-split"); clicked => { root.split-beside(); } }
+                            AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-folder(); } }
+                            if root.show-launch-as : LaunchAsButton {
+                                account-entries: root.account-entries;
+                                enabled: root.primary-enabled && !root.occupied;
+                                hint: root.occupied ? root.occupied-text : root.primary-hint;
+                                alongside: root.launch-alongside;
+                                launch-as(account, alongside) => { root.launch-as(account, alongside); }
+                                add-account => { root.add-account(); }
+                            }
+                            if root.kill-visible : AppButton { text: GuiI18n.text("gui-kill"); tone: "danger"; enabled: root.kill-enabled; hint: root.kill-hint; clicked => { root.kill(); } }
+                            if root.restart-visible : AppButton { text: GuiI18n.text("gui-restart"); enabled: root.restart-enabled && !root.occupied; hint: root.restart-reason; clicked => { root.restart(); } }
+                            AppButton { text: root.primary-label; tone: root.primary-tone; enabled: root.primary-enabled && !root.primary-waits; hint: root.primary-reason; clicked => { root.primary(); } }
+                        }
+                    }
+                    Heading { text: root.title; font-size: Theme.workspace-title-size; overflow: elide; }
+                    HorizontalLayout {
+                        // The header keeps its height whichever chips a host has.
+                        min-height: Theme.chip-height;
+                        spacing: 8px;
+                        alignment: start;
+                        if root.minecraft != "" : VerticalLayout { alignment: center; Chip { text: root.minecraft; } }
+                        if root.loader != "" : VerticalLayout { alignment: center; Chip { text: root.loader; tone: root.loader-kind; } }
+                        if root.mods >= 0 : VerticalLayout { alignment: center; Chip { text: GuiI18n.count("gui-host-chip-mods", root.mods); } }
+                        if root.storage != "" : VerticalLayout { alignment: center; Chip { text: root.storage; } }
+                        if root.linked-name != "" : VerticalLayout { alignment: center; Chip { text: root.linked-name; tone: root.linked-tone; width: min(self.natural-width, 200px); } }
+                        if root.address != "" : VerticalLayout { alignment: center; Chip { text: root.address; } }
+                    }
                 }
             }
-            HorizontalLayout {
-                spacing: 8px;
-                SurfaceTabs {
+            VerticalLayout {
+                padding: root.compact ? 12px : 22px;
+                spacing: root.compact ? 10px : 14px;
+                // The host on one row: which it is, its state, and its actions.
+                // The view below: which surface, and the layout controls.
+                if root.compact : VerticalLayout {
+                    spacing: 8px;
+                    // Placed by hand rather than laid out: the actions move under
+                    // the host when one row cannot hold both, and a layout would
+                    // take that row's width from the actions it decides about.
+                    Rectangle {
+                        property <length> gap: 8px;
+                        property <bool> one-row: host-row.min-width + self.gap + actions.min-width <= self.width;
+                        height: self.one-row ? Theme.control-height : 2 * Theme.control-height + self.gap;
+                        host-row := HorizontalLayout {
+                            x: 0px;
+                            y: 0px;
+                            width: parent.one-row ? parent.width - actions.width - parent.gap : parent.width;
+                            height: Theme.control-height;
+                            spacing: parent.gap;
+                            PaneHostButton {
+                                name: root.title;
+                                kind: root.host-kind-label;
+                                accessible-name: GuiI18n.value("gui-pane-host", root.pane-label);
+                                clicked => { root.choose-host(); }
+                            }
+                            VerticalLayout { alignment: center; StatePill { state: root.status; state-kind: root.status-kind; restarting: root.restart-stage != ""; } }
+                            if root.restart-required : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-server-restart-required"); tone-color: Theme.warning; } }
+                            if root.paired && root.width >= 520px : VerticalLayout { alignment: center; Pill { text: root.pair-label; tone-color: root.pair-tone; } }
+                            if root.address != "" && root.width >= 760px : VerticalLayout { alignment: center; Pill { text: root.address; } }
+                            if root.java-summary != "" && root.width >= 640px : VerticalLayout { alignment: center; JavaRuntimePill { summary: root.java-summary; origin: root.java-origin; tone: root.java-tone; tone-label: root.java-tone-label; clicked => { root.open-java(); } } }
+                        }
+                        actions := HorizontalLayout {
+                            x: parent.width - self.width;
+                            y: parent.one-row ? 0px : Theme.control-height + parent.gap;
+                            width: self.min-width;
+                            height: Theme.control-height;
+                            spacing: parent.gap;
+                            if root.kill-visible : AppButton { text: GuiI18n.text("gui-kill"); accessible-name: GuiI18n.values("gui-pane-action", GuiI18n.text("gui-kill"), root.pane-label); tone: "danger"; enabled: root.kill-enabled; hint: root.kill-hint; clicked => { root.kill(); } }
+                            if root.restart-visible : AppButton { text: GuiI18n.text("gui-restart"); accessible-name: GuiI18n.values("gui-pane-action", GuiI18n.text("gui-restart"), root.pane-label); enabled: root.restart-enabled && !root.occupied; hint: root.restart-reason; clicked => { root.restart(); } }
+                            AppButton { text: root.primary-label; accessible-name: GuiI18n.values("gui-pane-action", root.primary-label, root.pane-label); tone: root.primary-tone; enabled: root.primary-enabled && !root.primary-waits; hint: root.primary-reason; clicked => { root.primary(); } }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        SurfaceTabs {
+                            surfaces: root.surfaces;
+                            selected: root.selected-surface;
+                            selected-index: root.surface-choice;
+                            chosen(surface) => { root.surface-selected(surface); }
+                        }
+                        IconButton { icon: @image-url("../../../../assets/icons/folder.svg"); accessible-name: GuiI18n.values("gui-pane-action", root.folder-label, root.pane-label); tooltip: root.folder-label; clicked => { root.open-folder(); } }
+                        if root.can-split-below : IconButton { icon: @image-url("../../../../assets/icons/split-below.svg"); accessible-name: GuiI18n.value("gui-pane-split-below", root.pane-label); tooltip: GuiI18n.text("gui-pane-split-below-tooltip"); clicked => { root.split-below(); } }
+                        if root.can-close : IconButton { icon: @image-url("../../../../assets/icons/close.svg"); accessible-name: GuiI18n.value("gui-pane-close", root.pane-label); tooltip: GuiI18n.text("gui-pane-close-tooltip"); clicked => { root.close-pane(); } }
+                    }
+                }
+                if root.workflow-id != "" && root.workflow-here : Rectangle {
+                    height: max(64px, workflow-copy.preferred-height + 24px);
+                    border-radius: Theme.small-radius;
+                    border-width: Theme.strong-border-width;
+                    border-color: Theme.border-strong;
+                    background: Theme.note-fill;
+                    HorizontalLayout {
+                        padding: 12px; spacing: 9px; cross-axis-alignment: center;
+                        workflow-copy := VerticalLayout {
+                            horizontal-stretch: 1;
+                            Heading { text: root.workflow-title; font-size: Theme.row-heading-size; }
+                            BodyText { text: root.workflow-summary; color: Theme.text-secondary; wrap: word-wrap; }
+                            if root.occupied : HorizontalLayout {
+                                spacing: 6px;
+                                BusySpinner { width: 14px; height: 14px; }
+                                BodyText { text: root.occupied-text; horizontal-stretch: 1; wrap: word-wrap; }
+                            }
+                        }
+                        for action in root.workflow-actions : AppButton {
+                            text: action.label;
+                            tone: action.tone;
+                            enabled: action.enabled && (!action.requires-stopped || (!root.host-running && !root.occupied));
+                            hint: root.occupied ? root.occupied-text : GuiI18n.text("gui-hint-stop-host-first");
+                            clicked => { root.workflow-action(root.workflow-id, action.id); }
+                        }
+                    }
+                }
+                // Before a workflow is active, such as while one starts, its
+                // progress still belongs above the surface that asked for it.
+                if root.occupied && root.workflow-id == "" : Rectangle {
+                    border-radius: Theme.small-radius;
+                    border-width: Theme.strong-border-width;
+                    border-color: Theme.border-strong;
+                    background: Theme.surface;
+                    HorizontalLayout {
+                        padding: 10px; spacing: 9px; cross-axis-alignment: center;
+                        BusySpinner { width: 18px; height: 18px; }
+                        BodyText { text: root.occupied-text; horizontal-stretch: 1; wrap: word-wrap; }
+                    }
+                }
+                if !root.compact : SurfaceTabs {
                     surfaces: root.surfaces;
                     selected: root.selected-surface;
                     selected-index: root.surface-choice;
                     chosen(surface) => { root.surface-selected(surface); }
                 }
-                IconButton { icon: @image-url("../../../../assets/icons/folder.svg"); accessible-name: GuiI18n.values("gui-pane-action", root.folder-label, root.pane-label); tooltip: root.folder-label; clicked => { root.open-folder(); } }
-                if root.can-split-below : IconButton { icon: @image-url("../../../../assets/icons/split-below.svg"); accessible-name: GuiI18n.value("gui-pane-split-below", root.pane-label); tooltip: GuiI18n.text("gui-pane-split-below-tooltip"); clicked => { root.split-below(); } }
-                if root.can-close : IconButton { icon: @image-url("../../../../assets/icons/close.svg"); accessible-name: GuiI18n.value("gui-pane-close", root.pane-label); tooltip: GuiI18n.text("gui-pane-close-tooltip"); clicked => { root.close-pane(); } }
+
+                Divider { }
+                @children
             }
         }
-        if !root.compact : HorizontalLayout {
-            spacing: 12px;
-            if root.back-label != "" : AppButton { text: root.back-label; clicked => { root.back(); } }
-            Heading { text: root.title; font-size: Theme.workspace-title-size; overflow: elide; }
-            VerticalLayout { alignment: center; StatePill { state: root.status; state-kind: root.status-kind; restarting: root.restart-stage != ""; } }
-            if root.restart-required : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-server-restart-required"); tone-color: Theme.warning; } }
-            if root.paired : VerticalLayout { alignment: center; Pill { text: root.pair-label; tone-color: root.pair-tone; } }
-            if root.address != "" && root.width >= 980px : VerticalLayout { alignment: center; Pill { text: root.address; } }
-            if root.java-summary != "" : VerticalLayout { alignment: center; JavaRuntimePill { summary: root.java-summary; origin: root.java-origin; tone: root.java-tone; tone-label: root.java-tone-label; clicked => { root.open-java(); } } }
-            Rectangle { horizontal-stretch: 1; }
-            if root.can-split-beside : IconButton { icon: @image-url("../../../../assets/icons/split-beside.svg"); accessible-name: GuiI18n.text("gui-workspace-split"); clicked => { root.split-beside(); } }
-            AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-folder(); } }
-            if root.show-launch-as : LaunchAsButton {
-                account-entries: root.account-entries;
-                enabled: root.primary-enabled && !root.occupied;
-                hint: root.occupied ? root.occupied-text : root.primary-hint;
-                alongside: root.launch-alongside;
-                launch-as(account, alongside) => { root.launch-as(account, alongside); }
-                add-account => { root.add-account(); }
-            }
-            if root.kill-visible : AppButton { text: GuiI18n.text("gui-kill"); tone: "danger"; enabled: root.kill-enabled; hint: root.kill-hint; clicked => { root.kill(); } }
-            if root.restart-visible : AppButton { text: GuiI18n.text("gui-restart"); enabled: root.restart-enabled && !root.occupied; hint: root.restart-reason; clicked => { root.restart(); } }
-            AppButton { text: root.primary-label; tone: root.primary-tone; enabled: root.primary-enabled && !root.primary-waits; hint: root.primary-reason; clicked => { root.primary(); } }
-        }
-        if root.workflow-id != "" && root.workflow-here : Rectangle {
-            height: max(64px, workflow-copy.preferred-height + 24px);
-            border-radius: Theme.small-radius;
-            border-width: Theme.strong-border-width;
-            border-color: Theme.border-strong;
-            background: Theme.note-fill;
-            HorizontalLayout {
-                padding: 12px; spacing: 9px; cross-axis-alignment: center;
-                workflow-copy := VerticalLayout {
-                    horizontal-stretch: 1;
-                    Heading { text: root.workflow-title; font-size: Theme.row-heading-size; }
-                    BodyText { text: root.workflow-summary; color: Theme.text-secondary; wrap: word-wrap; }
-                    if root.occupied : HorizontalLayout {
-                        spacing: 6px;
-                        BusySpinner { width: 14px; height: 14px; }
-                        BodyText { text: root.occupied-text; horizontal-stretch: 1; wrap: word-wrap; }
-                    }
-                }
-                for action in root.workflow-actions : AppButton {
-                    text: action.label;
-                    tone: action.tone;
-                    enabled: action.enabled && (!action.requires-stopped || (!root.host-running && !root.occupied));
-                    hint: root.occupied ? root.occupied-text : GuiI18n.text("gui-hint-stop-host-first");
-                    clicked => { root.workflow-action(root.workflow-id, action.id); }
-                }
-            }
-        }
-        // Before a workflow is active, such as while one starts, its
-        // progress still belongs above the surface that asked for it.
-        if root.occupied && root.workflow-id == "" : Rectangle {
-            border-radius: Theme.small-radius;
-            border-width: Theme.strong-border-width;
-            border-color: Theme.border-strong;
-            background: Theme.surface;
-            HorizontalLayout {
-                padding: 10px; spacing: 9px; cross-axis-alignment: center;
-                BusySpinner { width: 18px; height: 18px; }
-                BodyText { text: root.occupied-text; horizontal-stretch: 1; wrap: word-wrap; }
-            }
-        }
-        if !root.compact : SurfaceTabs {
-            surfaces: root.surfaces;
-            selected: root.selected-surface;
-            selected-index: root.surface-choice;
-            chosen(surface) => { root.surface-selected(surface); }
-        }
-        Divider { }
-        @children
     }
 }
 
@@ -453,6 +544,7 @@ export component HostPickerCard inherits Rectangle {
         lift: Theme.shadow-offset-card;
         fill: root.current ? Theme.selection-card : card-area.has-hover ? Theme.elevated : Theme.surface;
     }
+    KeyboardFocus { width: root.width; height: root.height; ring-radius: Theme.card-radius; activated => { root.picked(root.item.kind, root.item.id); } }
     card-area := TouchArea { clicked => { root.picked(root.item.kind, root.item.id); } }
     VerticalLayout {
         padding: 12px; spacing: 8px;
@@ -492,6 +584,7 @@ export component HostPickerCard inherits Rectangle {
             accessible-role: button;
             accessible-label: GuiI18n.value("gui-host-choice-server", server.name);
             accessible-action-default => { root.picked("server", server.id); }
+            KeyboardFocus { width: parent.width; height: parent.height; ring-radius: Theme.small-radius; activated => { root.picked("server", server.id); } }
             linked-area := TouchArea { clicked => { root.picked("server", server.id); } }
             HorizontalLayout {
                 padding-left: 10px; padding-right: 10px; spacing: 8px;

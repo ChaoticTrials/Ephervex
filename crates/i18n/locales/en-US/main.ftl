@@ -2512,6 +2512,13 @@ gui-pane-bottom-left = Bottom left
 gui-pane-top-right = Top right
 gui-pane-bottom-right = Bottom right
 gui-pane-host = Host shown in { $value }
+
+# A host's mod count on its page header.
+gui-host-chip-mods = { $count ->
+    [one] 1 mod
+   *[other] { $count } mods
+}
+
 gui-workspace-more-surfaces = More
 gui-pane-split-below = Add a pane below { $value }
 gui-pane-close = Close { $value }

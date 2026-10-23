@@ -354,6 +354,17 @@ not another host header or navigation structure. More than one host workspace
 can therefore be composed by a parent without teaching its surfaces about that
 parent.
 
+A host's page is a framed plate like Home. Its header band runs edge to edge in
+the page color and holds the host's kind and state, its name, the actions it
+offers, and a strip of chips for its Minecraft version, loader, mod count,
+storage class, and linked server. The surface tabs sit below the band. Each
+pane of a split is the same plate in a smaller frame with a compact header. The
+page area never scrolls: the window's minimum size keeps every pane at or above
+its minimum size, so the plates' hard shadows fall into the gaps and the page
+margin. The surface tabs, a pane's host button, the More button, and the host
+picker are Tab stops with the shared focus ring and Enter or Space activation;
+the More list takes focus when it opens and is walked with the arrow keys.
+
 A server's Mods surface carries the same catalog browser as a client's, and it
 is absent for a Vanilla server and for one whose base installation is not
 complete. A result whose server side the catalog never stated is marked with a

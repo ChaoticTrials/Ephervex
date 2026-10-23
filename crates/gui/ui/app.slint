@@ -1291,7 +1291,6 @@ export component AppWindow inherits Window {
                 if root.workspace-open && !root.settings-open : Rectangle {
                     property <bool> split: root.workspace-panes.length > 1;
                     horizontal-stretch: 1;
-                    background: Theme.background;
                     VerticalLayout {
                         if split : HorizontalLayout {
                             padding-left: 12px; padding-right: 12px; padding-top: 12px;
@@ -1301,18 +1300,16 @@ export component AppWindow inherits Window {
                             Rectangle { horizontal-stretch: 1; }
                         }
                         // Two equal columns of one or two equal rows. A window
-                        // too small for the panes' minimum scrolls them rather
-                        // than letting one pane draw over another.
-                        pane-area := ScrollView {
+                        // too small for the panes' minimum cuts them off rather than
+                        // letting one pane draw over another.
+                        pane-area := Rectangle {
                             property <length> gap: 10px;
                             property <length> margin: split ? 12px : 0px;
-                            property <length> area-width: max(self.visible-width - 2 * self.margin, split ? 2 * Theme.workspace-pane-min-width + self.gap : 0px);
-                            property <length> area-height: max(self.visible-height - 2 * self.margin, split ? 2 * Theme.workspace-pane-min-height + self.gap : 0px);
+                            property <length> area-width: max(self.width - 2 * self.margin, split ? 2 * Theme.workspace-pane-min-width + self.gap : 0px);
+                            property <length> area-height: max(self.height - 2 * self.margin, split ? 2 * Theme.workspace-pane-min-height + self.gap : 0px);
                             property <length> column-width: split ? (self.area-width - self.gap) / 2 : self.area-width;
                             property <length> stacked-height: (self.area-height - self.gap) / 2;
                             vertical-stretch: 1;
-                            viewport-width: self.area-width + 2 * self.margin;
-                            viewport-height: self.area-height + 2 * self.margin;
                             for pane in root.workspace-panes : HostWorkspace {
                                 property <HostView> host: root.host-views[pane.host];
                                 property <LogView> log-view: root.log-views[pane.log];
@@ -1340,6 +1337,13 @@ export component AppWindow inherits Window {
                                 java-origin: host.java-origin;
                                 open-java => { root.show-pane-surface(pane.id, "Settings"); }
                                 address: self.is-client ? "" : host.server.address;
+                                minecraft: self.is-client ? host.client.minecraft : host.server.minecraft;
+                                loader: self.is-client ? host.client.loader : host.server.loader;
+                                loader-kind: self.is-client ? host.client.loader-kind : host.server.loader-kind;
+                                storage: self.is-client ? host.client.storage : host.server.storage;
+                                mods: self.is-client ? host.client.mods : -1;
+                                linked-name: self.is-client ? host.client.paired-server-name : host.server.paired-client-name;
+                                linked-tone: self.is-client ? "server" : "neutral";
                                 restart-required: !self.is-client && host.server.restart-required;
                                 choose-host => { root.pane-host-picker-pane = pane.id; root.pane-host-picker-kind = host.kind; root.pane-host-picker-id = host.id; root.pane-host-query = ""; root.pane-host-query-changed(); root.modal = "pane-host"; }
                                 split-beside => { root.split-pane-beside(pane.id); }

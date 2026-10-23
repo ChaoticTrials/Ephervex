@@ -225,8 +225,9 @@ export global Theme {
     // the same declared height, so the row and the list have to agree.
     out property <length> license-row-height: 30px;
     // The smallest a pane of a split workspace is drawn. Below it the
-    // panes scroll together instead of overlapping or squeezing their
-    // headers, and the pane geometry arithmetic reads the same numbers.
+    // panes keep this size and are cut off at the window's edge instead of
+    // overlapping or squeezing their headers, and the pane geometry
+    // arithmetic reads the same numbers.
     out property <length> workspace-pane-min-width: 360px;
     out property <length> workspace-pane-min-height: 260px;
     // The column a Minecraft default row keeps its editor and Reset action in

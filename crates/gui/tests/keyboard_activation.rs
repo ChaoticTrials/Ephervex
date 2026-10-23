@@ -7,10 +7,13 @@
 
 #![allow(clippy::expect_used)]
 
+mod support;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ephervex_gui::ui::{AppWindow, GuiI18n};
+use ephervex_gui::ui::{AppWindow, GuiI18n, InstanceRow, ServerRow};
+use ephervex_gui::workspace_layout::Surface;
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{
     AccessibleRole, ElementHandle, ElementQuery, TestingBackend, TestingBackendOptions,
@@ -283,6 +286,98 @@ fn only_the_focused_control_draws_the_focus_outline() {
     let home = control(&ui, &lookup("gui-home"));
     assert!(tab_to(&ui, &home));
     assert_eq!(focus_outlines(&ui).len(), 1);
+}
+
+#[test]
+fn tab_reaches_a_surface_tab_and_enter_selects_that_surface() {
+    let ui = window();
+    let requests = support::follow_surface_requests(&ui);
+    support::show_client(&ui, client(), "Overview");
+    settle(&ui);
+
+    let mods = control(&ui, &lookup(Surface::Mods.label()));
+    assert!(tab_to(&ui, &mods), "Tab never reached the Mods tab");
+    press(&ui, Key::Return);
+
+    assert_eq!(requests.borrow().as_slice(), [(1, "Mods".to_string())]);
+}
+
+#[test]
+fn tab_reaches_a_panes_host_button_and_enter_opens_the_host_picker() {
+    let ui = window();
+    let mut first = support::pane(1, 0, "Overview");
+    first.label = "Pane 1".into();
+    let mut second = support::pane(2, 1, "Console");
+    second.column = 1;
+    second.label = "Pane 2".into();
+    support::show(
+        &ui,
+        vec![
+            support::client_view(client()),
+            support::server_view(ServerRow {
+                id: "server".into(),
+                name: "Repro Server".into(),
+                installed: true,
+                ..ServerRow::default()
+            }),
+        ],
+        vec![first, second],
+    );
+    settle(&ui);
+
+    let label = lookup_args(
+        "gui-pane-host",
+        [("value", Arg::from("Pane 2".to_string()))],
+    );
+    let host_button = control(&ui, &label);
+    assert!(
+        tab_to(&ui, &host_button),
+        "Tab never reached the second pane's host button"
+    );
+    press(&ui, Key::Return);
+
+    assert_eq!(ui.get_modal(), "pane-host");
+    assert_eq!(ui.get_pane_host_picker_pane(), 2);
+}
+
+#[test]
+fn the_more_list_is_walked_with_the_arrow_keys_and_enter_picks_the_entry() {
+    let ui = window();
+    let requests = support::follow_surface_requests(&ui);
+    let mut first = support::pane(1, 0, "Overview");
+    first.label = "Pane 1".into();
+    let mut second = support::pane(2, 0, "Mods");
+    second.column = 1;
+    second.label = "Pane 2".into();
+    support::show(
+        &ui,
+        vec![support::client_view(client())],
+        vec![first, second],
+    );
+    settle(&ui);
+
+    let more = control(&ui, &lookup("gui-workspace-more-surfaces"));
+    assert!(tab_to(&ui, &more), "Tab never reached the More button");
+    press(&ui, Key::Return);
+    press(&ui, Key::DownArrow);
+    press(&ui, Key::Return);
+
+    let requests = requests.borrow();
+    assert_eq!(requests.len(), 1, "one entry is picked: {requests:?}");
+    assert_eq!(requests[0].0, 1, "the first pane's list was used");
+    assert_ne!(requests[0].1, "Overview");
+}
+
+fn client() -> InstanceRow {
+    InstanceRow {
+        id: "client".into(),
+        name: "Repro Client".into(),
+        minecraft: "1.21.1".into(),
+        state: "Ready".into(),
+        state_kind: "ready".into(),
+        can_launch: true,
+        ..InstanceRow::default()
+    }
 }
 
 /// Presses Tab until the focus outline sits exactly on `target`, or focus has
