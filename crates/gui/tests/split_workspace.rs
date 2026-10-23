@@ -675,7 +675,7 @@ fn open_more(ui: &AppWindow, more: &ElementHandle, value: &str) {
     settle(ui);
     let entry = ElementHandle::find_by_accessible_label(ui, value)
         .filter(|element| element.accessible_role() == Some(AccessibleRole::Button))
-        .find(|element| element.size().height > 0.0 && element.absolute_position().y < 40.0)
+        .find(|element| element.size().height > 0.0 && element.absolute_position().y < 60.0)
         .unwrap_or_else(|| panic!("no entry {value} under More"));
     let origin = more.absolute_position();
     let within = entry.absolute_position();

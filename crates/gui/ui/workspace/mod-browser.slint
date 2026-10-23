@@ -126,6 +126,10 @@ export component ModBrowser inherits Rectangle {
         }
         ScrollView {
             VerticalLayout {
+                padding-left: Theme.lift-room;
+                padding-top: Theme.lift-room;
+                padding-right: Theme.shadow-room;
+                padding-bottom: Theme.shadow-room;
                 spacing: 8px;
                 for mod in root.host.browser-results : Rectangle {
                     height: 92px;

@@ -260,6 +260,144 @@ pub(crate) fn choice_index(choices: &[ThemeChoice], theme: &ApplicationTheme) ->
         .unwrap_or_default()
 }
 
+/// The pairs of foreground and fill the interface draws, checked against any
+/// complete palette, built in or from a theme file.
+#[cfg(test)]
+pub(crate) mod drawn_pairs {
+    use slint::Color;
+
+    use crate::ui::ThemePalette;
+
+    /// The WCAG contrast ratio of two opaque colors.
+    pub(crate) fn contrast(a: Color, b: Color) -> f64 {
+        fn luminance(color: Color) -> f64 {
+            let linear = |channel: u8| {
+                let value = f64::from(channel) / 255.0;
+                if value <= 0.039_28 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * linear(color.red())
+                + 0.7152 * linear(color.green())
+                + 0.0722 * linear(color.blue())
+        }
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    /// Each pair drawn, named, with the ratio it has to reach. A caption is
+    /// read at 4.5:1, a glyph at 3:1.
+    pub(crate) fn shortfalls(palette: &ThemePalette) -> Vec<String> {
+        let mut pairs: Vec<(String, Color, Color, f64)> = Vec::new();
+        let mut pair = |name: &str, front: Color, back: Color, minimum: f64| {
+            pairs.push((name.to_owned(), front, back, minimum));
+        };
+        for (name, fill) in [
+            ("surface", palette.surface),
+            ("selection", palette.selection),
+            ("selection-strong", palette.selection_strong),
+            ("note-fill", palette.note_fill),
+        ] {
+            pair(&format!("text on {name}"), palette.text, fill, 4.5);
+        }
+        for (name, fill) in [
+            ("accent-primary", palette.accent_primary),
+            ("state-running", palette.state_running),
+            ("state-building", palette.state_building),
+            ("state-attention", palette.state_attention),
+            ("state-stopped", palette.state_stopped),
+            ("state-server", palette.state_server),
+        ] {
+            pair(
+                &format!("on-accent on {name}"),
+                palette.on_accent,
+                fill,
+                4.5,
+            );
+        }
+        for (name, fill) in [
+            ("primary-fill", palette.primary_fill),
+            ("primary-fill-hover", palette.primary_fill_hover),
+        ] {
+            pair(
+                &format!("on-primary on {name}"),
+                palette.on_primary,
+                fill,
+                4.5,
+            );
+        }
+        for (name, fill) in [
+            ("danger-fill", palette.danger_fill),
+            ("danger-fill-hover", palette.danger_fill_hover),
+        ] {
+            pair(
+                &format!("on-danger on {name}"),
+                palette.on_danger,
+                fill,
+                4.5,
+            );
+        }
+        // The glyph of a favorite star that is on.
+        pair(
+            "warning on note-fill",
+            palette.warning,
+            palette.note_fill,
+            3.0,
+        );
+        // A pill's caption is its tone, drawn on `surface`, or on `selection`
+        // while a pill button is under the pointer.
+        let tones = [
+            ("text", palette.text),
+            ("text-secondary", palette.text_secondary),
+            ("text-muted", palette.text_muted),
+            ("accent", palette.accent),
+            ("accent-secondary", palette.accent_secondary),
+            ("success", palette.success),
+            ("warning", palette.warning),
+            ("danger", palette.danger),
+            ("server", palette.server),
+            ("modrinth", palette.modrinth),
+            ("curseforge", palette.curseforge),
+            ("group-tone-1", palette.group_tone_1),
+            ("group-tone-2", palette.group_tone_2),
+            ("group-tone-3", palette.group_tone_3),
+            ("group-tone-4", palette.group_tone_4),
+            ("group-tone-5", palette.group_tone_5),
+            ("group-tone-6", palette.group_tone_6),
+        ];
+        for (name, tone) in tones {
+            for (fill_name, fill) in [
+                ("surface", palette.surface),
+                ("selection", palette.selection),
+            ] {
+                pair(&format!("{name} on {fill_name}"), tone, fill, 4.5);
+            }
+        }
+        let mut found: Vec<String> = pairs
+            .into_iter()
+            .filter_map(|(name, front, back, minimum)| {
+                let ratio = contrast(front, back);
+                (ratio < minimum).then(|| format!("{name} is {ratio:.2}:1, under {minimum}:1"))
+            })
+            .collect();
+        // The knob sits on the track inside an outline. It stands apart from
+        // the track by its own fill, or by the outline when the fills are close.
+        for (track_name, track) in [("toggle-on", palette.toggle_on), ("bar", palette.bar)] {
+            let by_fill = contrast(palette.toggle_knob, track) >= 3.0;
+            let by_outline = contrast(palette.border_strong, track) >= 3.0
+                && contrast(palette.border_strong, palette.toggle_knob) >= 3.0;
+            if !by_fill && !by_outline {
+                found.push(format!(
+                    "the knob of a switch is not apart from its {track_name} track"
+                ));
+            }
+        }
+        found
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
@@ -642,24 +780,7 @@ mod tests {
         }
     }
 
-    /// The WCAG contrast ratio of two opaque colors.
-    fn contrast(a: Color, b: Color) -> f64 {
-        fn luminance(color: Color) -> f64 {
-            let linear = |channel: u8| {
-                let value = f64::from(channel) / 255.0;
-                if value <= 0.039_28 {
-                    value / 12.92
-                } else {
-                    ((value + 0.055) / 1.055).powf(2.4)
-                }
-            };
-            0.2126 * linear(color.red())
-                + 0.7152 * linear(color.green())
-                + 0.0722 * linear(color.blue())
-        }
-        let (a, b) = (luminance(a), luminance(b));
-        (a.max(b) + 0.05) / (a.min(b) + 0.05)
-    }
+    use super::drawn_pairs::{contrast, shortfalls};
 
     /// Every palette Ephervex ships.
     fn built_ins() -> Vec<(String, ThemePalette)> {
@@ -670,13 +791,13 @@ mod tests {
             .collect()
     }
 
-    /// A switch that is on is its knob over its track. A palette that paints
-    /// both in one color leaves a flat pill with nothing to say where it is set.
+    /// Every foreground the interface draws on a fill is readable on it, and a
+    /// switch's knob is told apart from its track.
     #[test]
-    fn the_knob_of_a_switch_that_is_on_stands_apart_from_its_track() {
+    fn every_drawn_pair_is_readable_in_the_built_in_palettes() {
         for (scheme, palette) in built_ins() {
-            let ratio = contrast(palette.toggle_knob, palette.toggle_on);
-            assert!(ratio >= 3.0, "{scheme}: knob over track is {ratio:.2}:1");
+            let found = shortfalls(&palette);
+            assert!(found.is_empty(), "{scheme}: {found:?}");
         }
     }
 

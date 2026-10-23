@@ -754,6 +754,23 @@ mod tests {
         assert_eq!(branding.icon.expect("icon").as_str(), "icon.png");
     }
 
+    /// The example is a dark theme with colors of its own, so it is held to the
+    /// same readable pairs the built-in palette is.
+    #[test]
+    fn the_documented_example_keeps_every_drawn_pair_readable() {
+        use slint::ComponentHandle as _;
+
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = crate::ui::AppWindow::new().expect("window");
+        let (theme, problems) = parse_theme("modrinth", EXAMPLE);
+        assert!(problems.is_empty(), "{problems:?}");
+        let theme = theme.expect("usable");
+        crate::palette::apply_theme(&ui, &theme.preference(), std::slice::from_ref(&theme));
+        let palette = ui.global::<crate::ui::Theme>().get_palette();
+        let found = crate::palette::drawn_pairs::shortfalls(&palette);
+        assert!(found.is_empty(), "{found:?}");
+    }
+
     #[test]
     fn every_color_a_theme_can_set_is_documented() {
         let guide = include_str!("../../../docs/themes.md");

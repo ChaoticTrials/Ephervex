@@ -197,7 +197,7 @@ export component HostRuntimeForm inherits ScrollView {
         args-field.text = root.host.runtime-jvm-args;
     }
     viewport-width: self.width;
-    VerticalLayout { alignment: start; width: min(parent.width, 720px); spacing: 12px;
+    VerticalLayout { alignment: start; width: min(parent.width, 720px); spacing: 12px; padding-left: Theme.lift-room; padding-top: Theme.lift-room; padding-right: Theme.shadow-room; padding-bottom: Theme.shadow-room;
         SectionTitle { title: GuiI18n.text("gui-instance-runtime"); detail: root.for-client ? GuiI18n.text("gui-instance-runtime-detail") : GuiI18n.text("gui-server-runtime-detail"); }
         BodyText { text: root.host.runtime-global; color: Theme.text-muted; wrap: word-wrap; }
         HorizontalLayout { spacing: 12px;

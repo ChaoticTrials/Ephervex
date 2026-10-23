@@ -122,6 +122,16 @@ width, corner radii, hard shadow offsets, grid size, button heights) is among
 them, as are the shell measurements (column widths, shell padding and gap, the
 minimum window size).
 
+Buttons, setting cards, selected navigation items, menus, and dialogs are
+`Plate` faces: a strong outline and a hard shadow that overflows the right and
+bottom edges, so a container that clips, such as a scroll view, pads those sides
+by `Theme.shadow-room` and the top and left by `Theme.lift-room`. A button rises
+on hover, sinks on press, and is flat and faded while disabled. `Chip` (in the
+fixed-width family) and `Pill` are small tags with the lighter chip outline. Short headings (`DisplayHeading`, used for page, section,
+and dialog titles) are the only text set in the heading family. The parts of a
+switch and a slider are placed on whole physical pixels, so a renderer that
+draws at fractional positions shows no soft edge.
+
 A theme can set colors, and a theme folder also its logo and window icon.
 Token names are part of its format, so a token can be added but never renamed
 or removed.

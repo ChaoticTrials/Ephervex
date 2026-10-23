@@ -54,12 +54,12 @@ accent = "#1bd96a"
 accent-secondary = "#4f9cff"
 success = "#1bd96a"
 warning = "#ffa347"
-danger = "#ff496e"
+danger = "#ff5f80"
 
 # Filled buttons. The primary green is deeper than the brand green so the
 # light caption on it stays readable.
 primary-fill = "#0f7a3c"
-primary-fill-hover = "#118444"
+primary-fill-hover = "#107f3f"
 on-primary = "#ecf9fb"
 danger-fill = "#6e2233"
 danger-fill-hover = "#8a2a40"
@@ -67,14 +67,14 @@ danger-fill-hover = "#8a2a40"
 # Text.
 text = "#ecf9fb"
 text-secondary = "#b0bac5"
-text-muted = "#7c8591"
+text-muted = "#98a1ad"
 on-danger = "#fff0f3"
 log-error = "#ff7a93"
 
 # Server marks, catalogs and loaders.
 server = "#c78aff"
 modrinth = "#1bd96a"
-curseforge = "#f16436"
+curseforge = "#f47547"
 vanilla = "#91bd59"
 forge = "#5981c0"
 neoforge = "#c0664d"

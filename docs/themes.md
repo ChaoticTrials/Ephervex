@@ -103,19 +103,19 @@ also holds a commented-out `[branding]` section for use in a theme folder.
 | `elevated` | A raised card, such as one under the pointer |
 | `overlay` | Popovers, such as dropdown lists and menus, which must read against an `elevated` card |
 | `border` | Borders and dividers |
-| `bar` | The top bar, the navigation column, and the status bar |
+| `bar` | The top bar, the navigation column, the status bar, and the track of a switch that is off |
 | `header-ribbon-1` | The first sixth of the ribbon along the bottom of the top bar; transparent hides it |
 | `header-ribbon-2` | The second sixth of the top bar ribbon |
 | `header-ribbon-3` | The third sixth of the top bar ribbon |
 | `header-ribbon-4` | The fourth sixth of the top bar ribbon |
 | `header-ribbon-5` | The fifth sixth of the top bar ribbon |
 | `header-ribbon-6` | The final sixth of the top bar ribbon |
-| `well` | The floor of technical views: consoles, logs, crash reports |
-| `selection` | A selected row, and the highlighted entry of a menu |
+| `well` | The floor of technical views: consoles, logs, crash reports. A disabled field is drawn on it too. |
+| `selection` | The highlighted entry of a menu, a dropdown list, or the tab bar's More list, and a hovered row of the license list |
 | `selection-card` | A selected card |
-| `selection-strong` | A selected chip |
+| `selection-strong` | A selected filter chip. `text` is drawn on it. |
 | `toggle-on` | The track of a switch that is on |
-| `toggle-knob` | The knob of a switch that is on. Keep it apart from `toggle-on`. |
+| `toggle-knob` | The knob of a switch, on or off. It sits inside a `border-strong` outline, so keep the knob apart from `toggle-on` and `bar` by its own color or by that outline. |
 | `capture-active` | A key binding field waiting for a key |
 | `accent` | Links, focus, and the main accent |
 | `accent-secondary` | A second accent for secondary highlights |
@@ -123,10 +123,10 @@ also holds a commented-out `[branding]` section for use in a theme folder.
 | `warning` | Warnings |
 | `danger` | Errors and destructive actions |
 | `primary-fill` | A primary button. Its caption is `on-primary`, so keep them apart. |
-| `primary-fill-hover` | A primary button under the pointer |
+| `primary-fill-hover` | A primary button under the pointer. Workbench keeps it equal to `primary-fill`, because the button rises instead. |
 | `on-primary` | The caption of a primary button |
 | `danger-fill` | A destructive button. Its caption is `on-danger`, so keep them apart. |
-| `danger-fill-hover` | A destructive button under the pointer |
+| `danger-fill-hover` | A destructive button under the pointer. Workbench keeps it equal to `danger-fill`. |
 | `text` | Primary text |
 | `text-secondary` | Descriptions and secondary text |
 | `text-muted` | Hints and disabled text |
@@ -148,14 +148,14 @@ also holds a commented-out `[branding]` section for use in a theme folder.
 | `scrim` | The wash behind a dialog; usually a translucent black |
 | `shadow-hard` | The hard-edged offset shadow under a card, button, dialog, or panel |
 | `border-strong` | The outline around a card, button, chip, or panel |
-| `accent-primary` | The fill of the main action and the outline of the selected card |
+| `accent-primary` | The fill of the selected navigation, settings and workspace tab items, of an icon button under the pointer and of a slider, and the ring around the selected card. The main button reads `primary-fill`. |
 | `on-accent` | A caption on an accent or state fill, such as `accent-primary` or `state-running` |
-| `state-running` | The strip and stamp of a host that is running |
-| `state-building` | The strip and stamp of a host that is being built |
-| `state-attention` | The strip and stamp of a host that needs a fix |
-| `state-stopped` | The strip and stamp of a host that is stopped |
-| `state-server` | The mark of a server |
-| `note-fill` | The paper of a sticky note and of a warning box |
+| `state-running` | The fill of the tag of a host that is running, and of a success button and toast |
+| `state-building` | The fill of the tag of a host that is starting, stopping, or restarting |
+| `state-attention` | The fill of the tag of a host that failed or needs recovery |
+| `state-stopped` | The fill of an info button |
+| `state-server` | The fill of a server tag |
+| `note-fill` | The fill of the workflow banner and of a favorite star that is on |
 | `danger-soft` | The fill of a problem box. `danger` text is drawn on it. |
 | `grid-line` | The hairline grid over the window floor; usually a faint translucent line |
 | `terminal` | The floor of a console or log that is drawn dark on any page |
@@ -166,14 +166,18 @@ also holds a commented-out `[branding]` section for use in a theme folder.
 Keep text readable: `text`, `text-secondary` and `text-muted` are drawn on
 `background`, `surface`, `field` and `elevated`, and captions on the button fills.
 
-The built-in Workbench theme is held to the same bar. A switch that is on keeps
-its knob apart from its track, button captions keep a readable ratio on their
-fills, and the scrim dims the page firmly. The tones drawn as text (`accent`,
-`accent-secondary`, `success`, `warning`, `danger`, the marks, and the group
-tones) are held at 4.5:1 or more on every surface, so they are darker than the
-pastel fills of the same hue. `on-accent` is dark on every accent and state fill.
-A disabled button has no fill, only a border and a muted caption, so it reads as
-inactive rather than as a secondary button.
+The built-in Workbench theme is held to the same bar, and so is the example
+theme. Every caption is readable on the fill it is drawn on: `text` on
+`surface`, `selection`, `selection-strong` and `note-fill`, `on-accent` on `accent-primary` and each `state-` fill, `on-primary` on
+`primary-fill` and `primary-fill-hover`, and `on-danger` on `danger-fill` and
+`danger-fill-hover`. A switch's knob is told apart from its track by its own
+color or by the `border-strong` outline. The scrim dims the page firmly.
+
+The tones drawn as text (`accent`, `accent-secondary`, `success`, `warning`, `danger`, the marks, and the group
+tones) are held at 4.5:1 or more on every surface, and on `surface` and `selection`, which is what a tag is drawn on,
+so they are darker than the pastel fills of the same hue. `on-accent` is dark on every accent and state fill.
+A disabled button keeps its fill and its caption at reduced opacity and does not
+rise, so it reads as inactive.
 
 ## Branding
 

@@ -353,6 +353,8 @@ export component DiagnosticsSurface inherits Rectangle {
             property <bool> narrow: self.width < 560px;
             alignment: start;
             width: min(parent.width, 980px);
+            padding-left: Theme.lift-room; padding-top: Theme.lift-room; padding-right: Theme.shadow-room;
+            padding-bottom: Theme.shadow-room;
             spacing: 12px;
             HorizontalLayout {
                 spacing: 10px;

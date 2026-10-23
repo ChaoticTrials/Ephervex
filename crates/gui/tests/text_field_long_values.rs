@@ -22,6 +22,9 @@ const LONG_VALUE: &str = "/home/melanx/Games/Minecraft/Ephervex/persistent-insta
 /// Gap between the field and the button beside it in the storage settings row.
 const GAP_BESIDE_FIELD: usize = 8;
 
+/// How far the hard shadow of a field that has focus falls past its right edge.
+const FOCUS_SHADOW_REACH: usize = 3;
+
 #[test]
 fn a_long_value_is_not_drawn_past_the_border_of_its_field() {
     let ui = window();
@@ -149,16 +152,19 @@ fn focus_and_press(ui: &AppWindow, field: &ElementHandle, key: Key) {
     press(ui, key);
 }
 
-/// The strip of the row between the field and the button beside it, which is
-/// outside the field's border and so holds nothing that belongs to the field.
+/// The strip of the row between the field and the button beside it, past the
+/// shadow a focused field casts. It is outside the field's border and so holds
+/// nothing that belongs to the field.
 fn gap_beside(field: &ElementHandle, ui: &AppWindow) -> Vec<Rgba8Pixel> {
     let snapshot: SharedPixelBuffer<Rgba8Pixel> = ui.window().take_snapshot().expect("render");
     let width = snapshot.width() as usize;
-    let left = pixel(field.absolute_position().x + field.size().width);
+    let left = pixel(field.absolute_position().x + field.size().width) + FOCUS_SHADOW_REACH;
     let top = pixel(field.absolute_position().y);
     let rows = pixel(field.size().height);
     (top..top + rows)
-        .flat_map(|y| (left..left + GAP_BESIDE_FIELD).map(move |x| y * width + x))
+        .flat_map(|y| {
+            (left..left + GAP_BESIDE_FIELD - FOCUS_SHADOW_REACH).map(move |x| y * width + x)
+        })
         .map(|index| snapshot.as_slice()[index])
         .collect()
 }

@@ -10,6 +10,7 @@ import {
     WorkspaceHostChoice,
     WorkspaceSurfaceRow
 } from "../models.slint";
+import { Plate } from "../components/surface.slint";
 import { Theme } from "../theme.slint";
 
 // A host's Java at a glance: the runtime it would run with, in a tone that
@@ -35,24 +36,29 @@ export component WorkspaceTab inherits Rectangle {
     min-width: max(112px, label.preferred-width + 30px);
     height: 38px;
     horizontal-stretch: 0;
-    border-radius: 5px;
-    background: area.has-hover ? Theme.elevated : transparent;
     accessible-role: button;
     accessible-label: text;
     accessible-action-default => { root.clicked(); }
+    // Tabs abut, so the face leaves room on every side for the outline and
+    // the shadow of the selected one.
+    Plate {
+        x: 2px;
+        y: 1px;
+        width: root.width - 2px - Theme.shadow-offset-small - 1px;
+        height: root.height - 2px - Theme.shadow-offset-small;
+        radius: Theme.small-radius;
+        lift: root.selected ? Theme.shadow-offset-small : 0px;
+        outline: root.selected ? Theme.border-strong : transparent;
+        fill: root.selected ? Theme.accent-primary : area.has-hover ? Theme.elevated : transparent;
+    }
     label := Text {
         text: root.text;
-        color: root.selected ? Theme.text : Theme.text-secondary;
+        color: root.selected ? Theme.on-accent : Theme.text;
         font-size: Theme.body-size;
-        font-weight: root.selected ? 600 : 400;
+        font-weight: 700;
         horizontal-alignment: center;
         vertical-alignment: center;
         overflow: elide;
-    }
-    Rectangle {
-        x: 12px; y: parent.height - 2px; width: parent.width - 24px; height: 2px;
-        border-radius: 1px;
-        background: root.selected ? Theme.accent : transparent;
     }
     area := TouchArea { clicked => { root.clicked(); } }
 }
@@ -66,13 +72,16 @@ export component PaneHostButton inherits Rectangle {
     height: Theme.control-height;
     horizontal-stretch: 1;
     min-width: 80px;
-    border-radius: 6px;
-    border-width: 1px;
-    border-color: area.has-hover ? Theme.accent : Theme.border;
-    background: area.has-hover ? Theme.elevated : transparent;
     accessible-role: button;
     accessible-label: root.accessible-name;
     accessible-action-default => { root.clicked(); }
+    Plate {
+        width: root.width;
+        height: root.height;
+        radius: Theme.small-radius;
+        lift: area.has-hover ? Theme.shadow-offset-small : 0px;
+        fill: Theme.surface;
+    }
     HorizontalLayout {
         padding-left: 10px; padding-right: 10px; spacing: 8px;
         Text { text: root.kind; color: Theme.text-muted; font-size: Theme.caption-size; vertical-alignment: center; }
@@ -123,17 +132,24 @@ export component SurfaceTabs inherits Rectangle {
         width: root.tab-width;
         height: root.height;
         more := Rectangle {
-            border-radius: 5px;
-            background: more-area.has-hover ? Theme.elevated : transparent;
             accessible-role: button;
             accessible-label: GuiI18n.text("gui-workspace-more-surfaces");
             accessible-expandable: true;
             accessible-action-default => { menu.show(); }
             accessible-action-expand => { menu.show(); }
-            Rectangle { x: 0px; y: (parent.height - 18px) / 2; width: 1px; height: 18px; background: Theme.border; }
+            Plate {
+                x: 2px;
+                y: 1px;
+                width: parent.width - 2px - Theme.shadow-offset-small - 1px;
+                height: parent.height - 2px - Theme.shadow-offset-small;
+                radius: Theme.small-radius;
+                lift: 0px;
+                outline: transparent;
+                fill: more-area.has-hover ? Theme.elevated : transparent;
+            }
             HorizontalLayout {
                 alignment: center; spacing: 6px;
-                Text { text: GuiI18n.text("gui-workspace-more-surfaces"); color: Theme.text-secondary; font-size: Theme.body-size; vertical-alignment: center; }
+                Text { text: GuiI18n.text("gui-workspace-more-surfaces"); color: Theme.text; font-size: Theme.body-size; font-weight: 700; vertical-alignment: center; }
                 Path { width: 8px; height: 5px; y: (parent.height - self.height) / 2; commands: "M 0 0 L 4 4 L 8 0"; stroke: Theme.text-secondary; stroke-width: 1.5px; fill: transparent; }
             }
             more-area := TouchArea { clicked => { menu.show(); } }
@@ -141,21 +157,27 @@ export component SurfaceTabs inherits Rectangle {
     menu := PopupWindow {
         x: 0px;
         y: parent.height + 4px;
-        width: max(root.tab-width * 1.5, 180px);
-        Rectangle {
-            border-radius: 7px; border-width: 1px; border-color: Theme.border; background: Theme.elevated;
-            VerticalLayout {
+        // The hard shadow falls outside the list.
+        width: max(root.tab-width * 1.5, 180px) + Theme.shadow-offset-card;
+        height: menu-list.preferred-height + Theme.shadow-offset-card;
+        Plate {
+            width: parent.width - Theme.shadow-offset-card;
+            height: parent.height - Theme.shadow-offset-card;
+            lift: Theme.shadow-offset-card;
+            radius: Theme.button-radius;
+            fill: Theme.overlay;
+            menu-list := VerticalLayout {
                 padding: 4px;
                 for surface[index] in root.surfaces : Rectangle {
                     property <bool> hidden: !(index == root.selected-index || index < root.leading);
                     height: self.hidden ? 34px : 0px;
                     visible: self.hidden;
-                    border-radius: 5px;
-                    background: entry-area.has-hover ? Theme.surface : transparent;
+                    border-radius: Theme.chip-radius;
+                    background: entry-area.has-hover ? Theme.selection : transparent;
                     accessible-role: button;
                     accessible-label: surface.label;
                     accessible-action-default => { root.chosen(surface.id); }
-                    Text { x: 10px; text: surface.label; color: Theme.text; font-size: Theme.body-size; vertical-alignment: center; height: parent.height; }
+                    Text { x: 10px; text: surface.label; color: Theme.text; font-size: Theme.body-size; font-weight: 600; vertical-alignment: center; height: parent.height; }
                     entry-area := TouchArea { clicked => { root.chosen(surface.id); } }
                 }
             }
@@ -265,9 +287,9 @@ export component HostWorkspace inherits Rectangle {
     callback split-below();
     callback close-pane();
     background: Theme.background;
-    border-width: root.compact ? 1px : 0px;
-    border-color: Theme.border;
-    border-radius: root.compact ? 8px : 0px;
+    border-width: root.compact ? Theme.strong-border-width : 0px;
+    border-color: Theme.border-strong;
+    border-radius: root.compact ? Theme.card-radius : 0px;
     clip: true;
     accessible-role: groupbox;
     accessible-label: root.pane-label;
@@ -353,10 +375,10 @@ export component HostWorkspace inherits Rectangle {
         }
         if root.workflow-id != "" && root.workflow-here : Rectangle {
             height: max(64px, workflow-copy.preferred-height + 24px);
-            border-radius: 7px;
-            border-width: 1px;
-            border-color: Theme.warning;
-            background: Theme.warning.with-alpha(0.08);
+            border-radius: Theme.small-radius;
+            border-width: Theme.strong-border-width;
+            border-color: Theme.border-strong;
+            background: Theme.note-fill;
             HorizontalLayout {
                 padding: 12px; spacing: 9px; cross-axis-alignment: center;
                 workflow-copy := VerticalLayout {
@@ -381,9 +403,9 @@ export component HostWorkspace inherits Rectangle {
         // Before a workflow is active, such as while one starts, its
         // progress still belongs above the surface that asked for it.
         if root.occupied && root.workflow-id == "" : Rectangle {
-            border-radius: 7px;
-            border-width: 1px;
-            border-color: Theme.accent;
+            border-radius: Theme.small-radius;
+            border-width: Theme.strong-border-width;
+            border-color: Theme.border-strong;
             background: Theme.surface;
             HorizontalLayout {
                 padding: 10px; spacing: 9px; cross-axis-alignment: center;
@@ -410,13 +432,27 @@ export component HostPickerCard inherits Rectangle {
     in property <string> current-id;
     callback picked(string, string);
     property <bool> current: root.item.kind == root.current-kind && root.item.id == root.current-id;
-    border-radius: 8px;
-    border-width: root.current ? 2px : 1px;
-    border-color: root.current ? Theme.accent : Theme.border;
-    background: card-area.has-hover ? Theme.elevated : Theme.surface;
     accessible-role: button;
+    accessible-checkable: true;
+    accessible-checked: root.current;
     accessible-label: root.item.kind == "server" ? GuiI18n.value("gui-host-choice-server", root.item.name) : GuiI18n.value("gui-host-choice-client", root.item.name);
     accessible-action-default => { root.picked(root.item.kind, root.item.id); }
+    // The selected card keeps its outline and gains a ring outside it, so
+    // the container leaves `Theme.shadow-room` around the cards.
+    if root.current : Rectangle {
+        x: -Theme.selection-outline-width;
+        y: -Theme.selection-outline-width;
+        width: root.width + 2 * Theme.selection-outline-width;
+        height: root.height + 2 * Theme.selection-outline-width;
+        border-radius: Theme.card-radius + Theme.selection-outline-width;
+        background: Theme.accent-primary;
+    }
+    Plate {
+        width: root.width;
+        height: root.height;
+        lift: Theme.shadow-offset-card;
+        fill: root.current ? Theme.selection-card : card-area.has-hover ? Theme.elevated : Theme.surface;
+    }
     card-area := TouchArea { clicked => { root.picked(root.item.kind, root.item.id); } }
     VerticalLayout {
         padding: 12px; spacing: 8px;
@@ -437,10 +473,22 @@ export component HostPickerCard inherits Rectangle {
         for server in root.item.linked : Rectangle {
             property <bool> current: root.current-kind == "server" && root.current-id == server.id;
             height: Theme.control-height;
-            border-radius: 6px;
-            border-width: 1px;
-            border-color: self.current ? Theme.accent : Theme.border;
-            background: linked-area.has-hover ? Theme.elevated : Theme.background;
+            accessible-checkable: true;
+            accessible-checked: self.current;
+            if self.current : Rectangle {
+                x: -Theme.selection-outline-width;
+                y: -Theme.selection-outline-width;
+                width: parent.width + 2 * Theme.selection-outline-width;
+                height: parent.height + 2 * Theme.selection-outline-width;
+                border-radius: Theme.small-radius + Theme.selection-outline-width;
+                background: Theme.accent-primary;
+            }
+            Rectangle {
+                border-radius: Theme.small-radius;
+                border-width: Theme.strong-border-width;
+                border-color: Theme.border-strong;
+                background: parent.current ? Theme.selection-card : linked-area.has-hover ? Theme.elevated : Theme.background;
+            }
             accessible-role: button;
             accessible-label: GuiI18n.value("gui-host-choice-server", server.name);
             accessible-action-default => { root.picked("server", server.id); }

@@ -25,6 +25,8 @@ export global Theme {
     out property <length> item-title-size: 18px * text-scale;
     out property <length> brand-size: 20px * text-scale;
     out property <length> workspace-title-size: 23px * text-scale;
+    // The title of a dialog.
+    out property <length> modal-title-size: 22px * text-scale;
     out property <length> about-title-size: 24px * text-scale;
     out property <length> diagnostics-title-size: 25px * text-scale;
     out property <length> page-title-size: 27px * text-scale;
@@ -41,7 +43,8 @@ export global Theme {
     out property <color> overlay: palette.overlay;
     out property <color> border: palette.border;
     // One step under `background`, for the chrome that frames a page:
-    // the top bar, the navigation column and the status bar.
+    // the top bar, the navigation column and the status bar, and the track of
+    // a switch that is off.
     out property <color> bar: palette.bar;
     // Six equal segments along the top bar. Transparent colors leave the
     // ribbon absent without changing the height or the other page chrome.
@@ -53,10 +56,10 @@ export global Theme {
     out property <color> header-ribbon-6: palette.header-ribbon-6;
     // The floor a technical view is read against - a console, a crash
     // report, a log file - held apart from `background` so a page and the
-    // output on it are never the same surface.
+    // output on it are never the same surface. A disabled field is drawn on it too.
     out property <color> well: palette.well;
-    // A selected row, the card form of the same, and the stronger tint a
-    // selected chip takes.
+    // The highlighted entry of a menu, a dropdown list or the More list, and a
+    // hovered license row, a selected card, and the fill a selected filter chip takes.
     out property <color> selection: palette.selection;
     out property <color> selection-card: palette.selection-card;
     out property <color> selection-strong: palette.selection-strong;
@@ -64,7 +67,8 @@ export global Theme {
     // waiting for a key. Both are an accent held far enough back that what
     // sits on them stays readable.
     out property <color> toggle-on: palette.toggle-on;
-    // The knob of a switch that is on, which has to stand apart from its track.
+    // The knob of a switch, drawn inside the outline every switch has, which
+    // keeps it apart from the track.
     out property <color> toggle-knob: palette.toggle-knob;
     out property <color> capture-active: palette.capture-active;
     out property <color> accent: palette.accent;
@@ -131,19 +135,22 @@ export global Theme {
     out property <color> shadow-hard: palette.shadow-hard;
     // The outline drawn around a card, button, chip, or panel.
     out property <color> border-strong: palette.border-strong;
-    // The fill of the main action and the outline of the selected card.
+    // The fill of the selected navigation, settings and workspace tab items,
+    // of an icon button under the pointer and of a slider, and the ring
+    // around the selected card. The main button reads `primary-fill`.
     out property <color> accent-primary: palette.accent-primary;
     // A caption on an accent or state fill, held apart from `text` so it stays
     // readable when `text` changes with the page.
     out property <color> on-accent: palette.on-accent;
-    // What a host is doing, as the strip and stamp that say so: running, being
-    // built, needing a fix, stopped, and the mark of a server.
+    // The fills of the tags that say what a host is doing: running, in
+    // progress, needing attention. Running also fills a success button and
+    // toast, and stopped fills an info button. A server tag takes its own.
     out property <color> state-running: palette.state-running;
     out property <color> state-building: palette.state-building;
     out property <color> state-attention: palette.state-attention;
     out property <color> state-stopped: palette.state-stopped;
     out property <color> state-server: palette.state-server;
-    // The paper of a sticky note and of a warning box.
+    // The paper of the workflow banner and of a favorite star that is on.
     out property <color> note-fill: palette.note-fill;
     // The fill of a problem box, which carries `danger` text.
     out property <color> danger-soft: palette.danger-soft;
@@ -158,23 +165,33 @@ export global Theme {
     // Every control that can share a toolbar row is this tall, so a row
     // that mixes a button, a chip and a field lines up without each caller
     // having to know what the others chose.
-    out property <length> control-height: 36px;
+    out property <length> control-height: button-height;
     // The width of the outline around a card, button, chip, or panel.
     out property <length> strong-border-width: 2px;
     // The width of a chip's outline, which is lighter than a card's.
     out property <length> chip-border-width: 1.5px;
-    // The width of the accent outline around the selected card.
-    out property <length> selection-outline-width: 3px;
+    // The width of the accent ring around the selected card, outside its outline.
+    out property <length> selection-outline-width: 4px;
     // Corner radii of a card or panel, a small control, a chip, and a button.
     out property <length> card-radius: 12px;
     out property <length> small-radius: 9px;
     out property <length> chip-radius: 6px;
     out property <length> button-radius: 11px;
+    // The corner radius of a dialog, larger than a card's so it reads as the
+    // frontmost surface.
+    out property <length> dialog-radius: 18px;
     // How far the hard shadow falls, down and to the right: under a card, under
     // a small button, and under a dialog or the quick view.
     out property <length> shadow-offset-card: 4px;
     out property <length> shadow-offset-small: 3px;
     out property <length> shadow-offset-dialog: 8px;
+    // How much of a disabled control's own paint remains.
+    out property <float> disabled-opacity: 0.45;
+    // The room a scrolling container keeps at its right and bottom edges, so the
+    // hard shadow of a face against them, and a face lifted or pressed, is not
+    // clipped. A raised face also moves `lift-room` up and left.
+    out property <length> shadow-room: shadow-offset-card + 1px;
+    out property <length> lift-room: 1px;
     // The side of one square of the grid over the window floor.
     out property <length> grid-size: 32px;
     // Button heights: small, default, and big.
