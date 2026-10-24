@@ -57,9 +57,9 @@ export component ModBrowser inherits Rectangle {
     callback set-include-incompatible(bool);
     callback set-page-size(string);
     callback open-provider-settings();
-    border-radius: 8px;
-    border-width: 1px;
-    border-color: Theme.border;
+    border-radius: Theme.card-radius;
+    border-width: Theme.strong-border-width;
+    border-color: Theme.border-strong;
     background: Theme.surface;
     VerticalLayout {
         padding: 16px;

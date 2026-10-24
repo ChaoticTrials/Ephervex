@@ -279,9 +279,9 @@ export component ManagedModsPanel inherits Rectangle {
     callback restore-file(string);
     // The row, its path, and its title, for the confirmation the bin opens.
     callback delete-file(ModRow, string, string);
-    border-radius: 8px;
-    border-width: 1px;
-    border-color: Theme.border;
+    border-radius: Theme.card-radius;
+    border-width: Theme.strong-border-width;
+    border-color: Theme.border-strong;
     background: Theme.surface;
     VerticalLayout {
         padding: 16px;

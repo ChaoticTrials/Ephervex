@@ -136,8 +136,8 @@ component FindingCard inherits Rectangle {
     callback review-fix(string);
     callback open-route(string);
     callback install(string, string);
-    border-radius: 8px;
-    border-width: 1px;
+    border-radius: Theme.card-radius;
+    border-width: Theme.strong-border-width;
     border-color: root.item.problem ? Theme.warning.with-alpha(0.7) : Theme.border;
     background: Theme.surface;
     height: card.preferred-height;
@@ -191,9 +191,9 @@ component FindingCard inherits Rectangle {
 
 component CheckList inherits Rectangle {
     in property <[DiagnosticCheckRow]> checks;
-    border-radius: 8px;
-    border-width: 1px;
-    border-color: Theme.border;
+    border-radius: Theme.card-radius;
+    border-width: Theme.strong-border-width;
+    border-color: Theme.border-strong;
     background: Theme.surface;
     height: rows.preferred-height;
     rows := VerticalLayout {
@@ -214,8 +214,8 @@ export component FixPanel inherits Rectangle {
     in property <string> blocked-reason;
     callback cancel();
     callback apply();
-    border-radius: 8px;
-    border-width: 1px;
+    border-radius: Theme.card-radius;
+    border-width: Theme.strong-border-width;
     border-color: Theme.accent;
     background: Theme.elevated;
     height: panel.preferred-height;
@@ -272,8 +272,8 @@ export component RunFailureNotice inherits Rectangle {
     property <string> diagnostics-tone: root.host.run-verify-suggested ? "default" : "primary";
     property <color> tone: root.host.run-eula-refused ? Theme.warning : Theme.danger;
     height: content.preferred-height;
-    border-radius: 8px;
-    border-width: 1px;
+    border-radius: Theme.card-radius;
+    border-width: Theme.strong-border-width;
     border-color: root.tone.with-alpha(0.6);
     background: root.tone.with-alpha(0.08);
     accessible-role: groupbox;
@@ -375,8 +375,8 @@ export component DiagnosticsSurface inherits Rectangle {
                     : root.state == "result" && root.host.diagnosis-healthy ? Theme.success
                     : root.state == "result" ? Theme.warning
                     : Theme.border;
-                border-radius: 8px;
-                border-width: 1px;
+                border-radius: Theme.card-radius;
+                border-width: Theme.strong-border-width;
                 border-color: self.tone;
                 background: Theme.surface;
                 height: outcome.preferred-height;
@@ -412,8 +412,8 @@ export component DiagnosticsSurface inherits Rectangle {
                 apply => { root.apply-fix(); }
             }
             if root.host.fix-result != "" : Rectangle {
-                border-radius: 8px;
-                border-width: 1px;
+                border-radius: Theme.card-radius;
+                border-width: Theme.strong-border-width;
                 border-color: root.host.fix-result-failed ? Theme.danger : Theme.border;
                 background: Theme.surface;
                 height: fixed.preferred-height;
