@@ -3812,6 +3812,8 @@ fn register_instance_list(
         send(&sender, Command::SetInstanceSort(sort));
     });
 
+    register_case_changes(ui, commands);
+
     let sender = commands.clone();
     ui.on_set_favorite(move |kind, id, favorite| {
         if let Some(host) = backend::parse_mod_host(&kind, &id) {
@@ -4186,6 +4188,55 @@ fn apply_loader_options(ui: &AppWindow, form: &str, minecraft: &str) {
             ui.set_create_loader_versions(model(Vec::new()));
         }
     }
+}
+
+/// The steps, note, and reproduced count of an instance's case.
+fn register_case_changes(ui: &AppWindow, commands: &Sender<Command>) {
+    fn change(commands: &Sender<Command>, client: &str, change: backend::CaseChange) {
+        if let Ok(client) = client.parse() {
+            send(commands, Command::ChangeCase { client, change });
+        }
+    }
+    let sender = commands.clone();
+    ui.on_case_add_step(move |client, text| {
+        change(
+            &sender,
+            &client,
+            backend::CaseChange::AddStep(text.to_string()),
+        );
+    });
+    let sender = commands.clone();
+    ui.on_case_set_step_done(move |client, step, done| {
+        if let Ok(step) = u32::try_from(step) {
+            change(
+                &sender,
+                &client,
+                backend::CaseChange::SetStepDone { step, done },
+            );
+        }
+    });
+    let sender = commands.clone();
+    ui.on_case_remove_step(move |client, step| {
+        if let Ok(step) = u32::try_from(step) {
+            change(&sender, &client, backend::CaseChange::RemoveStep(step));
+        }
+    });
+    let sender = commands.clone();
+    ui.on_case_save_note(move |client, note| {
+        change(
+            &sender,
+            &client,
+            backend::CaseChange::SetNote(note.to_string()),
+        );
+    });
+    let sender = commands.clone();
+    ui.on_case_count_reproduced(move |client| {
+        change(&sender, &client, backend::CaseChange::CountReproduced);
+    });
+    let sender = commands.clone();
+    ui.on_case_reset_reproduced(move |client| {
+        change(&sender, &client, backend::CaseChange::ResetReproduced);
+    });
 }
 
 /// Pinning and unpinning a Minecraft release.
@@ -9889,6 +9940,20 @@ fn listed_instance(
         // Stamped from the lifecycle, which a snapshot knows nothing about.
         pair_starting: false,
         favorite: item.facts.favorite,
+        case_steps: model(
+            item.case
+                .steps
+                .iter()
+                .map(|step| crate::ui::CaseStepRow {
+                    id: i32::try_from(step.id).unwrap_or(i32::MAX),
+                    text: step.text.as_str().into(),
+                    done: step.done,
+                })
+                .collect(),
+        ),
+        case_done: to_i32(item.case.steps.iter().filter(|step| step.done).count()),
+        case_note: item.case.note.as_str().into(),
+        case_reproduced: i32::try_from(item.case.reproduced).unwrap_or(i32::MAX),
         group_id: group.map_or_else(SharedString::default, |group| group.id.to_string().into()),
         group_name: group.map_or_else(SharedString::default, |group| group.name.as_str().into()),
         group_index,
@@ -17020,6 +17085,43 @@ mod tests {
         }]));
         stamp_host_lifecycle(&ui, &lifecycle.borrow());
         assert!(can_restart(&ui), "stamped again after a refresh");
+    }
+
+    #[test]
+    fn an_instances_row_carries_its_case() {
+        let mut item = crate::presentation::InstancePresentation::from_record(
+            &crate::presentation::samples::client_record(
+                ephervex_model::StorageClass::Temporary,
+                ephervex_model::LoaderSelection::vanilla(),
+            ),
+            0,
+            0,
+            None,
+            [],
+        );
+        item.case.add_step("Place a belt").expect("step");
+        item.case.add_step("Fill it").expect("step");
+        item.case.set_step_done(1, true);
+        item.case.set_note("Only when full").expect("note");
+        item.case.count_reproduced();
+
+        let row = listed_instance(item, &[], chrono::Utc::now()).row;
+
+        assert_eq!(row.case_done, 1);
+        assert_eq!(row.case_note, "Only when full");
+        assert_eq!(row.case_reproduced, 1);
+        let steps: Vec<(i32, String, bool)> = row
+            .case_steps
+            .iter()
+            .map(|step| (step.id, step.text.to_string(), step.done))
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                (1, "Place a belt".to_owned(), true),
+                (2, "Fill it".to_owned(), false)
+            ]
+        );
     }
 
     /// The overview reports the work on the row of the instance it belongs to,

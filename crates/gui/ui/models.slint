@@ -24,6 +24,13 @@ export struct ToastRow {
     repeats: int,
 }
 
+// One reproduction step of an instance.
+export struct CaseStepRow {
+    id: int,
+    text: string,
+    done: bool,
+}
+
 export struct InstanceRow {
     snapshot-deletion-note: string,
     id: string,
@@ -93,6 +100,12 @@ export struct InstanceRow {
     state-line: string,
     // When the instance last ran, as relative text, empty when it never has.
     last-run: string,
+    // What the user wrote down while reproducing a bug on this instance.
+    case-steps: [CaseStepRow],
+    // How many of the steps are checked off.
+    case-done: int,
+    case-note: string,
+    case-reproduced: int,
     // Whether a pane currently shows this host.
     open: bool,
 }

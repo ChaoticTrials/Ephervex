@@ -11,6 +11,7 @@ use ephervex_core::InstalledHost;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Surface {
     Overview,
+    Case,
     Console,
     Mods,
     Packs,
@@ -22,8 +23,9 @@ pub enum Surface {
     Diagnostics,
 }
 
-const CLIENT_SURFACES: [Surface; 8] = [
+const CLIENT_SURFACES: [Surface; 9] = [
     Surface::Overview,
+    Surface::Case,
     Surface::Mods,
     Surface::Packs,
     Surface::Isolation,
@@ -81,6 +83,7 @@ impl Surface {
     pub const fn id(self) -> &'static str {
         match self {
             Self::Overview => "Overview",
+            Self::Case => "Case",
             Self::Console => "Console",
             Self::Mods => "Mods",
             Self::Packs => "Packs",
@@ -107,6 +110,7 @@ impl Surface {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Overview => "gui-instance-tab-overview",
+            Self::Case => "gui-instance-tab-case",
             Self::Console => "gui-server-tab-console",
             Self::Mods => "gui-instance-tab-mods",
             Self::Packs => "gui-packs-tab",

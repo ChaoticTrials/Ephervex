@@ -53,6 +53,7 @@ import { ServerStatisticsCard } from "workspace/server-statistics.slint";
 import { ModBrowser } from "workspace/mod-browser.slint";
 import { GuiI18n, NameRules, ServerHints, ServerPackRules } from "globals.slint";
 import { HomePage } from "home/home-page.slint";
+import { CaseSurface } from "workspace/case.slint";
 import { StorageCard } from "home/storage-card.slint";
 import { TipsCard } from "home/tips-card.slint";
 import { PendingCard } from "host-list/host-card.slint";
@@ -725,6 +726,13 @@ export component AppWindow inherits Window {
     callback choose-instance-sort(int);
     callback pane-host-query-changed();
     callback set-favorite(string, string, bool);
+    // An instance's case: its id, then what changed.
+    callback case-add-step(string, string);
+    callback case-set-step-done(string, int, bool);
+    callback case-remove-step(string, int);
+    callback case-save-note(string, string);
+    callback case-count-reproduced(string);
+    callback case-reset-reproduced(string);
     callback set-client-group(string, string);
     callback delete-group(string);
     callback pick-host-icon(string, string);
@@ -1540,6 +1548,19 @@ export component AppWindow inherits Window {
                                     restore(id, label) => { root.snapshot-host-kind = host.kind; root.snapshot-host-id = host.id; root.snapshot-action-id = id; root.snapshot-action-label = label; root.snapshot-safety-copy = true; root.modal-error = ""; root.modal = "snapshot-restore"; }
                                     rename(id, label) => { root.snapshot-host-kind = host.kind; root.snapshot-host-id = host.id; root.snapshot-action-id = id; root.snapshot-action-label = label; root.modal-error = ""; root.modal = "snapshot-rename"; }
                                     delete(id, label) => { root.snapshot-host-kind = host.kind; root.snapshot-host-id = host.id; root.snapshot-action-id = id; root.snapshot-action-label = label; root.modal-error = ""; root.modal = "snapshot-delete"; }
+                                }
+                                if host.available && host.kind == "client" && pane.surface == "Case" : CaseSurface {
+                                    host-id: host.id;
+                                    steps: host.client.case-steps;
+                                    done-count: host.client.case-done;
+                                    note: host.client.case-note;
+                                    reproduced: host.client.case-reproduced;
+                                    add-step(text) => { root.case-add-step(host.id, text); }
+                                    set-step-done(step, done) => { root.case-set-step-done(host.id, step, done); }
+                                    remove-step(step) => { root.case-remove-step(host.id, step); }
+                                    save-note(note) => { root.case-save-note(host.id, note); }
+                                    count-reproduced => { root.case-count-reproduced(host.id); }
+                                    reset-reproduced => { root.case-reset-reproduced(host.id); }
                                 }
                                 if host.available && pane.surface == "Packs" : PackContentPanel {
                                     items: host.pack-content;

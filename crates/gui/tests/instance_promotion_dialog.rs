@@ -271,6 +271,7 @@ fn temporary_instance() -> InstanceRow {
         state_line: "".into(),
         last_run: "".into(),
         open: false,
+        ..InstanceRow::default()
     }
 }
 

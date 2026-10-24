@@ -2517,6 +2517,31 @@ gui-pane-top-right = Top right
 gui-pane-bottom-right = Bottom right
 gui-pane-host = Host shown in { $value }
 
+# The Case tab of an instance: the steps that reproduce a bug, how often it
+# happened, and a note.
+gui-instance-tab-case = Case
+gui-case-steps = Steps
+gui-case-progress = { $first } of { $second } done
+gui-case-no-steps = No steps yet. Write down what it takes to make the bug happen.
+gui-case-add-step = Add a step
+gui-case-add-step-placeholder = Add a step...
+gui-case-add = Add
+gui-case-add-step-hint = Type what to do before adding a step.
+gui-case-remove-step = Remove the step "{ $value }"
+gui-case-remove-step-tooltip = Remove this step
+gui-case-reproduced = Reproduced
+gui-case-not-reproduced = Not seen again yet
+gui-case-reproduced-count = { $count ->
+    [one] Seen again once
+   *[other] Seen again { $count } times
+}
+gui-case-reproduced-it = Reproduced it
+gui-case-reset-count = Reset
+gui-case-note = Note
+gui-case-note-placeholder = What happens, what you expected, anything that helps to reproduce it...
+gui-case-save-note = Save note
+gui-case-note-saved = The note has no unsaved changes.
+
 # A host's mod count on its page header.
 gui-host-chip-mods = { $count ->
     [one] 1 mod

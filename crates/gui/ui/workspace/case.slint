@@ -1,0 +1,173 @@
+// The Case surface: what it takes to reproduce the bug, a note, and how often it happened.
+
+import { ScrollView } from "std-widgets.slint";
+import { AcknowledgementToggle, AppButton, IconButton, TextField } from "../components/controls.slint";
+import { Plate } from "../components/surface.slint";
+import { BodyText, DisplayHeading } from "../components/text.slint";
+import { GuiI18n } from "../globals.slint";
+import { CaseStepRow } from "../models.slint";
+import { Theme } from "../theme.slint";
+
+export component CaseSurface inherits ScrollView {
+    // Whose case this is; drafts do not follow a pane to another instance.
+    in property <string> host-id;
+    in property <[CaseStepRow]> steps;
+    in property <string> note;
+    in property <int> reproduced;
+    // How many steps are checked off.
+    in property <int> done-count;
+    callback add-step(string);
+    callback set-step-done(int, bool);
+    callback remove-step(int);
+    callback save-note(string);
+    callback count-reproduced();
+    callback reset-reproduced();
+    // The step count when the draft was last cleared, so a step the backend
+    // refused stays in the field for the user to fix.
+    private property <int> seen-steps: 0;
+    private property <int> step-count: root.steps.length;
+    // The note as the surface last showed it, so typing after a save is not
+    // replaced by the saved text arriving.
+    private property <string> shown-note: "";
+    viewport-width: self.width;
+    init => {
+        root.seen-steps = root.steps.length;
+        root.shown-note = root.note;
+    }
+    changed host-id => {
+        draft.text = "";
+        note-input.text = root.note;
+        root.shown-note = root.note;
+        root.seen-steps = root.steps.length;
+    }
+    changed step-count => {
+        if (root.step-count > root.seen-steps) {
+            draft.text = "";
+        }
+        root.seen-steps = root.step-count;
+    }
+    VerticalLayout {
+        alignment: start;
+        spacing: 22px;
+        // The shadows of the cards fall right and below.
+        padding-right: Theme.shadow-room;
+        padding-bottom: Theme.shadow-room + 8px;
+        padding-top: 4px;
+        VerticalLayout {
+            spacing: 12px;
+            HorizontalLayout {
+                spacing: 9px;
+                alignment: start;
+                DisplayHeading { text: GuiI18n.text("gui-case-steps"); font-size: Theme.item-title-size; }
+                if root.steps.length > 0 : BodyText { text: GuiI18n.values("gui-case-progress", "\{root.done-count}", "\{root.steps.length}"); color: Theme.text-muted; font-weight: 600; }
+            }
+            Plate {
+                height: steps-list.preferred-height + 2 * Theme.strong-border-width;
+                steps-list := VerticalLayout {
+                    padding: 14px;
+                    spacing: 10px;
+                    if root.steps.length == 0 : BodyText { text: GuiI18n.text("gui-case-no-steps"); color: Theme.text-muted; wrap: word-wrap; }
+                    for step in root.steps : HorizontalLayout {
+                        spacing: 10px;
+                        AcknowledgementToggle {
+                            label: step.text;
+                            checked: step.done;
+                            horizontal-stretch: 1;
+                            toggled(done) => { root.set-step-done(step.id, done); }
+                        }
+                        VerticalLayout {
+                            alignment: start;
+                            IconButton {
+                                icon: @image-url("../../../../assets/icons/close.svg");
+                                accessible-name: GuiI18n.value("gui-case-remove-step", step.text);
+                                tooltip: GuiI18n.text("gui-case-remove-step-tooltip");
+                                clicked => { root.remove-step(step.id); }
+                            }
+                        }
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: 10px;
+                padding-right: Theme.shadow-room;
+                draft := TextField {
+                    placeholder: GuiI18n.text("gui-case-add-step-placeholder");
+                    accessible-name: GuiI18n.text("gui-case-add-step");
+                    horizontal-stretch: 1;
+                    accepted => { root.add-step(self.text); }
+                }
+                AppButton {
+                    text: GuiI18n.text("gui-case-add");
+                    icon: @image-url("../../../../assets/icons/add.svg");
+                    enabled: draft.text != "";
+                    hint: GuiI18n.text("gui-case-add-step-hint");
+                    clicked => { root.add-step(draft.text); }
+                }
+            }
+        }
+        VerticalLayout {
+            spacing: 12px;
+            DisplayHeading { text: GuiI18n.text("gui-case-reproduced"); font-size: Theme.item-title-size; }
+            HorizontalLayout {
+                spacing: 12px;
+                padding-right: Theme.shadow-room;
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 1;
+                    BodyText {
+                        text: root.reproduced == 0 ? GuiI18n.text("gui-case-not-reproduced") : GuiI18n.count("gui-case-reproduced-count", root.reproduced);
+                        font-weight: 600;
+                        wrap: word-wrap;
+                    }
+                }
+                if root.reproduced > 0 : AppButton { text: GuiI18n.text("gui-case-reset-count"); clicked => { root.reset-reproduced(); } }
+                AppButton { text: GuiI18n.text("gui-case-reproduced-it"); tone: "primary"; clicked => { root.count-reproduced(); } }
+            }
+        }
+        VerticalLayout {
+            spacing: 12px;
+            DisplayHeading { text: GuiI18n.text("gui-case-note"); font-size: Theme.item-title-size; }
+            Plate {
+                height: max(110px, note-input.preferred-height + 28px + 2 * Theme.strong-border-width);
+                fill: Theme.field;
+                note-input := TextInput {
+                    x: 14px;
+                    y: 14px;
+                    width: parent.width - 28px;
+                    wrap: word-wrap;
+                    single-line: false;
+                    font-size: Theme.body-size;
+                    color: Theme.text;
+                    accessible-label: GuiI18n.text("gui-case-note");
+                    init => { self.text = root.note; }
+                }
+                if note-input.text == "" : Text {
+                    x: 14px;
+                    y: 14px;
+                    width: parent.width - 28px;
+                    text: GuiI18n.text("gui-case-note-placeholder");
+                    color: Theme.text-muted;
+                    font-size: Theme.body-size;
+                    wrap: word-wrap;
+                }
+            }
+            HorizontalLayout {
+                alignment: end;
+                padding-right: Theme.shadow-room;
+                AppButton {
+                    text: GuiI18n.text("gui-case-save-note");
+                    tone: "primary";
+                    enabled: note-input.text != root.note;
+                    hint: GuiI18n.text("gui-case-note-saved");
+                    clicked => { root.save-note(note-input.text); }
+                }
+            }
+        }
+    }
+    changed note => {
+        if (note-input.text == root.shown-note) {
+            note-input.text = root.note;
+        }
+        root.shown-note = root.note;
+    }
+}

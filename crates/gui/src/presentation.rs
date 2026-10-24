@@ -201,6 +201,8 @@ pub fn server_state_line(state: &str, address: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstancePresentation {
     pub snapshot_deletion_note: String,
+    /// Filled in from the organization, which a record knows nothing about.
+    pub case: ephervex_core::CaseNotes,
     pub id: String,
     pub name: String,
     pub minecraft: String,
@@ -304,6 +306,7 @@ impl InstancePresentation {
         };
         Self {
             snapshot_deletion_note: String::new(),
+            case: ephervex_core::CaseNotes::default(),
             id: record.id.to_string(),
             name: record.name.clone(),
             minecraft: record.minecraft_version.clone(),

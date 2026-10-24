@@ -82,6 +82,17 @@ pub enum ServerPackTarget {
     Import,
 }
 
+/// One change to an instance's case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaseChange {
+    AddStep(String),
+    SetStepDone { step: u32, done: bool },
+    RemoveStep(u32),
+    SetNote(String),
+    CountReproduced,
+    ResetReproduced,
+}
+
 #[derive(Debug)]
 pub enum Command {
     Refresh,
@@ -98,6 +109,11 @@ pub enum Command {
     },
     /// Installs the managed Java a host expects.
     InstallHostJava(InstalledHost),
+    /// Changes what is written down about reproducing a bug on an instance.
+    ChangeCase {
+        client: InstanceId,
+        change: CaseChange,
+    },
     /// Marks or unmarks a host as a favorite.
     SetFavorite {
         host: InstalledHost,
@@ -5679,6 +5695,22 @@ fn run_worker(
                     Err(error) => send_scoped_modal_error(&events, ModalScope::DELETE_MOD, &error),
                 }
             }
+            Command::ChangeCase { client, change } => {
+                let result = match change {
+                    CaseChange::AddStep(text) => app.add_case_step(client, &text),
+                    CaseChange::SetStepDone { step, done } => {
+                        app.set_case_step_done(client, step, done)
+                    }
+                    CaseChange::RemoveStep(step) => app.remove_case_step(client, step),
+                    CaseChange::SetNote(note) => app.set_case_note(client, &note),
+                    CaseChange::CountReproduced => app.count_case_reproduced(client),
+                    CaseChange::ResetReproduced => app.reset_case_reproduced(client),
+                };
+                match result {
+                    Ok(()) => send_snapshot(&mut app, &events),
+                    Err(error) => send_error(&events, &error),
+                }
+            }
             Command::SetFavorite { host, favorite } => {
                 let result = match host {
                     InstalledHost::Instance(id) => app.set_client_favorite(id, favorite),
@@ -6783,6 +6815,7 @@ fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
         presentation.snapshot_deletion_note =
             snapshot_deletion_note(app, InstalledHost::Instance(record.id));
         presentation.icon = organization.client_icon(record.id);
+        presentation.case = organization.case_of(record.id);
         presentation.facts.favorite = organization.is_favorite_client(record.id);
         presentation.facts.group = organization.group_of(record.id);
         presentation.facts.linking = linking

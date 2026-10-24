@@ -264,7 +264,8 @@ metadata check, and interrupted-state report as one that never moved.
 
 ## Instance organization
 
-Favorites, groups and icons are presentation state (ADR 0048). They live in
+Favorites, groups, icons and an instance's case (its reproduction steps, note
+and how often the bug was seen again) are presentation state (ADR 0048). They live in
 `organization.json` in the data directory, beside the `icons/` store, and not in
 `instance.json` or the index, so no snapshot restore, promotion, storage move or
 reconciliation can roll them back and no diagnostic bundle carries them. The
@@ -285,6 +286,14 @@ it is read, decoded within dimension and pixel bounds of its own, scaled
 to at most 256 pixels, re-encoded as PNG and stored under the hash of its bytes.
 The organization file keeps that hash. A host with no icon, or one whose file is
 missing or will not load, draws its loader symbol.
+
+A case is text the user typed, so its bounds are enforced where it is stored and
+again where the file is read: at most 100 steps of 300 characters and a note of
+8000 characters, control characters dropped, repeated step ids collapsed. A
+refused entry names the limit and keeps what the user typed in the field. An
+instance whose case is emptied leaves no entry, and the entry of a deleted
+instance is dropped with the other stale entries. The Case surface is offered
+by instances after Overview and by no server.
 
 Searching, filtering and ordering are pure functions over a small facts record
 per instance, in core. The desktop list, the split workspace's host picker and
