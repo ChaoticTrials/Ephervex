@@ -11,8 +11,8 @@ export component IsolationFilePanel inherits Rectangle {
     in property <string> title;
     in property <[string]> items;
     in property <color> tone;
-    border-radius: 6px;
-    border-width: 1px;
+    border-radius: Theme.card-radius;
+    border-width: Theme.strong-border-width;
     border-color: root.tone;
     background: Theme.surface;
     VerticalLayout {
@@ -34,9 +34,9 @@ export component IsolationHistory inherits Rectangle {
     in property <[string]> items;
     visible: root.items.length > 0;
     height: self.visible ? min(150px, root.items.length * 27px + 42px) : 0px;
-    border-radius: 6px;
-    border-width: 1px;
-    border-color: Theme.border;
+    border-radius: Theme.card-radius;
+    border-width: Theme.strong-border-width;
+    border-color: Theme.border-strong;
     background: Theme.surface;
     VerticalLayout {
         padding: 10px;
@@ -52,8 +52,8 @@ export component IsolationRecoveryNotice inherits Rectangle {
     in property <string> detail;
     in property <bool> busy;
     callback retry();
-    border-radius: 7px;
-    border-width: 1px;
+    border-radius: Theme.card-radius;
+    border-width: Theme.strong-border-width;
     border-color: root.recovery == "failed" ? Theme.danger : Theme.warning;
     background: Theme.surface;
     HorizontalLayout {
@@ -182,9 +182,9 @@ export component IsolationSurface inherits Rectangle {
         spacing: 14px;
         Rectangle {
             horizontal-stretch: 1;
-            border-radius: 7px;
-            border-width: 1px;
-            border-color: Theme.border;
+            border-radius: Theme.card-radius;
+            border-width: Theme.strong-border-width;
+            border-color: Theme.border-strong;
             background: Theme.surface;
             VerticalLayout {
                 padding: 14px;
@@ -221,9 +221,9 @@ export component IsolationSurface inherits Rectangle {
                         spacing: 6px;
                         for candidate in root.candidates : Rectangle {
                             height: 52px;
-                            border-radius: 5px;
-                            border-width: 1px;
-                            border-color: candidate.selected ? Theme.accent : Theme.border;
+                            border-radius: Theme.small-radius;
+                            border-width: Theme.strong-border-width;
+                            border-color: candidate.selected ? Theme.accent : Theme.border-strong;
                             background: Theme.background;
                             HorizontalLayout {
                                 padding-left: 10px; padding-right: 10px; spacing: 9px; cross-axis-alignment: center;
@@ -237,9 +237,9 @@ export component IsolationSurface inherits Rectangle {
         }
         Rectangle {
             width: min(390px, parent.width * 0.38);
-            border-radius: 7px;
-            border-width: 1px;
-            border-color: Theme.border;
+            border-radius: Theme.card-radius;
+            border-width: Theme.strong-border-width;
+            border-color: Theme.border-strong;
             background: Theme.surface;
             VerticalLayout {
                 padding: 14px;

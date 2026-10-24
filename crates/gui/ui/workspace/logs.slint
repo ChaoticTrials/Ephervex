@@ -350,9 +350,9 @@ export component DiagnosticFileList inherits Rectangle {
                 for item in root.items : Rectangle {
                     height: 66px;
                     background: open-area.has-hover ? Theme.elevated : Theme.background;
-                    border-radius: 6px;
-                    border-width: item.name == root.selected ? 2px : 1px;
-                    border-color: item.name == root.selected ? Theme.accent : open-area.has-hover ? Theme.accent.with-alpha(0.7) : Theme.border;
+                    border-radius: Theme.card-radius;
+                    border-width: item.name == root.selected ? Theme.selection-outline-width : Theme.strong-border-width;
+                    border-color: item.name == root.selected ? Theme.accent : open-area.has-hover ? Theme.accent.with-alpha(0.7) : Theme.border-strong;
                     accessible-role: button;
                     accessible-label: item.name;
                     accessible-action-default => { root.opened(item.name); }
@@ -416,8 +416,8 @@ export component CrashNotice inherits Rectangle {
     callback open-crash-report();
     callback open-log();
     height: content.preferred-height;
-    border-radius: 6px;
-    border-width: 1px;
+    border-radius: Theme.card-radius;
+    border-width: Theme.strong-border-width;
     border-color: Theme.danger.with-alpha(0.6);
     background: Theme.danger.with-alpha(0.08);
     content := VerticalLayout {

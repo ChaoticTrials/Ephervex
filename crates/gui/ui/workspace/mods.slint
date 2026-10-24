@@ -17,9 +17,9 @@ export component ImpactList inherits Rectangle {
     in property <[ImpactRow]> rows;
     vertical-stretch: 1;
     max-height: root.rows.length * 22px + 18px;
-    border-radius: 6px;
-    border-width: 1px;
-    border-color: Theme.border;
+    border-radius: Theme.card-radius;
+    border-width: Theme.strong-border-width;
+    border-color: Theme.border-strong;
     background: Theme.background;
     ScrollView {
         viewport-width: self.width;
@@ -49,9 +49,9 @@ export component RelationList inherits Rectangle {
     // Tall enough for two rows carrying a project id under the name, which
     // is the taller of the two shapes a row takes.
     height: 96px * Theme.text-scale;
-    border-radius: 6px;
-    border-width: 1px;
-    border-color: Theme.border;
+    border-radius: Theme.card-radius;
+    border-width: Theme.strong-border-width;
+    border-color: Theme.border-strong;
     background: Theme.background;
     ScrollView {
         viewport-width: self.width;
@@ -108,9 +108,9 @@ export component LinkedTargetsPanel inherits Rectangle {
     // Result lists are read-only; a confirmation's are not.
     in property <bool> selectable: false;
     callback toggled(int);
-    border-radius: 6px;
-    border-width: 1px;
-    border-color: Theme.border;
+    border-radius: Theme.card-radius;
+    border-width: Theme.strong-border-width;
+    border-color: Theme.border-strong;
     background: Theme.background;
     // Room for the first rows whatever the dialog around it works out, so
     // a confirmation offering one server never hands it a scroll bar for a
@@ -121,9 +121,9 @@ export component LinkedTargetsPanel inherits Rectangle {
         VerticalLayout { alignment: start; padding: 8px; spacing: 6px;
             for row[index] in root.rows : Rectangle {
                 height: 62px;
-                border-radius: 5px;
-                border-width: row.selected ? 2px : 1px;
-                border-color: row.selected ? Theme.accent : Theme.border.with-alpha(0.6);
+                border-radius: Theme.small-radius;
+                border-width: row.selected ? Theme.selection-outline-width : Theme.strong-border-width;
+                border-color: row.selected ? Theme.accent : Theme.border-strong.with-alpha(0.6);
                 background: row.actionable || !root.selectable ? Theme.surface : Theme.surface.with-alpha(0.45);
                 // Under the row's content, so a click on the switch reaches
                 // the switch and a click anywhere else still selects.
@@ -181,9 +181,9 @@ export component ModCard inherits Rectangle {
     callback delete-file(string, string);
     callback restore-file(string);
     height: 86px;
-    border-radius: 6px;
-    border-width: 1px;
-    border-color: root.item.suspect-confidence == "high" ? Theme.danger.with-alpha(0.7) : root.item.suspect-confidence != "" ? Theme.warning.with-alpha(0.6) : touch.has-hover && root.item.can-manage ? Theme.accent.with-alpha(0.7) : Theme.border;
+    border-radius: Theme.card-radius;
+    border-width: Theme.strong-border-width;
+    border-color: root.item.suspect-confidence == "high" ? Theme.danger.with-alpha(0.7) : root.item.suspect-confidence != "" ? Theme.warning.with-alpha(0.6) : touch.has-hover && root.item.can-manage ? Theme.accent.with-alpha(0.7) : Theme.border-strong;
     background: Theme.background;
     touch := TouchArea {
         enabled: root.item.can-manage;

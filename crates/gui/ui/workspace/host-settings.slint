@@ -24,9 +24,9 @@ component JavaChoiceItem inherits Rectangle {
     // Why choosing waits while `enabled` is false.
     in property <string> hint;
     callback chosen();
-    border-radius: 6px;
-    border-width: 1px;
-    border-color: root.choice.current ? Theme.accent : Theme.border;
+    border-radius: Theme.card-radius;
+    border-width: Theme.strong-border-width;
+    border-color: root.choice.current ? Theme.accent : Theme.border-strong;
     background: root.choice.current ? Theme.selection-card : Theme.surface;
     height: row.preferred-height;
     accessible-role: AccessibleRole.groupbox;

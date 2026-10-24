@@ -37,9 +37,9 @@ export component DiagnosticBundlePanel inherits VerticalLayout {
         AppButton { text: GuiI18n.text("gui-bundle-select-none"); enabled: !root.exporting; hint: GuiI18n.text("gui-hint-export-running"); clicked => { root.select-all(false); } }
     }
     if root.parts.length > 0 : Rectangle {
-        border-radius: 6px;
-        border-width: 1px;
-        border-color: Theme.border;
+        border-radius: Theme.card-radius;
+        border-width: Theme.strong-border-width;
+        border-color: Theme.border-strong;
         background: Theme.background;
         height: min(300px, part-list.preferred-height + 2px);
         ScrollView {
@@ -138,7 +138,7 @@ component FindingCard inherits Rectangle {
     callback install(string, string);
     border-radius: Theme.card-radius;
     border-width: Theme.strong-border-width;
-    border-color: root.item.problem ? Theme.warning.with-alpha(0.7) : Theme.border;
+    border-color: root.item.problem ? Theme.warning.with-alpha(0.7) : Theme.border-strong;
     background: Theme.surface;
     height: card.preferred-height;
     accessible-role: groupbox;
@@ -414,7 +414,7 @@ export component DiagnosticsSurface inherits Rectangle {
             if root.host.fix-result != "" : Rectangle {
                 border-radius: Theme.card-radius;
                 border-width: Theme.strong-border-width;
-                border-color: root.host.fix-result-failed ? Theme.danger : Theme.border;
+                border-color: root.host.fix-result-failed ? Theme.danger : Theme.border-strong;
                 background: Theme.surface;
                 height: fixed.preferred-height;
                 fixed := VerticalLayout {

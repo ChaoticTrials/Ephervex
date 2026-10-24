@@ -2187,7 +2187,7 @@ export component AppWindow inherits Window {
                                     TextField { text <=> root.offline-account-name; placeholder: GuiI18n.text("gui-offline-account-placeholder"); }
                                     HorizontalLayout { spacing: 8px; AppButton { text: GuiI18n.text("gui-add-offline-account"); width: 180px; clicked => { root.add-offline-account(root.offline-account-name); } } AppButton { text: GuiI18n.text("gui-microsoft-sign-in"); width: 205px; tone: "primary"; clicked => { root.begin-microsoft-login(); } } Rectangle { horizontal-stretch: 1; } }
                                     if root.accounts.length == 0 : EmptyState { title: GuiI18n.text("gui-no-accounts"); message: GuiI18n.text("gui-no-accounts-detail"); }
-                                    for account in root.accounts : Rectangle { height: 78px; border-radius: 8px; border-width: account.is-default ? 2px : 1px; border-color: account.is-default ? Theme.accent : Theme.border; background: Theme.surface; accessible-role: list-item; accessible-label: account.name; HorizontalLayout { padding: 12px; spacing: 8px; cross-axis-alignment: center; VerticalLayout { alignment: center; horizontal-stretch: 1; Heading { text: account.name; font-size: Theme.row-heading-size; } BodyText { text: account.kind + " | " + account.credential-state; } }
+                                    for account in root.accounts : Rectangle { height: 78px; border-radius: Theme.card-radius; border-width: account.is-default ? Theme.selection-outline-width : Theme.strong-border-width; border-color: account.is-default ? Theme.accent : Theme.border-strong; background: Theme.surface; accessible-role: list-item; accessible-label: account.name; HorizontalLayout { padding: 12px; spacing: 8px; cross-axis-alignment: center; VerticalLayout { alignment: center; horizontal-stretch: 1; Heading { text: account.name; font-size: Theme.row-heading-size; } BodyText { text: account.kind + " | " + account.credential-state; } }
                                         // The marker stands where the button it replaces would be, at
                                         // that button's size, so the column does not jump between one
                                         // row and the next.
@@ -2475,13 +2475,16 @@ export component AppWindow inherits Window {
 
     }
 
+    // Along the bottom edge, in the middle of the window.
     Rectangle {
-        x: parent.width - self.width - Theme.shell-padding;
+        x: Theme.shell-padding;
         y: Theme.shell-padding;
-        width: min(440px, parent.width - 2 * Theme.shell-padding);
-        height: parent.height - 2 * Theme.shell-padding;
-        VerticalLayout { alignment: end; spacing: 8px;
-            for toast in root.toasts : ToastPanel { message: toast.message; error: toast.error; repeats: toast.repeats; dismiss => { root.dismiss-toast(toast.id); } }
+        width: parent.width - 2 * Theme.shell-padding;
+        height: parent.height - 2 * Theme.shell-padding - Theme.shadow-room;
+        VerticalLayout { alignment: end; spacing: 10px;
+            for toast in root.toasts : HorizontalLayout { alignment: center;
+                ToastPanel { message: toast.message; error: toast.error; repeats: toast.repeats; dismiss => { root.dismiss-toast(toast.id); } }
+            }
         }
     }
 
@@ -2650,9 +2653,9 @@ export component AppWindow inherits Window {
                             }
                         }
                         if root.import-pack-header != "" : Rectangle {
-                            border-radius: 6px;
-                            border-width: 1px;
-                            border-color: root.import-status-kind == "ready" || root.import-status-kind == "submitting" ? Theme.success : Theme.border;
+                            border-radius: Theme.card-radius;
+                            border-width: Theme.strong-border-width;
+                            border-color: root.import-status-kind == "ready" || root.import-status-kind == "submitting" ? Theme.success : Theme.border-strong;
                             background: Theme.surface;
                             // Left to itself, the card measures its wrapped lines unwrapped.
                             height: pack-summary.preferred-height;
@@ -2898,9 +2901,9 @@ export component AppWindow inherits Window {
                         vertical-stretch: 1; border-radius: Theme.card-radius; border-width: Theme.strong-border-width; border-color: Theme.border-strong; background: Theme.background;
                         ScrollView { viewport-width: self.width; VerticalLayout { padding: 6px; spacing: 4px;
                             for entry in root.mod-versions : Rectangle {
-                                height: 46px; border-radius: 5px;
-                                border-width: entry.version-id == root.mod-action-selected ? 2px : 1px;
-                                border-color: entry.version-id == root.mod-action-selected ? Theme.accent : entry.installed ? Theme.accent-secondary.with-alpha(0.5) : Theme.border.with-alpha(0.6);
+                                height: 46px; border-radius: Theme.small-radius;
+                                border-width: entry.version-id == root.mod-action-selected ? Theme.selection-outline-width : Theme.strong-border-width;
+                                border-color: entry.version-id == root.mod-action-selected ? Theme.accent : entry.installed ? Theme.accent-secondary.with-alpha(0.5) : Theme.border-strong.with-alpha(0.6);
                                 background: entry.installed ? Theme.accent-secondary.with-alpha(0.08) : Theme.surface;
                                 HorizontalLayout { padding-left: 10px; padding-right: 10px; spacing: 8px;
                                     VerticalLayout { alignment: center; spacing: 2px; horizontal-stretch: 1;
@@ -3049,7 +3052,7 @@ export component AppWindow inherits Window {
                         AppButton { text: GuiI18n.text("gui-loader-change-action"); tone: "primary"; enabled: !root.loader-change-pending && root.loader-change-selected != "" && root.loader-change-selected != root.loader-change-current-build; hint: root.loader-change-pending ? GuiI18n.text("gui-hint-busy") : root.loader-change-selected == "" ? GuiI18n.text("gui-hint-choose-build") : GuiI18n.text("gui-hint-build-already-current"); clicked => { root.loader-change-pending = true; root.modal-error = ""; root.change-loader-version(root.mod-action-host, root.loader-change-selected); } }
                     }
                 }
-                if root.modal == "eula" : VerticalLayout { spacing: 12px; BodyText { text: GuiI18n.text("gui-eula-detail"); wrap: word-wrap; } AppButton { text: GuiI18n.text("gui-open-minecraft-eula"); clicked => { root.open-eula-reference(); } } Rectangle { height: 70px; border-radius: 6px; border-width: 1px; border-color: root.eula-accepted ? Theme.success : Theme.warning; background: Theme.surface; BodyText { x: 12px; width: parent.width - 24px; text: root.eula-status; wrap: word-wrap; } } if !root.eula-accepted : BodyText { text: GuiI18n.text("gui-eula-confirm"); color: Theme.text; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } if root.eula-accepted : AppButton { text: GuiI18n.text("gui-revoke-consent"); tone: "danger"; clicked => { root.revoke-eula(); } } if !root.eula-accepted : AppButton { text: GuiI18n.text("gui-accept-eula"); tone: "primary"; clicked => { root.accept-eula(); } } } }
+                if root.modal == "eula" : VerticalLayout { spacing: 12px; BodyText { text: GuiI18n.text("gui-eula-detail"); wrap: word-wrap; } AppButton { text: GuiI18n.text("gui-open-minecraft-eula"); clicked => { root.open-eula-reference(); } } Rectangle { height: 70px; border-radius: Theme.card-radius; border-width: Theme.strong-border-width; border-color: root.eula-accepted ? Theme.success : Theme.warning; background: Theme.surface; BodyText { x: 12px; width: parent.width - 24px; text: root.eula-status; wrap: word-wrap; } } if !root.eula-accepted : BodyText { text: GuiI18n.text("gui-eula-confirm"); color: Theme.text; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } if root.eula-accepted : AppButton { text: GuiI18n.text("gui-revoke-consent"); tone: "danger"; clicked => { root.revoke-eula(); } } if !root.eula-accepted : AppButton { text: GuiI18n.text("gui-accept-eula"); tone: "primary"; clicked => { root.accept-eula(); } } } }
                 if root.modal == "kill" : VerticalLayout { spacing: 14px; BodyText { text: GuiI18n.value("gui-force-kill-detail", root.pending-action-name != "" ? root.pending-action-name : GuiI18n.text("gui-this-server")); color: Theme.warning; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-force-kill-action"); tone: "danger"; clicked => { root.server-kill(root.pending-action-id); root.modal = ""; } } } }
                 if root.modal == "groups" : VerticalLayout { spacing: 12px;
                     BodyText { text: GuiI18n.text("gui-groups-detail"); wrap: word-wrap; }
