@@ -195,7 +195,7 @@ fn every_shape_places_its_panes_apart_and_inside_the_window() {
         theme.get_workspace_pane_min_width(),
         theme.get_workspace_pane_min_height(),
     );
-    let (minimum_width, minimum_height) = support::minimum_size(&ui);
+    let (minimum_width, minimum_height) = support::narrowest_with_list_size(&ui);
     let minimum = (
         u16::try_from(minimum_width).expect("a width"),
         u16::try_from(minimum_height).expect("a height"),
@@ -335,7 +335,7 @@ fn each_panes_header_stays_inside_the_pane() {
 #[test]
 fn a_panes_tab_row_stays_inside_the_pane_on_the_smallest_window() {
     let ui = window();
-    support::set_minimum_size(&ui);
+    support::set_narrowest_with_list(&ui);
     for (shape, panes) in shapes() {
         let placed: Vec<(i32, i32, bool)> = panes
             .iter()
@@ -582,7 +582,7 @@ fn a_panes_tabs_switch_only_that_pane() {
 #[test]
 fn tabs_that_do_not_fit_wait_under_more() {
     let ui = window();
-    support::set_minimum_size(&ui);
+    support::set_narrowest_with_list(&ui);
     let surfaces = support::follow_surface_requests(&ui);
     let mut panes = vec![
         placed(1, CLIENT, "Overview", 0, 0, false),
@@ -646,7 +646,7 @@ fn the_list_under_more_closes_when_the_window_is_resized() {
         (1, "gui-instance-tab-logs", beside(), 240),
         (2, "gui-server-tab-console", beside(), 120),
     ] {
-        support::set_minimum_size(&ui);
+        support::set_narrowest_with_list(&ui);
         split(&ui, panes);
         let hidden = lookup(hidden);
         let listed = |ui: &AppWindow| {
@@ -666,7 +666,7 @@ fn the_list_under_more_closes_when_the_window_is_resized() {
         settle(&ui);
         assert!(listed(&ui), "pane {pane}: More lists {hidden}");
 
-        let (minimum_width, minimum_height) = support::minimum_size(&ui);
+        let (minimum_width, minimum_height) = support::narrowest_with_list_size(&ui);
         ui.window()
             .set_size(PhysicalSize::new(minimum_width + wider, minimum_height));
         settle(&ui);
@@ -1112,7 +1112,7 @@ fn header_actions_act_on_their_panes_host() {
 #[test]
 fn a_panes_host_and_actions_stay_inside_the_pane_and_apart() {
     let ui = window();
-    for (width, height) in [(1480_u32, 900_u32), support::minimum_size(&ui)] {
+    for (width, height) in [(1480_u32, 900_u32), support::narrowest_with_list_size(&ui)] {
         ui.window().set_size(PhysicalSize::new(width, height));
         // The default text size, then the largest one offered.
         for (scale, default_text) in [(1.0, true), (1.25, false)] {

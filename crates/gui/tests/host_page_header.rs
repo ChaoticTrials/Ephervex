@@ -1,5 +1,5 @@
 //! The header of a host's page: what the host is, how it stands, and the
-//! actions it offers, all inside the page at the smallest window.
+//! actions it offers, all inside the page at the narrowest window that has the list beside it.
 
 #![allow(clippy::expect_used)]
 
@@ -38,7 +38,7 @@ fn labeled(ui: &ephervex_gui::ui::AppWindow, label: &str) -> ElementHandle {
 #[test]
 fn the_header_chips_say_what_the_host_is() {
     let ui = support::test_window();
-    support::set_minimum_size(&ui);
+    support::set_narrowest_with_list(&ui);
     support::show_client(&ui, client(), "Overview");
 
     for label in ["1.20.1", "Forge 47.3.0", "Temporary", "conveyor-srv"] {
@@ -52,7 +52,7 @@ fn the_header_chips_say_what_the_host_is() {
 #[test]
 fn a_host_with_no_mods_still_says_so_in_its_header() {
     let ui = support::test_window();
-    support::set_minimum_size(&ui);
+    support::set_narrowest_with_list(&ui);
     let mut row = client();
     row.mods = 0;
     support::show_client(&ui, row, "Overview");
@@ -64,7 +64,7 @@ fn a_host_with_no_mods_still_says_so_in_its_header() {
 #[test]
 fn every_header_action_sits_inside_the_page_at_the_smallest_window() {
     let ui = support::test_window();
-    support::set_minimum_size(&ui);
+    support::set_narrowest_with_list(&ui);
     support::show_client(&ui, client(), "Overview");
 
     // The page ends at the window's edge less the shell's outer padding.
@@ -89,14 +89,13 @@ fn every_header_action_sits_inside_the_page_at_the_smallest_window() {
 
 #[allow(clippy::cast_precision_loss)]
 fn page_right(ui: &ephervex_gui::ui::AppWindow) -> f32 {
-    let (width, _) = support::minimum_size(ui);
-    width as f32 - ui.global::<Theme>().get_shell_padding()
+    ui.window().size().width as f32 - ui.global::<Theme>().get_shell_padding()
 }
 
 #[test]
 fn the_chip_strip_stays_inside_the_page_with_long_values_and_large_text() {
     let ui = support::test_window();
-    support::set_minimum_size(&ui);
+    support::set_narrowest_with_list(&ui);
     ui.global::<Theme>().set_text_scale(1.25);
     let mut row = client();
     row.loader = "NeoForge 21.1.249".into();

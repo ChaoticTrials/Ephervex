@@ -153,7 +153,7 @@ fn the_mods_panel_notice_opens_the_report_the_marks_come_from() {
 #[test]
 fn the_crash_notice_actions_stay_inside_their_pane_and_apart() {
     let ui = window();
-    for width in [1480_u32, support::minimum_width(&ui)] {
+    for width in [1480_u32, support::narrowest_with_list_size(&ui).0] {
         // Tall enough that nothing is scrolled out of the pane.
         ui.window().set_size(PhysicalSize::new(width, 3000));
         // The default text size, then the largest one offered.

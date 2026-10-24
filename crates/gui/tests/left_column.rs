@@ -19,10 +19,10 @@ fn settle(ui: &AppWindow) {
     ui.window().take_snapshot().expect("render");
 }
 
-/// The smallest window with the largest text, where the column is tightest.
+/// The narrowest window that shows the column with the largest text, where it is tightest.
 fn tight() -> AppWindow {
     let ui = support::test_window();
-    support::set_minimum_size(&ui);
+    support::set_narrowest_with_list(&ui);
     ui.global::<Theme>().set_text_scale(1.25);
     ui.set_loading(false);
     settle(&ui);
@@ -237,7 +237,7 @@ fn darkness(ui: &AppWindow, x: f32, y: f32) -> u32 {
 #[test]
 fn the_refresh_search_filter_and_settings_controls_share_a_right_edge() {
     let ui = support::test_window();
-    support::set_minimum_size(&ui);
+    support::set_narrowest_with_list(&ui);
     ui.set_loading(false);
     settle(&ui);
 
@@ -257,7 +257,7 @@ fn the_refresh_search_filter_and_settings_controls_share_a_right_edge() {
 #[test]
 fn the_refresh_search_filter_and_settings_controls_draw_a_hard_shadow() {
     let ui = support::test_window();
-    support::set_minimum_size(&ui);
+    support::set_narrowest_with_list(&ui);
     ui.set_loading(false);
     settle(&ui);
 

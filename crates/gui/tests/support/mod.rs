@@ -138,6 +138,30 @@ pub(crate) fn set_minimum_size(ui: &AppWindow) {
     ui.window().set_size(PhysicalSize::new(width, height));
 }
 
+/// The narrowest window that still shows the list column beside the page,
+/// which leaves a host page its narrowest, at the smallest height allowed.
+pub(crate) fn narrowest_with_list_size(ui: &AppWindow) -> (u32, u32) {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let width = ui.global::<Theme>().get_shell_list_inline_width().ceil() as u32;
+    let (_, height) = minimum_size(ui);
+    (width, height)
+}
+
+/// Sizes the window to `narrowest_with_list_size`.
+pub(crate) fn set_narrowest_with_list(ui: &AppWindow) {
+    let (width, height) = narrowest_with_list_size(ui);
+    ui.window().set_size(PhysicalSize::new(width, height));
+}
+
+/// Sizes the window to the narrowest that still shows the side column beside
+/// the page, at the smallest height the application allows.
+pub(crate) fn set_narrowest_with_side_column(ui: &AppWindow) {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let width = ui.global::<Theme>().get_shell_side_inline_width().ceil() as u32;
+    let (_, height) = minimum_size(ui);
+    ui.window().set_size(PhysicalSize::new(width, height));
+}
+
 /// Answers the window's text lookups from the bundled English messages.
 pub(crate) fn install_i18n(ui: &AppWindow) {
     let global = ui.global::<GuiI18n>();

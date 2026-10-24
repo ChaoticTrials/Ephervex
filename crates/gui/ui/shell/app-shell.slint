@@ -1,19 +1,90 @@
 // The frame of the window: the grid floor with the columns laid over it.
 
+import { IconButton } from "../components/controls.slint";
 import { GridFloor } from "../components/surface.slint";
 import { Theme } from "../theme.slint";
 
-// Children are the columns, left to right. Each column sizes itself: the list
-// and the side column by their theme widths, the middle one by what is left.
+// Children are placed by the window from the geometry this exposes: the list
+// column on the left, the page, and the side column on the right. A column the
+// window is too narrow for becomes a drawer: it leaves the row, a button on a
+// rail beside the page opens it over the page, and a press outside it closes it.
 export component AppShell inherits Rectangle {
+    // Whether the page has a side column to place.
+    in property <bool> has-side: false;
+    in property <string> list-button-label;
+    in property <string> side-button-label;
+    // What the rail buttons say while their drawer is open.
+    in property <string> list-hide-label;
+    in property <string> side-hide-label;
+    in-out property <bool> list-open: false;
+    in-out property <bool> side-open: false;
+    out property <bool> list-inline: root.width >= Theme.shell-list-inline-width;
+    out property <bool> side-inline: root.width >= Theme.shell-side-inline-width;
+    out property <length> content-height: max(0px, root.height - 2 * Theme.shell-padding);
+    // How far a column's content starts below the shell's padding: under the
+    // button that opened it when the column is a drawer.
+    out property <length> list-top: root.list-inline ? 0px : Theme.control-height + 14px;
+    out property <length> side-top: root.side-inline ? 0px : Theme.control-height + 14px;
+    out property <length> page-x: Theme.shell-padding + (root.list-inline ? Theme.list-column-width : Theme.shell-rail-width) + Theme.shell-gap;
+    out property <length> page-width: max(0px, root.width - root.page-x - Theme.shell-padding - (root.has-side ? (root.side-inline ? Theme.side-column-width : Theme.shell-rail-width) + Theme.shell-gap : 0px));
     background: Theme.background;
+    changed list-inline => { root.list-open = false; }
+    changed side-inline => { root.side-open = false; }
     GridFloor {
         width: root.width;
         height: root.height;
     }
-    HorizontalLayout {
-        padding: Theme.shell-padding;
-        spacing: Theme.shell-gap;
+    // Escape closes a drawer from anywhere in the shell. The rail buttons come
+    // before the columns so that Tab reaches them first.
+    scope := FocusScope {
+        width: root.width;
+        height: root.height;
+        key-pressed(event) => {
+            if event.text == Key.Escape && (root.list-open || root.side-open) {
+                root.list-open = false;
+                root.side-open = false;
+                return accept;
+            }
+            return reject;
+        }
+        if !root.list-inline : IconButton {
+            z: 12;
+            x: Theme.shell-padding;
+            y: Theme.shell-padding;
+            icon: @image-url("../../../../assets/icons/panel-left.svg");
+            accessible-name: root.list-open ? root.list-hide-label : root.list-button-label;
+            active: root.list-open;
+            lift: Theme.shadow-offset-small;
+            clicked => {
+                root.side-open = false;
+                root.list-open = !root.list-open;
+                if root.list-open { scope.focus(); }
+            }
+        }
+        if root.has-side && !root.side-inline : IconButton {
+            z: 12;
+            x: root.width - Theme.shell-padding - self.width;
+            y: Theme.shell-padding;
+            icon: @image-url("../../../../assets/icons/panel-right.svg");
+            accessible-name: root.side-open ? root.side-hide-label : root.side-button-label;
+            active: root.side-open;
+            lift: Theme.shadow-offset-small;
+            clicked => {
+                root.list-open = false;
+                root.side-open = !root.side-open;
+                if root.side-open { scope.focus(); }
+            }
+        }
         @children
+        if (root.list-open && !root.list-inline) || (root.side-open && root.has-side && !root.side-inline) : Rectangle {
+            z: 9;
+            background: Theme.scrim;
+            TouchArea {
+                clicked => {
+                    root.list-open = false;
+                    root.side-open = false;
+                }
+            }
+        }
     }
 }

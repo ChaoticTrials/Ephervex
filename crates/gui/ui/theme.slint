@@ -255,8 +255,17 @@ export global Theme {
     // The padding around the shell's content and the gap between its columns.
     out property <length> shell-padding: 20px;
     out property <length> shell-gap: 22px;
+    // The window width from which the list column sits beside the page; below
+    // it the list is a drawer opened from a rail. The page then keeps room for
+    // two split panes.
+    out property <length> shell-list-inline-width: 1120px;
+    // The window width from which the side column sits beside the page; below
+    // it the column is a drawer opened from a rail.
+    out property <length> shell-side-inline-width: 1240px;
+    // The width of the rail that holds a drawer's button.
+    out property <length> shell-rail-width: 48px;
     // The smallest the window can be resized to.
-    out property <length> window-min-width: 1240px;
+    out property <length> window-min-width: 1000px;
     out property <length> window-min-height: 760px;
     // The height of a chip.
     out property <length> chip-height: 22px * text-scale;

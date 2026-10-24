@@ -20516,8 +20516,12 @@ mod tests {
     #[test]
     fn a_card_press_opens_its_host_on_the_overview_surface() {
         let source = ui_markup();
-        assert!(source.contains("open-client(id) => { root.open-host(\"client\", id); }"));
-        assert!(source.contains("open-server(id) => { root.open-host(\"server\", id); }"));
+        assert!(source.contains(
+            "open-client(id) => { shell.list-open = false; root.open-host(\"client\", id); }"
+        ));
+        assert!(source.contains(
+            "open-server(id) => { shell.list-open = false; root.open-host(\"server\", id); }"
+        ));
         assert!(source.contains(
             "function open-host(kind: string, id: string) {\n        root.open-host-surface(kind, id, \"Overview\");"
         ));

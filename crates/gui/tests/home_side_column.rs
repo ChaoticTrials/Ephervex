@@ -242,9 +242,9 @@ fn the_tips_name_controls_that_exist() {
 }
 
 #[test]
-fn no_card_shadow_reaches_past_the_column_at_the_smallest_window() {
+fn no_card_shadow_reaches_past_the_column_at_the_narrowest_window_that_shows_it() {
     let ui = home();
-    support::set_minimum_size(&ui);
+    support::set_narrowest_with_side_column(&ui);
     ui.set_artifact_cache_over_budget(true);
     measured(&ui, "12.4 GiB", "10 GiB", 1.0);
 

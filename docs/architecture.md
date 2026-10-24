@@ -78,8 +78,13 @@ release, because the headless tests find elements by it.
 | `settings/` | Application settings panels and the Minecraft defaults screen with its window size picker |
 
 The window has three columns: the host list, the page, and a right column that
-stands beside Home only; the settings and a host take its width and its gap. The list is always on screen and lists
-every instance and server; pressing a card opens that host in the workspace.
+stands beside Home only; the settings and a host take its width and its gap. The
+list lists every instance and server; pressing a card opens that host in the
+workspace. `AppShell` exposes the geometry: a window narrower than
+`shell-list-inline-width` turns the list into a drawer, and one narrower than
+`shell-side-inline-width` does the same for the right column. A drawer leaves
+the row, a button on a rail beside the page opens it over a scrim, and choosing
+a host, pressing the scrim, or resizing the window past the width closes it.
 The page is the settings when `settings-open` is set, otherwise the host panes
 when Rust has opened a workspace, otherwise Home. `settings-open` and the
 workspace are independent, so Back from the settings returns to the host that

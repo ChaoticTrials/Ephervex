@@ -279,7 +279,7 @@ fn no_card_shadow_reaches_past_the_edge_of_the_page() {
 #[test]
 fn the_quick_actions_and_cards_fit_the_page_at_the_smallest_window_and_largest_text() {
     let ui = home();
-    support::set_minimum_size(&ui);
+    support::set_narrowest_with_side_column(&ui);
     ui.global::<Theme>().set_text_scale(1.25);
     ui.set_home_greeting("Good afternoon, QuietBlock".into());
     ui.set_running(model(vec![RunningRow {

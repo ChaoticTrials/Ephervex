@@ -4003,3 +4003,8 @@ gui-operator-level = Level { $level }
 gui-operators-none = ops.json lists no operators.
 gui-operators-unreadable = ops.json could not be read.
 gui-operators-edit-hint = Change operators with the op and deop console commands. Ephervex does not rewrite ops.json while the server runs.
+
+gui-shell-show-list = Show instances and servers
+gui-shell-show-side = Show storage and tips
+gui-shell-hide-list = Hide instances and servers
+gui-shell-hide-side = Hide storage and tips

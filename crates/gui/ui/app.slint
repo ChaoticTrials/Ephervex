@@ -1087,10 +1087,14 @@ export component AppWindow inherits Window {
     }
     changed settings-open => {
         if (self.minecraft-capturing-id != "") { self.minecraft-cancel-capture(); }
+        shell.list-open = false;
     }
     changed shows-home => {
         if (self.shows-home) { self.home-appeared(); }
+        shell.side-open = false;
     }
+    // Whatever opens a page from the list leaves the list's drawer behind.
+    changed workspace-open => { shell.list-open = false; }
     changed create-minecraft => {
         if root.create-minecraft != "" {
             root.warm-language-catalog(root.create-minecraft);
@@ -1176,11 +1180,34 @@ export component AppWindow inherits Window {
         preferred-width: 1480px;
         min-height: Theme.window-min-height;
         preferred-height: 900px;
-        AppShell {
+        shell := AppShell {
             vertical-stretch: 1;
-            // Every instance and server, beside whatever the page shows.
+            has-side: root.shows-home;
+            list-button-label: GuiI18n.text("gui-shell-show-list");
+            side-button-label: GuiI18n.text("gui-shell-show-side");
+            list-hide-label: GuiI18n.text("gui-shell-hide-list");
+            side-hide-label: GuiI18n.text("gui-shell-hide-side");
+            // Every instance and server, beside whatever the page shows, or
+            // over it as a drawer in a narrow window.
+            Rectangle {
+                z: 10;
+                x: shell.list-inline || shell.list-open ? 0px : -self.width;
+                y: 0px;
+                width: Theme.shell-padding + Theme.list-column-width + Theme.shell-padding;
+                height: shell.height;
+                visible: shell.list-inline || shell.list-open;
+                background: shell.list-inline ? transparent : Theme.background;
+                if !shell.list-inline : TouchArea { }
+                if !shell.list-inline : Rectangle {
+                    x: parent.width - Theme.strong-border-width;
+                    width: Theme.strong-border-width;
+                    background: Theme.border-strong;
+                }
             VerticalLayout {
+                x: Theme.shell-padding;
+                y: Theme.shell-padding + shell.list-top;
                 width: Theme.list-column-width;
+                height: shell.content-height - shell.list-top;
                 spacing: 14px;
                 BrandBar {
                     logo: root.logo;
@@ -1190,7 +1217,7 @@ export component AppWindow inherits Window {
                 HostList {
                     vertical-stretch: 1;
                     home-selected: root.shows-home;
-                    open-home => { root.open-home(); }
+                    open-home => { shell.list-open = false; root.open-home(); }
                     instances: root.instances;
                     servers: root.listed-servers;
                     pending-instances: root.pending-instances;
@@ -1226,7 +1253,7 @@ export component AppWindow inherits Window {
                     create-instance => { root.open-create-instance-modal(); }
                     import-modpack => { root.open-import-modal(); }
                     create-server => { root.open-create-server(); }
-                    open-client(id) => { root.open-host("client", id); }
+                    open-client(id) => { shell.list-open = false; root.open-host("client", id); }
                     toggle-client-favorite(id, favorite) => { root.set-favorite("client", id, favorite); }
                     set-client-group(id, group) => { root.set-client-group(id, group); }
                     new-client-group(id) => { root.pending-action-kind = "new-group"; root.pending-action-id = id; root.pending-rename-text = ""; root.modal-error = ""; root.modal = "rename"; }
@@ -1240,7 +1267,7 @@ export component AppWindow inherits Window {
                     make-client-persistent(id) => { root.open-make-persistent(id); }
                     rename-client(id, name) => { root.pending-action-kind = "client"; root.pending-action-id = id; root.pending-rename-text = name; root.modal-error = ""; root.modal = "rename"; }
                     delete-client(row) => { root.pending-action-id = row.id; root.pending-action-name = row.name; root.pending-snapshot-deletion-note = row.snapshot-deletion-note; root.pending-action-linked-servers = row.linked-servers; root.pending-action-stoppable-linked-servers = row.stoppable-linked-servers; root.pending-action-unstoppable-linked-servers = row.unstoppable-linked-servers; root.modal-error = ""; root.modal = "delete-instance"; }
-                    open-server(id) => { root.open-host("server", id); }
+                    open-server(id) => { shell.list-open = false; root.open-host("server", id); }
                     toggle-server-favorite(id, favorite) => { root.set-favorite("server", id, favorite); }
                     pick-server-icon(id) => { root.pick-host-icon("server", id); }
                     clear-server-icon(id) => { root.clear-host-icon("server", id); }
@@ -1259,8 +1286,9 @@ export component AppWindow inherits Window {
                     account-entries: root.account-launch-entries;
                     choose-account(id) => { root.set-default-account(id); }
                     manage-accounts => { root.open-settings("Accounts"); }
-                    open-settings => { root.open-settings("General"); }
+                    open-settings => { shell.list-open = false; root.open-settings("General"); }
                 }
+            }
             }
 
             // The page: the settings, the host panes, or Home. One container
@@ -1272,7 +1300,10 @@ export component AppWindow inherits Window {
             // collapsed into a column whenever the open tab happened to be a
             // narrow one.
             Rectangle {
-                horizontal-stretch: 1;
+                x: shell.page-x;
+                y: Theme.shell-padding;
+                width: shell.page-width;
+                height: shell.content-height;
 
                 if root.shows-home : HomePage {
                     greeting: root.home-greeting;
@@ -2316,7 +2347,24 @@ export component AppWindow inherits Window {
 
             // Beside Home only. The other pages take this width, so the page
             // grows by the column and its gap when it is left.
-            if root.shows-home : RightColumn {
+            if root.shows-home : Rectangle {
+                z: 10;
+                width: Theme.shell-padding + Theme.side-column-width + Theme.shell-padding;
+                x: shell.side-inline || shell.side-open ? shell.width - self.width : shell.width;
+                y: 0px;
+                height: shell.height;
+                visible: shell.side-inline || shell.side-open;
+                background: shell.side-inline ? transparent : Theme.background;
+                if !shell.side-inline : TouchArea { }
+                if !shell.side-inline : Rectangle {
+                    x: 0px;
+                    width: Theme.strong-border-width;
+                    background: Theme.border-strong;
+                }
+            RightColumn {
+                x: Theme.shell-padding;
+                y: Theme.shell-padding + shell.side-top;
+                height: shell.content-height - shell.side-top;
                 StorageCard {
                     temporary: root.home-temporary-count;
                     persistent: root.home-persistent-count;
@@ -2331,6 +2379,7 @@ export component AppWindow inherits Window {
                     cache-fill: root.artifact-cache-fill;
                 }
                 TipsCard { }
+            }
             }
         }
 
