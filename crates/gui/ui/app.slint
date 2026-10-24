@@ -55,7 +55,7 @@ import { GuiI18n, NameRules, ServerHints, ServerPackRules } from "globals.slint"
 import { HomePage } from "home/home-page.slint";
 import { CaseSurface } from "workspace/case.slint";
 import { StorageCard } from "home/storage-card.slint";
-import { HostStorageCard, LinkedServersCard } from "workspace/host-column.slint";
+import { HostStorageCard, LinkedServersCard, ReportCard } from "workspace/host-column.slint";
 import { TipsCard } from "home/tips-card.slint";
 import { PendingCard } from "host-list/host-card.slint";
 import { HostList } from "host-list/host-list.slint";
@@ -2406,6 +2406,11 @@ export component AppWindow inherits Window {
                     repair(id) => { root.repair-server(id); }
                     delete(row) => { root.pending-action-id = row.id; root.pending-action-name = row.name; root.pending-snapshot-deletion-note = row.snapshot-deletion-note; root.modal-error = ""; root.modal = "delete-server"; }
                     create => { root.open-create-linked-server(root.column-host.id, root.column-host.client.name); }
+                }
+                if root.shows-host-column && root.column-host.kind == "client" : ReportCard {
+                    summary: root.column-host.client.summary;
+                    copy(text) => { root.copy-text(text); }
+                    open-bundle => { root.show-pane-surface(root.column-pane.id, "Diagnostics"); shell.side-open = false; }
                 }
                 if root.shows-host-column : HostStorageCard {
                     storage: root.column-host.kind == "client" ? root.column-host.client.storage : root.column-host.server.storage;

@@ -50,6 +50,7 @@ pub mod instance_listing;
 pub mod isolation;
 mod isolation_servers;
 pub mod issue_link;
+pub mod issue_summary;
 pub mod java_choices;
 pub mod java_failure;
 pub mod java_install;
@@ -162,6 +163,7 @@ pub use isolation_servers::{
 pub use issue_link::{
     IssueLinkRefusal, MAX_ISSUE_LINK_BYTES, open_issue_link, validated_issue_link,
 };
+pub use issue_summary::{IssueSummaryFacts, issue_summary};
 pub use java_choices::{
     AutomaticJava, JavaChoice, JavaChoices, JavaPinIndex, JavaRuntimePins, LauncherJavaChoice,
     PinningHost,

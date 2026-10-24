@@ -7,6 +7,8 @@ import { BodyText, DisplayHeading, Heading } from "../components/text.slint";
 import { GuiI18n } from "../globals.slint";
 import { PendingEntityRow, ServerRow } from "../models.slint";
 import { SideCard } from "../home/side-card.slint";
+import { Plate } from "../components/surface.slint";
+import { ScrollView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
 
 // One linked server: its name, state and address, and the few things done to
@@ -168,6 +170,61 @@ export component HostStorageCard inherits SideCard {
             text: GuiI18n.text("gui-open-folder");
             icon: @image-url("../../../../assets/icons/folder.svg");
             clicked => { root.open-folder(); }
+        }
+    }
+}
+
+// The text an instance adds to a bug report, shown as it will be copied.
+export component ReportCard inherits SideCard {
+    in property <string> summary;
+    callback copy(string);
+    callback open-bundle();
+    DisplayHeading { text: GuiI18n.text("gui-report-title"); font-size: Theme.item-title-size; }
+    BodyText { text: GuiI18n.text("gui-report-detail"); font-size: Theme.label-size; color: Theme.text-secondary; wrap: word-wrap; }
+    // Long summaries scroll inside the preview rather than growing the card.
+    Rectangle {
+        height: 190px;
+        Plate {
+            width: parent.width;
+            height: parent.height;
+            radius: Theme.small-radius;
+            fill: Theme.field;
+            ScrollView {
+                x: 10px;
+                y: 8px;
+                width: parent.width - 20px;
+                height: parent.height - 16px;
+                viewport-width: self.visible-width;
+                viewport-height: text.preferred-height;
+                text := Text {
+                    x: 0px;
+                    y: 0px;
+                    width: parent.visible-width;
+                    vertical-alignment: top;
+                    text: root.summary;
+                    color: Theme.text;
+                    font-family: Theme.mono-family;
+                    font-size: Theme.caption-size;
+                    wrap: word-wrap;
+                    accessible-role: AccessibleRole.text;
+                    accessible-label: root.summary;
+                }
+            }
+        }
+    }
+    // The buttons raise a hard shadow to the right and below.
+    VerticalLayout {
+        spacing: 8px;
+        padding-right: Theme.shadow-room;
+        padding-bottom: Theme.shadow-room;
+        AppButton {
+            text: GuiI18n.text("gui-report-copy");
+            tone: "primary";
+            clicked => { root.copy(root.summary); }
+        }
+        AppButton {
+            text: GuiI18n.text("gui-report-bundle");
+            clicked => { root.open-bundle(); }
         }
     }
 }

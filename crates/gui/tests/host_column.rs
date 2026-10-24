@@ -181,3 +181,36 @@ fn a_server_that_cannot_be_joined_says_why_on_its_connect_button() {
         Some("Start the server first.")
     );
 }
+
+#[test]
+fn the_report_card_copies_exactly_the_summary_it_shows() {
+    let mut view = client_with_server();
+    view.client.summary = "Conveyor dupe\n\nMinecraft: 1.20.1".into();
+    let ui = window(1600, view);
+    assert!(drawn(&ui, "ReportCard"));
+    let copied = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&copied);
+    ui.on_copy_text(move |text| sink.borrow_mut().push(text.to_string()));
+    press(&ui, &lookup("gui-report-copy"));
+    assert_eq!(
+        copied.borrow().as_slice(),
+        ["Conveyor dupe\n\nMinecraft: 1.20.1"]
+    );
+}
+
+#[test]
+fn a_server_page_has_no_report_card() {
+    let ui = window(1600, support::server_view(linked_server()));
+    assert!(!drawn(&ui, "ReportCard"));
+}
+
+#[test]
+fn the_report_card_leads_to_the_diagnostic_bundle() {
+    let ui = window(1600, client_with_server());
+    let requests = support::follow_surface_requests(&ui);
+    press(&ui, &lookup("gui-report-bundle"));
+    assert_eq!(
+        requests.borrow().last(),
+        Some(&(1, "Diagnostics".to_owned()))
+    );
+}

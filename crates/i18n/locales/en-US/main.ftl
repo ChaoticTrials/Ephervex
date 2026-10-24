@@ -4022,3 +4022,8 @@ gui-issue-link-save = Save
 gui-issue-link-placeholder = https://github.com/owner/repo/issues/42
 gui-issue-link-open = Open the issue link { $value }
 gui-issue-link-open-failed = The issue link could not be opened in the browser.
+
+gui-report-title = Report
+gui-report-detail = Exactly this text is copied. Paste it into the bug report.
+gui-report-copy = Copy summary
+gui-report-bundle = Diagnostic bundle...

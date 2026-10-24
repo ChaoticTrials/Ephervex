@@ -9892,6 +9892,21 @@ fn apply_snapshot(
 }
 
 /// One instance as the list holds it.
+/// What the instance contributes to a bug report.
+fn instance_summary(item: &crate::presentation::InstancePresentation) -> String {
+    ephervex_core::issue_summary(&ephervex_core::IssueSummaryFacts {
+        name: &item.name,
+        issue_link: &item.issue_link,
+        minecraft: &item.minecraft,
+        loader: &item.loader,
+        mods: item.managed_mods,
+        storage: &item.storage,
+        linked_servers: item.linked_servers,
+        paired_server: item.pair.as_ref().map_or("", |pair| pair.name.as_str()),
+        case: &item.case,
+    })
+}
+
 fn listed_instance(
     item: crate::presentation::InstancePresentation,
     groups: &[ephervex_core::InstanceGroup],
@@ -9902,6 +9917,8 @@ fn listed_instance(
         .and_then(|group| groups.iter().position(|candidate| candidate.id == group.id))
         .map_or(-1, to_i32);
     let last_run = backend::format_last_run(item.last_launched_at, now);
+    let summary = instance_summary(&item);
+    let connect = item.launch_and_connect.first();
     let row = InstanceRow {
         snapshot_deletion_note: item.snapshot_deletion_note.into(),
         id: item.id.into(),
@@ -9923,28 +9940,16 @@ fn listed_instance(
         state_kind: item.state_kind.into(),
         can_launch: item.can_launch,
         can_kill: item.can_kill,
-        connect_server_id: item
-            .launch_and_connect
-            .first()
-            .map_or_else(SharedString::default, |connect| {
-                connect.server_id.clone().into()
-            }),
-        connect_server_name: item
-            .launch_and_connect
-            .first()
-            .map_or_else(SharedString::default, |connect| {
-                connect.server_name.clone().into()
-            }),
-        can_connect: item
-            .launch_and_connect
-            .first()
-            .is_some_and(|connect| connect.enabled),
-        connect_reason: item
-            .launch_and_connect
-            .first()
-            .map_or_else(SharedString::default, |connect| {
-                connect.reason.clone().into()
-            }),
+        connect_server_id: connect.map_or_else(SharedString::default, |connect| {
+            connect.server_id.clone().into()
+        }),
+        connect_server_name: connect.map_or_else(SharedString::default, |connect| {
+            connect.server_name.clone().into()
+        }),
+        can_connect: connect.is_some_and(|connect| connect.enabled),
+        connect_reason: connect.map_or_else(SharedString::default, |connect| {
+            connect.reason.clone().into()
+        }),
         // Filled in from the creation tracker, which a snapshot knows
         // nothing about.
         creating_server_detail: SharedString::default(),
@@ -9978,6 +9983,7 @@ fn listed_instance(
         case_done: to_i32(item.case.steps.iter().filter(|step| step.done).count()),
         case_note: item.case.note.as_str().into(),
         issue_link: item.issue_link.as_str().into(),
+        summary: summary.into(),
         case_reproduced: i32::try_from(item.case.reproduced).unwrap_or(i32::MAX),
         group_id: group.map_or_else(SharedString::default, |group| group.id.to_string().into()),
         group_name: group.map_or_else(SharedString::default, |group| group.name.as_str().into()),
@@ -17124,6 +17130,11 @@ mod tests {
         let row = listed_instance(item, &[], chrono::Utc::now()).row;
 
         assert_eq!(row.issue_link, "https://example.com/issues/7");
+        assert!(
+            row.summary.contains("Issue: https://example.com/issues/7"),
+            "the summary names the issue: {}",
+            row.summary
+        );
     }
 
     #[test]
