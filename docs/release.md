@@ -910,6 +910,16 @@ access token with repository write access, so the release is attributed to an
 account rather than to Forgejo's Ghost user. The GitHub job needs no secret; it
 uses the token that workflow is given.
 
+Both workflows pick the files to ship, and write the `.sha256` beside each, with
+[`packaging/stage-release-assets.sh`](../packaging/stage-release-assets.sh).
+The Forgejo workflow's publish step is one call to
+[`packaging/publish-forgejo-release.sh`](../packaging/publish-forgejo-release.sh),
+which stages the artifacts, reuses or creates the release for the tag, and
+replaces any asset that already carries the same name. The GitHub job uploads
+through a different API and keeps its own publish step. Both scripts can be run
+locally; `packaging/test-release-assets.sh` checks them against dummy artifacts
+with no toolchain, build, or network.
+
 Both jobs read an optional `CURSEFORGE_API_KEY` repository secret and bake it
 into the release binaries as the default CurseForge API key (ADR 0030). Leave
 it unset and the release ships with no built-in key, same as any other build:

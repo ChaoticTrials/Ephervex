@@ -196,29 +196,7 @@ jobs:
         # assembled in the same output directory, so what ships is copied out by
         # name instead of left for a glob to find. The names come from the
         # architecture table, which is also what produced them.
-        run: |
-          set -eu
-          fail() { echo "ERROR: $*" >&2; exit 1; }
-          . ./packaging/linux-baseline
-          . ./packaging/linux-architectures
-
-          VERSION="$(packaging/workspace-version.sh)"
-          APPIMAGE_ARCH="$(ephervex_appimage_arch "${EPHERVEX_BASELINE_ARCH}")"
-          DEB_ARCH="$(ephervex_deb_arch "${EPHERVEX_BASELINE_ARCH}")"
-          RPM_ARCH="$(ephervex_rpm_arch "${EPHERVEX_BASELINE_ARCH}")"
-
-          mkdir -p upload
-          for artifact in \
-            "Ephervex-${APPIMAGE_ARCH}.AppImage" \
-            "ephervex_${VERSION}_${DEB_ARCH}.deb" \
-            "ephervex-${VERSION}-1.${RPM_ARCH}.rpm"; do
-            [ -f "dist/${artifact}" ] || fail "${artifact} was not built."
-            cp "dist/${artifact}" "upload/${artifact}"
-            # Beside each artifact, so a download can be checked without
-            # trusting the page it came from.
-            (cd upload && sha256sum "${artifact}" > "${artifact}.sha256")
-          done
-          ls -l upload
+        run: packaging/stage-release-assets.sh dist upload
 
       - name: Keep the artifacts for the publish job
         uses: actions/upload-artifact@v4

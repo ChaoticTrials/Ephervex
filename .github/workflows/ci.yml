@@ -68,6 +68,11 @@ jobs:
         # packaging scripts ask this table what the name is.
         run: packaging/test-linux-architectures.sh
 
+      - name: Verify the release asset staging
+        # Which files a release ships and the checksum beside each, plus the
+        # publish script's refusals. Offline, against dummy artifacts.
+        run: packaging/test-release-assets.sh
+
       - name: Formatting
         run: cargo fmt --all --check
 
