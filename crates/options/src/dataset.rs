@@ -91,6 +91,9 @@ pub struct SchemaFamily {
     pub supported: BTreeMap<String, usize>,
     /// Canonical settings that provably did not exist in this release.
     pub unsupported: Vec<String>,
+    /// The preset this release applies at startup, when it has one.
+    #[serde(default)]
+    pub startup_preset: Option<StartupPreset>,
 }
 
 /// Which family one Minecraft release uses.
@@ -107,6 +110,23 @@ pub struct ReleaseMapping {
     /// a number from a different release.
     #[serde(default)]
     pub data_version: Option<i64>,
+}
+
+/// A preset a release applies right after it reads `options.txt`, replacing a
+/// fixed group of settings with its own values.
+///
+/// The game applies whichever preset the file names, or its default when the
+/// file names none, so a value written for one of the controlled settings is
+/// discarded at the next launch unless the preset setting holds the one value
+/// that applies nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct StartupPreset {
+    /// The canonical setting that holds the preset.
+    pub setting: String,
+    /// The token of that setting under which the preset replaces nothing.
+    pub neutral: String,
+    /// The canonical settings the other presets replace.
+    pub controls: Vec<String>,
 }
 
 /// The generated compatibility dataset.
@@ -339,6 +359,9 @@ impl OptionsDataset {
                     )));
                 }
             }
+            if let Some(preset) = &schema.startup_preset {
+                self.check_startup_preset(schema, preset, &ids)?;
+            }
             for setting in &schema.unsupported {
                 if !ids.contains(setting.as_str()) {
                     return Err(inconsistent(format!(
@@ -374,6 +397,48 @@ impl OptionsDataset {
         if !versions.contains(self.canonical_minecraft_version.as_str()) {
             return Err(inconsistent(
                 "the canonical release is not itself mapped".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// A startup preset must name a setting the family writes, a neutral token
+    /// that setting enumerates, and controlled settings the registry defines.
+    fn check_startup_preset(
+        &self,
+        schema: &SchemaFamily,
+        preset: &StartupPreset,
+        ids: &BTreeSet<&str>,
+    ) -> Result<(), DatasetError> {
+        let inconsistent = |detail: String| DatasetError::Inconsistent {
+            detail: format!("schema `{}` has a startup preset that {detail}", schema.id),
+        };
+        let neutral_is_enumerated =
+            self.representation(schema, &preset.setting)
+                .is_some_and(|representation| {
+                    matches!(
+                        &representation.codec,
+                        OptionCodec::EnumToken { tokens, .. } if tokens.contains(&preset.neutral)
+                    )
+                });
+        if !neutral_is_enumerated {
+            return Err(inconsistent(
+                "names a setting the family does not write as an enumeration containing its neutral token"
+                    .to_owned(),
+            ));
+        }
+        let distinct: BTreeSet<&str> = preset.controls.iter().map(String::as_str).collect();
+        if preset.controls.is_empty() || distinct.len() != preset.controls.len() {
+            return Err(inconsistent(
+                "lists no controlled settings or lists one twice".to_owned(),
+            ));
+        }
+        if distinct.contains(preset.setting.as_str()) {
+            return Err(inconsistent("controls its own setting".to_owned()));
+        }
+        if !distinct.is_subset(ids) {
+            return Err(inconsistent(
+                "controls a setting the registry does not define".to_owned(),
             ));
         }
         Ok(())
@@ -458,6 +523,96 @@ mod tests {
               {body}
             }}"#
         )
+    }
+
+    /// A document whose one family applies a startup preset, with `preset` as
+    /// the family's `startup_preset` value.
+    fn preset_document(preset: &str) -> String {
+        format!(
+            r#"{{
+              "format_version": 1,
+              "revision": 3,
+              "canonical_minecraft_version": "26.2",
+              "setting_registry": [
+                {{"id":"graphicsPreset","key":"graphicsPreset","type":"enum","category":"Video","translation_key":null,"manageable":true}},
+                {{"id":"cloudStatus","key":"renderClouds","type":"enum","category":"Video","translation_key":null,"manageable":true}}
+              ],
+              "current_canonical_setting_ids": ["graphicsPreset", "cloudStatus"],
+              "representations": [
+                {{"key":"graphicsPreset","codec":{{"kind":"enum_token","tokens":["custom","fancy"],"quoted":true}}}},
+                {{"key":"renderClouds","codec":{{"kind":"enum_token","tokens":["false","true"],"quoted":true}}}}
+              ],
+              "schemas": [{{"id":"aaaaaaaaaaaaaaaa","supported":{{"graphicsPreset":0,"cloudStatus":1}},"unsupported":[],"startup_preset":{preset}}}],
+              "releases": [{{"minecraft_version":"26.2","schema":"aaaaaaaaaaaaaaaa"}}]
+            }}"#
+        )
+    }
+
+    #[test]
+    fn a_startup_preset_naming_a_neutral_token_and_the_settings_it_replaces_is_read() {
+        let dataset = OptionsDataset::parse(&preset_document(
+            r#"{"setting":"graphicsPreset","neutral":"custom","controls":["cloudStatus"]}"#,
+        ))
+        .expect("a well-formed preset");
+
+        let preset = dataset
+            .schema_for("26.2")
+            .and_then(|schema| schema.startup_preset.as_ref())
+            .expect("the family carries its preset");
+        assert_eq!(preset.setting, "graphicsPreset");
+        assert_eq!(preset.neutral, "custom");
+        assert_eq!(preset.controls, ["cloudStatus"]);
+    }
+
+    #[test]
+    fn a_family_without_a_startup_preset_has_none() {
+        let dataset = OptionsDataset::parse(&document("")).expect("valid");
+
+        assert!(
+            dataset
+                .schema_for("26.2")
+                .expect("mapped")
+                .startup_preset
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn an_incoherent_startup_preset_refuses_the_whole_document() {
+        for (why, preset) in [
+            (
+                "a preset held by a setting the family does not write",
+                r#"{"setting":"fov","neutral":"custom","controls":["cloudStatus"]}"#,
+            ),
+            (
+                "a neutral token its setting does not enumerate",
+                r#"{"setting":"graphicsPreset","neutral":"missing","controls":["cloudStatus"]}"#,
+            ),
+            (
+                "a preset that controls nothing",
+                r#"{"setting":"graphicsPreset","neutral":"custom","controls":[]}"#,
+            ),
+            (
+                "a controlled setting listed twice",
+                r#"{"setting":"graphicsPreset","neutral":"custom","controls":["cloudStatus","cloudStatus"]}"#,
+            ),
+            (
+                "a preset that controls its own setting",
+                r#"{"setting":"graphicsPreset","neutral":"custom","controls":["graphicsPreset"]}"#,
+            ),
+            (
+                "a controlled setting the registry does not define",
+                r#"{"setting":"graphicsPreset","neutral":"custom","controls":["nothing"]}"#,
+            ),
+        ] {
+            assert!(
+                matches!(
+                    OptionsDataset::parse(&preset_document(preset)),
+                    Err(DatasetError::Inconsistent { .. })
+                ),
+                "{why} must be refused"
+            );
+        }
     }
 
     #[test]

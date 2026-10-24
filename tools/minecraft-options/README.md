@@ -219,6 +219,19 @@ the game writes as an integer, becomes *unknown* here, at generation time. No
 expression is ever written into the dataset, so nothing downstream has to
 evaluate one.
 
+A family may also carry a `startup_preset`. From 1.21.11 the client applies a
+graphics preset right after loading `options.txt`, using the preset the file
+names or its default when it names none, and that replaces a fixed group of
+settings (render distance, clouds, particles and others) on every launch. The
+analyzer finds the group from the preset enum's own switch over its ordinal and
+the options accessors it calls, and takes the one preset value the switch has no
+case for as the value that replaces nothing. The family records the preset
+setting, that neutral token and the controlled settings in canonical ids; an
+application that writes any of them also writes the neutral token, unless the
+user manages the preset. A release whose group cannot be resolved is reported
+as an extraction gap instead of being recorded partly. Older builds ignore the
+field, so the format version is unchanged.
+
 Free text is the value written raw after the first colon. A string setting a
 release prints as a JSON string (`soundDevice:"Foo"` from 1.19) or stores as a
 Gson array line (`resourcePacks` before 1.17) is not that, so it stays

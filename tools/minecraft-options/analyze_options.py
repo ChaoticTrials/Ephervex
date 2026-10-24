@@ -2320,6 +2320,97 @@ def extract_keybinds(dis: Disassembler, members: list[Member], legacy_codes: boo
     return out
 
 
+# The option that names a graphics preset. Persisted keys are never renamed across
+# the supported range, so the key is what identifies it.
+GRAPHICS_PRESET_KEY = "graphicsPreset"
+SWITCH_ROW_RE = re.compile(r"^\s+(-?\d+):\s*\d+\s*$")
+
+
+def member_chunks(text: str) -> list[str]:
+    """The disassembly split into one chunk per member, keeping a switch's table rows."""
+    chunks: list[list[str]] = []
+    for line in text.split("\n"):
+        if MEMBER_RE.match(line):
+            chunks.append([])
+        if chunks:
+            chunks[-1].append(line)
+    return ["\n".join(chunk) for chunk in chunks]
+
+
+def extract_preset_controls(dis: Disassembler, options: dict[str, dict[str, Any]], members: list[Member],
+                            option_class: str | None, roots: list[str]) -> dict[str, Any] | None:
+    """Which options a release's startup graphics preset overwrites, and the value that leaves them alone.
+
+    The client applies the preset the file names (the default when it names none)
+    right after loading, and the preset's `apply` sets a fixed group of options
+    through the options root's accessors. `None` when the release has no preset
+    option. Otherwise `controls` holds the persisted keys of every option `apply`
+    reaches, `neutral` the one persisted preset value whose ordinal `apply` has no
+    case for, and `error` replaces both when either cannot be proven.
+    """
+    entry = options.get(GRAPHICS_PRESET_KEY)
+    if entry is None:
+        return None
+    result: dict[str, Any] = {"setting": GRAPHICS_PRESET_KEY}
+    enum_class = (entry.get("allowed_values") or {}).get("source_enum_class")
+    values = (entry.get("allowed_values") or {}).get("values") or []
+    if not enum_class or not values or not option_class:
+        return {**result, "error": "the preset option's enum was not resolved"}
+    # The method that applies a preset is found by its shape, because a release
+    # that obfuscates the enum does not name it: an instance method that switches
+    # on the enum's ordinal and reaches options accessors.
+    candidates = []
+    for chunk in member_chunks(dis.get(enum_class)):
+        parsed = parse_members(chunk)
+        if not parsed or "static" in parsed[0].signature.split("(")[0].split():
+            continue
+        calls = [ins.method() for ins in parsed[0].insns]
+        switched = sum(ins.op in SWITCH_OPS for ins in parsed[0].insns)
+        if switched == 1 and any(c and c[1] == "ordinal" for c in calls):
+            candidates.append((chunk, parsed[0]))
+    if len(candidates) != 1:
+        return {**result, "error": "the preset enum has no single method that switches on its ordinal"}
+    apply_text, apply_member = candidates[0]
+    insns = apply_member.insns
+    cases: set[int] = set()
+    in_switch = False
+    for line in apply_text.split("\n"):
+        if "tableswitch" in line or "lookupswitch" in line:
+            in_switch = True
+            continue
+        if in_switch:
+            row = SWITCH_ROW_RE.match(line)
+            if row:
+                cases.add(int(row.group(1)))
+            elif line.strip().startswith("default"):
+                break
+    ordinals = {v.get("ordinal"): v.get("persisted") for v in values}
+    neutral = sorted(token for ordinal, token in ordinals.items() if ordinal not in cases and token)
+    if len(neutral) != 1 or not cases <= set(ordinals):
+        return {**result, "error": "apply does not leave exactly one preset value unapplied"}
+
+    persisted_by_field = {v.get("field"): k for k, v in options.items() if v.get("field")}
+    accessor_field: dict[str, str] = {}
+    for member in members:
+        if "(" in member.signature and member.signature.split("(")[1].startswith(")"):
+            field = next((i.field() for i in member.insns if i.op == "getfield" and i.field()), None)
+            if field:
+                accessor_field[member.name] = field[1]
+    controls: set[str] = set()
+    descriptor = f"()L{option_class};"
+    for ins in insns:
+        ref = ins.method()
+        if not ref or ref[0] not in roots or ref[2] != descriptor:
+            continue
+        key = persisted_by_field.get(accessor_field.get(ref[1], ""))
+        if key is None:
+            return {**result, "error": f"apply reaches option accessor `{ref[1]}` that is not a persisted option"}
+        controls.add(key)
+    if not controls:
+        return {**result, "error": "apply reaches no persisted option"}
+    return {**result, "neutral": neutral[0], "controls": sorted(controls)}
+
+
 # Defaults no analyzed release has reassigned; they prove which table a release's codes use.
 KEY_CODE_ANCHORS = {"key.forward": "w", "key.left": "a", "key.back": "s", "key.right": "d",
                     "key.jump": "space", "key.inventory": "e", "key.drop": "q", "key.chat": "t",
@@ -2782,6 +2873,9 @@ def extraction_gaps(analysis: dict[str, Any]) -> list[str]:
     for label, family in (("sound category", "sound_family"), ("model part", "model_part_family")):
         if not (analysis.get(family) or {}).get("names"):
             gaps.append(f"no {label} family members")
+    preset = analysis.get("graphics_preset") or {}
+    if preset.get("error"):
+        gaps.append(f"graphics preset controls unresolved: {preset['error']}")
     errors = analysis.get("javap_errors") or []
     if errors:
         gaps.append(f"javap failed on {len({e.get('class') for e in errors})} class(es)")
@@ -2959,6 +3053,7 @@ def analyze_jar(path: Path, root: Path) -> dict[str, Any]:
 
         keybinds = extract_keybinds(dis, members, legacy_codes, option_class)
         code_space, code_check = resolve_key_code_space(keybinds, legacy_codes)
+        graphics_preset = extract_preset_controls(dis, options, members, option_class, roots)
         sound_enum, part_enum = field_generic_types(root_text)
         sounds = dynamic_family(dis, "soundCategory_", sound_enum, constants,
                                 sound_default_volume(members, sound_enum))
@@ -2982,6 +3077,7 @@ def analyze_jar(path: Path, root: Path) -> dict[str, Any]:
                                 for k, v in sorted(options.items())],
             "options": options,
             "keybinds": keybinds,
+            "graphics_preset": graphics_preset,
             "sound_family": sounds,
             "model_part_family": model_parts,
             "root_constant_candidates": root_strings,
@@ -3245,6 +3341,7 @@ def normalize(record: dict[str, Any]) -> dict[str, Any]:
             "data_version": (analysis.get("schema_marker") or {}).get("value"),
             "keybinding_code_space": analysis.get("keybinding_code_space"),
             "keybinding_code_space_check": analysis.get("keybinding_code_space_check"),
+            "graphics_preset": analysis.get("graphics_preset"),
             # Re-derived from the populations rather than trusted from the raw
             # record, so a record written by an older analyzer is judged by the
             # current definition.

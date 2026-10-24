@@ -666,3 +666,142 @@ fn applying_the_same_preferences_twice_changes_nothing_the_second_time() {
     assert_eq!(once, twice);
     assert_eq!(ParsedOptions::parse(&once).render(), once);
 }
+
+// ------------------------------------------------------- startup graphics preset
+
+/// Releases from 1.21.11 apply a graphics preset right after loading the file.
+const PRESET_RELEASES: &[&str] = &["1.21.11", "26.1.2", "26.2", "26.3"];
+
+fn clouds_off() -> ConfiguredPreferences {
+    managed(&[(
+        "cloud_status",
+        MinecraftPreferenceValue::Enum("false".to_owned()),
+    )])
+}
+
+#[test]
+fn a_setting_the_startup_preset_controls_is_written_with_the_preset_that_replaces_nothing() {
+    for version in PRESET_RELEASES {
+        let text = applied_text(version, &clouds_off());
+
+        assert!(text.contains("renderClouds:\"false\""), "{version}: {text}");
+        assert!(
+            text.contains("graphicsPreset:\"custom\""),
+            "{version} would replace the chosen clouds with its default preset's: {text}"
+        );
+    }
+}
+
+#[test]
+fn a_setting_the_startup_preset_does_not_control_leaves_the_preset_unwritten() {
+    let preferences = managed(&[
+        ("gui_scale", MinecraftPreferenceValue::Integer(3)),
+        ("fov", MinecraftPreferenceValue::Integer(90)),
+    ]);
+    for version in PRESET_RELEASES {
+        let text = applied_text(version, &preferences);
+
+        assert!(text.contains("guiScale:3"), "{version}: {text}");
+        assert!(!text.contains("graphicsPreset"), "{version}: {text}");
+    }
+}
+
+#[test]
+fn a_release_without_a_startup_preset_never_gets_a_preset_line() {
+    for version in ["1.12.2", "1.16.5"] {
+        let text = applied_text(version, &clouds_off());
+
+        assert!(text.contains("renderClouds:"), "{version}: {text}");
+        assert!(!text.contains("graphicsPreset"), "{version}: {text}");
+    }
+}
+
+#[test]
+fn a_preset_the_user_manages_is_written_as_chosen() {
+    let preferences = managed(&[
+        (
+            "cloud_status",
+            MinecraftPreferenceValue::Enum("false".to_owned()),
+        ),
+        (
+            "graphics_preset",
+            MinecraftPreferenceValue::Enum("fast".to_owned()),
+        ),
+    ]);
+    for version in PRESET_RELEASES {
+        let text = applied_text(version, &preferences);
+
+        assert!(
+            text.contains("graphicsPreset:\"fast\""),
+            "{version}: {text}"
+        );
+        assert!(!text.contains("custom"), "{version}: {text}");
+    }
+}
+
+#[test]
+fn an_existing_preset_is_replaced_only_when_a_controlled_setting_is_written() {
+    let base = tempfile::tempdir().expect("temp dir");
+    let path = base.path().join(OPTIONS_FILE_NAME);
+    std::fs::write(&path, "version:4903\ngraphicsPreset:\"fast\"\nguiScale:2\n").expect("write");
+
+    apply(
+        base.path(),
+        "26.2",
+        &managed(&[("gui_scale", MinecraftPreferenceValue::Integer(3))]),
+        LanguageAvailability::Verified,
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read"),
+        "version:4903\ngraphicsPreset:\"fast\"\nguiScale:3\n",
+        "an unrelated setting must not touch the instance's own preset"
+    );
+
+    apply(
+        base.path(),
+        "26.2",
+        &clouds_off(),
+        LanguageAvailability::Verified,
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read"),
+        "version:4903\ngraphicsPreset:\"custom\"\nguiScale:3\nrenderClouds:\"false\"\n"
+    );
+}
+
+#[test]
+fn applying_the_same_controlled_setting_twice_changes_nothing_the_second_time() {
+    let base = tempfile::tempdir().expect("temp dir");
+    apply(
+        base.path(),
+        "26.2",
+        &clouds_off(),
+        LanguageAvailability::Verified,
+    );
+    let first = std::fs::read_to_string(base.path().join(OPTIONS_FILE_NAME)).expect("read");
+
+    apply(
+        base.path(),
+        "26.2",
+        &clouds_off(),
+        LanguageAvailability::Verified,
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(base.path().join(OPTIONS_FILE_NAME)).expect("read"),
+        first
+    );
+}
+
+#[test]
+fn a_controlled_setting_the_release_cannot_express_does_not_write_the_preset() {
+    let preferences = managed(&[(
+        "cloud_status",
+        MinecraftPreferenceValue::Enum("not-a-cloud-status".to_owned()),
+    )]);
+    for version in PRESET_RELEASES {
+        let text = applied_text(version, &preferences);
+
+        assert!(!text.contains("graphicsPreset"), "{version}: {text}");
+    }
+}

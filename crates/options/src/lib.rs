@@ -89,12 +89,12 @@ pub use catalog::{
 };
 pub use codec::{OptionCodec, SettingValue, Unrepresentable};
 pub use compatibility::{
-    CompatibilitySource, OptionsCompatibility, PreferenceComponent, PreferenceSupport,
+    CompatibilitySource, OptionsCompatibility, PreferenceComponent, PreferenceSupport, PresetGuard,
     ReleaseSupport, ResolvedField,
 };
 pub use dataset::{
     DATASET_FORMAT_VERSION, DatasetError, OptionsDataset, RegistrySetting, ReleaseMapping,
-    Representation, SchemaFamily,
+    Representation, SchemaFamily, StartupPreset,
 };
 pub use error::OptionsError;
 pub use feed::{

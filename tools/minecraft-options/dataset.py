@@ -356,11 +356,38 @@ def schema_for(record: dict[str, Any], settings: list[dict[str, Any]]) -> dict[s
     # that gives an id meaning, and inventing one here would create a setting
     # no application build could interpret.
     unknown_to_canonical = sorted(set(extracted) - set(by_key))
-    return {
+    schema = {
         "supported": supported,
         "unsupported": sorted(unsupported),
         "extra_keys": unknown_to_canonical,
     }
+    preset = startup_preset_for(record, by_key, supported)
+    if preset is not None:
+        schema["startup_preset"] = preset
+    return schema
+
+
+def startup_preset_for(
+    record: dict[str, Any], by_key: dict[str, dict[str, Any]], supported: dict[str, dict[str, Any]]
+) -> dict[str, Any] | None:
+    """The startup preset this release applies, in canonical ids, when it was proven.
+
+    Only a preset whose setting this dataset can write, and whose neutral value
+    that setting's codec enumerates, is recorded: a neutral value Ephervex cannot
+    write is no use to it.
+    """
+    found = record.get("graphics_preset")
+    if not found or found.get("error") or not found.get("controls"):
+        return None
+    setting = by_key.get(found["setting"])
+    codec = (supported.get(setting["id"]) or {}).get("codec") if setting else None
+    if not codec or codec.get("kind") != "enum_token" or found["neutral"] not in codec["tokens"]:
+        return None
+    controls = sorted(by_key[key]["id"] for key in found["controls"] if key in by_key)
+    controls = [control for control in controls if control != setting["id"]]
+    if not controls:
+        return None
+    return {"setting": setting["id"], "neutral": found["neutral"], "controls": controls}
 
 
 def fingerprint(schema: dict[str, Any]) -> str:
@@ -371,8 +398,11 @@ def fingerprint(schema: dict[str, Any]) -> str:
     genuinely identical. Table positions are excluded so that adding a release
     cannot renumber an existing family.
     """
+    content = {"supported": schema["supported"], "unsupported": schema["unsupported"]}
+    if schema.get("startup_preset") is not None:
+        content["startup_preset"] = schema["startup_preset"]
     body = json.dumps(
-        {"supported": schema["supported"], "unsupported": schema["unsupported"]},
+        content,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,
@@ -421,6 +451,8 @@ def assemble(
                     for setting_id, representation in sorted(schemas[schema_id]["supported"].items())
                 },
                 "unsupported": schemas[schema_id]["unsupported"],
+                **({"startup_preset": schemas[schema_id]["startup_preset"]}
+                   if schemas[schema_id].get("startup_preset") is not None else {}),
             }
             for schema_id in sorted(schemas)
         ],
@@ -444,6 +476,8 @@ def expand(document: dict[str, Any]) -> dict[str, dict[str, Any]]:
             },
             "unsupported": list(schema["unsupported"]),
             "extra_keys": [],
+            **({"startup_preset": copy.deepcopy(schema["startup_preset"])}
+               if schema.get("startup_preset") is not None else {}),
         }
     return schemas
 
@@ -615,8 +649,10 @@ def _gained_only_later_settings(existing: dict[str, Any], fresh: dict[str, Any])
     A setting registered afterwards is unknown to that analysis and stays
     unknown, so it must not move the release to another family.
     """
-    return fresh["supported"] == existing["supported"] and set(existing["unsupported"]) <= set(
-        fresh["unsupported"]
+    return (
+        fresh["supported"] == existing["supported"]
+        and fresh.get("startup_preset") == existing.get("startup_preset")
+        and set(existing["unsupported"]) <= set(fresh["unsupported"])
     )
 
 
@@ -765,12 +801,41 @@ def _check_field_types(document: dict[str, Any]) -> None:
         supported = schema["supported"]
         if not isinstance(supported, dict) or not all(isinstance(key, str) for key in supported):
             raise DatasetError(f"schema `{schema['id']}` has a supported map that is not keyed by setting id")
+        preset = schema.get("startup_preset")
+        if preset is not None:
+            if not isinstance(preset, dict):
+                raise DatasetError(f"schema `{schema['id']}` has a startup preset that is not an object")
+            if not isinstance(preset["setting"], str) or not isinstance(preset["neutral"], str):
+                raise DatasetError(f"schema `{schema['id']}` has a startup preset setting or neutral value that is not a string")
+            controls = preset["controls"]
+            if not isinstance(controls, list) or not all(isinstance(entry, str) for entry in controls):
+                raise DatasetError(f"schema `{schema['id']}` has startup preset controls that are not a list of ids")
     for release in document["releases"]:
         if not isinstance(release, dict):
             raise DatasetError("a release is not an object")
         for field in ("minecraft_version", "schema"):
             if not isinstance(release[field], str):
                 raise DatasetError(f"a release has a `{field}` that is not a string")
+
+
+def _startup_preset_problem(
+    preset: dict[str, Any], supported: dict[str, int], table: list[dict[str, Any]], ids: set[str]
+) -> str | None:
+    """Why a startup preset cannot be used as written, if it cannot."""
+    position = supported.get(preset["setting"])
+    if position is None:
+        return "names a setting the schema does not support"
+    codec = table[position].get("codec") or {}
+    if codec.get("kind") != "enum_token" or preset["neutral"] not in codec.get("tokens", []):
+        return "has a neutral value its setting does not enumerate"
+    controls = preset["controls"]
+    if not controls or len(set(controls)) != len(controls):
+        return "lists no controlled settings or lists one twice"
+    if preset["setting"] in controls:
+        return "controls its own setting"
+    if not set(controls) <= ids:
+        return "controls a setting the registry does not define"
+    return None
 
 
 def _validate(document: dict[str, Any]) -> None:
@@ -835,6 +900,11 @@ def _validate(document: dict[str, Any]) -> None:
         for setting_id in unsupported:
             if setting_id not in ids:
                 raise DatasetError(f"schema `{schema_id}` names unknown unsupported setting `{setting_id}`")
+        preset = schema.get("startup_preset")
+        if preset is not None:
+            problem = _startup_preset_problem(preset, schema["supported"], table, ids)
+            if problem is not None:
+                raise DatasetError(f"schema `{schema_id}` has a startup preset that {problem}")
         if fingerprint(
             {
                 "supported": {
@@ -842,6 +912,7 @@ def _validate(document: dict[str, Any]) -> None:
                     for setting_id, position in schema["supported"].items()
                 },
                 "unsupported": unsupported,
+                "startup_preset": preset,
             }
         ) != schema_id:
             raise DatasetError(f"schema `{schema_id}` does not match its own content")

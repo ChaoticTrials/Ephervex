@@ -211,6 +211,10 @@ pub struct PreferencePlan {
     pub data_version: Option<i64>,
     /// Every configured preference, in id order.
     pub entries: Vec<PlannedPreference>,
+    /// Assignments the release needs alongside the entries so they take effect,
+    /// empty unless an entry writes a setting the release's startup preset
+    /// would otherwise replace on the next launch.
+    preset_writes: Vec<(String, String)>,
 }
 
 impl PreferencePlan {
@@ -234,11 +238,20 @@ impl PreferencePlan {
             .collect()
     }
 
-    /// Every assignment this plan makes, in id order.
+    /// The assignments that keep the release's startup preset from replacing
+    /// what the entries write.
+    #[must_use]
+    pub fn preset_writes(&self) -> &[(String, String)] {
+        &self.preset_writes
+    }
+
+    /// Every assignment this plan makes: the entries' in id order, then the
+    /// startup preset's.
     fn assignments(&self) -> Vec<(String, String)> {
         self.entries
             .iter()
             .flat_map(|entry| entry.writes.iter().cloned())
+            .chain(self.preset_writes.iter().cloned())
             .collect()
     }
 }
@@ -326,6 +339,8 @@ pub fn plan_managed_preferences(
         });
     }
 
+    let preset_writes = preset_guard_writes(&entries, minecraft_version, compatibility);
+
     PreferencePlan {
         minecraft_version: minecraft_version.to_owned(),
         schema: compatibility
@@ -334,7 +349,37 @@ pub fn plan_managed_preferences(
         source: compatibility.source(),
         data_version: compatibility.data_version(minecraft_version),
         entries,
+        preset_writes,
     }
+}
+
+/// The preset assignment a release needs so its managed settings survive launch.
+///
+/// A release that applies a startup preset replaces every setting the preset
+/// controls, on every launch, unless the file names the preset that replaces
+/// nothing. Nothing is added when no entry writes a controlled setting, so an
+/// instance's own preset stays its own, and nothing when an entry already writes the
+/// preset itself, because that choice is the user's.
+fn preset_guard_writes(
+    entries: &[PlannedPreference],
+    minecraft_version: &str,
+    compatibility: &OptionsCompatibility,
+) -> Vec<(String, String)> {
+    let Some(guard) = compatibility.preset_guard(minecraft_version) else {
+        return Vec::new();
+    };
+    let written: Vec<&str> = entries
+        .iter()
+        .flat_map(|entry| entry.writes.iter().map(|(key, _)| key.as_str()))
+        .collect();
+    if written.contains(&guard.key.as_str())
+        || !written
+            .iter()
+            .any(|key| guard.controlled_keys.contains(*key))
+    {
+        return Vec::new();
+    }
+    vec![(guard.key, guard.neutral_value)]
 }
 
 /// Resolves one managed preference, and the assignments it would make.

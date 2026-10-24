@@ -34,8 +34,10 @@
 //! A remote document that is invalid, truncated, from a newer format, or older
 //! than what shipped is not adopted, and the build carries on with what it has.
 
+use std::collections::BTreeSet;
+
 use crate::catalog::{FieldRole, MinecraftPreferenceDescriptor};
-use crate::codec::OptionCodec;
+use crate::codec::{OptionCodec, SettingValue};
 use crate::dataset::{OptionsDataset, Representation};
 use crate::preferences::PreferenceKey;
 
@@ -193,6 +195,18 @@ impl CompatibilitySource {
     }
 }
 
+/// What keeps one release's startup preset from replacing settings Ephervex
+/// writes, resolved to the exact text and keys of that release.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresetGuard {
+    /// The options key that holds the preset.
+    pub key: String,
+    /// The stored text under which the preset replaces nothing.
+    pub neutral_value: String,
+    /// The options keys the preset replaces at startup.
+    pub controlled_keys: BTreeSet<String>,
+}
+
 /// The active options compatibility knowledge.
 #[derive(Debug, Clone)]
 pub struct OptionsCompatibility {
@@ -278,6 +292,32 @@ impl OptionsCompatibility {
     #[must_use]
     pub fn data_version(&self, minecraft_version: &str) -> Option<i64> {
         self.dataset.data_version_for(minecraft_version)
+    }
+
+    /// The startup preset this release applies, resolved for writing.
+    ///
+    /// `None` when the release has no such preset, or when the dataset does not
+    /// prove a neutral value this build can write for it.
+    #[must_use]
+    pub fn preset_guard(&self, minecraft_version: &str) -> Option<PresetGuard> {
+        let schema = self.dataset.schema_for(minecraft_version)?;
+        let preset = schema.startup_preset.as_ref()?;
+        let holder = self.dataset.representation(schema, &preset.setting)?;
+        let neutral_value = holder
+            .codec
+            .encode(&SettingValue::Text(preset.neutral.clone()))
+            .ok()?;
+        let controlled_keys = preset
+            .controls
+            .iter()
+            .filter_map(|setting| self.dataset.representation(schema, setting))
+            .map(|representation| representation.key.clone())
+            .collect();
+        Some(PresetGuard {
+            key: holder.key.clone(),
+            neutral_value,
+            controlled_keys,
+        })
     }
 
     /// What this release lets Ephervex do with one of the seven preferences

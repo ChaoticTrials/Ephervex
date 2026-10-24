@@ -122,7 +122,21 @@ fn every_fixture_round_trips_byte_for_byte_before_anything_is_applied() {
     }
 }
 
-/// Writing back exactly what a fixture already holds must not change a byte.
+/// What a fixture should read like after its own values are applied back.
+///
+/// Unchanged, except that a release applying a startup preset must name the
+/// preset that replaces nothing, because the preset would otherwise replace the
+/// very values being written.
+fn expected_after_applying(era: &Era) -> String {
+    let mut parsed = ParsedOptions::parse(era.text);
+    if let Some(guard) = OptionsCompatibility::bundled().preset_guard(era.version) {
+        parsed.set(&guard.key, guard.neutral_value);
+    }
+    parsed.render()
+}
+
+/// Writing back exactly what a fixture already holds must not change a byte,
+/// apart from the startup preset line a release needs for the values to hold.
 ///
 /// This is the assertion that catches an encoding the dataset has wrong. Each
 /// fixture is a file in the shape its release writes; asking this build to
@@ -174,7 +188,8 @@ fn applying_what_a_fixture_already_says_rewrites_none_of_it() {
             era.version
         );
         assert_eq!(
-            text, era.text,
+            text,
+            expected_after_applying(era),
             "{} was rewritten by values it already held",
             era.version
         );
@@ -293,6 +308,15 @@ fn applying_preferences_changes_only_the_lines_it_names() {
         let mut touched: Vec<String> = Vec::new();
         for id in &report.applied {
             touched.extend(touched_keys(era, id));
+        }
+        // A release that applies a startup preset also needs the preset that
+        // replaces nothing, whenever a setting that preset controls is written.
+        if let Some(guard) = OptionsCompatibility::bundled().preset_guard(era.version)
+            && touched
+                .iter()
+                .any(|key| guard.controlled_keys.contains(key))
+        {
+            touched.push(guard.key);
         }
 
         // Every key the file had is still there, and every one no preference
