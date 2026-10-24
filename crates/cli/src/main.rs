@@ -11241,6 +11241,7 @@ mod tests {
                 client_side: SideSupport::Unsupported,
                 server_side: SideSupport::Required,
                 icon_url: None,
+                downloads: None,
             },
             version: ModVersionInfo {
                 provider: ModProvider::Modrinth,

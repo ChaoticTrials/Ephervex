@@ -141,5 +141,6 @@ pub(crate) fn project(id: &str) -> ModProject {
         client_side: SideSupport::Required,
         server_side: SideSupport::Required,
         icon_url: None,
+        downloads: None,
     }
 }

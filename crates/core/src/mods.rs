@@ -3031,6 +3031,7 @@ mod tests {
                 client_side: SideSupport::Required,
                 server_side,
                 icon_url: None,
+                downloads: None,
             },
             version: ModVersionInfo {
                 provider: ModProvider::Modrinth,
@@ -3412,6 +3413,7 @@ mod tests {
             client_side: SideSupport::Required,
             server_side: SideSupport::Unsupported,
             icon_url: icon_url.map(ToOwned::to_owned),
+            downloads: None,
         }
     }
 

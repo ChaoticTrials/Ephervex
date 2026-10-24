@@ -146,7 +146,7 @@ export component ModBrowser inherits Rectangle {
                             horizontal-stretch: 1;
                             Heading { text: mod.title; font-size: Theme.row-heading-size; overflow: elide; }
                             BodyText { text: mod.description; wrap: word-wrap; overflow: elide; vertical-alignment: top; height: Theme.body-size * 2.7; }
-                            BodyText { text: GuiI18n.values("gui-mod-result-meta", mod.author, mod.note); color: Theme.text-muted; overflow: elide; }
+                            BodyText { text: GuiI18n.values("gui-mod-result-meta", mod.author, mod.downloads != "" ? mod.note + " | " + mod.downloads : mod.note); color: Theme.text-muted; overflow: elide; }
                         }
                         // What the server makes of the mod sits over the action
                         // it affects, as a managed mod's badges sit over its bin.

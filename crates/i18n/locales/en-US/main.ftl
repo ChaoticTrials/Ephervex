@@ -4037,3 +4037,5 @@ gui-report-bundle = Diagnostic bundle...
 gui-issue-link-optional = Issue link (optional)
 gui-create-with-server = Also create a linked server
 gui-linked-server-name = Linked server name
+
+gui-mod-downloads = { $value } downloads

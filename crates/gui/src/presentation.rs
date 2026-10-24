@@ -679,6 +679,34 @@ pub const fn loader_kind_name(kind: LoaderKind) -> &'static str {
     }
 }
 
+/// A download count worded for a result row, such as "1.2M downloads".
+#[must_use]
+pub fn downloads_text(count: u64) -> String {
+    lookup_args(
+        "gui-mod-downloads",
+        [("value", Arg::from(compact_count(count)))],
+    )
+}
+
+/// A count in few characters: whole below a thousand, then one decimal of the
+/// thousands, millions, or billions, with a trailing `.0` left off.
+fn compact_count(count: u64) -> String {
+    const UNITS: [(u64, &str); 3] = [(1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K")];
+    for (size, suffix) in UNITS {
+        if count >= size {
+            // Tenths, rounded down so a figure never reads higher than it is.
+            let tenths = count / (size / 10);
+            let whole = tenths / 10;
+            return if tenths % 10 == 0 {
+                format!("{whole}{suffix}")
+            } else {
+                format!("{whole}.{}{suffix}", tenths % 10)
+            };
+        }
+    }
+    count.to_string()
+}
+
 #[must_use]
 pub fn storage_name(storage: StorageClass) -> String {
     match storage {
@@ -1384,6 +1412,24 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use ephervex_core::{DependencyKnowledge, ImpactedMod, ModOrigin, ModPresence};
+
+    #[test]
+    fn a_download_count_is_worded_in_few_characters_and_never_rounded_up() {
+        for (count, shown) in [
+            (0, "0"),
+            (999, "999"),
+            (1_000, "1K"),
+            (1_250, "1.2K"),
+            (999_999, "999.9K"),
+            (1_000_000, "1M"),
+            (12_340_000, "12.3M"),
+            (2_000_000_000, "2B"),
+            (u64::MAX, "18446744073.7B"),
+        ] {
+            assert_eq!(super::compact_count(count), shown, "{count}");
+        }
+        assert_eq!(super::downloads_text(1_500), "1.5K downloads");
+    }
 
     fn impacted(name: &str, distance: u32) -> ImpactedMod {
         ImpactedMod {

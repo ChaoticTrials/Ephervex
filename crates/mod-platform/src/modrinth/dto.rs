@@ -47,6 +47,8 @@ pub(super) struct RawHit {
     pub(super) server_side: RawSide,
     #[serde(default)]
     pub(super) icon_url: Option<String>,
+    #[serde(default, deserialize_with = "crate::model::lenient_count")]
+    pub(super) downloads: Option<u64>,
 }
 
 /// One project as the project endpoints report it.
@@ -68,6 +70,8 @@ pub(super) struct RawProject {
     pub(super) server_side: RawSide,
     #[serde(default)]
     pub(super) icon_url: Option<String>,
+    #[serde(default, deserialize_with = "crate::model::lenient_count")]
+    pub(super) downloads: Option<u64>,
 }
 
 /// The four values Modrinth publishes for a side.

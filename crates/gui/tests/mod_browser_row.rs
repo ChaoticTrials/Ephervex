@@ -479,12 +479,30 @@ fn result(project: &str, title: &str) -> ModSearchRow {
         description: "Nice to have items, blocks, and other features.".into(),
         author: "MelanX".into(),
         note: "Compatible".into(),
+        downloads: SharedString::default(),
         icon: Image::default(),
         installed: false,
         queued: false,
         server_support: SharedString::default(),
         blocked_reason: SharedString::default(),
     }
+}
+
+/// What the catalog says about how often a project was downloaded sits in the
+/// result's meta line, and a project it says nothing about shows no figure.
+#[test]
+fn a_result_shows_the_download_count_the_catalog_reports() {
+    let ui = window();
+    let mut counted = result("utilitix", "UtilitiX");
+    counted.downloads = "1.2M downloads".into();
+    mod_browser(&ui, vec![counted, result("plain", "Plain")]);
+    settle(&ui);
+
+    let meta = |text: &str| {
+        ElementHandle::find_by_accessible_label(&ui, text).any(|element| element.size().width > 0.0)
+    };
+    assert!(meta("by MelanX | Compatible | 1.2M downloads"));
+    assert!(meta("by MelanX | Compatible"));
 }
 
 fn managed_mod() -> ModRow {

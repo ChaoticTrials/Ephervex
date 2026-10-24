@@ -1467,9 +1467,12 @@ pub struct ModSearchData {
     /// on both sides of the panel.
     pub icon: String,
     /// A short localized note about the result, such as whether it fits this
-    /// instance. The catalogs do not publish one comparable statistic between
-    /// them, and inventing a number here would only look like one.
+    /// instance.
     pub note: String,
+    /// The catalog's own download figure for the project, worded for the row,
+    /// or empty when it does not say. Each provider counts its own way, so the
+    /// figure is only read against other results from the same one.
+    pub downloads: String,
     /// What the catalog states about the server side: empty when it says the
     /// mod runs there, `unknown` when it says nothing, `client-only` when it
     /// says the mod cannot. Only filled for a server's results.
@@ -12229,7 +12232,13 @@ fn search_row(
         InstalledHost::Instance(_) => (String::new(), String::new()),
         InstalledHost::Server(_) => server_result_notes(&hit),
     };
+    let downloads = hit
+        .project
+        .downloads
+        .map(crate::presentation::downloads_text)
+        .unwrap_or_default();
     ModSearchData {
+        downloads,
         icon: icons
             .get(&hit.project.id)
             .map(|path| path.display().to_string())

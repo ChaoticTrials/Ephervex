@@ -84,6 +84,7 @@ pub(super) fn hit_project(raw: RawHit) -> ModProject {
         client_side: raw.client_side.into(),
         server_side: raw.server_side.into(),
         icon_url: icon_url(raw.icon_url),
+        downloads: raw.downloads,
     }
 }
 
@@ -101,6 +102,7 @@ pub(super) fn project(raw: RawProject) -> ModProject {
         client_side: raw.client_side.into(),
         server_side: raw.server_side.into(),
         icon_url: icon_url(raw.icon_url),
+        downloads: raw.downloads,
     }
 }
 
@@ -247,6 +249,34 @@ fn verifiable_hashes(file: &RawFile) -> Vec<Hash> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
+
+    #[test]
+    fn a_hit_and_a_project_carry_the_download_count_the_provider_reports() {
+        let hit: RawHit =
+            serde_json::from_str(r#"{"project_id":"AABBCCDD","downloads":1234567}"#).unwrap();
+        assert_eq!(hit_project(hit).downloads, Some(1_234_567));
+        let project: RawProject =
+            serde_json::from_str(r#"{"id":"AABBCCDD","project_type":"mod","downloads":42}"#)
+                .unwrap();
+        assert_eq!(super::project(project).downloads, Some(42));
+    }
+
+    #[test]
+    fn an_odd_download_count_leaves_it_unknown_without_refusing_the_hit() {
+        for odd in ["-5", "1.5e3", "\"many\"", "null"] {
+            let hit: RawHit =
+                serde_json::from_str(&format!(r#"{{"project_id":"AABBCCDD","downloads":{odd}}}"#))
+                    .expect("a statistic never decides whether a hit is read");
+            let expected = if odd == "1.5e3" { Some(1_500) } else { None };
+            assert_eq!(hit_project(hit).downloads, expected, "{odd}");
+        }
+    }
+
+    #[test]
+    fn a_hit_without_a_download_count_has_none() {
+        let hit: RawHit = serde_json::from_str(r#"{"project_id":"AABBCCDD"}"#).unwrap();
+        assert_eq!(hit_project(hit).downloads, None);
+    }
 
     fn file(name: &str, primary: bool) -> RawFile {
         RawFile {

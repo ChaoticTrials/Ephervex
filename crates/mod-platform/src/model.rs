@@ -18,6 +18,7 @@ use std::fmt;
 
 use chrono::{DateTime, Utc};
 use ephervex_model::{Hash, LoaderKind, ModProvider, ModRelationKind};
+use serde::Deserialize;
 
 /// The instance a search or a resolution is for.
 ///
@@ -74,6 +75,26 @@ pub struct ModProject {
     /// knows about caches and download policy, and a project with no icon is an
     /// ordinary state rather than a failure.
     pub icon_url: Option<String>,
+    /// How many times the provider says the project has been downloaded, when
+    /// it says. A popularity figure the provider keeps, not something this
+    /// launcher counted.
+    pub downloads: Option<u64>,
+}
+
+/// A download count, or `None` for anything that is not a non-negative number.
+pub(crate) fn lenient_count<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| {
+        value.as_u64().or_else(|| {
+            let float = value.as_f64()?;
+            // A fractional or enormous figure is rounded to what it reads as.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            (float.is_finite() && float >= 0.0).then(|| float.round() as u64)
+        })
+    }))
 }
 
 /// The answer to a batch project lookup: the mods, and the ids that are not.
@@ -727,6 +748,7 @@ mod tests {
             client_side: client,
             server_side: server,
             icon_url: None,
+            downloads: None,
         }
     }
 

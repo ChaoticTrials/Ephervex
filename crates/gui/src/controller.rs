@@ -11191,6 +11191,7 @@ fn mod_search_rows(rows: Vec<ModSearchData>) -> Vec<ModSearchRow> {
             description: row.description.into(),
             author: row.author.into(),
             note: row.note.into(),
+            downloads: row.downloads.into(),
             icon: cached_image(&row.icon),
             // Both are decided against state the row cannot see, so a fresh
             // page arrives unmarked and is marked by the two passes below.
@@ -18723,6 +18724,7 @@ mod tests {
                     author: String::new(),
                     icon: String::new(),
                     note: String::new(),
+                    downloads: String::new(),
                     server_support: String::new(),
                     blocked_reason: String::new(),
                 }],

@@ -15,7 +15,9 @@ use i_slint_backend_testing::{
     AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions, mock_elapsed_time,
 };
 use slint::platform::WindowEvent;
-use slint::{ComponentHandle, Image, LogicalPosition, ModelRc, PhysicalSize, VecModel};
+use slint::{
+    ComponentHandle, Image, LogicalPosition, ModelRc, PhysicalSize, SharedString, VecModel,
+};
 
 const WINDOW_WIDTH: u16 = 1480;
 const WINDOW_HEIGHT: u16 = 900;
@@ -44,6 +46,7 @@ fn blocked_install(ui: &AppWindow, reason: &str) -> ElementHandle {
             description: "Nice to have items, blocks, and other features.".into(),
             author: "MelanX".into(),
             note: "Compatible".into(),
+            downloads: SharedString::default(),
             icon: Image::default(),
             installed: false,
             queued: false,

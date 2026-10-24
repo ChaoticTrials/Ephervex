@@ -500,6 +500,9 @@ export struct ModSearchRow {
     // A short, already-localized note about the result, such as whether it
     // fits this instance. Not a number and not a catalog statistic.
     note: string,
+    // How often the catalog says the project was downloaded, worded for the
+    // row; empty when it does not say.
+    downloads: string,
     // Whether this instance already has the project. Decided against the
     // managed mods list, so it follows an install without a re-search.
     installed: bool,
